@@ -158,8 +158,8 @@ def _credential_dto(row: svc.CredentialRow) -> CredentialDTO:
 
 
 @platform_config_bp.route("/platform-config", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_response(ListPlatformConfigsResponse)
 async def get_platform_configs() -> ListPlatformConfigsResponse:
     """Get platform configs."""
@@ -174,8 +174,8 @@ async def get_platform_configs() -> ListPlatformConfigsResponse:
 
 
 @platform_config_bp.route("/platform-config/<platform>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_request(UpdatePlatformConfigRequest)
 @validate_response(MessageResponse)
 async def update_platform_config(
@@ -197,8 +197,8 @@ async def update_platform_config(
 
 
 @platform_config_bp.route("/platform-config/<platform>/test", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_response(TestConnectionResponse)
 async def test_platform_connection(
     platform: str,
@@ -218,8 +218,8 @@ async def test_platform_connection(
 
 
 @platform_config_bp.route("/settings", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 @validate_response(HubSettingsResponse)
 async def get_hub_settings() -> HubSettingsResponse:
     """Get hub settings."""
@@ -229,8 +229,8 @@ async def get_hub_settings() -> HubSettingsResponse:
 
 
 @platform_config_bp.route("/settings", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("users:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("users:admin")  # type: ignore[misc]
 async def update_hub_settings() -> tuple[Any, int]:
     """Update hub settings.
 

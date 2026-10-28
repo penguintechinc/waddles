@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import Any, Final, Protocol, runtime_checkable
 
 from services.provider_connections.errors import InvalidConnectionInput, UnknownProvider
+from services.provider_connections.kinds import ConnectionKind, SecretScheme
 
 #: How an admin supplies the credential. ``credentials`` = pasted/CLI-supplied token pair, the only
 #: kind implemented by this foundation; ``oauth_connect`` / ``bot_invite_link`` / ``app_manifest``
@@ -69,6 +70,19 @@ class MetadataField:
 
 
 @dataclass(slots=True, frozen=True)
+class BindingKey:
+    """One key of the data-plane binding metadata contract: wire name <- stored name.
+
+    ``wire`` may differ from ``stored`` (an alias applied only when projecting for the wire, never
+    in storage). A ``required`` key missing or empty on a row makes it an incomplete binding.
+    """
+
+    wire: str
+    stored: str
+    required: bool = False
+
+
+@dataclass(slots=True, frozen=True)
 class AdapterSpec:
     """Immutable description of one provider; the single source for descriptors and validation.
 
@@ -89,6 +103,13 @@ class AdapterSpec:
     public_metadata_keys: frozenset[str]
     runtime_metadata_keys: frozenset[str]
     refreshable: bool
+    #: ``PLATFORM_OAUTH`` for an OAuth install; a static kind takes a sealed structured secret.
+    kind: ConnectionKind = ConnectionKind.PLATFORM_OAUTH
+    #: For static kinds: the secret schemes an admin may supply (empty for OAuth providers).
+    secret_schemes: tuple[SecretScheme, ...] = ()
+    #: The data-plane metadata contract (flat string->string). Empty = the provider's facts ride
+    #: elsewhere (static kinds: the resolve ``endpoint``), so its binding metadata is ``{}``.
+    binding_metadata: tuple[BindingKey, ...] = ()
 
     def __post_init__(self) -> None:
         """Reject a malformed spec at registration time rather than at first request."""

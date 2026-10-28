@@ -196,7 +196,7 @@ class TestRoleAssignment:
         # is_super_admin) -- see this module's C3 fix note. Seed the caller
         # (lands on id 1, matching _admin_headers()'s default) BEFORE the
         # target user so hub_users' autoincrement doesn't collide.
-        seed_super_admin(auth_db, user_id=1)
+        seed_super_admin(auth_db, user_id=1, bootstrap=True)
         user_id = _seed_user(auth_db)
         response = await client.post(
             f"/api/v1/superadmin/users/{user_id}/super-admin-role",
@@ -334,7 +334,7 @@ class TestPrivilegeEscalationRegression:
         Confirms this blueprint is unaffected by the fix for the caller it
         was always meant to serve.
         """
-        seed_super_admin(auth_db, user_id=1)
+        seed_super_admin(auth_db, user_id=1, bootstrap=True)
         target_id = _seed_user(auth_db)
         response = await client.post(
             f"/api/v1/superadmin/users/{target_id}/super-admin-role",

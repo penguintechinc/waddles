@@ -721,25 +721,88 @@ fn build_redis_client(cfg: &penguin_spine::SpineConfig) -> Option<redis::Client>
     }
 }
 
+/// Derives the bundle-`kv` Valkey connection config from the spine config
+/// for the DEDICATED `noeviction` kv instance (`VALKEY_KV_URL` /
+/// `VALKEY_KV_USERNAME` / `VALKEY_KV_PASSWORD`). TLS follows the kv URL
+/// scheme, never the spine's. Returns `None` when `VALKEY_KV_URL` is
+/// unset/blank -- deliberately NO fallback to the durable spine instance.
+fn kv_instance_config(
+    spine: &penguin_spine::SpineConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<penguin_spine::SpineConfig> {
+    let non_empty = |k: &str| lookup(k).filter(|v| !v.trim().is_empty());
+    let url = non_empty("VALKEY_KV_URL")?;
+    let mut cfg = spine.clone();
+    cfg.security_transport_tls = url.starts_with("rediss://");
+    cfg.valkey_url = url;
+    cfg.valkey_username = non_empty("VALKEY_KV_USERNAME");
+    cfg.valkey_password = non_empty("VALKEY_KV_PASSWORD");
+    Some(cfg)
+}
+
+/// Surfaces "bundle-kv is unavailable" loudly: ERROR log with `reason` plus
+/// a `kv` error-counter increment (`kind="kv_instance_unavailable"`). The
+/// caller then leaves `kv` unwired, so every kv host-call denies
+/// `not_implemented` (fail-CLOSED) -- never a fallback to the durable/spine
+/// instance and never an unmetered quota bypass.
+fn kv_degraded(reason: &str, detail: &str) {
+    tracing::error!(
+        reason = %reason,
+        detail = %detail,
+        "kv capability DEGRADED: dedicated kv Valkey instance unavailable; kv disabled \
+         (fail-closed: not_implemented on every kv host-call, NO fallback to the durable instance)"
+    );
+    static COUNTER: std::sync::OnceLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::OnceLock::new();
+    COUNTER
+        .get_or_init(|| {
+            opentelemetry::global::meter("bundle_host_kv")
+                .u64_counter("waddles_bundle_kv_instance_unavailable_total")
+                .with_description(
+                    "Bundle kv disabled at startup: dedicated kv Valkey unset/unreachable/evicting",
+                )
+                .build()
+        })
+        .add(
+            1,
+            &[opentelemetry::KeyValue::new("reason", reason.to_string())],
+        );
+}
+
 /// Opens the direct Valkey connection the `kv` host capability is backed
 /// by (`spine::ProcessDeps::kv_conn`'s doc). Never fatal on failure --
 /// returns `None` (logged) so the caller can start every other capability
 /// regardless.
-async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::MultiplexedConnection> {
-    let client = build_redis_client(cfg)?;
+async fn connect_kv(
+    spine_cfg: &penguin_spine::SpineConfig,
+) -> Option<redis::aio::MultiplexedConnection> {
+    // Dedicated kv instance, never the durable spine one -- see
+    // `kv_instance_config`. Unavailability is LOUD (`kv_degraded`) and
+    // fail-closed (kv `None` => not_implemented), never a fallback.
+    let Some(cfg) = kv_instance_config(spine_cfg, |k| std::env::var(k).ok()) else {
+        kv_degraded("url_unset", "VALKEY_KV_URL is unset or blank");
+        return None;
+    };
+    let cfg = &cfg;
+    let Some(client) = build_redis_client(cfg) else {
+        kv_degraded(
+            "client_build_failed",
+            "could not build the kv Valkey client",
+        );
+        return None;
+    };
     match client.get_multiplexed_async_connection().await {
         Ok(mut conn) => {
-            // Low-severity fix, security review of PR #425: `count_key`
-            // has no TTL, so an `allkeys-*` `maxmemory-policy` can evict it
-            // under memory pressure, silently resetting the kv quota --
-            // checked once here, never on the per-op hot path
-            // (`bundle_host_kv::policy`'s doc).
             let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut conn).await;
             bundle_host_kv::policy::log_and_record(&policy_check);
+            if let bundle_host_kv::policy::PolicyCheck::Violation(policy) = &policy_check {
+                kv_degraded("evicting_policy", policy);
+                return None;
+            }
             Some(conn)
         }
         Err(err) => {
-            tracing::warn!(error = %err, "kv capability: Valkey connection failed; kv disabled (not_implemented on every kv host-call)");
+            kv_degraded("connect_failed", &err.to_string());
             None
         }
     }
@@ -2124,6 +2187,55 @@ pub async fn run_healthcheck() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Wiring: bundle-kv goes to `VALKEY_KV_URL` (dedicated), the spine config
+    /// stays on the durable `VALKEY_URL`; unset kv URL => None (no fallback).
+    #[test]
+    fn kv_instance_config_routes_kv_to_dedicated_and_leaves_spine_on_durable() {
+        let spine = penguin_spine::SpineConfig {
+            valkey_url: "rediss://durable:6380/0".to_string(),
+            valkey_username: None,
+            valkey_password: Some("durable-pass".to_string()),
+            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
+            security_transport_tls: true,
+            security_transport_auth: true,
+            consumer_id: "c".to_string(),
+            stream_maxlen: 100,
+            read_count: 1,
+            block_ms: 1_000,
+            claim_idle_ms: 30_000,
+            claim_interval_ms: 15_000,
+            stats_interval_ms: 10_000,
+            pel_alert: 5_000,
+            dlq_maxlen: 100,
+            max_deliveries: 5,
+            drain_socket_timeout_s: 65,
+            relay_block_timeout_s: 30,
+        };
+        let env = |k: &str| match k {
+            "VALKEY_KV_URL" => Some("rediss://infra-redis:6380/0".to_string()),
+            "VALKEY_KV_PASSWORD" => Some("cache-pass".to_string()),
+            _ => None,
+        };
+        let kv = kv_instance_config(&spine, env).expect("kv url set");
+        assert_eq!(kv.valkey_url, "rediss://infra-redis:6380/0");
+        assert_eq!(kv.valkey_password.as_deref(), Some("cache-pass"));
+        assert!(kv.security_transport_tls);
+        assert_eq!(spine.valkey_url, "rediss://durable:6380/0");
+        assert_eq!(spine.valkey_password.as_deref(), Some("durable-pass"));
+
+        let plain = kv_instance_config(&spine, |k| {
+            (k == "VALKEY_KV_URL").then(|| "redis://:p@infra-redis:6379/0".to_string())
+        })
+        .expect("kv url set");
+        assert!(!plain.security_transport_tls);
+        assert!(plain.valkey_password.is_none());
+
+        // Unset: NO fallback to the durable instance.
+        assert!(kv_instance_config(&spine, |_| None).is_none());
+        assert!(kv_instance_config(&spine, |_| Some("  ".to_string())).is_none());
+        kv_degraded("test", "does not panic");
+    }
+
     use super::*;
     use crate::config::{CliConfig, Config};
     use clap::Parser;

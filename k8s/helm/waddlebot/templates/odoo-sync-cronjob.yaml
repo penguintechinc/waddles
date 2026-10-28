@@ -43,7 +43,7 @@ spec:
           {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 10 }}
           containers:
           - name: odoo-sync
-            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
             imagePullPolicy: {{ .Values.global.imagePullPolicy }}
             # Overrides hub-api's own `ENTRYPOINT`/`CMD` (hypercorn) -- same services/ tree,
             # a different standalone entrypoint (odoo_sync_service.py's own `main()`).

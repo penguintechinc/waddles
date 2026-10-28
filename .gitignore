@@ -244,3 +244,6 @@ node_modules/
 !core/bundle_compiler/src/build/
 
 coverage/
+
+# SDD scratch (agent working notes; never committed)
+.superpowers/

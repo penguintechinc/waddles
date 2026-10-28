@@ -1787,8 +1787,8 @@
     {
       "rule_id": "python-silent-except-return-default",
       "path": "hub_api/blueprints/v1/bundle_activation.py",
-      "line": 137,
-      "line_hash": "2ed56431754d6781"
+      "line": 170,
+      "line_hash": "f108aea7b809b1e9"
     },
     {
       "rule_id": "python-silent-except-return-default",
