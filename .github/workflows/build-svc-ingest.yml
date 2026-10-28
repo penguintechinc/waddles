@@ -33,6 +33,7 @@ on:
     paths:
       - 'core/svc_ingest/**'
       - 'core/service_auth/**'
+      - 'core/discord_mentions/**'
       - '.version'
       - '.github/workflows/build-svc-ingest.yml'
   pull_request:
@@ -40,6 +41,7 @@ on:
     paths:
       - 'core/svc_ingest/**'
       - 'core/service_auth/**'
+      - 'core/discord_mentions/**'
   merge_group:
     types: [checks_requested]
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']

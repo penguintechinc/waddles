@@ -12,6 +12,7 @@ on:
     paths:
       - 'core/connector_e2e/**'
       - 'core/svc_ingest/**'
+      - 'core/discord_mentions/**'
       - 'core/bundle_executor/**'
       - 'wit/waddle-connector/**'
       - '.github/workflows/rust-connector-e2e.yml'
@@ -21,6 +22,7 @@ on:
     paths:
       - 'core/connector_e2e/**'
       - 'core/svc_ingest/**'
+      - 'core/discord_mentions/**'
       - 'core/bundle_executor/**'
       - 'wit/waddle-connector/**'
   workflow_dispatch:

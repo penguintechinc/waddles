@@ -11,12 +11,14 @@ on:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
       - 'core/svc_action/**'
+      - 'core/discord_mentions/**'
       - '.version'
       - '.github/workflows/build-svc-action.yml'
   pull_request:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
       - 'core/svc_action/**'
+      - 'core/discord_mentions/**'
   merge_group:
     types: [checks_requested]
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']

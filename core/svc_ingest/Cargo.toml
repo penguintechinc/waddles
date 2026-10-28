@@ -218,6 +218,12 @@ service_auth = { path = "../service_auth", version = "=0.1.0" }
 # path dependency (Docker build context is `core/`), like `service_auth`.
 connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
 
+# Discord `allowed_mentions` mass-mention backstop stamped onto every
+# create-message body `src/discord_rest.rs` sends -- one definition shared with
+# `core/svc_action`'s Discord senders. Same-repo path dependency, so the Docker
+# build context is `core/` (see Dockerfile.rust).
+discord-mentions = { path = "../discord_mentions", version = "=0.1.0" }
+
 [dev-dependencies]
 http-body-util = "=0.1.3"
 # Already resolved transitively (tokio-tungstenite's own dependency) at

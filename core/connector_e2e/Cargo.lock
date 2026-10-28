@@ -482,6 +482,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "circuit-breaker"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -914,6 +921,13 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
+]
+
+[[package]]
+name = "discord-mentions"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -3147,8 +3161,10 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "circuit-breaker",
  "clap",
  "connection_resolver",
+ "discord-mentions",
  "hkdf",
  "hmac",
  "penguin-bundle-host",

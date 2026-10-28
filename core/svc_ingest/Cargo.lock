@@ -608,6 +608,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "discord-mentions"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2541,6 +2548,7 @@ dependencies = [
  "circuit-breaker",
  "clap",
  "connection_resolver",
+ "discord-mentions",
  "futures-util",
  "hkdf",
  "hmac",
