@@ -660,9 +660,9 @@ jobs:
       - name: Rebuild approved native dependency
         run: npm rebuild ${{ matrix.native_dependency }}
 
-      - name: Run frontend tests
+      - name: Run frontend tests (90% coverage gate)
         if: matrix.test
-        run: npm test
+        run: npm run coverage
 
       - name: Build
         run: npm run build

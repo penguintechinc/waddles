@@ -243,5 +243,7 @@ node_modules/
 # exempt it from the generic build/ ignore above.
 !core/bundle_compiler/src/build/
 
+coverage/
+
 # SDD scratch (agent working notes; never committed)
 .superpowers/
