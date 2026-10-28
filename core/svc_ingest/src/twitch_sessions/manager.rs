@@ -1399,7 +1399,8 @@ mod tests {
         async fn get_dek(
             &self,
             _tenant_id: &str,
-        ) -> Result<(crate::identity_crypto::Dek, u32), crate::identity_crypto::DekUnavailableError> {
+        ) -> Result<(crate::identity_crypto::Dek, u32), crate::identity_crypto::DekUnavailableError>
+        {
             Ok((zeroize::Zeroizing::new([9u8; 32]), 1))
         }
     }

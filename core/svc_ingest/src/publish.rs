@@ -1285,7 +1285,6 @@ mod tests {
         }
     }
 
-
     /// A `None` actor (system/account-level event) never touches the DEK
     /// provider at all -- no encryption needed, no DEK resolution attempt.
     #[tokio::test]
@@ -1476,7 +1475,6 @@ mod tests {
             "expected to examine exactly the 3 defined normalizer cases"
         );
     }
-
 
     #[tokio::test]
     async fn sourceless_and_dm_events_are_dropped_without_resolving() {
