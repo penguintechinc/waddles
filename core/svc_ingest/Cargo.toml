@@ -218,19 +218,11 @@ service_auth = { path = "../service_auth", version = "=0.1.0" }
 # path dependency (Docker build context is `core/`), like `service_auth`.
 connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
 
-# Dataplane scope-resolver machine-JWT client (`src/scope_resolver.rs`): bootstraps
-# with the pod's projected SA token, caches/refreshes the hub-api-issued EdDSA
-# machine JWT. Same-repo path dependency, so the Docker build context is `core/`
-# (see Dockerfile.rust) exactly like core/svc_process.
-service_auth = { path = "../service_auth", version = "=0.1.0" }
 # Discord `allowed_mentions` mass-mention backstop stamped onto every
 # create-message body `src/discord_rest.rs` sends -- one definition shared with
 # `core/svc_action`'s Discord senders. Same-repo path dependency, so the Docker
 # build context is `core/` (see Dockerfile.rust).
 discord-mentions = { path = "../discord_mentions", version = "=0.1.0" }
-# Dataplane connection resolver client (`src/twitch_sessions`): resolves Twitch
-# connections via hub-api. Same-repo path dependency (build context `core/`).
-connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
