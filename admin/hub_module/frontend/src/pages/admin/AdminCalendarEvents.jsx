@@ -32,6 +32,23 @@ const STATUS_STYLES = {
   cancelled: 'bg-navy-500/20 text-fg-muted border-navy-500/30',
 };
 
+/**
+ * Extracts a renderable message from an API failure. The calendar proxy returns
+ * `{success:false,error:{code,message}}` (an OBJECT) while older paths return a
+ * bare string -- rendering the object directly crashes React, so always reduce to text.
+ */
+export function apiErrorMessage(err, fallback) {
+  const e = err?.response?.data?.error;
+  if (typeof e === 'string' && e) return e;
+  if (e && typeof e.message === 'string' && e.message) return e.message;
+  return fallback;
+}
+
+/**
+ * Community calendar event admin page (`/admin/:communityId/calendar/events`):
+ * lists events from the admin calendar proxy, creates/edits/deletes/approves
+ * them, and hosts the per-community Discord event-sync toggle.
+ */
 function AdminCalendarEvents() {
   const { communityId } = useParams();
   const [events, setEvents] = useState([]);
@@ -74,7 +91,7 @@ function AdminCalendarEvents() {
       setEditingEvent(null);
       fetchEvents();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to create event');
+      setError(apiErrorMessage(err, 'Failed to create event'));
       throw err;
     }
   };
@@ -96,7 +113,7 @@ function AdminCalendarEvents() {
       setEditingEvent(null);
       fetchEvents();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to update event');
+      setError(apiErrorMessage(err, 'Failed to update event'));
       throw err;
     }
   };
@@ -108,7 +125,7 @@ function AdminCalendarEvents() {
       setMessage({ type: 'success', text: 'Event deleted' });
       fetchEvents();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to delete event');
+      setError(apiErrorMessage(err, 'Failed to delete event'));
     }
   };
 
@@ -118,7 +135,7 @@ function AdminCalendarEvents() {
       setMessage({ type: 'success', text: 'Event approved' });
       fetchEvents();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to approve event');
+      setError(apiErrorMessage(err, 'Failed to approve event'));
     }
   };
 
@@ -130,7 +147,7 @@ function AdminCalendarEvents() {
       setMessage({ type: 'success', text: 'Event rejected' });
       fetchEvents();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to reject event');
+      setError(apiErrorMessage(err, 'Failed to reject event'));
     }
   };
 
