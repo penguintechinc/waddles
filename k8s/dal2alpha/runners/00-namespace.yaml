@@ -1,0 +1,17 @@
+# Runner namespace. PSA restricted: deploy-only runner needs no docker/privileged.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: github-runners
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Controller namespace (ARC controller itself).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: arc-systems
+  labels:
+    pod-security.kubernetes.io/enforce: restricted

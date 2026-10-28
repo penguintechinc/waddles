@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Static-secret connection kinds (edge-reshape Chunk 2, Task 2): `external_http`, `aws_lambda` and `gcp_function` providers on the standard connection framework. An admin posts `secret: {scheme, document}` (instead of OAuth `credentials`); the JSON document is sealed at rest under row-bound AAD (`platform_connections.sealed_secret`) and is never returned by any admin route. `connection_kind` int (1 platform_oauth, 2 external_http, 3 aws_lambda, 4 gcp_function) is the new type authority; DTO gains `kind` + `publicId`. Endpoint URLs are validated (https only, no userinfo/fragment, no private/loopback/link-local/CGNAT IP literal, <=2048); credential validation is structural only (no outbound call at write time). Gated by flag `waddles.integrations.static_connections` (Professional, default OFF). Migration `0064_connection_kinds`.
 - Numeric-scope envelope contract (data-plane numeric-id migration, slice A foundation): `tenant_id` (i64) + `community_id` (i32,
   0 = tenant-wide) are now the AUTHORITATIVE scope keys on the spine `StageEnvelope` (schema v3; slug/name strings become
   display-only), bound into `binding.mac` by a new domain-tagged, length-framed formula (penguin-libs `penguin-spine` 0.2.0,
@@ -32,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user-keyed table/column has no rule, so a future table cannot silently regress erasure. See `docs/PRIVACY.md`.
 
 ### Changed
+- Connector host (#840 step 2): `penguin-bundle-host` bumped `0.2.0` -> `0.3.0` (penguin-libs `eef86927`, PR #135) in
+  `bundle_executor`, `bundle_host_http`, `svc_action`, `svc_process`, and added to `svc_ingest`. The inert `UnwiredInvoker` is
+  replaced by `WireConnectorInvoker` (+ `ExecutorLink`), which carries connector `receiver` exports over the executor host-API
+  wire as `ExportKind::Connector*`; the executor routes them to an always-pinned `ConnectorRouter` (`Executor::pin_connector`).
+  `core/connector_e2e` now drives the Echo/fault connectors through the real wire. No deployed behavior change: svc_ingest
+  still constructs no `ConnectorDriver` and the executor pins no connector at startup.
 - Docs (no code or behavior change): corrected stale "M5-blocked skeleton" / "TODO(M4)" claims in `k8s/helm/waddlebot/values.yaml`
   (`pipeline.rustDataPlane`) and the `templates/svc-{ingest,process,action}-rust.yaml` and `templates/bundle-executor.yaml` headers.
   The Rust data plane is implemented: svc_ingest has native Twitch IRC, Discord Gateway, Twitch EventSub and outbound drains;

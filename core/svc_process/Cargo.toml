@@ -98,7 +98,7 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # instead of guessing from `d.env.app_id` -- the exact "shared ingest-source
 # stream" bug this crate's own `src/hop.rs` doc comment already called out
 # (env.app_id never identifies the reading bundle on a shared stream).
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ce638ec24f0bca0e2afd7655b99d1f9162030156", package = "penguin-spine", version = "=0.2.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
 # `penguin-licensing` (spec SS13.5): gates the process-stage drain loop on
 # the `waddles.core.rust-data-plane` PostHog-compatible flag (default OFF,
 # fail-closed on an unreachable license server) -- see `src/license.rs`.
@@ -107,12 +107,12 @@ penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git"
 # Frame/Message shapes shared verbatim with `bundle-executor` -- see
 # `src/host_api.rs`. Same pinned rev `core/svc_action`/`core/bundle_executor`
 # already use (PR penguintechinc/penguin-libs#93).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b063b7ba49f8544f95dba0d23dcbe0e109b7b16c", package = "penguin-bundle-host", version = "=0.2.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "eef86927d015f530c14d8ed54d311494c1a8000d", package = "penguin-bundle-host", version = "=0.3.0" }
 # mTLS host-API server (spec SS6.6/SS7.1): the executor dials `:8301`; this
 # crate is the TLS *server* side, mirroring `core/bundle_executor/src/tls.rs`
 # (the client side) with the roles reversed -- same exact version pins
 # `core/svc_action` uses for its own `:8302` listener.
-rustls = { version = "=0.23.46", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
 rustls-pki-types = "=1.15.1"
 prometheus = "=0.14.0"

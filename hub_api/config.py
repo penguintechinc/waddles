@@ -270,6 +270,13 @@ class HubAPIConfig:
     grpc_enabled: bool = True
     deployment_env: str = "alpha"
 
+    # HIGH-2: SPIFFE peer-identity path of `services.machine_auth.machine_authenticated`. The
+    # header carries the verified X.509-SVID id from the mTLS listener and is read ONLY when
+    # `spiffe_peer_trust` is true (default OFF -> header ignored). Turn it on only where the edge
+    # strips this header from every request that did not arrive on the mTLS listener.
+    spiffe_peer_trust: bool = False
+    spiffe_peer_id_header: str = "X-Spiffe-Peer-Id"
+
     # Session lifecycle (`services/session_service.py`). Access tokens are short-lived (15 min,
     # `flask_core.auth.ACCESS_TOKEN_TTL_SECONDS`) and renewed from a rotating refresh token.
     # `refresh_token_ttl_seconds` is the idle window (each rotation slides it forward);
@@ -364,6 +371,8 @@ class HubAPIConfig:
             connections_state_ttl_s=int(os.getenv("CONNECTIONS_STATE_TTL_S", "600")),
             grpc_enabled=_bool_env("GRPC_INTERNAL_ENABLED", True),
             deployment_env=os.getenv("DEPLOYMENT_ENV", "alpha"),
+            spiffe_peer_trust=_bool_env("SPIFFE_PEER_TRUST", False),
+            spiffe_peer_id_header=os.getenv("SPIFFE_PEER_ID_HEADER", "X-Spiffe-Peer-Id"),
             refresh_token_ttl_seconds=_bounded_int_env(
                 "REFRESH_TOKEN_TTL_SECONDS", 7 * 24 * 3600, minimum=900, maximum=90 * 24 * 3600
             ),

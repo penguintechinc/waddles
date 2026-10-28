@@ -104,7 +104,7 @@ def _availability_dto(row: Any) -> AvailabilityDTO:
 
 
 @bundle_tenant_availability_bp.route("/<tenant_slug>/availability", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(AvailabilityListResponse)
 async def list_availability(
     tenant_slug: str,
@@ -120,8 +120,8 @@ async def list_availability(
 
 
 @bundle_tenant_availability_bp.route("/<tenant_slug>/availability", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(SetAvailableRequest)
 @validate_response(MessageResponse, 201)
 async def enable_availability(
@@ -144,8 +144,8 @@ async def enable_availability(
 
 
 @bundle_tenant_availability_bp.route("/<tenant_slug>/availability/<app_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def disable_availability(
     tenant_slug: str, app_id: str

@@ -23,6 +23,11 @@ from typing import Any
 from waddle_sdk import log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 #: `!roll` alone, or `!roll <spec>` where `<spec>` is validated separately --
 #: this only decides "is this bundle's command even being invoked", same
 #: division of labor as `bundles/csharp/superpenguin-roll`'s own `ChatCommand`.
@@ -78,7 +83,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         reply_text = USAGE_TEXT
     else:
         count, sides = parsed
-        rolls = [random.randint(1, sides) for _ in range(count)]  # noqa: S311 - a game, not crypto
+        rolls = [_RNG.randint(1, sides) for _ in range(count)]
         reply_text = f"\U0001f3b2 rolls {rolls} (total {sum(rolls)})"
 
     log.info("roll.transform matched", platform=event.platform)

@@ -82,13 +82,13 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # landed `binding` module (a separate follow-up, re-verified against this
 # rev's own canonical test vectors, not done here), and `src/dispatch.rs`'s
 # `fixture_delivered` for the `group` field this rev added.
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ce638ec24f0bca0e2afd7655b99d1f9162030156", package = "penguin-spine", version = "=0.2.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
 # `penguin-bundle-host::wire` (spec SS6.6): the host-API frame codec and
 # Frame/Message shapes shared verbatim with `bundle-executor` -- see
 # `src/host_api.rs`. Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # (PR penguintechinc/penguin-libs#93, same commit `core/bundle_executor`
 # pins).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b063b7ba49f8544f95dba0d23dcbe0e109b7b16c", package = "penguin-bundle-host", version = "=0.2.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "eef86927d015f530c14d8ed54d311494c1a8000d", package = "penguin-bundle-host", version = "=0.3.0" }
 # Spec SS13.5's two flags this crate gates on (`waddles.core.rust-data-plane`,
 # `waddles.core.bundle-egress`) -- see `src/flags.rs`. Pinned to the tip of
 # `release/rust-licensing/v0.1.x`.
@@ -99,12 +99,14 @@ penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git"
 # now implements the identical formula -- `src/hop.rs`'s module doc records
 # the cross-check against that module's canonical test vectors and why this
 # crate keeps its own copy rather than switching over in this landing.
+hmac = "=0.12.1"
 sha2 = "=0.10.9"
+subtle = "=2.6.1"
 hex = "=0.4.3"
 # mTLS host-API server (spec SS6.6/SS7.1): the executor dials `:8302`: this
 # crate is the TLS *server* side, mirroring `core/bundle_executor/src/tls.rs`
 # (the client side) with the roles reversed. Same exact version pins.
-rustls = { version = "=0.23.46", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
 rustls-pki-types = "=1.15.1"
 # `relay` host capability (Twitch outbound, spec SS7.4) LPUSHes onto

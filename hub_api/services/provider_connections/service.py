@@ -25,12 +25,17 @@ Hard rules enforced in this file:
 
 from __future__ import annotations
 
+import json
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
+from uuid import UUID, uuid4
 
+from flask_core.feature_flags import feature_enabled
+
+from services.platform_integrations_crypto import platform_connection_aad
 from services.provider_connections import store
 from services.provider_connections.adapter import (
     AdapterRegistry,
@@ -45,12 +50,22 @@ from services.provider_connections.errors import (
     ConnectionConflict,
     ConnectionNotFound,
     ConnectionNotUsable,
+    FeatureNotEnabled,
     InvalidConnectionInput,
     ProviderConnectionError,
     ProviderUnavailable,
     RefreshNotConfigured,
     RefreshRejected,
+    StaticScopeRequired,
     UnknownProvider,
+    VaultCorrupt,
+)
+from services.provider_connections.kinds import ConnectionKind, SecretScheme, UnknownSecretScheme
+from services.provider_connections.static_secret import (
+    infer_scheme,
+    reject_control_characters,
+    validate_secret_document,
+    wire_secret_fields,
 )
 from services.provider_connections.store import Binding, ResolveState, SealedSecrets
 from services.provider_connections.telemetry import (
@@ -59,7 +74,12 @@ from services.provider_connections.telemetry import (
     operation_span,
     token_refresh_counter,
 )
-from services.provider_connections.vault import TokenVault
+from services.provider_connections.vault import (
+    SEAL_AAD,
+    SEAL_LEGACY,
+    TokenVault,
+    reseal_if_legacy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +87,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_REFRESH_SKEW: Final = timedelta(seconds=120)
 #: Hard ceiling on one data-plane list page.
 MAX_PAGE_SIZE: Final = 1000
+
+
+#: Two-gate feature (PostHog flag default OFF + Professional tier) for the static-secret kinds.
+FEATURE_STATIC_CONNECTIONS: Final = "waddles.integrations.static_connections"
+
+
+async def _default_static_gate(tenant_slug: str) -> bool:
+    """The real entitlement check for static-secret connections (flag + tier)."""
+    return bool(await feature_enabled(FEATURE_STATIC_CONNECTIONS, tenant=tenant_slug))
 
 
 @dataclass(slots=True, frozen=True)
@@ -99,6 +128,7 @@ class DataPlaneBinding:
     expires_at: datetime | None
     updated_at: datetime | None
     metadata: dict[str, Any]
+    kind: int = int(ConnectionKind.PLATFORM_OAUTH)
 
 
 @dataclass(slots=True, frozen=True)
@@ -116,9 +146,15 @@ class ResolvedCredentials:
     connection_id: int
     community_id: int
     provider: str
-    access_token: str = field(repr=False)
+    kind: int = int(ConnectionKind.PLATFORM_OAUTH)
+    access_token: str | None = field(default=None, repr=False)
     expires_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Non-secret target facts of a static kind (``url`` / ``region`` / ``function`` / ``project``).
+    endpoint: dict[str, str | None] = field(default_factory=dict)
+    #: ``SecretScheme`` code + camelCase wire fields of a static secret; ``None`` for OAuth rows.
+    secret_scheme: int | None = None
+    secret_fields: dict[str, str | None] | None = field(default=None, repr=False)
 
 
 class ProviderConnectionService:
@@ -132,8 +168,14 @@ class ProviderConnectionService:
         *,
         clock: Callable[[], datetime] | None = None,
         refresh_skew: timedelta = DEFAULT_REFRESH_SKEW,
+        static_gate: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
-        """Bind the penguin-dal handle, adapter registry and vault (all injectable for tests)."""
+        """Bind the penguin-dal handle, adapter registry and vault (all injectable for tests).
+
+        ``static_gate(tenant_slug)`` answers whether the tenant may create static-secret
+        connections; the default is the real two-gate feature check (flag + Professional tier).
+        """
+        self._static_gate = static_gate or _default_static_gate
         self._db = db
         self._registry = registry
         self._vault = vault
@@ -145,6 +187,10 @@ class ProviderConnectionService:
     def providers(self) -> list[AdapterSpec]:
         """Every registered provider's spec; the API renders these into install descriptors."""
         return self._registry.specs()
+
+    def provider_kind(self, provider: str) -> ConnectionKind:
+        """The :class:`ConnectionKind` a provider creates (:class:`UnknownProvider` if unknown)."""
+        return self._registry.get(provider).spec.kind
 
     # -- admin: create ---------------------------------------------------------------------
 
@@ -163,6 +209,8 @@ class ProviderConnectionService:
         """Verify the credential with the provider, resolve the resource, then store it sealed."""
         adapter = self._registry.get(provider)
         spec = adapter.spec
+        if spec.kind is not ConnectionKind.PLATFORM_OAUTH:
+            raise InvalidConnectionInput("this provider takes a secret document, not credentials")
         with operation_span(provider, "create"):
             clean_metadata = validate_metadata(spec, metadata)
             credentials = adapter.normalize_credentials(
@@ -182,6 +230,9 @@ class ProviderConnectionService:
             facts = self._compose_facts(adapter, account.scopes, resource.facts)
             facts.update(self._metadata_inputs(spec, clean_metadata))
             now = self._clock()
+            # The row's immutable identity is minted first: it is part of the tokens' AAD (M4).
+            public_id = uuid4()
+            aad = platform_connection_aad(public_id=public_id, platform=spec.platform)
             binding = await store.insert_connection(
                 self._db,
                 tenant_id=tenant_id,
@@ -189,19 +240,22 @@ class ProviderConnectionService:
                 platform=spec.platform,
                 resource_type=spec.resource_type,
                 resource_id=resource.resource_id,
+                public_id=public_id,
                 secrets=SealedSecrets(
-                    access_token=self._vault.seal(credentials.access_token),
+                    access_token=self._vault.seal(credentials.access_token, aad=aad),
                     refresh_token=(
-                        self._vault.seal(credentials.refresh_token)
+                        self._vault.seal(credentials.refresh_token, aad=aad)
                         if credentials.refresh_token
                         else None
                     ),
+                    seal_version=SEAL_AAD,
                 ),
                 expires_at=account.expires_at,
                 resource_metadata=facts,
                 installed_by_user_id=actor_user_id,
                 enabled=enabled,
                 now=now,
+                connection_kind=int(ConnectionKind.PLATFORM_OAUTH),
             )
             if account.expires_at is not None and not credentials.refresh_token:
                 logger.info(
@@ -216,6 +270,90 @@ class ProviderConnectionService:
                 provider,
                 binding.connection.id,
                 community_id,
+                enabled,
+            )
+            return self._view(binding)
+
+    async def create_static(
+        self,
+        *,
+        tenant_id: int,
+        tenant_slug: str,
+        community_id: int,
+        actor_user_id: int | None,
+        provider: str,
+        secret_scheme: int,
+        secret_document: Mapping[str, Any],
+        metadata: Mapping[str, Any],
+        enabled: bool,
+    ) -> ConnectionView:
+        """Create an external-http / aws-lambda / gcp-function connection from a secret document.
+
+        Everything is validated structurally (no outbound call -- host policy is the dispatcher's
+        send-time job), the JSON document is sealed with the row-bound AAD, and the row is stored
+        with ``connection_kind`` set, ``resource_id = public_id`` and only non-secret target facts
+        in ``resource_metadata``. The secret is never echoed, logged or returned.
+        """
+        adapter = self._registry.get(provider)
+        spec = adapter.spec
+        if spec.kind is ConnectionKind.PLATFORM_OAUTH:
+            raise InvalidConnectionInput("this provider takes OAuth credentials, not a secret")
+        # Defence in depth: the flag lives here, not only in the HTTP layer, so a CLI / internal
+        # caller of this method cannot bypass the entitlement.
+        if not await self._static_gate(tenant_slug):
+            raise FeatureNotEnabled("Static-secret connections are not enabled for this plan")
+        with operation_span(provider, "create_static"):
+            try:
+                scheme = SecretScheme.from_code(secret_scheme)
+            except UnknownSecretScheme:
+                raise InvalidConnectionInput("unknown secret scheme") from None
+            if scheme not in spec.secret_schemes:
+                raise InvalidConnectionInput("secret scheme is not supported by this provider")
+            document = validate_secret_document(scheme, secret_document)
+            reject_control_characters(metadata)
+            clean_metadata = validate_metadata(spec, metadata)
+            # One source of truth: the adapter's own structural checks run on the exact canonical
+            # document that will be sealed (no outbound call -- see static_secret module docs).
+            canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
+            credentials = adapter.normalize_credentials(Credentials(access_token=canonical))
+            account = await adapter.validate_credentials(credentials)
+            resource = await adapter.resolve_resource(credentials, account, clean_metadata)
+            owner = await store.community_tenant_id(self._db, community_id)
+            if owner != tenant_id:
+                raise ConnectionNotFound("community not found")
+            facts = self._compose_facts(adapter, account.scopes, resource.facts)
+            facts["secret_scheme"] = int(scheme)
+            public_id = uuid4()
+            aad = platform_connection_aad(public_id=public_id, platform=spec.platform)
+            sealed = self._vault.seal(canonical, aad=aad)
+            binding = await store.insert_connection(
+                self._db,
+                tenant_id=tenant_id,
+                community_id=community_id,
+                platform=spec.platform,
+                resource_type=spec.resource_type,
+                resource_id=str(public_id),
+                public_id=public_id,
+                secrets=SealedSecrets(
+                    access_token=None,
+                    refresh_token=None,
+                    seal_version=SEAL_AAD,
+                    sealed_secret=sealed,
+                ),
+                expires_at=None,
+                resource_metadata=facts,
+                installed_by_user_id=actor_user_id,
+                enabled=enabled,
+                now=self._clock(),
+                connection_kind=int(spec.kind),
+            )
+            logger.info(
+                "provider_connections.created_static provider=%s connection_id=%d "
+                "community_id=%d scheme=%d enabled=%s",
+                provider,
+                binding.connection.id,
+                community_id,
+                int(scheme),
                 enabled,
             )
             return self._view(binding)
@@ -273,6 +411,12 @@ class ProviderConnectionService:
             raise ConnectionNotFound("connection not found")
         adapter = self._registry.get(binding.connection.platform)
         spec = adapter.spec
+        if spec.kind is not ConnectionKind.PLATFORM_OAUTH and (
+            metadata is not None or access_token is not None
+        ):
+            raise InvalidConnectionInput(
+                "a static-secret connection cannot be edited; delete it and create a new one"
+            )
         with operation_span(spec.provider, "update"):
             changes_link = metadata is not None or access_token is not None
             if changes_link and binding.shared_with > 0:
@@ -343,10 +487,14 @@ class ProviderConnectionService:
             if credentials.refresh_token and not spec.refreshable:
                 raise InvalidConnectionInput("this provider does not use a refresh token")
             account = await adapter.validate_credentials(credentials)
-            values["access_token"] = self._vault.seal(credentials.access_token)
+            aad = self._row_aad(binding.connection)
+            values["access_token"] = self._vault.seal(credentials.access_token, aad=aad)
             values["refresh_token"] = (
-                self._vault.seal(credentials.refresh_token) if credentials.refresh_token else None
+                self._vault.seal(credentials.refresh_token, aad=aad)
+                if credentials.refresh_token
+                else None
             )
+            values["seal_version"] = SEAL_AAD
             values["expires_at"] = account.expires_at
             values["status"] = store.STATUS_ACTIVE
             values["status_reason"] = None
@@ -436,8 +584,15 @@ class ProviderConnectionService:
             )
             return DataPlanePage(items=items, next_after=next_after)
 
-    async def resolve(self, *, community_id: int, connection_id: int) -> ResolvedCredentials:
-        """Hand the data plane a fresh access token for one usable binding (refresh if stale)."""
+    async def resolve(
+        self, *, community_id: int, connection_id: int, static_allowed: bool = False
+    ) -> ResolvedCredentials:
+        """Hand the data plane a fresh access token for one usable binding (refresh if stale).
+
+        ``static_allowed`` is the caller's ``connections:resolve:static`` entitlement and defaults
+        to fail-closed: a static-secret kind is refused with :class:`StaticScopeRequired` (before
+        any usability check, so nothing about the row leaks) unless the caller holds it.
+        """
         state = await store.read_resolve_state(
             self._db, community_id=community_id, connection_id=connection_id
         )
@@ -445,8 +600,27 @@ class ProviderConnectionService:
             raise ConnectionNotFound("connection not found")
         provider = state.connection.platform
         adapter = self._registry.get(provider)
+        kind = ConnectionKind.from_code(state.connection.connection_kind)
+        if kind is not ConnectionKind.PLATFORM_OAUTH:
+            if not static_allowed:
+                raise StaticScopeRequired("static-secret connections need a broader scope")
+            # A static row never falls through to the token-opening path (its access_token is
+            # NULL by construction): it has its own branch and its own sealed document.
+            with operation_span(provider, "resolve"):
+                self._assert_usable(state)
+                return self._resolve_static(adapter, kind, state)
         with operation_span(provider, "resolve"):
             self._assert_usable(state)
+            # Reject an incomplete binding BEFORE any refresh: never rotate a row we will refuse.
+            if (
+                self.binding_metadata(
+                    provider, state.connection.resource_metadata, connection_id=connection_id
+                )
+                is None
+            ):
+                raise ConnectionNotUsable(
+                    "the connection's binding is incomplete", reason="metadata_incomplete"
+                )
             plaintext, connection = await self._fresh_token(
                 adapter, connection_id, community_id=community_id, state=state
             )
@@ -455,12 +629,79 @@ class ProviderConnectionService:
                 connection_id=connection_id,
                 community_id=community_id,
                 provider=provider,
+                kind=int(kind),
                 access_token=plaintext,
                 expires_at=connection.expires_at,
                 metadata={k: v for k, v in connection.resource_metadata.items() if k in allowed},
             )
 
     # -- internals -------------------------------------------------------------------------
+
+    def binding_metadata(
+        self, provider: str, stored: Mapping[str, Any], *, connection_id: int
+    ) -> dict[str, str] | None:
+        """Project stored ``resource_metadata`` to the provider's data-plane metadata contract.
+
+        Flat string->string, allow-listed by the adapter's ``binding_metadata`` (aliases applied
+        here, storage untouched). ``None`` = a required key is missing, so the row is not a
+        complete binding; the log line names the connection id and the missing *keys* only.
+        """
+        spec = self._registry.get(provider).spec
+        out: dict[str, str] = {}
+        missing: list[str] = []
+        for key in spec.binding_metadata:
+            value = stored.get(key.stored)
+            if isinstance(value, int) and not isinstance(value, bool):
+                value = str(value)  # e.g. a numeric channel id stored as an int
+            if isinstance(value, str) and value:
+                out[key.wire] = value
+            elif key.required:
+                missing.append(key.stored)
+        if missing:
+            logger.warning(
+                "provider_connections.binding_incomplete connection_id=%d missing=%s",
+                connection_id,
+                ",".join(missing),
+            )
+            return None
+        return out
+
+    def _resolve_static(
+        self, adapter: ProviderAdapter, kind: ConnectionKind, state: ResolveState
+    ) -> ResolvedCredentials:
+        """Open a static row's sealed secret document and shape it for the wire (no refresh).
+
+        Every failure is a fixed-text framework error: the document is opened with the row-bound
+        AAD, must parse to an object whose key set is exactly one of the provider's schemes, and a
+        row whose own ``expires_at`` has passed is refused like an expired OAuth link.
+        """
+        connection = state.connection
+        if connection.expires_at is not None and connection.expires_at <= self._clock():
+            raise ConnectionNotUsable("the connection has expired", reason="connection_expired")
+        plaintext = self._open(state.secrets.sealed_secret, state)
+        try:
+            doc = json.loads(plaintext)
+        except ValueError:
+            raise VaultCorrupt("a stored connection secret is malformed") from None
+        scheme = infer_scheme(doc) if isinstance(doc, dict) else None
+        if scheme is None or scheme not in adapter.spec.secret_schemes:
+            raise VaultCorrupt("a stored connection secret is malformed")
+        meta = connection.resource_metadata
+        return ResolvedCredentials(
+            connection_id=connection.id,
+            community_id=state.grant.community_id,
+            provider=connection.platform,
+            kind=int(kind),
+            access_token=None,
+            expires_at=connection.expires_at,
+            metadata={},
+            endpoint={
+                key: (str(meta[key]) if meta.get(key) is not None else None)
+                for key in ("url", "region", "function", "project")
+            },
+            secret_scheme=int(scheme),
+            secret_fields=wire_secret_fields(scheme, doc),
+        )
 
     def _needs_refresh(self, expires_at: datetime | None) -> bool:
         return expires_at is not None and expires_at <= self._clock() + self._refresh_skew
@@ -505,7 +746,9 @@ class ProviderConnectionService:
             if state is None:
                 raise ConnectionNotFound("connection not found")
         if not self._needs_refresh(state.connection.expires_at):
-            return self._vault.open(state.secrets.access_token), state.connection
+            access = self._open(state.secrets.access_token, state)
+            await self._reseal_if_legacy(state)
+            return access, state.connection
 
         failure: ConnectionNotUsable | None = None
         async with store.lock_for_refresh(
@@ -516,7 +759,7 @@ class ProviderConnectionService:
             current = locked.state
             if not self._needs_refresh(current.connection.expires_at):
                 token_refresh_counter.add(1, {"provider": provider, "outcome": "already_rotated"})
-                return self._vault.open(current.secrets.access_token), current.connection
+                return self._open(current.secrets.access_token, current), current.connection
             self._assert_usable_connection(current)
             now = self._clock()
             if current.secrets.refresh_token is None or not adapter.spec.refreshable:
@@ -528,7 +771,7 @@ class ProviderConnectionService:
             else:
                 try:
                     refreshed = await adapter.refresh(
-                        self._vault.open(current.secrets.refresh_token),
+                        self._open(current.secrets.refresh_token, current),
                         current.connection.resource_metadata,
                     )
                 except RefreshRejected:
@@ -569,14 +812,22 @@ class ProviderConnectionService:
                     )
                     raise
                 else:
-                    sealed_access = self._vault.seal(refreshed.access_token)
-                    sealed_refresh = (
-                        self._vault.seal(refreshed.refresh_token)
-                        if refreshed.refresh_token
-                        else current.secrets.refresh_token
-                    )
+                    aad = self._row_aad(current.connection)
+                    sealed_access = self._vault.seal(refreshed.access_token, aad=aad)
+                    if refreshed.refresh_token:
+                        sealed_refresh: str | None = self._vault.seal(
+                            refreshed.refresh_token, aad=aad
+                        )
+                    elif current.secrets.seal_version == SEAL_LEGACY:
+                        # Keeping the old refresh token, but the row is being stamped AAD-bound:
+                        # it must be re-sealed too or it would fail authentication next read.
+                        sealed_refresh = self._vault.seal(
+                            self._open(current.secrets.refresh_token, current), aad=aad
+                        )
+                    else:
+                        sealed_refresh = current.secrets.refresh_token
                     await locked.save_tokens(
-                        secrets=SealedSecrets(sealed_access, sealed_refresh),
+                        secrets=SealedSecrets(sealed_access, sealed_refresh, seal_version=SEAL_AAD),
                         expires_at=refreshed.expires_at,
                         now=now,
                     )
@@ -593,6 +844,69 @@ class ProviderConnectionService:
         if failure is None:  # pragma: no cover - every non-returning path above sets it
             raise ProviderConnectionError("token refresh finished without a result")
         raise failure
+
+    @staticmethod
+    def _row_aad(connection: store.ConnectionRow) -> bytes:
+        """The AAD binding this row's sealed tokens to it: immutable ``public_id`` + platform."""
+        return platform_connection_aad(public_id=connection.public_id, platform=connection.platform)
+
+    def _open(self, ciphertext: str | None, state: ResolveState) -> str:
+        """Open one of this row's ciphertexts through the versioned vault."""
+        if ciphertext is None:
+            raise VaultCorrupt("a stored connection secret is missing")
+        return self._vault.open(
+            ciphertext,
+            aad=self._row_aad(state.connection),
+            seal_version=state.secrets.seal_version,
+        )
+
+    async def _reseal_if_legacy(self, state: ResolveState) -> None:
+        """Lazy M4 upgrade on resolve: re-seal a legacy (v0) row AAD-bound, best effort.
+
+        The row just opened successfully, so a failure here is operational (lock/connection), not
+        tamper: it is logged by type only and must never fail the resolve that triggered it.
+        ``scripts/reseal_connections.py`` reports anything left behind.
+        """
+        if state.secrets.seal_version != SEAL_LEGACY:
+            return
+        try:
+            await store.reseal_legacy(
+                self._db, connection_id=state.connection.id, rewrap=self._rewrap_legacy
+            )
+        except Exception as exc:  # noqa: BLE001 - opportunistic upgrade, see docstring
+            log_failure(
+                logger,
+                "provider_connections.lazy_reseal_failed",
+                exc,
+                level=logging.WARNING,
+                connection_id=state.connection.id,
+            )
+
+    def _rewrap_legacy(
+        self, public_id: UUID, platform: str, current: SealedSecrets
+    ) -> SealedSecrets | None:
+        """Re-seal a genuinely legacy pair under the row's AAD; ``None`` if it is not legacy.
+
+        A pair that already opens under the row's AAD while the column says legacy is a suspected
+        downgrade (the column was flipped): it is logged (ids only) and left alone, never
+        re-blessed.
+        """
+        if current.access_token is None:  # pragma: no cover - the 0064 CHECK forbids it
+            return None  # a legacy (v0) row always carries an OAuth token
+        aad = platform_connection_aad(public_id=public_id, platform=platform)
+        access = reseal_if_legacy(current.access_token, aad=aad)
+        refresh = (
+            reseal_if_legacy(current.refresh_token, aad=aad) if current.refresh_token else None
+        )
+        if access is None or (current.refresh_token and refresh is None):
+            logger.warning(
+                "provider_connections.suspected_seal_downgrade platform=%s public_id=%s "
+                "-- ciphertext is AAD-bound but seal_version says legacy; not re-sealed",
+                platform,
+                public_id,
+            )
+            return None
+        return SealedSecrets(access, refresh, seal_version=SEAL_AAD)
 
     @staticmethod
     def _assert_usable_connection(state: ResolveState) -> None:
@@ -659,6 +973,7 @@ class ProviderConnectionService:
             expires_at=row.connection.expires_at,
             updated_at=row.connection.updated_at,
             metadata={k: v for k, v in meta.items() if k in spec.runtime_metadata_keys},
+            kind=row.connection.connection_kind,
         )
 
 

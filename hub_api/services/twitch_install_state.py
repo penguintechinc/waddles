@@ -18,7 +18,7 @@ payload** (PKCE verifier only, never a credential): the tenant admin
 supplies their Twitch application's `client_id`/`client_secret` at
 authorize time, and the public callback has no other way to recover them
 to complete the token exchange. `client_secret` is therefore AES-256-GCM
-encrypted (`services.platform_integrations_crypto.encrypt_token`, the same
+encrypted (`services.provider_connections.vault.seal_secret`, the same
 primitive `services.credential_resolver.store_tenant_credentials` uses for
 the row this flow ultimately writes) before being JSON-encoded into the
 Redis value -- defense in depth on top of Redis never being reachable
@@ -38,9 +38,8 @@ from quart import current_app
 from config import HubAPIConfig
 from services.platform_integrations_crypto import (
     PlatformCredentialCryptoError,
-    decrypt_value,
-    encrypt_token,
 )
+from services.provider_connections.vault import open_secret, seal_secret
 from services.rate_limiting import RATE_LIMITER_CONFIG_KEY
 
 logger = logging.getLogger(__name__)
@@ -118,7 +117,7 @@ async def create_state(
         "tenant_id": tenant_id,
         "installed_by_user_id": installed_by_user_id,
         "client_id": client_id,
-        "client_secret_ciphertext": encrypt_token(client_secret),
+        "client_secret_ciphertext": seal_secret(client_secret),
         "redirect_uri": redirect_uri,
     }
     client = _redis_client()
@@ -150,7 +149,7 @@ async def consume_state(state: str) -> TwitchInstallStatePayload | None:
         return None
     try:
         data = json.loads(raw)
-        client_secret = decrypt_value(str(data["client_secret_ciphertext"]))
+        client_secret = open_secret(str(data["client_secret_ciphertext"]))
         return TwitchInstallStatePayload(
             tenant_id=int(data["tenant_id"]),
             installed_by_user_id=int(data["installed_by_user_id"]),
