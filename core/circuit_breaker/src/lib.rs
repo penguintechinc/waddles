@@ -105,13 +105,32 @@ impl SourceEntry {
 pub struct CircuitBreaker {
     sources: Mutex<HashMap<String, SourceEntry>>,
     metrics: Arc<dyn CircuitBreakerMetrics>,
+    threshold: u32,
+    window: Duration,
+    backoff: Duration,
 }
 
 impl CircuitBreaker {
     pub fn new(metrics: Arc<dyn CircuitBreakerMetrics>) -> Self {
+        Self::with_config(metrics, FAILURE_THRESHOLD, FAILURE_WINDOW, OPEN_BACKOFF)
+    }
+
+    /// Like [`Self::new`] but with a caller-chosen trip threshold, failure
+    /// window and open backoff (the defaults suit guest-fault isolation; an
+    /// external-API breaker such as svc_ingest's Discord resolver tunes
+    /// them, and tests use short durations).
+    pub fn with_config(
+        metrics: Arc<dyn CircuitBreakerMetrics>,
+        threshold: u32,
+        window: Duration,
+        backoff: Duration,
+    ) -> Self {
         Self {
             sources: Mutex::new(HashMap::new()),
             metrics,
+            threshold,
+            window,
+            backoff,
         }
     }
 
@@ -185,12 +204,12 @@ impl CircuitBreaker {
     /// failures aged out of [`FAILURE_WINDOW`], or open with an elapsed
     /// backoff. Called under the map lock from [`Self::record_failure`] once
     /// the map passes [`SWEEP_THRESHOLD`].
-    fn sweep(sources: &mut HashMap<String, SourceEntry>, now: Instant) {
+    fn sweep(sources: &mut HashMap<String, SourceEntry>, now: Instant, window: Duration) {
         sources.retain(|_, entry| match entry.state {
             SourceState::Closed => entry
                 .failures
                 .iter()
-                .any(|t| now.duration_since(*t) < FAILURE_WINDOW),
+                .any(|t| now.duration_since(*t) < window),
             SourceState::Open { until } => now < until,
         });
     }
@@ -207,7 +226,7 @@ impl CircuitBreaker {
         let mut sources = self.lock_sources();
         let now = Instant::now();
         if sources.len() >= SWEEP_THRESHOLD && !sources.contains_key(source) {
-            Self::sweep(&mut sources, now);
+            Self::sweep(&mut sources, now, self.window);
         }
         let entry = sources
             .entry(source.to_string())
@@ -215,7 +234,7 @@ impl CircuitBreaker {
 
         entry
             .failures
-            .retain(|t| now.duration_since(*t) < FAILURE_WINDOW);
+            .retain(|t| now.duration_since(*t) < self.window);
         entry.failures.push(now);
 
         if matches!(entry.state, SourceState::Open { .. }) {
@@ -224,15 +243,15 @@ impl CircuitBreaker {
             return false;
         }
 
-        if entry.failures.len() as u32 >= FAILURE_THRESHOLD {
+        if entry.failures.len() as u32 >= self.threshold {
             entry.state = SourceState::Open {
-                until: now + OPEN_BACKOFF,
+                until: now + self.backoff,
             };
             error!(
                 source,
                 failures = entry.failures.len(),
-                window_s = FAILURE_WINDOW.as_secs(),
-                backoff_s = OPEN_BACKOFF.as_secs(),
+                window_s = self.window.as_secs(),
+                backoff_s = self.backoff.as_secs(),
                 alert = true,
                 "circuit breaker OPEN: source disabled after repeated guest faults \
                  (trap/timeout/fuel exhaustion) -- other sources and tenants unaffected"

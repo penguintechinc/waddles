@@ -633,6 +633,7 @@ fn try_start_discord(
             &dek_provider,
             &metrics.identity_encryption_total,
             shutdown_rx,
+            metrics.clone(),
         )
         .await;
     });
