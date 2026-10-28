@@ -292,7 +292,7 @@ test-csharp-bundle-compile:
 # examined (a check over nothing is not a pass; add ALLOW_EMPTY=1 for deployments with no
 # Enterprise tenant), 3 if it could not run. Pin heads with EXPECT="tenant:1=42:<hash>".
 verify-audit-chain:
-# NOTE: superseded by the Rust port core/waddles_ops_cli (phase 1 = signing only; audit/suppression pending). Do not rewire until proven in CI.
+# NOTE: Rust port complete in core/waddles_ops_cli (`waddles-ops verify-audit-chain`); Python kept until the port is CI-validated. Do not rewire until then.
 	@cd hub_api && python3 -m cli.verify_audit_chain $(if $(ALLOW_EMPTY),--allow-empty) \
 		$(foreach e,$(EXPECT),--expect $(e))
 
@@ -415,3 +415,10 @@ pre-commit:
 	@$(MAKE) test-security
 	@$(MAKE) test
 	@echo "=== Pre-commit complete ==="
+
+# gen-ops-cli-vectors: regenerate the Python-side parity vectors core/waddles_ops_cli replays
+# (signing, audit-chain canonical bytes, suppression codes, sidecar bodies). Deterministic: CI
+# can run it then `git diff --exit-code core/waddles_ops_cli/tests/*.json`.
+.PHONY: gen-ops-cli-vectors
+gen-ops-cli-vectors:
+	python3 -I scripts/gen_ops_cli_vectors.py
