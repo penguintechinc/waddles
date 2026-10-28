@@ -13,7 +13,7 @@ use thiserror::Error;
 use webrtc::peer_connection::{
     register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
     PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceCandidateType, Registry,
-    SettingEngine,
+    SettingEngine, SettingEngineBuilder,
 };
 use webrtc::runtime::{default_runtime, Runtime};
 
@@ -124,18 +124,18 @@ impl PeerConnectionFactory {
     }
 
     fn setting_engine(&self) -> SettingEngine {
-        let mut setting_engine = SettingEngine::default();
+        let mut builder = SettingEngineBuilder::new();
         // RFC 8445 §5.1.1.1 excludes loopback candidates by default; both
         // this crate's own loopback integration tests and a pod-network
         // deployment that binds `BIND_ADDR=127.0.0.1` need the override to
         // gather any usable candidate at all. Non-loopback deployments are
         // unaffected -- there is no loopback interface to produce a
         // candidate from.
-        setting_engine.set_include_loopback_candidate(true);
+        builder = builder.with_include_loopback_candidate(true);
         if let Some(ip) = self.config.nat_1to1_ip {
-            setting_engine.set_nat_1to1_ips(vec![ip.to_string()], RTCIceCandidateType::Host);
+            builder = builder.with_nat_1to1_ips(vec![ip.to_string()], RTCIceCandidateType::Host);
         }
-        setting_engine
+        builder.build()
     }
 
     /// Builds one `PeerConnection` bound to a single explicit
