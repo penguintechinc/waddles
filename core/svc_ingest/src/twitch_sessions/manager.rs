@@ -202,7 +202,7 @@ where
                 &kid,
                 &scope,
                 &*dek_provider,
-                &*identity_metrics,
+                &identity_metrics,
                 stop_rx,
             );
             tokio::pin!(session);
