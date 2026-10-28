@@ -20,6 +20,7 @@ from waddle_sdk.command import CommandSpec, ParsedCommand, parse_command
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+import app
 from app import (
     _NOTHING_CAUGHT_YET,
     _USAGE,
@@ -648,8 +649,8 @@ def test_pseudonym_differs_per_actor() -> None:
 
 def test_roll_catch_uses_weighted_choice_and_variance(monkeypatch: pytest.MonkeyPatch) -> None:
     fish = FishCatch("Bass", "uncommon", 10.0, "fight")
-    monkeypatch.setattr("random.choices", lambda population, weights, k: [fish])
-    monkeypatch.setattr("random.uniform", lambda lo, hi: 1.0)
+    monkeypatch.setattr(app._RNG, "choices", lambda population, weights, k: [fish])
+    monkeypatch.setattr(app._RNG, "uniform", lambda lo, hi: 1.0)
 
     result_fish, weight = _roll_catch()
     assert result_fish is fish

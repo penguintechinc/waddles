@@ -135,8 +135,8 @@ class PermissionListResponse:
 
 
 @bundle_permissions_bp.route("/<app_id>/versions/<version>/permissions/approve", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(ApprovePermissionsRequest)
 @validate_response(MessageResponse)
 async def approve_permissions(
@@ -170,7 +170,7 @@ async def approve_permissions(
 
 
 @bundle_permissions_bp.route("/<app_id>/versions/<version>/permissions/approved", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(PermissionListResponse)
 async def list_approved_permissions(app_id: str, version: str) -> PermissionListResponse:
     """The GLOBAL-tier approved ceiling for `(app_id, version)` -- any authenticated tenant."""
@@ -187,8 +187,8 @@ async def list_approved_permissions(app_id: str, version: str) -> PermissionList
 @bundle_permissions_bp.route(
     "/tenant/<tenant_slug>/<app_id>/versions/<version>/permissions/restrict", methods=["PUT"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(RestrictPermissionsRequest)
 @validate_response(MessageResponse)
 async def restrict_permissions(
@@ -227,7 +227,7 @@ async def restrict_permissions(
 @bundle_permissions_bp.route(
     "/community/<int:community_id>/<app_id>/permissions/grant", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(GrantPermissionsRequest)
 @validate_response(GrantVersionResponse)
 async def grant_permissions(
@@ -269,7 +269,7 @@ async def grant_permissions(
 @bundle_permissions_bp.route(
     "/community/<int:community_id>/<app_id>/permissions/<permission_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(GrantVersionResponse)
 async def revoke_permission(
     community_id: int, app_id: str, permission_id: str
@@ -309,7 +309,7 @@ async def revoke_permission(
 @bundle_permissions_bp.route(
     "/community/<int:community_id>/<app_id>/permissions/granted", methods=["GET"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(PermissionListResponse)
 async def list_granted_permissions(
     community_id: int, app_id: str
@@ -372,7 +372,7 @@ class SetInstancePolicyResponse:
 
 
 @bundle_permissions_bp.route("/permissions/instance-policy", methods=["GET"])
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(ListInstancePoliciesResponse)
 async def list_instance_policies() -> ListInstancePoliciesResponse:
     """Every explicit instance-policy row -- global-admin-only, spans every tenant by design."""
@@ -390,7 +390,7 @@ async def list_instance_policies() -> ListInstancePoliciesResponse:
 
 
 @bundle_permissions_bp.route("/permissions/instance-policy", methods=["PUT"])
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(SetInstancePolicyRequest)
 @validate_response(SetInstancePolicyResponse)
 async def set_instance_policy(

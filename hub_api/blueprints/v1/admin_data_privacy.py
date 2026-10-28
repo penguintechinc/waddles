@@ -225,8 +225,8 @@ async def _run_single(
 
 
 @admin_data_privacy_bp.route("/<tenant_slug>/privacy/users/<user_id>/export", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[misc]
 @document_response(SingleDsarResponse)
 async def export_user(tenant_slug: str, user_id: str) -> tuple[Any, int]:
     """Export `user_id`'s personal data held within the admin's own tenant (GDPR Art. 15/20)."""
@@ -234,8 +234,8 @@ async def export_user(tenant_slug: str, user_id: str) -> tuple[Any, int]:
 
 
 @admin_data_privacy_bp.route("/<tenant_slug>/privacy/users/<user_id>/erase", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[misc]
 @validate_request(EraseUserRequest)
 @document_response(SingleDsarResponse)
 async def erase_user(data: EraseUserRequest, tenant_slug: str, user_id: str) -> tuple[Any, int]:
@@ -244,8 +244,8 @@ async def erase_user(data: EraseUserRequest, tenant_slug: str, user_id: str) -> 
 
 
 @admin_data_privacy_bp.route("/<tenant_slug>/privacy/users/<user_id>/do-not-sell", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[misc]
 @document_response(SingleDsarResponse)
 async def do_not_sell_user(tenant_slug: str, user_id: str) -> tuple[Any, int]:
     """Record a CCPA/CPRA Do-Not-Sell opt-out for `user_id` (one-way, idempotent)."""
@@ -253,8 +253,8 @@ async def do_not_sell_user(tenant_slug: str, user_id: str) -> tuple[Any, int]:
 
 
 @admin_data_privacy_bp.route("/<tenant_slug>/privacy/bulk", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[misc]
 @validate_request(BulkDsarRequest)
 @document_response(BulkDsarResponse)
 async def bulk_dsar(data: BulkDsarRequest, tenant_slug: str) -> tuple[Any, int]:

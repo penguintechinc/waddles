@@ -1,7 +1,7 @@
 //! Behavioural tests of the connector driver's host-side contract (issue #840
 //! B0, spec S2.6 / S3.5): size ceiling before invocation, events-per-frame
 //! cap, platform spoof refusal, the three failure classes, reconnect under
-//! backoff, and the loud-failure default invoker.
+//! backoff, and the loud-failure production invoker (no executor attached).
 //!
 //! The transport/invoker/sink here are scripted fakes ON PURPOSE -- they let
 //! each failure class be driven deterministically. The real-path proof (real
@@ -13,12 +13,13 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use svc_ingest::connector::ExecutorLink;
 use svc_ingest::connector::{
     register_connector_metrics, ConnectionCtx, ConnectionEnd, ConnectorDriver, ConnectorEvent,
     ConnectorFrameError, ConnectorInvokeError, ConnectorInvoker, ConnectorMetrics,
     ConnectorRegistry, DriverError, EventLimits, EventSink, FrameDropReason, FrameOutcome,
     Handshake, PinnedConnector, RawFrame, RegistryError, RunEnd, SinkError, Transport,
-    TransportError, UnwiredInvoker,
+    TransportError, WireConnectorInvoker,
 };
 use tokio::sync::oneshot;
 
@@ -464,8 +465,14 @@ async fn run_reconnects_after_a_trip_under_backoff_and_then_delivers() {
 }
 
 #[tokio::test]
-async fn the_unwired_invoker_fails_loudly_and_publishes_nothing() {
-    let r = rig(UnwiredInvoker, 4096);
+async fn the_production_invoker_with_no_executor_fails_loudly_and_publishes_nothing() {
+    let r = rig(
+        WireConnectorInvoker::new(
+            Arc::new(ExecutorLink::new()),
+            registry(4096, EventLimits::default()),
+        ),
+        4096,
+    );
     let mut t = ScriptedTransport::new(vec![frames(&[b"anything"])]);
     let (_keep, mut rx) = never_shutdown();
     let report = r.driver.serve_connection(&mut t, &mut rx).await.unwrap();

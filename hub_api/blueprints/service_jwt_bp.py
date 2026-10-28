@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import Any
 
 from flask_core.service_jwt import (
+    BOUND_TOKEN_TTL_SECONDS,
+    COMMUNITY_BOUND_SCOPES,
     DEFAULT_TOKEN_TTL_SECONDS,
     BootstrapRejected,
     ServiceJwtIssuer,
@@ -36,6 +39,33 @@ K8S_API_SERVER = os.getenv("KUBERNETES_SERVICE_HOST_URL", "https://kubernetes.de
 K8S_CA_CERT_PATH = os.getenv(
     "KUBERNETES_CA_CERT_PATH", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
+
+
+def _binding_claims(scope: str, body: dict[str, Any]) -> dict[str, int] | None:
+    """Translate the request's binding fields into issuer ``extra_claims``.
+
+    ``connections:resolve`` / ``connections:resolve:static`` REQUIRE ``community_id`` (non-negative
+    int; ``connection_id`` optional) -- a resolve token is always community-bound. Every other
+    scope (``connections:list`` included, which is unbound) must not carry the fields.
+    Raises ``ValueError`` on any violation.
+    """
+    has_binding = "community_id" in body or "connection_id" in body
+    if scope not in COMMUNITY_BOUND_SCOPES:
+        if has_binding:
+            raise ValueError("binding fields not accepted for this scope")
+        return None
+    claims: dict[str, int] = {}
+    fields = (("community_id", "community", True), ("connection_id", "conn", False))
+    for field, claim, required in fields:
+        if field not in body:
+            if required:
+                raise ValueError(f"{field} is required")
+            continue
+        value = body[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{field} must be a non-negative integer")
+        claims[claim] = value
+    return claims
 
 
 @service_jwt_bp.route("/service-token", methods=["POST"])
@@ -62,6 +92,12 @@ async def issue_service_token() -> tuple[Response, int]:
     scope = body.get("scope")
     if not scope:
         return jsonify({"error": "scope is required"}), 400
+    try:
+        extra_claims = _binding_claims(scope, body)
+    except ValueError:
+        # Fixed event only: the rejected body fields are caller-controlled, never logged.
+        current_app.logger.warning("service_jwt.invalid_binding_request")
+        return jsonify({"error": "invalid request"}), 400
 
     try:
         # `verify_service_account_token` makes a blocking `requests.post`
@@ -97,7 +133,10 @@ async def issue_service_token() -> tuple[Response, int]:
 
     try:
         token, claims = issuer.issue_with_claims(
-            matched.service_id, scope, ttl_seconds=DEFAULT_TOKEN_TTL_SECONDS
+            matched.service_id,
+            scope,
+            ttl_seconds=BOUND_TOKEN_TTL_SECONDS if extra_claims else DEFAULT_TOKEN_TTL_SECONDS,
+            extra_claims=extra_claims,
         )
     except BootstrapRejected:
         current_app.logger.warning("service_jwt.issue_rejected")
@@ -118,9 +157,12 @@ async def issue_service_token() -> tuple[Response, int]:
             tenant=claims.get("tenant"),
             jti=claims.get("jti"),
             exp=claims.get("exp"),
+            community_id=claims.get("community"),
+            connection_id=claims.get("conn"),
         )
 
-    return jsonify({"token": token, "expires_in": DEFAULT_TOKEN_TTL_SECONDS}), 200
+    expires_in = claims["exp"] - claims["iat"]
+    return jsonify({"token": token, "expires_in": expires_in}), 200
 
 
 @service_jwt_bp.route("/service-jwks.json", methods=["GET"])
