@@ -80,34 +80,15 @@ export const publicApi = {
 };
 
 export const communityApi = {
-  getMyCommunities: () => api.get('/api/v1/communities/my'),
-  create: (data) => api.post('/api/v1/communities/create', data),
-  getDashboard: (id) => api.get(`/api/v1/communities/${id}/dashboard`),
-  getLeaderboard: (id, params) => api.get(`/api/v1/communities/${id}/leaderboard`, { params }),
-  getActivity: (id, params) => api.get(`/api/v1/communities/${id}/activity`, { params }),
-  getEvents: (id, params) => api.get(`/api/v1/communities/${id}/events`, { params }),
-  getMemories: (id, params) => api.get(`/api/v1/communities/${id}/memories`, { params }),
-  getModules: (id) => api.get(`/api/v1/communities/${id}/modules`),
-  getMembers: (id, params) => api.get(`/api/v1/communities/${id}/members`, { params }),
-  updateProfile: (id, data) => api.put(`/api/v1/communities/${id}/profile`, data),
-  leave: (id) => api.post(`/api/v1/communities/${id}/leave`),
+  // Reads/actions below are the ones hub-api serves AND a page still calls through this
+  // wrapper. "My communities", the dashboard, leaderboards, activity stats, the roster, join
+  // requests and community creation moved to typed modules on the served routes:
+  // `services/{myCommunities,communityActivity,communityMembers,joinRequests,communityAdmin}Api.ts`.
   getChatHistory: (id, params) => api.get(`/api/v1/community/${id}/chat/history`, { params }),
   getChatChannels: (id) => api.get(`/api/v1/community/${id}/chat/channels`),
-  // Join functionality
-  join: (id, message) => api.post(`/api/v1/communities/${id}/join`, { message }),
-  getMyJoinRequests: () => api.get('/api/v1/communities/join-requests'),
-  cancelJoinRequest: (requestId) => api.delete(`/api/v1/communities/join-requests/${requestId}`),
-  // Server linking (user adding their server)
-  addServer: (id, data) => api.post(`/api/v1/communities/${id}/servers`, data),
-  getServers: (id) => api.get(`/api/v1/communities/${id}/servers`),
+  // Server linking (user adding their server) -- no hub-api route yet; MyChannels still calls these.
   getMyServerLinkRequests: () => api.get('/api/v1/communities/server-link-requests'),
   cancelServerLinkRequest: (requestId) => api.delete(`/api/v1/communities/server-link-requests/${requestId}`),
-  // Activity leaderboards
-  getWatchTimeLeaderboard: (id, params) =>
-    api.get(`/api/v1/communities/${id}/leaderboard/watch-time`, { params }),
-  getMessageLeaderboard: (id, params) =>
-    api.get(`/api/v1/communities/${id}/leaderboard/messages`, { params }),
-  getMyActivityStats: (id) => api.get(`/api/v1/communities/${id}/activity/my-stats`),
   // Reputation visibility (gh-310) -- community + global score/tier for the
   // caller, and a top-scorers leaderboard (display names only, no ids).
   getMyReputation: (id) => api.get(`/api/v1/community/${id}/reputation/me`),
@@ -119,12 +100,6 @@ export const adminApi = {
   // Community settings
   getSettings: (communityId) => api.get(`/api/v1/admin/${communityId}/settings`),
   updateSettings: (communityId, data) => api.put(`/api/v1/admin/${communityId}/settings`, data),
-  // Join requests
-  getJoinRequests: (communityId, params) => api.get(`/api/v1/admin/${communityId}/join-requests`, { params }),
-  approveJoinRequest: (communityId, requestId, note) =>
-    api.post(`/api/v1/admin/${communityId}/join-requests/${requestId}/approve`, { note }),
-  rejectJoinRequest: (communityId, requestId, note) =>
-    api.post(`/api/v1/admin/${communityId}/join-requests/${requestId}/reject`, { note }),
   // Member management
   getMembers: (communityId, params) => api.get(`/api/v1/admin/${communityId}/members`, { params }),
   updateMemberRole: (communityId, userId, role) =>
@@ -212,8 +187,6 @@ export const adminApi = {
     api.put(`/api/v1/admin/${communityId}/reputation/config`, data),
   getAtRiskUsers: (communityId, params) =>
     api.get(`/api/v1/admin/${communityId}/reputation/at-risk`, { params }),
-  getReputationLeaderboard: (communityId, params) =>
-    api.get(`/api/v1/admin/${communityId}/reputation/leaderboard`, { params }),
   // AI Insights
   getAIInsights: (communityId, params) =>
     api.get(`/api/v1/admin/${communityId}/ai-insights`, { params }),
@@ -897,13 +870,6 @@ export const tokenApi = {
 };
 
 // ─── Join Request API ────────────────────────────────────────────────────────
-export const joinRequestApi = {
-  submit: (communityId, data) => api.post(`/community/${communityId}/join-requests`, data),
-  getMine: (communityId) => api.get(`/community/${communityId}/join-requests/mine`),
-  list: (communityId) => api.get(`/admin/${communityId}/join-requests`),
-  approve: (communityId, requestId) => api.put(`/admin/${communityId}/join-requests/${requestId}/approve`),
-  reject: (communityId, requestId) => api.put(`/admin/${communityId}/join-requests/${requestId}/reject`),
-};
 
 // ─── Passkey API ─────────────────────────────────────────────────────────────
 export const userOAuthApi = {

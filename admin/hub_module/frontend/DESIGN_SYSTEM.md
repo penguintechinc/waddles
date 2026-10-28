@@ -33,8 +33,17 @@ Live reference: run `npm run dev` and open `/design-system` (development builds 
 | `scripts/__tests__/analyze.test.mjs` | The analyzer going blind (each defect class has a positive fixture). |
 | `src/styles/__tests__/tokens.test.ts` | A token change that drops a text pairing below 4.5:1 or a control border below 3:1. |
 | axe-core in `src/components/ui/__tests__` | Violations in any primitive state. |
+| `scripts/__tests__/unserved-registry.test.mjs` | A "not available yet" feature whose endpoints hub-api now serves (wire the UI, delete the entry), or a registry entry no page uses. |
+| `scripts/__tests__/backend-routes.test.mjs` | The hub-api route scanner mis-resolving blueprint prefixes (it once hid served routes as gaps). |
 
 Reports: `npm run audit:ui` (a11y counters + route survey), `npm run audit:api` (UI calls with no hub-api route), or `make webui-audit` from the repo root.
+
+## API contract
+
+- Call only routes hub-api serves. `npm run audit:api` (or `make webui-audit`) diffs every UI call against the blueprints; do not invent a route to match a legacy path.
+- hub-api serialises **snake_case** for most ported groups (`user_id`, `has_more`, `announcement_type`); the legacy UI read camelCase and silently got `undefined`. Parse responses in `src/services/<domain>Api.ts` with `src/lib/wire.ts` (throws `WireShapeError`, shown by `QueryBoundary`) instead of reading raw fields in pages.
+- No served route for a feature? Add it to `src/lib/unservedFeatures.json` and render `<ServedFeature feature="...">` / `<NotAvailableYet>`. The user sees "not available yet" (not a 404 or an empty page) and the guard test tells you when the backend catches up.
+- Paths must start with `/api/v1`: the SPA host answers anything else with `index.html` (the audit reports these as "missing the /api/v1 prefix").
 
 ## Known gaps
 
