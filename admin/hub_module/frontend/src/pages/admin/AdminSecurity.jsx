@@ -249,10 +249,11 @@ function AdminSecurity() {
               </label>
 
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-security-filter-action" className="block text-sm font-medium text-navy-300 mb-2">
                   Filter Action
                 </label>
                 <select
+                  id="admin-security-filter-action"
                   value={config.filterAction || 'warn'}
                   onChange={(e) => updateConfig('filterAction', e.target.value)}
                   disabled={!config.contentFilterEnabled}
@@ -286,6 +287,7 @@ function AdminSecurity() {
             <h2 className="text-lg font-semibold text-sky-100 mb-4">Add Blocked Word</h2>
             <div className="space-y-4">
               <input
+                aria-label="Enter word or phrase to block"
                 type="text"
                 value={newWord}
                 onChange={(e) => setNewWord(e.target.value)}
@@ -294,6 +296,7 @@ function AdminSecurity() {
                 className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
               />
               <input
+                aria-label="Reason for blocking (optional)"
                 type="text"
                 value={newWordReason}
                 onChange={(e) => setNewWordReason(e.target.value)}

@@ -18,7 +18,7 @@ version: '3.8'
 
 services:
   jaeger:
-    image: jaegertracing/all-in-one:latest
+    image: jaegertracing/all-in-one:1.76.0@sha256:ab6f1a1f0fb49ea08bcd19f6b84f6081d0d44b364b6de148e1798eb5816bacac
     container_name: waddlebot-jaeger
     hostname: jaeger
     restart: unless-stopped

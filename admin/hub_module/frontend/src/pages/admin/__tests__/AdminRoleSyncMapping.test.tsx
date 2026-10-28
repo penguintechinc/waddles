@@ -122,6 +122,7 @@ vi.mock('../../../services/roleSyncApi', async () => {
       listBindings: vi.fn(),
       createBinding: vi.fn(),
       deleteBinding: vi.fn(),
+      updatePairing: vi.fn(),
     },
   };
 });
@@ -136,7 +137,7 @@ const PAIRING: GuildPairing = {
   discord_guild_id: '555000111',
   direction: 'bidirectional',
   sync_enabled: true,
-  event_sync_enabled: false,
+  event_sync_enabled: true,
   role_name_prefix: 'wb-',
   created_by_user_id: 1,
   created_at: '2026-10-01T00:00:00Z',
@@ -211,13 +212,54 @@ describe('AdminRoleSyncMapping', () => {
   it('lists bindings for the selected pairing with direction summaries', async () => {
     mount();
 
-    expect(await screen.findByTestId('binding-row-1')).toHaveTextContent(
-      'Tier 2 subscribers → Discord role 901',
-    );
-    expect(screen.getByTestId('binding-row-2')).toHaveTextContent(
-      'Discord role 902 → moderator',
-    );
+    const sub = await screen.findByTestId('binding-row-1');
+    expect(sub).toHaveTextContent('901');
+    expect(sub).toHaveTextContent('Subscriber tier 2');
+    expect(sub).toHaveTextContent('Twitch sub → Discord');
+    const role = screen.getByTestId('binding-row-2');
+    expect(role).toHaveTextContent('902');
+    expect(role).toHaveTextContent('moderator');
+    expect(role).toHaveTextContent('Discord → Waddles');
     expect(mockedRoleSyncApi.listBindings).toHaveBeenCalledWith(42, 7);
+  });
+
+  it('renders the pairing status card with sync state, event sync and mapping count', async () => {
+    mount();
+    const card = await screen.findByTestId('pairing-status-card');
+    expect(card).toHaveTextContent('Guild 555000111');
+    expect(card).toHaveTextContent('Discord ↔ Waddles (bidirectional)');
+    expect(screen.getByTestId('sync-state-badge')).toHaveTextContent('Sync enabled');
+    await waitFor(() => expect(card).toHaveTextContent(/Mappings\s*2/));
+    expect(card).toHaveTextContent(/Event sync\s*On/);
+    expect(screen.getByTestId('demote-policy')).toHaveTextContent('grant-only');
+  });
+
+  it('shows an empty bindings state without a table', async () => {
+    mockedRoleSyncApi.listBindings.mockResolvedValue([]);
+    mount();
+    expect(await screen.findByText(/No role bindings yet/)).toBeInTheDocument();
+    expect(screen.queryByTestId('binding-table')).not.toBeInTheDocument();
+  });
+
+  it('optimistically toggles sync and PATCHes the pairing', async () => {
+    mockedRoleSyncApi.updatePairing.mockResolvedValue({ ...PAIRING, sync_enabled: false });
+    mount();
+    const box = await screen.findByLabelText('Role sync enabled');
+    fireEvent.click(box);
+    await waitFor(() =>
+      expect(mockedRoleSyncApi.updatePairing).toHaveBeenCalledWith(42, 7, { sync_enabled: false }),
+    );
+  });
+
+  it('reverts the toggle and shows the server error when the PATCH fails', async () => {
+    mockedRoleSyncApi.updatePairing.mockRejectedValue({
+      response: { data: { error: { message: 'forbidden' } } },
+    });
+    mount();
+    const box = await screen.findByLabelText('Role sync enabled');
+    fireEvent.click(box);
+    expect(await screen.findByRole('alert')).toHaveTextContent('forbidden');
+    await waitFor(() => expect(screen.getByLabelText('Role sync enabled')).toBeChecked());
   });
 
   it('surfaces a load error instead of swallowing it', async () => {

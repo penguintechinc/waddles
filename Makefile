@@ -1,4 +1,4 @@
-.PHONY: reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: seed-bc-demo reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -194,11 +194,23 @@ seed-mock-data:
 seed-ui-mock-data:
 	@bash scripts/seed-ui-mock-data.sh $(filter --docker,$(SEED_ARGS))
 
+# Bar Citizen demo pre-link (idempotent upsert; needs DATABASE_URL, see
+# scripts/demo/seed_bc_demo.py header for DEMO_* overrides, docs/demo/ runbook).
+seed-bc-demo:
+	@python3 scripts/demo/seed_bc_demo.py
+
 # Marketing screenshots -> docs/screenshots/ (pinned Playwright, see
 # tests/screenshots). Needs a running hub-webui at BASE_URL and seeded data;
 # SCREENSHOT_EMAIL/SCREENSHOT_PASSWORD from env (never committed).
 screenshots:
 	@bash scripts/screenshots.sh
+
+# Hub-webui static audit: accessibility counters + route survey (ui-audit) and UI calls
+# with no hub-api route (api-gap-check). Exits non-zero if a scanner examines zero files.
+# The zero-budget accessibility ratchet itself runs in `npm test` (scripts/__tests__).
+.PHONY: webui-audit
+webui-audit:
+	@cd admin/hub_module/frontend && node scripts/ui-audit.mjs && node scripts/api-gap-check.mjs --pages
 
 clean:
 	docker-compose down -v
@@ -280,6 +292,7 @@ test-csharp-bundle-compile:
 # examined (a check over nothing is not a pass; add ALLOW_EMPTY=1 for deployments with no
 # Enterprise tenant), 3 if it could not run. Pin heads with EXPECT="tenant:1=42:<hash>".
 verify-audit-chain:
+# NOTE: Rust port complete in core/waddles_ops_cli (`waddles-ops verify-audit-chain`); Python kept until the port is CI-validated. Do not rewire until then.
 	@cd hub_api && python3 -m cli.verify_audit_chain $(if $(ALLOW_EMPTY),--allow-empty) \
 		$(foreach e,$(EXPECT),--expect $(e))
 
@@ -402,3 +415,10 @@ pre-commit:
 	@$(MAKE) test-security
 	@$(MAKE) test
 	@echo "=== Pre-commit complete ==="
+
+# gen-ops-cli-vectors: regenerate the Python-side parity vectors core/waddles_ops_cli replays
+# (signing, audit-chain canonical bytes, suppression codes, sidecar bodies). Deterministic: CI
+# can run it then `git diff --exit-code core/waddles_ops_cli/tests/*.json`.
+.PHONY: gen-ops-cli-vectors
+gen-ops-cli-vectors:
+	python3 -I scripts/gen_ops_cli_vectors.py

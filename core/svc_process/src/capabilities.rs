@@ -2547,6 +2547,7 @@ mod tests {
             &'a self,
             data_key: &'a str,
             count_key: &'a str,
+            _legacy_count_key: &'a str,
             value: &'a [u8],
             _ttl_seconds: u32,
             max_keys: u64,
@@ -2572,6 +2573,7 @@ mod tests {
             &'a self,
             data_key: &'a str,
             count_key: &'a str,
+            _legacy_count_key: &'a str,
         ) -> bundle_host_kv::BoxFuture<'a, Result<bool, String>> {
             let existed = self.data.lock().unwrap().remove(data_key).is_some();
             if existed {
@@ -2586,6 +2588,7 @@ mod tests {
             &'a self,
             data_key: &'a str,
             count_key: &'a str,
+            _legacy_count_key: &'a str,
             delta: i64,
             _ttl_seconds: u32,
             max_keys: u64,

@@ -13,6 +13,7 @@ use penguin_spine::{KeyRing, PlatformEvent, Scope, SpineMetrics};
 
 use super::registry::EventLimits;
 use super::types::{ConnectionCtx, ConnectorEvent};
+use crate::identity_crypto::DekProvider;
 use crate::publish::{deterministic_workstream_id, publish_event, EventAppender, PublishError};
 
 /// Why a sink refused or failed an event. The driver counts the outcome and
@@ -156,15 +157,17 @@ pub fn to_platform_event(
 }
 
 /// The production sink: publishes onto the spine via `publish_event`.
-pub struct SpineEventSink<A: EventAppender, M: SpineMetrics> {
+pub struct SpineEventSink<A: EventAppender, M: SpineMetrics, D: DekProvider> {
     appender: A,
     metrics: M,
     keyring: KeyRing,
     active_kid: String,
     scope: Scope,
+    dek_provider: D,
+    identity_metrics: prometheus::IntCounterVec,
 }
 
-impl<A: EventAppender, M: SpineMetrics> SpineEventSink<A, M> {
+impl<A: EventAppender, M: SpineMetrics, D: DekProvider> SpineEventSink<A, M, D> {
     /// Builds a sink over an appender (a `SpineClient` in production), the
     /// binding keyring/kid and the deployment scope.
     pub fn new(
@@ -173,6 +176,8 @@ impl<A: EventAppender, M: SpineMetrics> SpineEventSink<A, M> {
         keyring: KeyRing,
         active_kid: impl Into<String>,
         scope: Scope,
+        dek_provider: D,
+        identity_metrics: prometheus::IntCounterVec,
     ) -> Self {
         Self {
             appender,
@@ -180,18 +185,20 @@ impl<A: EventAppender, M: SpineMetrics> SpineEventSink<A, M> {
             keyring,
             active_kid: active_kid.into(),
             scope,
+            dek_provider,
+            identity_metrics,
         }
     }
 }
 
-impl<A: EventAppender, M: SpineMetrics> SpineEventSink<A, M> {
+impl<A: EventAppender, M: SpineMetrics, D: DekProvider> SpineEventSink<A, M, D> {
     /// The underlying appender (tests read a recording fake back through it).
     pub fn appender(&self) -> &A {
         &self.appender
     }
 }
 
-impl<A: EventAppender, M: SpineMetrics> EventSink for SpineEventSink<A, M> {
+impl<A: EventAppender, M: SpineMetrics, D: DekProvider> EventSink for SpineEventSink<A, M, D> {
     async fn publish(&self, ctx: &ConnectionCtx, event: ConnectorEvent) -> Result<(), SinkError> {
         let platform_event = to_platform_event(ctx, event)?;
         let workstream_id = deterministic_workstream_id(&ctx.source_id);
@@ -205,6 +212,8 @@ impl<A: EventAppender, M: SpineMetrics> EventSink for SpineEventSink<A, M> {
             &workstream_id,
             Some(&ctx.connection_id),
             platform_event,
+            &self.dek_provider,
+            &self.identity_metrics,
         )
         .await?;
         Ok(())

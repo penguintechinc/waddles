@@ -44,7 +44,7 @@ export default function AdminAnnouncements() {
   const statusColors = {
     draft: { bg: 'bg-yellow-500/20', text: 'text-yellow-400', label: 'Draft' },
     published: { bg: 'bg-green-500/20', text: 'text-green-400', label: 'Published' },
-    archived: { bg: 'bg-gray-500/20', text: 'text-gray-400', label: 'Archived' },
+    archived: { bg: 'bg-navy-500/20', text: 'text-fg-muted', label: 'Archived' },
   };
 
   // Fetch announcements

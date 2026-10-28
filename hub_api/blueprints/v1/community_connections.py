@@ -65,6 +65,7 @@ every other public route in this file's sibling blueprints is bounded.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -125,6 +126,29 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
 
 def _envelope(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
     return {"status": "success", "data": data, "meta": {"version": 1}}, 200
+
+
+@dataclass(slots=True, frozen=True)
+class ConnectionTokenDTO:
+    """Decrypted OAuth token pair for an internal service (exact fields)."""
+
+    access_token: str
+    refresh_token: str | None
+    expires_at: str | None
+    scopes: list[str] | None
+
+
+def _token_envelope(
+    access_token: str, refresh_token: str | None, expires_at: datetime | None, scopes: Any
+) -> tuple[dict[str, Any], int]:
+    """Project token fields through `ConnectionTokenDTO` (nothing else)."""
+    dto = ConnectionTokenDTO(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_at=expires_at.isoformat() if expires_at else None,
+        scopes=list(scopes) if scopes is not None else None,
+    )
+    return _envelope(asdict(dto))
 
 
 def _callback_redirect_uri(provider: str) -> str:
@@ -393,13 +417,8 @@ async def internal_get_token(community_id: int, provider: str) -> tuple[dict[str
         and tokens.expires_at <= datetime.now(UTC) + timedelta(seconds=_REFRESH_SKEW_S)
     )
     if not needs_refresh:
-        return _envelope(
-            {
-                "access_token": tokens.access_token,
-                "refresh_token": tokens.refresh_token,
-                "expires_at": tokens.expires_at.isoformat() if tokens.expires_at else None,
-                "scopes": tokens.scopes,
-            }
+        return _token_envelope(
+            tokens.access_token, tokens.refresh_token, tokens.expires_at, tokens.scopes
         )
 
     assert tokens.refresh_token is not None  # nosec B101 - guarded by needs_refresh above
@@ -422,13 +441,11 @@ async def internal_get_token(community_id: int, provider: str) -> tuple[dict[str
         access_token=refreshed.access_token,
         expires_at=new_expires_at,
     )
-    return _envelope(
-        {
-            "access_token": refreshed.access_token,
-            "refresh_token": refreshed.refresh_token or tokens.refresh_token,
-            "expires_at": new_expires_at.isoformat() if new_expires_at else None,
-            "scopes": refreshed.scopes or tokens.scopes,
-        }
+    return _token_envelope(
+        refreshed.access_token,
+        refreshed.refresh_token or tokens.refresh_token,
+        new_expires_at,
+        refreshed.scopes or tokens.scopes,
     )
 
 

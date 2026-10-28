@@ -14,14 +14,14 @@ const STATUS_COLORS = {
   in_progress: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30',
   waiting: 'bg-orange-500/20 text-orange-300 border-orange-500/30',
   resolved: 'bg-green-500/20 text-green-300 border-green-500/30',
-  closed: 'bg-gray-500/20 text-gray-300 border-gray-500/30',
+  closed: 'bg-navy-500/20 text-fg-secondary border-navy-500/30',
 };
 
 const PRIORITY_COLORS = {
   urgent: 'bg-red-500/20 text-red-300 border-red-500/30',
   high: 'bg-orange-500/20 text-orange-300 border-orange-500/30',
   medium: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
-  low: 'bg-gray-500/20 text-gray-300 border-gray-500/30',
+  low: 'bg-navy-500/20 text-fg-secondary border-navy-500/30',
 };
 
 function AdminSupportTicketDetail() {
@@ -118,8 +118,9 @@ function AdminSupportTicketDetail() {
         {/* Controls row */}
         <div className="flex flex-wrap items-center gap-4">
           <div>
-            <label className="block text-xs text-navy-400 mb-1">Status</label>
+            <label htmlFor="admin-support-ticket-detail-status" className="block text-xs text-navy-400 mb-1">Status</label>
             <select
+              id="admin-support-ticket-detail-status"
               value={ticket.status || 'open'}
               onChange={(e) => handleStatusChange(e.target.value)}
               className="bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-1.5 text-sm"
@@ -130,8 +131,9 @@ function AdminSupportTicketDetail() {
             </select>
           </div>
           <div>
-            <label className="block text-xs text-navy-400 mb-1">Priority</label>
+            <label htmlFor="admin-support-ticket-detail-priority" className="block text-xs text-navy-400 mb-1">Priority</label>
             <select
+              id="admin-support-ticket-detail-priority"
               value={ticket.priority || 'medium'}
               onChange={(e) => handlePriorityChange(e.target.value)}
               className="bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-1.5 text-sm"
@@ -235,11 +237,12 @@ function AdminSupportTicketDetail() {
         {/* Add Comment Form */}
         <form onSubmit={handleAddComment} className="mt-6 space-y-3">
           <textarea
+            aria-label="Write a comment"
             value={commentText}
             onChange={(e) => setCommentText(e.target.value)}
             placeholder="Write a comment..."
             rows={3}
-            className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-4 py-3 text-sm placeholder-navy-500 focus:outline-none focus:border-gold-500"
+            className="w-full bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-4 py-3 text-sm placeholder-navy-500 focus:border-gold-500"
           />
           <div className="flex items-center justify-between">
             <label className="flex items-center gap-2 text-sm text-sky-200">

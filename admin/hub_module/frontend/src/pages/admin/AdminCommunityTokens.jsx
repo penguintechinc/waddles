@@ -266,20 +266,21 @@ export default function AdminCommunityTokens() {
       {/* Create Token Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-lg font-semibold text-sky-100 mb-4">Create Community Access Token</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-community-tokens-dialog-1-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+            <h2 id="admin-community-tokens-dialog-1-title" className="text-lg font-semibold text-sky-100 mb-4">Create Community Access Token</h2>
 
             <form onSubmit={handleCreate} className="space-y-5">
               <div>
-                <label className="block text-sm text-navy-400 mb-1.5">
+                <label htmlFor="admin-community-tokens-input" className="block text-sm text-navy-400 mb-1.5">
                   Token Name <span className="text-red-400">*</span>
                 </label>
                 <input
+                  id="admin-community-tokens-input"
                   type="text"
                   value={createName}
                   onChange={(e) => setCreateName(e.target.value)}
                   placeholder="e.g. Event bot, Welcome service"
-                  className="w-full bg-navy-800 border border-navy-700 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 text-sm focus:outline-none focus:border-gold-400"
+                  className="w-full bg-navy-800 border border-navy-700 rounded-lg px-3 py-2 text-sky-100 placeholder-navy-400 text-sm focus:border-gold-400"
                 />
               </div>
 
@@ -341,10 +342,10 @@ export default function AdminCommunityTokens() {
       {/* Success Modal */}
       {showSuccessModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-community-tokens-dialog-2-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg mx-4">
             <div className="flex items-center gap-2 mb-2">
               <ShieldExclamationIcon className="h-5 w-5 text-yellow-400" />
-              <h2 className="text-lg font-semibold text-sky-100">Token Created</h2>
+              <h2 id="admin-community-tokens-dialog-2-title" className="text-lg font-semibold text-sky-100">Token Created</h2>
             </div>
             <p className="text-yellow-400 text-sm mb-4 font-medium">
               This token grants community access. Treat it like a password. It will not be shown again.

@@ -2,113 +2,234 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Waddles Hub global styles. Tokens live in styles/tokens.css; this file turns
+ * them into the shared element defaults and the legacy component classes
+ * (.btn, .input, .card, .badge, ...) that ~180 existing pages already use, so
+ * upgrading them here upgrades the whole app. New code should prefer the React
+ * primitives in components/ui, which render these same classes with the
+ * accessibility wiring (labels, aria-*, focus order) built in.
+ */
+
 @layer base {
-  body {
-    @apply bg-navy-950 text-sky-100 antialiased;
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+    /* Anchored/focused content must clear the sticky header. */
+    scroll-padding-top: 5rem;
   }
-  /* Custom scrollbar for dark mode */
+  body {
+    @apply bg-app text-fg antialiased;
+  }
+
+  /* Visible keyboard focus everywhere. Components that draw their own ring
+     opt out with `focus-visible:outline-none`; nothing should remove focus
+     indication without replacing it. */
+  :focus-visible {
+    outline: 2px solid rgb(var(--c-focus));
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: rgb(var(--c-focus) / 0.35);
+    color: rgb(var(--c-fg));
+  }
+
+  /* Native checkboxes/radios/range pick up the brand color on a dark canvas. */
+  input[type='checkbox'],
+  input[type='radio'],
+  input[type='range'],
+  progress {
+    accent-color: rgb(var(--c-interactive));
+  }
+
+  hr {
+    @apply border-line;
+  }
+
+  /* Scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--c-line-strong)) transparent;
+  }
   ::-webkit-scrollbar {
-    @apply w-2;
+    @apply w-2 h-2;
   }
   ::-webkit-scrollbar-track {
-    @apply bg-navy-900;
+    @apply bg-transparent;
   }
   ::-webkit-scrollbar-thumb {
-    @apply bg-navy-600 rounded-full hover:bg-navy-500;
+    @apply bg-line-strong rounded-full hover:bg-line-input;
   }
 }
 
 @layer components {
-  /* Buttons */
+  /* ---- Typography ---- */
+  .page-title {
+    @apply text-2xl font-semibold tracking-tight text-fg;
+  }
+  .page-subtitle {
+    @apply mt-1 text-sm text-fg-secondary;
+  }
+  .section-title {
+    @apply text-base font-semibold text-fg;
+  }
+  .eyebrow {
+    @apply text-xs font-semibold uppercase tracking-wider text-fg-muted;
+  }
+
+  /* ---- Buttons ---- */
   .btn {
-    @apply px-4 py-2 rounded-lg font-medium transition-all duration-200 cursor-pointer;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 min-h-control rounded-control
+           text-sm font-medium cursor-pointer select-none whitespace-nowrap
+           transition-colors duration-150
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2
+           disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-primary {
-    @apply bg-gold-500 text-navy-950 hover:bg-gold-400 active:bg-gold-600 shadow-lg shadow-gold-500/20;
+    @apply bg-accent text-fg-inverse hover:bg-accent-hover active:bg-gold-600 shadow-card;
   }
   .btn-secondary {
-    @apply bg-navy-700 text-sky-100 hover:bg-navy-600 active:bg-navy-800 border border-navy-500;
+    @apply bg-surface-raised text-fg border border-line-strong hover:bg-navy-700 active:bg-navy-800;
   }
   .btn-success {
-    @apply bg-emerald-500 text-white hover:bg-emerald-400 active:bg-emerald-600;
+    @apply bg-success text-fg-inverse hover:bg-emerald-400 active:bg-emerald-600;
   }
   .btn-danger {
-    @apply bg-red-600 text-white hover:bg-red-500 active:bg-red-700;
+    @apply bg-danger text-white hover:bg-danger-hover active:bg-red-800;
   }
   .btn-outline {
-    @apply bg-transparent border-2 border-sky-400 text-sky-400 hover:bg-sky-400/10;
+    @apply bg-transparent border border-interactive text-interactive hover:bg-interactive/10 active:bg-interactive/20;
+  }
+  .btn-ghost {
+    @apply bg-transparent text-fg-secondary hover:bg-surface-raised hover:text-fg active:bg-navy-700;
+  }
+  .btn-sm {
+    @apply px-3 py-1.5 min-h-0 text-xs;
+  }
+  .btn-lg {
+    @apply px-6 py-3 text-base;
   }
 
-  /* Inputs */
+  /* ---- Form controls ---- */
+  .label {
+    @apply block mb-1.5 text-sm font-medium text-fg-secondary;
+  }
+  .field-hint {
+    @apply mt-1.5 text-xs text-fg-muted;
+  }
+  .field-error {
+    @apply mt-1.5 text-xs text-danger-fg;
+  }
   .input {
-    @apply w-full px-3 py-2 bg-navy-800 border border-navy-600 rounded-lg
-           text-sky-100 placeholder-navy-400
-           focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-sky-500
-           transition-colors duration-200;
+    @apply block w-full min-h-control px-3 py-2 text-sm text-fg bg-surface-field
+           border border-line-input rounded-control
+           placeholder:text-fg-muted
+           transition-colors duration-150
+           hover:border-fg-muted
+           focus:outline-none focus:border-focus focus:ring-2 focus:ring-focus/40
+           disabled:opacity-50 disabled:cursor-not-allowed
+           read-only:bg-surface-raised
+           aria-[invalid=true]:border-danger aria-[invalid=true]:ring-danger/30;
   }
-  .input:hover {
-    @apply border-navy-500;
+  textarea.input {
+    @apply resize-y;
   }
 
-  /* Cards */
+  /* ---- Cards ---- */
   .card {
-    @apply bg-navy-900 rounded-xl shadow-lg border border-navy-700;
+    @apply bg-surface rounded-card border border-line shadow-card;
+  }
+  .card-interactive {
+    @apply transition-colors duration-150 hover:bg-surface-raised hover:border-line-strong;
   }
   .card-header {
-    @apply px-6 py-4 border-b border-navy-700;
+    @apply px-6 py-4 border-b border-line;
   }
   .card-body {
-    @apply px-6 py-4;
+    @apply px-6 py-5;
   }
 
-  /* Links */
+  /* ---- Links ---- */
   a {
-    @apply text-sky-400 hover:text-sky-300 transition-colors;
+    @apply text-interactive hover:text-interactive-hover transition-colors;
   }
 
-  /* Tables */
+  /* ---- Tables ---- */
   table {
-    @apply w-full;
+    @apply w-full text-sm;
+  }
+  caption {
+    @apply py-2 text-left text-sm text-fg-muted;
   }
   thead {
-    @apply bg-navy-800 border-b border-navy-600;
+    @apply bg-surface-raised;
   }
   th {
-    @apply text-left p-4 font-medium text-sky-200;
+    @apply px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-fg-secondary whitespace-nowrap;
   }
   tbody tr {
-    @apply border-b border-navy-700 hover:bg-navy-800/50 transition-colors;
+    @apply border-b border-line transition-colors hover:bg-surface-raised/50;
+  }
+  tbody tr:last-child {
+    @apply border-b-0;
   }
   td {
-    @apply p-4 text-sky-100;
+    @apply px-4 py-3 align-middle text-fg;
   }
 
-  /* Badges / Tags */
+  /* ---- Badges ---- */
   .badge {
-    @apply px-2 py-1 rounded text-xs font-medium;
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border;
   }
   .badge-gold {
-    @apply bg-gold-500/20 text-gold-300 border border-gold-500/30;
+    @apply bg-gold-500/15 text-gold-300 border-gold-500/30;
   }
   .badge-sky {
-    @apply bg-sky-500/20 text-sky-300 border border-sky-500/30;
+    @apply bg-sky-500/15 text-sky-300 border-sky-500/30;
   }
   .badge-green {
-    @apply bg-emerald-500/20 text-emerald-300 border border-emerald-500/30;
+    @apply bg-emerald-500/15 text-emerald-300 border-emerald-500/30;
   }
   .badge-red {
-    @apply bg-red-500/20 text-red-300 border border-red-500/30;
+    @apply bg-red-500/15 text-red-300 border-red-500/30;
+  }
+  .badge-gray {
+    @apply bg-navy-700/60 text-navy-200 border-navy-600;
   }
 
-  /* Navigation */
+  /* ---- Alerts (pair with role="alert" / role="status" in markup) ---- */
+  .alert {
+    @apply flex items-start gap-3 p-4 rounded-control border text-sm;
+  }
+  .alert-success {
+    @apply bg-success/10 border-success/30 text-success-fg;
+  }
+  .alert-warning {
+    @apply bg-warning/10 border-warning/30 text-warning-fg;
+  }
+  .alert-danger {
+    @apply bg-danger/10 border-danger/40 text-danger-fg;
+  }
+  .alert-info {
+    @apply bg-info/10 border-info/30 text-info-fg;
+  }
+
+  /* ---- Navigation ---- */
   .nav-link {
-    @apply px-4 py-2 rounded-lg text-navy-300 hover:text-sky-300 hover:bg-navy-800 transition-all;
+    @apply px-4 py-2 rounded-control text-fg-secondary hover:text-fg hover:bg-surface-raised transition-colors;
   }
-  .nav-link.active {
-    @apply bg-navy-800 text-gold-400;
+  .nav-link.active,
+  .nav-link[aria-current='page'] {
+    @apply bg-surface-raised text-fg-accent;
   }
 
-  /* Accents & Highlights */
+  /* ---- Loading ---- */
+  .skeleton {
+    @apply animate-pulse rounded-control bg-surface-raised;
+  }
+
+  /* ---- Accents & gradients ---- */
   .accent-gold {
     @apply text-gold-400;
   }
@@ -118,8 +239,6 @@
   .accent-green {
     @apply text-emerald-400;
   }
-
-  /* Gradients */
   .gradient-header {
     @apply bg-gradient-to-r from-navy-900 via-navy-800 to-navy-900;
   }
@@ -129,14 +248,11 @@
   .gradient-text {
     @apply bg-gradient-to-r from-sky-400 via-gold-300 to-emerald-400 bg-clip-text text-transparent;
   }
-
-  /* Dividers */
-  hr, .divider {
-    @apply border-navy-700;
+  .divider {
+    @apply border-line;
   }
 }
 
-/* Custom utility classes */
 @layer utilities {
   .glow-gold {
     box-shadow: 0 0 20px rgba(251, 191, 36, 0.3);
@@ -146,5 +262,28 @@
   }
   .glow-green {
     box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
+  }
+}
+
+/*
+ * Reduced motion (WCAG 2.3.3). Unlayered so it beats every utility. Decorative
+ * animation and transitions are removed; spinners keep rotating, slowly,
+ * because a frozen ring reads as "hung" rather than "loading".
+ */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .animate-spin {
+    animation-duration: 2.5s !important;
+    animation-iteration-count: infinite !important;
   }
 }

@@ -45,9 +45,9 @@ wasmtime = { version = "=49.0.2", default-features = false, features = ["compone
 # binary, not a hand-authored stub component (round 2 of the compiler-
 # sandbox spike found those impractical). See `src/host/mod.rs`.
 wasmtime-wasi = { version = "=49.0.2", default-features = false, features = ["p2"] }
-tokio = { version = "=1.53.1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync", "signal"] }
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync", "signal"] }
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
-rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "tls12"] }
 # `rustls-pemfile` is RUSTSEC-2025-0134 (unmaintained, archived) -- PEM
 # parsing goes straight through `rustls-pki-types`'s own `PemObject` trait
 # instead (the crate the old wrapper delegated to anyway).
@@ -77,7 +77,7 @@ hmac = "=0.12.1"
 # Message shapes and correlation-id table shared verbatim with the stage
 # side (spec SS6.6). Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # at the time of this commit (PR penguintechinc/penguin-libs#93).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "eef86927d015f530c14d8ed54d311494c1a8000d", package = "penguin-bundle-host", version = "=0.3.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0b97183fa7ae7c91464bd6539821ad0a091d5764", package = "penguin-bundle-host", version = "=0.3.0" }
 tracing = "=0.1.44"
 # `penguin-logging` (spec SS4.5's dependency list) is deliberately NOT
 # depended on here, unlike every other Rust data-plane service in this
@@ -169,7 +169,7 @@ http = "=1.5.0"
 bytes = "=1.12.1"
 prost = "=0.14.4"
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "metrics"] }
-tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
 # Test-only: generates throwaway self-signed CA/client cert+key pairs at
 # test run time (`src/tls.rs`'s tests) so `tests/dependency_policy.rs`'s
 # and gitleaks' pre-commit scan never see a committed PEM private key --

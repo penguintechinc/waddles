@@ -258,7 +258,7 @@ export default function SuperAdminModuleRegistry() {
         <div className="mb-8 flex justify-between items-center">
           <div>
             <h1 className="text-3xl font-bold text-gold-400 mb-2">Module Registry</h1>
-            <p className="text-gray-400">Manage all marketplace modules</p>
+            <p className="text-fg-muted">Manage all marketplace modules</p>
           </div>
           <button
             onClick={() => setShowCreateModal(true)}
@@ -286,19 +286,21 @@ export default function SuperAdminModuleRegistry() {
         {/* Filters */}
         <div className="mb-6 flex gap-4">
           <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-fg-muted" size={20} />
             <input
+              aria-label="Search modules"
               type="text"
               placeholder="Search modules..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-white focus:outline-none focus:border-sky-500"
+              className="w-full pl-10 pr-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-white focus:border-sky-500"
             />
           </div>
           <select
+            aria-label="Filter by category"
             value={category}
             onChange={(e) => setCategory(e.target.value)}
-            className="px-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-white focus:outline-none focus:border-sky-500"
+            className="px-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-white focus:border-sky-500"
           >
             {categories.map((cat) => (
               <option key={cat.value} value={cat.value}>
@@ -307,9 +309,10 @@ export default function SuperAdminModuleRegistry() {
             ))}
           </select>
           <select
+            aria-label="Filter by status"
             value={isPublished}
             onChange={(e) => setIsPublished(e.target.value)}
-            className="px-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-white focus:outline-none focus:border-sky-500"
+            className="px-4 py-2 bg-navy-800 border border-navy-700 rounded-lg text-white focus:border-sky-500"
           >
             <option value="">All Status</option>
             <option value="true">Published</option>
@@ -322,11 +325,11 @@ export default function SuperAdminModuleRegistry() {
           <table className="w-full">
             <thead className="bg-navy-700">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Module</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Category</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Stats</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Status</th>
-                <th className="px-6 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">Actions</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-fg-muted uppercase tracking-wider">Module</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-fg-muted uppercase tracking-wider">Category</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-fg-muted uppercase tracking-wider">Stats</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-fg-muted uppercase tracking-wider">Status</th>
+                <th className="px-6 py-3 text-right text-xs font-medium text-fg-muted uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-navy-700">
@@ -343,7 +346,7 @@ export default function SuperAdminModuleRegistry() {
                       )}
                       <div>
                         <div className="font-semibold text-white">{module.displayName}</div>
-                        <div className="text-sm text-gray-400">{module.name}</div>
+                        <div className="text-sm text-fg-muted">{module.name}</div>
                         {module.isCore && (
                           <span className="text-xs text-gold-400">Core Module</span>
                         )}
@@ -372,7 +375,7 @@ export default function SuperAdminModuleRegistry() {
                         Published
                       </span>
                     ) : (
-                      <span className="flex items-center gap-1 text-gray-400">
+                      <span className="flex items-center gap-1 text-fg-muted">
                         <EyeOff size={16} />
                         Unpublished
                       </span>
@@ -419,7 +422,7 @@ export default function SuperAdminModuleRegistry() {
             >
               Previous
             </button>
-            <span className="px-4 py-2 text-gray-400">
+            <span className="px-4 py-2 text-fg-muted">
               Page {page} of {pagination.totalPages}
             </span>
             <button

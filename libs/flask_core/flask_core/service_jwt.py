@@ -33,9 +33,11 @@ built so that swap is a *configuration* change, not a rewrite --
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -62,6 +64,7 @@ from .jwt_hardening import (
     JwtRejection,
     classify_decode_error,
     inspect_header,
+    is_valid_kid,
     log_rejection,
     record_verification,
 )
@@ -594,3 +597,130 @@ def require_service_scope(scope: str) -> Callable[[F], F]:
         return wrapper  # type: ignore[return-value]
 
     return decorator
+
+
+# ---------------------------------------------------------------------------
+# Verify-only trust bundle + caller-side token client
+#
+# Privilege separation (H-2 / security audit HIGH, HS256 shared secret): ONLY
+# hub-api (the issuer) may hold an Ed25519 private key. Every other service
+# verifies with public keys and mints nothing -- it obtains a short-lived
+# machine JWT from hub-api by presenting its Kubernetes SA token. A verifier
+# compromise therefore yields no forging capability, unlike the legacy HS256
+# `MODULE_SECRET_KEY`/`SECRET_KEY` design where every verifier held the minting key.
+# ---------------------------------------------------------------------------
+
+_PRIVATE_PREFIX = "SERVICE_JWT_PRIVATE_KEY_"
+_PUBLIC_PREFIX = "SERVICE_JWT_PUBLIC_KEY_"
+
+
+@dataclass(frozen=True, slots=True)
+class StaticTrustBundle:
+    """Immutable kid -> Ed25519 public key map (a `TrustBundleSource`).
+
+    Verify-only by construction: it holds no private key, so a service built on
+    it can validate machine JWTs but never mint one. Rotation = ship the new
+    public key alongside the old one, flip hub-api's active kid, then drop the old.
+    """
+
+    keys: Mapping[str, Ed25519PublicKey]
+
+    def get_public_key(self, kid: str) -> Ed25519PublicKey | None:
+        """Return the public key for `kid`, or None if it is not in the bundle."""
+        return self.keys.get(kid)
+
+
+def load_verifier_from_env(
+    *, audience: str | None = None, trusted_issuers: frozenset[str] | None = None
+) -> ServiceJwtVerifier:
+    """Build a verify-only `ServiceJwtVerifier` from `SERVICE_JWT_PUBLIC_KEY_<kid>` PEMs.
+
+    Fails closed (raises `ServiceJwtError`) when no public key is configured, when
+    any key is not Ed25519, when a kid is malformed, or when a `SERVICE_JWT_PRIVATE_KEY_*`
+    variable is present -- a verifier-only service holding signing material defeats
+    the privilege separation this module exists for, so it is refused at startup
+    rather than tolerated. No HS256/shared-secret fallback exists anywhere here.
+    """
+    private_vars = sorted(name for name in os.environ if name.startswith(_PRIVATE_PREFIX))
+    if private_vars:
+        raise ServiceJwtError(
+            "verify-only service must not hold a service-JWT private key "
+            f"(found {len(private_vars)} {_PRIVATE_PREFIX}* variable(s))"
+        )
+    keys: dict[str, Ed25519PublicKey] = {}
+    for env_name, pem in os.environ.items():
+        if not env_name.startswith(_PUBLIC_PREFIX):
+            continue
+        kid = env_name.removeprefix(_PUBLIC_PREFIX)
+        if not is_valid_kid(kid):
+            raise ServiceJwtError("SERVICE_JWT_PUBLIC_KEY_<kid> has a malformed kid")
+        try:
+            public_key = serialization.load_pem_public_key(pem.encode())
+        except ValueError as exc:
+            raise ServiceJwtError(f"public key for kid {kid!r} is not valid PEM") from exc
+        if not isinstance(public_key, Ed25519PublicKey):
+            raise ServiceJwtError(f"key {kid!r} is not an Ed25519 key")
+        keys[kid] = public_key
+    if not keys:
+        raise ServiceJwtError(f"no {_PUBLIC_PREFIX}<kid> configured; refusing to run unauthenticated")
+    return ServiceJwtVerifier(
+        trust_bundle=StaticTrustBundle(keys=keys),
+        audience=audience or os.getenv("SERVICE_JWT_AUDIENCE", "waddlebot-internal"),
+        trusted_issuers=trusted_issuers if trusted_issuers is not None else frozenset({ISSUER}),
+    )
+
+
+@dataclass(slots=True)
+class ServiceTokenClient:
+    """Caller-side: exchange the pod's projected SA token for a cached machine JWT.
+
+    Replaces `jwt.encode(..., SECRET_KEY, 'HS256')` at every minting site -- the
+    caller never holds a signing key. Any failure raises `BootstrapRejected`;
+    there is deliberately no fallback token source.
+    """
+
+    token_endpoint: str
+    scope: str
+    sa_token_path: str
+    timeout_seconds: float = 5.0
+    refresh_margin_seconds: int = 60
+    _token: str = ""
+    _expires_at: float = 0.0
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def get_token(self) -> str:
+        """Return a valid cached token, fetching a fresh one when near expiry."""
+        with self._lock:
+            if self._token and time.time() < self._expires_at - self.refresh_margin_seconds:
+                return self._token
+            self._token, self._expires_at = self._fetch()
+            return self._token
+
+    async def get_token_async(self) -> str:
+        """`get_token` off the event loop (blocking file + HTTP I/O)."""
+        return await asyncio.to_thread(self.get_token)
+
+    def _fetch(self) -> tuple[str, float]:
+        try:
+            with open(self.sa_token_path, encoding="ascii") as fh:
+                sa_token = fh.read().strip()
+        except OSError as exc:
+            raise BootstrapRejected("projected ServiceAccount token unreadable") from exc
+        if not sa_token:
+            raise BootstrapRejected("projected ServiceAccount token is empty")
+        try:
+            response = requests.post(
+                self.token_endpoint,
+                json={"scope": self.scope},
+                headers={"Authorization": f"Bearer {sa_token}"},
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+            body = response.json()
+            token = body["token"]
+            expires_in = int(body["expires_in"])
+        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+            raise BootstrapRejected("service token request failed") from exc
+        if not isinstance(token, str) or not token or not 0 < expires_in <= MAX_TOKEN_TTL_SECONDS:
+            raise BootstrapRejected("service token response malformed")
+        return token, time.time() + expires_in

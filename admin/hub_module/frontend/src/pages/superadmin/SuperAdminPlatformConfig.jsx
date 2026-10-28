@@ -177,8 +177,9 @@ export default function SuperAdminPlatformConfig() {
                 <div className="card p-6 space-y-4">
                   <h3 className="text-lg font-semibold text-sky-100">Banner Content</h3>
                   <div>
-                    <label className="block text-sm font-medium text-sky-200 mb-1">Banner text</label>
+                    <label htmlFor="super-admin-platform-config-banner-text" className="block text-sm font-medium text-sky-200 mb-1">Banner text</label>
                     <input
+                      id="super-admin-platform-config-banner-text"
                       type="text"
                       value={settings.banner_text || ''}
                       onChange={(e) => handleSettingChange('banner_text', e.target.value)}
@@ -191,9 +192,10 @@ export default function SuperAdminPlatformConfig() {
                   {/* Colour pickers */}
                   <div className="flex gap-6 flex-wrap">
                     <div>
-                      <label className="block text-sm font-medium text-sky-200 mb-1">Background colour</label>
+                      <label htmlFor="super-admin-platform-config-background-colour" className="block text-sm font-medium text-sky-200 mb-1">Background colour</label>
                       <div className="flex items-center gap-2">
                         <input
+                          id="super-admin-platform-config-background-colour"
                           type="color"
                           value={settings.banner_bg_color || '#F5C518'}
                           onChange={(e) => handleSettingChange('banner_bg_color', e.target.value)}
@@ -203,9 +205,10 @@ export default function SuperAdminPlatformConfig() {
                       </div>
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-sky-200 mb-1">Text colour</label>
+                      <label htmlFor="super-admin-platform-config-text-colour" className="block text-sm font-medium text-sky-200 mb-1">Text colour</label>
                       <div className="flex items-center gap-2">
                         <input
+                          id="super-admin-platform-config-text-colour"
                           type="color"
                           value={settings.banner_text_color || '#000000'}
                           onChange={(e) => handleSettingChange('banner_text_color', e.target.value)}
@@ -283,8 +286,9 @@ export default function SuperAdminPlatformConfig() {
                   <h3 className="text-lg font-semibold text-sky-100 mb-4">CAPTCHA</h3>
                   <div className="space-y-4">
                     <div>
-                      <label className="block text-sm font-medium text-sky-200 mb-1">CAPTCHA Provider</label>
+                      <label htmlFor="super-admin-platform-config-captcha-provider" className="block text-sm font-medium text-sky-200 mb-1">CAPTCHA Provider</label>
                       <select
+                        id="super-admin-platform-config-captcha-provider"
                         value={settings.captcha_provider || 'none'}
                         onChange={(e) => handleSettingChange('captcha_provider', e.target.value)}
                         className="input"
@@ -297,8 +301,9 @@ export default function SuperAdminPlatformConfig() {
                     {settings.captcha_provider && settings.captcha_provider !== 'none' && (
                       <>
                         <div>
-                          <label className="block text-sm font-medium text-sky-200 mb-1">Site Key</label>
+                          <label htmlFor="super-admin-platform-config-site-key" className="block text-sm font-medium text-sky-200 mb-1">Site Key</label>
                           <input
+                            id="super-admin-platform-config-site-key"
                             type="text"
                             value={settings.captcha_site_key || ''}
                             onChange={(e) => handleSettingChange('captcha_site_key', e.target.value)}
@@ -307,8 +312,9 @@ export default function SuperAdminPlatformConfig() {
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-sky-200 mb-1">Secret Key</label>
+                          <label htmlFor="super-admin-platform-config-secret-key" className="block text-sm font-medium text-sky-200 mb-1">Secret Key</label>
                           <input
+                            id="super-admin-platform-config-secret-key"
                             type="password"
                             value={settings.captcha_secret_key || ''}
                             onChange={(e) => handleSettingChange('captcha_secret_key', e.target.value)}

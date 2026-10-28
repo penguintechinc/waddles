@@ -1808,7 +1808,7 @@ mod tests {
     #[tokio::test]
     async fn on_invoke_rejects_an_unloaded_app_id() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -1849,7 +1849,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -1952,7 +1952,7 @@ mod tests {
         app_id: &str,
         digest: &str,
     ) -> Result<ResultBody, ErrorBody> {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         executor
             .on_invoke(
@@ -2302,7 +2302,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let deadline_ms = 500;
         let start = std::time::Instant::now();
@@ -2381,7 +2381,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -2416,7 +2416,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -2477,7 +2477,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -2642,7 +2642,7 @@ mod tests {
             .await
             .expect("load succeeds");
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -2686,7 +2686,7 @@ mod tests {
             .on_load(fixture_load_body("waddles.test.app"))
             .await
             .expect("a fresh bundle still loads after another bundle's fuel trap");
-        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection2 = crate::wire::Connection::new(tx2);
         let ok = executor
             .on_invoke(
@@ -2733,7 +2733,7 @@ mod tests {
         // receiver is discarded (as below, same as this module's other
         // no-host-call tests) never blocks waiting for an answer that would
         // never come -- a host-call branch would hang forever here instead.
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         let result = executor
             .on_invoke(
@@ -2804,7 +2804,7 @@ mod tests {
             }
         });
 
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(tx);
         // Generous deadline/fuel: the point is real elapsed wall-clock time
         // for the heartbeat to tick during, not a trap.
@@ -3318,7 +3318,7 @@ mod tests {
         const N: u32 = 2000;
         let start = std::time::Instant::now();
         for i in 0..N {
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
             let connection = crate::wire::Connection::new(tx);
             executor
                 .on_invoke(
@@ -3383,7 +3383,7 @@ mod tests {
             payload: serde_json::Value,
             deadline_ms: u64,
         ) -> Result<ResultBody, ErrorBody> {
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
             let connection = crate::wire::Connection::new(tx);
             executor
                 .on_invoke(

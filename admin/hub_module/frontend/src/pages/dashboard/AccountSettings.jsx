@@ -449,10 +449,11 @@ function AccountSettings() {
             <form onSubmit={handleSetPassword} className="p-4 bg-navy-900 rounded-lg border border-navy-700 space-y-4">
               {user?.hasPassword && (
                 <div>
-                  <label className="block text-sm font-medium text-sky-200 mb-1">
+                  <label htmlFor="account-settings-current-password" className="block text-sm font-medium text-sky-200 mb-1">
                     Current Password
                   </label>
                   <input
+                    id="account-settings-current-password"
                     type="password"
                     value={currentPassword}
                     onChange={(e) => setCurrentPassword(e.target.value)}
@@ -462,10 +463,11 @@ function AccountSettings() {
                 </div>
               )}
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">
+                <label htmlFor="account-settings-new-password" className="block text-sm font-medium text-sky-200 mb-1">
                   New Password
                 </label>
                 <input
+                  id="account-settings-new-password"
                   type="password"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
@@ -476,10 +478,11 @@ function AccountSettings() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">
+                <label htmlFor="account-settings-confirm-new-password" className="block text-sm font-medium text-sky-200 mb-1">
                   Confirm New Password
                 </label>
                 <input
+                  id="account-settings-confirm-new-password"
                   type="password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
@@ -607,8 +610,9 @@ function AccountSettings() {
             <h3 className="font-medium text-sky-100">New OAuth Credential</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">Platform</label>
+                <label htmlFor="account-settings-platform" className="block text-sm font-medium text-sky-200 mb-1">Platform</label>
                 <input
+                  id="account-settings-platform"
                   className="input w-full"
                   placeholder="e.g. twitch, discord"
                   value={oauthForm.platform}
@@ -617,8 +621,9 @@ function AccountSettings() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">Scopes (comma-separated)</label>
+                <label htmlFor="account-settings-scopes-comma-separated" className="block text-sm font-medium text-sky-200 mb-1">Scopes (comma-separated)</label>
                 <input
+                  id="account-settings-scopes-comma-separated"
                   className="input w-full"
                   placeholder="e.g. read:user"
                   value={oauthForm.scopes}
@@ -626,8 +631,9 @@ function AccountSettings() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">Client ID</label>
+                <label htmlFor="account-settings-client-id" className="block text-sm font-medium text-sky-200 mb-1">Client ID</label>
                 <input
+                  id="account-settings-client-id"
                   className="input w-full"
                   placeholder="Client ID"
                   value={oauthForm.clientId}
@@ -636,8 +642,9 @@ function AccountSettings() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">Client Secret</label>
+                <label htmlFor="account-settings-client-secret" className="block text-sm font-medium text-sky-200 mb-1">Client Secret</label>
                 <input
+                  id="account-settings-client-secret"
                   type="password"
                   className="input w-full"
                   placeholder="Client Secret"

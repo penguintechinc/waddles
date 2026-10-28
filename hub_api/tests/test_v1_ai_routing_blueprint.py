@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from flask_core.ai_disclosure import with_ai_disclosure
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -269,7 +270,8 @@ class TestCompletions:
         )
         assert response.status_code == 200
         body = await response.get_json()
-        assert body["text"] == "hello from the model"
+        assert body["text"] == with_ai_disclosure("hello from the model")
+        assert body["text"].endswith("AI-generated")
         assert body["tier_used"] == "free"
         assert body["input_tokens"] == 10
 

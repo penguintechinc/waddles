@@ -52,7 +52,7 @@ function PlatformDashboard() {
         <Link to="/platform/users" className="card p-6 hover:shadow-md transition-shadow">
           <UserGroupIcon className="w-8 h-8 text-blue-500 mb-3" />
           <div className="text-3xl font-bold">{stats?.users?.total || 0}</div>
-          <div className="text-slate-600">Total Users</div>
+          <div className="text-fg-muted">Total Users</div>
           <div className="text-sm text-green-600 mt-1">
             {stats?.users?.active7d || 0} active this week
           </div>
@@ -61,8 +61,8 @@ function PlatformDashboard() {
         <Link to="/platform/communities" className="card p-6 hover:shadow-md transition-shadow">
           <HomeIcon className="w-8 h-8 text-purple-500 mb-3" />
           <div className="text-3xl font-bold">{stats?.communities?.total || 0}</div>
-          <div className="text-slate-600">Communities</div>
-          <div className="text-sm text-slate-500 mt-1">
+          <div className="text-fg-muted">Communities</div>
+          <div className="text-sm text-fg-muted mt-1">
             {stats?.communities?.public || 0} public
           </div>
         </Link>
@@ -70,8 +70,8 @@ function PlatformDashboard() {
         <div className="card p-6">
           <ServerIcon className="w-8 h-8 text-green-500 mb-3" />
           <div className="text-3xl font-bold">{stats?.sessions?.active || 0}</div>
-          <div className="text-slate-600">Active Sessions</div>
-          <div className="text-sm text-slate-500 mt-1">
+          <div className="text-fg-muted">Active Sessions</div>
+          <div className="text-sm text-fg-muted mt-1">
             {stats?.sessions?.last24h || 0} in 24h
           </div>
         </div>
@@ -81,7 +81,7 @@ function PlatformDashboard() {
           <div className="text-3xl font-bold">
             {stats?.communities?.totalMembers?.toLocaleString() || 0}
           </div>
-          <div className="text-slate-600">Total Memberships</div>
+          <div className="text-fg-muted">Total Memberships</div>
         </div>
       </div>
 
@@ -102,7 +102,7 @@ function PlatformDashboard() {
                 </div>
                 <div>
                   <div className="text-2xl font-bold">{stats?.platforms?.[p.id] || 0}</div>
-                  <div className="text-slate-600">{p.label}</div>
+                  <div className="text-fg-muted">{p.label}</div>
                 </div>
               </div>
             ))}

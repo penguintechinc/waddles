@@ -100,6 +100,25 @@ impl tracing::Subscriber for Capture {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
+struct FakeDekProvider;
+
+impl svc_ingest::identity_crypto::DekProvider for FakeDekProvider {
+    async fn get_dek(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<(svc_ingest::identity_crypto::Dek, u32), svc_ingest::identity_crypto::DekUnavailableError> {
+        Ok((zeroize::Zeroizing::new([9u8; 32]), 3))
+    }
+}
+
+fn test_identity_metrics() -> prometheus::IntCounterVec {
+    prometheus::IntCounterVec::new(
+        prometheus::Opts::new("test_identity_encryption_total", "test-only"),
+        &["tenant", "status"],
+    )
+    .unwrap()
+}
+
 #[tokio::test(start_paused = true)]
 async fn run_loop_logs_carry_no_channel_login() {
     let lines = Arc::new(Mutex::new(Vec::new()));
@@ -108,6 +127,7 @@ async fn run_loop_logs_carry_no_channel_login() {
     let (tx, rx) = oneshot::channel();
     let keyring = KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])]);
     let scope = Scope::new("acme", None);
+    let identity_metrics = test_identity_metrics();
     let fut = run_with_connector(
         ScriptedConnector(Mutex::new(0)),
         "waddlebot",
@@ -121,6 +141,8 @@ async fn run_loop_logs_carry_no_channel_login() {
         &keyring,
         "k1",
         &scope,
+        &FakeDekProvider,
+        &identity_metrics,
         rx,
     );
     tokio::pin!(fut);

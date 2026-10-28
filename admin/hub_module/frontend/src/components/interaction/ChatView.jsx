@@ -169,6 +169,7 @@ export default function ChatView({ channel, socket }) {
       <div className="px-4 py-3 bg-navy-900 border-t border-navy-700">
         <div className="flex items-center gap-2">
           <input
+            aria-label={`Message #${channel.name}`}
             type="text"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
@@ -177,6 +178,7 @@ export default function ChatView({ channel, socket }) {
             className="flex-1 bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm placeholder-navy-500 focus:outline-none focus:border-gold-500 focus:ring-1 focus:ring-gold-500"
           />
           <button
+            aria-label="Send message"
             onClick={handleSend}
             disabled={!inputValue.trim()}
             className="bg-gold-500 text-navy-900 hover:bg-gold-400 rounded-lg px-4 py-2 flex items-center gap-1.5 text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
