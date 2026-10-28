@@ -129,6 +129,14 @@ spec:
         # templates/_service_jwt.tpl::waddlebot.serviceJwtIdentitiesJson.
         - name: SERVICE_JWT_IDENTITIES
           value: {{ include "waddlebot.serviceJwtIdentitiesJson" . | quote }}
+        # HIGH-2 SPIFFE-readiness (hub_api/services/machine_auth.py). OFF by default: when ON,
+        # hub-api trusts the peer-identity header below as a verified SVID, so the edge MUST
+        # strip it on non-mTLS traffic and a per-identity community allow-list must exist first
+        # (X-Connection-Community is NOT an entitlement check) -- docs/PROVIDER_CONNECTIONS.md.
+        - name: SPIFFE_PEER_TRUST
+          value: {{ .Values.pipeline.hubApi.spiffePeerTrust | default false | quote }}
+        - name: SPIFFE_PEER_ID_HEADER
+          value: {{ .Values.pipeline.hubApi.spiffePeerIdHeader | default "X-Spiffe-Peer-Id" | quote }}
         - name: MODULE_NAME
           value: "hub-api"
         - name: PIPELINE_STAGE

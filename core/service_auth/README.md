@@ -33,3 +33,11 @@ and `MachineJwtClient::with_timeouts(.., HttpTimeouts)` take explicit values.
   rotated-in `kid` is picked up on the next refetch after the TTL (so a key
   rotation can take up to the negative TTL to be honoured by a verifier that
   saw the new `kid` first; lower the TTL if that window matters).
+
+## BoundMachineJwtClient (community-bound bearers)
+
+`BoundMachineJwtClient::get_token_for(community_id, connection_id)` mints a machine JWT bound by hub-api
+(`POST /internal/service-token`, body `{scope, community_id, connection_id?}`) to exactly one
+`(community, connection)` and caches it in a 256-entry LRU (bearer JWT only, never connection secrets).
+Refreshes within `CLOCK_SKEW_SECONDS` of `exp`; concurrent callers per binding share one mint.
+The unbound `MachineJwtClient` is unchanged (`connections:list`).

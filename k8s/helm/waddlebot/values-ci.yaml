@@ -19,6 +19,8 @@ global:
   imageTag: "ci"
   imagePullPolicy: Never      # forces use of the kind-loaded image; a cache-miss must fail loudly, never fall back to a network pull
 
+<<<<<<< HEAD
+=======
 # The workflow pre-creates the namespace via `kubectl create namespace` (before
 # `helm install`) so it can seed waddlebot-platform-credentials ahead of time --
 # exactly how a real operator provisions a Secret before first install (gh-478).
@@ -27,6 +29,7 @@ global:
 # Namespace and fail install with "cannot be imported into the current release".
 namespaceCreate: false
 
+>>>>>>> origin/release/v3.0.X
 # Dummy, obviously-fake platform credentials -- CI never talks to real Discord/Twitch.
 # waddlebot-platform-credentials is created out-of-band by the workflow (kubectl create
 # secret) BEFORE `helm install`, exactly like a real operator would before first install,
@@ -55,6 +58,8 @@ pipeline:
       replicas: 1
     svcActionRust:
       replicas: 1
+<<<<<<< HEAD
+=======
     # bundle-executor is not in helm-chart-e2e.yml's kind-load image list (its
     # core/bundle_executor/Dockerfile.rust does exist) -- disabling
     # both here isn't a scope-cut, it's the only image reference that can't be
@@ -63,6 +68,7 @@ pipeline:
       enabled: false
     bundleExecutorAction:
       enabled: false
+>>>>>>> origin/release/v3.0.X
   migrationsJob:
     enabled: true
   coreBundleSeeder:
@@ -73,6 +79,20 @@ pipeline:
     enabled: false
   svcAction:
     enabled: false
+<<<<<<< HEAD
+
+modules:
+  hub:
+    enabled: true
+    replicas: 1
+  router:
+    enabled: false     # not required for install/upgrade correctness; cuts one image build
+
+presentation:
+  enabled: false
+streaming:
+  enabled: false
+=======
   # Not in the workflow's 6-image kind-load list -- correct keys are
   # pipeline.svcPresentation/svcStreaming/hubWebui, NOT the top-level
   # "presentation:"/"streaming:" this file previously set (those paths don't
@@ -106,12 +126,17 @@ reputation:
   enabled: false   # own image (docker.io/waddlebot/reputation-module), not in the kind-load list
 egressProxy:
   enabled: false   # values.yaml's own "SKELETON: no Dockerfile/CI image yet" -- allowlistSigning.secretName has no auto-provisioning wired up yet either (not in autoProvisionedKeys), so the pod can never reach Ready regardless of image availability
+>>>>>>> origin/release/v3.0.X
 posthog:
   enabled: false
 spire:
   enabled: false
 
 infrastructure:
+<<<<<<< HEAD
+  minio:
+    enabled: true       # exercises the #479 immutable minio-init Job fix
+=======
   valkeyDurable:
     enabled: true
     replicas: 1
@@ -124,6 +149,7 @@ infrastructure:
       limits: { cpu: "250m", memory: "256Mi" }
   seaweedfs:
     enabled: true       # exercises the #479 immutable bucket-init Job fix (now aws-cli/SeaweedFS, gh-508)
+>>>>>>> origin/release/v3.0.X
   ollama:
     enabled: false
   qdrant:
@@ -136,8 +162,11 @@ ingress:
   enabled: false          # no external LB/ingress controller on kind
 httproute:
   enabled: false
+<<<<<<< HEAD
+=======
 
 # R5: kind has no Tetragon agent/CRD (only the CiliumNetworkPolicy CRD is installed -- see the workflow);
 # this job validates install/upgrade/hook lifecycle, not policy enforcement.
 tetragon:
   enabled: false
+>>>>>>> origin/release/v3.0.X

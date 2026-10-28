@@ -1027,6 +1027,19 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
+  # Idempotent super-admin seed (templates/hub-admin-seed-job.yaml): post-install/post-upgrade
+  # hook re-applying config/postgres/migrations/081_seed_default_hub_admin.sql (no-op once any
+  # super-admin exists) -- SQL migrations never replay on an existing DB, so without this a
+  # deploy over an existing DB never seeds the admin.
+  hubAdminSeedJob:
+    enabled: true
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "64Mi"
+      limits:
+        cpu: "250m"
+        memory: "256Mi"
   # Activates first-party waddles.core.* App Bundles under the platform's SYSTEM identity at
   # deploy time (hub_api/cli/seed_core_bundles.py) -- no human global-admin approval, unlike a
   # third-party vendor bundle. `tenantSlugs` is a comma-separated CORE_BUNDLES_TENANT_SLUGS
@@ -1176,6 +1189,11 @@ pipeline:
     enabled: true
     port: 8204
     grpcPort: 50204
+    # SPIFFE_PEER_TRUST / SPIFFE_PEER_ID_HEADER (hub_api/services/machine_auth.py). Default OFF.
+    # Enable ONLY behind an mTLS terminator that strips the header from non-mTLS traffic AND
+    # after a per-identity community allow-list exists -- see docs/PROVIDER_CONNECTIONS.md.
+    spiffePeerTrust: false
+    spiffePeerIdHeader: "X-Spiffe-Peer-Id"
     replicas: 2
     # Maps to WADDLES_AI_ENABLED (hub_api/config.py) -- deploy-time
     # kill-switch for the whole services/ai_routing/ subsystem, so
@@ -1410,10 +1428,13 @@ pipeline:
   #   - Connector bundles (#840 B0): the executor library can now invoke connector exports
   #     (core/bundle_executor/src/connector.rs ConnectorHost) and svc_ingest has the host-side
   #     Transport/driver skeleton (core/svc_ingest/src/connector), proven end to end by
-  #     core/connector_e2e. The deployed pods cannot yet run a connector: the executor host-API
-  #     wire (penguin-libs ExportKind) has no connector export kinds, so svc_ingest's production
-  #     invoker is UnwiredInvoker, which fails every call loudly. No real platform Transport exists yet.
-  #   - svc_ingest has no host-API listener.
+  #     core/connector_e2e over the real host-API wire (penguin-bundle-host 0.3.0
+  #     ExportKind::Connector*; svc_ingest's production invoker is WireConnectorInvoker). The
+  #     deployed pods still cannot run a connector: no real platform Transport exists yet, no
+  #     ConnectorDriver is constructed by svc_ingest's main, and the executor pins no connector at
+  #     startup. With no executor attached every connector call fails loudly (typed Unavailable).
+  #   - svc_ingest has no host-API listener (WireConnectorInvoker's ExecutorLink::attach takes an
+  #     accepted stream; the mTLS accept loop lands with the first real transport).
   #
   # HIDDEN SECOND GATE -- read before enabling (src/license.rs:32 flag key, :115 check):
   #   core/svc_ingest only starts its receivers and outbound drains when the PostHog flag
@@ -1521,6 +1542,11 @@ pipeline:
       # so NOTHING renders unless this is true. Default false; only values-alpha.yaml enables it.
       dynamicConnections:
         enabled: false
+        # Per-community Twitch session reconcile cadence (TWITCH_RECONCILE_INTERVAL_SECS, bounds
+        # 10..3600) and per-call hub-api timeout (TWITCH_RESOLVE_TIMEOUT_SECS). Rendered only while
+        # enabled. A new/removed Twitch binding takes effect within <= one reconcile interval.
+        twitchReconcileIntervalSecs: 60
+        twitchResolveTimeoutSecs: 10
       resources:
         requests:
           cpu: "100m"
@@ -1622,6 +1648,13 @@ pipeline:
       # mTLS host-API listener core/bundle_executor dials (spec SS6.6/SS7.1) -- matches
       # HOST_API_PORT's own CliConfig default (core/svc_action/src/config.rs).
       hostApiPort: 8302
+      # feature/edge-reshape-chunk2-conn-store (Task 8) -- gates svc-action's
+      # `connections:resolve` + `connections:resolve:static` grant in
+      # `serviceJwt.identities.svc-action` (stripped from hub-api's SERVICE_JWT_IDENTITIES while
+      # false) and the SERVICE_JWT_* env/mount both svc-action pods use to mint it. Default false;
+      # only values-alpha.yaml enables it (same posture as svcIngest.dynamicConnections).
+      dynamicConnections:
+        enabled: false
       # ACTION_APP_ID (core/svc_action/src/config.rs) -- empty (default) disables the
       # dispatch drain loop entirely. values-alpha.yaml sets this to the migration-083
       # seeded demo app_id.
@@ -3328,6 +3361,15 @@ serviceJwt:
         # ResolveDisplayNames call would 403 even with a working connection.
         - "identity:displayname:read"
         - "egress:connect"
+        # feature/edge-reshape-chunk2-conn-store (Task 8) -- svc-action is the per-send EGRESS
+        # consumer of the connection store: `connections:resolve` mints a community-bound token
+        # for twitch OAuth / youtube / moderation sends and `connections:resolve:static` is the
+        # separate (least-privilege) scope hub-api demands for the static Lambda/GCP/HTTP kinds.
+        # It does NOT get `connections:list` (binding discovery is svc-ingest's job). Both are
+        # filtered out of the rendered allow-list unless
+        # pipeline.rustDataPlane.svcAction.dynamicConnections.enabled (default false).
+        - "connections:resolve"
+        - "connections:resolve:static"
     # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
     # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints
     # pseudonyms or calls egress, so exactly one scope.
@@ -3353,6 +3395,10 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "connections:resolve"
+        # feature/edge-reshape-chunk2-conn-store (Task 8) -- unbound binding discovery
+        # (GET /api/v1/internal/provider-connections) for the twitch OAuth kind. NOT the
+        # `connections:resolve:static` scope: svc-ingest never resolves Lambda/GCP/HTTP secrets.
+        - "connections:list"
         # feature/dataplane-scope-resolver (numeric-id migration, Slice A) -- svc-ingest has no DB;
         # it resolves (platform, guild/channel) -> numeric (tenant_id, community_id) through
         # hub-api's GET /api/v1/internal/dataplane/resolve-scope. A SEPARATE scope from
@@ -3516,7 +3562,7 @@ kms:
 # Enterprise SSO (SAML 2.0 / OIDC -- Enterprise tier, Google OAuth2 -- Professional tier).
 # Backend: hub_api/services/sso_*.py, migration 0049_sso_connections. Entitlement is
 # enforced in code by the two-gate feature check (flags `waddles.auth.sso_saml` /
-# `waddles.auth.sso_google`, both default OFF), so this subtree only provisions the
+# `waddles.auth.sso_custom`, both default OFF), so this subtree only provisions the
 # plumbing -- a deployment that never uses SSO needs nothing here.
 #
 # templates/sso.yaml owns the encryption-key Secret; templates/_sso.tpl renders the hub-api

@@ -1120,6 +1120,27 @@ async def _ensure_sentinel_community(install_dal: AsyncDB, *, tenant_id: int) ->
     )
 
 
+#: Permission ids whose manifest-declared `params` ARE the enforced per-call amount bound
+#: (`params.max_bet` / `params.max_amount`). `bundle_capability_gate`'s `economy_amount_bound`
+#: reads the bound from the GRANT's `params_json`; an absent value silently means the catalog
+#: ceiling (1000), so a grant written with `{}` makes the bundle's declared bound decorative.
+_ECONOMY_BOUND_PERMISSION_IDS = frozenset({"economy.wager", "economy.transfer"})
+
+
+def _declared_bound_params(manifest: BundleManifestV2) -> dict[str, dict[str, Any]]:
+    """Per-permission `params` the SYSTEM auto-grant must carry: the declared economy bounds.
+
+    Only the `economy.*` money-moving ids are carried (a deliberately narrow scope: every other
+    declared param keeps its previous, grant-without-params behaviour). Without this the seeded
+    grant enforced the 1000 ceiling instead of what the manifest declared (e.g. `steal` 10).
+    """
+    return {
+        d.id: dict(d.params)
+        for d in manifest.permission_declarations
+        if d.id in _ECONOMY_BOUND_PERMISSION_IDS and d.params
+    }
+
+
 async def _grant_core_bundle_permissions(
     install_dal: AsyncDB,
     *,
@@ -1166,7 +1187,7 @@ async def _grant_core_bundle_permissions(
             version=version,
             manifest=manifest,
             granted_permission_ids=required,
-            params_by_id=None,
+            params_by_id=_declared_bound_params(manifest) or None,
             granted_by=None,
             valkey_client=valkey_client,
         )

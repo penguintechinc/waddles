@@ -38,6 +38,7 @@ from services.provider_connections.adapter import (
     INSTALL_KIND_CREDENTIALS,
     Account,
     AdapterSpec,
+    BindingKey,
     CredentialField,
     Credentials,
     MetadataField,
@@ -154,6 +155,12 @@ TWITCH_SPEC: Final = AdapterSpec(
         }
     ),
     refreshable=True,
+    binding_metadata=(
+        BindingKey("channel", "channel_login", required=True),
+        BindingKey("bot_login", "bot_login", required=True),
+        BindingKey("channel_login", "channel_login"),
+        BindingKey("channel_id", "channel_id"),
+    ),
 )
 
 

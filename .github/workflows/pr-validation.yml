@@ -381,6 +381,32 @@ jobs:
           CREATE TABLE calendar_events (
               id SERIAL PRIMARY KEY
           );
+          -- 0063_seal_aad_version ALTERs this legacy table (config/postgres/migrations/
+          -- 030_platform_integrations.sql, never Alembic): same columns as the real DDL minus its
+          -- indexes/scope CHECK. Mirrored in pr-validation.yml's bootstrap -- keep both in sync.
+          CREATE TABLE platform_integrations (
+              id SERIAL PRIMARY KEY,
+              platform VARCHAR(50) NOT NULL,
+              integration_type VARCHAR(20) NOT NULL,
+              community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
+              user_id INTEGER REFERENCES hub_users(id) ON DELETE CASCADE,
+              access_token TEXT,
+              refresh_token TEXT,
+              client_id VARCHAR(255),
+              client_secret TEXT,
+              token_type VARCHAR(50) DEFAULT 'Bearer',
+              expires_at TIMESTAMP WITH TIME ZONE,
+              scopes TEXT[],
+              config_data JSONB,
+              is_active BOOLEAN DEFAULT TRUE,
+              is_encrypted BOOLEAN DEFAULT TRUE,
+              created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+              created_by_user_id INTEGER REFERENCES hub_users(id) ON DELETE SET NULL,
+              updated_by_user_id INTEGER REFERENCES hub_users(id) ON DELETE SET NULL,
+              CONSTRAINT platform_integrations_unique_bot
+                  UNIQUE (platform, integration_type, community_id, user_id)
+          );
           SQL
 
       # Runs whenever any alembic-related file changed (`any`), including a
@@ -946,8 +972,9 @@ jobs:
         run: |
           set -euo pipefail
           pip install --disable-pip-version-check --require-hashes -r hub_api/requirements.txt
+          pip install --disable-pip-version-check --require-hashes -r libs/flask_core/requirements.txt
           pip install --disable-pip-version-check "PyYAML>=6.0.2,<7.0.0"
-          python3 -c "import defusedxml, signxml, yaml"
+          python3 -c "import authlib, defusedxml, signxml, yaml"
 
       - name: Fail on OpenAPI spec drift
         run: make check-openapi-drift

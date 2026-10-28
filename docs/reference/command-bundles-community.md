@@ -1,6 +1,6 @@
 # Community Tools Commands
 
-Event, bookmark, looking-for-group, ticket and label commands ship as first-party App Bundles. Each keeps its state in community-scoped kv and is gated by a `waddles.command-<name>` flag, default OFF. Shared behavior (platforms, flags, mod checks, logging) is in [Command Bundles Reference](command-bundles.md).
+Event, bookmark, looking-for-group, ticket and label commands ship as first-party App Bundles. Each keeps its state in community-scoped kv and is activation-gated (install -> enable -> activate), not feature-flag-gated. Shared behavior (platforms, gating, mod checks, logging) is in [Command Bundles Reference](command-bundles.md).
 
 Mod-only verbs require the caller to be a moderator or broadcaster. If the platform reports no role information the verb is refused (fails closed).
 
@@ -8,7 +8,7 @@ Mod-only verbs require the caller to be a moderator or broadcaster. If the platf
 
 ## `!event` and `!rsvp`
 
-Light community events with RSVPs. Flag: `waddles.command-event`. This is separate from event sync (Waddles pushing events out to Discord) and shares no data with it.
+Light community events with RSVPs. This is separate from event sync (Waddles pushing events out to Discord) and shares no data with it.
 
 | Command | Effect | Who |
 |---|---|---|
@@ -22,7 +22,7 @@ Limits: 50 events per community, 500 RSVPs per event. RSVPs are stored by the ca
 
 ## `!bookmark`
 
-Saved links for the community. Flag: `waddles.command-bookmark`.
+Saved links for the community.
 
 | Command | Effect | Who |
 |---|---|---|
@@ -34,7 +34,7 @@ Only `http` and `https` URLs with a dotted host are accepted, with no embedded c
 
 ## `!lfg`
 
-Looking-for-group posts. Flag: `waddles.command-lfg`.
+Looking-for-group posts.
 
 | Command | Effect | Who |
 |---|---|---|
@@ -48,7 +48,7 @@ Limits: 25 open groups per community, one group per owner, 20 members per group,
 
 ## `!ticket`
 
-A support-ticket desk. Flag: `waddles.command-ticket`.
+A support-ticket desk.
 
 | Command | Effect | Who |
 |---|---|---|
@@ -61,7 +61,7 @@ Limits: 100 open tickets per community, 3 open per creator, 300 characters per d
 
 ## `!label`
 
-Labels attached to a user, keyed by the user's UUID. Flag: `waddles.command-label`.
+Labels attached to a user, keyed by the user's UUID.
 
 | Command | Effect | Who |
 |---|---|---|

@@ -78,14 +78,12 @@ missing `tenant_id` column to the EXISTING `communities` binding --
 gap, not a new table). `communities`/`community_members` are the same M1/
 M6-owned tables every other Community-module blueprint already reads.
 
-Known inherited behavior (preserved, not fixed -- migration plan's
-Non-goals: "no behavior changes"): `analyticsService.js`'s axios calls
-never set `err.statusCode`, so Node's `errorHandler.js` masks EVERY
-downstream failure (analytics-core 4xx/5xx, timeout, connection refused)
-to a generic 500 -- identical bug shape to `blueprints/v1/event.py`'s own
-documented "Known inherited behavior". Reproduced here via
-`services/community_common.py::api_error` on any `ProxyResult(ok=False)`
-(see `services/analytics_service.py::_relay`).
+Upstream failures (gh-894): `analytics-core` transport failures (timeout,
+connection refused) and upstream 5xx are relayed as a 502 JSON envelope naming
+the upstream dependency, as are upstream 401/403/other 4xx (hub-api's own
+service auth, never the client's); {400,404,409,422,429} keep their status with a
+re-wrapped `api_error` body -- see `services/analytics_service.py::_upstream_error`. Never a
+masked 500.
 """
 
 from __future__ import annotations

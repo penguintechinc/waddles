@@ -24,6 +24,16 @@ def _helm(values, extra=()):
     return subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603
 
 
+def _acl_sha256(secret: str) -> str:
+    """Return the unsalted sha256 hex the chart's init script writes as a Valkey ACL `#<hash>`.
+
+    Uses the same `sha256sum` the chart shells out to: the test only asserts this digest never
+    leaks into non-secret docs (Valkey mandates the format); it does not hash credentials for storage.
+    """
+    out = subprocess.run(["sha256sum"], input=secret.encode(), capture_output=True, check=True)
+    return out.stdout.decode().split()[0]
+
+
 def _docs(values, extra=()):
     r = _helm(values, extra)
     assert r.returncode == 0, r.stderr
@@ -192,12 +202,11 @@ def test_admin_password_not_migrated_and_statefulset_restarts_on_rotation(values
     ann = sts["spec"]["template"]["metadata"]["annotations"]
     assert ann.get("valkey.waddles/admin-revision") == "1"
     assert "checksum/valkey-admin" not in ann
-    import hashlib
     for d in docs:  # no password / password hash anywhere in non-secret docs
         if d["kind"] == "Secret":
             continue
         blob = yaml.safe_dump(d)
-        assert pw not in blob and hashlib.sha256(pw.encode()).hexdigest() not in blob, d["metadata"]["name"]
+        assert pw not in blob and _acl_sha256(pw) not in blob, d["metadata"]["name"]
 
 
 def test_revision_bump_changes_annotation():

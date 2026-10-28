@@ -5,7 +5,6 @@ allow-list ACL (+config|get AFTER -@dangerous, no admin user / replication), TLS
 Secret that no workload envFrom's and no secret-derived value in any non-secret field, and the
 svc-*-rust VALKEY_KV_URL wiring. Zero rendered documents / zero matching clients is a hard failure.
 """
-import hashlib
 import subprocess
 from pathlib import Path
 
@@ -23,6 +22,16 @@ def _helm(values, extra=()):
     for kv in extra:
         args += ["--set", kv]
     return subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603
+
+
+def _acl_sha256(secret: str) -> str:
+    """Return the unsalted sha256 hex the chart's init script writes as a Valkey ACL `#<hash>`.
+
+    Uses the same `sha256sum` the chart shells out to: the test only asserts this digest never
+    leaks into non-secret docs (Valkey mandates the format); it does not hash credentials for storage.
+    """
+    out = subprocess.run(["sha256sum"], input=secret.encode(), capture_output=True, check=True)
+    return out.stdout.decode().split()[0]
 
 
 def _docs(values, extra=()):
@@ -110,7 +119,7 @@ def test_kv_password_isolated_and_not_in_nonsecret_fields():
             assert d is kv[0] or not any(k.startswith("VALKEY_KV_") for k in (d.get("stringData") or {})), d["metadata"]["name"]
             continue
         blob = yaml.safe_dump(d)
-        assert pw not in blob and hashlib.sha256(pw.encode()).hexdigest() not in blob, d["metadata"]["name"]
+        assert pw not in blob and _acl_sha256(pw) not in blob, d["metadata"]["name"]
         if d["kind"] not in ("Deployment", "StatefulSet", "Job", "CronJob", "DaemonSet"):
             continue
         tpl = d["spec"]["jobTemplate"]["spec"]["template"] if d["kind"] == "CronJob" else d["spec"]["template"]
