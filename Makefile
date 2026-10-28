@@ -292,6 +292,7 @@ test-csharp-bundle-compile:
 # examined (a check over nothing is not a pass; add ALLOW_EMPTY=1 for deployments with no
 # Enterprise tenant), 3 if it could not run. Pin heads with EXPECT="tenant:1=42:<hash>".
 verify-audit-chain:
+# NOTE: superseded by the Rust port core/waddles_ops_cli (phase 1 = signing only; audit/suppression pending). Do not rewire until proven in CI.
 	@cd hub_api && python3 -m cli.verify_audit_chain $(if $(ALLOW_EMPTY),--allow-empty) \
 		$(foreach e,$(EXPECT),--expect $(e))
 

@@ -1,0 +1,36 @@
+[package]
+name = "waddles_ops_cli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Rust operator CLI superseding hub_api/cli/{sign_approved_bundles,suppression,verify_audit_chain}.py (security-sensitive CLI => Rust). Phase 1: byte-identical bundle signing + verification."
+
+[lib]
+name = "waddles_ops_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "waddles-ops"
+path = "src/main.rs"
+
+# Exact-version pins, matching core/bundle_executor (the verifier) so the
+# signature format is produced and checked by the same crypto crates.
+[dependencies]
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
+base64 = "=0.22.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+thiserror = "=2.0.20"
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
