@@ -1,0 +1,63 @@
+schema_version: 2
+app_id: waddles.core.example.chatguard
+name: Chat Guard Bundle (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: "PenguinTech/waddles"
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/chatguard
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      # NO `filters.command_prefix` on purpose: chatguard inspects ORDINARY chat lines, not just
+      # `!chatguard` / `!permit`. An absent filter key is "not a constraint", so the stage sees
+      # every chat.message; transform() cheap-rejects exempt (mod) authors and unconfigured
+      # communities after ONE kv read (same shape as `greeter`).
+      - platform: twitch
+        event_types: ["chat.message"]
+      - platform: discord
+        event_types: ["chat.message"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- configuration, permits and warn cooldowns are kv-only. The identity host
+# import is served by the PROCESS stage only, relay by the ACTION stage only: transform decides,
+# dispatch enforces (delete + warn).
+data:
+  tables: []
+limits:
+  timeout_ms: 10000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: "storage.kv"
+    justification: "persists the community's filter configuration, per-user link permits and warning cooldowns (pseudonymous keys only)"
+  - id: "identity.resolve"
+    justification: "chatguard resolves the permit target and the offending author to community user uuids (uuid-only, no names)"
+  - id: "chat.delete:discord"
+    justification: "deletes a message that broke an enabled filter rule (only the triggering event's own channel; the host confirms the delete)"
+  - id: "chat.send:discord"
+    justification: "chatguard replies to moderators and warns the offending author via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "chatguard replies to moderators and warns the offending author via the relay host import (relay.push -> chat.send:twitch)"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

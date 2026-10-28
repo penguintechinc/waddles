@@ -18,12 +18,12 @@ is a skip locally but a FAILURE in CI.
 from __future__ import annotations
 
 import json
-from urllib.parse import urlparse
 import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 import yaml
@@ -93,9 +93,12 @@ def _svc_ingest_deployment(docs: list[dict[str, Any]]) -> dict[str, Any]:
     found = [
         doc
         for doc in docs
-        if doc.get("kind") == "Deployment" and doc["metadata"]["name"].endswith("-svc-ingest-rust")
+        if doc.get("kind") == "Deployment"
+        and doc["metadata"]["name"].endswith("-svc-ingest-rust")
     ]
-    assert len(found) == 1, f"expected exactly one svc-ingest-rust Deployment, got {len(found)}"
+    assert len(found) == 1, (
+        f"expected exactly one svc-ingest-rust Deployment, got {len(found)}"
+    )
     return found[0]
 
 
@@ -103,7 +106,13 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
     docs: list[dict[str, Any]],
 ) -> None:
     entry = _identities(docs)["svc-ingest"]
-    assert entry["allowed_scopes"] == ["connections:resolve", "dataplane:resolve-scope"]
+    # resolve (bound, twitch OAuth) + list (binding discovery) + scope resolver; NEVER the
+    # static-kind scope (that is svc-action's alone).
+    assert entry["allowed_scopes"] == [
+        "connections:resolve",
+        "connections:list",
+        "dataplane:resolve-scope",
+    ]
     assert entry["tenant"] == "system"
     assert entry["k8s_service_account"] == "svc-ingest"
     parsed = urlparse(entry["service_id"])
@@ -111,22 +120,28 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
     assert parsed.path.rstrip("/").endswith("/svc-ingest")
 
 
-def test_connections_resolve_is_granted_to_no_other_identity(docs: list[dict[str, Any]]) -> None:
+def test_connections_resolve_is_granted_only_to_svc_ingest_and_svc_action(
+    docs: list[dict[str, Any]],
+) -> None:
     identities = _identities(docs)
     assert len(identities) >= 3, identities.keys()
     for name, entry in identities.items():
-        if name != "svc-ingest":
+        if name not in {"svc-ingest", "svc-action"}:
             assert "connections:resolve" not in entry["allowed_scopes"], name
 
 
-def test_the_dedicated_svc_ingest_service_account_is_rendered(docs: list[dict[str, Any]]) -> None:
+def test_the_dedicated_svc_ingest_service_account_is_rendered(
+    docs: list[dict[str, Any]],
+) -> None:
     accounts = [d for d in docs if d.get("kind") == "ServiceAccount"]
-    assert [a["metadata"]["name"] for a in accounts if a["metadata"]["name"] == "svc-ingest"] == [
-        "svc-ingest"
-    ]
+    assert [
+        a["metadata"]["name"] for a in accounts if a["metadata"]["name"] == "svc-ingest"
+    ] == ["svc-ingest"]
 
 
-def test_svc_ingest_deployment_runs_as_the_dedicated_identity(docs: list[dict[str, Any]]) -> None:
+def test_svc_ingest_deployment_runs_as_the_dedicated_identity(
+    docs: list[dict[str, Any]],
+) -> None:
     pod = _svc_ingest_deployment(docs)["spec"]["template"]["spec"]
     assert pod["serviceAccountName"] == "svc-ingest"
 
@@ -135,9 +150,13 @@ def test_svc_ingest_deployment_projects_the_audience_scoped_bootstrap_token(
     docs: list[dict[str, Any]],
 ) -> None:
     pod = _svc_ingest_deployment(docs)["spec"]["template"]["spec"]
-    volume = next(v for v in pod["volumes"] if v["name"] == "service-jwt-bootstrap-token")
+    volume = next(
+        v for v in pod["volumes"] if v["name"] == "service-jwt-bootstrap-token"
+    )
     (source,) = volume["projected"]["sources"]
-    assert source["serviceAccountToken"]["audience"] == "hub-api"  # TokenReview audience
+    assert (
+        source["serviceAccountToken"]["audience"] == "hub-api"
+    )  # TokenReview audience
     container = pod["containers"][0]
     assert any(
         m["name"] == "service-jwt-bootstrap-token" and m["readOnly"]
@@ -151,16 +170,26 @@ def test_svc_ingest_deployment_projects_the_audience_scoped_bootstrap_token(
 def test_dynamic_connections_defaults_off_in_base_values_and_on_only_in_alpha() -> None:
     base = yaml.safe_load((_CHART_DIR / "values.yaml").read_text())
     alpha = yaml.safe_load(_ALPHA_VALUES.read_text())
-    assert base["pipeline"]["rustDataPlane"]["svcIngest"]["dynamicConnections"]["enabled"] is False
-    assert alpha["pipeline"]["rustDataPlane"]["svcIngest"]["dynamicConnections"]["enabled"] is True
+    assert (
+        base["pipeline"]["rustDataPlane"]["svcIngest"]["dynamicConnections"]["enabled"]
+        is False
+    )
+    assert (
+        alpha["pipeline"]["rustDataPlane"]["svcIngest"]["dynamicConnections"]["enabled"]
+        is True
+    )
 
 
-def test_disabled_renders_no_svc_ingest_grant(disabled_docs: list[dict[str, Any]]) -> None:
+def test_disabled_renders_no_svc_ingest_grant(
+    disabled_docs: list[dict[str, Any]],
+) -> None:
     identities = _identities(disabled_docs)
     assert "svc-ingest" not in identities
     assert len(identities) >= 3, identities.keys()  # other identities still rendered
     for name, entry in identities.items():
-        assert "connections:resolve" not in entry["allowed_scopes"], name
+        assert (
+            "connections:resolve" not in entry["allowed_scopes"] or name == "svc-action"
+        ), name
 
 
 def test_disabled_renders_no_service_jwt_mount_or_env_on_svc_ingest(
@@ -169,7 +198,9 @@ def test_disabled_renders_no_service_jwt_mount_or_env_on_svc_ingest(
     pod = _svc_ingest_deployment(disabled_docs)["spec"]["template"]["spec"]
     assert "service-jwt-bootstrap-token" not in [v["name"] for v in pod["volumes"]]
     container = pod["containers"][0]
-    assert "service-jwt-bootstrap-token" not in [m["name"] for m in container["volumeMounts"]]
+    assert "service-jwt-bootstrap-token" not in [
+        m["name"] for m in container["volumeMounts"]
+    ]
     env_names = {e["name"] for e in container["env"]}
     assert not {n for n in env_names if n.startswith("SERVICE_JWT_")}
 
@@ -185,10 +216,14 @@ def test_enabled_renders_grant_mount_and_env(docs: list[dict[str, Any]]) -> None
 _RESOLVER_SCOPE = "dataplane:resolve-scope"
 
 
-def test_dataplane_resolve_scope_is_granted_to_svc_ingest_alone(docs: list[dict[str, Any]]) -> None:
+def test_dataplane_resolve_scope_is_granted_to_svc_ingest_alone(
+    docs: list[dict[str, Any]],
+) -> None:
     identities = _identities(docs)
     assert _RESOLVER_SCOPE in identities["svc-ingest"]["allowed_scopes"]
-    assert len(identities) >= 3, identities.keys()  # denominator: the others were examined
+    assert len(identities) >= 3, (
+        identities.keys()
+    )  # denominator: the others were examined
     for name, entry in identities.items():
         if name != "svc-ingest":
             assert _RESOLVER_SCOPE not in entry["allowed_scopes"], name

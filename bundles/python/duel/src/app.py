@@ -95,6 +95,11 @@ from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 #: No sub-modules declared for v1 -- every `VERBS` token other than
 #: `list`/`set` resolves to a usage reply (see `_resolve_command`), never a
 #: silent drop.
@@ -410,7 +415,7 @@ async def _handle_challenge(
     )
 
     opponent_pseudonym = _pseudonym(normalized.lower())
-    challenger_wins = random.random() < 0.5  # noqa: S311 -- a game, not a security decision
+    challenger_wins = _RNG.random() < 0.5
 
     if challenger_wins:
         winner_name, winner_pseudonym, loser_pseudonym = username, pseudonym, opponent_pseudonym
@@ -434,7 +439,7 @@ async def _handle_challenge(
         channel_id=channel_id,
     )
 
-    flavor = random.choice(_OUTCOME_FLAVOR)  # noqa: S311 -- a game, not a security decision
+    flavor = _RNG.choice(_OUTCOME_FLAVOR)
     reply = f"⚔️ {username} challenges {normalized} to a duel... {flavor}! {winner_name} wins!"
     return reply, "resolved"
 

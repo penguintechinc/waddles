@@ -107,6 +107,8 @@ def _gate_functions(app_path: Path) -> list[tuple[str, bool]]:
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef) or len(node.args.args) != 1:
             continue
+        if node.returns is not None and "dict" in ast.unparse(node.returns):
+            continue  # an intent router (`_recognize`) forwards badges; it is not a gate -- see below
         keys = {
             n.value
             for n in ast.walk(node)
@@ -244,3 +246,33 @@ def test_transform_forwards_a_real_true_unchanged(monkeypatch: pytest.MonkeyPatc
     assert result is not None
     assert result.payload["is_mod"] is True and result.payload["is_broadcaster"] is False
     assert inspect.iscoroutinefunction(module.transform)
+
+
+def test_intent_routers_never_launder_a_string_badge_into_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bundles whose `transform()` runs the whole command route through a pure `_recognize()`.
+
+    Their `transform()` returns the reply, not the forwarded badges, so the laundering check above
+    cannot see them; the router still turns `"false"` into a real `False` before `_settle` gates on it.
+    """
+    _fake_wit_world(monkeypatch)
+    exercised: list[str] = []
+    for app_path in BADGE_APPS:
+        module = _load(app_path, monkeypatch)
+        router = getattr(module, "_recognize", None)
+        if router is None:
+            continue
+        event = _platform_event(
+            module, {"text": _command_text(app_path), "channel_id": "1", "is_mod": "false", "is_broadcaster": "false"}
+        )
+        intent = router(event)
+        assert intent is not None and "is_mod" in intent, f"{app_path.parent.parent.name}: router dropped the badge"
+        exercised.append(app_path.parent.parent.name)
+        assert intent["is_mod"] is False, f"{exercised[-1]} laundered a string is_mod"
+        assert intent.get("is_broadcaster") is False, f"{exercised[-1]} laundered is_broadcaster"
+        genuine = router(
+            _platform_event(
+                module, {"text": _command_text(app_path), "channel_id": "1", "is_mod": True, "is_broadcaster": False}
+            )
+        )
+        assert genuine is not None and genuine["is_mod"] is True, f"{exercised[-1]} denied a genuine moderator"
+    assert {"steal", "defuse", "prediction", "lottery"} <= set(exercised), exercised

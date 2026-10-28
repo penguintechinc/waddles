@@ -42,7 +42,7 @@ sha2 = "=0.10.9"
 metrics = "=0.24.6"
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }
 # Compile-fail test proving `InvokeScope` has no public constructor usable
 # from outside this crate (spec SS5.1, Gemini condition 1) -- see
 # tests/compile_fail.rs.

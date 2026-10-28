@@ -255,7 +255,7 @@ def _key_dto(info: config_service.ByokKeyInfo) -> ByokKeyDTO:
 
 
 @ai_config_bp.route("/<int:community_id>/ai/config", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(AIConfigResponse)
 async def get_config(community_id: int) -> AIConfigResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<community_id>/ai/config`."""
@@ -271,7 +271,7 @@ async def get_config(community_id: int) -> AIConfigResponse | tuple[dict[str, ob
 
 
 @ai_config_bp.route("/<int:community_id>/ai/config", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(SetAIConfigRequest)
 @validate_response(AIConfigResponse)
 async def set_config(
@@ -298,7 +298,7 @@ async def set_config(
 
 
 @ai_config_bp.route("/<int:community_id>/ai/byok-keys", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(ListByokKeysResponse)
 async def list_byok_keys(community_id: int) -> ListByokKeysResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<community_id>/ai/byok-keys` -- masked, never the real key."""
@@ -314,7 +314,7 @@ async def list_byok_keys(community_id: int) -> ListByokKeysResponse | tuple[dict
 
 
 @ai_config_bp.route("/<int:community_id>/ai/byok-keys", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(SetByokKeyRequest)
 @validate_response(ByokKeyDTO)
 async def set_byok_key(
@@ -344,7 +344,7 @@ async def set_byok_key(
 
 
 @ai_config_bp.route("/<int:community_id>/ai/byok-keys/<provider>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def delete_byok_key(
     community_id: int, provider: str
@@ -369,7 +369,7 @@ async def delete_byok_key(
 
 
 @ai_completions_bp.route("/<int:community_id>/ai/completions", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(CompletionRequestDTO)
 @validate_response(CompletionResponseDTO)
 async def create_completion(

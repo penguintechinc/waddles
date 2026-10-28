@@ -22,7 +22,7 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
 ] }
 thiserror = "=2.0.20"
 tracing = "=0.1.44"
-tokio = { version = "=1.53.1", features = ["time", "sync"] }
+tokio = { version = "=1.53.3", features = ["time", "sync"] }
 uuid = { version = "=1.26.1", features = ["v4"] }
 # The gate crate's `MemberRow`/`SnapshotMembership` -- the membership loader
 # here produces exactly what the gate's production MembershipCheck consumes.
@@ -33,7 +33,7 @@ bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0
 opentelemetry = "=0.32.0"
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }
 testcontainers = "=0.28.0"
 sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid"] }
 futures = "=0.3.31"

@@ -114,8 +114,8 @@ def _envelope(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
 
 
 @loyalty_bp.route("/<int:community_id>/loyalty/config", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.loyalty:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.loyalty:read")  # type: ignore[misc]
 async def get_config(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/admin/<id>/loyalty/config`."""
     ctx = get_tenant_context(request)
@@ -140,8 +140,8 @@ async def get_config(community_id: int) -> tuple[dict[str, Any], int]:
 
 
 @loyalty_bp.route("/<int:community_id>/loyalty/config", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.loyalty:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.loyalty:write")  # type: ignore[misc]
 async def update_config(community_id: int) -> tuple[dict[str, Any], int]:
     """`PUT /api/v1/admin/<id>/loyalty/config` -- partial update, unset fields left unchanged."""
     if not _tenant_ok(community_id):
@@ -172,8 +172,8 @@ async def update_config(community_id: int) -> tuple[dict[str, Any], int]:
 
 
 @loyalty_bp.route("/<int:community_id>/loyalty/leaderboard", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.loyalty:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.loyalty:read")  # type: ignore[misc]
 async def get_leaderboard(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/admin/<id>/loyalty/leaderboard?limit=`."""
     if not _tenant_ok(community_id):
@@ -196,8 +196,8 @@ async def get_leaderboard(community_id: int) -> tuple[dict[str, Any], int]:
 
 
 @loyalty_bp.route("/<int:community_id>/loyalty/user/<platform_user_id>/balance", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.loyalty:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.loyalty:admin")  # type: ignore[misc]
 async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict[str, Any], int]:
     """`PUT /api/v1/admin/<id>/loyalty/user/<platformUserId>/balance` -- admin add/remove points.
 
@@ -242,8 +242,8 @@ async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict
 
 
 @loyalty_bp.route("/<int:community_id>/loyalty/wipe", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.loyalty:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.loyalty:admin")  # type: ignore[misc]
 async def wipe_currency(community_id: int) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/admin/<id>/loyalty/wipe` -- zero every balance in the community."""
     if not _tenant_ok(community_id):
@@ -255,8 +255,8 @@ async def wipe_currency(community_id: int) -> tuple[dict[str, Any], int]:
 
 
 @loyalty_bp.route("/<int:community_id>/loyalty/stats", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.loyalty:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.loyalty:read")  # type: ignore[misc]
 async def get_stats(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/admin/<id>/loyalty/stats`."""
     if not _tenant_ok(community_id):

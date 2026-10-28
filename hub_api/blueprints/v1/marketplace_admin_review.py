@@ -76,8 +76,8 @@ def _int_query_arg(name: str, default: int) -> int:
 
 
 @admin_review_bp.route("/vendor-requests", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def get_vendor_requests() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/admin/marketplace/vendor-requests`."""
     dal = _dal()
@@ -89,8 +89,8 @@ async def get_vendor_requests() -> tuple[dict[str, Any], int]:
 
 
 @admin_review_bp.route("/vendor-requests/<request_id>/approve", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def approve_vendor_request(request_id: str) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/marketplace/admin/marketplace/vendor-requests/<id>/approve`."""
     dal = _dal()
@@ -106,8 +106,8 @@ async def approve_vendor_request(request_id: str) -> tuple[dict[str, Any], int]:
 
 
 @admin_review_bp.route("/vendor-requests/<request_id>/reject", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def reject_vendor_request(request_id: str) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/marketplace/admin/marketplace/vendor-requests/<id>/reject`."""
     dal = _dal()
@@ -130,8 +130,8 @@ async def reject_vendor_request(request_id: str) -> tuple[dict[str, Any], int]:
 
 
 @admin_review_bp.route("/submissions", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def get_submissions() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/admin/marketplace/submissions`."""
     dal = _dal()
@@ -143,8 +143,8 @@ async def get_submissions() -> tuple[dict[str, Any], int]:
 
 
 @admin_review_bp.route("/submissions/<int:submission_id>/approve", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def approve_submission(submission_id: int) -> tuple[dict[str, Any], int]:
     """`POST .../submissions/<id>/approve` -- self-approval-safe."""
     dal = _dal()
@@ -160,8 +160,8 @@ async def approve_submission(submission_id: int) -> tuple[dict[str, Any], int]:
 
 
 @admin_review_bp.route("/submissions/<int:submission_id>/reject", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def reject_submission(submission_id: int) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/marketplace/admin/marketplace/submissions/<id>/reject`."""
     dal = _dal()
@@ -181,8 +181,8 @@ async def reject_submission(submission_id: int) -> tuple[dict[str, Any], int]:
 
 
 @admin_review_bp.route("/settings", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def get_marketplace_settings() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/admin/marketplace/settings`."""
     dal = _dal()
@@ -191,8 +191,8 @@ async def get_marketplace_settings() -> tuple[dict[str, Any], int]:
 
 
 @admin_review_bp.route("/settings", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def update_marketplace_settings() -> tuple[dict[str, Any], int]:
     """`PUT /api/v1/marketplace/admin/marketplace/settings`."""
     dal = _dal()
@@ -207,8 +207,8 @@ async def update_marketplace_settings() -> tuple[dict[str, Any], int]:
 
 
 @admin_review_bp.route("/vendor-submissions", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def get_vendor_submissions_for_review() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/admin/marketplace/vendor-submissions`."""
     dal = _dal()
@@ -220,8 +220,8 @@ async def get_vendor_submissions_for_review() -> tuple[dict[str, Any], int]:
 
 
 @admin_review_bp.route("/vendor-submissions/<int:submission_id>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def get_vendor_submission_details(submission_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/marketplace/admin/marketplace/vendor-submissions/<id>`."""
     dal = _dal()
@@ -233,8 +233,8 @@ async def get_vendor_submission_details(submission_id: int) -> tuple[dict[str, A
 
 
 @admin_review_bp.route("/vendor-submissions/<int:submission_id>/approve", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def approve_vendor_submission(submission_id: int) -> tuple[dict[str, Any], int]:
     """`POST .../vendor-submissions/<id>/approve` -- self-approval-safe."""
     dal = _dal()
@@ -254,8 +254,8 @@ async def approve_vendor_submission(submission_id: int) -> tuple[dict[str, Any],
 
 
 @admin_review_bp.route("/vendor-submissions/<int:submission_id>/reject", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def reject_vendor_submission(submission_id: int) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/marketplace/admin/marketplace/vendor-submissions/<id>/reject`."""
     dal = _dal()
@@ -275,8 +275,8 @@ async def reject_vendor_submission(submission_id: int) -> tuple[dict[str, Any], 
 
 
 @admin_review_bp.route("/vendor-submissions/<int:submission_id>/request-info", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def request_more_info(submission_id: int) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/marketplace/admin/marketplace/vendor-submissions/<id>/request-info`."""
     dal = _dal()
@@ -292,8 +292,8 @@ async def request_more_info(submission_id: int) -> tuple[dict[str, Any], int]:
 
 
 @admin_review_bp.route("/vendor-submissions/<int:submission_id>/publish", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("marketplace:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("marketplace:admin")  # type: ignore[misc]
 async def publish_vendor_module(submission_id: int) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/marketplace/admin/marketplace/vendor-submissions/<id>/publish`."""
     dal = _dal()
