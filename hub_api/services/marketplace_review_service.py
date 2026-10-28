@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from services.errors import ApiError, bad_request, forbidden, not_found
-from services.marketplace_crypto import encrypt_webhook_secret
+from services.marketplace_crypto import encrypt_payment_details, encrypt_webhook_secret
 from services.url_guard import SSRFError, validate_url
 
 _PAYMENT_METHODS = frozenset({"paypal", "stripe", "check", "bank_transfer", "other"})
@@ -393,7 +393,7 @@ def submit_vendor_module(dal: Any, data: dict[str, Any]) -> dict[str, Any]:
         pricing_amount=data["pricingAmount"],
         pricing_currency=data.get("pricingCurrency", "USD"),
         payment_method=data["paymentMethod"],
-        payment_details=data.get("paymentDetails", {}),
+        payment_details=encrypt_payment_details(data.get("paymentDetails", {})),
         supported_platforms=data.get("supportedPlatforms", []),
         documentation_url=data.get("documentationUrl"),
         support_email=data.get("supportEmail"),
