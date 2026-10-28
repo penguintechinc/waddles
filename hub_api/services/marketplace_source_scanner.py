@@ -302,6 +302,14 @@ def _validate_bundle(
         bundle_yaml = _load_yaml(bundle_dir / "bundle.yaml")
         raw = _load_yaml(bundle_dir / "hub-manifest.yaml")
     except (ValueError, yaml.YAMLError, OSError) as exc:
+        logger.warning(
+            "marketplace scan: bundle rejected",
+            extra={
+                "source_public_id": str(source.public_id),
+                "reason": "manifest_unreadable",
+                "exc_type": type(exc).__name__,
+            },
+        )
         return reject("manifest_unreadable", str(exc))
     if not isinstance(raw, dict) or not isinstance(bundle_yaml, dict):
         return reject("manifest_malformed", "manifest must be a YAML mapping")
@@ -315,6 +323,14 @@ def _validate_bundle(
         assigned = f"{source_namespace_prefix(source_short(source))}{dir_name}"
         enforce_source_namespace(app_id=assigned, source=source)
     except ApiError as exc:
+        logger.warning(
+            "marketplace scan: bundle rejected",
+            extra={
+                "source_public_id": str(source.public_id),
+                "reason": "namespace_violation",
+                "exc_type": type(exc).__name__,
+            },
+        )
         return reject("namespace_violation", str(exc.message))
     raw = {
         **raw,
@@ -330,7 +346,16 @@ def _validate_bundle(
             allow_prebuilt=source.build_mode == BuildMode.PREBUILT,
         )
     except (ManifestV2Error, KeyError, TypeError, AttributeError) as exc:
-        return reject(getattr(exc, "reason", "manifest_invalid"), str(exc))
+        reason = str(getattr(exc, "reason", "manifest_invalid"))
+        logger.warning(
+            "marketplace scan: bundle rejected",
+            extra={
+                "source_public_id": str(source.public_id),
+                "reason": reason,
+                "exc_type": type(exc).__name__,
+            },
+        )
+        return reject(reason, str(exc))
     if manifest.provider != "thirdparty":
         return reject(
             "provider_not_thirdparty", "external bundles must declare provider: thirdparty"
@@ -338,6 +363,14 @@ def _validate_bundle(
     try:
         findings = scan_bundle_dependencies(bundle_dir)
     except ValueError as exc:
+        logger.warning(
+            "marketplace scan: bundle rejected",
+            extra={
+                "source_public_id": str(source.public_id),
+                "reason": "dependency_manifest_unreadable",
+                "exc_type": type(exc).__name__,
+            },
+        )
         return reject("dependency_manifest_unreadable", str(exc))
     if findings:
         first = findings[0]

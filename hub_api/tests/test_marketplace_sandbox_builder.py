@@ -36,7 +36,9 @@ CFG = sb.SandboxBuilderConfig(
 
 
 def _log(wasm: bytes = WASM) -> str:
-    return f"noise\n{sb.BEGIN_MARKER}\n{base64.b64encode(wasm).decode()}\n{sb.END_MARKER}\n"
+    sha = hashlib.sha256(wasm).hexdigest()
+    body = base64.b64encode(wasm).decode()
+    return f"noise\n{sb.BEGIN_MARKER}\nsha256:{sha}\n{body}\n{sb.END_MARKER}\n"
 
 
 class FakeClient:
@@ -203,7 +205,19 @@ async def test_reproducible_flag_from_committed_artifact(tarball: Path) -> None:
         ),
         (FakeClient(log="no markers"), "no_artifact_in_output"),
         (FakeClient(log=_log(b"notwasm-bytes")), "output_not_wasm"),
-        (FakeClient(log=f"{sb.BEGIN_MARKER}\n!!!\n{sb.END_MARKER}"), "artifact_not_base64"),
+        (
+            FakeClient(log=f"{sb.BEGIN_MARKER}\nsha256:{'0' * 64}\n!!!\n{sb.END_MARKER}"),
+            "artifact_not_base64",
+        ),
+        (FakeClient(log=f"{sb.BEGIN_MARKER}\n{sb.END_MARKER}"), "artifact_digest_missing"),
+        (
+            FakeClient(log=_log().replace(DIGEST, "0" * 64)),
+            "artifact_digest_mismatch",
+        ),
+        # regression: H1 -- attacker build script printed an earlier fake marker block.
+        (FakeClient(log=_log(b"\x00asm-attacker-chosen") + _log()), "multiple_artifact_markers"),
+        (FakeClient(log=_log() + _log(b"\x00asm-attacker-chosen")), "multiple_artifact_markers"),
+        (FakeClient(log=f"{sb.END_MARKER}\n{sb.BEGIN_MARKER}\n"), "no_artifact_in_output"),
     ],
 )
 async def test_failures_raise_and_still_clean_up(

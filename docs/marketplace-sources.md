@@ -27,6 +27,12 @@ To stop a source's bundles, remove it (below) -- that disables the source and de
 | Hub runs source code | never | never -- only the offline, no-network builder Job |
 | Install | admin approve -> platform re-sign | same |
 
+Known trade-off: a prebuilt `.wasm` is opaque to the supply-chain denylist (its dependencies cannot
+be inspected); the publisher key + attestation is the trust mechanism. Sandbox builds emit the
+artifact through a single trusted marker block (untrusted build output is kept off that channel;
+the hub rejects duplicate markers and digest mismatches). External approvals always require the
+reviewed `permissionHash`.
+
 ## Add a source
 
 1. `POST /api/v1/marketplace/sources` with `name`, `git_url` (https only, no embedded credentials),

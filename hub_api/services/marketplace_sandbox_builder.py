@@ -70,6 +70,7 @@ COMPONENT_LABEL = "sandbox-builder"
 SUPPORTED_LANGUAGES = frozenset({"python", "rust"})
 _REASON_RE = re.compile(r"[^a-z0-9_:.\-]")
 _WASM_MAGIC = b"\x00asm"
+_SHA_LINE_RE = re.compile(r"sha256:[0-9a-f]{64}")
 #: ConfigMap objects are capped at 1 MiB by the API server; leave headroom for base64/metadata.
 CONFIGMAP_SOURCE_LIMIT = 700 * 1024
 
@@ -279,12 +280,27 @@ def build_job_manifest(
 
 
 def parse_build_log(log: str, *, max_wasm_bytes: int) -> bytes:
-    """Extract + validate the base64 WASM between the markers (size cap, magic, non-empty)."""
+    """Extract + validate the ONE trusted artifact block from the pod log.
+
+    Trust model: the untrusted build's stdout/stderr never reaches the pod log (the in-Job
+    entrypoint `bundles/sandbox_build.py` sends it to a file), and the entrypoint is the only
+    intended writer of the marker channel. Defence in depth against a build step that still
+    manages to write a forged block (e.g. via /proc/<pid>/fd/1): EXACTLY one block is accepted
+    (any extra marker rejects the build -- we never pick one), the block carries the sha256 of
+    the bytes the entrypoint read, and that digest must match the decoded payload. The hub
+    still recomputes the digest itself afterwards.
+    """
+    if log.count(BEGIN_MARKER) > 1 or log.count(END_MARKER) > 1:
+        raise SandboxBuildError("multiple_artifact_markers")
     start = log.find(BEGIN_MARKER)
-    end = log.find(END_MARKER, start + 1)
-    if start < 0 or end < 0:
+    end = log.find(END_MARKER)
+    if start < 0 or end < 0 or end < start:
         raise SandboxBuildError("no_artifact_in_output")
-    b64 = "".join(log[start + len(BEGIN_MARKER) : end].split())
+    lines = log[start + len(BEGIN_MARKER) : end].split()
+    if not lines or not _SHA_LINE_RE.fullmatch(lines[0]):
+        raise SandboxBuildError("artifact_digest_missing")
+    claimed = lines[0][len("sha256:") :]
+    b64 = "".join(lines[1:])
     if len(b64) > (max_wasm_bytes * 4) // 3 + 8:
         raise SandboxBuildError("output_too_large")
     try:
@@ -293,6 +309,8 @@ def parse_build_log(log: str, *, max_wasm_bytes: int) -> bytes:
         raise SandboxBuildError("artifact_not_base64") from exc
     if len(data) > max_wasm_bytes:
         raise SandboxBuildError("output_too_large")
+    if hashlib.sha256(data).hexdigest() != claimed:
+        raise SandboxBuildError("artifact_digest_mismatch")
     if not data.startswith(_WASM_MAGIC):
         raise SandboxBuildError("output_not_wasm")
     return data

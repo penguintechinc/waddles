@@ -7,6 +7,12 @@ gzip tarball of ONE bundle directory mounted read-only at `SANDBOX_INPUT` (layou
 stdout between fixed markers (the orchestrator reads it back through the pod log, so the Job
 needs no volume, credential or network path to hand the artifact over).
 
+Channel trust model: the bundle's own build scripts (build.rs, setup hooks, ...) are UNTRUSTED.
+They run with stdout/stderr redirected to a file under the scratch dir -- never the pod log --
+and in their own session, which is killed after the step. This entrypoint is the only intended
+writer of the marker channel and emits exactly ONE block carrying the sha256 of the bytes it
+read; the hub rejects any log with more than one block or a digest mismatch.
+
 Fail-loud throughout: an unsupported language, an unsafe tar member, missing vendored
 dependencies, a failed toolchain step, a missing/ambiguous output or an oversize artifact all
 exit non-zero with a one-line `sandbox-build: <reason>` on stderr -- never a silent skip, never
@@ -18,8 +24,10 @@ Usage: sandbox_build.py <language> <dir_name>
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -69,9 +77,27 @@ def _extract(repo: Path, prefix: str) -> Path:
 def _run(cmd: list[str], cwd: Path, env: dict[str, str]) -> None:
     """Run one toolchain step with a minimal environment; non-zero exit fails the build."""
     print(f"sandbox-build: running {cmd[0]}", file=sys.stderr, flush=True)
-    result = subprocess.run(cmd, cwd=cwd, env=env, check=False)  # noqa: S603 - fixed argv, no shell
-    if result.returncode != 0:
-        raise SandboxBuildError(f"toolchain_failed:{cmd[0]}:{result.returncode}")
+    log_path = WORK / "build-step.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab") as sink:
+        # Untrusted output goes to a file, never the pod log the hub parses; new session so
+        # stray background processes can be killed once the step ends.
+        proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=sink,
+            stderr=sink,
+            start_new_session=True,
+        )
+        returncode = proc.wait()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if returncode != 0:
+        raise SandboxBuildError(f"toolchain_failed:{cmd[0]}:{returncode}")
 
 
 def _base_env() -> dict[str, str]:
@@ -214,6 +240,7 @@ def main(argv: list[str]) -> int:
         print(f"sandbox-build: {type(exc).__name__}", file=sys.stderr, flush=True)
         return 3
     print(BEGIN_MARKER, flush=True)
+    print(f"sha256:{hashlib.sha256(data).hexdigest()}")
     encoded = base64.b64encode(data).decode("ascii")
     for i in range(0, len(encoded), 76):
         print(encoded[i : i + 76])

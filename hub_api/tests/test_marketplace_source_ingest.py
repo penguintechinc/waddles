@@ -262,7 +262,7 @@ async def test_approve_requires_signing_key_and_does_not_install(
 ) -> None:
     src, _, _ = env
     cand = _candidate(src)
-    await _ingest(install_dal, src, cand)
+    b = (await _ingest(install_dal, src, cand)).bundles[0]
     monkeypatch.delenv("BUNDLE_SIGNING_PRIVATE_KEY")
     with pytest.raises(ApiError):
         await ing.approve_source_version(
@@ -271,7 +271,7 @@ async def test_approve_requires_signing_key_and_does_not_install(
             app_id=cand.assigned_app_id,
             version="1.0.0",
             approved_by=7,
-            expected_permission_hash=None,
+            expected_permission_hash=b.permission_hash,
         )
     assert await approvals.list_global_installs(install_dal) == []
 
@@ -303,18 +303,19 @@ async def test_install_rechecks_namespace_for_external_version(install_dal: Any,
 async def test_approve_by_wrong_source_forbidden(install_dal: Any, env: Any) -> None:
     src, _, _ = env
     cand = _candidate(src)
-    await _ingest(install_dal, src, cand)
+    b = (await _ingest(install_dal, src, cand)).bundles[0]
     other = dataclasses.replace(src, public_id=uuid.uuid4())
     await install_dal.marketplace_sources.async_insert(public_id=str(other.public_id))
-    with pytest.raises(ApiError):
+    with pytest.raises(ApiError) as exc:
         await ing.approve_source_version(
             install_dal,
             other,
             app_id=cand.assigned_app_id,
             version="1.0.0",
             approved_by=7,
-            expected_permission_hash=None,
+            expected_permission_hash=b.permission_hash,
         )
+    assert exc.value.status_code == 403
 
 
 async def _disable(install_dal: Any, src: Any) -> None:
@@ -481,9 +482,9 @@ async def test_generic_route_refuses_disabled_source_version(
 ) -> None:
     src, _, _ = env
     cand = _candidate(src)
-    await _ingest(install_dal, src, cand)
+    b = (await _ingest(install_dal, src, cand)).bundles[0]
     await _disable(install_dal, src)
-    resp = await _route_approve(route_app, cand.assigned_app_id)
+    resp = await _route_approve(route_app, cand.assigned_app_id, permissionHash=b.permission_hash)
     assert resp.status_code == 409
     assert await approvals.list_global_installs(install_dal) == []
     assert "marketplace_version_approved" not in await _audit_actions(install_dal)
@@ -494,9 +495,9 @@ async def test_generic_route_sourced_requires_platform_key_before_install(
 ) -> None:
     src, _, _ = env
     cand = _candidate(src)
-    await _ingest(install_dal, src, cand)
+    b = (await _ingest(install_dal, src, cand)).bundles[0]
     monkeypatch.delenv("BUNDLE_SIGNING_PRIVATE_KEY")
-    resp = await _route_approve(route_app, cand.assigned_app_id)
+    resp = await _route_approve(route_app, cand.assigned_app_id, permissionHash=b.permission_hash)
     assert resp.status_code >= 400
     assert await approvals.list_global_installs(install_dal) == []
 
@@ -514,7 +515,7 @@ async def test_generic_route_sourced_namespace_enforced(
     await install_dal(install_dal.app_version_uploads.app_id == cand.assigned_app_id).update(
         app_id="waddles.core.evil"
     )
-    resp = await _route_approve(route_app, "waddles.core.evil")
+    resp = await _route_approve(route_app, "waddles.core.evil", permissionHash="0" * 64)
     assert resp.status_code in (403, 409)
     assert await approvals.list_global_installs(install_dal) == []
 
@@ -571,3 +572,98 @@ async def test_resolve_approval_source_routing(
     with pytest.raises(ApiError) as exc:  # fail closed, never the ungated legacy path
         await ing.resolve_approval_source(install_dal, app_id=app_id, version="1.0.0")
     assert exc.value.status_code == 409
+
+
+# --- H2: external approvals must be bound to the reviewed permission hash ----------------------
+
+
+async def test_external_approve_without_permission_hash_refused(
+    install_dal: Any, env: Any, route_app: Any
+) -> None:
+    """regression: permissionHash=None skipped the consent binding for source_id versions."""
+    src, _, _ = env
+    cand = _candidate(src)
+    await _ingest(install_dal, src, cand)
+    with pytest.raises(ApiError) as exc:
+        await ing.approve_source_version(
+            install_dal,
+            src,
+            app_id=cand.assigned_app_id,
+            version="1.0.0",
+            approved_by=7,
+            expected_permission_hash=None,
+        )
+    assert (exc.value.status_code, exc.value.code) == (422, "permission_hash_required")
+    resp = await _route_approve(route_app, cand.assigned_app_id)
+    assert resp.status_code == 422
+    assert await approvals.list_global_installs(install_dal) == []
+
+
+async def test_external_approve_stale_hash_refused_correct_hash_ok(
+    install_dal: Any, env: Any, route_app: Any
+) -> None:
+    src, _, _ = env
+    cand = _candidate(src)
+    b = (await _ingest(install_dal, src, cand)).bundles[0]
+    resp = await _route_approve(route_app, cand.assigned_app_id, permissionHash="f" * 64)
+    assert resp.status_code == 409
+    assert await approvals.list_global_installs(install_dal) == []
+    resp = await _route_approve(route_app, cand.assigned_app_id, permissionHash=b.permission_hash)
+    assert resp.status_code == 200
+    assert len(await approvals.list_global_installs(install_dal)) == 1
+
+
+# --- H3: a sign failure must not strand the app with no installed version ----------------------
+
+
+async def test_sign_failure_restores_prior_install(
+    install_dal: Any, env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """regression: failure uninstalled_globally() the app, losing the prior good version."""
+    src, _, _ = env
+    c1, c2 = _candidate(src), _candidate(src, version="1.1.0")
+    b1 = (await _ingest(install_dal, src, c1)).bundles[0]
+    b2 = (await _ingest(install_dal, src, c2)).bundles[0]
+    kw = {"app_id": c1.assigned_app_id, "approved_by": 7}
+    await ing.approve_source_version(
+        install_dal, src, version="1.0.0", expected_permission_hash=b1.permission_hash, **kw
+    )
+    (good,) = await approvals.list_global_installs(install_dal)
+    uninstall = AsyncMock(wraps=approvals.uninstall_globally)
+    monkeypatch.setattr(approvals, "uninstall_globally", uninstall)
+    monkeypatch.setattr(
+        signing, "upload_signed_sidecar", AsyncMock(side_effect=RuntimeError("bucket down"))
+    )
+    with pytest.raises(RuntimeError):
+        await ing.approve_source_version(
+            install_dal, src, version="1.1.0", expected_permission_hash=b2.permission_hash, **kw
+        )
+    uninstall.assert_not_awaited()  # tenants/communities never cascaded
+    current = [r for r in await approvals.list_global_installs(install_dal) if r.revoked_at is None]
+    assert [(r.id, r.version, r.revoked_at) for r in current] == [(good.id, "1.0.0", None)]
+    failed = await _vrow(install_dal, c2.assigned_app_id, "1.1.0")
+    assert failed.approval_id is None
+    rows = await install_dal(install_dal.app_global_installs.version == "1.1.0").select()
+    assert all(r.revoked_at is not None for r in rows)
+
+
+async def test_sign_failure_first_install_leaves_nothing_installed(
+    install_dal: Any, env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src, _, _ = env
+    cand = _candidate(src)
+    b = (await _ingest(install_dal, src, cand)).bundles[0]
+    monkeypatch.setattr(
+        signing, "upload_signed_sidecar", AsyncMock(side_effect=RuntimeError("bucket down"))
+    )
+    with pytest.raises(RuntimeError):
+        await ing.approve_source_version(
+            install_dal,
+            src,
+            app_id=cand.assigned_app_id,
+            version="1.0.0",
+            approved_by=7,
+            expected_permission_hash=b.permission_hash,
+        )
+    rows = await install_dal(install_dal.app_global_installs.id > 0).select()
+    assert len(rows) == 1 and rows.first().revoked_at is not None

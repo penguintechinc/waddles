@@ -31,7 +31,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, ParamSpec, TypeVar, cast
 from urllib.parse import urlparse
 
 from flask_core.api_utils import error_response
@@ -189,13 +189,17 @@ def _count(op: str, outcome: str) -> None:
     )
 
 
-def _flag_gate[**P, R](
-    fn: Callable[P, Awaitable[R]],
-) -> Callable[P, Awaitable[R | tuple[dict[str, object], int]]]:
+_P = ParamSpec("_P")  # not PEP 695: semgrep 1.99 cannot parse `[**P, R]`
+_R = TypeVar("_R")
+
+
+def _flag_gate(  # noqa: UP047 - PEP 695 syntax breaks the semgrep no-stubs scan
+    fn: Callable[_P, Awaitable[_R]],
+) -> Callable[_P, Awaitable[_R | tuple[dict[str, object], int]]]:
     """Return 404 unless the PostHog flag is on (runs before body validation)."""
 
     @functools.wraps(fn)
-    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R | tuple[dict[str, object], int]:
+    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R | tuple[dict[str, object], int]:
         ctx = get_tenant_context(request)
         if ctx is None or not await feature_enabled(
             FEATURE_MARKETPLACE_SOURCES, tenant=ctx.tenant_slug
@@ -336,6 +340,15 @@ async def get_source(public_id: str) -> SourceResponse | tuple[dict[str, object]
     try:
         return SourceResponse(success=True, source=_dto(await _load(public_id)))
     except ApiError as exc:
+        logger.info(
+            "marketplace source: request refused",
+            extra={
+                "op": "get",
+                "source_public_id": public_id,
+                "status": exc.status_code,
+                "code": exc.code,
+            },
+        )
         return _err(exc)
 
 
@@ -365,6 +378,15 @@ async def remove_source(public_id: str) -> SourceRemoveResponse | tuple[dict[str
             )
             disposition = "disabled"
     except ApiError as exc:
+        logger.info(
+            "marketplace source: request refused",
+            extra={
+                "op": "remove",
+                "source_public_id": public_id,
+                "status": exc.status_code,
+                "code": exc.code,
+            },
+        )
         return _err(exc)
     _count("remove", disposition)
     logger.info(
@@ -423,6 +445,15 @@ async def rescan_source(public_id: str) -> ScanSummaryDTO | tuple[dict[str, obje
             )
         refreshed = await svc.get_source(dal, record.public_id)
     except ApiError as exc:
+        logger.info(
+            "marketplace source: request refused",
+            extra={
+                "op": "rescan",
+                "source_public_id": public_id,
+                "status": exc.status_code,
+                "code": exc.code,
+            },
+        )
         return _err(exc)
     _count("rescan", "ok")
     return ScanSummaryDTO(
@@ -491,6 +522,15 @@ async def approve_update(
             actor_id=caller,
         )
     except ApiError as exc:
+        logger.info(
+            "marketplace source: request refused",
+            extra={
+                "op": "approve_update",
+                "source_public_id": public_id,
+                "status": exc.status_code,
+                "code": exc.code,
+            },
+        )
         return _err(exc)
     _count("approve_update", "ok")
     logger.info(

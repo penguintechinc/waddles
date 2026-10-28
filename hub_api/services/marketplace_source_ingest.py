@@ -19,10 +19,12 @@ import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import yaml
 from penguin_dal import AsyncDB
+from sqlalchemy import update as sa_update
 
 from services import bundle_approval_service, bundle_audit, bundle_signing_service
 from services import marketplace_source_telemetry as mkt_telemetry
@@ -119,11 +121,26 @@ async def _ingest_one(
     app_id = candidate.assigned_app_id
     try:
         enforce_source_namespace(app_id=app_id, source=source)  # defense in depth
-    except ApiError:
+    except ApiError as exc:
+        logger.warning(
+            "marketplace ingest: bundle rejected",
+            extra={
+                "source_public_id": str(source.public_id),
+                "reason": "namespace_violation",
+                "status": exc.status_code,
+            },
+        )
         return _reject(candidate, "namespace_violation")
     try:
         verified: VerifiedPrebuilt = verify_prebuilt_attestation(candidate, source, wasm)
     except AttestationError as exc:
+        logger.warning(
+            "marketplace ingest: bundle rejected",
+            extra={
+                "source_public_id": str(source.public_id),
+                "reason": f"attestation_{exc.reason}",
+            },
+        )
         return _reject(candidate, f"attestation_{exc.reason}")
 
     existing = await _existing_digest(install_dal, app_id, candidate.version)
@@ -349,6 +366,36 @@ async def approve_source_version(
         )
 
 
+async def _rollback_install(
+    install_dal: AsyncDB, *, new_install_id: int, version_id: int, revoked_by: int
+) -> None:
+    """Undo ONE failed approval atomically: revoke the new install, restore the prior one.
+
+    The install txn superseded the previously-current row; here (single txn) the new row is
+    revoked, the row it superseded becomes current again, and the version's `approval_id` is
+    cleared. Tenants/communities are untouched because the prior version never stopped being
+    the app's install -- unlike `uninstall_globally`, which would hide the whole app.
+    """
+    installs = install_dal.metadata.tables["app_global_installs"]
+    versions_t = install_dal.metadata.tables["app_versions"]
+    async with install_dal.engine.begin() as conn:
+        await conn.execute(
+            sa_update(installs)
+            .where(installs.c.id == new_install_id)
+            .values(revoked_at=datetime.now(UTC), revoked_by=revoked_by)
+        )
+        await conn.execute(
+            sa_update(installs)
+            .where(installs.c.superseded_by == new_install_id)
+            .values(superseded_by=None)
+        )
+        await conn.execute(
+            sa_update(versions_t)
+            .where((versions_t.c.id == version_id) & (versions_t.c.approval_id == new_install_id))
+            .values(approval_id=None)
+        )
+
+
 async def _approve_inner(
     install_dal: AsyncDB,
     source: SourceRecord,
@@ -362,10 +409,19 @@ async def _approve_inner(
 
     `approved_by` is the concrete platform:admin (never None/SYSTEM). The platform signing key
     is checked BEFORE installing so a missing key never leaves an installed-but-unsigned
-    version; if signing/sidecar upload still fails after install, the install is revoked
-    (fail-closed) and the error re-raised. The signature binds the global-install id as
+    version; if signing/sidecar upload still fails after install, the NEW install is revoked and
+    the previously-good install is restored as current (`_rollback_install`) -- never a global
+    uninstall of the app -- and the error re-raised. The signature binds the global-install id as
     `approval_id`, exactly the payload the executor verifies (`build_signing_payload`).
     """
+    if not expected_permission_hash:
+        # An external version is never approved blind: the admin must be bound to the exact
+        # permission set they reviewed (review/approve TOCTOU), same as the consent hash check.
+        raise ApiError(
+            "an external marketplace version requires the reviewed permissionHash",
+            422,
+            "permission_hash_required",
+        )
     bundle_signing_service.PlatformSigner.from_env()  # fail before any state change
     versions = await install_dal(
         (install_dal.app_versions.app_id == app_id) & (install_dal.app_versions.version == version)
@@ -405,8 +461,11 @@ async def _approve_inner(
             "marketplace approve: re-sign failed; revoking install",
             extra={"app_id": app_id, "version": version},
         )
-        await bundle_approval_service.uninstall_globally(
-            install_dal, app_id=app_id, revoked_by=approved_by
+        await _rollback_install(
+            install_dal,
+            new_install_id=int(install.id),
+            version_id=int(vrow.id),
+            revoked_by=approved_by,
         )
         raise
     mkt_telemetry.record_approval(outcome="signed")
