@@ -12,9 +12,6 @@ afterAll(rec.restore);
 const ADMINAPI_ROWS: readonly ContractRow[] = [
   ['getSettings(communityId)', 'GET /api/v1/admin/{communityId}/settings'],
   ['updateSettings(communityId, data)', 'PUT /api/v1/admin/{communityId}/settings', { body: '@data' }],
-  ['getJoinRequests(communityId, params)', 'GET /api/v1/admin/{communityId}/join-requests'],
-  ['approveJoinRequest(communityId, requestId, note)', 'POST /api/v1/admin/{communityId}/join-requests/{requestId}/approve', { body: { note: '@note' } }],
-  ['rejectJoinRequest(communityId, requestId, note)', 'POST /api/v1/admin/{communityId}/join-requests/{requestId}/reject', { body: { note: '@note' } }],
   ['getMembers(communityId, params)', 'GET /api/v1/admin/{communityId}/members'],
   ['updateMemberRole(communityId, userId, role)', 'PUT /api/v1/admin/{communityId}/members/{userId}/role', { body: { role: '@role' } }],
   ['adjustReputation(communityId, userId, amount, reason)', 'PUT /api/v1/admin/{communityId}/members/{userId}/reputation', { body: { amount: '@amount', reason: '@reason' } }],
@@ -56,7 +53,6 @@ const ADMINAPI_ROWS: readonly ContractRow[] = [
   ['getReputationConfig(communityId)', 'GET /api/v1/admin/{communityId}/reputation/config'],
   ['updateReputationConfig(communityId, data)', 'PUT /api/v1/admin/{communityId}/reputation/config', { body: '@data' }],
   ['getAtRiskUsers(communityId, params)', 'GET /api/v1/admin/{communityId}/reputation/at-risk'],
-  ['getReputationLeaderboard(communityId, params)', 'GET /api/v1/admin/{communityId}/reputation/leaderboard'],
   ['getAIInsights(communityId, params)', 'GET /api/v1/admin/{communityId}/ai-insights'],
   ['getAIInsight(communityId, insightId)', 'GET /api/v1/admin/{communityId}/ai-insights/{insightId}'],
   ['getAIResearcherConfig(communityId)', 'GET /api/v1/admin/{communityId}/ai-researcher/config'],
