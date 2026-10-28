@@ -1,4 +1,4 @@
-.PHONY: reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security test-marketplace-security test-marketplace-e2e test-marketplace-mutation \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -369,6 +369,22 @@ generate-seaweedfs-sse-key:
 # hub_api/tests/envelope/test_seaweedfs_sse_kms_e2e.py and docs/guides/external-kms-byok.md.
 test-seaweedfs-sse-kms:
 	@cd hub_api && WADDLES_E2E_SEAWEEDFS=1 python3 -m pytest tests/envelope/test_seaweedfs_sse_kms_e2e.py -v -p no:cacheprovider
+
+# Marketplace-sources security regression (plan Task 11): consolidated, CLUSTER-LESS, runs in normal
+# CI. Fails on zero/short test count, any skip/failure (scripts/marketplace_test_gate.sh security).
+# HUB_PYTHON must have hub_api/requirements-dev.txt installed.
+test-marketplace-security:
+	@bash scripts/marketplace_test_gate.sh security
+
+# Marketplace-sources flag-ON real-path E2E against a LIVE deployment (fixture git server behind the
+# git-proxy allowlist; see docs/guides/marketplace-sources-e2e.md). Missing prerequisites FAIL; a
+# skipped/zero-collected run FAILS. Optional PYTEST_K narrows to one gate (mutation check).
+test-marketplace-e2e:
+	@bash scripts/marketplace_test_gate.sh e2e
+
+# Mutation check for the security gates (no cluster): each gate disabled must turn its tests RED.
+test-marketplace-mutation:
+	@python3 scripts/marketplace_mutation_check.py unit all
 
 # Builds+pushes images at HEAD's SHA (Rust svc-ingest/svc-process/svc-action into their
 # own "*-rust" repositories), then `helm upgrade --install` with only the image tag set --
