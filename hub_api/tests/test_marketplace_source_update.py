@@ -398,3 +398,28 @@ async def test_rewrite_on_concurrently_disabled_source_is_unchanged(
     await disable_source(pg_dal, src.public_id)  # stale `src` still looks ACTIVE
     assert await upd.check_source_for_update(pg_dal, src) is upd.UpdateOutcome.UNCHANGED
     assert await _audit_count(pg_dal, src.public_id, upd.REWRITE_AUDIT_ACTION) == 0
+
+
+async def test_ancestry_git_calls_are_disk_watched_and_never_lazy_fetch(
+    pg_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every ancestry git subprocess is watch=root + GIT_NO_LAZY_FETCH=1; promisor dropped."""
+    remote = Remote(tmp_path)
+    src = await _active(pg_dal, remote.first)
+    tip = remote.advance()
+    seen: list[tuple[list[str], dict[str, str], Any]] = []
+    real = upd._run_git
+
+    async def spy(argv: list[str], **kw: Any) -> str:
+        seen.append((argv, kw["env"], kw["watch"]))
+        return await real(argv, **kw)
+
+    monkeypatch.setattr(upd, "_run_git", spy)
+    assert await upd.is_pin_reachable(src, tip) is True
+    assert len(seen) >= 6  # init, remote add, fetch, remote remove, rev-parse x2, merge-base
+    assert all(w is not None and w.name == "repo" for _, _, w in seen)
+    assert all(env["GIT_NO_LAZY_FETCH"] == "1" for _, env, _ in seen)
+    names = [next(a for a in argv if a in {"init", "remote", "fetch", "rev-parse", "merge-base"})
+             for argv, _, _ in seen]  # fmt: skip
+    assert names.index("fetch") < max(i for i, n in enumerate(names) if n == "remote")
+    assert "merge-base" in names

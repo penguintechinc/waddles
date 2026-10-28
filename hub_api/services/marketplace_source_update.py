@@ -166,20 +166,25 @@ async def is_pin_reachable(source: SourceRecord, new_tip: str) -> bool:
     with tempfile.TemporaryDirectory(prefix="mktanc-") as tmp:
         root = Path(tmp) / "repo"
         root.mkdir()
-        env = _git_env(Path(tmp), proxy=px)
+        # Defense-in-depth: `--filter=tree:0` makes origin a promisor remote; forbid any lazy
+        # on-demand fetch outside the bounded fetch step. GIT_NO_LAZY_FETCH needs git>=2.44; on
+        # older git the promisor remote is removed right after the fetch (see below), so a lazy
+        # fetch has nowhere to go. Either way every subprocess is disk-watched (watch=root).
+        env = {**_git_env(Path(tmp), proxy=px), "GIT_NO_LAZY_FETCH": "1"}
         deadline = time.monotonic() + _ANCESTRY_FETCH_TIMEOUT_S
 
-        async def git(*args: str, ok: tuple[int, ...] = (0,), watch: Path | None = None) -> str:
+        async def git(*args: str, ok: tuple[int, ...] = (0,)) -> str:
             return await _run_git(
                 _git_argv(*args, proxy=px, local=local),
-                cwd=root, env=env, limits=limits, deadline=deadline, watch=watch,
+                cwd=root, env=env, limits=limits, deadline=deadline, watch=root,
                 ok_returncodes=ok,
             )  # fmt: skip
 
         await git("init", "--quiet")
         await git("remote", "add", "origin", remote)
         await git("fetch", "--quiet", "--filter=tree:0", "--no-tags", "--no-recurse-submodules",
-                  "origin", new_tip, watch=root)  # fmt: skip
+                  "origin", new_tip)  # fmt: skip
+        await git("remote", "remove", "origin")  # drop promisor remote: no lazy fetch possible
         tip = (await git("rev-parse", "FETCH_HEAD^{commit}")).strip()
         if tip != new_tip:
             raise ScanRejectedError("sha_mismatch", "fetched commit does not equal the new tip")
