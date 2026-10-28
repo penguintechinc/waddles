@@ -84,6 +84,25 @@ impl tracing::Subscriber for Capture {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
+struct FakeDekProvider;
+
+impl svc_ingest::identity_crypto::DekProvider for FakeDekProvider {
+    async fn get_dek(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<(svc_ingest::identity_crypto::Dek, u32), svc_ingest::identity_crypto::DekUnavailableError> {
+        Ok((zeroize::Zeroizing::new([9u8; 32]), 3))
+    }
+}
+
+fn test_identity_metrics() -> prometheus::IntCounterVec {
+    prometheus::IntCounterVec::new(
+        prometheus::Opts::new("test_identity_encryption_total", "test-only"),
+        &["tenant", "status"],
+    )
+    .unwrap()
+}
+
 /// Installs the global capture once; every test calls it first so no
 /// callsite is ever registered without it.
 fn init_capture() {
@@ -346,6 +365,8 @@ impl Env {
             "127.0.0.1".to_string(),
             self.server.port(),
             false,
+            Arc::new(FakeDekProvider),
+            Arc::new(test_identity_metrics()),
         ));
         SessionManager::new(
             self.hub.clone(),

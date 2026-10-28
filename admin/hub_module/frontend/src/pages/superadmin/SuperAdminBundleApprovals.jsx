@@ -160,15 +160,16 @@ function SuperAdminBundleApprovals() {
       </div>
 
       <div className="bg-navy-800 border border-navy-700 rounded-lg p-4">
-        <label className="block text-sm font-medium text-navy-300 mb-2">Filter by Status</label>
+        <label htmlFor="super-admin-bundle-approvals-filter-by-status" className="block text-sm font-medium text-navy-300 mb-2">Filter by Status</label>
         <select
+          id="super-admin-bundle-approvals-filter-by-status"
           data-testid="bundle-approvals-status-filter"
           value={status}
           onChange={(e) => {
             setStatus(e.target.value);
             setPage(1);
           }}
-          className="w-full md:w-64 bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:outline-none focus:border-gold-400"
+          className="w-full md:w-64 bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:border-gold-400"
         >
           <option value="pending">Pending Approval</option>
           <option value="rejected">Rejected</option>
@@ -264,8 +265,8 @@ function SuperAdminBundleApprovals() {
           className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
           data-testid="bundle-approvals-review-panel"
         >
-          <div className="bg-navy-800 border border-navy-700 rounded-lg max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6">
-            <h2 className="text-xl font-bold text-white mb-1">{reviewing.appId}</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="super-admin-bundle-approvals-dialog-1-title" className="bg-navy-800 border border-navy-700 rounded-lg max-w-2xl w-full max-h-[85vh] overflow-y-auto p-6">
+            <h2 id="super-admin-bundle-approvals-dialog-1-title" className="text-xl font-bold text-white mb-1">{reviewing.appId}</h2>
             <p className="text-navy-400 text-sm mb-4">Version {reviewing.version}</p>
 
             {panelLoading && <p className="text-navy-300">Loading permission summary...</p>}

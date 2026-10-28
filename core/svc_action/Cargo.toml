@@ -27,7 +27,7 @@ path = "src/main.rs"
 # that file's header comment for the full rationale. `deny.toml`'s
 # `[sources] allow-git` must list this exact repository URL.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.53.3", features = ["full"] }
 # Host-API acceptor TCP keepalive (fix/executor-link-heartbeat, alpha
 # 2026-10-02 incident: a rolled svc pod left the executor's socket
 # half-open with no OS-level signal) -- already resolves to this exact
@@ -71,7 +71,7 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
 # `penguin-logging` owns the tracing-subscriber/OTel/OTLP stack internally
 # (spec SS4.9) -- see `src/telemetry.rs`. Pinned to the HEAD of
 # `release/rust-logging/v0.1.x` at the time of this commit.
-penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0a320ba2b08a6850b66e3062f6a9dfb44fec6950", package = "penguin-logging", version = "=0.1.0" }
 # `penguin-spine` (spec SS4.7): the action-stage's own `:action` stream
 # `XREADGROUP` consumer (single consumer group `{app_id}`) -- see
 # `src/dispatch.rs`. Pinned to the tip of `release/rust-spine/v0.1.x`,
@@ -82,17 +82,17 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # landed `binding` module (a separate follow-up, re-verified against this
 # rev's own canonical test vectors, not done here), and `src/dispatch.rs`'s
 # `fixture_delivered` for the `group` field this rev added.
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "90060a93925c50668cc1c6dd47a4ae24a7b4e321", package = "penguin-spine", version = "=0.2.0" }
 # `penguin-bundle-host::wire` (spec SS6.6): the host-API frame codec and
 # Frame/Message shapes shared verbatim with `bundle-executor` -- see
 # `src/host_api.rs`. Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # (PR penguintechinc/penguin-libs#93, same commit `core/bundle_executor`
 # pins).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "eef86927d015f530c14d8ed54d311494c1a8000d", package = "penguin-bundle-host", version = "=0.3.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0b97183fa7ae7c91464bd6539821ad0a091d5764", package = "penguin-bundle-host", version = "=0.3.0" }
 # Spec SS13.5's two flags this crate gates on (`waddles.core.rust-data-plane`,
 # `waddles.core.bundle-egress`) -- see `src/flags.rs`. Pinned to the tip of
 # `release/rust-licensing/v0.1.x`.
-penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "7110125df28045322e7c4c527d1d1be806f2f086", package = "penguin-licensing", version = "=0.1.0" }
 # D30 envelope binding MAC (spec SS5.11): HMAC-SHA256 hop verification --
 # `src/hop.rs`. Same exact pins `penguin-spine` itself uses internally for
 # byte-identical behavior. `penguin-spine`'s own `binding` module (above)
@@ -106,7 +106,7 @@ hex = "=0.4.3"
 # mTLS host-API server (spec SS6.6/SS7.1): the executor dials `:8302`: this
 # crate is the TLS *server* side, mirroring `core/bundle_executor/src/tls.rs`
 # (the client side) with the roles reversed. Same exact version pins.
-rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "tls12"] }
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
 rustls-pki-types = "=1.15.1"
 # `relay` host capability (Twitch outbound, spec SS7.4) LPUSHes onto
@@ -198,7 +198,7 @@ opentelemetry_sdk = { version = "=0.32.1", features = ["testing"] }
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
 # `tokio::time::{pause,advance}` for retry-backoff tests. Never linked into
 # the release binary.
-tokio = { version = "=1.53.1", features = ["test-util"] }
+tokio = { version = "=1.53.3", features = ["test-util"] }
 # `ServiceExt::oneshot` -- drives a request through the full `http::router`
 # (middleware included) in tests without binding a real socket. Test-only;
 # never linked into the release binary.

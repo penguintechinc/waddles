@@ -320,10 +320,11 @@ function AdminServers() {
       {/* Request Link Modal */}
       {showRequestModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md w-full mx-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-servers-dialog-1-title" className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md w-full mx-4">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-sky-100">Request Server Link</h3>
+              <h3 id="admin-servers-dialog-1-title" className="text-lg font-semibold text-sky-100">Request Server Link</h3>
               <button
+                aria-label="Close"
                 onClick={() => setShowRequestModal(false)}
                 className="text-navy-400 hover:text-sky-100"
               >
@@ -339,11 +340,12 @@ function AdminServers() {
 
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-1">Platform</label>
+                <label htmlFor="admin-servers-platform" className="block text-sm font-medium text-navy-300 mb-1">Platform</label>
                 <select
+                  id="admin-servers-platform"
                   value={requestForm.platform}
                   onChange={(e) => setRequestForm({ ...requestForm, platform: e.target.value })}
-                  className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 text-sm focus:outline-none focus:border-gold-500"
+                  className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 text-sm focus:border-gold-500"
                 >
                   <option value="discord">Discord</option>
                   <option value="slack">Slack</option>
@@ -354,37 +356,40 @@ function AdminServers() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-1">
+                <label htmlFor="admin-servers-input" className="block text-sm font-medium text-navy-300 mb-1">
                   Server / Channel ID <span className="text-red-400">*</span>
                 </label>
                 <input
+                  id="admin-servers-input"
                   type="text"
                   value={requestForm.platformServerId}
                   onChange={(e) => setRequestForm({ ...requestForm, platformServerId: e.target.value })}
                   placeholder="e.g. 123456789012345678"
-                  className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 placeholder-navy-500 text-sm focus:outline-none focus:border-gold-500"
+                  className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 placeholder-navy-500 text-sm focus:border-gold-500"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-1">
+                <label htmlFor="admin-servers-server-channel-name-optional" className="block text-sm font-medium text-navy-300 mb-1">
                   Server / Channel Name <span className="text-navy-500">(optional)</span>
                 </label>
                 <input
+                  id="admin-servers-server-channel-name-optional"
                   type="text"
                   value={requestForm.platformServerName}
                   onChange={(e) => setRequestForm({ ...requestForm, platformServerName: e.target.value })}
                   placeholder="My Discord Server"
-                  className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 placeholder-navy-500 text-sm focus:outline-none focus:border-gold-500"
+                  className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 placeholder-navy-500 text-sm focus:border-gold-500"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-1">Link Type</label>
+                <label htmlFor="admin-servers-link-type" className="block text-sm font-medium text-navy-300 mb-1">Link Type</label>
                 <select
+                  id="admin-servers-link-type"
                   value={requestForm.linkType}
                   onChange={(e) => setRequestForm({ ...requestForm, linkType: e.target.value })}
-                  className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 text-sm focus:outline-none focus:border-gold-500"
+                  className="w-full px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 text-sm focus:border-gold-500"
                 >
                   <option value="standard">Standard</option>
                   <option value="read_only">Read Only</option>

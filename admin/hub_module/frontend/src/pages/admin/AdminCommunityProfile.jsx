@@ -269,6 +269,7 @@ function AdminCommunityProfile() {
             </div>
             <div className="flex gap-3">
               <input
+                aria-label="Upload banner image"
                 ref={bannerInputRef}
                 type="file"
                 accept="image/*"
@@ -285,6 +286,7 @@ function AdminCommunityProfile() {
               </button>
               {bannerPreview && (
                 <button
+                  aria-label="Delete banner image"
                   type="button"
                   onClick={handleDeleteBanner}
                   disabled={uploadingBanner}
@@ -325,6 +327,7 @@ function AdminCommunityProfile() {
             </div>
             <div className="space-y-2">
               <input
+                aria-label="Upload logo image"
                 ref={logoInputRef}
                 type="file"
                 accept="image/*"
@@ -341,6 +344,7 @@ function AdminCommunityProfile() {
               </button>
               {logoPreview && (
                 <button
+                  aria-label="Delete logo image"
                   type="button"
                   onClick={handleDeleteLogo}
                   disabled={uploadingLogo}
@@ -362,8 +366,9 @@ function AdminCommunityProfile() {
           </h2>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">Display Name</label>
+              <label htmlFor="admin-community-profile-display-name" className="block text-sm font-medium text-navy-300 mb-2">Display Name</label>
               <input
+                id="admin-community-profile-display-name"
                 type="text"
                 value={profile.displayName}
                 onChange={(e) => updateField('displayName', e.target.value)}
@@ -374,8 +379,9 @@ function AdminCommunityProfile() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">Short Description</label>
+              <label htmlFor="admin-community-profile-short-description" className="block text-sm font-medium text-navy-300 mb-2">Short Description</label>
               <input
+                id="admin-community-profile-short-description"
                 type="text"
                 value={profile.description}
                 onChange={(e) => updateField('description', e.target.value)}
@@ -387,8 +393,9 @@ function AdminCommunityProfile() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">About (Extended)</label>
+              <label htmlFor="admin-community-profile-about-extended" className="block text-sm font-medium text-navy-300 mb-2">About (Extended)</label>
               <textarea
+                id="admin-community-profile-about-extended"
                 value={profile.aboutExtended}
                 onChange={(e) => updateField('aboutExtended', e.target.value)}
                 maxLength={5000}
@@ -410,11 +417,12 @@ function AdminCommunityProfile() {
           <div className="space-y-4">
             <div className="grid md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-community-profile-input" className="block text-sm font-medium text-navy-300 mb-2">
                   <GlobeAltIcon className="w-4 h-4 inline mr-1" />
                   Website
                 </label>
                 <input
+                  id="admin-community-profile-input"
                   type="url"
                   value={profile.websiteUrl}
                   onChange={(e) => updateField('websiteUrl', e.target.value)}
@@ -424,10 +432,11 @@ function AdminCommunityProfile() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-community-profile-discord-invite" className="block text-sm font-medium text-navy-300 mb-2">
                   Discord Invite
                 </label>
                 <input
+                  id="admin-community-profile-discord-invite"
                   type="url"
                   value={profile.discordInviteUrl}
                   onChange={(e) => updateField('discordInviteUrl', e.target.value)}
@@ -444,6 +453,7 @@ function AdminCommunityProfile() {
                   <div key={platform.key}>
                     <label className="block text-xs text-navy-400 mb-1">{platform.label}</label>
                     <input
+                      aria-label={platform.label}
                       type="url"
                       value={profile.socialLinks[platform.key] || ''}
                       onChange={(e) => updateSocialLink(platform.key, e.target.value)}

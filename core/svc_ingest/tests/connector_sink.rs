@@ -31,7 +31,26 @@ impl EventAppender for RecordingAppender {
     }
 }
 
-fn sink(fail: bool) -> SpineEventSink<RecordingAppender, NoopMetrics> {
+struct FakeDekProvider;
+
+impl svc_ingest::identity_crypto::DekProvider for FakeDekProvider {
+    async fn get_dek(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<(svc_ingest::identity_crypto::Dek, u32), svc_ingest::identity_crypto::DekUnavailableError> {
+        Ok((zeroize::Zeroizing::new([9u8; 32]), 3))
+    }
+}
+
+fn test_identity_metrics() -> prometheus::IntCounterVec {
+    prometheus::IntCounterVec::new(
+        prometheus::Opts::new("test_identity_encryption_total", "test-only"),
+        &["tenant", "status"],
+    )
+    .unwrap()
+}
+
+fn sink(fail: bool) -> SpineEventSink<RecordingAppender, NoopMetrics, FakeDekProvider> {
     SpineEventSink::new(
         RecordingAppender {
             calls: Mutex::new(Vec::new()),
@@ -41,6 +60,8 @@ fn sink(fail: bool) -> SpineEventSink<RecordingAppender, NoopMetrics> {
         KeyRing::new(vec![("kid-1".to_string(), vec![9u8; 32])]),
         "kid-1",
         Scope::new("acme", Some("main".to_string())),
+        FakeDekProvider,
+        test_identity_metrics(),
     )
 }
 
@@ -75,7 +96,20 @@ async fn a_connector_event_is_published_as_a_d30_minted_envelope_on_its_source_s
     assert_eq!(env.workstream_id, deterministic_workstream_id("src-1"));
     assert_eq!(env.session_id.as_deref(), Some("conn-1"));
     assert_eq!(env.event.platform, "echo");
-    assert_eq!(env.event.payload["text"], "hi");
+    let text_str = env.event.payload["text"].as_str().unwrap();
+    let json_env: svc_ingest::identity_crypto::JsonEnvelope =
+        serde_json::from_str(text_str).unwrap();
+    let dek = zeroize::Zeroizing::new([9u8; 32]);
+    let decrypted = svc_ingest::identity_crypto::decrypt_identity_value(
+        &json_env,
+        &dek,
+        "acme",
+        stream,
+        "text",
+        &env.event_id,
+    )
+    .unwrap();
+    assert_eq!(decrypted, "hi");
     assert_eq!(env.binding.kid, "kid-1");
     assert_eq!(env.binding.mac.len(), 64);
 }
@@ -103,7 +137,7 @@ trait AppenderCalls {
     fn appender_calls(&self) -> Vec<(String, StageEnvelope)>;
 }
 
-impl AppenderCalls for SpineEventSink<RecordingAppender, NoopMetrics> {
+impl AppenderCalls for SpineEventSink<RecordingAppender, NoopMetrics, FakeDekProvider> {
     fn appender_calls(&self) -> Vec<(String, StageEnvelope)> {
         self.appender().calls.lock().unwrap().clone()
     }

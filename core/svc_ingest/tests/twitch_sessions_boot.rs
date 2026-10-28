@@ -292,7 +292,18 @@ async fn try_start_with_missing_prereqs_fails_loud_and_never_marks_the_receiver_
     let registry = prometheus::Registry::new();
     let metrics = Arc::new(register_ingest_metrics(&registry));
     let readiness = Arc::new(ReceiverReadiness::new());
-    let err = try_start_twitch_sessions(&config, metrics, readiness.clone())
+    let dek_provider = svc_ingest::identity_crypto::ConfiguredDekProvider::HubApi(
+        svc_ingest::identity_crypto::TtlCachedDekProvider::new(
+            svc_ingest::identity_crypto::HubApiDekProvider::new(
+                reqwest::Client::new(),
+                "http://hub-api:8204",
+                svc_ingest::identity_crypto::UnimplementedMachineJwtProvider,
+                "svc_ingest",
+            ),
+            svc_ingest::identity_crypto::DEFAULT_DEK_CACHE_TTL,
+        ),
+    );
+    let err = try_start_twitch_sessions(&config, metrics, readiness.clone(), dek_provider)
         .expect_err("missing prereqs must be a startup error, never a silent no-op");
     assert!(
         err.to_string().contains("SERVICE_JWT_TOKEN_ENDPOINT"),

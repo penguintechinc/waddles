@@ -66,9 +66,9 @@ function AdminAliasConfig() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">Max Aliases Per User</label>
-          <input type="number" value={config.maxAliasesPerUser} onChange={(e) => setConfig({ ...config, maxAliasesPerUser: parseInt(e.target.value) || 1 })} min={1} max={50}
-            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500" />
+          <label htmlFor="admin-alias-config-max-aliases-per-user" className="block text-sm font-medium text-sky-100 mb-2">Max Aliases Per User</label>
+          <input id="admin-alias-config-max-aliases-per-user" type="number" value={config.maxAliasesPerUser} onChange={(e) => setConfig({ ...config, maxAliasesPerUser: parseInt(e.target.value) || 1 })} min={1} max={50}
+            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500" />
           <p className="text-xs text-navy-400 mt-1">Maximum aliases a user can create (1-50)</p>
         </div>
 

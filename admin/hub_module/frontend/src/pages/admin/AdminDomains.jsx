@@ -130,7 +130,7 @@ function AdminDomains() {
             <ExclamationTriangleIcon className="w-5 h-5 text-red-400" />
             <span className="text-red-400">{error}</span>
           </div>
-          <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
+          <button aria-label="Close" onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -146,7 +146,7 @@ function AdminDomains() {
             <CheckCircleIcon className="w-5 h-5" />
             <span>{message.text}</span>
           </div>
-          <button onClick={() => setMessage(null)} className="hover:opacity-75">
+          <button aria-label="Close" onClick={() => setMessage(null)} className="hover:opacity-75">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -158,11 +158,12 @@ function AdminDomains() {
         <form onSubmit={handleAddDomain} className="flex gap-4">
           <div className="flex-1">
             <input
+              aria-label="example.com"
               type="text"
               value={newDomain}
               onChange={(e) => setNewDomain(e.target.value)}
               placeholder="example.com"
-              className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:outline-none focus:border-gold-500"
+              className="w-full bg-navy-900 border border-navy-700 rounded-lg px-4 py-2 text-sky-100 focus:border-gold-500"
             />
           </div>
           <button
@@ -226,6 +227,7 @@ function AdminDomains() {
                     </button>
                   )}
                   <button
+                    aria-label={`Delete domain ${domain.domain}`}
                     onClick={() => setDeleteConfirm(domain)}
                     className="p-2 text-red-400 hover:bg-red-500/20 rounded-lg transition-colors"
                   >
@@ -254,6 +256,7 @@ function AdminDomains() {
                         <p className="font-mono text-sm text-gold-400 break-all">_waddlebot.{domain.domain}</p>
                       </div>
                       <button
+                        aria-label={`Copy DNS record name for ${domain.domain}`}
                         onClick={() => copyToClipboard(`_waddlebot.${domain.domain}`, `name-${domain.id}`)}
                         className="p-2 text-navy-400 hover:text-sky-300 rounded"
                       >
@@ -270,6 +273,7 @@ function AdminDomains() {
                         <p className="font-mono text-sm text-gold-400 break-all">{domain.verificationToken}</p>
                       </div>
                       <button
+                        aria-label={`Copy verification value for ${domain.domain}`}
                         onClick={() => copyToClipboard(domain.verificationToken, `token-${domain.id}`)}
                         className="p-2 text-navy-400 hover:text-sky-300 rounded"
                       >
@@ -294,8 +298,8 @@ function AdminDomains() {
       {/* Delete Confirmation Modal */}
       {deleteConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md mx-4">
-            <h3 className="text-lg font-semibold text-sky-100 mb-2">Remove Domain?</h3>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-domains-dialog-1-title" className="bg-navy-800 border border-navy-700 rounded-lg p-6 max-w-md mx-4">
+            <h3 id="admin-domains-dialog-1-title" className="text-lg font-semibold text-sky-100 mb-2">Remove Domain?</h3>
             <p className="text-navy-300 mb-4">
               Are you sure you want to remove <span className="text-gold-400 font-medium">{deleteConfirm.domain}</span>?
               This action cannot be undone.

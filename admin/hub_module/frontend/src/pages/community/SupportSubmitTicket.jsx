@@ -93,8 +93,9 @@ function SupportSubmitTicket() {
       <form onSubmit={handleSubmit} className="bg-navy-900 border border-navy-700 rounded-lg p-6 space-y-4">
         {/* Category */}
         <div>
-          <label className="block text-sm font-medium text-sky-200 mb-1">Category</label>
+          <label htmlFor="support-submit-ticket-category" className="block text-sm font-medium text-sky-200 mb-1">Category</label>
           <select
+            id="support-submit-ticket-category"
             value={form.category_id}
             onChange={(e) => handleChange('category_id', e.target.value)}
             className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm"
@@ -108,8 +109,9 @@ function SupportSubmitTicket() {
 
         {/* Subject */}
         <div>
-          <label className="block text-sm font-medium text-sky-200 mb-1">Subject *</label>
+          <label htmlFor="support-submit-ticket-subject" className="block text-sm font-medium text-sky-200 mb-1">Subject *</label>
           <input
+            id="support-submit-ticket-subject"
             type="text"
             value={form.subject}
             onChange={(e) => handleChange('subject', e.target.value)}
@@ -121,8 +123,9 @@ function SupportSubmitTicket() {
 
         {/* Description */}
         <div>
-          <label className="block text-sm font-medium text-sky-200 mb-1">Description</label>
+          <label htmlFor="support-submit-ticket-description" className="block text-sm font-medium text-sky-200 mb-1">Description</label>
           <textarea
+            id="support-submit-ticket-description"
             value={form.description}
             onChange={(e) => handleChange('description', e.target.value)}
             rows={5}
@@ -139,6 +142,7 @@ function SupportSubmitTicket() {
             </label>
             {field.type === 'textarea' ? (
               <textarea
+                aria-label={field.label}
                 value={form.custom_fields[field.label] || ''}
                 onChange={(e) => handleCustomFieldChange(field.label, e.target.value)}
                 required={field.required}
@@ -147,6 +151,7 @@ function SupportSubmitTicket() {
               />
             ) : field.type === 'select' ? (
               <select
+                aria-label={field.label}
                 value={form.custom_fields[field.label] || ''}
                 onChange={(e) => handleCustomFieldChange(field.label, e.target.value)}
                 required={field.required}
@@ -159,6 +164,7 @@ function SupportSubmitTicket() {
               </select>
             ) : (
               <input
+                aria-label={field.label}
                 type={field.type || 'text'}
                 value={form.custom_fields[field.label] || ''}
                 onChange={(e) => handleCustomFieldChange(field.label, e.target.value)}

@@ -6,10 +6,10 @@ import { HashtagIcon } from '@heroicons/react/24/outline';
 
 export default function ChatChannelList({ channels, activeChannel, onSelectChannel }) {
   return (
-    <div className="bg-gray-800 border-r border-gray-700 w-64 flex-shrink-0 overflow-y-auto">
+    <div className="bg-surface-raised border-r border-line w-64 flex-shrink-0 overflow-y-auto">
       {/* Header */}
-      <div className="p-4 border-b border-gray-700">
-        <h2 className="text-lg font-semibold text-gray-100">Channels</h2>
+      <div className="p-4 border-b border-line">
+        <h2 className="text-lg font-semibold text-fg">Channels</h2>
       </div>
 
       {/* Channel list */}
@@ -21,7 +21,7 @@ export default function ChatChannelList({ channels, activeChannel, onSelectChann
             className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors text-left
               ${activeChannel === channel.name
                 ? 'bg-blue-600 text-white'
-                : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+                : 'text-fg-secondary hover:bg-navy-700 hover:text-white'
               }`}
           >
             {/* Channel icon */}
@@ -40,7 +40,7 @@ export default function ChatChannelList({ channels, activeChannel, onSelectChann
         ))}
 
         {channels.length === 0 && (
-          <div className="text-gray-500 text-sm p-4 text-center">
+          <div className="text-fg-muted text-sm p-4 text-center">
             No channels available
           </div>
         )}

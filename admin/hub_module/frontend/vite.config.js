@@ -26,7 +26,11 @@ export default defineConfig({
         'src/components/dashboard/CommunityStatsWidget.jsx',
         'src/components/dashboard/QuickActionsWidget.jsx',
         'src/layouts/DashboardLayout.jsx',
+        'src/layouts/AdminLayout.jsx',
+        'src/layouts/useSidebarNav.ts',
+        'src/components/ui/**/*.{ts,tsx}',
       ],
+      exclude: ['src/components/ui/index.ts', 'src/components/ui/**/__tests__/**'],
       thresholds: {
         statements: 90,
         branches: 90,

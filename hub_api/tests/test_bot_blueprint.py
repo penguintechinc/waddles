@@ -356,7 +356,41 @@ class TestAIChatter:
         )
         assert response.status_code == 200
         body = await response.get_json()
-        assert body == {"success": True, "config": {"enabled": True, "max_responses_per_window": 5}}
+        # Output-DTO: exact field set (partial upstream bodies are filled with defaults).
+        assert body == {
+            "success": True,
+            "config": {
+                "enabled": True,
+                "max_responses_per_window": 5,
+                "window_seconds": 600,
+                "max_per_user_per_window": 2,
+                "response_probability": 0.30,
+                "min_message_length": 10,
+            },
+        }
+
+    async def test_get_config_drops_unknown_upstream_keys(
+        self, client: Any, auth_headers: Any, community_id: int, monkeypatch: Any
+    ) -> None:
+        """Regression (output-DTO audit): relayed upstream extras never reach the client."""
+
+        async def fake_get(cid: int) -> dict[str, Any]:
+            return {"enabled": True, "internal_api_key": "sk-secret", "model_endpoint": "http://x"}
+
+        monkeypatch.setattr(bot_ai_chatter, "get_chatter_config", fake_get)
+        response = await client.get(
+            f"/api/v1/admin/{community_id}/ai-chatter/config",
+            headers=auth_headers(scope="bot.ai_chatter:read"),
+        )
+        body = await response.get_json()
+        assert set(body["config"]) == {
+            "enabled",
+            "max_responses_per_window",
+            "window_seconds",
+            "max_per_user_per_window",
+            "response_probability",
+            "min_message_length",
+        }
 
     async def test_update_config_proxies_service_response(
         self, client: Any, auth_headers: Any, community_id: int, monkeypatch: Any

@@ -170,6 +170,10 @@ pub struct IngestMetrics {
     /// Bindings skipped by the latest Twitch discovery pass, labeled by a
     /// fixed reason set (a gauge: per-pass snapshots must not accumulate).
     pub twitch_discovery_skipped: prometheus::IntGaugeVec,
+    /// Identity-field (`actor`) envelope-encryption outcomes, labeled by
+    /// tenant/status (`success`/`dek_unavailable`) -- `crate::identity_crypto`,
+    /// `crate::publish::publish_event`.
+    pub identity_encryption_total: prometheus::IntCounterVec,
 }
 
 /// Registers this service's ingest-path metrics against `registry`. Must be
@@ -379,6 +383,18 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
     registry
         .register(Box::new(twitch_discovery_skipped.clone()))
         .expect("register svc_ingest_twitch_discovery_skipped");
+    let identity_encryption_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_identity_encryption_total",
+            "Identity-field (actor) envelope-encryption outcomes on the ingest->process \
+             stream, labeled by tenant/status (success/dek_unavailable)",
+        ),
+        &["tenant", "status"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(identity_encryption_total.clone()))
+        .expect("register svc_ingest_identity_encryption_total");
 
     IngestMetrics {
         twitch_sessions_live,
@@ -398,6 +414,7 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         receiver_connection_healthy,
         spine_connect_attempts_total,
         consumer_loop_running,
+        identity_encryption_total,
     }
 }
 

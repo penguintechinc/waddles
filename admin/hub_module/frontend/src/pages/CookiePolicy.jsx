@@ -94,29 +94,29 @@ export default function CookiePolicy() {
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-sky-500"></div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-app">
       {/* Header */}
-      <div className="bg-white border-b border-gray-200">
+      <div className="bg-surface border-b border-line">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           {/* Back Navigation */}
           <Link
             to="/"
-            className="inline-flex items-center text-blue-600 hover:text-blue-700 font-medium mb-4"
+            className="inline-flex items-center text-interactive hover:text-interactive-hover font-medium mb-4"
           >
             <ArrowLeftIcon className="w-4 h-4 mr-2" />
             Back to Home
           </Link>
 
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">
+          <h1 className="text-4xl font-bold text-fg mb-2">
             Cookie Policy
           </h1>
-          <p className="text-gray-600">
+          <p className="text-fg-muted">
             Learn about the cookies we use and how to manage your preferences
           </p>
         </div>
@@ -125,8 +125,8 @@ export default function CookiePolicy() {
       {/* Main Content */}
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         {error && !policy && (
-          <div className="mb-8 bg-red-50 border border-red-200 rounded-lg p-4">
-            <p className="text-red-900 text-sm">
+          <div className="mb-8 bg-danger/10 border border-danger/40 rounded-lg p-4">
+            <p className="text-danger-fg text-sm">
               {error}
             </p>
           </div>
@@ -134,10 +134,10 @@ export default function CookiePolicy() {
 
         {/* Introduction Section */}
         <section className="mb-12">
-          <h2 className="text-2xl font-bold text-gray-900 mb-4">
+          <h2 className="text-2xl font-bold text-fg mb-4">
             What Are Cookies?
           </h2>
-          <div className="prose prose-sm max-w-none text-gray-600 space-y-4">
+          <div className="prose prose-sm max-w-none text-fg-muted space-y-4">
             <p>
               Cookies are small text files that are placed on your device when you visit our website.
               They are widely used to make websites work more efficiently, provide information to the
@@ -154,87 +154,87 @@ export default function CookiePolicy() {
 
         {/* Cookie Categories Section */}
         <section className="mb-12">
-          <h2 className="text-2xl font-bold text-gray-900 mb-6">
+          <h2 className="text-2xl font-bold text-fg mb-6">
             Cookie Categories
           </h2>
 
           <div className="space-y-8">
             {/* Essential Cookies */}
-            <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <div className="bg-surface rounded-lg border border-line p-6">
               <div className="flex items-start justify-between mb-3">
-                <h3 className="text-xl font-semibold text-gray-900">
+                <h3 className="text-xl font-semibold text-fg">
                   Essential Cookies
                 </h3>
-                <span className="px-3 py-1 bg-red-100 text-red-800 text-xs font-semibold rounded-full">
+                <span className="px-3 py-1 bg-danger/15 text-danger-fg text-xs font-semibold rounded-full">
                   Required
                 </span>
               </div>
-              <p className="text-gray-600 mb-4">
+              <p className="text-fg-muted mb-4">
                 These cookies are necessary for the website to function and cannot be disabled.
                 They enable critical functionality such as authentication, security, and access control.
                 Without these cookies, our website cannot operate properly.
               </p>
-              <div className="text-sm text-gray-500">
+              <div className="text-sm text-fg-muted">
                 You cannot opt out of essential cookies as they are required for site functionality.
               </div>
             </div>
 
             {/* Functional Cookies */}
-            <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <div className="bg-surface rounded-lg border border-line p-6">
               <div className="flex items-start justify-between mb-3">
-                <h3 className="text-xl font-semibold text-gray-900">
+                <h3 className="text-xl font-semibold text-fg">
                   Functional Cookies
                 </h3>
-                <span className="px-3 py-1 bg-blue-100 text-blue-800 text-xs font-semibold rounded-full">
+                <span className="px-3 py-1 bg-info/15 text-info-fg text-xs font-semibold rounded-full">
                   Optional
                 </span>
               </div>
-              <p className="text-gray-600 mb-4">
+              <p className="text-fg-muted mb-4">
                 Functional cookies improve your user experience by remembering your preferences and
                 settings across visits. These allow us to maintain your chosen theme, language,
                 and layout preferences so you don't have to set them again.
               </p>
-              <div className="text-sm text-gray-500">
+              <div className="text-sm text-fg-muted">
                 You can disable functional cookies, but this may reduce your experience on our website.
               </div>
             </div>
 
             {/* Analytics Cookies */}
-            <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <div className="bg-surface rounded-lg border border-line p-6">
               <div className="flex items-start justify-between mb-3">
-                <h3 className="text-xl font-semibold text-gray-900">
+                <h3 className="text-xl font-semibold text-fg">
                   Analytics Cookies
                 </h3>
-                <span className="px-3 py-1 bg-green-100 text-green-800 text-xs font-semibold rounded-full">
+                <span className="px-3 py-1 bg-success/15 text-success-fg text-xs font-semibold rounded-full">
                   Optional
                 </span>
               </div>
-              <p className="text-gray-600 mb-4">
+              <p className="text-fg-muted mb-4">
                 Analytics cookies help us understand how users interact with our website, including
                 which pages are most visited, how long users spend on pages, and what actions they take.
                 This information helps us improve our features, performance, and overall service.
               </p>
-              <div className="text-sm text-gray-500">
+              <div className="text-sm text-fg-muted">
                 You can disable analytics cookies if you prefer not to share usage data.
               </div>
             </div>
 
             {/* Marketing Cookies */}
-            <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <div className="bg-surface rounded-lg border border-line p-6">
               <div className="flex items-start justify-between mb-3">
-                <h3 className="text-xl font-semibold text-gray-900">
+                <h3 className="text-xl font-semibold text-fg">
                   Marketing Cookies
                 </h3>
-                <span className="px-3 py-1 bg-purple-100 text-purple-800 text-xs font-semibold rounded-full">
+                <span className="px-3 py-1 bg-gold-500/15 text-gold-300 text-xs font-semibold rounded-full">
                   Optional
                 </span>
               </div>
-              <p className="text-gray-600 mb-4">
+              <p className="text-fg-muted mb-4">
                 Marketing cookies enable personalized advertising and help us measure the effectiveness
                 of our advertising campaigns. They track your behavior across different websites to
                 show you relevant ads and measure conversion actions.
               </p>
-              <div className="text-sm text-gray-500">
+              <div className="text-sm text-fg-muted">
                 You can disable marketing cookies to opt out of personalized advertising.
               </div>
             </div>
@@ -243,45 +243,45 @@ export default function CookiePolicy() {
 
         {/* Cookie Details Table */}
         <section className="mb-12">
-          <h2 className="text-2xl font-bold text-gray-900 mb-6">
+          <h2 className="text-2xl font-bold text-fg mb-6">
             Specific Cookies Used
           </h2>
 
           <div className="space-y-8">
             {COOKIE_TABLE_DATA.map((categoryData) => (
               <div key={categoryData.category} className="overflow-x-auto">
-                <h3 className="text-lg font-semibold text-gray-900 mb-3">
+                <h3 className="text-lg font-semibold text-fg mb-3">
                   {categoryData.category} Cookies
                 </h3>
                 {categoryData.cookies.length === 0 ? (
-                  <p className="text-sm text-gray-600">{categoryData.notice}</p>
+                  <p className="text-sm text-fg-muted">{categoryData.notice}</p>
                 ) : (
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="bg-gray-100 border-b border-gray-200">
-                      <th className="px-4 py-3 text-left font-semibold text-gray-900">
+                    <tr className="bg-surface-raised border-b border-line">
+                      <th className="px-4 py-3 text-left font-semibold text-fg">
                         Cookie Name
                       </th>
-                      <th className="px-4 py-3 text-left font-semibold text-gray-900">
+                      <th className="px-4 py-3 text-left font-semibold text-fg">
                         Purpose
                       </th>
-                      <th className="px-4 py-3 text-left font-semibold text-gray-900">
+                      <th className="px-4 py-3 text-left font-semibold text-fg">
                         Duration
                       </th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-200">
+                  <tbody className="divide-y divide-line">
                     {categoryData.cookies.map((cookie) => (
-                      <tr key={cookie.name} className="bg-white hover:bg-gray-50 transition-colors">
+                      <tr key={cookie.name} className="bg-surface hover:bg-surface-raised transition-colors">
                         <td className="px-4 py-3">
-                          <code className="font-mono text-gray-900 bg-gray-100 px-2 py-1 rounded text-xs">
+                          <code className="font-mono text-fg bg-surface-raised px-2 py-1 rounded text-xs">
                             {cookie.name}
                           </code>
                         </td>
-                        <td className="px-4 py-3 text-gray-600">
+                        <td className="px-4 py-3 text-fg-muted">
                           {cookie.purpose}
                         </td>
-                        <td className="px-4 py-3 text-gray-600">
+                        <td className="px-4 py-3 text-fg-muted">
                           {cookie.duration}
                         </td>
                       </tr>
@@ -295,18 +295,18 @@ export default function CookiePolicy() {
         </section>
 
         {/* Manage Preferences Section */}
-        <section className="mb-12 bg-blue-50 border border-blue-200 rounded-lg p-8">
-          <h2 className="text-2xl font-bold text-gray-900 mb-4">
+        <section className="mb-12 bg-info/10 border border-info/30 rounded-lg p-8">
+          <h2 className="text-2xl font-bold text-fg mb-4">
             Manage Your Cookie Preferences
           </h2>
-          <p className="text-gray-700 mb-6">
+          <p className="text-fg-secondary mb-6">
             You can update your cookie preferences at any time. Click the button below to open
             the cookie preferences modal where you can enable or disable optional cookie categories.
             Note that essential cookies cannot be disabled as they are required for the site to function.
           </p>
           <button
             onClick={openPreferences}
-            className="inline-flex items-center px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
+            className="inline-flex items-center px-6 py-3 bg-sky-700 text-white font-semibold rounded-lg hover:bg-sky-800 transition-colors"
           >
             Update Cookie Preferences
           </button>
@@ -314,10 +314,10 @@ export default function CookiePolicy() {
 
         {/* How to Delete Cookies */}
         <section className="mb-12">
-          <h2 className="text-2xl font-bold text-gray-900 mb-4">
+          <h2 className="text-2xl font-bold text-fg mb-4">
             How to Delete Cookies from Your Browser
           </h2>
-          <p className="text-gray-600 mb-6">
+          <p className="text-fg-muted mb-6">
             You can manage and delete cookies using your browser's settings. Here's how to do it
             in the most common browsers:
           </p>
@@ -369,9 +369,9 @@ export default function CookiePolicy() {
                 ],
               },
             ].map((item) => (
-              <div key={item.browser} className="bg-white border border-gray-200 rounded-lg p-6">
-                <h3 className="font-semibold text-gray-900 mb-3">{item.browser}</h3>
-                <ol className="list-decimal list-inside space-y-2 text-sm text-gray-600">
+              <div key={item.browser} className="bg-surface border border-line rounded-lg p-6">
+                <h3 className="font-semibold text-fg mb-3">{item.browser}</h3>
+                <ol className="list-decimal list-inside space-y-2 text-sm text-fg-muted">
                   {item.steps.map((step, idx) => (
                     <li key={idx}>{step}</li>
                   ))}
@@ -383,19 +383,19 @@ export default function CookiePolicy() {
 
         {/* Contact Section */}
         <section className="mb-12">
-          <h2 className="text-2xl font-bold text-gray-900 mb-4">
+          <h2 className="text-2xl font-bold text-fg mb-4">
             Questions About Cookies?
           </h2>
-          <p className="text-gray-600 mb-4">
+          <p className="text-fg-muted mb-4">
             If you have any questions about our cookie usage or privacy practices, please contact us:
           </p>
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
-            <p className="text-gray-900">
+          <div className="bg-surface border border-line rounded-lg p-6">
+            <p className="text-fg">
               Email:
               {' '}
               <a
                 href="mailto:support@waddlebot.com"
-                className="font-medium text-blue-600 hover:text-blue-700"
+                className="font-medium text-interactive hover:text-interactive-hover"
               >
                 support@waddlebot.com
               </a>
@@ -404,7 +404,7 @@ export default function CookiePolicy() {
         </section>
 
         {/* Policy Version */}
-        <section className="border-t border-gray-200 pt-8 text-sm text-gray-500">
+        <section className="border-t border-line pt-8 text-sm text-fg-muted">
           <p>
             <strong>Policy Version:</strong>
             {' '}
