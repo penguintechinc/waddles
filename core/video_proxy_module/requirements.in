@@ -1,0 +1,43 @@
+# Web Framework
+quart==0.20.0
+hypercorn==0.17.3
+
+# gRPC
+# Range (not a hard ==1.68.1 pin) matching core/identity_core_module's proven
+# working range -- flask_core's opentelemetry-exporter-otlp-proto-grpc dep
+# needs protobuf>=6.33.5 (compiled gencode), but grpcio-tools==1.68.1 caps
+# protobuf<6, forcing a downgrade that crashes flask_core's import
+# (google.protobuf.runtime_version.VersionError) on container start.
+grpcio>=1.67.0,<1.77.0
+grpcio-tools>=1.67.0,<1.77.0
+protobuf>=5.29.6
+
+# Database
+pydal==20241111.1
+psycopg2-binary==2.9.12
+
+# Rate limiting (security.md A04) -- Valkey/Redis client for services/rate_limiting.py
+redis==5.0.1
+
+# HTTP Client
+aiohttp>=3.13.4
+# services/license_service.py imports httpx directly -- was missing from
+# this file entirely (pre-existing gap, unrelated to this change: any
+# `from services...` import already transitively fails without it, since
+# services/__init__.py eagerly imports license_service).
+httpx==0.27.2
+
+# Authentication & Security
+pyjwt>=2.13.0
+cryptography>=46.0.6
+
+# Storage (S3-compatible: SeaweedFS in dev/beta, real S3 in prod)
+boto3==1.43.85
+
+# Utilities
+python-dateutil==2.8.2
+python-json-logger==2.0.7
+
+# Testing
+pytest>=9.0.3
+pytest-asyncio>=0.23.0
