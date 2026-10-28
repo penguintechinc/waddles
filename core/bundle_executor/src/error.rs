@@ -76,6 +76,12 @@ pub enum ExecutorError {
     #[error("stage connection unavailable")]
     ConnectionUnavailable,
 
+    /// The outbound writer queue was full and this frame was refused:
+    /// either a sheddable (telemetry) frame dropped by policy, or a
+    /// must-deliver frame whose bounded wait expired (writer stalled).
+    #[error("stage writer queue full ({0})")]
+    WriterBackpressure(&'static str),
+
     /// Configuration failed to load or validate.
     #[error("configuration error: {0}")]
     Config(String),

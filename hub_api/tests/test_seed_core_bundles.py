@@ -597,6 +597,53 @@ async def test_seed_one_self_heals_permission_grants_for_a_pre_catalog_bundle(
     )
 
 
+async def test_seed_one_community_grant_carries_declared_economy_bounds(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The auto-grant stores the manifest's `max_bet`/`max_amount`, not `{}` (= the 1000 ceiling).
+
+    `bundle_capability_gate::economy_amount_bound` reads the per-call bound from the GRANT's
+    `params_json` and treats an absent value as the catalog ceiling, so a SYSTEM grant written
+    with `params_by_id=None` silently dropped every declared bound (`steal` declares 10,
+    `jackpot` 500). Non-economy permissions keep their previous empty params.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    community_id = await _seed_community(install_dal)
+    manifest = {
+        **_MANIFEST,
+        "permissions": [
+            {"id": "storage.kv", "justification": "Persists per-community cooldowns."},
+            {"id": "identity.resolve", "justification": "Resolves the actor to a uuid."},
+            {
+                "id": "economy.wager",
+                "justification": "Settles the stake atomically.",
+                "params": {"max_bet": 25},
+            },
+            {
+                "id": "economy.transfer",
+                "justification": "Pays the penalty to the victim.",
+                "params": {"max_amount": 10},
+            },
+        ],
+    }
+    entry = _write_bundle(tmp_path, manifest=manifest, community_id=community_id)
+
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+
+    rows = await install_dal(
+        (install_dal.community_permission_grants.app_id == entry.app_id)
+        & (install_dal.community_permission_grants.community_id == community_id)
+        & (install_dal.community_permission_grants.revoked_at == None)  # noqa: E711
+    ).select()
+    params = {r.permission_id: r.params_json for r in rows}
+    assert set(params) == {"storage.kv", "identity.resolve", "economy.wager", "economy.transfer"}
+    assert params["economy.wager"] == {"max_bet": 25}
+    assert params["economy.transfer"] == {"max_amount": 10}
+    assert params["storage.kv"] in ({}, None)
+    assert params["identity.resolve"] in ({}, None)
+
+
 async def test_seed_one_new_digest_publishes_a_new_version(
     install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

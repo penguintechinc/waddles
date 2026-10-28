@@ -33,6 +33,14 @@ slack-sdk>=3.44.1
 # TLS, stdlib only), installed as a separate package step (Dockerfile),
 # same pattern as flask_core above.
 
+# Identity-field envelope encryption (identity_crypto.py) -- AES-256-GCM
+# via `cryptography`'s AEAD primitives (rustls-backed OpenSSL alternative
+# already used elsewhere in this org, security.md); prometheus_client for
+# the encryption-outcome counter, mirroring flask_core.custom_metrics'
+# existing direct dependency.
+cryptography>=42.0.0
+prometheus_client>=0.20.0
+
 # Environment
 python-dotenv>=1.0.0
 

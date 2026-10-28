@@ -117,11 +117,12 @@ function VendorSubmissions() {
       <div className="bg-navy-800 border border-navy-700 rounded-lg p-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">Status</label>
+            <label htmlFor="vendor-submissions-status" className="block text-sm font-medium text-navy-300 mb-2">Status</label>
             <select
+              id="vendor-submissions-status"
               value={filters.status}
               onChange={(e) => setFilters({ ...filters, status: e.target.value })}
-              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:outline-none focus:border-gold-400"
+              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:border-gold-400"
             >
               <option value="all">All Statuses</option>
               <option value="pending">Pending</option>
@@ -131,11 +132,12 @@ function VendorSubmissions() {
             </select>
           </div>
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">Sort By</label>
+            <label htmlFor="vendor-submissions-sort-by" className="block text-sm font-medium text-navy-300 mb-2">Sort By</label>
             <select
+              id="vendor-submissions-sort-by"
               value={filters.sortBy}
               onChange={(e) => setFilters({ ...filters, sortBy: e.target.value })}
-              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:outline-none focus:border-gold-400"
+              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:border-gold-400"
             >
               <option value="newest">Newest First</option>
               <option value="oldest">Oldest First</option>

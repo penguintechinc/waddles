@@ -99,11 +99,13 @@ Notes:
 | `waddles_executor_unloads_total` | counter | `result` | `evicted`, `still_referenced`, `orphaned`, `unknown_bundle` |
 | `waddles_executor_orphaned_unloads_total` | counter | — | duplicate/orphaned unloads (replaces the unexported `orphaned_unload_total` atomic, which still counts) |
 | `waddles_executor_connector_calls_total` | counter | `app_id, export, outcome` | connector-world export calls (`on-connect`/`on-frame`/`on-heartbeat-due`/`on-disconnect`); `outcome`: `ok`, `guest_error`, `fuel_exhausted`, `deadline`, `memory_limit`, `trap`, `pool_exhausted`, `instantiate_failed`, `internal`. No connection/source label (unbounded cardinality) |
+| `waddles_executor_wire_frames_shed_total` | counter | `class` | sheddable frames (guest `log` host-calls) dropped because the bounded outbound writer queue (256 frames) was full; `class`: `log` |
+| `waddles_executor_wire_backpressure_total` | counter | `outcome` | must-deliver frames (replies, state-mutating host-calls) that met a full writer queue; `outcome`: `waited`, `timeout` (10 s bound exceeded, frame refused) |
 | `waddles_executor_connector_call_seconds` | histogram | `app_id, export, outcome` | one connector export call, slot wait excluded |
 | `waddles_executor_invoke_seconds` | histogram | `app_id, export, result` | one invoke end to end; `result` is `ok` or the wire error code (`executor_deadline`, `memory_limit`, `wasm_trap`, `unknown_bundle`, ...) |
 | `waddles_executor_instantiate_seconds` | histogram | `app_id` | component instantiation per invoke |
 | `waddles_executor_guest_seconds` | histogram | `app_id, export` | guest export execution, host-call waits included; recorded for trapped guests too |
-| `waddles_executor_host_call_seconds` | histogram | `capability, op, result` | host-call round trip executor→stage→executor; `result`: `ok`, `denied`, `error`, `connection_lost`, `malformed` |
+| `waddles_executor_host_call_seconds` | histogram | `capability, op, result` | host-call round trip executor→stage→executor; `result`: `ok`, `denied`, `error`, `connection_lost`, `backpressure`, `malformed` |
 | `waddles_executor_sandbox_trip_total` | counter | `app_id, limit` | `timeout`, `memory`, `trap` |
 | `waddles_executor_invocations_active` | gauge (up/down) | — | guests currently executing (decrements on every exit path) |
 | `waddles_executor_bundles_loaded` | gauge | — | resident compiled components (distinct digests); explicit `0` after a disconnect wipe |

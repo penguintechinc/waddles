@@ -171,31 +171,33 @@ function InventoryMyItems() {
 
       {showModal && selectedCheckout && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-md mx-4">
-            <h2 className="text-lg font-semibold text-sky-100 mb-4">Return: {selectedCheckout.item_name}</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="inventory-my-items-dialog-1-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-md mx-4">
+            <h2 id="inventory-my-items-dialog-1-title" className="text-lg font-semibold text-sky-100 mb-4">Return: {selectedCheckout.item_name}</h2>
             <form onSubmit={handleReturn} className="space-y-4">
               <div>
-                <label className="block text-sm text-navy-400 mb-1">Quantity to Return</label>
+                <label htmlFor="inventory-my-items-quantity-to-return" className="block text-sm text-navy-400 mb-1">Quantity to Return</label>
                 <input
+                  id="inventory-my-items-quantity-to-return"
                   type="number"
                   min={1}
                   max={selectedCheckout.quantity_checked_out}
                   value={returnQty}
                   onChange={(e) => setReturnQty(Number(e.target.value))}
-                  className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 focus:outline-none focus:border-gold-500"
+                  className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 focus:border-gold-500"
                   required
                 />
               </div>
               <div>
-                <label className="block text-sm text-navy-400 mb-1">
+                <label htmlFor="inventory-my-items-notes-optional" className="block text-sm text-navy-400 mb-1">
                   Notes <span className="text-navy-500">(optional)</span>
                 </label>
                 <textarea
+                  id="inventory-my-items-notes-optional"
                   value={returnNotes}
                   onChange={(e) => setReturnNotes(e.target.value)}
                   rows={3}
                   placeholder="Any notes about the return..."
-                  className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 placeholder-navy-500 focus:outline-none focus:border-gold-500 resize-none"
+                  className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 placeholder-navy-500 focus:border-gold-500 resize-none"
                 />
               </div>
               {returnError && <div className="text-red-400 text-sm">{returnError}</div>}

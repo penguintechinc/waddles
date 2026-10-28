@@ -75,6 +75,11 @@ from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 #: No sub-modules declared for v1 -- every `VERBS` token other than
 #: `list`/`set` resolves to a usage reply (see `_resolve_command`), never a
 #: silent drop.
@@ -93,7 +98,7 @@ MAX_COOLDOWN_SECONDS = 3600
 _COOLDOWN_CONFIG_KEY = "rps.config.cooldown"
 
 #: The three real moves, in a fixed order used for the bot's uniformly
-#: random pick (`random.choice`, mockable in tests -- see
+#: random pick (`_RNG.choice`, mockable in tests -- see
 #: `tests/test_app.py::_force_bot_choice`).
 _MOVES: tuple[str, ...] = ("rock", "paper", "scissors")
 
@@ -400,7 +405,7 @@ async def _handle_play(
         channel_id=channel_id,
     )
 
-    bot_choice = random.choice(_MOVES)  # noqa: S311 -- a game, not a security decision
+    bot_choice = _RNG.choice(_MOVES)
     outcome = _resolve_outcome(normalized, bot_choice)
 
     if outcome == "win":

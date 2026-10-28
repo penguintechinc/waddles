@@ -38,6 +38,7 @@ from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_response
 
+from services import discord_guild_roles as roles_svc
 from services import guild_pairing as pairing_svc
 from services.community_common import community_in_tenant
 from services.current_user import get_current_user_id
@@ -88,6 +89,14 @@ class RoleSyncBindingListResponse:
     bindings: list[pairing_svc.RoleSyncBinding]
 
 
+@dataclass(slots=True, frozen=True)
+class DiscordGuildRolesResponse:
+    """Discord guild roles response envelope (dropdown source for role-sync mapping)."""
+
+    success: bool
+    roles: list[roles_svc.DiscordRole]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -124,8 +133,8 @@ async def _feature_gate_and_tenant_check(community_id: int) -> tuple[dict[str, o
 
 
 @guild_pairing_bp.route("/communities/<int:community_id>/guild-pairings", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:read")  # type: ignore[misc]
 @validate_response(GuildPairingListResponse)
 async def list_pairings(
     community_id: int,
@@ -139,8 +148,8 @@ async def list_pairings(
 
 
 @guild_pairing_bp.route("/communities/<int:community_id>/guild-pairings", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
 @validate_response(GuildPairingResponse, status_code=201)
 async def create_pairing(
     community_id: int,
@@ -178,8 +187,8 @@ async def create_pairing(
 @guild_pairing_bp.route(
     "/communities/<int:community_id>/guild-pairings/<int:pairing_id>", methods=["PATCH"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
 @validate_response(GuildPairingResponse)
 async def update_pairing(
     community_id: int, pairing_id: int
@@ -213,8 +222,8 @@ async def update_pairing(
 @guild_pairing_bp.route(
     "/communities/<int:community_id>/guild-pairings/<int:pairing_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
 async def delete_pairing(community_id: int, pairing_id: int) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/guild-pairings/<pairing_id>`."""
     gate_error = await _feature_gate_and_tenant_check(community_id)
@@ -236,8 +245,8 @@ async def delete_pairing(community_id: int, pairing_id: int) -> tuple[Any, int]:
     "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
     methods=["GET"],
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:read")  # type: ignore[misc]
 @validate_response(RoleSyncBindingListResponse)
 async def list_bindings(
     community_id: int, pairing_id: int
@@ -258,8 +267,8 @@ async def list_bindings(
     "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
     methods=["POST"],
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
 @validate_response(RoleSyncBindingResponse, status_code=201)
 async def create_binding(
     community_id: int, pairing_id: int
@@ -292,8 +301,8 @@ async def create_binding(
     "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings/<int:binding_id>",
     methods=["DELETE"],
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
 async def delete_binding(community_id: int, pairing_id: int, binding_id: int) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/guild-pairings/<pairing_id>/role-bindings/<binding_id>`."""
     gate_error = await _feature_gate_and_tenant_check(community_id)
@@ -310,3 +319,28 @@ async def delete_binding(community_id: int, pairing_id: int, binding_id: int) ->
 
 
 BLUEPRINTS: list[Blueprint] = [guild_pairing_bp]
+
+
+# ---------------------------------------------------------------------------
+# Discord guild roles (role-sync mapping dropdown source)
+# ---------------------------------------------------------------------------
+
+
+@guild_pairing_bp.route("/communities/<int:community_id>/discord/roles", methods=["GET"])
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@validate_response(DiscordGuildRolesResponse)
+async def list_discord_roles(
+    community_id: int,
+) -> DiscordGuildRolesResponse | tuple[dict[str, object], int]:
+    """`GET /api/v1/communities/<id>/discord/roles[?guild_id=]` -- the paired guild's roles."""
+    gate_error = await _feature_gate_and_tenant_check(community_id)
+    if gate_error is not None:
+        return gate_error
+    try:
+        roles = await roles_svc.list_guild_roles(
+            _dal(), community_id, guild_id=request.args.get("guild_id") or None
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return DiscordGuildRolesResponse(success=True, roles=roles)

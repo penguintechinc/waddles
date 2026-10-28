@@ -26,6 +26,8 @@ from tests.sso.conftest import Entitlements
 
 ADMIN_FIELDS = {
     "id",
+    "publicId",
+    "kind",
     "provider",
     "resourceType",
     "status",
@@ -78,12 +80,15 @@ class TestDescriptors:
             "capabilities",
             "requiredScopes",
             "refreshable",
+            "kind",
+            "secretSchemes",
             "credentialFields",
             "metadataFields",
         }
         assert twitch["provider"] == "twitch" and twitch["installKind"] == "credentials"
         assert twitch["capabilities"] == ["action_relay", "chat_ingest"]
         assert twitch["requiredScopes"] == ["chat:read"]
+        assert twitch["kind"] == 1 and twitch["secretSchemes"] == []
         assert [f["name"] for f in twitch["credentialFields"]] == ["access_token", "refresh_token"]
         assert [f["required"] for f in twitch["credentialFields"]] == [True, False]
         (channel,) = twitch["metadataFields"]
@@ -526,7 +531,7 @@ class TestCrudOverHttp:
 
 def _service_token(
     issuer: ServiceJwtIssuer,
-    scope: str = "connections:resolve",
+    scope: str = "connections:list",
     service_id: str = SYSTEM_SERVICE_ID,
 ) -> str:
     return issuer.issue(service_id, scope)
@@ -534,6 +539,19 @@ def _service_token(
 
 def _svc(issuer: ServiceJwtIssuer, **kwargs: Any) -> dict[str, str]:
     return {"Authorization": f"Bearer {_service_token(issuer, **kwargs)}"}
+
+
+def _bound(
+    issuer: ServiceJwtIssuer, community_id: int, connection_id: int | None = None
+) -> dict[str, str]:
+    """Bearer for a community-bound ``connections:resolve`` token (what resolve now requires)."""
+    extra = {"community": community_id}
+    if connection_id is not None:
+        extra["conn"] = connection_id
+    token, _claims = issuer.issue_with_claims(
+        SYSTEM_SERVICE_ID, "connections:resolve", extra_claims=extra
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 INTERNAL = "/api/v1/internal"
@@ -564,6 +582,7 @@ class TestInternalApi:
             "expiresAt",
             "updatedAt",
             "metadata",
+            "kind",
         }
         assert (item["connectionId"], item["communityId"], item["resourceId"]) == (
             cid,
@@ -576,7 +595,7 @@ class TestInternalApi:
 
         resolved = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/{cid}/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         assert resolved.status_code == 200
         out = await resolved.get_json()
@@ -585,10 +604,14 @@ class TestInternalApi:
             "connectionId",
             "communityId",
             "provider",
+            "kind",
             "accessToken",
             "expiresAt",
+            "endpoint",
+            "secret",
             "metadata",
         }
+        assert (out["kind"], out["secret"]) == (1, None)
         assert out["accessToken"] == bot_tokens[0]
         assert bot_tokens[1] not in await resolved.get_data(
             as_text=True
@@ -612,7 +635,7 @@ class TestInternalApi:
         clock.advance(seconds=14000)
         resolved = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/{cid}/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         assert resolved.status_code == 200 and fake_twitch.refresh_calls == 1
         assert (await resolved.get_json())["accessToken"] != bot_tokens[0]
@@ -659,7 +682,7 @@ class TestInternalApi:
                     SYSTEM_SERVICE_ID,
                     "waddlebot",
                     "svc-ingest",
-                    frozenset({"connections:resolve"}),
+                    frozenset({"connections:list"}),
                     tenant="acme-corp",
                 )
             },
@@ -735,13 +758,16 @@ class TestInternalApi:
             headers=admin_headers(pc_db),
             data=json.dumps({"enabled": False}),
         )
-        refused = await client.post(url, headers=_svc(service_issuer))
+        refused = await client.post(url, headers=_bound(service_issuer, pc_db.seed.community_id))
         assert refused.status_code == 409
-        err = (await refused.get_json())["error"]
-        assert (err["code"], err["details"]) == ("CONNECTION_NOT_USABLE", {"reason": "disabled"})
+        assert await refused.get_json() == {
+            "success": False,
+            "error": "not_usable",
+            "reason": "disabled",
+        }
         missing = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/777/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         assert missing.status_code == 404
 
@@ -759,7 +785,7 @@ class TestInternalApi:
         fake_twitch.down = True
         response = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/{cid}/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         assert response.status_code == 502
         assert (await response.get_json())["error"]["code"] == "PROVIDER_UNAVAILABLE"
@@ -775,7 +801,7 @@ class TestInternalApi:
         )
         response = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/{cid}/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         assert response.status_code == 500
         text = await response.get_data(as_text=True)
@@ -803,7 +829,7 @@ class TestHttpDoesNotLeakIntoLogs:
         cid = (await created.get_json())["connection"]["id"]
         resolved = await client.post(
             f"{INTERNAL}/communities/{pc_db.seed.community_id}/provider-connections/{cid}/resolve",
-            headers=_svc(service_issuer),
+            headers=_bound(service_issuer, pc_db.seed.community_id),
         )
         await client.get(_base(pc_db), headers=admin_headers(pc_db))
         await _create(client, pc_db, ("bogus-token", None))
@@ -820,3 +846,257 @@ class TestHttpDoesNotLeakIntoLogs:
         for secret in (*bot_tokens, token, "bogus-token", _service_token(service_issuer)):
             assert secret not in text
         assert BOT.login not in text and CHANNEL_LOGIN not in text
+
+
+# --------------------------------------------------------------------------
+# Static-secret kinds (migration 0064) over HTTP
+# --------------------------------------------------------------------------
+
+STATIC_FLAG = "waddles.integrations.static_connections"
+SECRET_TOKEN = "HTTP-STATIC-SECRET-abcdef0123456789"
+
+
+def _static_body(**overrides: Any) -> str:
+    body: dict[str, Any] = {
+        "provider": "external_http",
+        "secret": {"scheme": 1, "document": {"token": SECRET_TOKEN}},
+        "metadata": {"url": "https://hooks.example.com/waddles"},
+    }
+    body.update(overrides)
+    return json.dumps(body)
+
+
+async def _create_static_http(client: Any, db: Any, **overrides: Any) -> Any:
+    return await client.post(_base(db), headers=admin_headers(db), data=_static_body(**overrides))
+
+
+class TestStaticConnectionsApi:
+    async def test_creating_static_kind_requires_flag(
+        self, static_client: Any, pc_db: Any, entitlements: Entitlements
+    ) -> None:
+        entitlements.flag_off(STATIC_FLAG)
+        response = await _create_static_http(static_client, pc_db)
+        assert response.status_code == 402
+        assert (await response.get_json())["error"]["code"] == "FEATURE_NOT_ENABLED"
+        assert await raw_rows(pc_db, "platform_connections") == []
+        # the base feature is still on: listing works and nothing static is advertised
+        listing = await static_client.get(
+            "/api/v1/connection-providers", headers=admin_headers(pc_db)
+        )
+        assert [p["provider"] for p in (await listing.get_json())["providers"]] == ["twitch"]
+
+    async def test_the_free_tier_cannot_create_a_static_connection(
+        self, static_client: Any, pc_db: Any, entitlements: Entitlements
+    ) -> None:
+        entitlements.set_tier("free")
+        assert (await _create_static_http(static_client, pc_db)).status_code == 402
+
+    async def test_static_connection_secret_never_in_admin_dto_or_list(
+        self, static_client: Any, pc_db: Any
+    ) -> None:
+        created = await _create_static_http(static_client, pc_db)
+        assert created.status_code == 201
+        raw_body = await created.get_data(as_text=True)
+        body = json.loads(raw_body)
+        conn = body["connection"]
+        assert set(body) == {"success", "connection"}
+        assert set(conn) == ADMIN_FIELDS  # an extra field fails loudly (regression field-set test)
+        assert (conn["provider"], conn["resourceType"], conn["kind"]) == (
+            "external_http",
+            "external_http",
+            2,
+        )
+        assert conn["hasRefreshToken"] is False and conn["usable"] is True
+        assert conn["capabilities"] == ["dispatch"]
+        assert set(conn["metadata"]) == {"url", "secret_scheme", "capabilities"}
+        assert conn["publicId"] == (await raw_rows(pc_db, "platform_connections"))[0]["public_id"]
+        listed = await static_client.get(_base(pc_db), headers=admin_headers(pc_db))
+        got = await static_client.get(f"{_base(pc_db)}/{conn['id']}", headers=admin_headers(pc_db))
+        for response in (listed, got):
+            text = await response.get_data(as_text=True)
+            assert SECRET_TOKEN not in text and "token" not in json.loads(text).get(
+                "connection", {}
+            )
+        assert set((await listed.get_json())["connections"][0]) == ADMIN_FIELDS
+        assert SECRET_TOKEN not in raw_body
+
+    async def test_the_descriptor_advertises_kind_and_schemes(
+        self, static_client: Any, pc_db: Any
+    ) -> None:
+        response = await static_client.get(
+            "/api/v1/connection-providers", headers=admin_headers(pc_db)
+        )
+        by_name = {p["provider"]: p for p in (await response.get_json())["providers"]}
+        assert set(by_name) == {"twitch", "external_http", "aws_lambda", "gcp_function"}
+        assert (by_name["external_http"]["kind"], by_name["external_http"]["secretSchemes"]) == (
+            2,
+            [1, 2, 3],
+        )
+        assert by_name["aws_lambda"]["secretSchemes"] == [4]
+        assert by_name["gcp_function"]["secretSchemes"] == [5]
+        assert by_name["external_http"]["credentialFields"] == []
+
+    async def test_unknown_provider_still_unsupported(self, static_client: Any, pc_db: Any) -> None:
+        response = await _create_static_http(static_client, pc_db, provider="carrier_pigeon")
+        assert response.status_code == 400
+        assert (await response.get_json())["error"]["code"] == "UNKNOWN_PROVIDER"
+
+    async def test_the_credentials_and_secret_shapes_are_not_interchangeable(
+        self, static_client: Any, pc_db: Any, bot_tokens: Any
+    ) -> None:
+        both = await _create_static_http(static_client, pc_db, credentials={"access_token": "x"})
+        assert both.status_code == 400
+        no_secret = await static_client.post(
+            _base(pc_db),
+            headers=admin_headers(pc_db),
+            data=json.dumps(
+                {"provider": "external_http", "metadata": {"url": "https://a.example"}}
+            ),
+        )
+        assert no_secret.status_code == 400
+        oauth_with_secret = await _create(
+            static_client, pc_db, bot_tokens, secret={"scheme": 1, "document": {"token": "x"}}
+        )
+        assert oauth_with_secret.status_code == 400
+        oauth_without_credentials = await static_client.post(
+            _base(pc_db),
+            headers=admin_headers(pc_db),
+            data=json.dumps({"provider": "twitch", "metadata": {"channel_login": CHANNEL_LOGIN}}),
+        )
+        assert oauth_without_credentials.status_code == 400
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"secret": {"scheme": 1, "document": {"token": "x", "extra": "y"}}},
+            {"secret": {"scheme": 1, "document": {}}},
+            {"secret": {"scheme": 99, "document": {"token": "x"}}},
+            {"secret": {"scheme": 4, "document": {"access_key_id": "a", "secret_access_key": "b"}}},
+            {"secret": {"scheme": "bearer", "document": {"token": "x"}}},
+            {"secret": {"scheme": 1, "document": {"token": 5}}},
+            {"secret": {"scheme": 1, "document": {"token": "x"}, "extra": 1}},
+            {"metadata": {"url": "http://insecure.example"}},
+            {"metadata": {"url": "https://169.254.169.254/latest"}},
+            {"metadata": {}},
+        ],
+    )
+    async def test_hostile_or_malformed_static_bodies_are_400_and_store_nothing(
+        self, static_client: Any, pc_db: Any, overrides: dict[str, Any]
+    ) -> None:
+        response = await _create_static_http(static_client, pc_db, **overrides)
+        assert response.status_code == 400
+        assert SECRET_TOKEN not in await response.get_data(as_text=True)
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    async def test_aws_and_gcp_create_over_http(self, static_client: Any, pc_db: Any) -> None:
+        aws = await _create_static_http(
+            static_client,
+            pc_db,
+            provider="aws_lambda",
+            secret={
+                "scheme": 4,
+                "document": {"access_key_id": "AKIAX", "secret_access_key": "S3CR3T"},
+            },
+            metadata={"region": "us-east-1", "function": "hook"},
+        )
+        assert aws.status_code == 201 and (await aws.get_json())["connection"]["kind"] == 3
+        gcp = await _create_static_http(
+            static_client,
+            pc_db,
+            provider="gcp_function",
+            secret={"scheme": 5, "document": {"client_email": "a@b.c", "private_key": "PEM"}},
+            metadata={"project": "my-project-1", "region": "us-central1", "function": "hook"},
+        )
+        assert gcp.status_code == 201 and (await gcp.get_json())["connection"]["kind"] == 4
+        bad_region = await _create_static_http(
+            static_client,
+            pc_db,
+            provider="aws_lambda",
+            secret={"scheme": 4, "document": {"access_key_id": "A", "secret_access_key": "B"}},
+            metadata={"region": "us-east-1\n", "function": "hook"},
+        )
+        assert bad_region.status_code == 400
+
+    async def test_auth_chain_applies_to_static_create(
+        self, static_client: Any, pc_db: Any
+    ) -> None:
+        assert (await static_client.post(_base(pc_db), data=_static_body())).status_code == 401
+        no_scope = admin_headers(pc_db, scope="*:read")
+        assert (
+            await static_client.post(_base(pc_db), headers=no_scope, data=_static_body())
+        ).status_code == 403
+        other = await static_client.post(
+            _base(pc_db, pc_db.seed.other_community_id),
+            headers=admin_headers(pc_db),
+            data=_static_body(),
+        )
+        assert other.status_code == 403
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    async def test_patching_a_static_link_is_refused_but_the_switch_works(
+        self, static_client: Any, pc_db: Any
+    ) -> None:
+        cid = (await (await _create_static_http(static_client, pc_db)).get_json())["connection"][
+            "id"
+        ]
+        url = f"{_base(pc_db)}/{cid}"
+        refused = await static_client.patch(
+            url,
+            headers=admin_headers(pc_db),
+            data=json.dumps({"credentials": {"access_token": "x"}}),
+        )
+        assert refused.status_code == 400
+        off = await static_client.patch(
+            url, headers=admin_headers(pc_db), data=json.dumps({"enabled": False})
+        )
+        assert off.status_code == 200 and (await off.get_json())["connection"]["enabled"] is False
+        deleted = await static_client.delete(url, headers=admin_headers(pc_db))
+        assert deleted.status_code == 200 and (await deleted.get_json())["purged"] is True
+
+
+class TestValidationErrorsDoNotEchoSecrets:
+    """A secret in a position that fails pydantic validation must not come back in the 400 body."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            # secret string in the int `scheme` field of SecretBody
+            {
+                "provider": "external_http",
+                "secret": {"scheme": "LEAKME-secret-value", "document": {"token": "x"}},
+                "metadata": {"url": "https://a.example"},
+            },
+            # non-string document value carrying a secret-looking structure
+            {
+                "provider": "external_http",
+                "secret": {"scheme": 1, "document": {"token": {"nested": "LEAKME-secret-value"}}},
+                "metadata": {"url": "https://a.example"},
+            },
+            # unknown key whose NAME is the secret (extra=forbid reports the key)
+            {
+                "provider": "external_http",
+                "secret": {"scheme": 1, "document": {"token": "x"}, "LEAKME-secret-value": 1},
+                "metadata": {"url": "https://a.example"},
+            },
+            # CredentialsBody: secret in a position that must be str|None
+            {
+                "provider": "twitch",
+                "credentials": {"access_token": ["LEAKME-secret-value"]},
+                "metadata": {"channel_login": "x"},
+            },
+            {
+                "provider": "twitch",
+                "credentials": {"access_token": "ok", "LEAKME-secret-value": "x"},
+                "metadata": {"channel_login": "x"},
+            },
+        ],
+    )
+    async def test_the_error_body_never_contains_the_submitted_value(
+        self, static_client: Any, pc_db: Any, payload: dict[str, Any]
+    ) -> None:
+        response = await static_client.post(
+            _base(pc_db), headers=admin_headers(pc_db), data=json.dumps(payload)
+        )
+        assert response.status_code == 400
+        assert "LEAKME" not in await response.get_data(as_text=True)

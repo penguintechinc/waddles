@@ -294,8 +294,8 @@ async def _audit(tenant_id: int, action: str, details: dict[str, Any]) -> None:
 
 
 @tenant_kms_bp.route("/<tenant_slug>/kms", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(KMS_ADMIN_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(KMS_ADMIN_SCOPE)  # type: ignore[misc]
 @validate_response(KmsStatusResponse)
 async def get_kms_status(
     tenant_slug: str,
@@ -316,8 +316,8 @@ async def get_kms_status(
 
 
 @tenant_kms_bp.route("/<tenant_slug>/kms", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(KMS_ADMIN_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(KMS_ADMIN_SCOPE)  # type: ignore[misc]
 @validate_request(KmsConfigRequest)
 @validate_response(KmsConfigResponse)
 async def put_kms_config(
@@ -345,8 +345,8 @@ async def put_kms_config(
 
 
 @tenant_kms_bp.route("/<tenant_slug>/kms/activate", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(KMS_ADMIN_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(KMS_ADMIN_SCOPE)  # type: ignore[misc]
 @validate_response(KmsActivateResponse)
 async def activate_kms(
     tenant_slug: str,
@@ -370,8 +370,8 @@ async def activate_kms(
 
 
 @tenant_kms_bp.route("/<tenant_slug>/kms", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(KMS_ADMIN_SCOPE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(KMS_ADMIN_SCOPE)  # type: ignore[misc]
 @validate_response(KmsDisableResponse)
 async def disable_kms(
     tenant_slug: str,

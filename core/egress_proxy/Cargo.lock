@@ -1213,8 +1213,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-bundle-host"
-version = "0.2.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=b063b7ba49f8544f95dba0d23dcbe0e109b7b16c#b063b7ba49f8544f95dba0d23dcbe0e109b7b16c"
+version = "0.3.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=0b97183fa7ae7c91464bd6539821ad0a091d5764#0b97183fa7ae7c91464bd6539821ad0a091d5764"
 dependencies = [
  "regex",
  "serde",
@@ -1227,7 +1227,7 @@ dependencies = [
 [[package]]
 name = "penguin-logging"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=69e740ce5411d8cd005241fbd829c62e68efb96e#69e740ce5411d8cd005241fbd829c62e68efb96e"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=0a320ba2b08a6850b66e3062f6a9dfb44fec6950#0a320ba2b08a6850b66e3062f6a9dfb44fec6950"
 dependencies = [
  "axum",
  "opentelemetry",
@@ -1663,9 +1663,9 @@ checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustls"
-version = "0.23.46"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",
@@ -1731,7 +1731,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.22.1",
+ "base64 0.23.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
@@ -2067,9 +2067,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",

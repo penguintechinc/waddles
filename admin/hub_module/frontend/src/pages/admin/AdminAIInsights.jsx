@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { adminApi } from '../../services/api';
+import { onActivate } from '../../components/ui/a11y';
 
 const INSIGHT_TYPES = [
   { id: 'all', name: 'All Insights', icon: '🔍', color: 'bg-sky-500/20 text-sky-300 border-sky-500/30' },
@@ -28,6 +29,16 @@ function AdminAIInsights() {
   useEffect(() => {
     filterInsights();
   }, [insights, selectedType, currentPage]);
+
+  // Escape closes the detail dialog (keyboard users have no backdrop to click).
+  useEffect(() => {
+    if (!selectedInsight) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') closeModal();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [selectedInsight]);
 
   async function fetchInsights() {
     setLoading(true);
@@ -184,7 +195,7 @@ function AdminAIInsights() {
           {currentInsights.map((insight) => {
             const typeConfig = getInsightTypeConfig(insight.type);
             return (
-              <div key={insight.id} className="card p-6 hover:border-sky-500/50 transition-all cursor-pointer"
+              <div role="button" tabIndex={0} onKeyDown={onActivate(() => handleViewDetails(insight))} key={insight.id} className="card p-6 hover:border-sky-500/50 transition-all cursor-pointer"
                 onClick={() => handleViewDetails(insight)}>
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
@@ -236,7 +247,7 @@ function AdminAIInsights() {
       {totalPages > 1 && (
         <div className="flex justify-center items-center gap-2 mt-8">
           <button
-            onClick={() => goToPage(currentPage - 1)}
+            onClick={() => goToPage(currentPage - 1)} aria-label="Previous page"
             disabled={currentPage === 1}
             className="btn btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -278,7 +289,7 @@ function AdminAIInsights() {
           </div>
 
           <button
-            onClick={() => goToPage(currentPage + 1)}
+            onClick={() => goToPage(currentPage + 1)} aria-label="Next page"
             disabled={currentPage === totalPages}
             className="btn btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -292,8 +303,10 @@ function AdminAIInsights() {
       {/* Detail Modal */}
       {selectedInsight && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          role="presentation"
           onClick={closeModal}>
           <div className="bg-navy-900 rounded-lg border border-navy-700 max-w-4xl w-full max-h-[90vh] overflow-y-auto"
+            role="dialog" aria-modal="true" aria-labelledby="insight-detail-title" tabIndex={-1}
             onClick={(e) => e.stopPropagation()}>
             <div className="sticky top-0 bg-navy-900 border-b border-navy-700 p-6 flex items-center justify-between">
               <div>
@@ -308,11 +321,12 @@ function AdminAIInsights() {
                     {formatDate(selectedInsight.created_at)}
                   </span>
                 </div>
-                <h2 className="text-2xl font-bold text-sky-100">
+                <h2 id="insight-detail-title" className="text-2xl font-bold text-sky-100">
                   {selectedInsight.title || 'Untitled Insight'}
                 </h2>
               </div>
               <button
+                aria-label="Close insight details"
                 onClick={closeModal}
                 className="text-navy-400 hover:text-sky-100 transition-colors"
               >

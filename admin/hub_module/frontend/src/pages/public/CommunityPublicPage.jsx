@@ -1,8 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { publicApi, communityApi } from '../../services/api';
+import { publicApi } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { Alert, NotAvailableYet } from '../../components/ui';
+import { getErrorMessage } from '../../components/ui/errors';
+import { useMyJoinRequest, useSubmitJoinRequest } from '../../hooks/useJoinRequests';
 import {
   GlobeAltIcon,
   LockClosedIcon,
@@ -35,9 +38,14 @@ function CommunityPublicPage() {
   const [community, setCommunity] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [joining, setJoining] = useState(false);
-  const [joinResult, setJoinResult] = useState(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
+  const communityId = Number(id);
+  // hub-api serves join REQUESTS for approval-mode communities only; there is no direct-join
+  // route for open communities (see UNSERVED_FEATURES['community-open-join']).
+  const requiresApproval = community?.joinMode === 'approval';
+  const submitJoin = useSubmitJoinRequest(communityId);
+  const myRequest = useMyJoinRequest(communityId, isAuthenticated && requiresApproval);
+  const requestStatus = myRequest.data?.status;
 
   useEffect(() => {
     async function fetchCommunity() {
@@ -57,32 +65,18 @@ function CommunityPublicPage() {
     fetchCommunity();
   }, [id]);
 
-  const handleJoin = async (data = {}) => {
+  const handleJoin = (data = {}) => {
     if (!isAuthenticated) {
       navigate('/login', { state: { returnTo: `/communities/${id}` } });
-      return;
+      return Promise.resolve();
     }
-
-    setJoining(true);
-    setJoinResult(null);
-
-    try {
-      const response = await communityApi.join(id, data.message || '');
-      setJoinResult(response.data);
-      setShowJoinModal(false);
-
-      if (response.data.joined) {
-        // Redirect to dashboard after successful join
-        setTimeout(() => navigate(`/dashboard/community/${id}`), 1500);
-      }
-    } catch (err) {
-      setJoinResult({
-        success: false,
-        message: err.response?.data?.error?.message || 'Failed to join community',
-      });
-    } finally {
-      setJoining(false);
-    }
+    // The failure is not swallowed: it is held in `submitJoin.error` and rendered as an Alert.
+    // Resolving either way lets FormModalBuilder close the modal so the result is visible
+    // (it keeps the modal open and only logs when its onSubmit rejects).
+    return submitJoin.mutateAsync(data.message || '').then(
+      () => undefined,
+      () => undefined,
+    );
   };
 
   if (loading) {
@@ -194,20 +188,60 @@ function CommunityPublicPage() {
               <span>Since {new Date(community.createdAt).toLocaleDateString()}</span>
             </div>
           </div>
-          <button
-            onClick={() => community.joinMode === 'approval' ? setShowJoinModal(true) : handleJoin()}
-            disabled={joining}
-            className="btn btn-primary mt-4 md:mt-0 disabled:opacity-50"
-          >
-            {joining ? 'Joining...' : community.joinMode === 'approval' ? 'Request to Join' : 'Join Community'}
-          </button>
+          {requiresApproval && requestStatus !== 'approved' && (
+            <button
+              type="button"
+              onClick={() => (isAuthenticated ? setShowJoinModal(true) : handleJoin())}
+              disabled={submitJoin.isPending || requestStatus === 'pending'}
+              className="btn btn-primary mt-4 md:mt-0 disabled:opacity-50"
+              data-testid="join-button"
+            >
+              {submitJoin.isPending
+                ? 'Sending...'
+                : requestStatus === 'pending'
+                  ? 'Request Pending'
+                  : requestStatus === 'rejected'
+                    ? 'Request Again'
+                    : 'Request to Join'}
+            </button>
+          )}
+          {requestStatus === 'approved' && (
+            <Link to={`/dashboard/community/${id}`} className="btn btn-primary mt-4 md:mt-0" data-testid="open-dashboard">
+              Open Community
+            </Link>
+          )}
         </div>
 
-        {/* Join Result Message */}
-        {joinResult && (
-          <div className={`mt-4 p-4 rounded-lg ${joinResult.success ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-red-500/20 text-red-300 border border-red-500/30'}`}>
-            {joinResult.message}
+        {/* Join status */}
+        {!requiresApproval && (
+          <div className="mt-4" data-testid="open-join-unavailable">
+            <NotAvailableYet feature="community-open-join" className="py-6" />
           </div>
+        )}
+        {submitJoin.isSuccess && (
+          <Alert tone="success" className="mt-4">
+            Your request was sent. Community admins will review it.
+          </Alert>
+        )}
+        {submitJoin.isError && (
+          <Alert tone="danger" title="We could not send your request" className="mt-4">
+            {getErrorMessage(submitJoin.error, 'Failed to send join request')}
+          </Alert>
+        )}
+        {!submitJoin.isSuccess && requestStatus === 'pending' && (
+          <Alert tone="info" className="mt-4">
+            Your request to join is pending review.
+          </Alert>
+        )}
+        {!submitJoin.isSuccess && requestStatus === 'rejected' && (
+          <Alert tone="warning" className="mt-4">
+            Your last request was declined. You can ask again.
+          </Alert>
+        )}
+        {myRequest.isError && (
+          <Alert tone="warning" title="We could not check your join request" className="mt-4">
+            {getErrorMessage(myRequest.error)}
+          </Alert>
         )}
 
         {/* Content */}

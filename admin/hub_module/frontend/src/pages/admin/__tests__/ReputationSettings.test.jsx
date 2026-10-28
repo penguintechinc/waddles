@@ -3,14 +3,24 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { adminApi } from '../../../services/api';
+import { isFeatureServed } from '../../../lib/unservedFeatures';
+import { httpError, mockApiGet, unexpectedUrl } from '../../../test/api';
+import { createTestQueryClient } from '../../../test/renderWithProviders';
+import { QueryClientProvider } from '@tanstack/react-query';
 import ReputationSettings from '../ReputationSettings';
+
+// The config + at-risk endpoints are not served by hub-api today, so the registry marks them
+// unserved. The editor tests below exercise the editor as it will behave once they are served.
+vi.mock('../../../lib/unservedFeatures', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, isFeatureServed: vi.fn(() => true) };
+});
 
 vi.mock('../../../services/api', () => ({
   adminApi: {
     getReputationConfig: vi.fn(),
     updateReputationConfig: vi.fn(),
     getAtRiskUsers: vi.fn(),
-    getReputationLeaderboard: vi.fn(),
   },
 }));
 
@@ -26,17 +36,23 @@ function rawConfig(over = {}) {
 
 function renderPage() {
   return render(
-    <MemoryRouter initialEntries={['/c/5/rep']}>
-      <Routes>
-        <Route path="/c/:communityId/rep" element={<ReputationSettings />} />
-      </Routes>
-    </MemoryRouter>
+    <QueryClientProvider client={createTestQueryClient()}>
+      <MemoryRouter initialEntries={['/c/5/rep']}>
+        <Routes>
+          <Route path="/c/:communityId/rep" element={<ReputationSettings />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>
   );
 }
+
+const SERVED_LEADERBOARD = '/api/v1/community/5/reputation/leaderboard';
+const envelope = (entries) => ({ status: 'success', data: { entries }, meta: { version: 1 } });
 
 describe('ReputationSettings', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    isFeatureServed.mockReturnValue(true);
     vi.spyOn(console, 'error').mockImplementation(() => {});
     adminApi.getReputationConfig.mockResolvedValue({ data: { success: true, config: rawConfig() } });
   });
@@ -149,40 +165,78 @@ describe('ReputationSettings', () => {
     expect(await screen.findByText('Failed to load at-risk users')).toBeInTheDocument();
   });
 
-  it('leaderboard tab: fetches, renders rows, and hides settings actions', async () => {
-    adminApi.getReputationLeaderboard.mockResolvedValue({
-      data: {
-        success: true,
-        users: [
-          { userId: 1, username: 'zed', rank: 1, reputation: { score: 810, label: 'Top' } },
-          { userId: 2, username: 'amy', avatarUrl: 'http://x/y.png', reputation: { score: 500 } },
-          { userId: 3, username: 'noscore' },
-        ],
-      },
-    });
-    const { container } = renderPage();
+  it('leaderboard tab: reads the served route, renders rows, and hides settings actions', async () => {
+    const get = mockApiGet((url) =>
+      url === SERVED_LEADERBOARD
+        ? envelope([
+            { display_name: 'zed', score: 810, tier: 'Legend' },
+            { display_name: 'amy', score: 500, tier: 'Newcomer' },
+          ])
+        : unexpectedUrl(url)
+    );
+    renderPage();
     await screen.findByText('Reputation Tiers');
     fireEvent.click(screen.getByText('Leaderboard'));
     expect(await screen.findByText('zed')).toBeInTheDocument();
-    expect(adminApi.getReputationLeaderboard).toHaveBeenCalledWith('5', { limit: 50 });
-    expect(screen.getByText('Top')).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith(SERVED_LEADERBOARD, { params: { limit: 50 } });
+    expect(screen.getByText('Legend')).toBeInTheDocument();
     expect(screen.getByText('#1')).toBeInTheDocument();
     expect(screen.getByText('#2')).toBeInTheDocument();
-    expect(screen.getByText('Z')).toBeInTheDocument();
-    expect(container.querySelector('img')).toHaveAttribute('src', 'http://x/y.png');
+    expect(screen.getByText('810')).toBeInTheDocument();
+    expect(screen.getByText('500')).toBeInTheDocument();
     expect(screen.queryByText('Save Changes')).not.toBeInTheDocument();
+    // The legacy admin route is gone from the contract.
+    expect(get.mock.calls.map(([u]) => u)).not.toContain('/api/v1/admin/5/reputation/leaderboard');
   });
 
-  it('leaderboard tab: empty and error states', async () => {
-    adminApi.getReputationLeaderboard.mockResolvedValue({ data: { success: true } });
+  it('leaderboard tab: empty state', async () => {
+    mockApiGet(() => envelope([]));
     renderPage();
     await screen.findByText('Reputation Tiers');
     fireEvent.click(screen.getByText('Leaderboard'));
     expect(await screen.findByText('No Reputation Data')).toBeInTheDocument();
-    adminApi.getReputationLeaderboard.mockRejectedValue(new Error('x'));
-    fireEvent.click(screen.getByText('Settings'));
+  });
+
+  it('leaderboard tab: shows the server error with retry instead of an empty table', async () => {
+    let calls = 0;
+    mockApiGet(() => {
+      calls += 1;
+      if (calls === 1) throw httpError(402, { status: 'error', error: { code: 'FEATURE_NOT_ENABLED', message: 'Community reputation is not enabled' } });
+      return envelope([{ display_name: 'zed', score: 700, tier: 'Trusted' }]);
+    });
+    renderPage();
+    await screen.findByText('Reputation Tiers');
     fireEvent.click(screen.getByText('Leaderboard'));
-    await waitFor(() => expect(adminApi.getReputationLeaderboard).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText('No Reputation Data')).toBeInTheDocument();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Community reputation is not enabled');
+    expect(screen.queryByText('No Reputation Data')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('zed')).toBeInTheDocument();
+  });
+
+  describe('while hub-api does not serve the config or at-risk routes', () => {
+    beforeEach(() => {
+      isFeatureServed.mockImplementation((key) => !['reputation-config', 'reputation-at-risk'].includes(key));
+    });
+
+    it('flags settings as not available yet and makes no dead calls', async () => {
+      renderPage();
+      const state = await screen.findByTestId('not-available-yet');
+      expect(state).toHaveAttribute('data-feature', 'reputation-config');
+      expect(screen.getByText("Reputation settings isn't available yet")).toBeInTheDocument();
+      expect(screen.queryByText('Save Changes')).not.toBeInTheDocument();
+      expect(screen.queryByText('View At-Risk Users')).not.toBeInTheDocument();
+      expect(screen.queryByText('Failed to load configuration')).not.toBeInTheDocument();
+      expect(adminApi.getReputationConfig).not.toHaveBeenCalled();
+      expect(adminApi.getAtRiskUsers).not.toHaveBeenCalled();
+    });
+
+    it('still serves the leaderboard tab', async () => {
+      mockApiGet((url) => (url === SERVED_LEADERBOARD ? envelope([{ display_name: 'zed', score: 810, tier: 'Legend' }]) : unexpectedUrl(url)));
+      renderPage();
+      await screen.findByTestId('not-available-yet');
+      fireEvent.click(screen.getByText('Leaderboard'));
+      expect(await screen.findByText('zed')).toBeInTheDocument();
+    });
   });
 });

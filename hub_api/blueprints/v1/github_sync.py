@@ -41,6 +41,7 @@ own docstring, not repeated here.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, dataclass
 from typing import Any, cast
 
 from flask_core.tenancy import tenant_middleware
@@ -153,7 +154,7 @@ async def receive_webhook() -> tuple[dict[str, object], int] | tuple[Response, i
 
 
 @github_sync_admin_bp.route("/<community_id>/github-sync/connections", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def list_connections(community_id: str) -> tuple[dict[str, object], int]:
     """List connections."""
     guard = await _guard(community_id)
@@ -165,7 +166,7 @@ async def list_connections(community_id: str) -> tuple[dict[str, object], int]:
 
 
 @github_sync_admin_bp.route("/<community_id>/github-sync/connections", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def create_connection(
     community_id: str,
 ) -> tuple[dict[str, object], int] | tuple[Response, int]:
@@ -192,13 +193,13 @@ async def create_connection(
         )
     except ApiError as exc:
         return _err(exc)
-    return _ok({"status": "success", "data": _connection_dict(connection)}, 201)
+    return _ok({"status": "success", "data": _connection_created_dict(connection)}, 201)
 
 
 @github_sync_admin_bp.route(
     "/<community_id>/github-sync/connections/<connection_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def delete_connection(
     community_id: str, connection_id: str
 ) -> tuple[dict[str, object], int] | tuple[Response, int]:
@@ -230,7 +231,7 @@ async def delete_connection(
 @github_sync_admin_bp.route(
     "/<community_id>/github-sync/ticket/<ticket_id>/sync-status", methods=["GET"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_sync_status(community_id: str, ticket_id: str) -> tuple[dict[str, object], int]:
     """Get sync status."""
     guard = await _guard(community_id)
@@ -273,7 +274,7 @@ async def get_sync_status(community_id: str, ticket_id: str) -> tuple[dict[str, 
 
 
 @github_sync_admin_bp.route("/<community_id>/github-sync/ticket/<ticket_id>/sync", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def trigger_sync(
     community_id: str, ticket_id: str
 ) -> tuple[dict[str, object], int] | tuple[Response, int]:
@@ -317,24 +318,58 @@ async def trigger_sync(
     )
 
 
+@dataclass(slots=True, frozen=True)
+class RepoConnectionDTO:
+    """Wire shape of a GitHub repo connection (encrypted token never a field).
+
+    `webhook_secret` is NEVER a field here (write-only): list/get return only the
+    `webhook_secret_set` boolean. The server-generated secret is revealed exactly
+    once, in the create response, via `_connection_created_dict`.
+    """
+
+    id: int
+    community_id: int | None
+    vendor_id: int | None
+    module_id: int | None
+    repo_owner: str
+    repo_name: str
+    sync_mode: str
+    default_labels: list[str]
+    auto_close_on_github_close: bool
+    auth_type: str
+    webhook_secret_set: bool
+    installation_id: str | None
+    is_active: bool
+    token_masked: str
+
+
+def _connection_created_dict(c: svc.RepoConnection) -> dict[str, object]:
+    """Shape a freshly created connection, revealing `webhook_secret` once (never re-served)."""
+    body = _connection_dict(c)
+    body["webhook_secret"] = c.webhook_secret
+    return body
+
+
 def _connection_dict(c: svc.RepoConnection) -> dict[str, object]:
-    """Shape a `RepoConnection` for the wire -- token NEVER included, only `token_masked`."""
-    return {
-        "id": c.id,
-        "community_id": c.community_id,
-        "vendor_id": c.vendor_id,
-        "module_id": c.module_id,
-        "repo_owner": c.repo_owner,
-        "repo_name": c.repo_name,
-        "sync_mode": c.sync_mode,
-        "default_labels": c.default_labels,
-        "auto_close_on_github_close": c.auto_close_on_github_close,
-        "auth_type": c.auth_type,
-        "webhook_secret": c.webhook_secret,
-        "installation_id": c.installation_id,
-        "is_active": c.is_active,
-        "token_masked": c.token_masked,
-    }
+    """Shape a `RepoConnection` via `RepoConnectionDTO` (no raw token)."""
+    return asdict(
+        RepoConnectionDTO(
+            id=c.id,
+            community_id=c.community_id,
+            vendor_id=c.vendor_id,
+            module_id=c.module_id,
+            repo_owner=c.repo_owner,
+            repo_name=c.repo_name,
+            sync_mode=c.sync_mode,
+            default_labels=c.default_labels,
+            auto_close_on_github_close=c.auto_close_on_github_close,
+            auth_type=c.auth_type,
+            webhook_secret_set=bool(c.webhook_secret),
+            installation_id=c.installation_id,
+            is_active=c.is_active,
+            token_masked=c.token_masked,
+        )
+    )
 
 
 BLUEPRINTS: list[Blueprint] = [github_sync_webhook_bp, github_sync_admin_bp]

@@ -1,0 +1,51 @@
+[package]
+name = "waddles_ops_cli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Rust operator CLI superseding hub_api/cli/{sign_approved_bundles,suppression,verify_audit_chain}.py (security-sensitive CLI => Rust): byte-identical bundle signing, audit-chain verification and ban-suppression tooling."
+
+[lib]
+name = "waddles_ops_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "waddles-ops"
+path = "src/main.rs"
+
+# Exact-version pins, matching core/bundle_executor (the verifier) so the
+# signature format is produced and checked by the same crypto crates.
+[dependencies]
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
+base64 = "=0.22.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+thiserror = "=2.0.20"
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+# Audit chain + suppression codes (same RustCrypto family/pins as core/bundle_executor).
+sha2 = "=0.10.9"
+hmac = "=0.12.1"
+hkdf = "=0.12.4"
+chrono = { version = "=0.4.45", default-features = false, features = ["std", "clock"] }
+tokio = { version = "=1.53.1", features = ["rt", "macros"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std", "env-filter"] }
+# Postgres (same sqlx line the other core/ crates resolve via sea-orm), rustls TLS, no native TLS.
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "json"] }
+# S3 with SigV4 signing -- the client core/svc_streaming and core/svc_presentation already use.
+object_store = { version = "=0.14.1", default-features = false, features = ["aws"] }
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["rt", "macros", "rt-multi-thread"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

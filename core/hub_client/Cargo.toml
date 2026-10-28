@@ -20,7 +20,7 @@ tonic-prost-build = "=0.14.6"
 # match core/svc_streaming's and core/service_auth's existing pins so a
 # future shared Cargo workspace doesn't carry two pins of the same crate.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tonic = { version = "=0.14.6", features = ["tls-ring"] }
 tonic-prost = "=0.14.6"
 prost = "=0.14.4"
@@ -38,7 +38,7 @@ async-trait = "=0.1.89"
 service_auth = { path = "../service_auth", version = "=0.1.0" }
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
 # CA-trust test only (fix/hub-grpc-tls-and-ca-trust) -- exercises a real local TLS
 # handshake proving the loaded CA trusts a cert it signed and rejects one it didn't,
 # same versions core/bundle_executor/Cargo.toml and core/svc_action/Cargo.toml already

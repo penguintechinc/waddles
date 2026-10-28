@@ -10,6 +10,8 @@ Guide, API reference, security model, data-plane contract and the "adding a prov
 |---|---|
 | `adapter.py` | `AdapterSpec` (declarative provider description) + `ProviderAdapter` protocol + metadata/credential validation + `AdapterRegistry`. No Waddles-specific imports. |
 | `twitch.py` | The first adapter: bot account token -> channel resolution -> refresh via the platform Twitch app. |
+| `kinds.py` | `ConnectionKind` / `SecretScheme` int enums -- the cross-task code contract (mirrors migration 0064's CHECK and the Rust enum). |
+| `static_secret.py` | `external_http` / `aws_lambda` / `gcp_function` adapters + `validate_endpoint_url` / `validate_secret_document`; credential check is structural only (no outbound call at write time). |
 | `registry.py` | **The only wiring point** -- adding a provider is its adapter module plus one line here. |
 | `vault.py` | The only code that encrypts/decrypts a connection secret (`TokenVault`; default AES-256-GCM platform baseline). |
 | `store.py` | penguin-dal persistence over `platform_connections` / `community_connection_access`; every query is tenant- *and* community-scoped; admin reads never select a token column. |

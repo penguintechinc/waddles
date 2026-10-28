@@ -94,8 +94,8 @@ def _redirect_uri() -> str:
 
 
 @tenant_discord_install_bp.route("/tenants/discord/install/authorize", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant.discord_install:write")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant.discord_install:write")  # type: ignore[misc]
 @validate_response(AuthorizeUrlResponse)
 async def start_install() -> AuthorizeUrlResponse | tuple[dict[str, object], int]:
     """`POST /api/v1/tenants/discord/install/authorize`.

@@ -333,19 +333,20 @@ class TestGoogleValidation:
 
 
 class TestEntitlement:
-    async def test_free_tier_cannot_create_any_connection(
+    async def test_free_tier_creates_google_only(
         self, kit: Kit, entitlements: Entitlements
     ) -> None:
         entitlements.set_tier("free")
-        for body in (kit.oidc_body(), kit.saml_body(), kit.google_body()):
+        for body in (kit.oidc_body(), kit.saml_body()):
             assert (await kit.post_connection(body)).status_code == 402
+        assert (await kit.post_connection(kit.google_body())).status_code == 201
 
-    async def test_professional_unlocks_google_but_not_saml_or_oidc(
+    async def test_professional_unlocks_google_and_oidc_but_not_saml(
         self, kit: Kit, entitlements: Entitlements
     ) -> None:
         entitlements.set_tier("professional")
         assert (await kit.post_connection(kit.google_body())).status_code == 201
-        assert (await kit.post_connection(kit.oidc_body())).status_code == 402
+        assert (await kit.post_connection(kit.oidc_body())).status_code == 201
         assert (await kit.post_connection(kit.saml_body())).status_code == 402
 
     async def test_enterprise_unlocks_everything(
@@ -358,9 +359,17 @@ class TestEntitlement:
     async def test_posthog_flag_off_blocks_even_an_entitled_tier(
         self, kit: Kit, entitlements: Entitlements
     ) -> None:
-        entitlements.flag_off("waddles.auth.sso_saml")
+        entitlements.flag_off("waddles.auth.sso_custom")
         assert (await kit.post_connection(kit.oidc_body())).status_code == 402
+        assert (await kit.post_connection(kit.saml_body())).status_code == 201
         assert (await kit.post_connection(kit.google_body())).status_code == 201
+
+    async def test_saml_flag_off_blocks_saml_only(
+        self, kit: Kit, entitlements: Entitlements
+    ) -> None:
+        entitlements.flag_off("waddles.auth.sso_saml")
+        assert (await kit.post_connection(kit.saml_body())).status_code == 402
+        assert (await kit.post_connection(kit.oidc_body())).status_code == 201
 
     async def test_402_body_is_the_standard_error_envelope(
         self, kit: Kit, entitlements: Entitlements

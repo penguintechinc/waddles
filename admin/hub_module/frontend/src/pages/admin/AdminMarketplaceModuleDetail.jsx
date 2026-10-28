@@ -33,7 +33,7 @@ function StarRating({ rating, max = 5 }) {
       {Array.from({ length: max }).map((_, i) => (
         <StarIcon
           key={i}
-          className={`w-4 h-4 ${i < Math.round(rating) ? 'text-yellow-400 fill-yellow-400' : 'text-gray-600'}`}
+          className={`w-4 h-4 ${i < Math.round(rating) ? 'text-yellow-400 fill-yellow-400' : 'text-fg-muted'}`}
         />
       ))}
     </div>
@@ -107,7 +107,7 @@ export default function AdminMarketplaceModuleDetail() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-900">
+      <div className="flex items-center justify-center min-h-screen bg-surface">
         <div className="text-yellow-400">Loading module details...</div>
       </div>
     );
@@ -115,12 +115,12 @@ export default function AdminMarketplaceModuleDetail() {
 
   if (!module && !loading) {
     return (
-      <div className="min-h-screen bg-gray-900 text-white p-6 flex flex-col items-center justify-center gap-4">
+      <div className="min-h-screen bg-surface text-white p-6 flex flex-col items-center justify-center gap-4">
         <XCircleIcon className="w-16 h-16 text-red-400" />
-        <p className="text-gray-400">{error || 'Module not found.'}</p>
+        <p className="text-fg-muted">{error || 'Module not found.'}</p>
         <button
           onClick={() => navigate(`/admin/${communityId}/marketplace`)}
-          className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+          className="flex items-center gap-2 px-4 py-2 bg-navy-700 hover:bg-navy-600 rounded-lg transition-colors"
         >
           <ArrowLeftIcon className="w-4 h-4" />
           Back to Marketplace
@@ -133,12 +133,12 @@ export default function AdminMarketplaceModuleDetail() {
   const IntegrationIcon = INTEGRATION_ICONS[module.integrationType] || CommandLineIcon;
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white p-6">
+    <div className="min-h-screen bg-surface text-white p-6">
       <div className="max-w-4xl mx-auto">
         {/* Back Link */}
         <button
           onClick={() => navigate(`/admin/${communityId}/marketplace`)}
-          className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors mb-6 text-sm"
+          className="flex items-center gap-2 text-fg-muted hover:text-white transition-colors mb-6 text-sm"
         >
           <ArrowLeftIcon className="w-4 h-4" />
           Back to Marketplace
@@ -161,19 +161,19 @@ export default function AdminMarketplaceModuleDetail() {
         )}
 
         {/* Module Header */}
-        <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 mb-6">
+        <div className="bg-surface-raised border border-line rounded-xl p-6 mb-6">
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-center gap-4">
               {module.iconUrl ? (
                 <img src={module.iconUrl} alt={module.displayName} className="w-16 h-16 rounded-xl" />
               ) : (
-                <div className="w-16 h-16 bg-gray-700 rounded-xl flex items-center justify-center">
+                <div className="w-16 h-16 bg-navy-700 rounded-xl flex items-center justify-center">
                   <TagIcon className="w-8 h-8 text-yellow-400" />
                 </div>
               )}
               <div>
                 <h1 className="text-2xl font-bold text-white">{module.displayName || module.name}</h1>
-                <p className="text-gray-400 text-sm">by {module.author || module.vendorName}</p>
+                <p className="text-fg-muted text-sm">by {module.author || module.vendorName}</p>
               </div>
             </div>
 
@@ -205,10 +205,10 @@ export default function AdminMarketplaceModuleDetail() {
             <span className={`inline-block border text-xs px-2 py-1 rounded ${pricingBadge.className}`}>
               {pricingBadge.label}
             </span>
-            <span className="inline-block bg-gray-700 border border-gray-600 text-gray-300 text-xs px-2 py-1 rounded">
+            <span className="inline-block bg-navy-700 border border-line-strong text-fg-secondary text-xs px-2 py-1 rounded">
               {module.category}
             </span>
-            <span className="inline-block bg-gray-700 border border-gray-600 text-gray-300 text-xs px-2 py-1 rounded">
+            <span className="inline-block bg-navy-700 border border-line-strong text-fg-secondary text-xs px-2 py-1 rounded">
               v{module.version}
             </span>
             {module.source && (
@@ -217,13 +217,13 @@ export default function AdminMarketplaceModuleDetail() {
               </span>
             )}
             {module.integrationType && (
-              <span className="inline-flex items-center gap-1 bg-gray-700 border border-gray-600 text-gray-300 text-xs px-2 py-1 rounded">
+              <span className="inline-flex items-center gap-1 bg-navy-700 border border-line-strong text-fg-secondary text-xs px-2 py-1 rounded">
                 <IntegrationIcon className="w-3 h-3" />
                 {module.integrationType.replace('_', ' ')}
               </span>
             )}
             {module.communicationModel && (
-              <span className="inline-block bg-gray-700 border border-gray-600 text-gray-300 text-xs px-2 py-1 rounded">
+              <span className="inline-block bg-navy-700 border border-line-strong text-fg-secondary text-xs px-2 py-1 rounded">
                 {module.communicationModel === 'webhook_push' ? 'Webhook Push' : 'REST Pull'}
               </span>
             )}
@@ -236,7 +236,7 @@ export default function AdminMarketplaceModuleDetail() {
           </div>
 
           {/* Stats Row */}
-          <div className="flex items-center gap-6 mt-4 text-sm text-gray-400">
+          <div className="flex items-center gap-6 mt-4 text-sm text-fg-muted">
             <div className="flex items-center gap-2">
               <StarRating rating={module.avgRating || 0} />
               <span>{(module.avgRating || 0).toFixed(1)}</span>
@@ -250,16 +250,16 @@ export default function AdminMarketplaceModuleDetail() {
         </div>
 
         {/* Description */}
-        <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 mb-6">
+        <div className="bg-surface-raised border border-line rounded-xl p-6 mb-6">
           <h2 className="text-lg font-semibold mb-3">Description</h2>
-          <p className="text-gray-300 leading-relaxed whitespace-pre-wrap">
+          <p className="text-fg-secondary leading-relaxed whitespace-pre-wrap">
             {module.description || 'No description provided.'}
           </p>
         </div>
 
         {/* Pricing Info */}
         {module.pricingType && module.pricingType !== 'free' && (
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 mb-6">
+          <div className="bg-surface-raised border border-line rounded-xl p-6 mb-6">
             <h2 className="text-lg font-semibold mb-3">Pricing</h2>
             <div className="flex items-center gap-4 text-sm">
               <span className={`border px-3 py-1 rounded ${pricingBadge.className}`}>
@@ -277,7 +277,7 @@ export default function AdminMarketplaceModuleDetail() {
 
         {/* Trigger Commands */}
         {module.triggerCommands && module.triggerCommands.length > 0 && (
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 mb-6">
+          <div className="bg-surface-raised border border-line rounded-xl p-6 mb-6">
             <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
               <CommandLineIcon className="w-5 h-5 text-yellow-400" />
               Commands
@@ -286,7 +286,7 @@ export default function AdminMarketplaceModuleDetail() {
               {module.triggerCommands.map((cmd, idx) => (
                 <code
                   key={idx}
-                  className="bg-gray-900 border border-gray-700 text-yellow-300 text-sm px-3 py-1 rounded font-mono"
+                  className="bg-surface border border-line text-yellow-300 text-sm px-3 py-1 rounded font-mono"
                 >
                   {cmd}
                 </code>
@@ -297,11 +297,11 @@ export default function AdminMarketplaceModuleDetail() {
 
         {/* Reviews */}
         {module.reviews && module.reviews.length > 0 && (
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
+          <div className="bg-surface-raised border border-line rounded-xl p-6">
             <h2 className="text-lg font-semibold mb-4">Reviews</h2>
             <div className="space-y-4">
               {module.reviews.map((review, idx) => (
-                <div key={idx} className="border-b border-gray-700 pb-4 last:border-0 last:pb-0">
+                <div key={idx} className="border-b border-line pb-4 last:border-0 last:pb-0">
                   <div className="flex items-center justify-between mb-1">
                     <span className="font-medium text-white text-sm">
                       {review.username || review.userId || 'Anonymous'}
@@ -309,10 +309,10 @@ export default function AdminMarketplaceModuleDetail() {
                     <StarRating rating={review.rating || 0} />
                   </div>
                   {review.comment && (
-                    <p className="text-gray-400 text-sm">{review.comment}</p>
+                    <p className="text-fg-muted text-sm">{review.comment}</p>
                   )}
                   {review.createdAt && (
-                    <p className="text-gray-600 text-xs mt-1">
+                    <p className="text-fg-muted text-xs mt-1">
                       {new Date(review.createdAt).toLocaleDateString()}
                     </p>
                   )}

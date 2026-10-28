@@ -1,0 +1,131 @@
+# Idempotent hub-webui super-admin seed -- post-install,post-upgrade hook Job.
+#
+# Why: config/postgres/migrations/081_seed_default_hub_admin.sql only runs on a FRESH DB
+# replay, and a fresh install no longer executes raw-SQL migration bodies at all (see the
+# KNOWN GAP note in _helpers.tpl). This Job re-applies that SAME file on every deploy. 081
+# is itself idempotent: it creates the super-admin only when INITIAL_ADMIN_EMAIL +
+# INITIAL_ADMIN_PASSWORD GUCs are set AND no super-admin exists yet (pgcrypto bcrypt hash,
+# never reinvented here), so re-running is a no-op (exit 0) once an admin exists.
+#
+# Weight 0 > db-migrate (-5): on post-install the schema Job has completed; on post-upgrade
+# the pre-upgrade migrate has long finished. The script additionally waits (bounded) for
+# Postgres + the hub_users table. DATABASE_URL comes from the dedicated db-migrate hook
+# Secret (migration-owner role); admin creds from the dedicated <release>-hub-admin-bootstrap Secret
+# (regular resource, exists by any post-* phase). INITIAL_ADMIN_PASSWORD in it is generated once and
+# preserved across upgrades (secrets.yaml, waddlebot.autoSecretValue lookup-KEEP).
+{{- if and .Values.pipeline.migrationsJob.enabled .Values.pipeline.hubAdminSeedJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-hub-admin-seed
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub-admin-seed
+  annotations:
+    # A post-upgrade hook failure marks the Helm release FAILED even though the app already
+    # rolled -- INTENTIONAL fail-loud (we want to know the admin seed failed), not a bug.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 900 # 3 attempts (backoffLimit 2) x ~240s in-script DB wait
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: hub-admin-seed
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "waddlebot.fullname" . }}-db-migrate
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: hub-admin-seed
+        # Same migrations image as templates/migrations-job.yaml (carries the 081 SQL + psycopg2).
+        {{- $registry := .Values.global.imageRegistry | default "" }}
+        {{- $repository := .Values.modules.migrations.image | default "waddlebot-migrations" }}
+        {{- $tag := .Values.global.imageTag | toString }}
+        {{- if $registry }}
+        image: "{{ $registry }}/{{ $repository }}:{{ $tag }}"
+        {{- else }}
+        image: "{{ $repository }}:{{ $tag }}"
+        {{- end }}
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        # Single-key secretKeyRef (not envFrom): the credential-separation render test forbids
+        # any workload but db-migrate envFrom'ing the db-migrate Secret wholesale.
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-db-migrate-secret
+              key: DATABASE_URL
+        - name: INITIAL_ADMIN_EMAIL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-hub-admin-bootstrap
+              key: INITIAL_ADMIN_EMAIL
+        - name: INITIAL_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-hub-admin-bootstrap
+              key: INITIAL_ADMIN_PASSWORD
+        command: ["python3", "-c"]
+        args:
+        - |
+          import os, sys, time
+          import psycopg2
+          sql = open("/app/config/postgres/migrations/081_seed_default_hub_admin.sql").read()
+          url = os.environ["DATABASE_URL"]
+          deadline = time.time() + 240
+          delay = 2
+          while True:
+              try:
+                  conn = psycopg2.connect(url)
+                  conn.autocommit = True
+                  cur = conn.cursor()
+                  cur.execute("SELECT to_regclass('public.hub_users') IS NOT NULL")
+                  if cur.fetchone()[0]:
+                      break
+                  print("hub_users not present yet; waiting", flush=True)
+              except psycopg2.OperationalError as exc:
+                  print("postgres not ready: %s" % type(exc).__name__, flush=True)
+              if time.time() > deadline:
+                  sys.exit("hub-admin-seed: database/schema not ready before deadline")
+              time.sleep(delay)
+              delay = min(delay * 2, 15)
+          # One-time: once bootstrapped, never re-seed (even if every super-admin was later deleted).
+          cur.execute("SELECT 1 FROM hub_settings WHERE setting_key = 'initial_admin_bootstrapped' AND setting_value = 'true'")
+          if cur.fetchone():
+              print("initial admin already bootstrapped (marker set); skipping", flush=True)
+              sys.exit(0)
+          # Same GUC handoff run-alembic.sh/the baseline migration use; 081 reads these.
+          cur.execute("SELECT set_config('waddlebot.initial_admin_email', %s, false), "
+                      "set_config('waddlebot.initial_admin_password', %s, false)",
+                      (os.environ.get("INITIAL_ADMIN_EMAIL", ""), os.environ.get("INITIAL_ADMIN_PASSWORD", "")))
+          cur.execute(sql)
+          for n in conn.notices:
+              print(n.strip(), flush=True)
+          cur.execute("SELECT count(*) FROM hub_users WHERE is_super_admin = true")
+          count = cur.fetchone()[0]
+          print("super-admin count: %d" % count, flush=True)
+          if count < 1:
+              print("WARNING: no super-admin exists (INITIAL_ADMIN_EMAIL unset or email taken); marker NOT set", flush=True)
+          else:
+              cur.execute("INSERT INTO hub_settings (setting_key, setting_value, updated_at) "
+                          "VALUES ('initial_admin_bootstrapped', 'true', NOW()) "
+                          "ON CONFLICT (setting_key) DO NOTHING")
+              print("bootstrap marker set", flush=True)
+        resources:
+          {{- toYaml .Values.pipeline.hubAdminSeedJob.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+{{- end }}

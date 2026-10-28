@@ -171,10 +171,11 @@ function AdminTranslation() {
 
             {/* Target Language */}
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-translation-target-language" className="block text-sm font-medium text-navy-300 mb-2">
                 Target Language
               </label>
               <select
+                id="admin-translation-target-language"
                 value={config.target_language || 'en'}
                 onChange={(e) => updateConfig('target_language', e.target.value)}
                 disabled={!config.enabled}
@@ -202,10 +203,11 @@ function AdminTranslation() {
           <div className="space-y-4">
             {/* Language Detection Method */}
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-translation-language-detection-method" className="block text-sm font-medium text-navy-300 mb-2">
                 Language Detection Method
               </label>
               <select
+                id="admin-translation-language-detection-method"
                 value={config.detection_method || 'ensemble'}
                 onChange={(e) => updateConfig('detection_method', e.target.value)}
                 disabled={!config.enabled}
@@ -222,11 +224,12 @@ function AdminTranslation() {
 
             {/* Confidence Threshold */}
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-translation-input" className="block text-sm font-medium text-navy-300 mb-2">
                 Confidence Threshold: {config.confidence_threshold?.toFixed(2) || '0.70'}
               </label>
               <div className="flex items-center gap-4">
                 <input
+                  id="admin-translation-input"
                   type="range"
                   min="0.5"
                   max="1.0"
@@ -249,10 +252,11 @@ function AdminTranslation() {
 
             {/* Minimum Words */}
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-translation-minimum-words-to-translate" className="block text-sm font-medium text-navy-300 mb-2">
                 Minimum Words to Translate
               </label>
               <input
+                id="admin-translation-minimum-words-to-translate"
                 type="number"
                 min="1"
                 max="20"
@@ -416,10 +420,11 @@ function AdminTranslation() {
           </p>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-translation-ai-decision-mode" className="block text-sm font-medium text-navy-300 mb-2">
                 AI Decision Mode
               </label>
               <select
+                id="admin-translation-ai-decision-mode"
                 value={config.ai_decision?.mode || 'never'}
                 onChange={(e) => updateNestedConfig('ai_decision', 'mode', e.target.value)}
                 disabled={!config.enabled}
@@ -436,11 +441,12 @@ function AdminTranslation() {
 
             {config.ai_decision?.mode && config.ai_decision.mode !== 'never' && (
               <div>
-                <label className="block text-sm font-medium text-navy-300 mb-2">
+                <label htmlFor="admin-translation-input-2" className="block text-sm font-medium text-navy-300 mb-2">
                   AI Confidence Threshold: {(config.ai_decision?.confidence_threshold || 0.7).toFixed(2)}
                 </label>
                 <div className="flex items-center gap-4">
                   <input
+                    id="admin-translation-input-2"
                     type="range"
                     min="0.5"
                     max="0.95"
@@ -472,10 +478,11 @@ function AdminTranslation() {
           </h2>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="admin-translation-google-cloud-translation-api-key" className="block text-sm font-medium text-navy-300 mb-2">
                 Google Cloud Translation API Key
               </label>
               <input
+                id="admin-translation-google-cloud-translation-api-key"
                 type="password"
                 value={config.google_api_key || ''}
                 onChange={(e) => updateConfig('google_api_key', e.target.value)}
@@ -518,11 +525,12 @@ function AdminTranslation() {
               <>
                 {/* Display Duration */}
                 <div>
-                  <label className="block text-sm font-medium text-navy-300 mb-2">
+                  <label htmlFor="admin-translation-input-3" className="block text-sm font-medium text-navy-300 mb-2">
                     Caption Display Duration: {config.captions?.display_duration || 5000}ms
                   </label>
                   <div className="flex items-center gap-4">
                     <input
+                      id="admin-translation-input-3"
                       type="range"
                       min="1000"
                       max="30000"
@@ -544,10 +552,11 @@ function AdminTranslation() {
 
                 {/* Max Captions */}
                 <div>
-                  <label className="block text-sm font-medium text-navy-300 mb-2">
+                  <label htmlFor="admin-translation-maximum-captions-on-screen" className="block text-sm font-medium text-navy-300 mb-2">
                     Maximum Captions on Screen
                   </label>
                   <input
+                    id="admin-translation-maximum-captions-on-screen"
                     type="number"
                     min="1"
                     max="10"

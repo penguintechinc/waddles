@@ -251,6 +251,7 @@ function SuperAdminUsers() {
         <div className="flex items-center space-x-2 bg-navy-900 rounded px-3 py-2 border border-navy-700">
           <MagnifyingGlassIcon className="w-5 h-5 text-navy-400" />
           <input
+            aria-label="Search by email or username"
             type="text"
             placeholder="Search by email or username..."
             value={searchTerm}
@@ -258,14 +259,15 @@ function SuperAdminUsers() {
               setSearchTerm(e.target.value);
               setPage(1);
             }}
-            className="bg-transparent outline-none text-sky-100 flex-1"
+            className="bg-transparent text-sky-100 flex-1"
           />
         </div>
 
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">Role</label>
+            <label htmlFor="super-admin-users-role" className="block text-sm font-medium text-navy-300 mb-2">Role</label>
             <select
+              id="super-admin-users-role"
               value={roleFilter}
               onChange={(e) => {
                 setRoleFilter(e.target.value);
@@ -281,8 +283,9 @@ function SuperAdminUsers() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">Status</label>
+            <label htmlFor="super-admin-users-status" className="block text-sm font-medium text-navy-300 mb-2">Status</label>
             <select
+              id="super-admin-users-status"
               value={activeFilter}
               onChange={(e) => {
                 setActiveFilter(e.target.value);
@@ -493,8 +496,8 @@ function SuperAdminUsers() {
       {/* Role Assignment Modal */}
       {showRoleModal && selectedUser && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
-            <h2 className="text-xl font-bold text-gold-400 mb-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="super-admin-users-dialog-1-title" className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
+            <h2 id="super-admin-users-dialog-1-title" className="text-xl font-bold text-gold-400 mb-4">
               {roleName === 'super_admin'
                 ? 'Super Admin Role'
                 : roleName === 'vendor'
@@ -532,8 +535,8 @@ function SuperAdminUsers() {
       {/* Verify Email Modal */}
       {showVerifyModal && selectedUser && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
-            <h2 className="text-xl font-bold text-gold-400 mb-4">Email Verification</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="super-admin-users-dialog-2-title" className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
+            <h2 id="super-admin-users-dialog-2-title" className="text-xl font-bold text-gold-400 mb-4">Email Verification</h2>
             <p className="text-navy-300 mb-4">
               {selectedUser.emailVerified
                 ? <>Remove email verification from <span className="font-medium text-sky-100">{selectedUser.username}</span>?</>
@@ -560,8 +563,8 @@ function SuperAdminUsers() {
       {/* Delete User Modal */}
       {showDeleteModal && selectedUser && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
-            <h2 className="text-xl font-bold text-red-400 mb-4">Delete User</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="super-admin-users-dialog-3-title" className="bg-navy-900 border border-navy-700 rounded-lg p-6 w-full max-w-md">
+            <h2 id="super-admin-users-dialog-3-title" className="text-xl font-bold text-red-400 mb-4">Delete User</h2>
             <p className="text-navy-300 mb-4">
               Are you sure you want to delete{' '}
               <span className="font-medium text-sky-100">{selectedUser.username}</span>?

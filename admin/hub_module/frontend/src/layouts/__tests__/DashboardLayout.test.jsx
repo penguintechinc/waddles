@@ -153,6 +153,38 @@ describe('DashboardLayout — categories', () => {
   });
 });
 
+describe('DashboardLayout — landmarks and keyboard access', () => {
+  it('renders a skip link that targets a focusable main landmark', () => {
+    renderAt('/dashboard');
+    const skip = screen.getByRole('link', { name: 'Skip to main content' });
+    const main = screen.getByRole('main');
+    expect(skip.getAttribute('href')).toBe(`#${main.id}`);
+    expect(main.getAttribute('tabindex')).toBe('-1');
+  });
+
+  it('exposes the route announcer live region', () => {
+    renderAt('/dashboard');
+    expect(screen.getByTestId('route-announcer')).toBeTruthy();
+  });
+
+  it('points the community Moderation entry at a route that exists (admin security)', () => {
+    mockAuth.isCommunityAdmin.mockReturnValue(true);
+    capturedProps = {};
+    render(
+      <MemoryRouter initialEntries={['/dashboard/community/7']}>
+        <Routes>
+          <Route path="/dashboard/community/:id/*" element={<DashboardLayout />} />
+          <Route path="/admin/:communityId/security" element={<div data-testid="security-page" />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const admin = capturedProps.categories.find((c) => c.key === 'community-admin');
+    const moderation = admin.items.find((i) => i.name === 'Moderation');
+    act(() => capturedProps.onNavigate(moderation.href));
+    expect(screen.getByTestId('security-page')).toBeTruthy();
+  });
+});
+
 describe('DashboardLayout — SidebarMenu props', () => {
   beforeEach(() => {
     mockAuth.isCommunityAdmin.mockReturnValue(false);
@@ -165,15 +197,24 @@ describe('DashboardLayout — SidebarMenu props', () => {
     expect(props.autoCollapse).toBe(true);
   });
 
-  it('passes currentPath matching location pathname', () => {
-    const props = renderAt('/dashboard');
-    expect(props.currentPath).toBe('/dashboard');
+  it('marks exactly the route-matching item active (longest match, not every prefix)', () => {
+    // SidebarMenu treats `currentPath.startsWith(item.href)` as active; the layout
+    // hands it tokenised hrefs so only the best match lights up.
+    const props = renderAt('/dashboard/profile');
+    const items = [...props.categories.flatMap((c) => c.items), ...props.footerItems];
+    const active = items.filter((i) => props.currentPath === i.href || props.currentPath.startsWith(i.href));
+    expect(active.map((i) => i.name)).toEqual(['My Profile', 'Test User'].slice(0, 1));
   });
 
   it('passes footerItems array with at least one item', () => {
     const props = renderAt('/dashboard');
     expect(Array.isArray(props.footerItems)).toBe(true);
     expect(props.footerItems.length).toBeGreaterThan(0);
+  });
+
+  it('keeps the fixed desktop sidebar outside the offset content shell', () => {
+    renderAt('/dashboard');
+    expect(screen.getByTestId('dashboard-content-shell').className).toContain('lg:pl-64');
   });
 
   it('onNavigate callback invokes navigate (does not throw)', () => {
