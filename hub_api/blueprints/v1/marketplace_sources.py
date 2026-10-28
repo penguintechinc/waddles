@@ -49,6 +49,7 @@ from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, unprocessable
 from services.marketplace_publisher_attestation import fingerprint_publisher_key
 from services.marketplace_sandbox_warning import WARNING_HASH
+from services.marketplace_source_build import launch_sandbox_scan, mark_pending_scan
 from services.marketplace_source_ingest import ingest_candidates
 from services.marketplace_source_scanner import BundleCandidate, ScanRejectedError, scan_source
 from services.marketplace_source_service import BuildMode, SandboxAck, SourceRecord, SourceStatus
@@ -306,6 +307,8 @@ async def add_source(
     except ApiError as exc:
         _count("add", "error")
         return _err(exc)
+    if mode == BuildMode.SANDBOX:
+        await _kick_sandbox_build(record)
     _count("add", "ok")
     logger.info(
         "marketplace source: added",
@@ -396,6 +399,29 @@ async def remove_source(public_id: str) -> SourceRemoveResponse | tuple[dict[str
     return SourceRemoveResponse(success=True, disposition=disposition)
 
 
+async def _kick_sandbox_build(record: SourceRecord) -> None:
+    """Move a SANDBOX source to PENDING_SCAN and launch its background scan+build+ingest.
+
+    The tier was already enforced by the caller; it is re-resolved here and handed to the
+    orchestrator, which re-checks tier + ack (`assert_build_allowed`) before any clone or Job.
+    """
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # nosec B101 - tenant_middleware ran first
+    dal = _install_dal()
+    tier = await get_tier(tenant=ctx.tenant_slug)
+    pending = await mark_pending_scan(dal, record)
+    launch_sandbox_scan(
+        dal,
+        pending,
+        tier=tier,
+        tenant_id=ctx.tenant_id,
+        tenant_slug=ctx.tenant_slug,
+        requested_by=get_current_user_id(request),
+        valkey_client=current_app.config.get("valkey_client"),
+    )
+    _count("build", "launched")
+
+
 async def _fetch_wasm(candidate: BundleCandidate) -> bytes:
     """Read a candidate's committed prebuilt artifact (scan-time temp tree is already guarded)."""
     if candidate.wasm_path is None:
@@ -408,20 +434,44 @@ async def _fetch_wasm(candidate: BundleCandidate) -> bytes:
 @require_scope("platform:admin")  # type: ignore[misc]
 @_flag_gate
 @validate_response(ScanSummaryDTO)
-async def rescan_source(public_id: str) -> ScanSummaryDTO | tuple[dict[str, object], int]:
-    """Bounded synchronous scan + prebuilt ingest at the pinned SHA (versions land unapproved)."""
+@validate_response(ScanSummaryDTO, 202)
+async def rescan_source(
+    public_id: str,
+) -> ScanSummaryDTO | tuple[ScanSummaryDTO, int] | tuple[dict[str, object], int]:
+    """Rescan + ingest at the pinned SHA (versions land unapproved).
+
+    PREBUILT: bounded synchronous scan + attest + ingest (200). SANDBOX: async scan + K8s build +
+    ingest in the background (202, status `pending_scan`; poll the source for the outcome).
+    """
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101 - tenant_middleware ran first
     dal = _install_dal()
     try:
         record = await _load(public_id)
-        if record.is_builtin or record.build_mode != BuildMode.PREBUILT:
-            raise ApiError("only external prebuilt sources can be rescanned here", 409, "CONFLICT")
+        if record.is_builtin:
+            raise ApiError("the built-in marketplace source cannot be rescanned", 409, "CONFLICT")
         if record.status == SourceStatus.DISABLED:
             raise ApiError("source is disabled", 409, "CONFLICT")
         denied = await _require_tier(record.build_mode)
         if denied is not None:
             return denied
+        if record.build_mode == BuildMode.SANDBOX:
+            await _kick_sandbox_build(record)
+            _count("rescan", "sandbox_launched")
+            return (
+                ScanSummaryDTO(
+                    success=True,
+                    status="pending_scan",
+                    examined=0,
+                    accepted=0,
+                    rejectedAtScan=0,
+                    created=0,
+                    skippedIdentical=0,
+                    refusedConflict=0,
+                    rejectedAtIngest=0,
+                ),
+                202,
+            )
         with tempfile.TemporaryDirectory(prefix="mktscan-") as workdir:
             try:
                 result = await scan_source(
@@ -532,6 +582,8 @@ async def approve_update(
             },
         )
         return _err(exc)
+    if updated.build_mode == BuildMode.SANDBOX:
+        await _kick_sandbox_build(updated)  # the fresh ack now binds the newly pinned commit
     _count("approve_update", "ok")
     logger.info(
         "marketplace source: update approved by admin",

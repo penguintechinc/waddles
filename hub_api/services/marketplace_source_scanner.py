@@ -22,6 +22,7 @@ import shutil
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -416,6 +417,32 @@ def _walk_bundles(
     return good, bad, examined
 
 
+BundlePacker = Callable[[Path, str, str, Path], Path]
+
+
+def bundle_tarball_path(pack_dir: Path, candidate: BundleCandidate) -> Path:
+    """Where `scan_source` archived `candidate`'s source tree (one tarball per bundle)."""
+    return pack_dir / f"{candidate.language}__{candidate.dir_name}.tgz"
+
+
+def _pack_candidates(
+    root: Path, good: list[BundleCandidate], pack_dir: Path, packer: BundlePacker
+) -> None:
+    """Archive every accepted bundle dir; any failure becomes a loud whole-scan rejection."""
+    for cand in good:
+        try:
+            packer(
+                root / "bundles" / cand.language / cand.dir_name,
+                cand.language,
+                cand.dir_name,
+                bundle_tarball_path(pack_dir, cand),
+            )
+        except Exception as exc:  # noqa: BLE001 - any packer failure rejects, reason sanitized
+            raise ScanRejectedError(
+                "pack_failed", str(getattr(exc, "reason", type(exc).__name__))
+            ) from exc
+
+
 async def scan_source(
     source: SourceRecord,
     *,
@@ -423,8 +450,14 @@ async def scan_source(
     limits: GuardLimits | None = None,
     dal: AsyncDB | None = None,
     actor_id: int | None = None,
+    pack_dir: Path | None = None,
+    packer: BundlePacker | None = None,
 ) -> ScanResult:
     """Clone `source` at its pinned SHA into an isolated temp dir, guard, walk and validate.
+
+    With `pack_dir` + `packer` (SANDBOX builds) each accepted bundle's source tree is archived to
+    `bundle_tarball_path(pack_dir, candidate)` BEFORE the clone is deleted; a packing failure
+    rejects the whole scan (`pack_failed`).
 
     Raises `ScanRejectedError` on any whole-scan failure (guard trip, SHA mismatch, clone failure,
     zero bundles examined). With `dal`, updates the source's status + `last_scanned_at`.
@@ -446,6 +479,8 @@ async def scan_source(
                     raise ScanRejectedError(
                         "no_bundles", "no bundles/{language}/{app}/ directories found"
                     )
+                if pack_dir is not None and packer is not None:
+                    await asyncio.to_thread(_pack_candidates, root, good, pack_dir, packer)
             except GuardViolationError as exc:
                 raise ScanRejectedError(exc.reason, str(exc)) from exc
             pinned = source.pinned_commit_sha or ""

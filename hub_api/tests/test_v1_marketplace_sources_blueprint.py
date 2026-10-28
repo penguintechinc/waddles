@@ -59,6 +59,14 @@ class Store:
         self.created_kwargs: dict[str, Any] = {}
         self.has_versions = False
         self.deactivated: list[uuid.UUID] = []
+        self.launched: list[tuple[SourceRecord, dict[str, Any]]] = []
+
+    async def mark_pending_scan(self, dal: Any, source: SourceRecord) -> SourceRecord:
+        self.rows[source.public_id] = dataclasses.replace(source, status=SourceStatus.PENDING_SCAN)
+        return self.rows[source.public_id]
+
+    def launch_sandbox_scan(self, dal: Any, source: SourceRecord, **kw: Any) -> None:
+        self.launched.append((source, kw))
 
     async def create_source(self, dal: Any, **kw: Any) -> SourceRecord:
         self.created_kwargs = kw
@@ -138,6 +146,8 @@ def store(monkeypatch: pytest.MonkeyPatch) -> Store:
     for name in ("create_source", "get_source", "list_sources", "delete_source",
                  "disable_and_deactivate_source", "approve_update"):  # fmt: skip
         monkeypatch.setattr(bp.svc, name, getattr(s, name))
+    monkeypatch.setattr(bp, "mark_pending_scan", s.mark_pending_scan)
+    monkeypatch.setattr(bp, "launch_sandbox_scan", s.launch_sandbox_scan)
     return s
 
 
@@ -506,6 +516,71 @@ async def test_rescan_refuses_builtin_sandbox_and_below_tier(
     c = app.test_client()
     base = "/api/v1/marketplace/sources"
     assert (await c.post(f"{base}/{built.public_id}/rescan", headers=_h())).status_code == 409
-    assert (await c.post(f"{base}/{sbx.public_id}/rescan", headers=_h())).status_code == 409
+    assert store.launched == []
     env.tier = "free"
     assert (await c.post(f"{base}/{pre.public_id}/rescan", headers=_h())).status_code == 402
+
+
+async def test_rescan_sandbox_launches_async_build_no_409(app: Quart, store: Store) -> None:
+    """G1: a SANDBOX source's rescan is no longer a 409 -- it launches the background build."""
+    sbx = _record(build_mode=BuildMode.SANDBOX, status=SourceStatus.ACTIVE)
+    store.rows[sbx.public_id] = sbx
+    r = await app.test_client().post(
+        f"/api/v1/marketplace/sources/{sbx.public_id}/rescan", headers=_h()
+    )
+    body = await r.get_json()
+    assert r.status_code == 202
+    assert body["status"] == "pending_scan"
+    assert len(store.launched) == 1
+    src, kw = store.launched[0]
+    assert src.public_id == sbx.public_id and src.status is SourceStatus.PENDING_SCAN
+    assert kw["tier"] == "enterprise" and kw["requested_by"] == 1
+    assert kw["tenant_slug"] and isinstance(kw["tenant_id"], int)
+
+
+async def test_rescan_sandbox_below_tier_402_never_launches(
+    app: Quart, store: Store, env: Env
+) -> None:
+    sbx = _record(build_mode=BuildMode.SANDBOX)
+    store.rows[sbx.public_id] = sbx
+    env.tier = "professional"
+    r = await app.test_client().post(
+        f"/api/v1/marketplace/sources/{sbx.public_id}/rescan", headers=_h()
+    )
+    assert r.status_code == 402 and store.launched == []
+
+
+async def test_rescan_builtin_still_409(app: Quart, store: Store) -> None:
+    built = _record(is_builtin=True, build_mode=BuildMode.BUILTIN_IMAGE)
+    store.rows[built.public_id] = built
+    r = await app.test_client().post(
+        f"/api/v1/marketplace/sources/{built.public_id}/rescan", headers=_h()
+    )
+    assert r.status_code == 409 and store.launched == []
+
+
+async def test_add_sandbox_launches_initial_build_prebuilt_does_not(
+    app: Quart, store: Store
+) -> None:
+    c = app.test_client()
+    r = await c.post("/api/v1/marketplace/sources", json=_body(), headers=_h())
+    assert r.status_code == 201 and store.launched == []
+    r = await c.post("/api/v1/marketplace/sources", json=_sandbox(), headers=_h())
+    assert r.status_code == 201
+    assert len(store.launched) == 1
+    assert store.launched[0][0].build_mode is BuildMode.SANDBOX
+
+
+async def test_approve_update_sandbox_launches_build_of_new_pin(app: Quart, store: Store) -> None:
+    sbx = _record(
+        build_mode=BuildMode.SANDBOX, pending_commit_sha=SHA2, status=SourceStatus.NEEDS_APPROVAL
+    )
+    store.rows[sbx.public_id] = sbx
+    r = await app.test_client().post(
+        f"/api/v1/marketplace/sources/{sbx.public_id}/approve-update",
+        json={"pending_commit_sha": SHA2, "sandbox_trust_ack": WARNING_HASH},
+        headers=_h(),
+    )
+    assert r.status_code == 200
+    assert len(store.launched) == 1
+    assert store.launched[0][0].pinned_commit_sha == SHA2
