@@ -153,7 +153,7 @@ async def receive_webhook() -> tuple[dict[str, object], int] | tuple[Response, i
 
 
 @github_sync_admin_bp.route("/<community_id>/github-sync/connections", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def list_connections(community_id: str) -> tuple[dict[str, object], int]:
     """List connections."""
     guard = await _guard(community_id)
@@ -165,7 +165,7 @@ async def list_connections(community_id: str) -> tuple[dict[str, object], int]:
 
 
 @github_sync_admin_bp.route("/<community_id>/github-sync/connections", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def create_connection(
     community_id: str,
 ) -> tuple[dict[str, object], int] | tuple[Response, int]:
@@ -198,7 +198,7 @@ async def create_connection(
 @github_sync_admin_bp.route(
     "/<community_id>/github-sync/connections/<connection_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def delete_connection(
     community_id: str, connection_id: str
 ) -> tuple[dict[str, object], int] | tuple[Response, int]:
@@ -230,7 +230,7 @@ async def delete_connection(
 @github_sync_admin_bp.route(
     "/<community_id>/github-sync/ticket/<ticket_id>/sync-status", methods=["GET"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_sync_status(community_id: str, ticket_id: str) -> tuple[dict[str, object], int]:
     """Get sync status."""
     guard = await _guard(community_id)
@@ -273,7 +273,7 @@ async def get_sync_status(community_id: str, ticket_id: str) -> tuple[dict[str, 
 
 
 @github_sync_admin_bp.route("/<community_id>/github-sync/ticket/<ticket_id>/sync", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def trigger_sync(
     community_id: str, ticket_id: str
 ) -> tuple[dict[str, object], int] | tuple[Response, int]:

@@ -1,7 +1,7 @@
 """Backfill coverage for the `roll` bundle: dice math, bounds, flag fail-closed, PII-free logs.
 
 Complements `test_app.py` (grammar/flag/relay basics) with the invariants it does not pin:
-the exact dice arithmetic (via a deterministic `random.randint`), both inclusive bounds, case
+the exact dice arithmetic (via a deterministic `_RNG.randint`), both inclusive bounds, case
 insensitivity, the flag's fail-closed default, the "extra tokens" non-match, the PII-free-log
 regression for user-typed spec text, and the static `_entry_wiring` re-export.
 """
@@ -112,7 +112,7 @@ def test_dice_arithmetic_uses_inclusive_one_to_sides_and_sums_the_rolls(
         drawn.append((low, high))
         return next(values)
 
-    monkeypatch.setattr(app.random, "randint", _fake_randint)
+    monkeypatch.setattr(app._RNG, "randint", _fake_randint)
 
     assert _reply_text(_run(transform(_event("!roll 2d6")))) == "\U0001f3b2 rolls [3, 5] (total 8)"
     assert drawn == [(1, 6), (1, 6)]
@@ -120,7 +120,7 @@ def test_dice_arithmetic_uses_inclusive_one_to_sides_and_sums_the_rolls(
 
 def test_bare_roll_defaults_to_one_d20(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
     drawn: list[tuple[int, int]] = []
-    monkeypatch.setattr(app.random, "randint", lambda lo, hi: drawn.append((lo, hi)) or 7)
+    monkeypatch.setattr(app._RNG, "randint", lambda lo, hi: drawn.append((lo, hi)) or 7)
 
     assert "rolls [7] (total 7)" in _reply_text(_run(transform(_event("!roll"))))
     assert drawn == [(1, DEFAULT_SIDES)]

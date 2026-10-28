@@ -176,6 +176,11 @@ describe('DashboardLayout — SidebarMenu props', () => {
     expect(props.footerItems.length).toBeGreaterThan(0);
   });
 
+  it('keeps the fixed desktop sidebar outside the offset content shell', () => {
+    renderAt('/dashboard');
+    expect(screen.getByTestId('dashboard-content-shell').className).toContain('lg:pl-64');
+  });
+
   it('onNavigate callback invokes navigate (does not throw)', () => {
     // The onNavigate prop is `(href) => navigate(href)`. Calling it exercises
     // line 172. The real MemoryRouter provides useNavigate, so no extra mock needed.

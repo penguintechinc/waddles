@@ -120,7 +120,7 @@ DEFAULT_TENANT_SLUG = "global"
 
 #: OIDC scope guarding tenant-admin management of enterprise SSO connections
 #: (SAML 2.0 / OIDC / Google). Declared by the `auth.sso_saml` /
-#: `auth.sso_google` feature contracts (`core_platform_module.features`) and
+#: `auth.sso_custom` feature contracts (`core_platform_module.features`) and
 #: enforced by `hub_api/blueprints/v1/sso.py`. Granted to the tenant `admin`
 #: bundle below; global admins already hold it via the `*:admin` wildcard.
 SCOPE_SSO_ADMIN = "auth.sso:admin"

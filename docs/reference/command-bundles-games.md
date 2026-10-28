@@ -1,6 +1,6 @@
 # Games and Gambling Commands
 
-Chat games ship as first-party App Bundles. Every command is gated by a `waddles.command-<name>` flag, default OFF. Shared behavior (platforms, flags, mod checks, logging) is in [Command Bundles Reference](command-bundles.md).
+Chat games ship as first-party App Bundles. Every command is activation-gated (install -> enable -> activate), not feature-flag-gated. Shared behavior (platforms, gating, mod checks, logging) is in [Command Bundles Reference](command-bundles.md).
 
 ## Word and number games
 
@@ -8,7 +8,7 @@ Each community has one active round at a time. State lives in kv and expires one
 
 ### `!scramble`
 
-Unscramble a word. Flag: `waddles.command-scramble`.
+Unscramble a word.
 
 | Command | Effect |
 |---|---|
@@ -20,7 +20,7 @@ Any word other than `start`, `giveup` or `reset` is treated as a guess, so a wor
 
 ### `!guess`
 
-Guess a secret number from 1 to 100. Flag: `waddles.command-guess`.
+Guess a secret number from 1 to 100.
 
 | Command | Effect |
 |---|---|
@@ -36,7 +36,7 @@ Guess a secret number from 1 to 100. Flag: `waddles.command-guess`.
 
 ### `!gamble`
 
-Bet points on a win probability. Flag: `waddles.command-gamble`.
+Bet points on a win probability.
 
 | Command | Effect | Who |
 |---|---|---|
@@ -49,7 +49,7 @@ A per-user cooldown of 10 seconds applies by default. If concurrent bets drive a
 
 ### `!heist`
 
-Timed group gamble. Flag: `waddles.command-heist`.
+Timed group gamble.
 
 | Command | Effect | Who |
 |---|---|---|

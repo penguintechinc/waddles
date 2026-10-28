@@ -1,0 +1,24 @@
+{
+  "accessToken": null,
+  "communityId": 7,
+  "connectionId": 12,
+  "endpoint": {
+    "function": "my-function",
+    "project": null,
+    "region": "us-east-1",
+    "url": null
+  },
+  "expiresAt": null,
+  "kind": 3,
+  "metadata": {},
+  "provider": "aws_lambda",
+  "secret": {
+    "fields": {
+      "accessKeyId": "FAKE-ACCESS-KEY-ID",
+      "secretAccessKey": "FAKE-SECRET-ACCESS-KEY",
+      "sessionToken": null
+    },
+    "scheme": 4
+  },
+  "success": true
+}

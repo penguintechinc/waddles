@@ -45,6 +45,11 @@ from typing import Any
 from waddle_sdk import log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 #: Bounds on the caller's own option list -- keeps a pathological input
 #: (hundreds of options, or a multi-kilobyte single option) from producing
 #: an unreasonable reply; neither is a security boundary, just sane chat UX.
@@ -103,7 +108,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         reply_text = parsed
         log.info("choose.transform usage", platform=event.platform)
     else:
-        reply_text = random.choice(parsed)  # noqa: S311 - a game reply, not a security decision
+        reply_text = _RNG.choice(parsed)
         log.info("choose.transform matched", platform=event.platform, option_count=len(parsed))
 
     return PlatformEvent(

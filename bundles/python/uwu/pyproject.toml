@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-uwu"
+version = "1.0.0"
+description = "`!uwu <text>` -> uwu-ifies the text (r/l -> w, 'nya' endings, a deterministic uwu/owo flourish) (capped, never logged). Stateless: relay only, no kv/db."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

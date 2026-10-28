@@ -38,6 +38,11 @@ from typing import Any, NoReturn
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 COMMAND = "scramble"
 
 #: Fixed, auditable embedded list: lowercase alphabetic words with >=2 distinct letters.
@@ -72,7 +77,7 @@ def _scramble_word(word: str) -> str:
     """Return a shuffle of `word` that differs from it (bounded retries, then a rotation)."""
     letters = list(word)
     for _ in range(20):
-        shuffled = "".join(random.sample(letters, len(letters)))
+        shuffled = "".join(_RNG.sample(letters, len(letters)))
         if shuffled != word:
             return shuffled
     return word[1:] + word[0]
@@ -201,7 +206,7 @@ async def _handle_start(*, community: str, provider: str, channel_id: str) -> st
         log.info("scramble.start_already_active", community=community)
         return f"A scramble is already active: {existing['scrambled']} (!scramble <word>)"
 
-    word = random.choice(WORD_BANK)  # noqa: S311 -- a game pick, not crypto
+    word = _RNG.choice(WORD_BANK)
     scrambled = _scramble_word(word)
     active = {"word": word, "scrambled": scrambled, "attempts": 0}
     await _kv_set(

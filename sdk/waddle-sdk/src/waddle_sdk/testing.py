@@ -36,26 +36,46 @@ Usage (pytest)::
 
 from __future__ import annotations
 
+import dataclasses
 import sys
 import types
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from waddle_sdk.kv import InvalidKvKeyError, validate_key
 
 __all__ = [
+    "ACTION_ONLY_CAPABILITIES",
+    "PROCESS_ONLY_CAPABILITIES",
     "FakeAiHost",
     "FakeEconomyHost",
     "FakeIdentityHost",
     "FakeKvHost",
     "FakeReputationHost",
     "InvalidKvKeyError",
+    "StageGuard",
+    "StageViolationError",
     "install_fake_ai_host",
     "install_fake_economy_host",
     "install_fake_identity_host",
     "install_fake_kv_host",
     "install_fake_reputation_host",
+    "rfc3339_from_millis",
 ]
+
+
+def rfc3339_from_millis(millis: int) -> str:
+    """Render epoch milliseconds as the RFC 3339 ``...Z`` stamp ``svc-ingest`` puts on an event.
+
+    For tests that must give an event an ``occurred_at`` consistent with a fake clock (the age
+    fence in ``waddle_sdk.event_dedupe`` compares it to ``clock.now_millis()``).
+    """
+    stamp = datetime.fromtimestamp(millis // 1000, tz=UTC)
+    return f"{stamp:%Y-%m-%dT%H:%M:%S}.{millis % 1000:03d}Z"
 
 
 @dataclass(slots=True)
@@ -499,3 +519,156 @@ def install_fake_ai_host(monkeypatch: Any) -> FakeAiHost:
     fake_wit_world.imports = types.SimpleNamespace(ai=ai_mod)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
     return host
+
+
+class StageViolationError(Exception):
+    """A host capability was called from a pipeline stage whose host does not serve it."""
+
+
+#: Capabilities the real host serves ONLY to the process stage (``core/svc_process/src/
+#: capabilities.rs``): ``svc_action`` has no handler for them, so a call from ``dispatch`` is
+#: denied/unwired on a real host even though it works against a stage-blind fake.
+PROCESS_ONLY_CAPABILITIES = frozenset({"economy", "identity", "reputation", "ai"})
+
+#: Capabilities served ONLY to the action stage (the process stage hard-denies ``relay``).
+ACTION_ONLY_CAPABILITIES = frozenset({"relay"})
+
+_STAGE: ContextVar[str | None] = ContextVar("waddle_sdk_testing_stage", default=None)
+
+
+@dataclass(slots=True)
+class StageGuard:
+    """Makes a bundle test's fake host stage-faithful: process-only calls fail from ``dispatch``.
+
+    **Why it exists.** The real pipeline serves ``economy`` / ``identity`` / ``reputation`` /
+    ``ai`` to ``transform`` (the process stage) and ``relay`` to ``dispatch`` (the action stage)
+    -- never the other way round. A stage-blind fake accepts every call from either entry point,
+    so a bundle that settles money inside ``dispatch`` passes every host-native test and then fails
+    on a real host. Wrapping the fakes with a guard turns that into a test failure.
+
+    **Use**::
+
+        GUARD = StageGuard()
+        transform = GUARD.process_stage(app.transform)   # sets the stage while it runs
+        dispatch = GUARD.action_stage(app.dispatch)
+
+        ns.economy = types.SimpleNamespace(
+            balance=GUARD.process_only("economy.balance", eco.balance), ...
+        )
+        ns.relay = types.SimpleNamespace(push=GUARD.action_only("relay.push", push))
+
+        @pytest.fixture
+        def host(monkeypatch):
+            GUARD.reset()
+            ...
+            yield h
+            GUARD.assert_clean()
+
+    A call made with NO stage set (a test poking the host directly, outside both entry points)
+    is not a violation -- only a call made from the WRONG stage is. Every violation is recorded
+    (so it fails the test even if the bundle swallows the error it is answered with) and the
+    call raises :class:`StageViolationError`.
+    """
+
+    violations: list[str] = field(default_factory=list)
+
+    def reset(self) -> None:
+        """Forget recorded violations (call from the per-test fixture, before the test runs)."""
+        self.violations.clear()
+
+    def assert_clean(self) -> None:
+        """Fail if any capability was called from a stage that does not serve it."""
+        if self.violations:
+            raise AssertionError(
+                "capability called from a stage that does not serve it (process: "
+                f"{sorted(PROCESS_ONLY_CAPABILITIES)}, action: {sorted(ACTION_ONLY_CAPABILITIES)}"
+                f"): {self.violations}"
+            )
+
+    @property
+    def stage(self) -> str | None:
+        """The stage the current task is simulating, or ``None`` outside both entry points."""
+        return _STAGE.get()
+
+    @contextmanager
+    def in_stage(self, stage: str) -> Iterator[None]:
+        """Run the body as the ``process`` or ``action`` stage."""
+        if stage not in ("process", "action"):
+            raise ValueError(f"unknown stage {stage!r}")
+        token = _STAGE.set(stage)
+        try:
+            yield
+        finally:
+            _STAGE.reset(token)
+
+    def process_stage(self, fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        """Wrap an entry point (``transform``) so it runs as the process stage."""
+
+        async def run(*args: Any, **kwargs: Any) -> Any:
+            with self.in_stage("process"):
+                return await fn(*args, **kwargs)
+
+        return run
+
+    def action_stage(self, fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        """Wrap an entry point (``dispatch``) so it runs as the action stage."""
+
+        async def run(*args: Any, **kwargs: Any) -> Any:
+            with self.in_stage("action"):
+                return await fn(*args, **kwargs)
+
+        return run
+
+    def two_stage(
+        self,
+        settle: Callable[..., Awaitable[Any]],
+        dispatch: Callable[..., Awaitable[Any]],
+    ) -> Callable[..., Awaitable[Any]]:
+        """Return a ``dispatch``-shaped driver that runs the REAL two-stage split.
+
+        For a bundle whose ``transform`` is ``recognize -> settle(intent, event, community=)``:
+        ``settle`` (the economy/identity work) runs as the process stage on the envelope's
+        ``intent`` payload, then ``dispatch`` runs as the action stage on the event ``settle``
+        returned. When ``settle`` drops the event (``None`` -- a redelivery), no dispatch happens
+        and the result's ``detail`` is ``"duplicate"``. Lets a suite written against the old
+        single-stage ``dispatch(envelope, config, http_client=)`` shape keep its assertions while
+        every host call is stage-checked.
+        """
+
+        async def run(envelope: Any, config: Any, *, http_client: Any = None) -> Any:
+            with self.in_stage("process"):
+                out = await settle(
+                    envelope.event.payload, envelope.event, community=envelope.community
+                )
+            if out is None:
+                return types.SimpleNamespace(
+                    transport=envelope.event.platform,
+                    detail="duplicate",
+                    sub_type=None,
+                    http_status=None,
+                )
+            action_envelope = dataclasses.replace(envelope, stage="action", event=out)
+            with self.in_stage("action"):
+                return await dispatch(action_envelope, config, http_client=http_client)
+
+        return run
+
+    def _wrap(self, name: str, fn: Callable[..., Any], served_by: str) -> Callable[..., Any]:
+        def guarded(*args: Any, **kwargs: Any) -> Any:
+            current = _STAGE.get()
+            if current is not None and current != served_by:
+                self.violations.append(f"{name} called from the {current} stage")
+                raise StageViolationError(
+                    f"{name} is served by the {served_by} stage only (called from {current})"
+                )
+            return fn(*args, **kwargs)
+
+        return guarded
+
+    def process_only(self, name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Wrap a host fake that only the process stage serves (economy/identity/...)."""
+        return self._wrap(name, fn, "process")
+
+    def action_only(self, name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Wrap a host fake that only the action stage serves (``relay``)."""
+        return self._wrap(name, fn, "action")
