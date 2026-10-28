@@ -229,6 +229,7 @@ function UserProfileEdit() {
             </div>
             <div className="space-y-2">
               <input
+                aria-label="Upload avatar image"
                 ref={fileInputRef}
                 type="file"
                 accept="image/jpeg,image/png,image/gif,image/webp"
@@ -245,6 +246,7 @@ function UserProfileEdit() {
               </button>
               {avatarPreview && (
                 <button
+                  aria-label="Delete profile picture"
                   type="button"
                   onClick={handleDeleteAvatar}
                   disabled={uploadingAvatar}
@@ -266,8 +268,9 @@ function UserProfileEdit() {
           </h2>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">Display Name</label>
+              <label htmlFor="user-profile-edit-display-name" className="block text-sm font-medium text-navy-300 mb-2">Display Name</label>
               <input
+                id="user-profile-edit-display-name"
                 type="text"
                 value={profile.displayName}
                 onChange={(e) => updateField('displayName', e.target.value)}
@@ -278,8 +281,9 @@ function UserProfileEdit() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">Bio</label>
+              <label htmlFor="user-profile-edit-bio" className="block text-sm font-medium text-navy-300 mb-2">Bio</label>
               <textarea
+                id="user-profile-edit-bio"
                 value={profile.bio}
                 onChange={(e) => updateField('bio', e.target.value)}
                 maxLength={2000}
@@ -291,12 +295,13 @@ function UserProfileEdit() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="user-profile-edit-input" className="block text-sm font-medium text-navy-300 mb-2">
                 <MapPinIcon className="w-4 h-4 inline mr-1" />
                 Location
               </label>
               <div className="grid md:grid-cols-3 gap-4">
                 <input
+                  id="user-profile-edit-input"
                   type="text"
                   value={profile.locationCity}
                   onChange={(e) => updateField('locationCity', e.target.value)}
@@ -305,6 +310,7 @@ function UserProfileEdit() {
                   className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 placeholder-navy-500 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
                 />
                 <input
+                  aria-label="State/Province"
                   type="text"
                   value={profile.locationState}
                   onChange={(e) => updateField('locationState', e.target.value)}
@@ -313,6 +319,7 @@ function UserProfileEdit() {
                   className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 placeholder-navy-500 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
                 />
                 <input
+                  aria-label="Country"
                   type="text"
                   value={profile.locationCountry}
                   onChange={(e) => updateField('locationCountry', e.target.value)}

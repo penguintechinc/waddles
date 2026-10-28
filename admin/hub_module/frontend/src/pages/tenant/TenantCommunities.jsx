@@ -87,11 +87,12 @@ function TenantCommunities() {
             />
           </svg>
           <input
+            aria-label="Search communities"
             type="text"
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search communities..."
-            className="w-full bg-navy-800 border border-navy-700 rounded-lg pl-9 pr-3 py-2 text-sky-100 placeholder-sky-600 focus:outline-none focus:border-gold-500 text-sm"
+            className="w-full bg-navy-800 border border-navy-700 rounded-lg pl-9 pr-3 py-2 text-sky-100 placeholder-sky-600 focus:border-gold-500 text-sm"
           />
         </div>
         <button

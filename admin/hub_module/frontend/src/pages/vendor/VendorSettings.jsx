@@ -127,43 +127,46 @@ function VendorSettings() {
 
           {/* Display Name */}
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">
+            <label htmlFor="vendor-settings-input" className="block text-sm font-medium text-navy-300 mb-2">
               Display Name <span className="text-red-400">*</span>
             </label>
             <input
+              id="vendor-settings-input"
               type="text"
               value={form.displayName}
               onChange={(e) => setField('displayName', e.target.value)}
               required
               maxLength={100}
               placeholder="Your vendor display name"
-              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:outline-none focus:border-gold-400"
+              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:border-gold-400"
             />
           </div>
 
           {/* Description */}
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">Description</label>
+            <label htmlFor="vendor-settings-description" className="block text-sm font-medium text-navy-300 mb-2">Description</label>
             <textarea
+              id="vendor-settings-description"
               value={form.description}
               onChange={(e) => setField('description', e.target.value)}
               rows={4}
               maxLength={500}
               placeholder="Describe yourself or your organization..."
-              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:outline-none focus:border-gold-400 resize-none"
+              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:border-gold-400 resize-none"
             />
             <p className="text-xs text-navy-500 mt-1">{form.description.length}/500</p>
           </div>
 
           {/* Website URL */}
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">Website URL</label>
+            <label htmlFor="vendor-settings-website-url" className="block text-sm font-medium text-navy-300 mb-2">Website URL</label>
             <input
+              id="vendor-settings-website-url"
               type="url"
               value={form.websiteUrl}
               onChange={(e) => setField('websiteUrl', e.target.value)}
               placeholder="https://your-website.com"
-              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:outline-none focus:border-gold-400"
+              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white placeholder-navy-500 focus:border-gold-400"
             />
           </div>
         </div>
@@ -175,11 +178,12 @@ function VendorSettings() {
           </h2>
 
           <div>
-            <label className="block text-sm font-medium text-navy-300 mb-2">Payout Method</label>
+            <label htmlFor="vendor-settings-payout-method" className="block text-sm font-medium text-navy-300 mb-2">Payout Method</label>
             <select
+              id="vendor-settings-payout-method"
               value={form.payoutMethod}
               onChange={(e) => setField('payoutMethod', e.target.value)}
-              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:outline-none focus:border-gold-400"
+              className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:border-gold-400"
             >
               {PAYOUT_METHODS.map((m) => (
                 <option key={m.value} value={m.value}>

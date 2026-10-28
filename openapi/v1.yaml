@@ -1769,6 +1769,29 @@ components:
       - status
       title: DeletionRequestDTO
       type: object
+    DiscordRole:
+      description: One Discord role -- `id` is a string snowflake (never a JS-lossy
+        int).
+      properties:
+        color:
+          title: Color
+          type: integer
+        id:
+          title: Id
+          type: string
+        name:
+          title: Name
+          type: string
+        position:
+          title: Position
+          type: integer
+      required:
+      - id
+      - name
+      - color
+      - position
+      title: DiscordRole
+      type: object
     DiscordStatsDTO:
       description: Discord stats DTO.
       properties:
@@ -14180,6 +14203,41 @@ paths:
         default:
           description: Undocumented response
       summary: '`POST /api/v1/communities/<id>/connections/<provider>/authorize`.'
+  /api/v1/communities/{community_id}/discord/roles:
+    get:
+      description: ''
+      operationId: get_list_discord_roles
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Discord guild roles response envelope (dropdown source
+                  for role-sync mapping).
+                properties:
+                  roles:
+                    items:
+                      $ref: '#/components/schemas/DiscordRole'
+                    title: Roles
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - roles
+                title: DiscordGuildRolesResponse
+                type: object
+          description: Discord guild roles response envelope (dropdown source for
+            role-sync mapping).
+      summary: '`GET /api/v1/communities/<id>/discord/roles[?guild_id=]` -- the paired
+        guild''s roles.'
   /api/v1/communities/{community_id}/guild-pairings:
     get:
       description: ''

@@ -649,13 +649,14 @@ function VendorAnalytics() {
                       <>
                         <tr
                           key={comm.id ?? idx}
+                          data-click-delegate
                           className="hover:bg-navy-750 transition-colors cursor-pointer"
                           onClick={() =>
                             setExpandedComm(isExpanded ? null : (comm.id ?? idx))
                           }
                         >
                           <td className="py-3 pr-4 font-medium text-white">
-                            {comm.communityName ?? comm.community_name ?? '—'}
+                            <button type="button" aria-expanded={isExpanded} className="text-left font-medium hover:underline focus-visible:underline">{comm.communityName ?? comm.community_name ?? '—'}</button>
                           </td>
                           <td className="py-3 pr-4 text-navy-200">
                             {comm.moduleName ?? comm.module_name ?? '—'}
@@ -751,6 +752,7 @@ function VendorAnalytics() {
                 </p>
                 <div className="flex items-center space-x-2">
                   <button
+                    aria-label="Previous page"
                     onClick={() => setCommPage((p) => Math.max(1, p - 1))}
                     disabled={commPage <= 1}
                     className="p-1.5 rounded border border-navy-600 text-navy-300 hover:text-white hover:border-navy-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
@@ -758,6 +760,7 @@ function VendorAnalytics() {
                     <ChevronLeftIcon className="w-4 h-4" />
                   </button>
                   <button
+                    aria-label="Next page"
                     onClick={() => setCommPage((p) => Math.min(totalCommPages, p + 1))}
                     disabled={commPage >= totalCommPages}
                     className="p-1.5 rounded border border-navy-600 text-navy-300 hover:text-white hover:border-navy-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"

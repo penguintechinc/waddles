@@ -170,59 +170,63 @@ function VendorRequest() {
 
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="vendor-request-company-name" className="block text-sm font-medium text-navy-300 mb-2">
                 Company Name *
               </label>
               <input
+                id="vendor-request-company-name"
                 type="text"
                 name="companyName"
                 value={formData.companyName}
                 onChange={handleChange}
                 required
-                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:outline-none focus:border-gold-400"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:border-gold-400"
                 placeholder="Your company name"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="vendor-request-company-website" className="block text-sm font-medium text-navy-300 mb-2">
                 Company Website
               </label>
               <input
+                id="vendor-request-company-website"
                 type="url"
                 name="companyWebsite"
                 value={formData.companyWebsite}
                 onChange={handleChange}
-                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:outline-none focus:border-gold-400"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:border-gold-400"
                 placeholder="https://example.com"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="vendor-request-business-description" className="block text-sm font-medium text-navy-300 mb-2">
                 Business Description *
               </label>
               <textarea
+                id="vendor-request-business-description"
                 name="businessDescription"
                 value={formData.businessDescription}
                 onChange={handleChange}
                 required
                 rows="4"
-                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:outline-none focus:border-gold-400"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:border-gold-400"
                 placeholder="Tell us about your business and why you want to submit modules to Waddles"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="vendor-request-experience-expertise" className="block text-sm font-medium text-navy-300 mb-2">
                 Experience & Expertise
               </label>
               <textarea
+                id="vendor-request-experience-expertise"
                 name="experienceSummary"
                 value={formData.experienceSummary}
                 onChange={handleChange}
                 rows="4"
-                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:outline-none focus:border-gold-400"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:border-gold-400"
                 placeholder="Describe your experience with bot development, integrations, or relevant technology"
               />
             </div>
@@ -235,29 +239,31 @@ function VendorRequest() {
 
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="vendor-request-email-address" className="block text-sm font-medium text-navy-300 mb-2">
                 Email Address *
               </label>
               <input
+                id="vendor-request-email-address"
                 type="email"
                 name="contactEmail"
                 value={formData.contactEmail}
                 onChange={handleChange}
                 required
-                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:outline-none focus:border-gold-400"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:border-gold-400"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-2">
+              <label htmlFor="vendor-request-phone-number" className="block text-sm font-medium text-navy-300 mb-2">
                 Phone Number
               </label>
               <input
+                id="vendor-request-phone-number"
                 type="tel"
                 name="contactPhone"
                 value={formData.contactPhone}
                 onChange={handleChange}
-                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:outline-none focus:border-gold-400"
+                className="w-full bg-navy-900 border border-navy-600 rounded px-4 py-2 text-white focus:border-gold-400"
                 placeholder="+1 (555) 000-0000"
               />
             </div>

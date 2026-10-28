@@ -52,6 +52,11 @@ pub struct EventSubState {
     pub keyring: KeyRing,
     pub active_kid: String,
     pub scope: Scope,
+    /// Identity-field (`actor`) DEK provider -- `crate::identity_crypto`,
+    /// forwarded to `handle_webhook` unchanged.
+    pub dek_provider: crate::identity_crypto::ConfiguredDekProvider<
+        crate::identity_crypto::UnimplementedMachineJwtProvider,
+    >,
 }
 
 /// Body-size cap enforced at the HTTP layer via
@@ -226,6 +231,7 @@ async fn process(
         &es.keyring,
         &es.active_kid,
         &es.scope,
+        &es.dek_provider,
         callback_key,
         content_type,
         &raw_headers,
