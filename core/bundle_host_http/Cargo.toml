@@ -17,7 +17,7 @@ path = "src/lib.rs"
 # this pipeline was extracted from) so no dependent crate resolves a
 # second version of the same package.
 [dependencies]
-tokio = { version = "=1.53.1", features = ["net", "time", "rt"] }
+tokio = { version = "=1.53.3", features = ["net", "time", "rt"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tracing = "=0.1.44"
@@ -25,14 +25,14 @@ prometheus = "=0.14.0"
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
 futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 base64 = "=0.22.1"
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "eef86927d015f530c14d8ed54d311494c1a8000d", package = "penguin-bundle-host", version = "=0.3.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0b97183fa7ae7c91464bd6539821ad0a091d5764", package = "penguin-bundle-host", version = "=0.3.0" }
 # Same-repo path dependency (not a penguin-libs crate) -- the shared signed
 # egress-allowlist assertion wire format (PR #468), also depended on by
 # core/egress_proxy's verifier so the two crates can never drift apart.
 egress-assertion = { path = "../egress_assertion", version = "=0.1.0" }
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
 # Test-only real HTTP server for `ReqwestTransport`'s connect/size-cap
 # tests (moved verbatim from svc_action) -- never linked into any release
 # binary of either consuming crate.

@@ -92,7 +92,7 @@ pub struct SessionDeps {
 
 /// The production [`SessionRunner`]: runs `run_with_connector` over a
 /// [`ResolvingConnector`] so every (re)connect re-resolves its credentials.
-pub struct RealRunner<R, A, M> {
+pub struct RealRunner<R, A, M, Dk> {
     resolver: Arc<R>,
     appender: Arc<A>,
     spine_metrics: Arc<M>,
@@ -104,9 +104,11 @@ pub struct RealRunner<R, A, M> {
     use_tls: bool,
     session_metrics: Option<Arc<dyn SessionMetrics>>,
     resolve_timeout: Duration,
+    dek_provider: Arc<Dk>,
+    identity_metrics: Arc<prometheus::IntCounterVec>,
 }
 
-impl<R, A, M> RealRunner<R, A, M> {
+impl<R, A, M, Dk> RealRunner<R, A, M, Dk> {
     /// Overrides the per-call credential-resolution bound (default 10s).
     #[must_use]
     pub fn with_resolve_timeout(mut self, timeout: Duration) -> Self {
@@ -134,6 +136,8 @@ impl<R, A, M> RealRunner<R, A, M> {
         host: String,
         port: u16,
         use_tls: bool,
+        dek_provider: Arc<Dk>,
+        identity_metrics: Arc<prometheus::IntCounterVec>,
     ) -> Self {
         Self {
             resolver,
@@ -147,15 +151,18 @@ impl<R, A, M> RealRunner<R, A, M> {
             use_tls,
             session_metrics: None,
             resolve_timeout: RESOLVE_TIMEOUT,
+            dek_provider,
+            identity_metrics,
         }
     }
 }
 
-impl<R, A, M> SessionRunner for RealRunner<R, A, M>
+impl<R, A, M, Dk> SessionRunner for RealRunner<R, A, M, Dk>
 where
     R: ConnectionResolve + 'static,
     A: EventAppender + 'static,
     M: SpineMetrics + 'static,
+    Dk: crate::identity_crypto::DekProvider + 'static,
 {
     fn spawn(
         &self,
@@ -171,6 +178,8 @@ where
         let (host, port, tls) = (self.host.clone(), self.port, self.use_tls);
         let session_metrics = self.session_metrics.clone();
         let resolve_timeout = self.resolve_timeout;
+        let dek_provider = self.dek_provider.clone();
+        let identity_metrics = self.identity_metrics.clone();
         tokio::spawn(async move {
             let label = SessionLabel {
                 community_id: spec.community_id,
@@ -192,6 +201,8 @@ where
                 &keyring,
                 &kid,
                 &scope,
+                &*dek_provider,
+                &*identity_metrics,
                 stop_rx,
             );
             tokio::pin!(session);
@@ -1382,9 +1393,28 @@ mod tests {
         }
     }
 
+    struct FakeDekProvider;
+
+    impl crate::identity_crypto::DekProvider for FakeDekProvider {
+        async fn get_dek(
+            &self,
+            _tenant_id: &str,
+        ) -> Result<(crate::identity_crypto::Dek, u32), crate::identity_crypto::DekUnavailableError> {
+            Ok((zeroize::Zeroizing::new([9u8; 32]), 1))
+        }
+    }
+
+    fn test_identity_metrics() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_identity_encryption_total", "test-only"),
+            &["tenant", "status"],
+        )
+        .unwrap()
+    }
+
     fn real_runner(
         transient: bool,
-    ) -> RealRunner<FakeResolver, NullAppender, penguin_spine::NoopMetrics> {
+    ) -> RealRunner<FakeResolver, NullAppender, penguin_spine::NoopMetrics, FakeDekProvider> {
         RealRunner::new(
             Arc::new(FakeResolver {
                 bindings: Mutex::new(Some(vec![])),
@@ -1401,6 +1431,8 @@ mod tests {
             "127.0.0.1".to_owned(),
             1,
             false,
+            Arc::new(FakeDekProvider),
+            Arc::new(test_identity_metrics()),
         )
     }
 
