@@ -72,12 +72,12 @@ function BindingRow({
 }) {
   return (
     <li
-      className="flex items-center justify-between rounded border border-slate-700 bg-slate-800 px-4 py-3"
+      className="flex items-center justify-between rounded border border-line bg-surface-raised px-4 py-3"
       data-testid={`binding-row-${binding.id}`}
     >
       <div>
-        <p className="font-medium text-slate-100">{scopeSummary(binding)}</p>
-        <p className="text-xs text-slate-500">{SYNC_SCOPE_LABELS[binding.sync_scope]}</p>
+        <p className="font-medium text-fg">{scopeSummary(binding)}</p>
+        <p className="text-xs text-fg-muted">{SYNC_SCOPE_LABELS[binding.sync_scope]}</p>
       </div>
       {canManage && (
         <button
@@ -182,7 +182,7 @@ export default function AdminRoleSyncMapping() {
 
   if (!pageEnabled) {
     return (
-      <div className="flex items-center justify-center min-h-[50vh] text-slate-400" role="status">
+      <div className="flex items-center justify-center min-h-[50vh] text-fg-muted" role="status">
         Discord role sync mapping is not yet available for this community.
       </div>
     );
@@ -246,7 +246,7 @@ export default function AdminRoleSyncMapping() {
   ];
 
   return (
-    <div className="p-6 text-slate-300">
+    <div className="p-6 text-fg-secondary">
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-semibold text-amber-400">Discord Role Sync</h1>
         {canManage && activePairingId !== null && (
@@ -261,7 +261,7 @@ export default function AdminRoleSyncMapping() {
         )}
       </div>
 
-      <p className="mb-4 text-sm text-slate-400">
+      <p className="mb-4 text-sm text-fg-muted">
         Map Discord guild roles to this community&apos;s Twitch subscriber tiers/moderators
         (platform → Discord), or to a platform community role (Discord → platform).
         Conflict rule: when a member holds multiple mapped Discord roles, the
@@ -270,7 +270,7 @@ export default function AdminRoleSyncMapping() {
       </p>
 
       {pairingsLoading && (
-        <p role="status" className="text-slate-400">
+        <p role="status" className="text-fg-muted">
           Loading guild pairings…
         </p>
       )}
@@ -282,7 +282,7 @@ export default function AdminRoleSyncMapping() {
       )}
 
       {!pairingsLoading && !pairingsError && (pairings?.length ?? 0) === 0 && (
-        <p className="text-slate-400">
+        <p className="text-fg-muted">
           No Discord guild is paired with this community yet. Pair a Discord server under{' '}
           <strong>Connections</strong> before mapping roles.
         </p>
@@ -290,14 +290,14 @@ export default function AdminRoleSyncMapping() {
 
       {!pairingsLoading && (pairings?.length ?? 0) > 0 && (
         <div className="mb-4">
-          <label htmlFor="pairing-select" className="mb-1 block text-sm font-medium text-slate-300">
+          <label htmlFor="pairing-select" className="mb-1 block text-sm font-medium text-fg-secondary">
             Paired Discord guild
           </label>
           <select
             id="pairing-select"
             value={activePairingId ?? ''}
             onChange={(e) => setSelectedPairingId(Number(e.target.value))}
-            className="rounded border border-slate-600 bg-slate-800 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500"
+            className="rounded border border-line-strong bg-surface-raised px-3 py-2 text-fg focus:outline-none focus:ring-2 focus:ring-sky-500"
           >
             {pairings?.map((pairing) => (
               <option key={pairing.id} value={pairing.id}>
@@ -319,7 +319,7 @@ export default function AdminRoleSyncMapping() {
       {activePairingId !== null && (
         <>
           {bindingsLoading && (
-            <p role="status" className="text-slate-400">
+            <p role="status" className="text-fg-muted">
               Loading bindings…
             </p>
           )}
@@ -331,7 +331,7 @@ export default function AdminRoleSyncMapping() {
           )}
 
           {!bindingsLoading && !bindingsError && (bindings?.length ?? 0) === 0 && (
-            <p className="text-slate-400">No role bindings yet for this guild pairing.</p>
+            <p className="text-fg-muted">No role bindings yet for this guild pairing.</p>
           )}
 
           <ul className="space-y-2" data-testid="binding-list">

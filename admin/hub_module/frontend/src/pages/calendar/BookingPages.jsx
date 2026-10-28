@@ -268,6 +268,7 @@ function BookingPages() {
                   Edit
                 </button>
                 <button
+                  aria-label={`Delete booking page ${page.title}`}
                   onClick={() => handleDelete(page.id)}
                   className="btn btn-secondary text-sm px-3"
                 >

@@ -84,13 +84,14 @@ function CommunityForm({
             <h2 className="text-lg font-semibold text-sky-100 border-b border-navy-700 pb-2">Basic Information</h2>
 
             <div>
-              <label className="block text-sm font-medium text-sky-200 mb-1">
+              <label htmlFor="community-form-community-name-url-friendly-auto-formatt" className="block text-sm font-medium text-sky-200 mb-1">
                 Community Name *
                 <span className="text-navy-400 font-normal ml-2">
                   (URL-friendly, auto-formatted)
                 </span>
               </label>
               <input
+                id="community-form-community-name-url-friendly-auto-formatt"
                 type="text"
                 name="name"
                 value={form.name}
@@ -103,8 +104,9 @@ function CommunityForm({
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-sky-200 mb-1">Display Name</label>
+              <label htmlFor="community-form-display-name" className="block text-sm font-medium text-sky-200 mb-1">Display Name</label>
               <input
+                id="community-form-display-name"
                 type="text"
                 name="displayName"
                 value={form.displayName}
@@ -115,8 +117,9 @@ function CommunityForm({
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-sky-200 mb-1">Description</label>
+              <label htmlFor="community-form-description" className="block text-sm font-medium text-sky-200 mb-1">Description</label>
               <textarea
+                id="community-form-description"
                 name="description"
                 value={form.description}
                 onChange={handleChange}
@@ -127,13 +130,14 @@ function CommunityForm({
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-sky-200 mb-1">
+              <label htmlFor="community-form-community-type-determines-available-feat" className="block text-sm font-medium text-sky-200 mb-1">
                 Community Type *
                 <span className="text-navy-400 font-normal ml-2">
                   (determines available features)
                 </span>
               </label>
               <select
+                id="community-form-community-type-determines-available-feat"
                 name="communityType"
                 value={form.communityType}
                 onChange={handleChange}
@@ -157,8 +161,9 @@ function CommunityForm({
             <h2 className="text-lg font-semibold text-sky-100 border-b border-navy-700 pb-2">Platform Configuration</h2>
 
             <div>
-              <label className="block text-sm font-medium text-sky-200 mb-1">Platform *</label>
+              <label htmlFor="community-form-platform" className="block text-sm font-medium text-sky-200 mb-1">Platform *</label>
               <select
+                id="community-form-platform"
                 name="platform"
                 value={form.platform}
                 onChange={handleChange}
@@ -176,11 +181,12 @@ function CommunityForm({
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-sky-200 mb-1">
+              <label htmlFor="community-form-platform-server-channel-id-optional" className="block text-sm font-medium text-sky-200 mb-1">
                 Platform Server/Channel ID
                 <span className="text-navy-400 font-normal ml-2">(optional)</span>
               </label>
               <input
+                id="community-form-platform-server-channel-id-optional"
                 type="text"
                 name="platformServerId"
                 value={form.platformServerId}
@@ -197,11 +203,12 @@ function CommunityForm({
               <h2 className="text-lg font-semibold text-sky-100 border-b border-navy-700 pb-2">Owner Information</h2>
 
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">
+                <label htmlFor="community-form-owner-name-optional" className="block text-sm font-medium text-sky-200 mb-1">
                   Owner Name
                   <span className="text-navy-400 font-normal ml-2">(optional)</span>
                 </label>
                 <input
+                  id="community-form-owner-name-optional"
                   type="text"
                   name="ownerName"
                   value={form.ownerName}
@@ -212,11 +219,12 @@ function CommunityForm({
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-sky-200 mb-1">
+                <label htmlFor="community-form-owner-platform-id-optional" className="block text-sm font-medium text-sky-200 mb-1">
                   Owner Platform ID
                   <span className="text-navy-400 font-normal ml-2">(optional)</span>
                 </label>
                 <input
+                  id="community-form-owner-platform-id-optional"
                   type="text"
                   name="ownerId"
                   value={form.ownerId}

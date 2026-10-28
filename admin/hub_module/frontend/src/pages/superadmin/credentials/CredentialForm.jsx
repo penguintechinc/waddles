@@ -127,10 +127,11 @@ export default function CredentialForm({ credential, integrationType, onSave, on
 
         {/* Platform Selection */}
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">
+          <label htmlFor="credential-form-select" className="block text-sm font-medium text-sky-100 mb-2">
             Platform <span className="text-red-400">*</span>
           </label>
           <select
+            id="credential-form-select"
             name="platform"
             value={formData.platform}
             onChange={handleChange}
@@ -151,11 +152,12 @@ export default function CredentialForm({ credential, integrationType, onSave, on
 
         {/* Access Token */}
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">
+          <label htmlFor="credential-form-access-token" className="block text-sm font-medium text-sky-100 mb-2">
             Access Token
           </label>
           <div className="relative">
             <input
+              id="credential-form-access-token"
               type={showSecrets.accessToken ? 'text' : 'password'}
               name="accessToken"
               value={formData.accessToken}
@@ -179,11 +181,12 @@ export default function CredentialForm({ credential, integrationType, onSave, on
 
         {/* Refresh Token */}
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">
+          <label htmlFor="credential-form-refresh-token-optional" className="block text-sm font-medium text-sky-100 mb-2">
             Refresh Token <span className="text-xs text-navy-400">(Optional)</span>
           </label>
           <div className="relative">
             <input
+              id="credential-form-refresh-token-optional"
               type={showSecrets.refreshToken ? 'text' : 'password'}
               name="refreshToken"
               value={formData.refreshToken}
@@ -207,10 +210,11 @@ export default function CredentialForm({ credential, integrationType, onSave, on
 
         {/* Client ID */}
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">
+          <label htmlFor="credential-form-client-id-optional" className="block text-sm font-medium text-sky-100 mb-2">
             Client ID <span className="text-xs text-navy-400">(Optional)</span>
           </label>
           <input
+            id="credential-form-client-id-optional"
             type="text"
             name="clientId"
             value={formData.clientId}
@@ -222,11 +226,12 @@ export default function CredentialForm({ credential, integrationType, onSave, on
 
         {/* Client Secret */}
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">
+          <label htmlFor="credential-form-client-secret-optional" className="block text-sm font-medium text-sky-100 mb-2">
             Client Secret <span className="text-xs text-navy-400">(Optional)</span>
           </label>
           <div className="relative">
             <input
+              id="credential-form-client-secret-optional"
               type={showSecrets.clientSecret ? 'text' : 'password'}
               name="clientSecret"
               value={formData.clientSecret}
@@ -250,10 +255,11 @@ export default function CredentialForm({ credential, integrationType, onSave, on
 
         {/* Expires At */}
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">
+          <label htmlFor="credential-form-expires-at-optional" className="block text-sm font-medium text-sky-100 mb-2">
             Expires At <span className="text-xs text-navy-400">(Optional)</span>
           </label>
           <input
+            id="credential-form-expires-at-optional"
             type="datetime-local"
             name="expiresAt"
             value={formData.expiresAt}
@@ -264,10 +270,11 @@ export default function CredentialForm({ credential, integrationType, onSave, on
 
         {/* Scopes */}
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">
+          <label htmlFor="credential-form-scopes-space-separated" className="block text-sm font-medium text-sky-100 mb-2">
             Scopes <span className="text-xs text-navy-400">(Space-separated)</span>
           </label>
           <input
+            id="credential-form-scopes-space-separated"
             type="text"
             name="scopes"
             value={formData.scopes}
@@ -279,10 +286,11 @@ export default function CredentialForm({ credential, integrationType, onSave, on
 
         {/* Config Data */}
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">
+          <label htmlFor="credential-form-config-data-json-optional" className="block text-sm font-medium text-sky-100 mb-2">
             Config Data <span className="text-xs text-navy-400">(JSON, Optional)</span>
           </label>
           <textarea
+            id="credential-form-config-data-json-optional"
             name="configData"
             value={formData.configData}
             onChange={handleChange}

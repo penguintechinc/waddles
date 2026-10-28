@@ -125,6 +125,7 @@ function DashboardHome() {
       {/* Search Input */}
       <div className="mb-6">
         <input
+          aria-label="Search your communities or discover new ones"
           type="text"
           placeholder="Search your communities or discover new ones..."
           value={searchTerm}
@@ -197,7 +198,7 @@ function DashboardHome() {
                       </p>
                       <div className="mt-3 flex items-center justify-between text-xs text-navy-500">
                         <span>{community.memberCount} members</span>
-                        <span>Joined {new Date(community.joinedAt).toLocaleDateString()}</span>
+                        {community.joinedAt && <span>Joined {new Date(community.joinedAt).toLocaleDateString()}</span>}
                       </div>
                     </div>
                   </Link>

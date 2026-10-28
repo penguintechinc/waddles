@@ -200,6 +200,13 @@ seed-ui-mock-data:
 screenshots:
 	@bash scripts/screenshots.sh
 
+# Hub-webui static audit: accessibility counters + route survey (ui-audit) and UI calls
+# with no hub-api route (api-gap-check). Exits non-zero if a scanner examines zero files.
+# The zero-budget accessibility ratchet itself runs in `npm test` (scripts/__tests__).
+.PHONY: webui-audit
+webui-audit:
+	@cd admin/hub_module/frontend && node scripts/ui-audit.mjs && node scripts/api-gap-check.mjs --pages
+
 clean:
 	docker-compose down -v
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

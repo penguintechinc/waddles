@@ -117,9 +117,9 @@ const gameTypeConfig = {
   other: {
     logo: null,
     label: 'Other',
-    bgColor: 'bg-gray-500/20',
-    borderColor: 'border-gray-500/30',
-    textColor: 'text-gray-300',
+    bgColor: 'bg-navy-500/20',
+    borderColor: 'border-navy-500/30',
+    textColor: 'text-fg-secondary',
   },
 };
 

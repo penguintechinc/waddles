@@ -301,23 +301,25 @@ function ChannelForm({ initial, onSave, onCancel, saving }) {
       </h3>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
-          <label className="block text-sm font-medium text-navy-300 mb-1">Name</label>
+          <label htmlFor="admin-interaction-channels-name" className="block text-sm font-medium text-navy-300 mb-1">Name</label>
           <input
+            id="admin-interaction-channels-name"
             type="text"
             required
             value={form.name}
             onChange={(e) => set('name', e.target.value)}
-            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:outline-none focus:border-sky-500"
+            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:border-sky-500"
             placeholder="Channel name"
           />
         </div>
         <div>
-          <label className="block text-sm font-medium text-navy-300 mb-1">Type</label>
+          <label htmlFor="admin-interaction-channels-type" className="block text-sm font-medium text-navy-300 mb-1">Type</label>
           <select
+            id="admin-interaction-channels-type"
             data-testid="channel-type-select"
             value={form.type}
             onChange={(e) => set('type', e.target.value)}
-            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:outline-none focus:border-sky-500"
+            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:border-sky-500"
           >
             {CHANNEL_TYPES.map((t) => (
               <option key={t.value} value={t.value}>
@@ -327,22 +329,24 @@ function ChannelForm({ initial, onSave, onCancel, saving }) {
           </select>
         </div>
         <div className="sm:col-span-2">
-          <label className="block text-sm font-medium text-navy-300 mb-1">Description</label>
+          <label htmlFor="admin-interaction-channels-description" className="block text-sm font-medium text-navy-300 mb-1">Description</label>
           <textarea
+            id="admin-interaction-channels-description"
             value={form.description}
             onChange={(e) => set('description', e.target.value)}
             rows={2}
-            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:outline-none focus:border-sky-500 resize-none"
+            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:border-sky-500 resize-none"
             placeholder="Optional description"
           />
         </div>
         <div>
-          <label className="block text-sm font-medium text-navy-300 mb-1">Sort Order</label>
+          <label htmlFor="admin-interaction-channels-sort-order" className="block text-sm font-medium text-navy-300 mb-1">Sort Order</label>
           <input
+            id="admin-interaction-channels-sort-order"
             type="number"
             value={form.sort_order}
             onChange={(e) => set('sort_order', parseInt(e.target.value, 10) || 0)}
-            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:outline-none focus:border-sky-500"
+            className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:border-sky-500"
           />
         </div>
         {form.type === 'voice' && (
@@ -386,15 +390,16 @@ function ChannelForm({ initial, onSave, onCancel, saving }) {
         </div>
         {form.is_temporary && (
           <div className="mt-3 max-w-xs">
-            <label className="block text-sm font-medium text-navy-300 mb-1">
+            <label htmlFor="admin-interaction-channels-duration-minutes" className="block text-sm font-medium text-navy-300 mb-1">
               Duration (minutes)
             </label>
             <input
+              id="admin-interaction-channels-duration-minutes"
               type="number"
               min={1}
               value={form.temp_duration_minutes}
               onChange={(e) => set('temp_duration_minutes', Math.max(1, parseInt(e.target.value, 10) || 60))}
-              className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:outline-none focus:border-sky-500"
+              className="bg-navy-800 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:border-sky-500"
             />
           </div>
         )}
@@ -501,9 +506,10 @@ function ChannelCreationPolicy({ communityId }) {
         <div className="flex items-start gap-4">
           <div className="flex-1 max-w-xs">
             <select
+              aria-label="Channel creation policy"
               value={policy}
               onChange={(e) => setPolicy(e.target.value)}
-              className="w-full bg-navy-900 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sky-500"
+              className="w-full bg-navy-900 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 text-sm focus:border-sky-500"
             >
               {POLICY_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>

@@ -29,7 +29,7 @@ const STATUS_STYLES = {
   pending: 'bg-yellow-500/20 text-yellow-300 border-yellow-500/30',
   approved: 'bg-green-500/20 text-green-300 border-green-500/30',
   rejected: 'bg-red-500/20 text-red-300 border-red-500/30',
-  cancelled: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
+  cancelled: 'bg-navy-500/20 text-fg-muted border-navy-500/30',
 };
 
 function AdminCalendarEvents() {
@@ -208,8 +208,8 @@ function AdminCalendarEvents() {
 
       {events.length === 0 ? (
         <div className="card p-8 text-center">
-          <CalendarDaysIcon className="h-16 w-16 text-gray-500 mx-auto mb-4" />
-          <p className="text-gray-400">No events yet. Create your first event!</p>
+          <CalendarDaysIcon className="h-16 w-16 text-fg-muted mx-auto mb-4" />
+          <p className="text-fg-muted">No events yet. Create your first event!</p>
         </div>
       ) : (
         <div className="card overflow-hidden">

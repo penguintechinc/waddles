@@ -137,26 +137,28 @@ function TenantAdmins() {
         )}
         <form onSubmit={handleAdd} className="flex flex-col sm:flex-row gap-3">
           <div className="flex-1">
-            <label className="block text-sky-300 text-xs font-medium mb-1">
+            <label htmlFor="tenant-admins-user-id-or-username" className="block text-sky-300 text-xs font-medium mb-1">
               User ID or Username
             </label>
             <input
+              id="tenant-admins-user-id-or-username"
               type="text"
               value={addForm.userId}
               onChange={(e) => setAddForm((f) => ({ ...f, userId: e.target.value }))}
               placeholder="Enter user ID or username"
               required
-              className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 placeholder-sky-600 focus:outline-none focus:border-gold-500 text-sm"
+              className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 placeholder-sky-600 focus:border-gold-500 text-sm"
             />
           </div>
           <div className="sm:w-44">
-            <label className="block text-sky-300 text-xs font-medium mb-1">
+            <label htmlFor="tenant-admins-role" className="block text-sky-300 text-xs font-medium mb-1">
               Role
             </label>
             <select
+              id="tenant-admins-role"
               value={addForm.role}
               onChange={(e) => setAddForm((f) => ({ ...f, role: e.target.value }))}
-              className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 focus:outline-none focus:border-gold-500 text-sm"
+              className="w-full bg-navy-700 border border-navy-600 rounded-lg px-3 py-2 text-sky-100 focus:border-gold-500 text-sm"
             >
               {ROLE_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>

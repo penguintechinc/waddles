@@ -71,6 +71,7 @@ function AdminMembers() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-sky-100">Members</h1>
         <input
+          aria-label="Search members"
           type="search"
           placeholder="Search members..."
           value={search}
@@ -176,8 +177,8 @@ function AdminMembers() {
       {/* Reset Password Modal */}
       {resetModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-md mx-4">
-            <h2 className="text-lg font-semibold text-sky-100 mb-1">Reset Password</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-members-dialog-1-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-md mx-4">
+            <h2 id="admin-members-dialog-1-title" className="text-lg font-semibold text-sky-100 mb-1">Reset Password</h2>
             <p className="text-sm text-navy-400 mb-4">
               Generating a temporary password for <span className="text-sky-200">{resetModal.member.username}</span>.
               Share this with them to allow a one-time login.

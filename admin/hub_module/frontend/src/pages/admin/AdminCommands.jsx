@@ -94,7 +94,7 @@ function AdminCommands() {
             <ExclamationTriangleIcon className="w-5 h-5 text-red-400" />
             <span className="text-red-400">{error}</span>
           </div>
-          <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
+          <button aria-label="Close" onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
             <XMarkIcon className="w-5 h-5" />
           </button>
         </div>
@@ -105,18 +105,20 @@ function AdminCommands() {
         <div className="relative flex-1 min-w-48">
           <MagnifyingGlassIcon className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-navy-400" />
           <input
+            aria-label="Search commands"
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search commands..."
-            className="w-full pl-9 pr-3 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 placeholder-navy-500 focus:outline-none focus:border-gold-500 text-sm"
+            className="w-full pl-9 pr-3 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 placeholder-navy-500 focus:border-gold-500 text-sm"
           />
         </div>
 
         <select
+          aria-label="Filter by platforms"
           value={platformFilter}
           onChange={(e) => setPlatformFilter(e.target.value)}
-          className="px-3 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 text-sm focus:outline-none focus:border-gold-500"
+          className="px-3 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 text-sm focus:border-gold-500"
         >
           <option value="all">All Platforms</option>
           <option value="discord">Discord</option>
@@ -126,9 +128,10 @@ function AdminCommands() {
         </select>
 
         <select
+          aria-label="Filter by modules"
           value={moduleFilter}
           onChange={(e) => setModuleFilter(e.target.value)}
-          className="px-3 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 text-sm focus:outline-none focus:border-gold-500"
+          className="px-3 py-2 bg-navy-800 border border-navy-700 rounded-lg text-sky-100 text-sm focus:border-gold-500"
         >
           <option value="all">All Modules</option>
           {modules.map((m) => (

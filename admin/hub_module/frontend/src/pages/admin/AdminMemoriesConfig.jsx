@@ -67,16 +67,16 @@ function AdminMemoriesConfig() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">Retention (days)</label>
-          <input type="number" value={config.retentionDays} onChange={(e) => setConfig({ ...config, retentionDays: parseInt(e.target.value) || 7 })} min={7} max={365}
-            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500" />
+          <label htmlFor="admin-memories-config-retention-days" className="block text-sm font-medium text-sky-100 mb-2">Retention (days)</label>
+          <input id="admin-memories-config-retention-days" type="number" value={config.retentionDays} onChange={(e) => setConfig({ ...config, retentionDays: parseInt(e.target.value) || 7 })} min={7} max={365}
+            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500" />
           <p className="text-xs text-navy-400 mt-1">How long memories are retained (7-365 days)</p>
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">Max Memories Per User</label>
-          <input type="number" value={config.maxMemoriesPerUser} onChange={(e) => setConfig({ ...config, maxMemoriesPerUser: parseInt(e.target.value) || 1 })} min={1} max={500}
-            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500" />
+          <label htmlFor="admin-memories-config-max-memories-per-user" className="block text-sm font-medium text-sky-100 mb-2">Max Memories Per User</label>
+          <input id="admin-memories-config-max-memories-per-user" type="number" value={config.maxMemoriesPerUser} onChange={(e) => setConfig({ ...config, maxMemoriesPerUser: parseInt(e.target.value) || 1 })} min={1} max={500}
+            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500" />
           <p className="text-xs text-navy-400 mt-1">Maximum number of memories per user</p>
         </div>
 

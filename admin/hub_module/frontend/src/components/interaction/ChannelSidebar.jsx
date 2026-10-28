@@ -46,6 +46,7 @@ export default function ChannelSidebar({
           {showCreate ? (
             <form onSubmit={handleCreate} className="bg-navy-800 border border-navy-600 rounded p-2 space-y-2">
               <input
+                aria-label="Channel name"
                 data-testid="channel-name-input"
                 type="text"
                 value={newName}
@@ -53,13 +54,14 @@ export default function ChannelSidebar({
                 placeholder="Channel name"
                 required
                 autoFocus
-                className="w-full bg-navy-900 border border-navy-600 text-sky-100 rounded px-2 py-1 text-sm focus:outline-none focus:border-sky-500"
+                className="w-full bg-navy-900 border border-navy-600 text-sky-100 rounded px-2 py-1 text-sm focus:border-sky-500"
               />
               <select
+                aria-label="Channel type"
                 data-testid="channel-type-select"
                 value={newType}
                 onChange={(e) => setNewType(e.target.value)}
-                className="w-full bg-navy-900 border border-navy-600 text-sky-100 rounded px-2 py-1 text-sm focus:outline-none focus:border-sky-500"
+                className="w-full bg-navy-900 border border-navy-600 text-sky-100 rounded px-2 py-1 text-sm focus:border-sky-500"
               >
                 {CHANNEL_TYPES.map((t) => (
                   <option key={t.value} value={t.value}>{t.label}</option>
@@ -75,6 +77,7 @@ export default function ChannelSidebar({
                   {creating ? 'Creating…' : 'Create'}
                 </button>
                 <button
+                  aria-label="Close"
                   type="button"
                   onClick={() => setShowCreate(false)}
                   className="p-1 text-navy-400 hover:text-sky-300 rounded transition-colors"

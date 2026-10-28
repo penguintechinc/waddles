@@ -253,8 +253,9 @@ function CalendarSettings() {
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-sky-200 mb-2">Timezone</label>
+            <label htmlFor="calendar-settings-timezone" className="block text-sm font-medium text-sky-200 mb-2">Timezone</label>
             <select
+              id="calendar-settings-timezone"
               value={availabilitySettings.timezone}
               onChange={(e) => setAvailabilitySettings({ ...availabilitySettings, timezone: e.target.value })}
               className="input"
@@ -283,8 +284,9 @@ function CalendarSettings() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-sky-200 mb-2">Minimum Notice</label>
+            <label htmlFor="calendar-settings-minimum-notice" className="block text-sm font-medium text-sky-200 mb-2">Minimum Notice</label>
             <select
+              id="calendar-settings-minimum-notice"
               value={availabilitySettings.min_notice_minutes}
               onChange={(e) => setAvailabilitySettings({ ...availabilitySettings, min_notice_minutes: parseInt(e.target.value) })}
               className="input"
@@ -299,8 +301,9 @@ function CalendarSettings() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-sky-200 mb-2">Max Future Booking</label>
+            <label htmlFor="calendar-settings-max-future-booking" className="block text-sm font-medium text-sky-200 mb-2">Max Future Booking</label>
             <select
+              id="calendar-settings-max-future-booking"
               value={availabilitySettings.max_future_days}
               onChange={(e) => setAvailabilitySettings({ ...availabilitySettings, max_future_days: parseInt(e.target.value) })}
               className="input"
@@ -314,8 +317,9 @@ function CalendarSettings() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-sky-200 mb-2">Buffer Between Appointments</label>
+            <label htmlFor="calendar-settings-buffer-between-appointments" className="block text-sm font-medium text-sky-200 mb-2">Buffer Between Appointments</label>
             <select
+              id="calendar-settings-buffer-between-appointments"
               value={availabilitySettings.buffer_minutes}
               onChange={(e) => setAvailabilitySettings({ ...availabilitySettings, buffer_minutes: parseInt(e.target.value) })}
               className="input"
@@ -355,6 +359,7 @@ function CalendarSettings() {
               {weeklyAvailability[day.key]?.enabled && (
                 <div className="flex items-center gap-2 flex-1">
                   <input
+                    aria-label={`${day.label} start time`}
                     type="time"
                     value={weeklyAvailability[day.key]?.start_time || '09:00'}
                     onChange={(e) => setWeeklyAvailability({
@@ -365,6 +370,7 @@ function CalendarSettings() {
                   />
                   <span className="text-navy-400">to</span>
                   <input
+                    aria-label={`${day.label} end time`}
                     type="time"
                     value={weeklyAvailability[day.key]?.end_time || '17:00'}
                     onChange={(e) => setWeeklyAvailability({
@@ -389,8 +395,9 @@ function CalendarSettings() {
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-sky-200 mb-2">Public Visibility</label>
+            <label htmlFor="calendar-settings-public-visibility" className="block text-sm font-medium text-sky-200 mb-2">Public Visibility</label>
             <select
+              id="calendar-settings-public-visibility"
               value={availabilitySettings.visibility_public}
               onChange={(e) => setAvailabilitySettings({ ...availabilitySettings, visibility_public: e.target.value })}
               className="input"
@@ -402,8 +409,9 @@ function CalendarSettings() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-sky-200 mb-2">Registered Users</label>
+            <label htmlFor="calendar-settings-registered-users" className="block text-sm font-medium text-sky-200 mb-2">Registered Users</label>
             <select
+              id="calendar-settings-registered-users"
               value={availabilitySettings.visibility_registered}
               onChange={(e) => setAvailabilitySettings({ ...availabilitySettings, visibility_registered: e.target.value })}
               className="input"
@@ -415,8 +423,9 @@ function CalendarSettings() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-sky-200 mb-2">Community Members</label>
+            <label htmlFor="calendar-settings-community-members" className="block text-sm font-medium text-sky-200 mb-2">Community Members</label>
             <select
+              id="calendar-settings-community-members"
               value={availabilitySettings.visibility_community}
               onChange={(e) => setAvailabilitySettings({ ...availabilitySettings, visibility_community: e.target.value })}
               className="input"
