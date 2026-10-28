@@ -756,3 +756,69 @@ async def test_rollback_clears_stale_signature_fields(
     assert v.artifact_signature_key_id is None
     assert v.artifact_signed_approval_id is None
     assert v.artifact_signed_at is None
+
+
+async def test_rollback_decides_from_locked_read_not_pre_lock_snapshot(
+    install_dal: Any, env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """regression: a supersede landing before the lock caused a stale restore."""
+    src, _, _ = env
+    app_id, cs, bs, kw = await _three_versions(install_dal, src)
+    inst = [
+        await approvals.install_version_globally(
+            install_dal,
+            app_id=app_id,
+            version=v,
+            installed_by=7,
+            expected_permission_hash=b.permission_hash,
+            source=src,
+        )  # fmt: skip
+        for v, b in zip(("1.0.0", "1.1.0"), bs, strict=False)
+    ]
+    p, a = inst
+    vrow = await _vrow(install_dal, app_id, "1.1.0")
+    b_ver = await _vrow(install_dal, app_id, "1.2.0")
+    real_begin = install_dal.engine.begin
+    installs_t = install_dal.metadata.tables["app_global_installs"]
+
+    class Conn:
+        def __init__(self, inner: Any) -> None:
+            self.inner, self.n = inner, 0
+
+        async def execute(self, stmt: Any, *args: Any, **kw: Any) -> Any:
+            self.n += 1
+            out = await self.inner.execute(stmt, *args, **kw)
+            if self.n == 2:  # B supersedes A at the lock point (after any pre-lock snapshot)
+                new_b = (
+                    await self.inner.execute(
+                        installs_t.insert().values(
+                            app_id=app_id, version="1.2.0", version_id=int(b_ver.id),
+                            permission_hash="h", summary_json={}, install_source="human",
+                            installed_by=7,
+                        )
+                    )
+                ).inserted_primary_key[0]  # fmt: skip
+                await self.inner.execute(
+                    installs_t.update().where(installs_t.c.id == a.id).values(superseded_by=new_b)
+                )
+            return out
+
+    class Ctx:
+        async def __aenter__(self) -> Conn:
+            self.cm = real_begin()
+            return Conn(await self.cm.__aenter__())
+
+        async def __aexit__(self, *exc: Any) -> Any:
+            return await self.cm.__aexit__(*exc)
+
+    class Engine:
+        begin = staticmethod(Ctx)
+
+    monkeypatch.setattr(type(install_dal), "engine", property(lambda self: Engine()))
+    await ing._rollback_install(
+        install_dal, new_install_id=int(a.id), version_id=int(vrow.id), revoked_by=7
+    )
+    cur = await _current(install_dal)
+    assert len(cur) == 1 and cur[0].version == "1.2.0"
+    rows = {r.id: r for r in await install_dal(install_dal.app_global_installs.id > 0).select()}
+    assert rows[p.id].superseded_by is not None

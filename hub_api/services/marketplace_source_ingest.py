@@ -384,18 +384,23 @@ async def _rollback_install(
     installs = install_dal.metadata.tables["app_global_installs"]
     versions_t = install_dal.metadata.tables["app_versions"]
     async with install_dal.engine.begin() as conn:
-        new_row = (
-            await conn.execute(select(installs).where(installs.c.id == new_install_id))
-        ).first()
-        if new_row is None:
+        # Only the immutable app_id is read before the lock; every decision below is made from
+        # reads taken AFTER the app-wide lock, so a concurrent supersede cannot make them stale.
+        app_id = (
+            await conn.execute(select(installs.c.app_id).where(installs.c.id == new_install_id))
+        ).scalar_one_or_none()
+        if app_id is None:
             raise RuntimeError("rollback target install row is missing")
         # Lock every row of this app (deterministic id order) before deciding anything.
         await conn.execute(
             select(installs.c.id)
-            .where(installs.c.app_id == new_row.app_id)
+            .where(installs.c.app_id == app_id)
             .order_by(installs.c.id)
             .with_for_update()
         )
+        new_row = (
+            await conn.execute(select(installs).where(installs.c.id == new_install_id))
+        ).first()  # fresh, locked re-read
         await conn.execute(
             sa_update(installs)
             .where(installs.c.id == new_install_id)
