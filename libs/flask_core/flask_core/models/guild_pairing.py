@@ -10,6 +10,7 @@ for FK resolution + any ORM-level read access other flask_core-based
 modules may need, same convention as `community.py`/`hub_user.py`/
 `tenant.py`'s own stub models.
 """
+import uuid
 from datetime import datetime
 
 from sqlalchemy import (
@@ -139,6 +140,10 @@ class PlatformConnection(db.Model):
     expires_at = Column(DateTime(timezone=True), nullable=True)
     # 0058: fixed machine code for why `status` left 'active' -- never provider text.
     status_reason = Column(String(40), nullable=True)
+    # 0063_seal_aad_version: immutable row identity -- the AAD the row's sealed tokens are bound
+    # to (M4) -- and which seal layout they use (0 = legacy no-AAD, 1 = AAD-bound).
+    public_id = Column(String(36), nullable=False, default=lambda: str(uuid.uuid4()), unique=True)
+    seal_version = Column(SmallInteger, nullable=False, default=0, server_default='0')
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

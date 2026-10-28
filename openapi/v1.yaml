@@ -52,6 +52,37 @@ components:
       - activatedAt
       title: ActivationDTO
       type: object
+    ActivationWarningDTO:
+      description: 'Response DTO: one non-fatal activation finding (e.g. a command-name
+        conflict).'
+      properties:
+        appId:
+          title: Appid
+          type: string
+        code:
+          title: Code
+          type: string
+        command:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Command
+        message:
+          title: Message
+          type: string
+        ownerAppId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Ownerappid
+      required:
+      - code
+      - appId
+      - command
+      - ownerAppId
+      - message
+      title: ActivationWarningDTO
+      type: object
     ActivityPeriodStats:
       description: Watch-time + message-count for one time window (all-time/weekly/monthly).
       properties:
@@ -404,6 +435,63 @@ components:
       - feature
       - name
       title: AvailabilityDTO
+      type: object
+    BatchItem:
+      description: One lookup of a batch request.
+      properties:
+        platform:
+          title: Platform
+          type: string
+        sourceId:
+          title: Sourceid
+          type: string
+      required:
+      - platform
+      - sourceId
+      title: BatchItem
+      type: object
+    BatchResult:
+      description: 'Outcome of one batch item: ``resolved`` carries ids, anything
+        else carries none.'
+      properties:
+        communityId:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          default: null
+          title: Communityid
+        communityName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Communityname
+        platform:
+          title: Platform
+          type: string
+        sourceId:
+          title: Sourceid
+          type: string
+        status:
+          title: Status
+          type: string
+        tenantId:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          default: null
+          title: Tenantid
+        tenantSlug:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Tenantslug
+      required:
+      - platform
+      - sourceId
+      - status
+      title: BatchResult
       type: object
     BundleDTO:
       description: 'Response DTO: one `app_catalog` row.'
@@ -1579,8 +1667,13 @@ components:
         grantId:
           title: Grantid
           type: integer
+        kind:
+          default: 1
+          title: Kind
+          type: integer
         metadata:
-          additionalProperties: true
+          additionalProperties:
+            type: string
           title: Metadata
           type: object
         provider:
@@ -1775,6 +1868,55 @@ components:
       - userId
       - status
       title: DsarResultDTO
+      type: object
+    EndpointDTO:
+      description: Non-secret target facts of a static connection; every field null
+        for an OAuth row.
+      properties:
+        function:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Function
+        project:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Project
+        region:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Region
+        url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Url
+      required:
+      - url
+      - region
+      - function
+      - project
+      title: EndpointDTO
+      type: object
+    ErrorBodyDTO:
+      description: The inner ``error`` object of the standard error envelope.
+      properties:
+        code:
+          title: Code
+          type: string
+        message:
+          title: Message
+          type: string
+        timestamp:
+          title: Timestamp
+          type: string
+      required:
+      - message
+      - code
+      - timestamp
+      title: ErrorBodyDTO
       type: object
     ExportManifestDTO:
       description: What an offline verifier needs to check an export slice (``make
@@ -3618,12 +3760,18 @@ components:
         id:
           title: Id
           type: integer
+        kind:
+          title: Kind
+          type: integer
         metadata:
           additionalProperties: true
           title: Metadata
           type: object
         provider:
           title: Provider
+          type: string
+        publicId:
+          title: Publicid
           type: string
         resourceType:
           title: Resourcetype
@@ -3649,6 +3797,8 @@ components:
           type: boolean
       required:
       - id
+      - publicId
+      - kind
       - provider
       - resourceType
       - status
@@ -3685,6 +3835,9 @@ components:
         installKind:
           title: Installkind
           type: string
+        kind:
+          title: Kind
+          type: integer
         metadataFields:
           items:
             $ref: '#/components/schemas/MetadataFieldDTO'
@@ -3704,6 +3857,11 @@ components:
         resourceType:
           title: Resourcetype
           type: string
+        secretSchemes:
+          items:
+            type: integer
+          title: Secretschemes
+          type: array
       required:
       - provider
       - displayName
@@ -3712,6 +3870,8 @@ components:
       - capabilities
       - requiredScopes
       - refreshable
+      - kind
+      - secretSchemes
       - credentialFields
       - metadataFields
       title: ProviderDTO
@@ -4245,6 +4405,47 @@ components:
           title: Necessary
           type: boolean
       title: SaveConsentPreferencesDTO
+      type: object
+    SecretBody:
+      additionalProperties: false
+      description: 'Structured secret of a static-secret provider: a ``SecretScheme``
+        code + its document.
+
+
+        The document is write-only -- sealed on arrival, with no field in any response
+        to carry it.'
+      properties:
+        document:
+          additionalProperties:
+            type: string
+          title: Document
+          type: object
+        scheme:
+          title: Scheme
+          type: integer
+      required:
+      - scheme
+      - document
+      title: SecretBody
+      type: object
+    SecretDTO:
+      description: 'A static connection''s structured credential: ``SecretScheme``
+        code + camelCase fields.'
+      properties:
+        fields:
+          additionalProperties:
+            anyOf:
+            - type: string
+            - type: 'null'
+          title: Fields
+          type: object
+        scheme:
+          title: Scheme
+          type: integer
+      required:
+      - scheme
+      - fields
+      title: SecretDTO
       type: object
     Server:
       description: Response DTO -- one `server_status_configs` row, admin view (host/port
@@ -11817,7 +12018,9 @@ paths:
 
         validation; 404 if `community_id` does not belong to the caller''s
 
-        tenant.'
+        tenant. Command-name conflicts never block activation -- they come back in
+
+        `warnings` on the (always) 201 response.'
       operationId: post_activate
       parameters:
       - in: path
@@ -11843,7 +12046,8 @@ paths:
           content:
             application/json:
               schema:
-                description: Generic message response DTO.
+                description: Response DTO for `POST /community/<community_id>/activation`
+                  (always 201).
                 properties:
                   message:
                     title: Message
@@ -11851,12 +12055,18 @@ paths:
                   success:
                     title: Success
                     type: boolean
+                  warnings:
+                    items:
+                      $ref: '#/components/schemas/ActivationWarningDTO'
+                    title: Warnings
+                    type: array
                 required:
                 - success
                 - message
-                title: MessageResponse
+                title: ActivateResponse
                 type: object
-          description: Generic message response DTO.
+          description: Response DTO for `POST /community/<community_id>/activation`
+            (always 201).
       summary: Activate an app for this community. Requires community-admin membership.
   /api/v1/apps/community/{community_id}/activation/{app_id}:
     delete:
@@ -13813,6 +14023,101 @@ paths:
       responses:
         default:
           description: Undocumented response
+  /api/v1/communities/{community_id}/calendar/event-sync:
+    get:
+      description: ''
+      operationId: get_get_event_sync
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Community-wide event-sync state: how many paired guilds
+                  have it on.'
+                properties:
+                  community_id:
+                    title: Community Id
+                    type: integer
+                  event_sync_enabled:
+                    title: Event Sync Enabled
+                    type: boolean
+                  pairings_enabled:
+                    title: Pairings Enabled
+                    type: integer
+                  pairings_total:
+                    title: Pairings Total
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - community_id
+                - event_sync_enabled
+                - pairings_total
+                - pairings_enabled
+                title: EventSyncStateResponse
+                type: object
+          description: 'Community-wide event-sync state: how many paired guilds have
+            it on.'
+      summary: '`GET /api/v1/communities/<id>/calendar/event-sync` -- current toggle
+        state.'
+    put:
+      description: '
+
+        Admin (tenant-JWT, scope-gated, flag-gated) counterpart of the internal
+
+        service-key route: sets `event_sync_enabled` on every guild pairing under
+
+        the community. 404 if the community has no pairings (nothing to toggle).'
+      operationId: put_put_event_sync
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Community-wide event-sync state: how many paired guilds
+                  have it on.'
+                properties:
+                  community_id:
+                    title: Community Id
+                    type: integer
+                  event_sync_enabled:
+                    title: Event Sync Enabled
+                    type: boolean
+                  pairings_enabled:
+                    title: Pairings Enabled
+                    type: integer
+                  pairings_total:
+                    title: Pairings Total
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - community_id
+                - event_sync_enabled
+                - pairings_total
+                - pairings_enabled
+                title: EventSyncStateResponse
+                type: object
+          description: 'Community-wide event-sync state: how many paired guilds have
+            it on.'
+      summary: '`PUT /api/v1/communities/<id>/calendar/event-sync` body `{"enabled":
+        bool}`.'
   /api/v1/communities/{community_id}/connections:
     get:
       description: ''
@@ -14299,11 +14604,20 @@ paths:
           application/json:
             schema:
               additionalProperties: false
-              description: Body of ``POST``. ``metadata`` keys are the provider's
+              description: 'Body of ``POST``. ``metadata`` keys are the provider''s
                 ``metadataFields``.
+
+
+                An OAuth provider takes ``credentials``; a static-secret provider
+                takes ``secret`` -- exactly
+
+                one of the two, never both.'
               properties:
                 credentials:
-                  $ref: '#/components/schemas/CredentialsBody'
+                  anyOf:
+                  - $ref: '#/components/schemas/CredentialsBody'
+                  - type: 'null'
+                  default: null
                 enabled:
                   default: true
                   title: Enabled
@@ -14316,9 +14630,13 @@ paths:
                 provider:
                   title: Provider
                   type: string
+                secret:
+                  anyOf:
+                  - $ref: '#/components/schemas/SecretBody'
+                  - type: 'null'
+                  default: null
               required:
               - provider
-              - credentials
               title: CreateConnectionRequest
               type: object
       responses:
@@ -15971,7 +16289,16 @@ paths:
 
         have to implement their own refresh-then-retry loop. Never logs a
 
-        token value on any path.'
+        token value on any path.
+
+
+        Auth: `Authorization: Bearer <community-bound machine JWT>` (scope
+
+        `connections:resolve`, `system` tenant, `community` claim equal to
+
+        `<id>`); missing/invalid -> 401, other community/tenant -> 403,
+
+        verifier unconfigured -> 503. No static shared secret is accepted.'
       operationId: get_internal_get_token
       parameters:
       - in: path
@@ -15990,7 +16317,15 @@ paths:
       summary: '`GET /api/v1/internal/communities/<id>/connections/<provider>/token`.'
   /api/v1/internal/communities/{community_id}/provider-connections/{connection_id}/resolve:
     post:
-      description: ''
+      description: '
+
+        An OAuth row refreshes under lock and returns ``accessToken``; a static row
+        returns its
+
+        ``endpoint`` + structured ``secret``. Not found or not granted to this community
+        is a 404 (never
+
+        a 403: no existence oracle).'
       operationId: post_internal_resolve
       parameters:
       - in: path
@@ -16008,31 +16343,46 @@ paths:
           content:
             application/json:
               schema:
-                description: A fresh access token for the data plane (the only secret-bearing
-                  response in this API).
+                description: 'What the data plane needs to call one connection (the
+                  only secret-bearing response here).
+
+
+                  Exactly one of ``accessToken`` (OAuth, kind 1) / ``secret`` (static,
+                  kinds 2-4) is non-null.'
                 properties:
                   accessToken:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
                     title: Accesstoken
-                    type: string
                   communityId:
                     title: Communityid
                     type: integer
                   connectionId:
                     title: Connectionid
                     type: integer
+                  endpoint:
+                    $ref: '#/components/schemas/EndpointDTO'
                   expiresAt:
                     anyOf:
                     - type: string
                     - type: 'null'
-                    default: null
                     title: Expiresat
+                  kind:
+                    title: Kind
+                    type: integer
                   metadata:
-                    additionalProperties: true
+                    additionalProperties:
+                      type: string
                     title: Metadata
                     type: object
                   provider:
                     title: Provider
                     type: string
+                  secret:
+                    anyOf:
+                    - $ref: '#/components/schemas/SecretDTO'
+                    - type: 'null'
                   success:
                     title: Success
                     type: boolean
@@ -16041,13 +16391,180 @@ paths:
                 - connectionId
                 - communityId
                 - provider
+                - kind
                 - accessToken
+                - expiresAt
+                - endpoint
+                - secret
+                - metadata
                 title: ResolvedCredentialsDTO
                 type: object
-          description: A fresh access token for the data plane (the only secret-bearing
-            response in this API).
-      summary: '``POST .../resolve`` -- a fresh access token for one usable binding
-        (refresh under lock).'
+          description: 'What the data plane needs to call one connection (the only
+            secret-bearing response here).
+
+
+            Exactly one of ``accessToken`` (OAuth, kind 1) / ``secret`` (static, kinds
+            2-4) is non-null.'
+        '403':
+          content:
+            application/json:
+              schema:
+                description: '403 body (guard refusals and a missing ``connections:resolve:static``):
+                  one fixed word.'
+                properties:
+                  error:
+                    title: Error
+                    type: string
+                required:
+                - error
+                title: ForbiddenDTO
+                type: object
+          description: '403 body (guard refusals and a missing ``connections:resolve:static``):
+            one fixed word.'
+        '404':
+          content:
+            application/json:
+              schema:
+                description: Standard error envelope (404 not found / not granted
+                  to this community, 503 unavailable).
+                properties:
+                  error:
+                    $ref: '#/components/schemas/ErrorBodyDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - error
+                title: ErrorEnvelopeDTO
+                type: object
+          description: Standard error envelope (404 not found / not granted to this
+            community, 503 unavailable).
+        '409':
+          content:
+            application/json:
+              schema:
+                description: '409 body of resolve: a flat refusal; ``reason`` is one
+                  of ``NOT_USABLE_REASONS``.'
+                properties:
+                  error:
+                    title: Error
+                    type: string
+                  reason:
+                    title: Reason
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - error
+                - reason
+                title: NotUsableDTO
+                type: object
+          description: '409 body of resolve: a flat refusal; ``reason`` is one of
+            ``NOT_USABLE_REASONS``.'
+        '503':
+          content:
+            application/json:
+              schema:
+                description: Standard error envelope (404 not found / not granted
+                  to this community, 503 unavailable).
+                properties:
+                  error:
+                    $ref: '#/components/schemas/ErrorBodyDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - error
+                title: ErrorEnvelopeDTO
+                type: object
+          description: Standard error envelope (404 not found / not granted to this
+            community, 503 unavailable).
+      summary: '``POST .../resolve`` -- endpoint + credential for one usable binding
+        of the BOUND community.'
+  /api/v1/internal/dataplane/resolve-scope:
+    get:
+      description: ''
+      operationId: get_resolve_scope_route
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Resolved scope. ``tenantId``/``communityId`` are the
+                  keys; the names are display-only.
+                properties:
+                  communityId:
+                    title: Communityid
+                    type: integer
+                  communityName:
+                    title: Communityname
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantId:
+                    title: Tenantid
+                    type: integer
+                  tenantSlug:
+                    title: Tenantslug
+                    type: string
+                required:
+                - success
+                - tenantId
+                - communityId
+                - tenantSlug
+                - communityName
+                title: ScopeDTO
+                type: object
+          description: Resolved scope. ``tenantId``/``communityId`` are the keys;
+            the names are display-only.
+      summary: '``GET`` -- one source to its numeric scope; 404 when unlinked, 409
+        when ambiguous.'
+  /api/v1/internal/dataplane/resolve-scope/batch:
+    post:
+      description: ''
+      operationId: post_resolve_scope_batch
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Body of the batch form.
+              properties:
+                items:
+                  items:
+                    $ref: '#/components/schemas/BatchItem'
+                  title: Items
+                  type: array
+              title: BatchRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Batch response, in request order.
+                properties:
+                  results:
+                    items:
+                      $ref: '#/components/schemas/BatchResult'
+                    title: Results
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: BatchResponse
+                type: object
+          description: Batch response, in request order.
+      summary: '``POST`` -- up to 100 lookups; each result carries its own status,
+        order preserved.'
   /api/v1/internal/live:
     get:
       description: ''

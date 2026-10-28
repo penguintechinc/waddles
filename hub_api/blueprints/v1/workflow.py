@@ -143,7 +143,7 @@ def _default_pagination(page: int, limit: int) -> dict[str, int]:
 
 
 @workflow_bp.route("/<community_id>/workflows", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def list_workflows(community_id: str) -> tuple[dict[str, object], int]:
     """List workflows."""
     guard = await _guard(community_id)
@@ -168,7 +168,7 @@ async def list_workflows(community_id: str) -> tuple[dict[str, object], int]:
 
 
 @workflow_bp.route("/<community_id>/workflows", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def create_workflow(community_id: str) -> tuple[dict[str, object], int]:
     """Create workflow."""
     guard = await _guard(community_id)
@@ -206,7 +206,7 @@ async def create_workflow(community_id: str) -> tuple[dict[str, object], int]:
 
 
 @workflow_bp.route("/<community_id>/workflows/<workflow_id>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_workflow(community_id: str, workflow_id: str) -> tuple[dict[str, object], int]:
     """Get workflow."""
     guard = await _guard(community_id)
@@ -220,7 +220,7 @@ async def get_workflow(community_id: str, workflow_id: str) -> tuple[dict[str, o
 
 
 @workflow_bp.route("/<community_id>/workflows/<workflow_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def update_workflow(community_id: str, workflow_id: str) -> tuple[dict[str, object], int]:
     """Update workflow."""
     guard = await _guard(community_id)
@@ -248,7 +248,7 @@ async def update_workflow(community_id: str, workflow_id: str) -> tuple[dict[str
 
 
 @workflow_bp.route("/<community_id>/workflows/<workflow_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def delete_workflow(community_id: str, workflow_id: str) -> tuple[dict[str, object], int]:
     """Delete workflow."""
     guard = await _guard(community_id)
@@ -276,7 +276,7 @@ async def delete_workflow(community_id: str, workflow_id: str) -> tuple[dict[str
 
 
 @workflow_bp.route("/<community_id>/workflows/<workflow_id>/publish", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def publish_workflow(community_id: str, workflow_id: str) -> tuple[dict[str, object], int]:
     """Publish workflow."""
     guard = await _guard(community_id)
@@ -304,7 +304,7 @@ async def publish_workflow(community_id: str, workflow_id: str) -> tuple[dict[st
 
 
 @workflow_bp.route("/<community_id>/workflows/validate", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def validate_workflow(community_id: str) -> tuple[dict[str, object], int]:
     """Validate workflow definition."""
     guard = await _guard(community_id)
@@ -337,7 +337,7 @@ async def validate_workflow(community_id: str) -> tuple[dict[str, object], int]:
 
 
 @workflow_bp.route("/<community_id>/workflows/<workflow_id>/execute", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def execute_workflow(community_id: str, workflow_id: str) -> tuple[dict[str, object], int]:
     """Execute workflow."""
     guard = await _guard(community_id)
@@ -371,7 +371,7 @@ async def execute_workflow(community_id: str, workflow_id: str) -> tuple[dict[st
 
 
 @workflow_bp.route("/<community_id>/workflows/<workflow_id>/test", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def test_workflow(community_id: str, workflow_id: str) -> tuple[dict[str, object], int]:
     """Test execute workflow.
 
@@ -403,7 +403,7 @@ async def test_workflow(community_id: str, workflow_id: str) -> tuple[dict[str, 
 
 
 @workflow_bp.route("/<community_id>/workflows/<workflow_id>/executions", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def list_executions(community_id: str, workflow_id: str) -> tuple[dict[str, object], int]:
     """List executions."""
     guard = await _guard(community_id)
@@ -435,7 +435,7 @@ async def list_executions(community_id: str, workflow_id: str) -> tuple[dict[str
 @workflow_bp.route(
     "/<community_id>/workflows/<workflow_id>/executions/<execution_id>", methods=["GET"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def get_execution(
     community_id: str, workflow_id: str, execution_id: str
 ) -> tuple[dict[str, object], int]:
@@ -460,7 +460,7 @@ async def get_execution(
 @workflow_bp.route(
     "/<community_id>/workflows/<workflow_id>/executions/<execution_id>/cancel", methods=["POST"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def cancel_execution(
     community_id: str, workflow_id: str, execution_id: str
 ) -> tuple[dict[str, object], int]:
@@ -490,7 +490,7 @@ async def cancel_execution(
 
 
 @workflow_bp.route("/<community_id>/workflows/<workflow_id>/webhooks", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def list_webhooks(community_id: str, workflow_id: str) -> tuple[dict[str, object], int]:
     """List webhooks."""
     guard = await _guard(community_id)
@@ -512,7 +512,7 @@ async def list_webhooks(community_id: str, workflow_id: str) -> tuple[dict[str, 
 
 
 @workflow_bp.route("/<community_id>/workflows/<workflow_id>/webhooks", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def create_webhook(community_id: str, workflow_id: str) -> tuple[dict[str, object], int]:
     """Create webhook."""
     guard = await _guard(community_id)
@@ -549,7 +549,7 @@ async def create_webhook(community_id: str, workflow_id: str) -> tuple[dict[str,
 @workflow_bp.route(
     "/<community_id>/workflows/<workflow_id>/webhooks/<webhook_id>", methods=["DELETE"]
 )
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 async def delete_webhook(
     community_id: str, workflow_id: str, webhook_id: str
 ) -> tuple[dict[str, object], int]:

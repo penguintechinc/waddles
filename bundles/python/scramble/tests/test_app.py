@@ -103,7 +103,7 @@ def _state(host: _FakeHost, community: str = "comm-1") -> dict[str, Any]:
 
 
 def _start(monkeypatch: pytest.MonkeyPatch, word: str = "penguin") -> None:
-    monkeypatch.setattr("app.random.choice", lambda seq: word)
+    monkeypatch.setattr("app._RNG.choice", lambda seq: word)
     _run(dispatch(_envelope("start"), {}, http_client=None))
 
 
@@ -201,7 +201,7 @@ def test_giveup_and_guess_with_no_round(fake_host: _FakeHost) -> None:
 
 def test_one_round_per_community(fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch) -> None:
     _start(monkeypatch, "penguin")
-    monkeypatch.setattr("app.random.choice", lambda seq: "waddle")
+    monkeypatch.setattr("app._RNG.choice", lambda seq: "waddle")
     _run(dispatch(_envelope("start", community="comm-2"), {}, http_client=None))
     assert _state(fake_host, "comm-1")["word"] == "penguin"
     assert _state(fake_host, "comm-2")["word"] == "waddle"

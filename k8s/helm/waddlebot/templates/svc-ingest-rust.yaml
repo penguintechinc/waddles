@@ -127,6 +127,13 @@ spec:
           value: "true"
         - name: WADDLES_ENVIRONMENT
           value: {{ .Values.global.environment | default "alpha" | quote }}
+        # Per-community Twitch sessions (INGEST_DYNAMIC_CONNECTIONS ON): reconcile cadence and
+        # the per-call hub-api resolve/list timeout. The static TWITCH_IRC_NICK/TWITCH_IRC_CHANNEL
+        # pair is deliberately never rendered here -- with the flag ON it is a FATAL conflict.
+        - name: TWITCH_RECONCILE_INTERVAL_SECS
+          value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchReconcileIntervalSecs | default 60 | quote }}
+        - name: TWITCH_RESOLVE_TIMEOUT_SECS
+          value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchResolveTimeoutSecs | default 10 | quote }}
         {{- end }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid }}
         - name: ENVELOPE_BINDING_ACTIVE_KID
@@ -145,18 +152,18 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL_TLS
+              key: VALKEY_DURABLE_URL_TLS
         - name: VALKEY_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: REDIS_PASSWORD
+              key: VALKEY_DURABLE_PASSWORD
         {{- else }}
         - name: VALKEY_URL
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL
+              key: VALKEY_DURABLE_URL
         {{- end }}
         - name: SECRET_KEY
           valueFrom:

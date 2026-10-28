@@ -50,12 +50,12 @@ python-dotenv>=1.0.0
 psutil>=5.9.0  # System metrics for health/metrics endpoints
 
 # Observability - OpenTelemetry (pinned to avoid resolution-too-deep)
-opentelemetry-api==1.39.1
-opentelemetry-sdk==1.39.1
-opentelemetry-instrumentation==0.60b1
-opentelemetry-instrumentation-flask==0.60b1
-opentelemetry-instrumentation-requests==0.60b1
-opentelemetry-exporter-otlp-proto-grpc==1.39.1
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-instrumentation==0.66b1
+opentelemetry-instrumentation-flask==0.66b1
+opentelemetry-instrumentation-requests==0.66b1
+opentelemetry-exporter-otlp-proto-grpc==1.45.1
 protobuf>=5.29.6,<7.0  # CVE fix + compatible with OTel 1.39
 
 # gRPC transport TLS (grpc_tls.py) -- direct usage, not just OTel's transitive pin

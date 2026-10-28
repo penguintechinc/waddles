@@ -52,7 +52,6 @@ from flask_core.auth import DEFAULT_TENANT_SLUG, verify_jwt_token
 from flask_core.secrets import require_secret_key
 
 from services.errors import ApiError, bad_request, conflict, not_found
-from services.schema import bind_marketplace_catalog_tables
 
 _MAX_LIMIT = 100
 
@@ -80,7 +79,6 @@ def visible_tenant_ids(dal: Any, request: Any) -> frozenset[int]:
     absent/invalid/expired token is treated as "anonymous, global catalog
     only", matching Node's `optionalAuth` -- never an error.
     """
-    bind_marketplace_catalog_tables(dal)
     visible: set[int] = set()
 
     global_row = dal(dal.tenants.slug == DEFAULT_TENANT_SLUG).select().first()
@@ -278,7 +276,6 @@ def get_catalog(
     community_id: int | None,
 ) -> CatalogListResponse:
     """Paginated, filtered, tenant-scoped catalog browse -- port of `getCatalog()`."""
-    bind_marketplace_catalog_tables(dal)
     page, limit = _clamp_pagination(page, limit)
     catalog = dal.marketplace_catalog
 
@@ -323,7 +320,6 @@ def get_catalog_entry(
     dal: Any, request: Any, source: str, source_id: int, community_id: int | None
 ) -> CatalogEntry | None:
     """Single catalog entry by `(source, sourceId)`, tenant-scoped -- port of `getCatalogEntry`."""
-    bind_marketplace_catalog_tables(dal)
     catalog = dal.marketplace_catalog
     query = _tenant_scope_query(dal, visible_tenant_ids(dal, request))
     query &= (catalog.source == source) & (catalog.source_id == source_id)
@@ -348,10 +344,9 @@ def get_categories(dal: Any) -> list[CategoryEntry]:
     module identities/pricing), so this one endpoint is intentionally not
     tenant-scoped, matching the faithful port.
     """
-    bind_marketplace_catalog_tables(dal)
     catalog = dal.marketplace_catalog
     # `marketplace_catalog` has no `id` field (composite `primarykey=`, see
-    # `bind_marketplace_catalog_tables`'s own docstring) -- `source_id`
+    # `bind_marketplace_module_tables`'s own docstring) -- `source_id`
     # (never NULL) stands in as the COUNT() target. Sorted in Python
     # rather than via a pydal aggregate `orderby=` (the category list is
     # a handful of rows, and ordering by an aliased aggregate expression
@@ -379,7 +374,6 @@ def get_categories(dal: Any) -> list[CategoryEntry]:
 
 def get_featured(dal: Any, request: Any, community_id: int | None) -> list[CatalogEntry]:
     """Top 8 modules by install count then rating, tenant-scoped -- port of `getFeatured()`."""
-    bind_marketplace_catalog_tables(dal)
     catalog = dal.marketplace_catalog
     query = _tenant_scope_query(dal, visible_tenant_ids(dal, request))
     rows = dal(query).select(orderby=(~catalog.install_count, ~catalog.avg_rating), limitby=(0, 8))
@@ -601,7 +595,6 @@ def list_modules(
     dal: Any, *, page: int, limit: int, search: str, category: str | None, featured: bool | None
 ) -> ModuleListResponse:
     """Paginated, published-only module browse -- port of `getModules()`."""
-    bind_marketplace_catalog_tables(dal)
     page, limit = _clamp_pagination(page, limit)
     modules = dal.hub_modules
 
@@ -641,7 +634,6 @@ def list_modules(
 
 def get_module(dal: Any, module_id: int) -> ModuleDetail:
     """Full module detail + reviews, published only -- port of `getModuleById`. Raises 404."""
-    bind_marketplace_catalog_tables(dal)
     modules = dal.hub_modules
     row = dal((modules.id == module_id) & (modules.is_published == True)).select().first()  # noqa: E712
     if row is None:
@@ -713,7 +705,6 @@ def _validate_url_field(payload: dict[str, Any], key: str) -> str | None:
 
 def create_module(dal: Any, payload: dict[str, Any], user_id: int) -> ModuleCreated:
     """Validate + insert a new `hub_modules` row -- port of `createModule()`. Raises `ApiError`."""
-    bind_marketplace_catalog_tables(dal)
     name = _validate_text(payload, "name", min_len=3, max_len=100, required=True)
     display_name = _validate_text(payload, "displayName", min_len=3, max_len=255, required=False)
     description = _validate_text(payload, "description", min_len=0, max_len=5000, required=False)
@@ -764,7 +755,6 @@ _UPDATABLE_FIELDS = (
 
 def update_module(dal: Any, module_id: int, payload: dict[str, Any], user_id: int) -> None:
     """Partial update; only fields present in `payload` change -- port of `updateModule`."""
-    bind_marketplace_catalog_tables(dal)
     modules = dal.hub_modules
     if dal(modules.id == module_id).select(limitby=(0, 1)).first() is None:
         raise not_found("Module not found")
@@ -805,7 +795,6 @@ def update_module(dal: Any, module_id: int, payload: dict[str, Any], user_id: in
 
 def delete_module(dal: Any, module_id: int, user_id: int) -> None:
     """Delete a non-core module -- port of `deleteModule()`. Raises `ApiError`."""
-    bind_marketplace_catalog_tables(dal)
     modules = dal.hub_modules
     row = dal((modules.id == module_id) & (modules.is_core == False)).select().first()  # noqa: E712
     if row is None:
@@ -816,7 +805,6 @@ def delete_module(dal: Any, module_id: int, user_id: int) -> None:
 
 def list_module_subscriptions(dal: Any, module_id: int) -> list[ModuleSubscription]:
     """Every community's installation of `module_id` -- port of `getModuleSubscriptions()`."""
-    bind_marketplace_catalog_tables(dal)
     rows = dal(dal.hub_module_installations.module_id == module_id).select(
         orderby=~dal.hub_module_installations.installed_at
     )

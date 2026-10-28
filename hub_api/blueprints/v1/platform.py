@@ -348,8 +348,8 @@ class PlatformStatsResponse:
 
 
 @platform_bp.route("/users", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(ListUsersResponse)
 async def list_users() -> ListUsersResponse:
     """List users."""
@@ -382,8 +382,8 @@ async def list_users() -> ListUsersResponse:
 
 
 @platform_bp.route("/users/<int:user_id>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 # NOT @validate_response -- `user: PlatformUserDetailDTO` is a nested
 # dataclass field; jsonify_dto() is the established workaround (see
 # services/dto_response.py's module docstring).
@@ -421,8 +421,8 @@ async def get_user(user_id: int) -> tuple[Any, int]:
 
 
 @platform_bp.route("/users/<int:user_id>/role", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(UpdateUserRoleRequest)
 @validate_response(MessageResponse)
 async def update_user_role(
@@ -438,8 +438,8 @@ async def update_user_role(
 
 
 @platform_bp.route("/users/<int:user_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(DeactivateUserRequest)
 @validate_response(MessageResponse)
 async def deactivate_user(
@@ -463,8 +463,8 @@ async def deactivate_user(
 
 
 @platform_bp.route("/communities", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(ListCommunitiesResponse)
 async def list_communities() -> ListCommunitiesResponse:
     """List communities."""
@@ -500,8 +500,8 @@ async def list_communities() -> ListCommunitiesResponse:
 
 
 @platform_bp.route("/communities/<int:community_id>", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 # NOT @validate_response -- nested `community: CommunityDetailDTO` +
 # nested `owner: CommunityOwnerDTO`; see services/dto_response.py.
 async def get_community(community_id: int) -> tuple[Any, int]:
@@ -541,8 +541,8 @@ async def get_community(community_id: int) -> tuple[Any, int]:
 
 
 @platform_bp.route("/communities/<int:community_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(UpdateCommunityRequest)
 @validate_response(MessageResponse)
 async def update_community(
@@ -566,8 +566,8 @@ async def update_community(
 
 
 @platform_bp.route("/communities/<int:community_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(DeactivateUserRequest)
 @validate_response(MessageResponse)
 async def deactivate_community(
@@ -590,8 +590,8 @@ async def deactivate_community(
 
 
 @platform_bp.route("/health", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(SystemHealthResponse, 200)
 @validate_response(SystemHealthResponse, 503)
 async def get_system_health() -> tuple[SystemHealthResponse, int]:
@@ -609,8 +609,8 @@ async def get_system_health() -> tuple[SystemHealthResponse, int]:
 
 
 @platform_bp.route("/modules", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(ModuleRegistryResponse)
 async def get_module_registry() -> ModuleRegistryResponse:
     """Get module registry."""
@@ -634,8 +634,8 @@ async def get_module_registry() -> ModuleRegistryResponse:
 
 
 @platform_bp.route("/audit-log", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(AuditLogResponse)
 async def get_audit_log() -> AuditLogResponse:
     """Get audit log."""
@@ -671,8 +671,8 @@ async def get_audit_log() -> AuditLogResponse:
 
 
 @platform_bp.route("/stats", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(PlatformStatsResponse)
 async def get_stats() -> PlatformStatsResponse:
     """Get platform stats."""

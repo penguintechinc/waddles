@@ -251,7 +251,7 @@ def test_spin_draws_via_random_choice_over_the_stored_options(
 ) -> None:
     _seed_options(fake_host, "comm-1", ["a", "b", "c"])
     seen: list[list[str]] = []
-    monkeypatch.setattr(app.random, "choice", lambda seq: (seen.append(list(seq)), seq[1])[1])
+    monkeypatch.setattr(app._RNG, "choice", lambda seq: (seen.append(list(seq)), seq[1])[1])
     assert "lands on: b!" in _reply_text(_transform_in("comm-1", "!wheel spin"))
     assert seen == [["a", "b", "c"]]
 

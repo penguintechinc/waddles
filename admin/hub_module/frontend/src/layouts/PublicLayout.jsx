@@ -57,8 +57,8 @@ function PublicLayout() {
               ))}
             </div>
 
-            {/* Auth + mobile menu button. Account links collapse into the mobile menu below md. */}
-            <div className="flex items-center gap-3">
+            {/* Auth buttons (hidden below md — repeated inside the mobile menu) */}
+            <div className="hidden md:flex items-center space-x-4">
               {isAuthenticated ? (
                 <div className="hidden md:flex items-center gap-4">
                   <Link
@@ -100,20 +100,25 @@ function PublicLayout() {
                   Sign In
                 </Link>
               )}
+            </div>
+
+            {/* Mobile menu toggle */}
+            <div className="flex items-center md:hidden">
               <button
                 type="button"
-                className="md:hidden inline-flex h-10 w-10 items-center justify-center rounded-control text-fg-secondary hover:bg-surface-raised hover:text-fg"
+                onClick={() => setMenuOpen((o) => !o)}
+                aria-label={menuOpen ? 'Close menu' : 'Open menu'}
                 aria-expanded={menuOpen}
                 aria-controls="public-mobile-menu"
-                aria-label={menuOpen ? 'Close menu' : 'Open menu'}
-                onClick={() => setMenuOpen((open) => !open)}
+                data-testid="public-mobile-menu-toggle"
+                className="inline-flex h-10 w-10 items-center justify-center rounded-control text-fg-secondary hover:bg-surface-raised hover:text-fg focus:outline-none focus:ring-2 focus:ring-sky-500"
               >
                 {menuOpen ? <XMarkIcon className="h-6 w-6" /> : <Bars3Icon className="h-6 w-6" />}
               </button>
             </div>
           </div>
           {menuOpen && (
-            <ul id="public-mobile-menu" className="md:hidden space-y-1 border-t border-line py-3">
+            <ul id="public-mobile-menu" data-testid="public-mobile-menu" className="md:hidden space-y-1 border-t border-line py-3">
               {navLinks.map((link) => (
                 <li key={link.to}>
                   <Link
@@ -151,6 +156,13 @@ function PublicLayout() {
                     </button>
                   </li>
                 </>
+              )}
+              {!isAuthenticated && (
+                <li>
+                  <Link to="/login" className="btn btn-primary block text-center">
+                    Sign In
+                  </Link>
+                </li>
               )}
             </ul>
           )}

@@ -381,6 +381,32 @@ jobs:
           CREATE TABLE calendar_events (
               id SERIAL PRIMARY KEY
           );
+          -- 0063_seal_aad_version ALTERs this legacy table (config/postgres/migrations/
+          -- 030_platform_integrations.sql, never Alembic): same columns as the real DDL minus its
+          -- indexes/scope CHECK. Mirrored in pr-validation.yml's bootstrap -- keep both in sync.
+          CREATE TABLE platform_integrations (
+              id SERIAL PRIMARY KEY,
+              platform VARCHAR(50) NOT NULL,
+              integration_type VARCHAR(20) NOT NULL,
+              community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
+              user_id INTEGER REFERENCES hub_users(id) ON DELETE CASCADE,
+              access_token TEXT,
+              refresh_token TEXT,
+              client_id VARCHAR(255),
+              client_secret TEXT,
+              token_type VARCHAR(50) DEFAULT 'Bearer',
+              expires_at TIMESTAMP WITH TIME ZONE,
+              scopes TEXT[],
+              config_data JSONB,
+              is_active BOOLEAN DEFAULT TRUE,
+              is_encrypted BOOLEAN DEFAULT TRUE,
+              created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+              created_by_user_id INTEGER REFERENCES hub_users(id) ON DELETE SET NULL,
+              updated_by_user_id INTEGER REFERENCES hub_users(id) ON DELETE SET NULL,
+              CONSTRAINT platform_integrations_unique_bot
+                  UNIQUE (platform, integration_type, community_id, user_id)
+          );
           SQL
 
       # Runs whenever any alembic-related file changed (`any`), including a
@@ -919,6 +945,39 @@ jobs:
       # VARCHAR(32) revision-id width limit and dangling down_revision refs.
       - name: Check single alembic head
         run: bash scripts/ci/check-alembic-single-head.sh .
+
+  openapi-drift:
+    name: OpenAPI spec drift (openapi/v1.yaml matches generated)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: hub_api/requirements.txt
+
+      # The generator imports create_app(), which needs the full hub-api
+      # runtime set. defusedxml + signxml (services/sso_saml.py) were missing
+      # on py3.13 and broke `make openapi-hubapi`; both are hash-pinned in
+      # requirements.txt -- the import assert fails loudly if that regresses.
+      - name: Install openapi-gen dependencies
+        run: |
+          set -euo pipefail
+          pip install --disable-pip-version-check --require-hashes -r hub_api/requirements.txt
+          pip install --disable-pip-version-check --require-hashes -r libs/flask_core/requirements.txt
+          pip install --disable-pip-version-check "PyYAML>=6.0.2,<7.0.0"
+          python3 -c "import authlib, defusedxml, signxml, yaml"
+
+      - name: Fail on OpenAPI spec drift
+        run: make check-openapi-drift
 
   lockfile-no-downgrades:
     name: Lockfile additions-only (no silent version changes)

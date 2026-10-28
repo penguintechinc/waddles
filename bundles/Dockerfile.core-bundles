@@ -21,7 +21,7 @@ FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcb
 # core/bundle_executor/Dockerfile.rust's own builder stage.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
-        build-essential=12.9 ca-certificates=20250419~deb12u1 \
+        build-essential=12.9 ca-certificates=20250419~deb12u2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Both targets, matching bundles/rust/ping/rust-toolchain.toml's own `targets` list exactly --
