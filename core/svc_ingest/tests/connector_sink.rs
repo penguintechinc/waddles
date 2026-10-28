@@ -37,7 +37,10 @@ impl svc_ingest::identity_crypto::DekProvider for FakeDekProvider {
     async fn get_dek(
         &self,
         _tenant_id: &str,
-    ) -> Result<(svc_ingest::identity_crypto::Dek, u32), svc_ingest::identity_crypto::DekUnavailableError> {
+    ) -> Result<
+        (svc_ingest::identity_crypto::Dek, u32),
+        svc_ingest::identity_crypto::DekUnavailableError,
+    > {
         Ok((zeroize::Zeroizing::new([9u8; 32]), 3))
     }
 }

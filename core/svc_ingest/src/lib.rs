@@ -1210,12 +1210,22 @@ mod tests {
         // `run.rs`'s own doc on why only one test per binary calls
         // `telemetry::init`) -- `tracing::info!`/`warn!` are harmless
         // no-ops without one.
-        try_start_twitch_irc(&base_config(), test_ingest_metrics(), test_readiness(), test_dek_provider());
+        try_start_twitch_irc(
+            &base_config(),
+            test_ingest_metrics(),
+            test_readiness(),
+            test_dek_provider(),
+        );
     }
 
     #[tokio::test]
     async fn try_start_discord_noop_when_not_configured() {
-        try_start_discord(&base_config(), test_ingest_metrics(), test_readiness(), test_dek_provider());
+        try_start_discord(
+            &base_config(),
+            test_ingest_metrics(),
+            test_readiness(),
+            test_dek_provider(),
+        );
     }
 
     #[tokio::test]
@@ -1230,7 +1240,12 @@ mod tests {
         config.cli.twitch_irc_channel = "somechannel".to_string();
         config.twitch_irc_oauth_token = Some(crate::config::Secret::new("test-token"));
         // envelope_binding_keys stays None -> must not start.
-        try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness(), test_dek_provider());
+        try_start_twitch_irc(
+            &config,
+            test_ingest_metrics(),
+            test_readiness(),
+            test_dek_provider(),
+        );
     }
 
     #[tokio::test]
@@ -1239,7 +1254,12 @@ mod tests {
         config.discord_bot_token = Some(crate::config::Secret::new("test-token"));
         config.envelope_binding_keys = Some(crate::config::Secret::new("k1:aabbcc"));
         // binding_active_kid stays "" -> must not start.
-        try_start_discord(&config, test_ingest_metrics(), test_readiness(), test_dek_provider());
+        try_start_discord(
+            &config,
+            test_ingest_metrics(),
+            test_readiness(),
+            test_dek_provider(),
+        );
     }
 
     #[tokio::test]
@@ -1266,7 +1286,12 @@ mod tests {
         config.envelope_binding_keys = Some(crate::config::Secret::new(
             "k1:0102030405060708090a0b0c0d0e0f10",
         ));
-        try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness(), test_dek_provider());
+        try_start_twitch_irc(
+            &config,
+            test_ingest_metrics(),
+            test_readiness(),
+            test_dek_provider(),
+        );
     }
 
     #[tokio::test]
@@ -1316,7 +1341,12 @@ mod tests {
             config.envelope_binding_keys = Some(crate::config::Secret::new(
                 "k1:0102030405060708090a0b0c0d0e0f10",
             ));
-            try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness(), test_dek_provider());
+            try_start_twitch_irc(
+                &config,
+                test_ingest_metrics(),
+                test_readiness(),
+                test_dek_provider(),
+            );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");
@@ -1344,7 +1374,12 @@ mod tests {
             config.envelope_binding_keys = Some(crate::config::Secret::new(
                 "k1:0102030405060708090a0b0c0d0e0f10",
             ));
-            try_start_discord(&config, test_ingest_metrics(), test_readiness(), test_dek_provider());
+            try_start_discord(
+                &config,
+                test_ingest_metrics(),
+                test_readiness(),
+                test_dek_provider(),
+            );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");
