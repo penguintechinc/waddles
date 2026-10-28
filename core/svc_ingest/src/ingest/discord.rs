@@ -12,7 +12,9 @@
 //! from that message's own `guild_id` (PA-WORKSTREAM: same `source_id` in,
 //! same `workstream_id` out), not fixed once at connect time.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 // `DiscordError` is re-exported at the crate root only (`gateway.rs`
 // privately `use`s it, no `pub use` inside that submodule) -- import from
@@ -74,18 +76,110 @@ fn build_http_client(
         .build()
 }
 
+/// Fresh-hit window for a cached permission set: within it no Discord call
+/// is made. A role grant/revoke takes effect within at most this long.
+pub const PERMISSIONS_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Hard cap on how old a cached value may be and still be served stale when
+/// Discord is failing. Past it the resolver fails closed -- bounds how long
+/// a demoted mod could keep privilege during an outage.
+pub const PERMISSIONS_STALE_MAX: Duration = Duration::from_secs(3600);
+/// Max cached (guild, user) entries -- the cache can never grow unbounded.
+pub const PERMISSIONS_CACHE_MAX_ENTRIES: usize = 10_000;
+/// Consecutive-ish transient failures (within [`PERMISSIONS_BREAKER_WINDOW`])
+/// that open the Discord breaker.
+pub const PERMISSIONS_BREAKER_THRESHOLD: u32 = 5;
+/// Window the breaker counts failures over.
+pub const PERMISSIONS_BREAKER_WINDOW: Duration = Duration::from_secs(30);
+/// How long an open breaker short-circuits Discord calls before retrying.
+pub const PERMISSIONS_BREAKER_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Single breaker key: a Discord REST outage is global to the bot token.
+const BREAKER_KEY: &str = "discord-rest";
+
+/// Counters for the resolver's cache/breaker (PII-free: outcome labels only,
+/// never a guild/user id). `outcome` is one of `hit`, `miss`, `stale_served`,
+/// `fail_closed`, `breaker_short_circuit`, `breaker_opened`, `breaker_closed`.
+/// No-op default so tests and unwired callers need no impl.
+pub trait PermissionsMetrics: Send + Sync {
+    /// Records one resolver outcome.
+    fn permissions_outcome(&self, _outcome: &str) {}
+}
+
+impl PermissionsMetrics for () {}
+
+/// Adapts [`PermissionsMetrics`] to the breaker's transition callback.
+struct BreakerMetricsAdapter(Arc<dyn PermissionsMetrics>);
+
+impl circuit_breaker::CircuitBreakerMetrics for BreakerMetricsAdapter {
+    fn transition(&self, action: &str) {
+        self.0.permissions_outcome(match action {
+            "opened" => "breaker_opened",
+            _ => "breaker_closed",
+        });
+    }
+}
+
+/// Cache tuning, overridable so tests can use short durations.
+#[derive(Debug, Clone, Copy)]
+pub struct PermissionsCacheConfig {
+    /// Fresh-hit window.
+    pub ttl: Duration,
+    /// Max age served stale on upstream failure.
+    pub stale_max: Duration,
+    /// Max entries.
+    pub max_entries: usize,
+}
+
+impl Default for PermissionsCacheConfig {
+    fn default() -> Self {
+        Self {
+            ttl: PERMISSIONS_CACHE_TTL,
+            stale_max: PERMISSIONS_STALE_MAX,
+            max_entries: PERMISSIONS_CACHE_MAX_ENTRIES,
+        }
+    }
+}
+
+struct CacheEntry {
+    perms: DiscordPermissions,
+    fetched_at: Instant,
+}
+
+/// Whether a failed lookup says "Discord is unhealthy" (timeout, connect
+/// error, 5xx, 429) as opposed to a definitive answer about this member
+/// (404 left the guild, 403, malformed body). Only the former trips the
+/// breaker and justifies serving stale permissions.
+fn is_transient(err: &anyhow::Error) -> bool {
+    match err.downcast_ref::<reqwest::Error>() {
+        Some(e) => match e.status() {
+            Some(st) => st.is_server_error() || st.as_u16() == 429,
+            None => e.is_timeout() || e.is_connect() || e.is_request(),
+        },
+        None => false,
+    }
+}
+
 /// The real resolver: two Discord REST calls per guild message --
 /// `GET /guilds/{guild_id}` (owner id + every role's permission bitfield)
 /// and `GET /guilds/{guild_id}/members/{author_id}` (the member's assigned
-/// role ids) -- combined via [`compute_discord_permissions`]. Deliberately
-/// uncached for now (documented follow-up, not a correctness gap): a role
-/// grant/revoke takes effect on this member's very next message instead of
-/// up to a cache TTL later. No request is made at all for a DM (no
-/// `guild_id`) -- see [`run_loop`]'s call site.
+/// role ids) -- combined via [`compute_discord_permissions`].
+///
+/// Resilience (self-DoS cascade fix): resolved permissions are cached per
+/// (guild, user) with stale-while-revalidate semantics -- fresh within
+/// [`PERMISSIONS_CACHE_TTL`]; on a transient Discord failure the last-known
+/// value (up to [`PERMISSIONS_STALE_MAX`] old) is served instead of failing
+/// closed, so a Discord blip never locks out mods/admins. A shared
+/// `circuit_breaker` stops calls entirely after repeated failures. Only with
+/// NO usable cached value does it fail closed to non-privileged. No request
+/// is made at all for a DM (no `guild_id`) -- see [`run_loop`]'s call site.
 pub struct RestPermissionsResolver {
     client: reqwest::Client,
     bot_token: String,
     api_base: String,
+    cache: Mutex<HashMap<(String, String), CacheEntry>>,
+    cache_cfg: PermissionsCacheConfig,
+    breaker: circuit_breaker::CircuitBreaker,
+    metrics: Arc<dyn PermissionsMetrics>,
 }
 
 impl RestPermissionsResolver {
@@ -95,10 +189,121 @@ impl RestPermissionsResolver {
     /// Gateway connection itself authenticates with.
     #[must_use]
     pub fn new(client: reqwest::Client, bot_token: String, api_base: String) -> Self {
+        Self::with_options(
+            client,
+            bot_token,
+            api_base,
+            PermissionsCacheConfig::default(),
+            (
+                PERMISSIONS_BREAKER_THRESHOLD,
+                PERMISSIONS_BREAKER_WINDOW,
+                PERMISSIONS_BREAKER_BACKOFF,
+            ),
+            Arc::new(()),
+        )
+    }
+
+    /// Full constructor: cache config, breaker `(threshold, window,
+    /// backoff)` and a metrics sink.
+    #[must_use]
+    pub fn with_options(
+        client: reqwest::Client,
+        bot_token: String,
+        api_base: String,
+        cache_cfg: PermissionsCacheConfig,
+        breaker: (u32, Duration, Duration),
+        metrics: Arc<dyn PermissionsMetrics>,
+    ) -> Self {
         Self {
             client,
             bot_token,
             api_base,
+            cache: Mutex::new(HashMap::new()),
+            cache_cfg,
+            breaker: circuit_breaker::CircuitBreaker::with_config(
+                Arc::new(BreakerMetricsAdapter(metrics.clone())),
+                breaker.0,
+                breaker.1,
+                breaker.2,
+            ),
+            metrics,
+        }
+    }
+
+    /// Returns the cached value and its age, if any. A poisoned cache lock
+    /// is treated as a miss -- the cache must never break the request path.
+    fn cache_get(&self, guild_id: &str, author_id: &str) -> Option<(DiscordPermissions, Duration)> {
+        let cache = self.cache.lock().ok()?;
+        let e = cache.get(&(guild_id.to_string(), author_id.to_string()))?;
+        Some((e.perms, e.fetched_at.elapsed()))
+    }
+
+    /// Inserts a value, keeping the map within `max_entries`: first drops
+    /// entries past the stale cap, then the single oldest if still full.
+    fn cache_put(&self, guild_id: &str, author_id: &str, perms: DiscordPermissions) {
+        let Ok(mut cache) = self.cache.lock() else {
+            return;
+        };
+        let key = (guild_id.to_string(), author_id.to_string());
+        if cache.len() >= self.cache_cfg.max_entries && !cache.contains_key(&key) {
+            let stale_max = self.cache_cfg.stale_max;
+            cache.retain(|_, e| e.fetched_at.elapsed() < stale_max);
+            if cache.len() >= self.cache_cfg.max_entries {
+                let oldest = cache
+                    .iter()
+                    .min_by_key(|(_, e)| e.fetched_at)
+                    .map(|(k, _)| k.clone());
+                if let Some(k) = oldest {
+                    cache.remove(&k);
+                }
+            }
+        }
+        cache.insert(
+            key,
+            CacheEntry {
+                perms,
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Number of cached entries (test/diagnostic visibility).
+    #[must_use]
+    pub fn cache_len(&self) -> usize {
+        self.cache.lock().map_or(0, |c| c.len())
+    }
+
+    /// Serves the last-known-good value if it is within the stale cap,
+    /// otherwise fails closed. `reason` is a static log tag.
+    fn stale_or_closed(
+        &self,
+        guild_id: &str,
+        cached: Option<(DiscordPermissions, Duration)>,
+        reason: &'static str,
+    ) -> DiscordPermissions {
+        match cached {
+            Some((perms, age)) if age < self.cache_cfg.stale_max => {
+                self.metrics.permissions_outcome("stale_served");
+                tracing::warn!(
+                    platform = "discord",
+                    guild_id,
+                    reason,
+                    age_s = age.as_secs(),
+                    conditionally_authorized = true,
+                    "serving stale cached discord permissions (conditionally authorized)"
+                );
+                perms
+            }
+            _ => {
+                self.metrics.permissions_outcome("fail_closed");
+                tracing::warn!(
+                    platform = "discord",
+                    guild_id,
+                    reason,
+                    "no usable cached discord permissions; defaulting to non-privileged (fail closed)"
+                );
+                DiscordPermissions::default()
+            }
         }
     }
 
@@ -166,13 +371,27 @@ impl RestPermissionsResolver {
 
 impl PermissionsResolver for RestPermissionsResolver {
     async fn resolve(&self, guild_id: &str, author_id: &str) -> DiscordPermissions {
+        let cached = self.cache_get(guild_id, author_id);
+        if let Some((perms, age)) = cached {
+            if age < self.cache_cfg.ttl {
+                self.metrics.permissions_outcome("hit");
+                return perms;
+            }
+        }
+        if !self.breaker.allow(BREAKER_KEY) {
+            self.metrics.permissions_outcome("breaker_short_circuit");
+            return self.stale_or_closed(guild_id, cached, "breaker_open");
+        }
+        self.metrics.permissions_outcome("miss");
         match self.fetch(guild_id, author_id).await {
-            Ok(perms) => perms,
+            Ok(perms) => {
+                self.breaker.record_success(BREAKER_KEY);
+                self.cache_put(guild_id, author_id, perms);
+                perms
+            }
             Err(err) => {
-                // Fail closed: a guild/member lookup failure (network,
-                // rate-limit, Discord outage, unexpected response shape)
-                // must never default to allow. `guild_id` is loggable (not
-                // PII); the bot token never is (never interpolated here).
+                // `guild_id` is loggable (not PII); the bot token never is
+                // (never interpolated here).
                 let timed_out = err
                     .downcast_ref::<reqwest::Error>()
                     .is_some_and(reqwest::Error::is_timeout);
@@ -181,9 +400,17 @@ impl PermissionsResolver for RestPermissionsResolver {
                     guild_id,
                     timed_out,
                     error = %err,
-                    "failed to resolve discord permissions; defaulting to non-privileged (fail closed)"
+                    "failed to resolve discord permissions"
                 );
-                DiscordPermissions::default()
+                if is_transient(&err) {
+                    self.breaker.record_failure(BREAKER_KEY);
+                    self.stale_or_closed(guild_id, cached, "upstream_failure")
+                } else {
+                    // Definitive per-member answer (e.g. 404: left the
+                    // guild) -- stale privilege would be wrong; fail closed.
+                    self.metrics.permissions_outcome("fail_closed");
+                    DiscordPermissions::default()
+                }
             }
         }
     }
@@ -1804,6 +2031,200 @@ mod tests {
             let perms = resolver_for(&server).resolve("111", "444").await;
             assert!(!perms.is_broadcaster);
             assert!(!perms.is_mod);
+        }
+
+        struct CountingMetrics(Mutex<Vec<String>>);
+        impl PermissionsMetrics for CountingMetrics {
+            fn permissions_outcome(&self, o: &str) {
+                self.0.lock().unwrap().push(o.to_string());
+            }
+        }
+        impl CountingMetrics {
+            fn count(&self, o: &str) -> usize {
+                self.0.lock().unwrap().iter().filter(|x| *x == o).count()
+            }
+        }
+
+        async fn mock_ok_mod(server: &MockServer) {
+            mock_guild(
+                server,
+                "111",
+                "999",
+                serde_json::json!([{"id": "r1", "permissions": MANAGE_MESSAGES}]),
+            )
+            .await;
+            mock_member(server, "111", "444", &["r1"]).await;
+        }
+
+        async fn mock_discord_down(server: &MockServer, status: u16) {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(server)
+                .await;
+        }
+
+        fn swr_resolver(
+            server: &MockServer,
+            ttl_ms: u64,
+            max_entries: usize,
+            threshold: u32,
+            backoff_ms: u64,
+            metrics: Arc<CountingMetrics>,
+        ) -> RestPermissionsResolver {
+            RestPermissionsResolver::with_options(
+                reqwest::Client::new(),
+                "test-token".into(),
+                server.uri(),
+                PermissionsCacheConfig {
+                    ttl: Duration::from_millis(ttl_ms),
+                    stale_max: Duration::from_secs(3600),
+                    max_entries,
+                },
+                (
+                    threshold,
+                    Duration::from_secs(60),
+                    Duration::from_millis(backoff_ms),
+                ),
+                metrics,
+            )
+        }
+
+        #[tokio::test]
+        async fn fresh_hit_makes_no_discord_call() {
+            let server = MockServer::start().await;
+            mock_ok_mod(&server).await;
+            let m = Arc::new(CountingMetrics(Mutex::default()));
+            let r = swr_resolver(&server, 60_000, 100, 5, 100, m.clone());
+            assert!(r.resolve("111", "444").await.is_mod);
+            let calls = server.received_requests().await.unwrap().len();
+            assert!(r.resolve("111", "444").await.is_mod);
+            assert_eq!(server.received_requests().await.unwrap().len(), calls);
+            assert_eq!(m.count("hit"), 1);
+        }
+
+        #[tokio::test]
+        async fn stale_value_served_when_discord_fails_after_ttl() {
+            let server = MockServer::start().await;
+            mock_ok_mod(&server).await;
+            let m = Arc::new(CountingMetrics(Mutex::default()));
+            let r = swr_resolver(&server, 1, 100, 5, 100, m.clone());
+            assert!(r.resolve("111", "444").await.is_mod);
+            mock_discord_down(&server, 503).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let p = r.resolve("111", "444").await;
+            assert!(p.is_mod, "mod must not be locked out by a Discord blip");
+            assert_eq!(m.count("stale_served"), 1);
+        }
+
+        #[tokio::test]
+        async fn stale_value_served_when_discord_times_out() {
+            let server = MockServer::start().await;
+            mock_ok_mod(&server).await;
+            let m = Arc::new(CountingMetrics(Mutex::default()));
+            let client =
+                build_http_client(Duration::from_millis(200), Duration::from_millis(300)).unwrap();
+            let r = RestPermissionsResolver::with_options(
+                client,
+                "test-token".into(),
+                server.uri(),
+                PermissionsCacheConfig {
+                    ttl: Duration::from_millis(1),
+                    ..PermissionsCacheConfig::default()
+                },
+                (5, Duration::from_secs(60), Duration::from_secs(30)),
+                m.clone(),
+            );
+            assert!(r.resolve("111", "444").await.is_mod);
+            server.reset().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+                .mount(&server)
+                .await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(r.resolve("111", "444").await.is_mod);
+            assert_eq!(m.count("stale_served"), 1);
+        }
+
+        #[tokio::test]
+        async fn cold_miss_fails_closed_when_discord_down() {
+            let server = MockServer::start().await;
+            mock_discord_down(&server, 503).await;
+            let m = Arc::new(CountingMetrics(Mutex::default()));
+            let r = swr_resolver(&server, 60_000, 100, 5, 100, m.clone());
+            let p = r.resolve("111", "444").await;
+            assert!(!p.is_mod && !p.is_broadcaster);
+            assert_eq!(m.count("fail_closed"), 1);
+            assert_eq!(r.cache_len(), 0, "failures are never cached");
+        }
+
+        #[tokio::test]
+        async fn definitive_404_never_serves_stale_privilege() {
+            let server = MockServer::start().await;
+            mock_ok_mod(&server).await;
+            let m = Arc::new(CountingMetrics(Mutex::default()));
+            let r = swr_resolver(&server, 1, 100, 5, 100, m.clone());
+            assert!(r.resolve("111", "444").await.is_mod);
+            mock_discord_down(&server, 404).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(!r.resolve("111", "444").await.is_mod);
+            assert_eq!(m.count("stale_served"), 0);
+        }
+
+        #[tokio::test]
+        async fn breaker_opens_after_n_failures_then_recovers() {
+            let server = MockServer::start().await;
+            mock_ok_mod(&server).await;
+            let m = Arc::new(CountingMetrics(Mutex::default()));
+            let r = swr_resolver(&server, 1, 100, 3, 150, m.clone());
+            assert!(r.resolve("111", "444").await.is_mod);
+            mock_discord_down(&server, 503).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            for _ in 0..3 {
+                assert!(r.resolve("111", "444").await.is_mod); // stale
+            }
+            assert_eq!(m.count("breaker_opened"), 1);
+            let calls = server.received_requests().await.unwrap().len();
+            for _ in 0..5 {
+                assert!(r.resolve("111", "444").await.is_mod); // short-circuit
+            }
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                calls,
+                "open breaker must stop calling Discord"
+            );
+            assert_eq!(m.count("breaker_short_circuit"), 5);
+
+            // Discord recovers; after the backoff the probe succeeds.
+            server.reset().await;
+            mock_guild(
+                &server,
+                "111",
+                "999",
+                serde_json::json!([{"id": "r1", "permissions": NONE}]),
+            )
+            .await;
+            mock_member(&server, "111", "444", &["r1"]).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let p = r.resolve("111", "444").await;
+            assert!(!p.is_mod, "fresh value replaces stale after recovery");
+            assert_eq!(m.count("breaker_closed"), 1);
+        }
+
+        #[tokio::test]
+        async fn cache_is_bounded() {
+            let server = MockServer::start().await;
+            mock_guild(&server, "111", "999", serde_json::json!([])).await;
+            for u in ["1", "2", "3", "4", "5"] {
+                mock_member(&server, "111", u, &[]).await;
+            }
+            let m = Arc::new(CountingMetrics(Mutex::default()));
+            let r = swr_resolver(&server, 60_000, 3, 5, 100, m);
+            for u in ["1", "2", "3", "4", "5"] {
+                r.resolve("111", u).await;
+                assert!(r.cache_len() <= 3);
+            }
+            assert_eq!(r.cache_len(), 3);
         }
     }
 }

@@ -126,6 +126,8 @@ pub struct IngestMetrics {
     pub events_published_total: prometheus::IntCounterVec,
     pub publish_errors_total: prometheus::IntCounterVec,
     pub receiver_reconnects_total: prometheus::IntCounterVec,
+    /// Discord permissions resolver cache/breaker outcomes, labeled by outcome.
+    pub discord_permissions_total: prometheus::IntCounterVec,
     /// Twitch EventSub webhook verification outcomes, labeled by result
     /// (`ok`/`bad_signature`/`replay_rejected`/`secret_not_found`/
     /// `missing_header`/`bad_content_type`/`oversized_body`) --
@@ -215,6 +217,18 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
     registry
         .register(Box::new(receiver_reconnects_total.clone()))
         .expect("register svc_ingest_receiver_reconnects_total");
+
+    let discord_permissions_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_discord_permissions_total",
+            "Discord permissions resolver outcomes (hit/miss/stale_served/fail_closed/breaker_*)",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(discord_permissions_total.clone()))
+        .expect("register svc_ingest_discord_permissions_total");
 
     let eventsub_verifications_total = prometheus::IntCounterVec::new(
         prometheus::Opts::new(
@@ -408,6 +422,7 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         events_published_total,
         publish_errors_total,
         receiver_reconnects_total,
+        discord_permissions_total,
         eventsub_verifications_total,
         eventsub_dedup_hits_total,
         eventsub_request_duration_seconds,
@@ -483,6 +498,14 @@ pub trait ReceiverHealthMetrics {
     /// secret material. The service process keeps running; only this one
     /// platform's ingest loop has stopped.
     fn receiver_marked_unhealthy(&self, _platform: &str, _code: Option<u16>) {}
+}
+
+impl crate::ingest::discord::PermissionsMetrics for IngestMetrics {
+    fn permissions_outcome(&self, outcome: &str) {
+        self.discord_permissions_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
 }
 
 impl ReceiverHealthMetrics for IngestMetrics {
