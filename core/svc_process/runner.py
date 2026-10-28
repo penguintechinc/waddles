@@ -250,6 +250,16 @@ def _resolve_platform_user_id(event: PlatformEvent) -> str | None:
     return None
 
 
+def _platform_native_author_id(event: PlatformEvent) -> str | None:
+    """The actor's platform-native id ONLY (never the display-name fallback), or `None`.
+
+    Used as the GDPR erasure key for `live_activity_events`: falling back to `event.actor` would
+    store a handle in an id column and could match a different person's id.
+    """
+    author_id = event.payload.get("author_id")
+    return author_id if isinstance(author_id, str) and author_id else None
+
+
 def _resolve_platform_entity_id(event: PlatformEvent) -> str | None:
     """The platform-native channel/server id for community resolution, or `None`.
 
@@ -525,6 +535,7 @@ class ProcessRunner:
                 community_id=community_id,
                 platform=event_in.platform,
                 actor=event_in.actor,
+                actor_platform_user_id=_platform_native_author_id(event_in),
                 message_in=event_in.payload.get("text"),
                 reply_out=event_out.payload.get("text") if event_out is not None else None,
                 channel_id=event_in.payload.get("channel_id")

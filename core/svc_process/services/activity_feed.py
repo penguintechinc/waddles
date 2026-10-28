@@ -37,12 +37,15 @@ async def record_activity(
     message_in: str | None,
     reply_out: str | None,
     channel_id: str | None,
+    actor_platform_user_id: str | None = None,
 ) -> None:
     """Insert one `live_activity_events` row. Raises on a DB write failure.
 
     Stays a thin, raising wrapper -- the fail-safe boundary lives in exactly
     one place (`runner.py::_emit_activity`), matching `services.
     dispatch_log.record_dispatch`'s own division of responsibility.
+    `actor_platform_user_id` is the erasure key (GDPR Art.17): hub-api deletes the row by the
+    `(platform, actor_platform_user_id)` pair, since the free-text `actor` handle is unmatchable.
     """
     await dal.live_activity_events.async_insert(
         community_id=community_id,
@@ -51,4 +54,5 @@ async def record_activity(
         message_in=message_in,
         reply_out=reply_out,
         channel_id=channel_id,
+        actor_platform_user_id=actor_platform_user_id,
     )

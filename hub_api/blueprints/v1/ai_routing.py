@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import uuid4
 
+from flask_core.ai_disclosure import with_ai_disclosure
 from flask_core.api_utils import error_response
 from flask_core.authz import AuthzDecision
 from flask_core.tenancy import get_tenant_context, tenant_middleware
@@ -429,7 +430,8 @@ async def create_completion(
 
     return CompletionResponseDTO(
         success=True,
-        text=response.text,
+        # EU AI Act Art.50: every AI reply delivered to chat carries the disclosure marker.
+        text=with_ai_disclosure(response.text),
         provider=response.provider,
         model=response.model,
         tier_used=response.tier_used,
