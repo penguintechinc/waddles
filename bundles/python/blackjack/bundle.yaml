@@ -1,0 +1,67 @@
+schema_version: 2
+app_id: waddles.core.example.blackjack
+name: Blackjack Bundle (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: "PenguinTech/waddles"
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/blackjack
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!blackjack", "!hit", "!stand"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!blackjack", "!hit", "!stand"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- hand state is kv-only; currency moves only through the economy host import.
+# The economy/identity host imports are served by the PROCESS stage only (svc_process), so every
+# game step runs in `transform`; `dispatch` only relays the reply (relay is action-stage only).
+data:
+  tables: []
+limits:
+  timeout_ms: 3000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: "storage.kv"
+    justification: "persists each player's open hand, a per-player action lock, replay markers and the mod-set bet limits"
+  - id: "economy.read"
+    justification: "blackjack reads the player's balance and max bet via the economy host import"
+  - id: "economy.wager"
+    justification: "blackjack burns the stake at the deal and settles the hand's payout atomically via economy.wager"
+    params:
+      max_bet: 500
+  - id: "identity.resolve"
+    justification: "blackjack resolves the invoking actor to a community user uuid (uuid-only, no names)"
+  - id: "chat.send:discord"
+    justification: "blackjack replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "blackjack replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

@@ -1,0 +1,35 @@
+[package]
+name = "connection_resolver"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Shared per-send connection resolver client (edge-reshape Chunk 2). Resolves one (community, connection) to its endpoint + decrypted credential via hub-api's internal REST resolve v2 endpoint using a community-bound machine JWT, and lists data-plane bindings. No credential cache, zeroizing secrets, circuit breaker. The public API is the contract svc-action and svc-ingest build on."
+
+[lib]
+name = "connection_resolver"
+path = "src/lib.rs"
+
+# Exact-version pins only (rules/critical-rules.md Dependency Pinning); versions
+# mirror core/service_auth and core/hub_client so one dependency graph resolves one
+# version of each crate.
+[dependencies]
+tokio = { version = "=1.53.3", features = ["rt", "sync", "time"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tracing = "=0.1.44"
+thiserror = "=2.0.20"
+zeroize = "=1.9.0"
+service_auth = { path = "../service_auth", version = "=0.1.0" }
+
+[dev-dependencies]
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
+wiremock = "=0.6.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

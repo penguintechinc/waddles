@@ -45,7 +45,7 @@ chrono = "=0.4.45"
 sha2 = "=0.10.9"
 
 [dev-dependencies]
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }
 sea-orm = { version = "=2.0.2", default-features = false, features = ["mock"] }
 # Test-only: parses `reader::connection_url`'s output with the same URL
 # parser `sqlx_postgres::PgConnectOptions::parse_from_url` uses, so the

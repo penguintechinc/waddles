@@ -12,7 +12,7 @@ v1 scope (KV-ONLY, no `db` capability -- same deliberate scoping as `fish`,
 not dependent on the in-flight #623 db API):
 
 - Bare `!slots` -- SPIN, the grammar's bare/default action. Draws three
-  independent weighted-random reel symbols (`random.choices(..., k=3)`,
+  independent weighted-random reel symbols (`_RNG.choices(..., k=3)`,
   with replacement -- a real three-reel slot machine). All three matching
   is a win, paying the matched symbol's own point value (points only, no
   currency/wallet -- see module-level rationale below); anything else is a
@@ -68,6 +68,11 @@ from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 #: No sub-modules declared for v1 -- every `VERBS` token other than
 #: `list`/`set` resolves to a usage reply (see `_resolve_command`), never a
 #: silent drop.
@@ -103,7 +108,7 @@ class SlotSymbol:
     flavor: str
 
 
-#: Weighted reel table. Weights are relative (`random.choices` normalizes
+#: Weighted reel table. Weights are relative (`_RNG.choices` normalizes
 #: them), not percentages. Each of the three reels draws independently
 #: (with replacement) from this same table -- a real three-reel slot
 #: machine. A win is all three reels landing on the *same* symbol; the
@@ -128,7 +133,7 @@ def _roll_reels() -> tuple[SlotSymbol, SlotSymbol, SlotSymbol]:
     """Draw three independent weighted-random reel symbols (with replacement)."""
     population = [entry[0] for entry in _REEL_TABLE]
     weights = [entry[1] for entry in _REEL_TABLE]
-    a, b, c = random.choices(population, weights=weights, k=3)  # noqa: S311 - a game, not security
+    a, b, c = _RNG.choices(population, weights=weights, k=3)
     return a, b, c
 
 
@@ -419,7 +424,7 @@ async def _handle_spin(
             f"You win {payout} points! (spin #{spins})"
         )
 
-    flavor = random.choice(_LOSE_FLAVORS)  # noqa: S311 - a game, not a security decision
+    flavor = _RNG.choice(_LOSE_FLAVORS)
     return f"\U0001f3b0 {username} spins... {reel_text} -- {flavor} (spin #{spins})"
 
 

@@ -206,7 +206,7 @@ class TestPlatformOverview:
             "communityTypes": [],
         }
 
-    async def test_overview_masks_downstream_failure_to_500(
+    async def test_overview_downstream_failure_is_502(
         self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def fake_get(path: str, **kwargs: Any) -> ProxyResult:
@@ -218,7 +218,24 @@ class TestPlatformOverview:
         response = await client.get(
             "/api/v1/analytics/platform/overview", headers=auth_headers(scope="analytics:read")
         )
-        assert response.status_code == 500
+        assert response.status_code == 502
+
+    async def test_overview_upstream_403_is_502_not_surfaced(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        envelope = {"success": False, "error": {"message": "forbidden", "code": "FORBIDDEN"}}
+
+        async def fake_get(path: str, **kwargs: Any) -> ProxyResult:
+            if path.endswith("/activity"):
+                return ProxyResult(ok=False, status_code=403, body=envelope)
+            return ProxyResult(ok=True, status_code=200, body={"success": True, "data": {}})
+
+        monkeypatch.setattr(analytics_module._proxy_client, "get", AsyncMock(side_effect=fake_get))
+        response = await client.get(
+            "/api/v1/analytics/platform/overview", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 502
+        assert (await response.get_json())["error"]["message"] != "forbidden"
 
 
 # ---------------------------------------------------------------------------
@@ -443,12 +460,12 @@ class TestCrossTenantLeak:
 
 
 # ---------------------------------------------------------------------------
-# Masked-500 -- "Known inherited behavior" (module docstring)
+# Fail-loud 502 -- upstream failure is never masked as 500 (gh-894)
 # ---------------------------------------------------------------------------
 
 
 class TestMaskedFailure:
-    async def test_downstream_failure_masks_to_500(
+    async def test_downstream_failure_is_502(
         self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
@@ -459,6 +476,67 @@ class TestMaskedFailure:
         response = await client.get(
             "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
         )
-        assert response.status_code == 500
+        assert response.status_code == 502
         body = await response.get_json()
         assert body["success"] is False
+
+    async def test_transport_failure_is_502(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(
+                return_value=ProxyResult(ok=False, status_code=502, body=None, transport_error=True)
+            ),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 502
+
+    async def test_upstream_4xx_passes_status_with_rewrapped_body(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        envelope = {"success": False, "error": {"message": "bad period", "code": "VALIDATION"}}
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(return_value=ProxyResult(ok=False, status_code=422, body=envelope)),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 422
+        payload = await response.get_json()
+        assert payload != envelope
+        assert payload["success"] is False
+        assert payload["error"]["message"] == "bad period"
+        assert payload["error"]["code"] == "ERROR_422"
+
+    async def test_upstream_401_is_502(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(return_value=ProxyResult(ok=False, status_code=401, body={"error": {}})),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 502
+
+    async def test_upstream_4xx_non_json_body_keeps_status(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(return_value=ProxyResult(ok=False, status_code=404, body=None)),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 404
+        assert (await response.get_json())["success"] is False

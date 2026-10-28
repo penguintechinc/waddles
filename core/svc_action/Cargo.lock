@@ -1105,7 +1105,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2330,8 +2330,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-bundle-host"
-version = "0.2.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=b063b7ba49f8544f95dba0d23dcbe0e109b7b16c#b063b7ba49f8544f95dba0d23dcbe0e109b7b16c"
+version = "0.3.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=eef86927d015f530c14d8ed54d311494c1a8000d#eef86927d015f530c14d8ed54d311494c1a8000d"
 dependencies = [
  "regex",
  "serde",
@@ -2382,8 +2382,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-spine"
-version = "0.2.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=ce638ec24f0bca0e2afd7655b99d1f9162030156#ce638ec24f0bca0e2afd7655b99d1f9162030156"
+version = "0.1.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=586b8dadfcad26f2e8207b91cd2deb81afb6630f#586b8dadfcad26f2e8207b91cd2deb81afb6630f"
 dependencies = [
  "chrono",
  "hex",
@@ -2688,7 +2688,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3030,14 +3030,14 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
 name = "rustls"
-version = "0.23.46"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -3089,7 +3089,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3329,7 +3329,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
@@ -3780,6 +3780,7 @@ dependencies = [
  "egress_detokenizer",
  "futures-util",
  "hex",
+ "hmac 0.12.1",
  "hub_client",
  "metrics",
  "opentelemetry",
@@ -3799,6 +3800,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "socket2",
+ "subtle",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
@@ -3871,7 +3873,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4601,7 +4603,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

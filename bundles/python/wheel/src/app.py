@@ -12,7 +12,7 @@ even though the task spec's own grammar line doesn't repeat the qualifier for
 it, matching every sibling bundle's "mutation = privileged, read = open"
 convention: `count`'s `add`/`remove` vs `list`, `command`'s `set`/`remove`/
 `timer` vs `list`); bare `!wheel` or `!wheel spin` spins the wheel, replying
-with a uniformly random option (stdlib `random.choice`, rejecting with an
+with a uniformly random option (`SystemRandom.choice`, rejecting with an
 "empty wheel" message rather than crashing when no options exist yet).
 
 State -- PER-COMMUNITY, via `waddle_sdk.community_kv` (explicit
@@ -65,6 +65,11 @@ from typing import Any, cast
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.flask_core import get_bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
 
 #: The command word this bundle answers to -- matched case-insensitively,
 #: and only as a whole token (`!wheel`/`!wheel ...`), never as a prefix of a
@@ -243,7 +248,7 @@ async def _handle_spin(community_id: str) -> str:
     options = await _load_options(community_id)
     if not options:
         return _EMPTY_WHEEL_MSG
-    winner = random.choice(options)  # noqa: S311 - a game pick, not a security decision
+    winner = _RNG.choice(options)
     log.info("wheel.spin", option_count=len(options))
     return f"\U0001f3a1 The wheel lands on: {winner}!"
 
