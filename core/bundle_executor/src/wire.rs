@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use penguin_bundle_host::wire::{
-    read_frame, write_frame, CorrelationError, CorrelationTable, ErrorBody, Frame, HelloBody,
-    HelloOkBody, IdAllocator, InvokeBody, LoadBody, LoadedBody, Message, ResultBody, ShutdownBody,
-    UnloadBody, UnloadedBody,
+    read_frame, write_frame, CapabilityKind, CorrelationError, CorrelationTable, ErrorBody, Frame,
+    HelloBody, HelloOkBody, IdAllocator, InvokeBody, LoadBody, LoadedBody, Message, ResultBody,
+    ShutdownBody, UnloadBody, UnloadedBody,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -95,6 +95,46 @@ pub trait RequestHandler: Send + Sync + 'static {
     }
 }
 
+/// Outbound writer-queue capacity, in frames. Sized against the 1 MiB
+/// `MAX_FRAME_BYTES` ceiling: real frames (host-call args, invoke results,
+/// replies) are single-digit KiB so 256 queued frames is ~1-2 MiB in
+/// practice, while even a pathological all-max-size queue is bounded at
+/// 256 MiB instead of growing without limit behind a slow stage reader.
+/// Deep enough to absorb the burst of host-calls from every concurrent
+/// invocation without stalling, shallow enough that a stalled reader is
+/// noticed (backpressure metric) in well under a second of traffic.
+pub const WRITER_QUEUE_CAPACITY: usize = 256;
+
+/// How long a must-deliver frame waits for queue space before failing
+/// loudly. A writer that makes no progress for this long is a dead link;
+/// `crate::heartbeat` will independently tear the session down.
+pub const MUST_DELIVER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Delivery class of an outbound frame, decided from the frame itself so
+/// a caller can never mislabel one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameClass {
+    /// Replies, hello, pong, and every host-call whose result a guest
+    /// consumes or whose effect mutates state: never dropped; a full queue
+    /// applies bounded backpressure.
+    MustDeliver,
+    /// Fire-and-forget guest log lines (`host-call` capability `log`):
+    /// shed, counted, when the queue is full -- never block on these.
+    Sheddable,
+}
+
+impl FrameClass {
+    /// Classifies a frame's message. Everything except a `log` host-call
+    /// is must-deliver: the executor's outbound kinds are all
+    /// request/reply-correlated, so dropping one would hang its peer.
+    pub(crate) fn of(message: &Message) -> Self {
+        match message {
+            Message::HostCall(b) if b.capability == CapabilityKind::Log => Self::Sheddable,
+            _ => Self::MustDeliver,
+        }
+    }
+}
+
 /// One host-API connection's request/reply bookkeeping: correlation ids
 /// this side allocates (for `hello` and `host-call`, the two message
 /// kinds the executor initiates -- spec SS6.6) and the channel frames are
@@ -102,7 +142,7 @@ pub trait RequestHandler: Send + Sync + 'static {
 pub struct Connection {
     ids: IdAllocator,
     pending: CorrelationTable,
-    writer_tx: mpsc::UnboundedSender<Frame>,
+    writer_tx: mpsc::Sender<Frame>,
     /// When the last frame (any kind) arrived from the stage on this
     /// connection -- `crate::heartbeat`'s half of the half-open-connection
     /// fix. Always present (not optional): every `Connection`, test
@@ -122,14 +162,14 @@ impl Connection {
     /// task instead of driving the full `hello`/`hello-ok` handshake
     /// `run_connection` normally requires -- production code never calls
     /// this from outside `wire`/`invoke`.
-    pub(crate) fn new(writer_tx: mpsc::UnboundedSender<Frame>) -> Arc<Self> {
+    pub(crate) fn new(writer_tx: mpsc::Sender<Frame>) -> Arc<Self> {
         Self::with_metrics(writer_tx, metrics::executor_metrics())
     }
 
     /// [`Connection::new`] with the metrics sink supplied -- the seam tests
     /// use to read back exactly the host calls made through one connection.
     pub(crate) fn with_metrics(
-        writer_tx: mpsc::UnboundedSender<Frame>,
+        writer_tx: mpsc::Sender<Frame>,
         metrics: Arc<ExecutorMetrics>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -155,20 +195,57 @@ impl Connection {
     pub async fn request(&self, message: Message) -> Result<Frame, ExecutorError> {
         let id = self.ids.next_id();
         let rx = self.pending.register(id)?;
-        self.send(Frame::new(id, message))?;
+        if let Err(e) = self.send(Frame::new(id, message)).await {
+            // Never leak a pending entry for a frame that was not queued.
+            self.pending.cancel(id);
+            return Err(e);
+        }
         rx.await.map_err(|_| ExecutorError::ConnectionUnavailable)
     }
 
     /// Sends `message` as the reply to an incoming request, reusing its
     /// `id` (spec SS6.6: "every reply reuses it").
-    pub fn reply_to(&self, id: u64, message: Message) -> Result<(), ExecutorError> {
-        self.send(Frame::new(id, message))
+    pub async fn reply_to(&self, id: u64, message: Message) -> Result<(), ExecutorError> {
+        self.send(Frame::new(id, message)).await
     }
 
-    fn send(&self, frame: Frame) -> Result<(), ExecutorError> {
-        self.writer_tx
-            .send(frame)
-            .map_err(|_| ExecutorError::ConnectionUnavailable)
+    /// Queues `frame` on the bounded writer channel per its [`FrameClass`].
+    ///
+    /// Must NOT be called from the read loop (`read_loop` only spawns tasks
+    /// that call this), so a full queue can stall a spawned reply/host-call
+    /// task but never the task that services stage `ping`s and reads
+    /// `host-result`s -- the very frames that would drain the stall.
+    async fn send(&self, frame: Frame) -> Result<(), ExecutorError> {
+        use mpsc::error::{SendTimeoutError, TrySendError};
+        let class = FrameClass::of(&frame.message);
+        let frame = match self.writer_tx.try_send(frame) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Closed(_)) => return Err(ExecutorError::ConnectionUnavailable),
+            Err(TrySendError::Full(frame)) => frame,
+        };
+        match class {
+            FrameClass::Sheddable => {
+                self.metrics.record_frame_shed("log");
+                debug!("host-api writer queue full, shed log frame");
+                Err(ExecutorError::WriterBackpressure("shed"))
+            }
+            FrameClass::MustDeliver => {
+                self.metrics.record_wire_backpressure("waited");
+                warn!(
+                    capacity = WRITER_QUEUE_CAPACITY,
+                    "host-api writer queue full, applying backpressure to must-deliver frame"
+                );
+                match self.writer_tx.send_timeout(frame, MUST_DELIVER_WAIT).await {
+                    Ok(()) => Ok(()),
+                    Err(SendTimeoutError::Closed(_)) => Err(ExecutorError::ConnectionUnavailable),
+                    Err(SendTimeoutError::Timeout(_)) => {
+                        self.metrics.record_wire_backpressure("timeout");
+                        warn!("host-api writer stalled, must-deliver frame refused");
+                        Err(ExecutorError::WriterBackpressure("timeout"))
+                    }
+                }
+            }
+        }
     }
 
     /// `pub(crate)` for the same reason as [`Connection::new`]: test-only
@@ -198,7 +275,7 @@ where
     H: RequestHandler,
 {
     let (mut reader, mut writer) = tokio::io::split(io);
-    let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<Frame>();
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Frame>(WRITER_QUEUE_CAPACITY);
     let connection = Connection::new(writer_tx);
 
     let writer_task = tokio::spawn(async move {
@@ -221,7 +298,9 @@ where
     // reading frames off the wire to satisfy it.
     let hello_id = connection.ids.next_id();
     let hello_rx = connection.pending.register(hello_id)?;
-    connection.send(Frame::new(hello_id, Message::Hello(hello)))?;
+    connection
+        .send(Frame::new(hello_id, Message::Hello(hello)))
+        .await?;
 
     let mut read_loop_fut = Box::pin(read_loop(&mut reader, &connection, &handler));
     let mut hello_rx = hello_rx;
@@ -384,7 +463,7 @@ where
                         Ok(loaded) => Message::Loaded(loaded),
                         Err(e) => Message::Error(e),
                     };
-                    let _ = connection.reply_to(frame.id, reply);
+                    let _ = connection.reply_to(frame.id, reply).await;
                 });
             }
             Message::Unload(body) => {
@@ -394,7 +473,7 @@ where
                         Ok(unloaded) => Message::Unloaded(unloaded),
                         Err(e) => Message::Error(e),
                     };
-                    let _ = connection.reply_to(frame.id, reply);
+                    let _ = connection.reply_to(frame.id, reply).await;
                 });
             }
             Message::Invoke(body) => {
@@ -407,7 +486,7 @@ where
                         Ok(result) => Message::Result(result),
                         Err(e) => Message::Error(e),
                     };
-                    let _ = connection.reply_to(frame.id, reply);
+                    let _ = connection.reply_to(frame.id, reply).await;
                 });
             }
             Message::Ping => {
@@ -421,7 +500,7 @@ where
                 let (connection, handler) = (Arc::clone(connection), Arc::clone(handler));
                 tokio::spawn(async move {
                     handler.on_ping().await;
-                    let _ = connection.reply_to(frame.id, Message::Pong);
+                    let _ = connection.reply_to(frame.id, Message::Pong).await;
                 });
             }
             Message::Shutdown(body) => {
@@ -1490,7 +1569,7 @@ mod tests {
         ) -> (Harness, Arc<Connection>) {
             let harness = Harness::new();
             let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
-            let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
+            let (tx, mut rx) = mpsc::channel::<Frame>(WRITER_QUEUE_CAPACITY);
             let connection = Connection::with_metrics(tx, metrics);
             let stage = Arc::clone(&connection);
             tokio::spawn(async move {
@@ -1601,7 +1680,7 @@ mod tests {
         async fn a_lost_connection_is_timed_as_connection_lost() {
             let harness = Harness::new();
             let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
-            let (tx, rx) = mpsc::unbounded_channel::<Frame>();
+            let (tx, rx) = mpsc::channel::<Frame>(WRITER_QUEUE_CAPACITY);
             let connection = Connection::with_metrics(tx, metrics);
             drop(rx); // the writer half is gone: nothing can be sent.
             host_call(
@@ -1616,6 +1695,140 @@ mod tests {
                 harness.count(
                     "waddles_executor_host_call_seconds",
                     &[("capability", "db"), ("result", "connection_lost")]
+                ),
+                1.0
+            );
+        }
+    }
+
+    /// Bounded writer queue: capacity, class-aware shedding, and
+    /// backpressure that never starves a concurrent liveness task.
+    mod bounded_writer {
+        use super::*;
+        use crate::metrics::test_support::Harness;
+        use std::sync::atomic::AtomicU64;
+        use std::time::Duration;
+
+        fn log_msg() -> Message {
+            Message::HostCall(HostCallBody {
+                app_id: "waddles.t.log".to_string(),
+                capability: CapabilityKind::Log,
+                op: "write".to_string(),
+                args: serde_json::json!({}),
+                call_id: 1,
+            })
+        }
+
+        fn must_msg() -> Message {
+            Message::HostCall(HostCallBody {
+                app_id: "waddles.t.kv".to_string(),
+                capability: CapabilityKind::Kv,
+                op: "set".to_string(),
+                args: serde_json::json!({}),
+                call_id: 1,
+            })
+        }
+
+        fn small(cap: usize) -> (Harness, Arc<Connection>, mpsc::Receiver<Frame>) {
+            let harness = Harness::new();
+            let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
+            let (tx, rx) = mpsc::channel::<Frame>(cap);
+            (harness, Connection::with_metrics(tx, metrics), rx)
+        }
+
+        #[test]
+        fn only_log_host_calls_are_sheddable() {
+            assert_eq!(FrameClass::of(&log_msg()), FrameClass::Sheddable);
+            for m in [must_msg(), Message::Pong] {
+                assert_eq!(FrameClass::of(&m), FrameClass::MustDeliver);
+            }
+        }
+
+        #[test]
+        fn production_capacity_is_bounded() {
+            const { assert!(WRITER_QUEUE_CAPACITY > 0 && WRITER_QUEUE_CAPACITY <= 1024) };
+        }
+
+        #[tokio::test]
+        async fn queue_never_exceeds_its_cap_and_sheds_log_frames_counted() {
+            let (h, conn, mut rx) = small(2);
+            conn.reply_to(1, Message::Pong).await.expect("1st fits");
+            conn.reply_to(2, Message::Pong).await.expect("2nd fits");
+            for _ in 0..3 {
+                let r = conn.request(log_msg()).await;
+                assert!(matches!(r, Err(ExecutorError::WriterBackpressure("shed"))));
+            }
+            assert_eq!(conn.pending.pending_count(), 0, "shed must cancel pending");
+            assert_eq!(
+                h.count(
+                    "waddles_executor_wire_frames_shed_total",
+                    &[("class", "log")]
+                ),
+                3.0
+            );
+            let mut queued = 0;
+            while rx.try_recv().is_ok() {
+                queued += 1;
+            }
+            assert_eq!(queued, 2, "cap enforced: shed frames were never queued");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn must_deliver_backpressure_does_not_block_a_liveness_task_or_deadlock() {
+            let (h, conn, mut rx) = small(1);
+            conn.reply_to(1, Message::Pong).await.expect("fills queue");
+
+            let ticks = Arc::new(AtomicU64::new(0));
+            let t = Arc::clone(&ticks);
+            let heartbeat = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    t.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            let c = Arc::clone(&conn);
+            let blocked = tokio::spawn(async move { c.reply_to(2, Message::Pong).await });
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(!blocked.is_finished(), "must-deliver send must wait");
+            assert!(
+                ticks.load(Ordering::SeqCst) >= 5,
+                "liveness task starved while a send was backpressured"
+            );
+            // Telemetry still sheds (never blocks) while a must-deliver waits.
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_millis(100), conn.request(log_msg())).await,
+                Ok(Err(ExecutorError::WriterBackpressure("shed")))
+            ));
+            // Draining the writer releases the waiter: no deadlock.
+            assert!(rx.recv().await.is_some());
+            let sent = tokio::time::timeout(Duration::from_secs(2), blocked)
+                .await
+                .expect("waiter released")
+                .expect("join");
+            assert!(sent.is_ok());
+            heartbeat.abort();
+            assert!(
+                h.count(
+                    "waddles_executor_wire_backpressure_total",
+                    &[("outcome", "waited")]
+                ) >= 1.0
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn stalled_writer_fails_must_deliver_loudly_after_the_bound() {
+            let (h, conn, _rx) = small(1);
+            conn.reply_to(1, Message::Pong).await.expect("fills queue");
+            let r = conn.reply_to(2, Message::Pong).await;
+            assert!(matches!(
+                r,
+                Err(ExecutorError::WriterBackpressure("timeout"))
+            ));
+            assert_eq!(
+                h.count(
+                    "waddles_executor_wire_backpressure_total",
+                    &[("outcome", "timeout")]
                 ),
                 1.0
             );

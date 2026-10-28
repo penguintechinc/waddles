@@ -707,7 +707,7 @@ pub(crate) mod tests {
         let (args_tx, args_rx) = tokio::sync::oneshot::channel();
         let (exec_io, stage_io) = tokio::io::duplex(64 * 1024);
         let (exec_reader, mut exec_writer) = tokio::io::split(exec_io);
-        let (writer_tx, mut writer_rx) = mpsc::unbounded_channel();
+        let (writer_tx, mut writer_rx) = mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(writer_tx);
 
         tokio::spawn(async move {
