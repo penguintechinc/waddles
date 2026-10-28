@@ -11,7 +11,15 @@ Channel trust model: the bundle's own build scripts (build.rs, setup hooks, ...)
 They run with stdout/stderr redirected to a file under the scratch dir -- never the pod log --
 and in their own session, which is killed after the step. This entrypoint is the only intended
 writer of the marker channel and emits exactly ONE block carrying the sha256 of the bytes it
-read; the hub rejects any log with more than one block or a digest mismatch.
+read plus the hub's per-build nonce; the hub rejects any log with more than one block, a
+digest mismatch, or a missing/wrong nonce.
+
+Nonce channel: the hub passes `SANDBOX_BUILD_NONCE` in the Job env. `_take_nonce()` runs first
+in `main`: it pops the variable from `os.environ` and marks the process NON-DUMPABLE
+(`prctl(PR_SET_DUMPABLE, 0)`). The build runs as the same uid, so without that it could read the
+original env block via `/proc/<ppid>/environ` (unsetenv does not scrub it) or `/proc/<ppid>/mem`;
+a non-dumpable process's `/proc/<pid>/*` files are root-owned and, with all caps dropped, closed
+to its same-uid children. The build subprocess also gets a hermetic env that never has it.
 
 Fail-loud throughout: an unsupported language, an unsafe tar member, missing vendored
 dependencies, a failed toolchain step, a missing/ambiguous output or an oversize artifact all
@@ -24,6 +32,7 @@ Usage: sandbox_build.py <language> <dir_name>
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import os
 import shutil
@@ -37,6 +46,8 @@ import yaml
 
 BEGIN_MARKER = "WADDLE_WASM_B64_BEGIN"
 END_MARKER = "WADDLE_WASM_B64_END"
+NONCE_ENV = "SANDBOX_BUILD_NONCE"
+PR_SET_DUMPABLE = 4
 SUPPORTED_LANGUAGES = ("python", "rust")
 BASE_REPO = Path(os.environ.get("SANDBOX_BASE_REPO", "/opt/repo-base"))
 WORK = Path(os.environ.get("SANDBOX_WORK", "/work"))
@@ -51,6 +62,21 @@ RUST_TARGET = "wasm32-wasip2"
 
 class SandboxBuildError(RuntimeError):
     """A build-step problem; the message is the machine-checkable reason."""
+
+
+def _take_nonce() -> str:
+    """Consume the hub's nonce: pop it from the env and make this process non-dumpable.
+
+    Must run before any untrusted code is spawned. Fails loud if the nonce is absent/malformed
+    or dumpability cannot be cleared -- never a build whose output the hub could not verify.
+    """
+    nonce = os.environ.pop(NONCE_ENV, "")
+    if len(nonce) != 32 or any(c not in "0123456789abcdef" for c in nonce):
+        raise SandboxBuildError("nonce_missing")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+        raise SandboxBuildError("dumpable_clear_failed")
+    return nonce
 
 
 def _extract(repo: Path, prefix: str) -> Path:
@@ -216,6 +242,7 @@ def main(argv: list[str]) -> int:
     try:
         if len(argv) != 3:
             raise SandboxBuildError("usage")
+        nonce = _take_nonce()
         language, dir_name = argv[1], argv[2]
         if language not in SUPPORTED_LANGUAGES:
             raise SandboxBuildError(f"unsupported_language:{language}")
@@ -241,6 +268,7 @@ def main(argv: list[str]) -> int:
         return 3
     print(BEGIN_MARKER, flush=True)
     print(f"sha256:{hashlib.sha256(data).hexdigest()}")
+    print(f"nonce:{nonce}")
     encoded = base64.b64encode(data).decode("ascii")
     for i in range(0, len(encoded), 76):
         print(encoded[i : i + 76])

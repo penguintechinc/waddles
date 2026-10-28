@@ -667,3 +667,92 @@ async def test_sign_failure_first_install_leaves_nothing_installed(
         )
     rows = await install_dal(install_dal.app_global_installs.id > 0).select()
     assert len(rows) == 1 and rows.first().revoked_at is not None
+
+
+# --- H3b: rollback must keep <=1 current install per app and a consistent row ------------------
+
+
+async def _three_versions(install_dal: Any, src: Any) -> tuple[Any, Any, Any, Any]:
+    cs = [_candidate(src, version=v) for v in ("1.0.0", "1.1.0", "1.2.0")]
+    bs = [(await _ingest(install_dal, src, c)).bundles[0] for c in cs]
+    return cs[0].assigned_app_id, cs, bs, {"approved_by": 7}
+
+
+async def _current(install_dal: Any) -> list[Any]:
+    rows = await install_dal(install_dal.app_global_installs.id > 0).select()
+    return [r for r in rows if r.superseded_by is None and r.revoked_at is None]
+
+
+async def test_rollback_after_concurrent_supersede_keeps_exactly_one_current(
+    install_dal: Any, env: Any
+) -> None:
+    """regression: A rolled back after B superseded A un-superseded P -> P and B both current."""
+    src, _, _ = env
+    app_id, cs, bs, kw = await _three_versions(install_dal, src)
+    p = await approvals.install_version_globally(
+        install_dal, app_id=app_id, version="1.0.0", installed_by=7,
+        expected_permission_hash=bs[0].permission_hash, source=src,
+    )  # fmt: skip
+    a = await approvals.install_version_globally(
+        install_dal, app_id=app_id, version="1.1.0", installed_by=7,
+        expected_permission_hash=bs[1].permission_hash, source=src,
+    )  # fmt: skip
+    b = await approvals.install_version_globally(
+        install_dal, app_id=app_id, version="1.2.0", installed_by=7,
+        expected_permission_hash=bs[2].permission_hash, source=src,
+    )  # fmt: skip
+    vrow = await _vrow(install_dal, app_id, "1.1.0")
+    await ing._rollback_install(
+        install_dal, new_install_id=int(a.id), version_id=int(vrow.id), revoked_by=7
+    )
+    cur = await _current(install_dal)
+    assert [r.id for r in cur] == [b.id]
+    rows = {r.id: r for r in await install_dal(install_dal.app_global_installs.id > 0).select()}
+    assert rows[p.id].superseded_by is not None  # P not resurrected
+    assert rows[a.id].revoked_at is not None
+
+
+async def test_rollback_does_not_resurrect_revoked_prior(install_dal: Any, env: Any) -> None:
+    src, _, _ = env
+    app_id, cs, bs, kw = await _three_versions(install_dal, src)
+    p = await approvals.install_version_globally(
+        install_dal, app_id=app_id, version="1.0.0", installed_by=7,
+        expected_permission_hash=bs[0].permission_hash, source=src,
+    )  # fmt: skip
+    a = await approvals.install_version_globally(
+        install_dal, app_id=app_id, version="1.1.0", installed_by=7,
+        expected_permission_hash=bs[1].permission_hash, source=src,
+    )  # fmt: skip
+    from datetime import UTC, datetime
+
+    await install_dal(install_dal.app_global_installs.id == p.id).update(
+        revoked_at=datetime.now(UTC), revoked_by=9
+    )
+    vrow = await _vrow(install_dal, app_id, "1.1.0")
+    await ing._rollback_install(
+        install_dal, new_install_id=int(a.id), version_id=int(vrow.id), revoked_by=7
+    )
+    assert await _current(install_dal) == []
+
+
+async def test_rollback_clears_stale_signature_fields(
+    install_dal: Any, env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """regression: rollback left artifact_signed_approval_id pointing at the revoked approval."""
+    src, _, _ = env
+    cand = _candidate(src)
+    b = (await _ingest(install_dal, src, cand)).bundles[0]
+    monkeypatch.setattr(
+        signing, "upload_signed_sidecar", AsyncMock(side_effect=RuntimeError("bucket down"))
+    )
+    with pytest.raises(RuntimeError):
+        await ing.approve_source_version(
+            install_dal, src, app_id=cand.assigned_app_id, version="1.0.0",
+            approved_by=7, expected_permission_hash=b.permission_hash,
+        )  # fmt: skip
+    v = await _vrow(install_dal, cand.assigned_app_id)
+    assert v.approval_id is None
+    assert v.artifact_signature is None
+    assert v.artifact_signature_key_id is None
+    assert v.artifact_signed_approval_id is None
+    assert v.artifact_signed_at is None

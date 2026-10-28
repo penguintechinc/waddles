@@ -35,10 +35,20 @@ CFG = sb.SandboxBuilderConfig(
 )
 
 
-def _log(wasm: bytes = WASM) -> str:
+NONCE = "c0ffee" * 5 + "ab"
+
+
+@pytest.fixture(autouse=True)
+def _fixed_nonce(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the per-build nonce so canned pod logs can carry the legitimate one."""
+    monkeypatch.setattr(sb, "_new_nonce", lambda: NONCE)
+
+
+def _log(wasm: bytes = WASM, nonce: str | None = NONCE) -> str:
     sha = hashlib.sha256(wasm).hexdigest()
     body = base64.b64encode(wasm).decode()
-    return f"noise\n{sb.BEGIN_MARKER}\nsha256:{sha}\n{body}\n{sb.END_MARKER}\n"
+    n = "" if nonce is None else f"nonce:{nonce}\n"
+    return f"noise\n{sb.BEGIN_MARKER}\nsha256:{sha}\n{n}{body}\n{sb.END_MARKER}\n"
 
 
 class FakeClient:
@@ -61,7 +71,7 @@ class FakeClient:
     async def wait_for_job(self, namespace: str, name: str, timeout_s: float) -> sb.JobOutcome:
         return self.outcome
 
-    async def read_logs(self, namespace: str, job_name: str) -> str:
+    async def read_logs(self, namespace: str, job_name: str, *, limit_bytes: int) -> str:
         return self.log
 
     async def cleanup(self, namespace: str, job_name: str, configmap_name: str) -> None:
@@ -160,7 +170,11 @@ async def test_job_spec_is_locked_down(tarball: Path) -> None:
     assert sc["readOnlyRootFilesystem"] is True and sc["allowPrivilegeEscalation"] is False
     assert sc["capabilities"] == {"drop": ["ALL"]} and sc["runAsNonRoot"] is True
     assert set(c["resources"]["limits"]) == {"cpu", "memory", "ephemeral-storage"}
-    assert [e["name"] for e in c["env"]] == ["SANDBOX_MAX_WASM_BYTES"]  # no creds/secrets
+    assert [e["name"] for e in c["env"]] == [
+        "SANDBOX_MAX_WASM_BYTES",
+        "SANDBOX_BUILD_NONCE",
+    ]  # no creds/secrets; the nonce is the only per-build value passed IN
+    assert next(e for e in c["env"] if e["name"] == "SANDBOX_BUILD_NONCE")["value"] == NONCE
     assert "envFrom" not in c and "secret" not in str(pod["volumes"]).lower()
     assert {v["name"] for v in pod["volumes"]} == {"source", "work"}
     assert next(m for m in c["volumeMounts"] if m["name"] == "source")["readOnly"] is True
@@ -206,10 +220,19 @@ async def test_reproducible_flag_from_committed_artifact(tarball: Path) -> None:
         (FakeClient(log="no markers"), "no_artifact_in_output"),
         (FakeClient(log=_log(b"notwasm-bytes")), "output_not_wasm"),
         (
-            FakeClient(log=f"{sb.BEGIN_MARKER}\nsha256:{'0' * 64}\n!!!\n{sb.END_MARKER}"),
+            FakeClient(
+                log=f"{sb.BEGIN_MARKER}\nsha256:{'0' * 64}\nnonce:{NONCE}\n!!!\n{sb.END_MARKER}"
+            ),
             "artifact_not_base64",
         ),
         (FakeClient(log=f"{sb.BEGIN_MARKER}\n{sb.END_MARKER}"), "artifact_digest_missing"),
+        # regression: H1 residual -- a forged single block (earlier block, real one evicted by
+        # log rotation) cannot know the per-build nonce.
+        (FakeClient(log=_log(b"\x00asm-forged", nonce=None)), "artifact_nonce_missing"),
+        (FakeClient(log=_log(b"\x00asm-forged", nonce="0" * 32)), "artifact_nonce_mismatch"),
+        (FakeClient(log=_log(nonce="")), "artifact_nonce_missing"),
+        # regression: unbounded pod-log read.
+        (FakeClient(log="x" * (CFG.max_wasm_bytes * 2)), "artifact_log_too_large"),
         (
             FakeClient(log=_log().replace(DIGEST, "0" * 64)),
             "artifact_digest_mismatch",
@@ -264,7 +287,31 @@ async def test_unsupported_language_refused_before_job(tarball: Path) -> None:
 
 def test_builder_reported_digest_is_never_trusted() -> None:
     log = f"digest: {'f' * 64}\n" + _log()
-    assert hashlib.sha256(sb.parse_build_log(log, max_wasm_bytes=1024)).hexdigest() == DIGEST
+    parsed = sb.parse_build_log(log, max_wasm_bytes=1024, expected_nonce=NONCE)
+    assert hashlib.sha256(parsed).hexdigest() == DIGEST
+
+
+def test_new_nonce_is_fresh_random_hex(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.undo()
+    a, b = sb._new_nonce(), sb._new_nonce()
+    assert a != b and len(a) == 32 and int(a, 16) >= 0
+
+
+async def test_bounded_log_read_requests_a_cap(tarball: Path) -> None:
+    """regression: the hub read the pod log with no size cap (memory DoS)."""
+    caps: list[int] = []
+
+    class Capped(FakeClient):
+        async def read_logs(self, namespace: str, job_name: str, *, limit_bytes: int) -> str:
+            caps.append(limit_bytes)
+            return self.log
+
+    src = _source()
+    await sb.run_sandbox_build(
+        src, _candidate(src), tarball, config=CFG, tier="enterprise", client=Capped()
+    )
+    assert caps == [sb.max_log_bytes(CFG)]
+    assert CFG.max_wasm_bytes * 4 // 3 < caps[0] < 64 * 1024 * 1024
 
 
 def test_pack_refuses_symlinks(tmp_path: Path) -> None:
@@ -369,3 +416,23 @@ async def test_failure_or_refusal_sets_error_and_no_version(
     assert statuses[0][1] and statuses[0][1].startswith("sandbox_build:")
     if case in ("not_enterprise", "no_ack"):
         assert client.jobs == []
+
+
+async def test_kubernetes_client_read_logs_is_server_side_capped() -> None:
+    """regression: `read_namespaced_pod_log` was called with no `limit_bytes`."""
+    from types import SimpleNamespace
+
+    seen: dict[str, Any] = {}
+
+    class Core:
+        async def list_namespaced_pod(self, ns: str, label_selector: str) -> Any:
+            return SimpleNamespace(items=[SimpleNamespace(metadata=SimpleNamespace(name="p"))])
+
+        async def read_namespaced_pod_log(self, name: str, ns: str, **kw: Any) -> str:
+            seen.update(kw)
+            return "log"
+
+    client = sb.KubernetesJobClient.__new__(sb.KubernetesJobClient)
+    client._apis = (object(), Core())  # type: ignore[assignment]  # test double, no cluster
+    assert await client.read_logs("ns", "job", limit_bytes=100) == "log"
+    assert seen == {"limit_bytes": 101}

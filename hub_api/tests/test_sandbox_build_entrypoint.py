@@ -10,6 +10,7 @@ from types import ModuleType
 
 import pytest
 
+NONCE = "ab" * 16
 _PATH = Path(__file__).resolve().parents[2] / "bundles" / "sandbox_build.py"
 
 
@@ -59,7 +60,63 @@ def test_emitted_block_is_single_and_carries_sha(
     monkeypatch.setattr(entry, "_extract", lambda repo, prefix: tmp_path)
     monkeypatch.setattr(entry, "_build_python", lambda r, b, e: out)
     monkeypatch.setattr(entry.shutil, "copytree", lambda *a, **k: None)
+    monkeypatch.setattr(entry, "_take_nonce", lambda: NONCE)  # real one makes pytest undumpable
     assert entry.main(["x", "python", "d"]) == 0
     text = capsys.readouterr().out
     assert text.count(entry.BEGIN_MARKER) == 1 and text.count(entry.END_MARKER) == 1
-    assert f"sha256:{hashlib.sha256(wasm).hexdigest()}" in text
+    lines = text.split()
+    assert lines[1] == f"sha256:{hashlib.sha256(wasm).hexdigest()}"
+    assert lines[2] == f"nonce:{NONCE}"  # hub verifies this line
+
+
+def test_missing_or_malformed_nonce_fails_loud(
+    entry: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("SANDBOX_BUILD_NONCE", raising=False)
+    assert entry.main(["x", "python", "d"]) == 2
+    captured = capsys.readouterr()
+    assert "nonce_missing" in captured.err and entry.BEGIN_MARKER not in captured.out
+    monkeypatch.setenv("SANDBOX_BUILD_NONCE", "short")
+    assert entry.main(["x", "python", "d"]) == 2
+
+
+_PROBE = r"""
+import importlib.util, os, subprocess, sys
+spec = importlib.util.spec_from_file_location("sb", sys.argv[1])
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+assert os.environ["SANDBOX_BUILD_NONCE"] == sys.argv[2]  # delivered like the Job env: initial block
+assert mod._take_nonce() == sys.argv[2]
+assert "SANDBOX_BUILD_NONCE" not in os.environ
+assert sys.argv[2] not in repr(mod._base_env())
+child = (
+    "import os,sys\n"
+    "leak=False\n"
+    "for f in ('environ','mem'):\n"
+    "    try:\n"
+    "        leak |= sys.argv[1].encode() in open('/proc/%d/%s' % (os.getppid(), f),'rb').read()\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "print('LEAK' if leak or sys.argv[1] in os.environ.values() else 'SAFE')\n"
+)
+out = subprocess.run([sys.executable, "-c", child, sys.argv[2]], capture_output=True, text=True)
+print(out.stdout.strip(), out.stderr.strip()[:200])
+"""
+
+
+def test_nonce_unreadable_by_untrusted_build_child(tmp_path: Path) -> None:
+    """The same-uid build child cannot recover the nonce (env, /proc/<ppid>/environ)."""
+    import subprocess
+
+    res = subprocess.run(  # noqa: S603 - fixed argv, test probe
+        [sys.executable, "-c", _PROBE, str(_PATH), NONCE],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            "SANDBOX_WORK": str(tmp_path / "w"),
+            "PATH": "/usr/bin:/bin",
+            "SANDBOX_BUILD_NONCE": NONCE,
+        },
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.startswith("SAFE"), res.stdout

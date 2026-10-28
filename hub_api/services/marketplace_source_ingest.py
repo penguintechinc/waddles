@@ -24,6 +24,7 @@ from typing import Any
 
 import yaml
 from penguin_dal import AsyncDB
+from sqlalchemy import select
 from sqlalchemy import update as sa_update
 
 from services import bundle_approval_service, bundle_audit, bundle_signing_service
@@ -369,30 +370,79 @@ async def approve_source_version(
 async def _rollback_install(
     install_dal: AsyncDB, *, new_install_id: int, version_id: int, revoked_by: int
 ) -> None:
-    """Undo ONE failed approval atomically: revoke the new install, restore the prior one.
+    """Undo ONE failed approval atomically, keeping <=1 current install per app.
 
-    The install txn superseded the previously-current row; here (single txn) the new row is
-    revoked, the row it superseded becomes current again, and the version's `approval_id` is
-    cleared. Tenants/communities are untouched because the prior version never stopped being
-    the app's install -- unlike `uninstall_globally`, which would hide the whole app.
+    Single txn. The app's install rows are locked (`FOR UPDATE`) so a concurrent approval of
+    the same app cannot interleave. The new install is revoked; the install it superseded is
+    restored as current ONLY if the new row was still current (nothing superseded it since) and
+    that prior row is not itself revoked -- otherwise a newer approval (B) already owns "current"
+    and clearing `superseded_by` would leave two current rows or resurrect a revoked one.
+    The version row is made consistent: `approval_id` returns to the restored prior install only
+    when the stored signature still binds that prior approval; signature fields that bind the
+    revoked approval are cleared. Tenants/communities are untouched (unlike `uninstall_globally`).
     """
     installs = install_dal.metadata.tables["app_global_installs"]
     versions_t = install_dal.metadata.tables["app_versions"]
     async with install_dal.engine.begin() as conn:
+        new_row = (
+            await conn.execute(select(installs).where(installs.c.id == new_install_id))
+        ).first()
+        if new_row is None:
+            raise RuntimeError("rollback target install row is missing")
+        # Lock every row of this app (deterministic id order) before deciding anything.
+        await conn.execute(
+            select(installs.c.id)
+            .where(installs.c.app_id == new_row.app_id)
+            .order_by(installs.c.id)
+            .with_for_update()
+        )
         await conn.execute(
             sa_update(installs)
             .where(installs.c.id == new_install_id)
             .values(revoked_at=datetime.now(UTC), revoked_by=revoked_by)
         )
-        await conn.execute(
-            sa_update(installs)
-            .where(installs.c.superseded_by == new_install_id)
-            .values(superseded_by=None)
+        restored_id: int | None = None
+        still_current = new_row.superseded_by is None
+        if still_current:
+            prior = (
+                await conn.execute(
+                    select(installs.c.id)
+                    .where(
+                        (installs.c.superseded_by == new_install_id)
+                        & installs.c.revoked_at.is_(None)
+                    )
+                    .order_by(installs.c.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if prior is not None:
+                await conn.execute(
+                    sa_update(installs).where(installs.c.id == prior).values(superseded_by=None)
+                )
+                restored_id = int(prior)
+        else:
+            logger.warning(
+                "marketplace rollback: install already superseded; not restoring prior",
+                extra={"install_id": new_install_id},
+            )
+        vrow = (await conn.execute(select(versions_t).where(versions_t.c.id == version_id))).first()
+        if vrow is None or vrow.approval_id != new_install_id:
+            return
+        sig_binds_prior = (
+            restored_id is not None and vrow.artifact_signed_approval_id == restored_id
         )
+        values: dict[str, Any] = {"approval_id": restored_id if sig_binds_prior else None}
+        if not sig_binds_prior:
+            values.update(
+                artifact_signature=None,
+                artifact_signature_key_id=None,
+                artifact_signed_approval_id=None,
+                artifact_signed_at=None,
+            )
         await conn.execute(
             sa_update(versions_t)
             .where((versions_t.c.id == version_id) & (versions_t.c.approval_id == new_install_id))
-            .values(approval_id=None)
+            .values(**values)
         )
 
 
