@@ -205,8 +205,6 @@ aes-gcm = "=0.10.3"
 hkdf = "=0.12.4"
 zeroize = { version = "=1.9.0", features = ["derive"] }
 x25519-dalek = { version = "=2.0.1", features = ["getrandom"] }
-service_auth = { path = "../service_auth", version = "=0.1.0" }
-connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
 
 # Dataplane scope-resolver machine-JWT client (`src/scope_resolver.rs`): bootstraps
 # with the pod's projected SA token, caches/refreshes the hub-api-issued EdDSA
