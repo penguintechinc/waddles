@@ -221,7 +221,7 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
     let discord_permissions_total = prometheus::IntCounterVec::new(
         prometheus::Opts::new(
             "svc_ingest_discord_permissions_total",
-            "Discord permissions resolver outcomes (hit/miss/stale_served/fail_closed/breaker_*)",
+            "Discord permissions resolver outcomes (hit/miss/stale_served/stale_elevated_denied/fail_closed/breaker_*)",
         ),
         &["outcome"],
     )

@@ -97,7 +97,7 @@ pub const PERMISSIONS_BREAKER_BACKOFF: Duration = Duration::from_secs(30);
 const BREAKER_KEY: &str = "discord-rest";
 
 /// Counters for the resolver's cache/breaker (PII-free: outcome labels only,
-/// never a guild/user id). `outcome` is one of `hit`, `miss`, `stale_served`,
+/// never a guild/user id). `outcome` is one of `hit`, `miss`, `stale_served` (non-privileged stale), `stale_elevated_denied`,
 /// `fail_closed`, `breaker_short_circuit`, `breaker_opened`, `breaker_closed`.
 /// No-op default so tests and unwired callers need no impl.
 pub trait PermissionsMetrics: Send + Sync {
@@ -166,9 +166,9 @@ fn is_transient(err: &anyhow::Error) -> bool {
 ///
 /// Resilience (self-DoS cascade fix): resolved permissions are cached per
 /// (guild, user) with stale-while-revalidate semantics -- fresh within
-/// [`PERMISSIONS_CACHE_TTL`]; on a transient Discord failure the last-known
-/// value (up to [`PERMISSIONS_STALE_MAX`] old) is served instead of failing
-/// closed, so a Discord blip never locks out mods/admins. A shared
+/// [`PERMISSIONS_CACHE_TTL`]; on a transient Discord failure a stale entry is
+/// capped to NON-privileged (never elevated -- see `stale_or_closed`), so a
+/// blip never grants revoked mod/admin rights. A shared
 /// `circuit_breaker` stops calls entirely after repeated failures. Only with
 /// NO usable cached value does it fail closed to non-privileged. No request
 /// is made at all for a DM (no `guild_id`) -- see [`run_loop`]'s call site.
@@ -273,26 +273,36 @@ impl RestPermissionsResolver {
         self.cache.lock().map_or(0, |c| c.len())
     }
 
-    /// Serves the last-known-good value if it is within the stale cap,
-    /// otherwise fails closed. `reason` is a static log tag.
+    /// Degraded-path answer (transient failure / open breaker). Stale data
+    /// may preserve ordinary access but must NEVER grant elevated privilege:
+    /// both `is_mod` and `is_broadcaster` are elevated, so a stale entry is
+    /// always capped to the non-privileged subset (`default()`). Elevated
+    /// actions require a LIVE successful lookup or fail closed -- otherwise a
+    /// just-demoted user could ride out (or induce) a Discord outage and keep
+    /// revoked privilege for up to the stale cap.
     fn stale_or_closed(
         &self,
         guild_id: &str,
         cached: Option<(DiscordPermissions, Duration)>,
         reason: &'static str,
     ) -> DiscordPermissions {
+        let capped = DiscordPermissions::default();
         match cached {
             Some((perms, age)) if age < self.cache_cfg.stale_max => {
-                self.metrics.permissions_outcome("stale_served");
+                let elevated_denied = perms.is_mod || perms.is_broadcaster;
+                self.metrics.permissions_outcome(if elevated_denied {
+                    "stale_elevated_denied"
+                } else {
+                    "stale_served"
+                });
                 tracing::warn!(
                     platform = "discord",
                     guild_id,
                     reason,
                     age_s = age.as_secs(),
-                    conditionally_authorized = true,
-                    "serving stale cached discord permissions (conditionally authorized)"
+                    elevated_denied,
+                    "discord permissions unavailable; serving non-privileged only (stale never grants elevated)"
                 );
-                perms
             }
             _ => {
                 self.metrics.permissions_outcome("fail_closed");
@@ -302,8 +312,16 @@ impl RestPermissionsResolver {
                     reason,
                     "no usable cached discord permissions; defaulting to non-privileged (fail closed)"
                 );
-                DiscordPermissions::default()
             }
+        }
+        capped
+    }
+
+    /// Drops a cached entry so a definitive denial (404/403/malformed) can
+    /// never be resurrected by a later outage's stale path.
+    fn cache_evict(&self, guild_id: &str, author_id: &str) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.remove(&(guild_id.to_string(), author_id.to_string()));
         }
     }
 
@@ -408,6 +426,7 @@ impl PermissionsResolver for RestPermissionsResolver {
                 } else {
                     // Definitive per-member answer (e.g. 404: left the
                     // guild) -- stale privilege would be wrong; fail closed.
+                    self.cache_evict(guild_id, author_id);
                     self.metrics.permissions_outcome("fail_closed");
                     DiscordPermissions::default()
                 }
@@ -751,6 +770,40 @@ async fn run_loop<C, A, M, P, Dk>(
     }
 }
 
+/// Builds the single process-wide [`RestPermissionsResolver`] (bounded HTTP
+/// client, SWR cache, circuit breaker, metrics sink) that [`run`] shares
+/// across every message. Returns `None` (logged) if the TLS backend cannot
+/// initialise, in which case discord ingest must not start.
+pub(crate) fn build_production_resolver(
+    bot_token: String,
+    api_base: String,
+    metrics: Arc<dyn PermissionsMetrics>,
+) -> Option<RestPermissionsResolver> {
+    let http = match build_permissions_http_client() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!(
+                platform = "discord",
+                error = %err,
+                "cannot build bounded discord REST client; discord ingest not started"
+            );
+            return None;
+        }
+    };
+    Some(RestPermissionsResolver::with_options(
+        http,
+        bot_token,
+        api_base,
+        PermissionsCacheConfig::default(),
+        (
+            PERMISSIONS_BREAKER_THRESHOLD,
+            PERMISSIONS_BREAKER_WINDOW,
+            PERMISSIONS_BREAKER_BACKOFF,
+        ),
+        metrics,
+    ))
+}
+
 /// Connects the real Discord Gateway receiver and a real
 /// `SpineClient`-backed publisher, then runs [`run_loop`] until `shutdown`
 /// resolves. This is the function `crate::lib::try_start_discord` spawns as
@@ -770,23 +823,15 @@ pub async fn run<
     dek_provider: &Dk,
     identity_metrics: &prometheus::IntCounterVec,
     shutdown: oneshot::Receiver<()>,
+    permissions_metrics: Arc<dyn PermissionsMetrics>,
 ) {
-    let http = match build_permissions_http_client() {
-        Ok(c) => c,
-        Err(err) => {
-            tracing::error!(
-                platform = "discord",
-                error = %err,
-                "cannot build bounded discord REST client; discord ingest not started"
-            );
-            return;
-        }
-    };
-    let permissions = RestPermissionsResolver::new(
-        http,
+    let Some(permissions) = build_production_resolver(
         gateway_cfg.token.clone(),
         penguin_connector_discord::gateway::DEFAULT_API_BASE.to_string(),
-    );
+        permissions_metrics,
+    ) else {
+        return;
+    };
     let receiver = DiscordGatewayReceiver::new(gateway_cfg);
     let backoff = Backoff::new(Duration::from_secs(30));
     run_loop(
@@ -1949,6 +1994,107 @@ mod tests {
             assert!(!perms.is_broadcaster && !perms.is_mod);
         }
 
+        /// Reads one `outcome` label of the Discord permissions counter from
+        /// a registry (what a Prometheus scrape would see).
+        fn outcome_count(registry: &prometheus::Registry, outcome: &str) -> u64 {
+            registry
+                .gather()
+                .iter()
+                .filter(|f| f.name().contains("discord_permissions"))
+                .flat_map(|f| f.get_metric().to_vec())
+                .filter(|m| m.label.iter().any(|l| l.value() == outcome))
+                .map(|m| m.counter.value() as u64)
+                .sum()
+        }
+
+        /// Drives the real `run_loop` with the exact resolver production
+        /// builds (`build_production_resolver`) and the real `IngestMetrics`.
+        async fn drive_live_flow(
+            server: &MockServer,
+            authors: &[&str],
+        ) -> (Arc<prometheus::Registry>, Vec<String>) {
+            let registry = Arc::new(prometheus::Registry::new());
+            let metrics = Arc::new(crate::telemetry::register_ingest_metrics(&registry));
+            let resolver =
+                build_production_resolver("test-token".into(), server.uri(), metrics.clone())
+                    .expect("resolver builds");
+            let msgs = authors
+                .iter()
+                .map(|a| {
+                    let mut m = test_msg(Some("111"), "cmd");
+                    m.author_id = (*a).to_string();
+                    m
+                })
+                .collect();
+            let appender = RecordingAppender::default();
+            let (_tx, rx) = oneshot::channel();
+            let _ = tokio::time::timeout(
+                Duration::from_millis(1500),
+                run_loop(
+                    FakeConnector::new(msgs, 0),
+                    &appender,
+                    metrics.as_ref(),
+                    &test_keyring(),
+                    "k1",
+                    &Scope::new("acme", None),
+                    &FakeDekProvider,
+                    &test_identity_metrics(),
+                    Backoff::new(Duration::from_secs(30)),
+                    rx,
+                    &resolver,
+                ),
+            )
+            .await;
+            let published = appender
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| {
+                    c.1.event
+                        .payload
+                        .get("is_mod")
+                        .map_or("?".into(), |v| v.to_string())
+                })
+                .collect();
+            (registry, published)
+        }
+
+        /// regression: discord self-DoS -- production path must go through
+        /// the SWR cache, so two identical lookups cost one Discord round.
+        #[tokio::test]
+        async fn production_flow_second_identical_lookup_hits_cache() {
+            let server = MockServer::start().await;
+            mock_ok_mod(&server).await;
+            let (registry, published) = drive_live_flow(&server, &["444", "444"]).await;
+            assert_eq!(published, ["true", "true"]);
+            // One guild + one member request for the first lookup only.
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+            assert_eq!(outcome_count(&registry, "hit"), 1);
+            assert_eq!(outcome_count(&registry, "miss"), 1);
+        }
+
+        /// A Discord outage in the live flow opens the breaker; later
+        /// lookups short-circuit instead of hammering Discord, fail closed,
+        /// and the outcomes are emitted as metrics.
+        #[tokio::test]
+        async fn production_flow_outage_opens_breaker_and_stops_calling() {
+            let server = MockServer::start().await;
+            mock_discord_down(&server, 503).await;
+            let authors = ["1", "2", "3", "4", "5", "6", "7", "8"];
+            let (registry, published) = drive_live_flow(&server, &authors).await;
+            assert_eq!(published.len(), 8, "every message still published");
+            assert!(published.iter().all(|p| p == "false"), "fail closed");
+            let calls = server.received_requests().await.unwrap().len();
+            assert!(
+                calls <= PERMISSIONS_BREAKER_THRESHOLD as usize,
+                "calls={calls}"
+            );
+            assert_eq!(outcome_count(&registry, "breaker_opened"), 1);
+            assert_eq!(outcome_count(&registry, "breaker_short_circuit"), 3);
+            assert_eq!(outcome_count(&registry, "fail_closed"), 8);
+        }
+
         #[test]
         fn permissions_client_builds_with_default_timeouts() {
             assert!(super::super::build_permissions_http_client().is_ok());
@@ -2113,8 +2259,55 @@ mod tests {
             mock_discord_down(&server, 503).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
             let p = r.resolve("111", "444").await;
-            assert!(p.is_mod, "mod must not be locked out by a Discord blip");
-            assert_eq!(m.count("stale_served"), 1);
+            assert!(
+                !p.is_mod && !p.is_broadcaster,
+                "attack must fail: stale ELEVATED perms are never served during an outage"
+            );
+            assert_eq!(m.count("stale_elevated_denied"), 1);
+            assert_eq!(m.count("stale_served"), 0);
+        }
+
+        #[tokio::test]
+        async fn stale_non_privileged_user_still_served_during_outage() {
+            let server = MockServer::start().await;
+            mock_guild(
+                &server,
+                "111",
+                "999",
+                serde_json::json!([{"id": "r1", "permissions": NONE}]),
+            )
+            .await;
+            mock_member(&server, "111", "444", &["r1"]).await;
+            let m = Arc::new(CountingMetrics(Mutex::default()));
+            let r = swr_resolver(&server, 1, 100, 5, 100, m.clone());
+            assert!(!r.resolve("111", "444").await.is_mod);
+            mock_discord_down(&server, 503).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let p = r.resolve("111", "444").await;
+            assert!(!p.is_mod && !p.is_broadcaster);
+            assert_eq!(
+                m.count("stale_served"),
+                1,
+                "availability: ordinary user served from stale"
+            );
+            assert_eq!(m.count("stale_elevated_denied"), 0);
+        }
+
+        #[tokio::test]
+        async fn definitive_denial_evicts_cache_so_outage_cannot_resurrect_elevation() {
+            let server = MockServer::start().await;
+            mock_ok_mod(&server).await;
+            let m = Arc::new(CountingMetrics(Mutex::default()));
+            let r = swr_resolver(&server, 1, 100, 5, 100, m.clone());
+            assert!(r.resolve("111", "444").await.is_mod);
+            mock_discord_down(&server, 404).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(!r.resolve("111", "444").await.is_mod);
+            assert_eq!(r.cache_len(), 0, "definitive denial evicts the entry");
+            mock_discord_down(&server, 503).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(!r.resolve("111", "444").await.is_mod);
+            assert_eq!(m.count("stale_elevated_denied"), 0);
         }
 
         #[tokio::test]
@@ -2142,8 +2335,12 @@ mod tests {
                 .mount(&server)
                 .await;
             tokio::time::sleep(Duration::from_millis(10)).await;
-            assert!(r.resolve("111", "444").await.is_mod);
-            assert_eq!(m.count("stale_served"), 1);
+            let p = r.resolve("111", "444").await;
+            assert!(
+                !p.is_mod && !p.is_broadcaster,
+                "timeout must not serve stale elevated"
+            );
+            assert_eq!(m.count("stale_elevated_denied"), 1);
         }
 
         #[tokio::test]
@@ -2181,12 +2378,13 @@ mod tests {
             mock_discord_down(&server, 503).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
             for _ in 0..3 {
-                assert!(r.resolve("111", "444").await.is_mod); // stale
+                assert!(!r.resolve("111", "444").await.is_mod); // stale: capped
             }
             assert_eq!(m.count("breaker_opened"), 1);
             let calls = server.received_requests().await.unwrap().len();
             for _ in 0..5 {
-                assert!(r.resolve("111", "444").await.is_mod); // short-circuit
+                // breaker open: elevated is denied, never served from stale
+                assert!(!r.resolve("111", "444").await.is_mod);
             }
             assert_eq!(
                 server.received_requests().await.unwrap().len(),
