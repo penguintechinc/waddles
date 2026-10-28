@@ -6,10 +6,10 @@ Single sign-on for Waddles tenants, implemented in **hub-api** (`hub_api/service
 | Protocol | Tier | Feature flag (PostHog + license tier, both must pass) |
 |---|---|---|
 | SAML 2.0 | Enterprise | `waddles.auth.sso_saml` |
-| OpenID Connect (any compliant IdP: Okta, Entra ID, Keycloak, Authentik, ...) | Enterprise | `waddles.auth.sso_saml` |
-| Google OAuth2 / Workspace | Professional | `waddles.auth.sso_google` |
+| Custom OAuth2 / OpenID Connect (bring-your-own IdP: Okta, Entra ID, Keycloak, Authentik, ...) | Professional | `waddles.auth.sso_custom` |
+| Google OAuth2 / Workspace (named `google` type) | Free (ungated, no flag) | -- |
 
-Both flags default **OFF**. Entitlement is evaluated by the real two-gate
+Both gated flags default **OFF**. Entitlement is evaluated by the real two-gate
 `flask_core.feature_flags.feature_enabled` (PostHog flag **and** tenant tier from the catalog
 in `flask_core.tier_catalog`) at connection create/update/enable, when listing login buttons,
 at login start and again at login completion — a downgrade or flag-off stops logins
@@ -63,7 +63,7 @@ no admin scopes).
 4. **Outbound HTTPS.** hub-api fetches each OIDC IdP's discovery document, JWKS and token
    endpoint. Allow egress on 443 to your IdPs if you police hub-api egress. SAML needs no
    outbound call (the browser carries everything).
-5. **Flags.** Turn on `waddles.auth.sso_saml` and/or `waddles.auth.sso_google` for the tenant in
+5. **Flags.** Turn on `waddles.auth.sso_saml` and/or `waddles.auth.sso_custom` (Google needs no flag) for the tenant in
    PostHog (self-hosted; alpha uses the in-cluster instance) and make sure the license tier
    covers it.
 

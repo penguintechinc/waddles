@@ -21,6 +21,8 @@ const api = axios.create({
   },
 });
 
+const REFRESH_URL = '/api/v1/auth/refresh';
+
 // Response interceptor for error handling
 api.interceptors.response.use(
   (response) => response,
@@ -31,11 +33,17 @@ api.interceptors.response.use(
     // cookie on a successful /refresh; the browser stores the new cookie
     // automatically from the Set-Cookie response header, so the retried
     // request needs nothing attached by hand.
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    //
+    // The refresh call itself is never refreshed: a 401 from /auth/refresh means
+    // the refresh cookie is dead, so it rejects straight to the catch below of
+    // the request that triggered it (-> /login) instead of re-entering here and
+    // refreshing without bound.
+    const isRefreshCall = originalRequest?.url === REFRESH_URL;
+    if (error.response?.status === 401 && !originalRequest._retry && !isRefreshCall) {
       originalRequest._retry = true;
 
       try {
-        const response = await api.post('/api/v1/auth/refresh');
+        const response = await api.post(REFRESH_URL);
         if (response.data.success) {
           return api(originalRequest);
         }
@@ -50,6 +58,11 @@ api.interceptors.response.use(
 );
 
 export default api;
+
+// Server-side OAuth login: hub-api owns client_id + redirect and returns the authorize URL.
+export const oauthApi = {
+  start: (platform) => api.get(`/api/v1/auth/oauth/${platform}`),
+};
 
 // API helper functions
 export const publicApi = {
@@ -964,6 +977,12 @@ export const rconApi = {
     api.get(`/api/v1/admin/${communityId}/rcon/info/${serverId}/status`),
   getPlayerList: (communityId, serverId) =>
     api.get(`/api/v1/admin/${communityId}/rcon/info/${serverId}/players`),
+};
+
+// Enterprise tenant SSO (SAML / custom OIDC / Google connections) -- public, pre-auth.
+export const ssoApi = {
+  getOptions: (tenant) => api.get('/api/v1/auth/sso/options', { params: tenant ? { tenant } : {} }),
+  start: (connectionId) => api.get(`/api/v1/auth/sso/${encodeURIComponent(connectionId)}/start`),
 };
 
 // ── Tenant API ─────────────────────────────────────────────────────

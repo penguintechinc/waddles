@@ -131,4 +131,12 @@ describe('AdminLayout', () => {
     act(() => screen.getByRole('button', { name: 'Open sidebar' }).click());
     expect(captured.mobileOpen).toBe(true);
   });
+
+  it('keeps the sidebar a sibling of the content shell, offset only at lg+ (release layout contract)', () => {
+    renderAt('/platform');
+    const shell = screen.getByTestId('admin-content-shell');
+    expect(shell.className).toContain('lg:pl-64');
+    expect(screen.getByRole('main').className).not.toMatch(/(^|\s)(lg:)?ml-64/);
+    expect(document.querySelector('aside')).toBeNull();
+  });
 });

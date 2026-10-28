@@ -181,7 +181,7 @@ function DashboardLayout() {
         onMobileClose={() => setMobileOpen(false)}
       />
 
-      <div className="flex min-h-screen flex-col lg:pl-64">
+      <div data-testid="dashboard-content-shell" className="flex min-h-screen flex-col lg:pl-64">
         <GlobalBanner />
         <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-line bg-surface/95 px-4 backdrop-blur sm:px-6 lg:px-8">
           <div className="flex items-center gap-3">

@@ -574,7 +574,7 @@ function AdminModules() {
         <div className="card" data-testid="community-bundle-apps-followup">
           <EmptyState
             icon={<PuzzlePieceIcon />}
-            title="Manage bundle apps"
+            title="Bundle Apps (Coming Soon)"
             description="Activate or deactivate the bundle-catalog apps your tenant has made available to this community."
             action={
               <Link to={`/admin/${communityId}/bundles`} className="btn btn-primary">

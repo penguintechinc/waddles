@@ -16,7 +16,7 @@ function BundleAppsAvailabilityLink() {
     <div className="card" data-testid="tenant-bundle-apps-followup">
       <EmptyState
         icon={<PuzzlePieceIcon />}
-        title="Bundle apps"
+        title="Bundle Apps (Coming Soon)"
         description="Choose which installed bundle apps are available to this tenant's communities."
         action={
           <Link to={`/tenant/${tenantSlug}/bundles`} className="btn btn-primary">

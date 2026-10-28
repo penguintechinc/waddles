@@ -21,6 +21,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "annotate-snippets"
+version = "0.12.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f211a51805bc641f3ad5b7664c77d2547af685cc33b4cd8d31964027a46f13f1"
+dependencies = [
+ "anstyle",
+ "memchr",
+ "unicode-width",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -90,6 +101,12 @@ name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
+
+[[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
 name = "assert-json-diff"
@@ -372,6 +389,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "connection_resolver"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -392,6 +423,12 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
 name = "cpufeatures"
@@ -504,6 +541,29 @@ name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e985e0451871ad22fb8d2b6b076e2028a502a0d3950998c2c5c0a4f9b5d9679"
+dependencies = [
+ "cfg-if",
+ "core_detect",
+ "multiversion_no_op",
+ "rustversion",
+ "scopeguard",
+ "simdutf8",
+]
+
+[[package]]
+name = "encoding_rs_io"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fba3fe847045ecff794b9c138293a80db914678c453ad63fbf0c6a9eb6e00b22"
+dependencies = [
+ "encoding_rs",
+]
 
 [[package]]
 name = "equivalent"
@@ -706,6 +766,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "granit-parser"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e20f99e46474f56bd905c56e817ebddcf377a611f94c53ac4649e4d3fa3c0cd0"
+dependencies = [
+ "arraydeque",
+ "smallvec",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -846,7 +916,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -1214,6 +1284,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "multiversion_no_op"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
+
+[[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1385,9 +1467,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "penguin-bundle-host"
+version = "0.3.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=eef86927d015f530c14d8ed54d311494c1a8000d#eef86927d015f530c14d8ed54d311494c1a8000d"
+dependencies = [
+ "regex",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "penguin-connector-discord"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=79a32e9676dfa55e9561b7bf94cb7f69023b393c#79a32e9676dfa55e9561b7bf94cb7f69023b393c"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=ecf906a326dfd41ef65e9a2fcb3daf9633cba7ec#ecf906a326dfd41ef65e9a2fcb3daf9633cba7ec"
 dependencies = [
  "futures-util",
  "reqwest 0.13.4",
@@ -1402,7 +1497,7 @@ dependencies = [
 [[package]]
 name = "penguin-connector-twitch"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=79a32e9676dfa55e9561b7bf94cb7f69023b393c#79a32e9676dfa55e9561b7bf94cb7f69023b393c"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=ecf906a326dfd41ef65e9a2fcb3daf9633cba7ec#ecf906a326dfd41ef65e9a2fcb3daf9633cba7ec"
 dependencies = [
  "hex",
  "hmac",
@@ -1415,13 +1510,13 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "penguin-licensing"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=f642e0695046386ca674e47eb9e6f7d6283ac531#f642e0695046386ca674e47eb9e6f7d6283ac531"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=7110125df28045322e7c4c527d1d1be806f2f086#7110125df28045322e7c4c527d1d1be806f2f086"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -1438,7 +1533,7 @@ dependencies = [
 [[package]]
 name = "penguin-logging"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=69e740ce5411d8cd005241fbd829c62e68efb96e#69e740ce5411d8cd005241fbd829c62e68efb96e"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=0a320ba2b08a6850b66e3062f6a9dfb44fec6950#0a320ba2b08a6850b66e3062f6a9dfb44fec6950"
 dependencies = [
  "axum",
  "opentelemetry",
@@ -1460,7 +1555,7 @@ dependencies = [
 [[package]]
 name = "penguin-spine"
 version = "0.2.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=ce638ec24f0bca0e2afd7655b99d1f9162030156#ce638ec24f0bca0e2afd7655b99d1f9162030156"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=90060a93925c50668cc1c6dd47a4ae24a7b4e321#90060a93925c50668cc1c6dd47a4ae24a7b4e321"
 dependencies = [
  "chrono",
  "hex",
@@ -1863,7 +1958,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -2001,9 +2096,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -2084,6 +2179,23 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-saphyr"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
+dependencies = [
+ "annotate-snippets",
+ "base64",
+ "encoding_rs_io",
+ "granit-parser",
+ "nohash-hasher",
+ "num-traits",
+ "serde_core",
+ "smallvec",
+ "zmij",
 ]
 
 [[package]]
@@ -2283,12 +2395,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "clap",
+ "connection_resolver",
  "futures-util",
  "hmac",
  "http-body-util",
  "libc",
+ "penguin-bundle-host",
  "penguin-connector-discord",
  "penguin-connector-twitch",
  "penguin-licensing",
@@ -2452,9 +2567,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
@@ -2771,6 +2886,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
 name = "untrusted"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2941,9 +3062,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -2954,14 +3075,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]
