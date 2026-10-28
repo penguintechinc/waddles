@@ -60,8 +60,46 @@ def test_formerly_skipped_objects_exist(pg_db: PgTestDatabase) -> None:
             "to_regclass('public.server_ban_sync') IS NOT NULL"
         )
         assert cur.fetchone() == (True, True, True, True)
-        cur.execute("SELECT count(*) FROM pg_policies WHERE tablename = 'platform_integrations'")
+        cur.execute(
+            "SELECT count(*) FROM pg_policies WHERE tablename = 'platform_integrations'"
+        )
         row = cur.fetchone()
         assert row is not None and row[0] > 0, "031/032 RLS policies were not applied"
         cur.execute("SELECT 1 FROM pg_roles WHERE rolname = 'hub_admin'")
         assert cur.fetchone() is not None
+
+
+@requires_docker
+def test_fresh_replay_reaches_single_head(pg_db: PgTestDatabase) -> None:
+    """`alembic_version` equals the one static graph head -- the new-cluster install guard."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(_SQL_DIR.parents[2] / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_SQL_DIR.parents[2] / "alembic"))
+    heads = ScriptDirectory.from_config(cfg).get_heads()
+    assert len(heads) == 1, f"alembic graph has {len(heads)} heads: {heads}"
+    with psycopg2.connect(pg_db.dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT version_num FROM alembic_version")
+        assert [r[0] for r in cur.fetchall()] == heads
+
+
+@requires_docker
+def test_late_legacy_sql_and_ports_land_on_fresh_path(pg_db: PgTestDatabase) -> None:
+    """Legacy 079 and 097-103 are applied on a fresh DB, incl. the 0060/0061 ported objects."""
+    with psycopg2.connect(pg_db.dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT version FROM schema_migrations")
+        applied = {r[0] for r in cur.fetchall()}
+        late = {
+            p.stem
+            for p in _SQL_DIR.glob("*.sql")
+            if p.stem[:3] == "079" or p.stem[:3] >= "097"
+        }
+        assert any(v.startswith("103") for v in late), "103 SQL file missing from disk"
+        assert late - applied == set()
+        cur.execute(
+            "SELECT count(*) FROM information_schema.columns WHERE table_name = 'streaming_targets' "
+            "AND column_name IN ('protocol', 'video_codec', 'audio_codec')"
+        )
+        row = cur.fetchone()
+        assert row is not None and row[0] == 3
