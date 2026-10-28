@@ -24,6 +24,30 @@ use std::time::Duration;
 use bundle_executor::connector::ConnectorLimits;
 use connector_e2e::{RigConnector, WireRig};
 use penguin_spine::{KeyRing, NoopMetrics, Scope, SpineError, StageEnvelope};
+/// Fixed-DEK provider so the sink's identity-encryption path is real but offline.
+struct FakeDekProvider;
+
+impl svc_ingest::identity_crypto::DekProvider for FakeDekProvider {
+    async fn get_dek(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<
+        (svc_ingest::identity_crypto::Dek, u32),
+        svc_ingest::identity_crypto::DekUnavailableError,
+    > {
+        Ok((svc_ingest::identity_crypto::Dek::new([9u8; 32]), 3))
+    }
+}
+
+/// Test-only identity-encryption counter the sink requires.
+fn test_identity_metrics() -> prometheus::IntCounterVec {
+    prometheus::IntCounterVec::new(
+        prometheus::Opts::new("test_identity_encryption_total", "test-only"),
+        &["tenant", "status"],
+    )
+    .expect("static metric name/labels are valid")
+}
+
 use svc_ingest::connector::{
     register_connector_metrics, ConnectionCtx, ConnectorDriver, ConnectorMetrics,
     ConnectorRegistry, ExecutorLink, Handshake, SpineEventSink, Transport, TransportError,
@@ -122,6 +146,8 @@ async fn start(
         KeyRing::new(vec![("kid-1".to_string(), vec![5u8; 32])]),
         "kid-1",
         Scope::new("acme", Some("main".to_string())),
+        FakeDekProvider,
+        test_identity_metrics(),
     );
     let prom = prometheus::Registry::new();
     let metrics = register_connector_metrics(&prom).unwrap();
@@ -325,6 +351,8 @@ async fn an_unregistered_platform_never_connects_and_fails_loudly() {
             KeyRing::new(vec![("kid-1".to_string(), vec![5u8; 32])]),
             "kid-1",
             Scope::new("acme", None),
+            FakeDekProvider,
+            test_identity_metrics(),
         )),
         register_connector_metrics(&prom).unwrap(),
     );
