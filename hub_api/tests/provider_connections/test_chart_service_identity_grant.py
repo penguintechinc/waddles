@@ -40,6 +40,15 @@ from tests.provider_connections.test_api import INTERNAL, _create
 _CHART_DIR = Path(__file__).resolve().parents[3] / "k8s" / "helm" / "waddlebot"
 _SVC_INGEST = "spiffe://penguintech.io/alpha/svc-ingest"
 _SCOPE = "connections:resolve"
+_LIST_SCOPE = "connections:list"
+
+
+def _bound_headers(issuer: ServiceJwtIssuer, community_id: int) -> dict[str, str]:
+    """Bearer for a community-bound resolve token minted by svc-ingest's identity."""
+    token, _claims = issuer.issue_with_claims(
+        _SVC_INGEST, _SCOPE, extra_claims={"community": community_id}
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _render_identities_env(*extra_set: str) -> str:
@@ -102,10 +111,11 @@ def service_issuer(chart_identities: dict[str, ServiceIdentity]) -> ServiceJwtIs
     """Override the shared hand-built issuer: a real Ed25519 issuer over the CHART's allow-list."""
     private = Ed25519PrivateKey.generate()
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
+    identities = dict(chart_identities)
     return ServiceJwtIssuer(
         keys={"k1": key},
         active_kid="k1",
-        identities=chart_identities,
+        identities=identities,
         audience=SERVICE_AUDIENCE,
     )
 
@@ -115,7 +125,8 @@ def test_chart_grants_svc_ingest_exactly_connections_resolve_on_the_system_tenan
 ) -> None:
     identity = chart_identities[_SVC_INGEST]
     # Minimum: the two data-plane scopes (connections + scope resolver), nothing else.
-    assert identity.allowed_scopes == frozenset({_SCOPE, "dataplane:resolve-scope"})
+    assert identity.allowed_scopes == frozenset({_SCOPE, _LIST_SCOPE, "dataplane:resolve-scope"})
+    assert "connections:resolve:static" not in identity.allowed_scopes
     assert identity.tenant == "system"
     # Pinned to the dedicated ServiceAccount, never the chart-wide shared one.
     assert (identity.k8s_namespace, identity.k8s_service_account) != ("", "")
@@ -151,14 +162,25 @@ def test_svc_ingest_identity_cannot_mint_any_scope_beyond_connections_resolve(
         service_issuer.issue(_SVC_INGEST, scope)
 
 
-def test_no_other_chart_identity_may_mint_connections_resolve(
+def test_only_svc_ingest_and_svc_action_may_mint_connections_resolve(
     service_issuer: ServiceJwtIssuer, chart_identities: dict[str, ServiceIdentity]
 ) -> None:
-    others = [sid for sid in chart_identities if sid != _SVC_INGEST]
-    assert others, "expected other service identities in the chart (svc-process, svc-action, ...)"
+    others = [sid for sid in chart_identities if not sid.endswith(("/svc-ingest", "/svc-action"))]
+    assert others, "expected other service identities in the chart (svc-process, ...)"
     for service_id in others:
         with pytest.raises(BootstrapRejected):
             service_issuer.issue(service_id, _SCOPE)
+
+
+def test_svc_action_may_mint_resolve_and_static_but_not_list(
+    service_issuer: ServiceJwtIssuer, chart_identities: dict[str, ServiceIdentity]
+) -> None:
+    action_id = next(sid for sid in chart_identities if sid.endswith("/svc-action"))
+    for scope in (_SCOPE, "connections:resolve:static"):
+        _token, claims = service_issuer.issue_with_claims(action_id, scope)
+        assert (claims["scope"], claims["tenant"]) == (scope, "system")
+    with pytest.raises(BootstrapRejected):
+        service_issuer.issue(action_id, _LIST_SCOPE)
 
 
 @pytest.mark.parametrize(
@@ -183,7 +205,7 @@ async def test_chart_minted_svc_ingest_token_reaches_the_internal_data_plane_rou
     created = await _create(client, pc_db, bot_tokens)
     assert created.status_code == 201
     connection_id = (await created.get_json())["connection"]["id"]
-    headers = {"Authorization": f"Bearer {service_issuer.issue(_SVC_INGEST, _SCOPE)}"}
+    headers = {"Authorization": f"Bearer {service_issuer.issue(_SVC_INGEST, _LIST_SCOPE)}"}
 
     listed = await client.get(
         f"{INTERNAL}/provider-connections?provider=twitch&capability=chat_ingest", headers=headers
@@ -195,7 +217,7 @@ async def test_chart_minted_svc_ingest_token_reaches_the_internal_data_plane_rou
     resolved = await client.post(
         f"{INTERNAL}/communities/{pc_db.seed.community_id}"
         f"/provider-connections/{connection_id}/resolve",
-        headers=headers,
+        headers=_bound_headers(service_issuer, pc_db.seed.community_id),
     )
     assert resolved.status_code == 200
     assert (await resolved.get_json())["accessToken"] == bot_tokens[0]
@@ -232,7 +254,7 @@ async def test_a_freshly_created_binding_is_listed_with_no_further_approval_or_e
         True,
         True,
     )
-    headers = {"Authorization": f"Bearer {service_issuer.issue(_SVC_INGEST, _SCOPE)}"}
+    headers = {"Authorization": f"Bearer {service_issuer.issue(_SVC_INGEST, _LIST_SCOPE)}"}
     listed = await client.get(f"{INTERNAL}/provider-connections?provider=twitch", headers=headers)
     assert [i["connectionId"] for i in (await listed.get_json())["items"]] == [body["id"]]
 
@@ -244,7 +266,7 @@ async def test_an_admin_disabled_binding_is_hidden_until_re_enabled(
     created = await _create(client, pc_db, bot_tokens, enabled=False)
     body = (await created.get_json())["connection"]
     assert (body["access"], body["enabled"], body["usable"]) == ("approved", False, False)
-    headers = {"Authorization": f"Bearer {service_issuer.issue(_SVC_INGEST, _SCOPE)}"}
+    headers = {"Authorization": f"Bearer {service_issuer.issue(_SVC_INGEST, _LIST_SCOPE)}"}
     url = f"{INTERNAL}/provider-connections?provider=twitch"
     assert (await (await client.get(url, headers=headers)).get_json())["items"] == []
 
@@ -270,8 +292,18 @@ def test_svc_ingest_grant_is_absent_when_dynamic_connections_is_disabled(
     assert len(identities) >= 3, "other identities must still render"  # denominator
     ids = {identity.service_id for identity in identities}
     assert _SVC_INGEST not in ids
-    assert all(_SCOPE not in identity.allowed_scopes for identity in identities)
-    assert _SCOPE not in env
+    # Both flags off: no identity carries any connections:* scope at all.
+    env_off = _render_identities_env(
+        "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false",
+        "pipeline.rustDataPlane.svcAction.dynamicConnections.enabled=false",
+    )
+    monkeypatch.setenv("SERVICE_JWT_IDENTITIES", env_off)
+    off = load_identities_from_env(env="alpha")
+    assert len(off) >= 3
+    assert all(
+        not any(s.startswith("connections:") for s in identity.allowed_scopes) for identity in off
+    )
+    assert "connections:" not in env_off
 
 
 def test_svc_ingest_grant_is_present_when_dynamic_connections_is_enabled(

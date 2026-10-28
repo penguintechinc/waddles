@@ -48,6 +48,8 @@ from typing import Any
 import httpx
 
 from services.bundle_telemetry import bundle_span, get_meter
+from services.schema import bind_auth_tables
+from services.sync_worker_dal import bind_reference_tenants, open_worker_dal
 
 try:
     from flask_core.feature_flags import feature_enabled
@@ -325,6 +327,10 @@ async def sync_community(
 
 async def run_odoo_sync_batch(dal: Any, client: OdooClient, config: OdooConfig) -> SyncSummary:
     """One pass over every community whose tenant has the flag on; fail-closed per community."""
+    # A standalone worker DAL (`main()`) has no startup hook binding tables; bind what this pass
+    # reads, idempotently (a no-op for an already-bound DAL, e.g. a test fixture's).
+    bind_auth_tables(dal)
+    bind_reference_tenants(dal)
     summary = SyncSummary()
     for community in dal(dal.communities.id > 0).select():
         summary.communities_examined += 1
@@ -370,13 +376,14 @@ async def run_odoo_sync_batch(dal: Any, client: OdooClient, config: OdooConfig) 
 
 async def main() -> int:
     """CronJob entrypoint: one pass, denominators printed; non-zero on failure/zero examined."""
-    from services.bundle_install_dal import build_install_dal  # local: heavy import
-
     config = OdooConfig.from_env()
-    install_dal = await build_install_dal(os.environ["DATABASE_URL"], pool_size=1)
     client = OdooClient(config)
     try:
-        summary = await run_odoo_sync_batch(install_dal.dal, client, config)
+        # RAW pydal DAL from `AsyncDAL.dal` (as hub-api's `app.py::startup`), never a penguin-dal
+        # `AsyncDB` -- that has no `.dal`; reading one raises `TableNotFoundError: Table 'dal'
+        # not found` (see `services/sync_worker_dal.py`).
+        with open_worker_dal(os.environ["DATABASE_URL"]) as async_dal:
+            summary = await run_odoo_sync_batch(async_dal.dal, client, config)
     finally:
         await client.aclose()
     print(

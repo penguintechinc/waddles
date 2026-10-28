@@ -67,16 +67,16 @@ function AdminClipConfig() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">Max Clip Duration (seconds)</label>
-          <input type="number" value={config.maxClipDurationSeconds} onChange={(e) => setConfig({ ...config, maxClipDurationSeconds: parseInt(e.target.value) || 10 })} min={10} max={300}
-            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500" />
+          <label htmlFor="admin-clip-config-max-clip-duration-seconds" className="block text-sm font-medium text-sky-100 mb-2">Max Clip Duration (seconds)</label>
+          <input id="admin-clip-config-max-clip-duration-seconds" type="number" value={config.maxClipDurationSeconds} onChange={(e) => setConfig({ ...config, maxClipDurationSeconds: parseInt(e.target.value) || 10 })} min={10} max={300}
+            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500" />
           <p className="text-xs text-navy-400 mt-1">Maximum clip length in seconds (10-300)</p>
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">Storage Retention (days)</label>
-          <input type="number" value={config.storageRetentionDays} onChange={(e) => setConfig({ ...config, storageRetentionDays: parseInt(e.target.value) || 7 })} min={7} max={365}
-            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500" />
+          <label htmlFor="admin-clip-config-storage-retention-days" className="block text-sm font-medium text-sky-100 mb-2">Storage Retention (days)</label>
+          <input id="admin-clip-config-storage-retention-days" type="number" value={config.storageRetentionDays} onChange={(e) => setConfig({ ...config, storageRetentionDays: parseInt(e.target.value) || 7 })} min={7} max={365}
+            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500" />
           <p className="text-xs text-navy-400 mt-1">How long clips are stored before auto-deletion</p>
         </div>
 

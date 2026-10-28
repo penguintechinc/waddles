@@ -317,11 +317,12 @@ function AdminMusicSettings() {
           </h2>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-navy-300 mb-4">
+              <label htmlFor="admin-music-settings-input" className="block text-sm font-medium text-navy-300 mb-4">
                 Default Volume: <span className="text-sky-300 font-bold">{config.default_volume ?? 50}%</span>
               </label>
               <div className="flex items-center gap-4">
                 <input
+                  id="admin-music-settings-input"
                   type="range"
                   min="0"
                   max="100"
@@ -365,10 +366,11 @@ function AdminMusicSettings() {
               <>
                 {/* Max Requests Per User */}
                 <div>
-                  <label className="block text-sm font-medium text-navy-300 mb-2">
+                  <label htmlFor="admin-music-settings-maximum-requests-per-user" className="block text-sm font-medium text-navy-300 mb-2">
                     Maximum Requests Per User
                   </label>
                   <input
+                    id="admin-music-settings-maximum-requests-per-user"
                     type="number"
                     min="1"
                     max="50"
@@ -383,10 +385,11 @@ function AdminMusicSettings() {
 
                 {/* Request Cooldown */}
                 <div>
-                  <label className="block text-sm font-medium text-navy-300 mb-2">
+                  <label htmlFor="admin-music-settings-request-cooldown-minutes" className="block text-sm font-medium text-navy-300 mb-2">
                     Request Cooldown (minutes)
                   </label>
                   <input
+                    id="admin-music-settings-request-cooldown-minutes"
                     type="number"
                     min="0"
                     max="1440"
@@ -415,11 +418,12 @@ function AdminMusicSettings() {
 
           {/* Add New Blacklist Item */}
           <div className="mb-6 p-4 bg-navy-800 rounded-lg">
-            <label className="block text-sm font-medium text-navy-300 mb-3">
+            <label htmlFor="admin-music-settings-add-to-blacklist" className="block text-sm font-medium text-navy-300 mb-3">
               Add to Blacklist
             </label>
             <div className="flex gap-3">
               <select
+                id="admin-music-settings-add-to-blacklist"
                 value={blacklistType}
                 onChange={(e) => setBlacklistType(e.target.value)}
                 className="px-3 py-2 bg-navy-700 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
@@ -428,6 +432,7 @@ function AdminMusicSettings() {
                 <option value="artist">Artist</option>
               </select>
               <input
+                aria-label="Blacklist entry"
                 type="text"
                 value={newBlacklistItem}
                 onChange={(e) => setNewBlacklistItem(e.target.value)}
@@ -464,6 +469,7 @@ function AdminMusicSettings() {
                     <span className="text-sky-100">{item.value}</span>
                   </div>
                   <button
+                    aria-label={`Remove ${item.type} ${item.value} from blacklist`}
                     onClick={() => handleRemoveBlacklistItem(item.id)}
                     className="btn btn-danger p-2 hover:bg-red-500/30"
                   >
@@ -538,7 +544,7 @@ function AdminMusicSettings() {
                   placeholder={youtubeLabels.length === 0 ? 'e.g. music, lofi' : ''}
                   aria-label="Add YouTube allowed label"
                   data-testid="youtube-label-input"
-                  className="flex-1 min-w-[8rem] bg-transparent text-sky-100 placeholder-navy-500 focus:outline-none py-1"
+                  className="flex-1 min-w-[8rem] bg-transparent text-sky-100 placeholder-navy-500 py-1"
                 />
               </div>
 

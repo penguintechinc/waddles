@@ -130,7 +130,7 @@ def _profile_dto(profile: dict[str, Any]) -> ProfileDTO:
 
 
 @profile_bp.route("/profile", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(ProfileResponse)
 async def get_my_profile() -> ProfileResponse | tuple[dict[str, object], int]:
     """Get my profile."""
@@ -146,7 +146,7 @@ async def get_my_profile() -> ProfileResponse | tuple[dict[str, object], int]:
 
 
 @profile_bp.route("/profile", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_request(UpdateProfileRequest)
 # NOT @validate_response -- update_my_profile() inserts/updates
 # hub_user_profiles then returns a nested-dataclass response, hitting the
@@ -180,7 +180,7 @@ async def update_my_profile(data: UpdateProfileRequest) -> tuple[Any, int]:
 
 
 @profile_bp.route("/profile/avatar", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(AvatarResponse)
 async def upload_avatar() -> AvatarResponse | tuple[dict[str, object], int]:
     """Upload avatar."""
@@ -207,7 +207,7 @@ async def upload_avatar() -> AvatarResponse | tuple[dict[str, object], int]:
 
 
 @profile_bp.route("/profile/avatar", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(AvatarResponse)
 async def delete_avatar() -> AvatarResponse | tuple[dict[str, object], int]:
     """Delete avatar."""
@@ -221,7 +221,7 @@ async def delete_avatar() -> AvatarResponse | tuple[dict[str, object], int]:
 
 
 @profile_bp.route("/linked-platforms", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
 @validate_response(LinkedPlatformsResponse)
 async def get_my_linked_platforms() -> LinkedPlatformsResponse:
     """Get my linked platforms."""

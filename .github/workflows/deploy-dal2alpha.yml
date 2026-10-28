@@ -1,0 +1,206 @@
+name: Deploy dal2-alpha
+
+# TRUSTED-CODE-ONLY (security constraint): this self-hosted runner must only ever
+# build/deploy trusted first-party code (non-fork, protected branch). The in-cluster
+# BuildKit runs with --oci-worker-no-process-sandbox, so build steps are NOT
+# PID-isolated; untrusted (fork/PR) code must never build here.
+#  - Triggers are push to release/v3.0.X only (forks cannot push to this repo) plus
+#    workflow_dispatch (maintainer/write-access only). There is deliberately NO
+#    pull_request / pull_request_target trigger -- never add one.
+#  - Job-level guards below also pin execution to this repo AND the protected
+#    release branch, so a dispatch from a feature branch is refused.
+# REQUIRED SETUP (repo settings, done by a human): GitHub Environment `dal2-alpha`
+# must have deployment protection (required reviewers) as the GitHub-side gate.
+
+# Merge-to-release -> build alpha images -> deploy to the dal2-alpha cluster,
+# surfaced as the GitHub Environment/Deployment `dal2-alpha`.
+#
+# POLICY NOTE: container image builds are otherwise gated to main-only for
+# Actions-budget reasons (build-container.yml + callers) -- that gating is
+# UNCHANGED. This workflow is the intended extension: ONE release-branch-merge
+# alpha build+deploy path. It does NOT re-enable per-PR / per-branch builds.
+# It cannot reuse build-container.yml (that workflow is main/release/dispatch
+# gated, tags beta-* on release branches, and builds one module at a time).
+#
+# Runners: gha-runner-scale-set (ARC) matches on the scale-set NAME only, so
+# `runs-on: dal2-alpha` is a single label (an array form never picks up).
+# Builds use the in-cluster rootless buildkitd via the buildx `remote` driver
+# (no docker.sock on the runner). Deploy uses the runner pod's ServiceAccount.
+#
+# NOTE: k8s/helm/waddlebot/values-dal2alpha.yaml is the single canonical overlay, owned by
+# branch chore/values-dal2alpha (must merge to release BEFORE/with this workflow; no copy here).
+#
+# Alpha is FULLY self-hosted (build AND deploy on the dal2 runner) so it costs
+# zero GitHub-hosted Actions minutes. Beta/prod will use a separate HYBRID
+# workflow later (GitHub-hosted build + self-hosted deploy) -- not built here.
+
+on:
+  push:
+    branches: [release/v3.0.X]
+  workflow_dispatch:
+
+# Serialize deploys; never cancel one mid-flight (a half-applied helm upgrade).
+concurrency:
+  group: dal2alpha-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  BUILDKIT_HOST: tcp://buildkitd.buildkit.svc:1234
+  IMAGE_PREFIX: ghcr.io/penguintechinc/waddles
+
+jobs:
+  build:
+    name: Build ${{ matrix.service }}
+    if: github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X'
+    runs-on: dal2-alpha
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # service = image repo name (mirrors scripts/alpha-deploy.sh SERVICES).
+          - { service: hub-api, file: hub_api/Dockerfile, context: ".", extra_ctx: "", target: "", suffix: "" }
+          - { service: hub-webui, file: admin/hub_module/Dockerfile.webui, context: ".", extra_ctx: "", target: "", suffix: "" }
+          - { service: waddlebot-migrations, file: migrations/Dockerfile, context: ".", extra_ctx: "", target: "", suffix: "" }
+          - { service: core-bundle-seeder, file: bundles/Dockerfile.core-bundles, context: ".", extra_ctx: "", target: "", suffix: "" }
+          - { service: reputation-module, file: core/reputation_module/Dockerfile, context: ".", extra_ctx: "", target: "", suffix: "" }
+          - { service: bundle-executor, file: core/bundle_executor/Dockerfile.rust, context: ".", extra_ctx: "", target: "", suffix: "" }
+          - { service: svc-ingest-rust, file: core/svc_ingest/Dockerfile.rust, context: core, extra_ctx: "", target: "", suffix: "" }
+          - { service: svc-process-rust, file: core/svc_process/Dockerfile.rust, context: core, extra_ctx: "proto=proto", target: "", suffix: "" }
+          - { service: svc-action-rust, file: core/svc_action/Dockerfile.rust, context: core, extra_ctx: "proto=proto", target: "", suffix: "" }
+          - { service: svc-presentation-rust, file: core/svc_presentation/Dockerfile.rust, context: core, extra_ctx: "proto=proto", target: "", suffix: "" }
+          - { service: waddlebot-egress-proxy, file: core/egress_proxy/Dockerfile.rust, context: core, extra_ctx: "", target: "", suffix: "" }
+          # svc-streaming: cpu variant only; chart appends -<variant> to the tag.
+          - { service: svc-streaming, file: core/svc_streaming/Dockerfile.rust, context: core/svc_streaming, extra_ctx: "", target: cpu, suffix: "-cpu" }
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      # alpha-<epoch64> (five-tier convention). Derived from the run's own
+      # created-at so every matrix leg and the deploy job agree on ONE tag
+      # without a separate coordinating job.
+      - name: Compute alpha tag
+        id: tag
+        env:
+          RUN_ID: ${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # run_id is monotonic per repo; epoch comes from the run's first attempt start
+          EPOCH="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '.run_started_at | fromdateiso8601')"
+          [ -n "${EPOCH}" ] || { echo "::error::could not derive epoch" >&2; exit 1; }
+          echo "tag=alpha-${EPOCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx (remote buildkitd)
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+        with:
+          driver: remote
+          endpoint: ${{ env.BUILDKIT_HOST }}
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          build-contexts: ${{ matrix.extra_ctx }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ steps.tag.outputs.tag }}${{ matrix.suffix }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          # Registry-backed cache: survives the dal2 runner's docker prune.
+          cache-from: type=registry,ref=${{ env.IMAGE_PREFIX }}/buildcache/${{ matrix.service }}:alpha
+          cache-to: type=registry,ref=${{ env.IMAGE_PREFIX }}/buildcache/${{ matrix.service }}:alpha,mode=max,image-manifest=true,oci-mediatypes=true
+
+  deploy:
+    name: Deploy to dal2-alpha
+    needs: build
+    if: github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X'
+    runs-on: dal2-alpha
+    # Creates/updates the GitHub Environment + Deployment; job failure = failure status.
+    environment:
+      name: dal2-alpha
+      url: https://waddlebot.dal2a.penguintech.cloud
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ needs.build.outputs.tag }}
+      RELEASE: waddlebot
+      NAMESPACE: waddlebot
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      # ARC runner image ships no helm. Pinned v3 (helm v4 breaks fresh installs, helm#31361).
+      - name: Install helm v3.17.3
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2  # v5
+        with:
+          version: v3.17.3
+
+      - name: Helm upgrade
+        run: |
+          set -euo pipefail
+          # Kube access: the runner pod's in-cluster ServiceAccount (no kubeconfig).
+          # Namespace is pre-created (runner RBAC has namespaceCreate:false).
+          [ -n "${TAG}" ] || { echo "::error::empty image tag from build job" >&2; exit 1; }
+          helm version --short
+          helm lint k8s/helm/waddlebot -f k8s/helm/waddlebot/values-alpha.yaml -f k8s/helm/waddlebot/values-dal2alpha.yaml --set-string "global.imageTag=${TAG}"
+          helm upgrade --install "${RELEASE}" k8s/helm/waddlebot \
+            --namespace "${NAMESPACE}" \
+            -f k8s/helm/waddlebot/values-alpha.yaml \
+            -f k8s/helm/waddlebot/values-dal2alpha.yaml \
+            --set-string "global.imageTag=${TAG}" \
+            --wait --timeout 15m
+
+      - name: Smoke test (count-verified)
+        run: |
+          set -euo pipefail
+          # 1. every Deployment fully available; denominator must be > 0.
+          mapfile -t ROWS < <(kubectl -n "${NAMESPACE}" get deploy -o jsonpath='{range .items[*]}{.metadata.name} {.spec.replicas} {.status.readyReplicas}{"\n"}{end}')
+          TOTAL="${#ROWS[@]}"; BAD=0
+          for r in "${ROWS[@]}"; do
+            read -r name want got <<< "${r}"
+            want="${want:-0}"; got="${got:-0}"
+            if [ "${want}" != "${got}" ]; then echo "NOT READY: ${name} want=${want} ready=${got}" >&2; BAD=$((BAD+1)); fi
+          done
+          echo "deployments examined=${TOTAL} not_ready=${BAD}"
+          [ "${TOTAL}" -gt 0 ] || { echo "::error::zero Deployments examined" >&2; exit 1; }
+          [ "${BAD}" -eq 0 ] || exit 1
+
+          # 2. no non-Running/non-Succeeded pods; examine count > 0.
+          PODS="$(kubectl -n "${NAMESPACE}" get pods --no-headers | wc -l)"
+          PBAD="$(kubectl -n "${NAMESPACE}" get pods --no-headers --field-selector=status.phase!=Running,status.phase!=Succeeded | wc -l)"
+          echo "pods examined=${PODS} bad=${PBAD}"
+          [ "${PODS}" -gt 0 ] && [ "${PBAD}" -eq 0 ] || exit 1
+
+          # 3. deployed images carry the new tag (proves this rollout, not a stale one).
+          IMGS="$(kubectl -n "${NAMESPACE}" get deploy -o jsonpath='{range .items[*]}{.spec.template.spec.containers[*].image}{"\n"}{end}' | tr ' ' '\n' | grep -c "ghcr.io/penguintechinc/waddles/.*:${TAG}" || true)"
+          echo "images on ${TAG}=${IMGS}"
+          [ "${IMGS}" -gt 0 ] || { echo "::error::no deployment runs tag ${TAG}" >&2; exit 1; }
+
+          # 4. real health + readiness check against hub-api (HTTP 200 required).
+          PORT="$(kubectl -n "${NAMESPACE}" get deploy "${RELEASE}-hub-api-v3" -o jsonpath='{.spec.template.spec.containers[?(@.name=="hub-api")].ports[?(@.name=="http")].containerPort}')"
+          [ -n "${PORT}" ] || { echo "::error::hub-api http port not found" >&2; exit 1; }
+          for p in /health /ready; do
+            kubectl -n "${NAMESPACE}" exec "deploy/${RELEASE}-hub-api-v3" -c hub-api -- \
+              python -c "import sys,urllib.request as u; r=u.urlopen('http://127.0.0.1:${PORT}${p}',timeout=10); print('${p}',r.status); sys.exit(0 if r.status==200 else 1)"
+          done

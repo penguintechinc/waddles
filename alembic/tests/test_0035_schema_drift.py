@@ -36,9 +36,17 @@ _TABLE_MODEL_PAIRS = [
 #: Columns later migrations ADDed to these tables (so the models carry them but 0035's own
 #: ``CREATE TABLE`` never did). ``test_0058_provider_connections.py`` proves this set equals what
 #: 0058 actually adds, so it cannot silently grow stale.
+_COLUMNS_ADDED_0058 = {
+    "platform_connections": {"resource_metadata", "expires_at", "status_reason"},
+    "community_connection_access": {"enabled"},
+}
+#: 0063_seal_aad_version -- proven against the migration by ``test_0063_seal_aad_version.py``.
+_COLUMNS_ADDED_0063 = {
+    "platform_connections": {"public_id", "seal_version"},
+    "community_connection_access": set(),
+}
 _COLUMNS_ADDED_LATER = {
-    "platform_connections": {"resource_metadata", "expires_at", "status_reason"},  # 0058
-    "community_connection_access": {"enabled"},  # 0058
+    table: _COLUMNS_ADDED_0058[table] | _COLUMNS_ADDED_0063[table] for table in _COLUMNS_ADDED_0058
 }
 
 

@@ -92,6 +92,7 @@ function WorkflowTestPanel({ workflowId, onClose, onHighlightNode }) {
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-white">Test Workflow</h3>
           <button
+            aria-label="Close"
             onClick={onClose}
             className="p-1 rounded hover:bg-navy-800 text-navy-400 hover:text-sky-300 transition-colors"
           >
@@ -101,10 +102,11 @@ function WorkflowTestPanel({ workflowId, onClose, onHighlightNode }) {
 
         {/* Test Input */}
         <div className="space-y-2">
-          <label className="block text-xs font-medium text-navy-300">
+          <label htmlFor="workflow-test-panel-test-input-json" className="block text-xs font-medium text-navy-300">
             Test Input (JSON)
           </label>
           <textarea
+            id="workflow-test-panel-test-input-json"
             value={testInput}
             onChange={(e) => setTestInput(e.target.value)}
             placeholder='{"message": "test", "user": "testuser"}'

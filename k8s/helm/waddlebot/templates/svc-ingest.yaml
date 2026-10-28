@@ -42,6 +42,10 @@ spec:
       app.kubernetes.io/component: svc-ingest
   template:
     metadata:
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      annotations:
+        checksum/valkey-tls: {{ include "waddlebot.valkeyTlsPodChecksum" . | quote }}
+      {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-ingest
@@ -90,11 +94,20 @@ spec:
         # deliberately UNSET -- tenant-wide per roadmap DATA-MODEL GAPS), hub-api
         # callback URL, and the JWT signing key shared with hub-api (same Secret key
         # SECRET_KEY as hub-api.yaml -- see templates/secrets.yaml).
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        # TLS-only durable Valkey: rediss:// URL w/ password + CA path (secrets.yaml VALKEY_DURABLE_URL_TLS_AUTH).
         - name: VALKEY_URL
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL
+              key: VALKEY_DURABLE_URL_TLS_AUTH
+        {{- else }}
+        - name: VALKEY_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_DURABLE_URL
+        {{- end }}
         - name: RUNNER_TENANT_SLUG
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL
@@ -183,11 +196,17 @@ spec:
           mountPath: /var/log/waddlebotlog
         - name: tmp
           mountPath: /tmp
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: logs
         emptyDir: {}
       - name: tmp
         emptyDir: {}
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

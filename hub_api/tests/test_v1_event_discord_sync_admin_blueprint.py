@@ -62,7 +62,7 @@ def _pair(dal: Any, community_id: int) -> None:
 def test_default_bot_permissions_include_manage_events() -> None:
     assert MANAGE_EVENTS_PERMISSION == 8589934592
     assert DEFAULT_BOT_PERMISSIONS & MANAGE_EVENTS_PERMISSION
-    assert DEFAULT_BOT_PERMISSIONS == 268511312 | 8589934592
+    assert DEFAULT_BOT_PERMISSIONS == 1_108_906_961_990
 
 
 async def test_put_sets_event_sync_enabled(

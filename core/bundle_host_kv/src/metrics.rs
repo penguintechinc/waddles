@@ -55,7 +55,7 @@ fn instruments() -> &'static Instruments {
                 .u64_counter("waddles_bundle_kv_maxmemory_policy_violation_total")
                 .with_description(
                     "Valkey maxmemory-policy is an allkeys-* eviction policy at startup -- \
-                     count_key can be evicted, silently resetting the storage.kv quota",
+                     the live key index can be evicted, silently resetting the storage.kv quota",
                 )
                 .build(),
         }

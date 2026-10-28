@@ -83,5 +83,5 @@ def ai_tool_call_denied(reason: str) -> ToolCallDeniedError:
         "The AI response requested an action that is not permitted",
         403,
         TOOL_CALL_DENIED_CODE,
-        reason,
+        reason=reason,
     )

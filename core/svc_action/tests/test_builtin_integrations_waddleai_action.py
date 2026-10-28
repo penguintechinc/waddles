@@ -86,6 +86,8 @@ class TestWaddleaiCompletion:
 
         assert result.transport == "bundle"
         assert "community=42" in result.detail
+        # EU AI Act Art.50: the delivered reply is marked AI-generated.
+        assert "ai_disclosed=True" in result.detail
         assert captured_request["url"] == "https://8.8.8.8/v1/api/v1/community/42/ai/completions"
         assert captured_request["method"] == "POST"
 

@@ -143,7 +143,7 @@ export default function AdminCalendarAttendance() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <div className="flex items-center gap-2 text-sm text-gray-400 mb-1">
+          <div className="flex items-center gap-2 text-sm text-fg-muted mb-1">
             <Link to={`/admin/${communityId}/calendar`} className="hover:text-sky-400">
               Calendar
             </Link>
@@ -181,13 +181,13 @@ export default function AdminCalendarAttendance() {
             <div className="absolute right-0 mt-2 w-40 bg-navy-800 border border-navy-700 rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10">
               <button
                 onClick={() => handleExport('csv')}
-                className="w-full px-4 py-2 text-left text-gray-300 hover:bg-navy-700 rounded-t-lg"
+                className="w-full px-4 py-2 text-left text-fg-secondary hover:bg-navy-700 rounded-t-lg"
               >
                 Export as CSV
               </button>
               <button
                 onClick={() => handleExport('json')}
-                className="w-full px-4 py-2 text-left text-gray-300 hover:bg-navy-700 rounded-b-lg"
+                className="w-full px-4 py-2 text-left text-fg-secondary hover:bg-navy-700 rounded-b-lg"
               >
                 Export as JSON
               </button>
@@ -200,7 +200,7 @@ export default function AdminCalendarAttendance() {
       {stats && (
         <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
           <div className="bg-navy-800 rounded-lg p-4 border border-navy-700">
-            <div className="flex items-center gap-2 text-gray-400 text-sm mb-1">
+            <div className="flex items-center gap-2 text-fg-muted text-sm mb-1">
               <TicketIcon className="h-4 w-4" />
               Total Tickets
             </div>
@@ -248,7 +248,7 @@ export default function AdminCalendarAttendance() {
       {stats && stats.total_tickets > 0 && (
         <div className="bg-navy-800 rounded-lg p-4 border border-navy-700">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-gray-400">Check-in Progress</span>
+            <span className="text-sm text-fg-muted">Check-in Progress</span>
             <span className="text-sm text-white">
               {stats.checked_in || 0} / {stats.total_tickets || 0}
             </span>
@@ -276,7 +276,7 @@ export default function AdminCalendarAttendance() {
       <div className="bg-navy-800 rounded-lg border border-navy-700">
         <div className="px-4 py-3 border-b border-navy-700 flex items-center justify-between">
           <h3 className="text-lg font-medium text-white">Check-in Activity Log</h3>
-          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
+          <label className="flex items-center gap-2 text-sm text-fg-muted cursor-pointer">
             <input
               type="checkbox"
               checked={successOnly}
@@ -293,7 +293,7 @@ export default function AdminCalendarAttendance() {
 
         <div className="divide-y divide-navy-700">
           {logs.length === 0 ? (
-            <div className="px-4 py-8 text-center text-gray-400">No check-in activity yet</div>
+            <div className="px-4 py-8 text-center text-fg-muted">No check-in activity yet</div>
           ) : (
             logs.map((log) => {
               const style = getLogStyle(log);
@@ -306,12 +306,12 @@ export default function AdminCalendarAttendance() {
                         <div className="text-sm text-white">
                           {log.holder_username || 'Unknown user'}
                           {log.ticket_type_name && (
-                            <span className="ml-2 px-2 py-0.5 bg-navy-700 rounded text-xs text-gray-300">
+                            <span className="ml-2 px-2 py-0.5 bg-navy-700 rounded text-xs text-fg-secondary">
                               {log.ticket_type_name}
                             </span>
                           )}
                         </div>
-                        <div className="text-xs text-gray-400 mt-1">
+                        <div className="text-xs text-fg-muted mt-1">
                           {log.action === 'check_in' && 'Checked in'}
                           {log.action === 'undo_check_in' && 'Check-in undone'}
                           {log.action === 'self_check_in' && 'Self check-in'}
@@ -325,14 +325,14 @@ export default function AdminCalendarAttendance() {
                           {log.scan_method === 'auto_checkin' && 'auto'}
                         </div>
                         {log.operator_username && (
-                          <div className="text-xs text-gray-500 mt-0.5">
+                          <div className="text-xs text-fg-muted mt-0.5">
                             by {log.operator_username}
                             {log.location && ` at ${log.location}`}
                           </div>
                         )}
                       </div>
                     </div>
-                    <div className="text-xs text-gray-400">
+                    <div className="text-xs text-fg-muted">
                       {log.created_at ? new Date(log.created_at).toLocaleString() : '-'}
                     </div>
                   </div>
@@ -345,24 +345,26 @@ export default function AdminCalendarAttendance() {
         {/* Pagination */}
         {totalPages > 1 && (
           <div className="flex items-center justify-between px-4 py-3 border-t border-navy-700">
-            <div className="text-sm text-gray-400">
+            <div className="text-sm text-fg-muted">
               Showing {(page - 1) * 25 + 1} - {Math.min(page * 25, totalLogs)} of {totalLogs}
             </div>
             <div className="flex items-center gap-2">
               <button
+                aria-label="Previous page"
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 disabled={page === 1}
-                className="p-2 text-gray-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                className="p-2 text-fg-muted hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <ChevronLeftIcon className="h-5 w-5" />
               </button>
-              <span className="text-sm text-gray-400">
+              <span className="text-sm text-fg-muted">
                 Page {page} of {totalPages}
               </span>
               <button
+                aria-label="Next page"
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 disabled={page === totalPages}
-                className="p-2 text-gray-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                className="p-2 text-fg-muted hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <ChevronRightIcon className="h-5 w-5" />
               </button>
