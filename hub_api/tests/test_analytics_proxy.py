@@ -173,4 +173,4 @@ class TestAnalyticsCoreProxyClientGet:
         _patch_transport(monkeypatch, handler)
         client = AnalyticsCoreProxyClient(_CONFIG)
         result = await client.get("/api/v1/analytics/platform/summary")
-        assert result == ProxyResult(ok=False, status_code=502, body=None)
+        assert result == ProxyResult(ok=False, status_code=502, body=None, transport_error=True)

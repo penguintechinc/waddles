@@ -8,6 +8,7 @@ import { useAuth } from './contexts/AuthContext';
 const TenantBundleCatalog = lazy(() => import('./pages/tenant/TenantBundleCatalog'));
 const AdminCommunityBundles = lazy(() => import('./pages/admin/AdminCommunityBundles'));
 const SuperAdminSuperCommunities = lazy(() => import('./pages/superadmin/SuperAdminSuperCommunities'));
+const SecretPullPage = lazy(() => import('./pages/secret/SecretPullPage'));
 const AdminRoleSyncMapping = lazy(() => import('./pages/admin/AdminRoleSyncMapping'));
 
 // Layouts
@@ -226,6 +227,14 @@ function App() {
         <Route path="/communities/:id" element={<CommunityPublicPage />} />
         <Route path="/live" element={<LiveStreamsPage />} />
         <Route path="/users/:userId" element={<UserPublicProfile />} />
+        <Route
+          path="/secret"
+          element={
+            <Suspense fallback={<LoadingSpinner />}>
+              <SecretPullPage />
+            </Suspense>
+          }
+        />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/login/:tenantSlug" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />

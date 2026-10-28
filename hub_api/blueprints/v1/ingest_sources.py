@@ -202,8 +202,8 @@ def _parse_int(raw: str | None, *, field_name: str) -> int | None:
 
 
 @ingest_sources_bp.route("", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:read")  # type: ignore[misc]
 @validate_response(IngestSourceListResponse)
 async def list_ingest_sources(
     community_id: int,
@@ -237,8 +237,8 @@ async def list_ingest_sources(
 
 
 @ingest_sources_bp.route("", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(CreateIngestSourceRequest)
 @validate_response(IngestSourceResponse, status_code=201)
 async def create_ingest_source(
@@ -262,8 +262,8 @@ async def create_ingest_source(
 
 
 @ingest_sources_bp.route("/<int:ingest_source_id>", methods=["PATCH"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(UpdateIngestSourceRequest)
 @validate_response(IngestSourceResponse)
 async def update_ingest_source(
@@ -287,8 +287,8 @@ async def update_ingest_source(
 
 
 @ingest_sources_bp.route("/<int:ingest_source_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("tenant:admin")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("tenant:admin")  # type: ignore[misc]
 async def delete_ingest_source(community_id: int, ingest_source_id: int) -> tuple[Any, int]:
     """`DELETE .../ingest-sources/<id>` -- hard-deletes the source, disables its workstream."""
     tenant_id = _tenant_id()

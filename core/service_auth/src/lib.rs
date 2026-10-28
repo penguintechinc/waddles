@@ -729,6 +729,210 @@ impl MachineJwtClient {
     }
 }
 
+/// Max distinct `(community, connection)` bearers held by [`BoundMachineJwtClient`].
+pub const BOUND_TOKEN_CACHE_CAP: usize = 256;
+
+type BindingKey = (i64, Option<i64>);
+
+/// A cached bound bearer. Expiry is on the monotonic tokio clock so tests can
+/// advance time without touching wall-clock state. `Debug` never prints the token.
+#[derive(Clone)]
+struct BoundCachedToken {
+    token: Arc<str>,
+    expires_at: tokio::time::Instant,
+    last_used: u64,
+}
+
+impl std::fmt::Debug for BoundCachedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundCachedToken")
+            .field("token", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Bounded LRU of bound bearers (bearer JWTs only -- never connection secrets).
+#[derive(Default)]
+struct BoundCache {
+    map: HashMap<BindingKey, BoundCachedToken>,
+    tick: u64,
+}
+
+impl BoundCache {
+    /// Fresh (outside the skew window) token for `key`, marking it recently used.
+    fn get_fresh(&mut self, key: &BindingKey, now: tokio::time::Instant) -> Option<Arc<str>> {
+        self.tick += 1;
+        let tick = self.tick;
+        let entry = self.map.get_mut(key)?;
+        if entry.expires_at > now + Duration::from_secs(CLOCK_SKEW_SECONDS) {
+            entry.last_used = tick;
+            Some(entry.token.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Insert `key`, evicting the least-recently-used binding beyond the cap.
+    fn insert(&mut self, key: BindingKey, token: Arc<str>, expires_at: tokio::time::Instant) {
+        self.tick += 1;
+        if !self.map.contains_key(&key) && self.map.len() >= BOUND_TOKEN_CACHE_CAP {
+            let oldest = self
+                .map
+                .iter()
+                .min_by_key(|(_, v)| v.last_used)
+                .map(|(k, _)| *k);
+            if let Some(k) = oldest {
+                self.map.remove(&k);
+            }
+        }
+        self.map.insert(
+            key,
+            BoundCachedToken {
+                token,
+                expires_at,
+                last_used: self.tick,
+            },
+        );
+    }
+}
+
+/// Mints and caches community-bound machine JWTs (bearer cache only; never
+/// connection secrets). Each token is bound by hub-api to exactly one
+/// `(community_id, optional connection_id)`; the cache is an LRU of
+/// [`BOUND_TOKEN_CACHE_CAP`] bindings with per-binding single-flight minting.
+pub struct BoundMachineJwtClient {
+    token_endpoint: String,
+    sa_token_path: String,
+    scope: String,
+    http: reqwest::Client,
+    cache: Mutex<BoundCache>,
+    gates: std::sync::Mutex<HashMap<BindingKey, Arc<Mutex<()>>>>,
+}
+
+impl std::fmt::Debug for BoundMachineJwtClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundMachineJwtClient")
+            .field("token_endpoint", &self.token_endpoint)
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BoundMachineJwtClient {
+    /// Client with explicit [`HttpTimeouts`]; errors if the HTTP client cannot be built.
+    pub fn with_timeouts(
+        token_endpoint: impl Into<String>,
+        sa_token_path: impl Into<String>,
+        scope: impl Into<String>,
+        timeouts: HttpTimeouts,
+    ) -> Result<Self, ServiceAuthError> {
+        Ok(Self {
+            token_endpoint: token_endpoint.into(),
+            sa_token_path: sa_token_path.into(),
+            scope: scope.into(),
+            http: timeouts.build_client()?,
+            cache: Mutex::new(BoundCache::default()),
+            gates: std::sync::Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Bearer bound to exactly (community_id, optional connection_id); refreshed
+    /// within `CLOCK_SKEW_SECONDS` of exp. Concurrent callers for the same
+    /// binding share one mint.
+    pub async fn get_token_for(
+        &self,
+        community_id: i64,
+        connection_id: Option<i64>,
+    ) -> Result<Arc<str>, ServiceAuthError> {
+        let key = (community_id, connection_id);
+        if let Some(t) = self
+            .cache
+            .lock()
+            .await
+            .get_fresh(&key, tokio::time::Instant::now())
+        {
+            return Ok(t);
+        }
+        let gate = {
+            let mut gates = self.lock_gates();
+            gates.entry(key).or_default().clone()
+        };
+        let result = {
+            let _flight = gate.lock().await;
+            // Another caller may have minted while we waited on the gate.
+            let cached = self
+                .cache
+                .lock()
+                .await
+                .get_fresh(&key, tokio::time::Instant::now());
+            match cached {
+                Some(t) => Ok(t),
+                None => self.mint(key).await,
+            }
+        };
+        let mut gates = self.lock_gates();
+        // Only the map and our local `gate` remain -> no waiters; drop the entry.
+        if Arc::strong_count(&gate) <= 2 {
+            gates.remove(&key);
+        }
+        result
+    }
+
+    /// Lock the single-flight gate map; a poisoned lock (a panicked holder) is recovered because
+    /// the map only holds per-binding `Arc` gates, but the recovery is logged, never silent.
+    fn lock_gates(&self) -> std::sync::MutexGuard<'_, HashMap<BindingKey, Arc<Mutex<()>>>> {
+        match self.gates.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("service_auth.bound_gates_poisoned_recovered");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    async fn mint(&self, key: BindingKey) -> Result<Arc<str>, ServiceAuthError> {
+        let (community_id, connection_id) = key;
+        let sa_token = tokio::fs::read_to_string(&self.sa_token_path).await?;
+        let mut body = serde_json::json!({
+            "scope": self.scope,
+            "community_id": community_id,
+        });
+        if let (Some(cid), Some(obj)) = (connection_id, body.as_object_mut()) {
+            obj.insert("connection_id".into(), serde_json::json!(cid));
+        }
+        let response = self
+            .http
+            .post(&self.token_endpoint)
+            .bearer_auth(sa_token.trim())
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            warn!(community_id, status = %response.status(), "service_auth.bound_mint_rejected");
+            return Err(ServiceAuthError::BootstrapRejected(format!(
+                "token endpoint returned {}",
+                response.status()
+            )));
+        }
+        let parsed: TokenResponse = response.json().await?;
+        if parsed.token.trim().is_empty() {
+            warn!(community_id, "service_auth.bound_mint_empty_token");
+            return Err(ServiceAuthError::BootstrapRejected(
+                "token endpoint returned an empty token".into(),
+            ));
+        }
+        let ttl = parsed.expires_in.min(MAX_TOKEN_TTL_SECONDS);
+        let token: Arc<str> = Arc::from(parsed.token.as_str());
+        self.cache.lock().await.insert(
+            key,
+            token.clone(),
+            tokio::time::Instant::now() + Duration::from_secs(ttl),
+        );
+        debug!(community_id, "service_auth.bound_token_minted");
+        Ok(token)
+    }
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1452,6 +1656,262 @@ mod tests {
             client.get_token().await.unwrap_err(),
             ServiceAuthError::Http(_)
         ));
+        let _ = std::fs::remove_file(sa);
+    }
+
+    // ---- BoundMachineJwtClient -------------------------------------------
+
+    /// Server that records each request body and answers `(status, body)`
+    /// from `responses` by hit index (last repeats).
+    async fn capture_server(
+        responses: Vec<(u16, String)>,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let rec = bodies.clone();
+        tokio::spawn(async move {
+            let mut n = 0usize;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let (status, body) = responses[n.min(responses.len() - 1)].clone();
+                n += 1;
+                let mut raw = Vec::new();
+                let mut buf = vec![0u8; 4096];
+                let body_text = loop {
+                    let Ok(k) = sock.read(&mut buf).await else {
+                        break String::new();
+                    };
+                    if k == 0 {
+                        break String::new();
+                    }
+                    raw.extend_from_slice(&buf[..k]);
+                    let text = String::from_utf8_lossy(&raw).into_owned();
+                    if let Some(idx) = text.find("\r\n\r\n") {
+                        let len = text[..idx]
+                            .to_ascii_lowercase()
+                            .lines()
+                            .find_map(|l| {
+                                l.strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if text.len() >= idx + 4 + len {
+                            break text[idx + 4..idx + 4 + len].to_string();
+                        }
+                    }
+                };
+                rec.lock().expect("lock").push(body_text);
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://{addr}"), bodies)
+    }
+
+    fn tok_body(t: &str, ttl: u64) -> (u16, String) {
+        (
+            200,
+            serde_json::json!({"token": t, "expires_in": ttl}).to_string(),
+        )
+    }
+
+    fn bound_client(url: String, sa: &str) -> BoundMachineJwtClient {
+        BoundMachineJwtClient::with_timeouts(
+            url,
+            sa,
+            "connections:resolve",
+            HttpTimeouts::default(),
+        )
+        .expect("client")
+    }
+
+    #[tokio::test]
+    async fn token_request_body_carries_community_and_connection() {
+        let (url, bodies) = capture_server(vec![tok_body("t1", 300)]).await;
+        let sa = temp_sa_token("bound_body", "sa");
+        let c = bound_client(url, &sa);
+        assert_eq!(&*c.get_token_for(7, Some(12)).await.expect("mint"), "t1");
+        c.get_token_for(8, None).await.expect("mint2");
+        let got: Vec<serde_json::Value> = bodies
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|b| serde_json::from_str(b).expect("json"))
+            .collect();
+        assert_eq!(
+            got[0],
+            serde_json::json!({"scope":"connections:resolve","community_id":7,"connection_id":12})
+        );
+        assert_eq!(
+            got[1],
+            serde_json::json!({"scope":"connections:resolve","community_id":8})
+        );
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn distinct_communities_get_distinct_cached_tokens() {
+        let (url, hits) = mock_server(vec![tok_body("a", 300), tok_body("b", 300)]).await;
+        let sa = temp_sa_token("bound_distinct", "sa");
+        let c = bound_client(url, &sa);
+        assert_eq!(&*c.get_token_for(1, None).await.expect("a"), "a");
+        assert_eq!(&*c.get_token_for(2, None).await.expect("b"), "b");
+        assert_eq!(&*c.get_token_for(1, None).await.expect("a again"), "a");
+        assert_eq!(&*c.get_token_for(1, Some(5)).await.expect("conn"), "b");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "3 distinct bindings -> 3 mints"
+        );
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn same_binding_hits_cache_until_skew() {
+        let (url, hits) = mock_server(vec![tok_body("t1", 100), tok_body("t2", 100)]).await;
+        let sa = temp_sa_token("bound_skew", "sa");
+        let c = bound_client(url, &sa);
+        for _ in 0..5 {
+            assert_eq!(&*c.get_token_for(3, None).await.expect("t1"), "t1");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // Advance to inside the skew window (100 - 30 = 70s usable).
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(69)).await;
+        tokio::time::resume();
+        assert_eq!(&*c.get_token_for(3, None).await.expect("still t1"), "t1");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::time::resume();
+        assert_eq!(&*c.get_token_for(3, None).await.expect("t2"), "t2");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_rejected_maps_to_error_not_panic() {
+        let (url, _) = mock_server(vec![(403, "{}".into())]).await;
+        let sa = temp_sa_token("bound_reject", "sa");
+        let c = bound_client(url, &sa);
+        assert!(matches!(
+            c.get_token_for(1, None).await.unwrap_err(),
+            ServiceAuthError::BootstrapRejected(m) if m.contains("403")
+        ));
+        assert!(c.cache.lock().await.map.is_empty(), "nothing cached");
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn bound_missing_sa_token_malformed_body_and_unreachable_are_errors() {
+        let c = bound_client("http://127.0.0.1:1/t".into(), "/nonexistent/sa/token");
+        assert!(matches!(
+            c.get_token_for(1, None).await.unwrap_err(),
+            ServiceAuthError::Io(_)
+        ));
+        let sa = temp_sa_token("bound_errs", "sa");
+        let c = bound_client("http://127.0.0.1:1/t".into(), &sa);
+        assert!(matches!(
+            c.get_token_for(1, None).await.unwrap_err(),
+            ServiceAuthError::Http(_)
+        ));
+        let (url, _) = mock_server(vec![(200, "garbage".into())]).await;
+        let c = bound_client(url, &sa);
+        assert!(matches!(
+            c.get_token_for(1, None).await.unwrap_err(),
+            ServiceAuthError::Http(_)
+        ));
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn bound_clamps_ttl_to_platform_max() {
+        let (url, _) = mock_server(vec![tok_body("t", 10 * MAX_TOKEN_TTL_SECONDS)]).await;
+        let sa = temp_sa_token("bound_clamp", "sa");
+        let c = bound_client(url, &sa);
+        c.get_token_for(1, None).await.expect("mint");
+        let exp = c.cache.lock().await.map[&(1, None)].expires_at;
+        assert!(exp <= tokio::time::Instant::now() + Duration::from_secs(MAX_TOKEN_TTL_SECONDS));
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn bound_concurrent_callers_share_one_mint() {
+        let (url, hits) =
+            mock_server_delayed(vec![tok_body("t", 300)], Duration::from_millis(150)).await;
+        let sa = temp_sa_token("bound_flight", "sa");
+        let c = Arc::new(bound_client(url, &sa));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let c = c.clone();
+            tasks.push(tokio::spawn(async move {
+                c.get_token_for(9, None).await.is_ok()
+            }));
+        }
+        for t in tasks {
+            assert!(t.await.expect("join"));
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "single-flight per binding");
+        assert!(c.gates.lock().expect("lock").is_empty(), "gate pruned");
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn lru_evicts_beyond_capacity() {
+        let (url, hits) = mock_server(vec![tok_body("t", 300)]).await;
+        let sa = temp_sa_token("bound_lru", "sa");
+        let c = bound_client(url, &sa);
+        for i in 0..=(BOUND_TOKEN_CACHE_CAP as i64) {
+            c.get_token_for(i, None).await.expect("mint");
+        }
+        assert_eq!(c.cache.lock().await.map.len(), BOUND_TOKEN_CACHE_CAP);
+        assert_eq!(hits.load(Ordering::SeqCst), BOUND_TOKEN_CACHE_CAP + 1);
+        // Binding 0 (oldest) was evicted -> re-mint; binding 2 still cached.
+        c.get_token_for(2, None).await.expect("cached");
+        assert_eq!(hits.load(Ordering::SeqCst), BOUND_TOKEN_CACHE_CAP + 1);
+        c.get_token_for(0, None).await.expect("re-mint");
+        assert_eq!(hits.load(Ordering::SeqCst), BOUND_TOKEN_CACHE_CAP + 2);
+        assert_eq!(c.cache.lock().await.map.len(), BOUND_TOKEN_CACHE_CAP);
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn bound_empty_minted_token_is_rejected_and_not_cached() {
+        let (url, hits) = mock_server(vec![tok_body("  ", 300)]).await;
+        let sa = temp_sa_token("bound_empty", "sa");
+        let c = bound_client(url, &sa);
+        for expected in 1..=2 {
+            assert!(matches!(
+                c.get_token_for(1, None).await.unwrap_err(),
+                ServiceAuthError::BootstrapRejected(m) if m.contains("empty token")
+            ));
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                expected,
+                "re-mints, never cached"
+            );
+        }
+        assert!(c.cache.lock().await.map.is_empty());
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn debug_never_prints_token() {
+        let (url, _) = mock_server(vec![tok_body("SECRET-BEARER-XYZ", 300)]).await;
+        let sa = temp_sa_token("bound_debug", "sa");
+        let c = bound_client(url, &sa);
+        c.get_token_for(1, None).await.expect("mint");
+        let client_dbg = format!("{c:?}");
+        let entry_dbg = format!("{:?}", c.cache.lock().await.map[&(1, None)]);
+        assert!(!client_dbg.contains("SECRET-BEARER-XYZ"));
+        assert!(!entry_dbg.contains("SECRET-BEARER-XYZ"));
         let _ = std::fs::remove_file(sa);
     }
 

@@ -44,7 +44,7 @@ FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcb
 # `egress_detokenizer` (outbound PII-detokenization) depends on `hub_client`.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
-        cmake=3.25.1-1 build-essential=12.9 ca-certificates=20250419~deb12u1 \
+        cmake=3.25.1-1 build-essential=12.9 ca-certificates=20250419~deb12u2 \
         protobuf-compiler=3.21.12-3+deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -81,7 +81,7 @@ FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install --no-install-recommends -y \
-        ca-certificates=20250419~deb12u1 \
+        ca-certificates=20250419~deb12u2 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system --gid 10001 appuser \

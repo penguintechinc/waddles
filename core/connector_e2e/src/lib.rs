@@ -1,246 +1,205 @@
-//! Real-path harness for the connector-bundle host capability (issue #840 B0).
+//! Real-path harness for the connector-bundle host capability (issue #840).
 //!
-//! [`ExecutorInvoker`] implements `svc_ingest`'s [`ConnectorInvoker`] over the
-//! bundle executor's in-process [`ConnectorHost`], so the host-side driver
-//! (`svc_ingest::connector`) runs against the real wasmtime executor and a
-//! real compiled WASM connector -- not a mock on either side of the seam.
+//! [`WireRig`] stands up the PRODUCTION path end to end inside one process:
+//! a real bundle [`Executor`] with a real compiled WASM connector pinned,
+//! speaking the host-API wire (`penguin-bundle-host` 0.3.0
+//! `ExportKind::Connector*`) over a duplex stream to svc_ingest's real
+//! [`ExecutorLink`], with svc_ingest's production [`WireConnectorInvoker`] on
+//! top. Nothing between the driver and wasmtime is mocked: the codec, the
+//! invoker, the executor's `run_connection` read loop, `ConnectorRouter`,
+//! `ConnectorHost` and the guest are all shipped code.
 //!
-//! Production joins these two over the host-API wire as separate processes;
-//! that wire cannot carry connector exports until `penguin-libs`'
-//! `ExportKind` grows them. This adapter is the executable statement of the
-//! contract the wire-backed invoker must also satisfy: the error mapping
-//! below is exactly the three-class taxonomy of spec S2.6.
+//! Only the duplex pipe stands in for the mTLS socket the two processes use
+//! in a deployment (the TLS accept/dial layers are separate, already-tested
+//! seams). Reconnects are real: [`WireRig::reconnect`] drops the connection and
+//! dials a fresh one against the SAME executor, exactly what its dial loop does.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Duration;
 
-use bundle_executor::connector::{
-    ConnectionCtx as ExecCtx, ConnectorCallError, ConnectorHost, FrameError, RawFrame as ExecFrame,
-};
+use bundle_executor::config::CliConfig;
+use bundle_executor::connector::ConnectorLimits;
+use bundle_executor::error::ExecutorError;
+use bundle_executor::heartbeat::Heartbeat;
+use bundle_executor::invoke::{ComponentSource, Executor};
+use bundle_executor::manifest::{VerifiedManifest, WitWorld};
+use bundle_executor::wire::run_connection;
+use clap::Parser;
+use sha2::{Digest, Sha256};
 use svc_ingest::connector::{
-    ConnectionCtx, ConnectorEvent, ConnectorFrameError, ConnectorInvokeError, ConnectorInvoker,
-    Handshake, RawFrame,
+    ConnectorRegistry, ExecutorLink, PinnedConnector, WireConnectorInvoker,
 };
+use tokio::io::duplex;
+use tokio::task::JoinHandle;
 
-/// A [`ConnectorInvoker`] backed by one executor [`ConnectorHost`] per
-/// platform.
-#[derive(Default)]
-pub struct ExecutorInvoker {
-    hosts: HashMap<String, ConnectorHost>,
-}
+/// Bytes the in-memory pipe buffers each way: far above one frame so a test
+/// never blocks on pipe back-pressure it does not mean to exercise.
+const PIPE_BYTES: usize = 4 << 20;
 
-impl ExecutorInvoker {
-    /// An invoker with no connectors; every call for an unknown platform is a
-    /// typed [`ConnectorInvokeError::Unavailable`].
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
+/// How long [`WireRig::reconnect`] lets a replaced executor connection wind
+/// down on its own before aborting it.
+const OLD_CONNECTION_GRACE: Duration = Duration::from_secs(5);
 
-    /// Serves `platform` with `host`.
-    #[must_use]
-    pub fn with_host(mut self, platform: impl Into<String>, host: ConnectorHost) -> Self {
-        self.hosts.insert(platform.into(), host);
-        self
-    }
+/// A [`ComponentSource`] that never serves anything: connectors are pinned
+/// directly (never fetched over the wire), so a stage `load` reaching this
+/// would be a harness bug and fails typed rather than returning fake bytes.
+pub struct NoSource;
 
-    fn host(&self, platform: &str) -> Result<&ConnectorHost, ConnectorInvokeError> {
-        self.hosts.get(platform).ok_or_else(|| {
-            ConnectorInvokeError::Unavailable(format!(
-                "no executor connector loaded for platform {platform:?}"
-            ))
-        })
-    }
-}
-
-fn to_exec_ctx(ctx: &ConnectionCtx) -> ExecCtx {
-    ExecCtx {
-        platform: ctx.platform.clone(),
-        source_id: ctx.source_id.clone(),
-        connection_id: ctx.connection_id.clone(),
-        session_token: ctx.session_token.clone(),
-    }
-}
-
-fn map_frame_error(e: FrameError) -> ConnectorFrameError {
-    match e {
-        FrameError::Unsupported(m) => ConnectorFrameError::Unsupported(m),
-        FrameError::Malformed(m) => ConnectorFrameError::Malformed(m),
-        FrameError::Backend(m) => ConnectorFrameError::Backend(m),
-    }
-}
-
-/// Maps the executor's call error onto the host's three failure classes: a
-/// guest `frame-error` keeps the connection; every sandbox containment tears
-/// it down; everything else is "unavailable" (never blamed on the guest).
-fn map_call_error(e: ConnectorCallError) -> ConnectorInvokeError {
-    let kind = e.kind();
-    match e {
-        ConnectorCallError::Guest(fe) => ConnectorInvokeError::Guest(map_frame_error(fe)),
-        ConnectorCallError::FuelExhausted(message)
-        | ConnectorCallError::DeadlineExceeded(message)
-        | ConnectorCallError::MemoryLimit(message)
-        | ConnectorCallError::Trap(message) => ConnectorInvokeError::sandbox_trip(kind, message),
-        other => ConnectorInvokeError::Unavailable(other.to_string()),
-    }
-}
-
-impl ConnectorInvoker for ExecutorInvoker {
-    async fn on_connect(
+impl ComponentSource for NoSource {
+    async fn fetch(
         &self,
-        platform: &str,
-        ctx: &ConnectionCtx,
-    ) -> Result<Handshake, ConnectorInvokeError> {
-        let reply = self
-            .host(platform)?
-            .on_connect(to_exec_ctx(ctx))
-            .await
-            .map_err(map_call_error)?;
-        Ok(Handshake {
-            bytes: reply.value.bytes,
-            secret_refs: reply.value.secret_refs,
-        })
-    }
-
-    async fn on_frame(
-        &self,
-        platform: &str,
-        frame: RawFrame,
-    ) -> Result<Vec<ConnectorEvent>, ConnectorInvokeError> {
-        let reply = self
-            .host(platform)?
-            .on_frame(ExecFrame {
-                ctx: to_exec_ctx(&frame.ctx),
-                bytes: frame.bytes,
-                received_at: frame.received_at,
-            })
-            .await
-            .map_err(map_call_error)?;
-        Ok(reply
-            .value
-            .into_iter()
-            .map(|e| ConnectorEvent {
-                platform: e.platform,
-                event_type: e.event_type,
-                actor: e.actor,
-                payload_json: e.payload_json,
-                occurred_at: e.occurred_at,
-            })
-            .collect())
-    }
-
-    async fn on_heartbeat_due(
-        &self,
-        platform: &str,
-        ctx: &ConnectionCtx,
-    ) -> Result<Option<Vec<u8>>, ConnectorInvokeError> {
-        Ok(self
-            .host(platform)?
-            .on_heartbeat_due(to_exec_ctx(ctx))
-            .await
-            .map_err(map_call_error)?
-            .value)
-    }
-
-    async fn on_disconnect(
-        &self,
-        platform: &str,
-        ctx: &ConnectionCtx,
-        reason: &str,
-    ) -> Result<(), ConnectorInvokeError> {
-        self.host(platform)?
-            .on_disconnect(to_exec_ctx(ctx), reason.to_string())
-            .await
-            .map_err(map_call_error)?;
-        Ok(())
+        component_key: &str,
+        _sidecar_key: &str,
+    ) -> Result<(Vec<u8>, Vec<u8>), ExecutorError> {
+        Err(ExecutorError::Config(format!(
+            "connector-e2e serves no stage components (asked for {component_key:?})"
+        )))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::*;
+/// `sha256:<hex>` of `bytes`, the digest form the executor and registry use.
+#[must_use]
+pub fn digest_of(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
+}
 
-    #[test]
-    fn every_frame_error_variant_maps_one_to_one() {
-        assert_eq!(
-            map_frame_error(FrameError::Unsupported("a".into())),
-            ConnectorFrameError::Unsupported("a".into())
-        );
-        assert_eq!(
-            map_frame_error(FrameError::Malformed("b".into())),
-            ConnectorFrameError::Malformed("b".into())
-        );
-        assert_eq!(
-            map_frame_error(FrameError::Backend("c".into())),
-            ConnectorFrameError::Backend("c".into())
-        );
-    }
+/// One connector to pin: its platform slug, core `app_id` and component bytes.
+pub struct RigConnector {
+    /// Platform slug the driver resolves it by.
+    pub platform: String,
+    /// Core-namespaced `app_id` (the connector world is core-only).
+    pub app_id: String,
+    /// The compiled component.
+    pub wasm: &'static [u8],
+}
 
-    /// The three-class taxonomy of spec S2.6: guest frame-error keeps the
-    /// connection; every sandbox containment tears it down; everything else is
-    /// "unavailable" and never blamed on the guest.
-    #[test]
-    fn call_errors_map_onto_the_three_failure_classes() {
-        let guest = map_call_error(ConnectorCallError::Guest(FrameError::Malformed("x".into())));
-        assert!(matches!(guest, ConnectorInvokeError::Guest(_)));
-        assert!(!guest.tears_down_connection());
+/// A live executor + svc_ingest wire link with the connectors pinned.
+pub struct WireRig {
+    /// svc_ingest's side of the executor connection.
+    pub link: Arc<ExecutorLink>,
+    /// The production invoker, ready to hand to a `ConnectorDriver`.
+    pub invoker: Arc<WireConnectorInvoker>,
+    /// The registry the invoker and a driver should share.
+    pub registry: Arc<ConnectorRegistry>,
+    /// The real executor (its pinned registry survives reconnects).
+    pub executor: Arc<Executor<NoSource>>,
+    connection: Option<JoinHandle<Result<(), ExecutorError>>>,
+}
 
-        for (err, kind) in [
-            (
-                ConnectorCallError::FuelExhausted("f".into()),
-                "fuel_exhausted",
-            ),
-            (ConnectorCallError::DeadlineExceeded("d".into()), "deadline"),
-            (ConnectorCallError::MemoryLimit("m".into()), "memory_limit"),
-            (ConnectorCallError::Trap("t".into()), "trap"),
-        ] {
-            let mapped = map_call_error(err);
-            assert!(
-                matches!(&mapped, ConnectorInvokeError::SandboxTrip { kind: k, .. } if *k == kind),
-                "{mapped:?} must be a {kind} sandbox trip"
+impl WireRig {
+    /// Builds the executor, pins every connector (after `tune`ing the
+    /// default limits), registers them for the host side and attaches the
+    /// first connection.
+    ///
+    /// # Panics
+    /// Test harness: any setup failure is a loud panic naming the cause.
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    pub async fn start(
+        connectors: Vec<RigConnector>,
+        max_frame_bytes: usize,
+        tune: impl Fn(&mut ConnectorLimits),
+    ) -> Self {
+        let cfg = CliConfig::try_parse_from([
+            "bundle-executor",
+            "--stage-host-api-addr",
+            "svc-ingest:8301",
+        ])
+        .expect("static executor args parse");
+        let executor = Arc::new(Executor::new(&cfg, NoSource).expect("executor builds"));
+        let mut registry = ConnectorRegistry::new();
+        for c in connectors {
+            let digest = digest_of(c.wasm);
+            let manifest = VerifiedManifest::new(
+                c.app_id.clone(),
+                digest.clone(),
+                WitWorld::Connector,
+                HashSet::new(),
             );
-            assert!(mapped.tears_down_connection());
+            let mut limits = ConnectorLimits::from_config(&cfg);
+            tune(&mut limits);
+            executor
+                .pin_connector(&manifest, c.wasm.to_vec(), limits, None)
+                .await
+                .expect("connector pins");
+            registry
+                .register(PinnedConnector::new(
+                    c.platform,
+                    c.app_id,
+                    digest,
+                    max_frame_bytes,
+                ))
+                .expect("connector registers");
         }
-
-        for err in [
-            ConnectorCallError::PoolExhausted { in_flight: 4 },
-            ConnectorCallError::InstantiateFailed("i".into()),
-            ConnectorCallError::Internal("n".into()),
-        ] {
-            let mapped = map_call_error(err);
-            assert!(
-                matches!(mapped, ConnectorInvokeError::Unavailable(_)),
-                "{mapped:?} must be unavailable, not a guest fault"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn an_unknown_platform_is_a_typed_unavailable_error_for_every_export() {
-        let inv = ExecutorInvoker::new();
-        let ctx = ConnectionCtx {
-            platform: "nope".to_string(),
-            source_id: "s".to_string(),
-            connection_id: "c".to_string(),
-            session_token: None,
+        let registry = Arc::new(registry);
+        let link = Arc::new(ExecutorLink::new());
+        let invoker = Arc::new(WireConnectorInvoker::new(
+            Arc::clone(&link),
+            Arc::clone(&registry),
+        ));
+        let mut rig = Self {
+            link,
+            invoker,
+            registry,
+            executor,
+            connection: None,
         };
-        let frame = RawFrame {
-            ctx: ctx.clone(),
-            bytes: vec![],
-            received_at: "2026-10-12T00:00:00.000Z".to_string(),
-        };
-        let errs = [
-            inv.on_connect("nope", &ctx).await.err(),
-            inv.on_frame("nope", frame).await.err(),
-            inv.on_heartbeat_due("nope", &ctx).await.err(),
-            inv.on_disconnect("nope", &ctx, "r").await.err(),
-        ];
-        assert_eq!(errs.len(), 4);
-        for e in errs {
-            assert!(
-                matches!(e, Some(ConnectorInvokeError::Unavailable(_))),
-                "{e:?}"
-            );
+        rig.reconnect().await;
+        rig
+    }
+
+    /// Ends the current executor connection (if any) and dials a fresh one
+    /// against the same executor -- what its dial loop does after a drop.
+    ///
+    /// # Panics
+    /// Test harness: a failed handshake is a loud panic.
+    #[allow(clippy::expect_used)]
+    pub async fn reconnect(&mut self) {
+        let previous = self.connection.take();
+        let (stage_io, exec_io) = duplex(PIPE_BYTES);
+        let executor = Arc::clone(&self.executor);
+        let hello = executor.hello(false, "runc");
+        self.connection = Some(tokio::spawn(async move {
+            run_connection(
+                exec_io,
+                hello,
+                executor,
+                "connector-e2e",
+                Heartbeat::disabled(),
+            )
+            .await
+        }));
+        self.link
+            .attach(stage_io)
+            .await
+            .expect("host-api handshake completes");
+        if let Some(old) = previous {
+            // Attaching replaced (and closed) the old session, so the old
+            // executor connection sees EOF and winds down on its own; give it
+            // a bounded moment to do so, and abort it if it somehow does not.
+            let abort = old.abort_handle();
+            if tokio::time::timeout(OLD_CONNECTION_GRACE, old)
+                .await
+                .is_err()
+            {
+                abort.abort();
+            }
         }
+    }
+
+    /// Drops the executor connection without a replacement (a crashed
+    /// executor): the link must report it, never keep a dead session.
+    pub fn sever(&mut self) {
+        if let Some(old) = self.connection.take() {
+            old.abort();
+        }
+    }
+}
+
+impl Drop for WireRig {
+    fn drop(&mut self) {
+        self.sever();
     }
 }

@@ -1,0 +1,56 @@
+schema_version: 2
+app_id: waddles.core.example.level
+name: Chat Levels Bundle (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: "PenguinTech/waddles"
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/level
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      # NO `filters.command_prefix` on purpose: every chat line earns XP, not just `!level`. An
+      # absent filter key is "not a constraint" (rust-data-plane design spec section 6), so the
+      # stage sees every chat.message; transform() cheap-rejects what it does not handle.
+      - platform: twitch
+        event_types: ["chat.message"]
+      - platform: discord
+        event_types: ["chat.message"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- state lives in `kv` only (see `permissions` below).
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists a per-pseudonym XP counter, last-award time and a small top-5 leaderboard"
+  - id: "chat.send:discord"
+    justification: "level replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "level replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

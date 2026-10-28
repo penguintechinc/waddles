@@ -542,3 +542,57 @@ class TestTetragonEnforced:
         docs = _render("values-production.yaml", ["tetragon.action=Post"])
         pol = [d for d in docs if d["kind"] == "TracingPolicyNamespaced" and "spire" not in d["metadata"]["name"]]
         assert pol and all(p["spec"]["kprobes"][0]["selectors"][0]["matchActions"][0]["action"] == "Post" for p in pol)
+        # the runc-caller guard selector follows the same action override (never a hardcoded Sigkill)
+        assert all(p["spec"]["kprobes"][0]["selectors"][1]["matchActions"][0]["action"] == "Post" for p in pol)
+
+    @staticmethod
+    def _app_policies(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """App-workload exec-allowlist TracingPolicyNamespaced docs (spire chart excluded)."""
+        return [d for d in docs if d["kind"] == "TracingPolicyNamespaced"
+                and d["metadata"]["name"].endswith("-exec-allowlist") and "spire" not in d["metadata"]["name"]]
+
+    @pytest.mark.parametrize("values", _SHIPPING)
+    def test_runc_init_exec_is_exempt_only_for_runc_callers(self, values: str) -> None:
+        """runc >= 1.2 execs `/proc/self/fd/<N>` for `runc init` (breaks exec probes + kubectl exec).
+
+        The allowlist selector exempts that path prefix, a second selector SIGKILLs it unless the
+        caller's binary is runc, and nothing else (no shell, no runc path, no wildcard) is added.
+        """
+        policies = self._app_policies(_render(values, ["modules.collectors.discord.enabled=true"]))
+        print(f"{values}: {len(policies)} exec-allowlist policies examined for the runc init guard")
+        assert policies
+        for p in policies:
+            name = p["metadata"]["name"]
+            sels = p["spec"]["kprobes"][0]["selectors"]
+            assert len(sels) == 2, f"{name}: expected allowlist selector + runc guard selector"
+            allow, guard = sels
+            # allowlist selector: still NotEqual+Sigkill, plus a NotPrefix that defers fd-path execs to the guard
+            assert allow["matchArgs"][0]["operator"] == "NotEqual"
+            assert allow["matchArgs"][1] == {"index": 0, "operator": "NotPrefix", "values": ["/proc/self/fd/"]}
+            assert [a["action"] for a in allow["matchActions"]] == ["Sigkill"]
+            assert not any(v.startswith("/proc/") or v.endswith("runc") for v in allow["matchArgs"][0]["values"])
+            # guard selector: kill fd-path execs from any binary that is not runc
+            assert guard["matchArgs"] == [{"index": 0, "operator": "Prefix", "values": ["/proc/self/fd/"]}]
+            (mb,) = guard["matchBinaries"]
+            assert mb["operator"] == "NotIn"
+            assert 0 < len(mb["values"]) <= 4
+            assert all(v.startswith("/") and v.endswith("/runc") for v in mb["values"]), mb["values"]
+            assert [a["action"] for a in guard["matchActions"]] == ["Sigkill"], f"{name}: guard must be enforced"
+
+    def test_runc_init_exemption_can_be_disabled(self) -> None:
+        policies = self._app_policies(_render("values-production.yaml", ["tetragon.runcInit.enabled=false"]))
+        print(f"{len(policies)} policies examined with tetragon.runcInit.enabled=false")
+        assert policies
+        for p in policies:
+            sels = p["spec"]["kprobes"][0]["selectors"]
+            assert len(sels) == 1 and len(sels[0]["matchArgs"]) == 1, p["metadata"]["name"]
+
+    def test_runc_init_requires_scoped_caller_binaries(self) -> None:
+        """Enabled with no callerBinaries must fail the render, never allow /proc/self/fd/ unscoped."""
+        result = subprocess.run(  # noqa: S603 -- fixed argv, no shell, test-only
+            ["helm", "template", "waddlebot", str(_CHART_DIR), "--kube-version", "1.30.0",
+             "--values", str(_CHART_DIR / "values-production.yaml"), "--set", "global.deploymentTier=alpha",
+             "--set", "tetragon.runcInit.callerBinaries=null"],
+            capture_output=True, text=True, check=False)
+        assert result.returncode != 0, "render must fail when runcInit is enabled without callerBinaries"
+        assert "tetragon.runcInit.callerBinaries" in (result.stdout + result.stderr)

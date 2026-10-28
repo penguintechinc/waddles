@@ -36,6 +36,11 @@ from typing import Any, NoReturn
 from waddle_sdk import community_kv, log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions: their Mersenne Twister is seeded at import, and componentize-py freezes
+#: import-time state into the build snapshot, so every instance would replay one stream.
+_RNG = random.SystemRandom()
+
 COMMAND = "guess"
 
 RANGE_MIN = 1
@@ -180,7 +185,7 @@ async def _handle_start(*, community: str, provider: str, channel_id: str) -> st
             f"{existing['high']} (!guess <n>)"
         )
 
-    secret = random.randint(RANGE_MIN, RANGE_MAX)  # noqa: S311 -- a game pick, not crypto
+    secret = _RNG.randint(RANGE_MIN, RANGE_MAX)
     active = {"secret": secret, "low": RANGE_MIN, "high": RANGE_MAX, "attempts": 0}
     await _kv_set(
         _ACTIVE_KEY,
