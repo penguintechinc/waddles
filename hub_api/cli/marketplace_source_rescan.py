@@ -34,6 +34,7 @@ async def _run() -> int:
             "pending": summary.pending,
             "skipped": summary.skipped,
             "errors": summary.errors,
+            "history_rewritten": summary.history_rewritten,
         },
     )
     return 1 if summary.errors else 0

@@ -60,6 +60,7 @@ class Store:
         self.has_versions = False
         self.deactivated: list[uuid.UUID] = []
         self.launched: list[tuple[SourceRecord, dict[str, Any]]] = []
+        self.prebuilt_launched: list[tuple[SourceRecord, dict[str, Any]]] = []
 
     async def mark_pending_scan(self, dal: Any, source: SourceRecord) -> SourceRecord:
         self.rows[source.public_id] = dataclasses.replace(source, status=SourceStatus.PENDING_SCAN)
@@ -67,6 +68,9 @@ class Store:
 
     def launch_sandbox_scan(self, dal: Any, source: SourceRecord, **kw: Any) -> None:
         self.launched.append((source, kw))
+
+    def launch_prebuilt_scan(self, dal: Any, source: SourceRecord, **kw: Any) -> None:
+        self.prebuilt_launched.append((source, kw))
 
     async def create_source(self, dal: Any, **kw: Any) -> SourceRecord:
         self.created_kwargs = kw
@@ -148,6 +152,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> Store:
         monkeypatch.setattr(bp.svc, name, getattr(s, name))
     monkeypatch.setattr(bp, "mark_pending_scan", s.mark_pending_scan)
     monkeypatch.setattr(bp, "launch_sandbox_scan", s.launch_sandbox_scan)
+    monkeypatch.setattr(bp, "launch_prebuilt_scan", s.launch_prebuilt_scan)
     return s
 
 
@@ -559,14 +564,19 @@ async def test_rescan_builtin_still_409(app: Quart, store: Store) -> None:
     assert r.status_code == 409 and store.launched == []
 
 
-async def test_add_sandbox_launches_initial_build_prebuilt_does_not(
+async def test_add_sandbox_launches_build_prebuilt_launches_scan_not_build(
     app: Quart, store: Store
 ) -> None:
     c = app.test_client()
     r = await c.post("/api/v1/marketplace/sources", json=_body(), headers=_h())
-    assert r.status_code == 201 and store.launched == []
+    assert r.status_code == 201 and store.launched == []  # no sandbox build for prebuilt
+    assert len(store.prebuilt_launched) == 1  # G2b: initial scan+ingest is launched
+    src, kw = store.prebuilt_launched[0]
+    assert src.build_mode is BuildMode.PREBUILT and src.status is SourceStatus.PENDING_SCAN
+    assert {"tenant_id", "tenant_slug", "requested_by"} <= kw.keys()
     r = await c.post("/api/v1/marketplace/sources", json=_sandbox(), headers=_h())
     assert r.status_code == 201
+    assert len(store.prebuilt_launched) == 1  # sandbox add does not take the prebuilt path
     assert len(store.launched) == 1
     assert store.launched[0][0].build_mode is BuildMode.SANDBOX
 

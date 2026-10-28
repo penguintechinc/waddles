@@ -13,6 +13,7 @@ import pytest
 
 from services import marketplace_source_build as mb
 from services import marketplace_source_scanner as sc
+from services.errors import ApiError
 from services.marketplace_sandbox_builder import (
     SandboxBuilderConfig,
     SandboxBuildError,
@@ -24,6 +25,7 @@ from services.marketplace_source_ingest import (
     OUTCOME_REJECTED,
     IngestedBundle,
 )
+from services.marketplace_source_scanner import ScanRejectedError
 from services.marketplace_source_service import BuildMode, SourceRecord, SourceStatus
 from tests.malicious_source_fixtures import add_bundle, commit_bare, make_source, manifest
 
@@ -288,3 +290,96 @@ async def test_mark_pending_scan_sets_status(
 
 def test_pack_bundle_dir_is_the_packer_used() -> None:
     assert mb.pack_bundle_dir is pack_bundle_dir
+
+
+def _prebuilt_source(tmp_path: Path) -> SourceRecord:
+    return make_source("a" * 40, mode=BuildMode.PREBUILT)
+
+
+def _stub_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scan(source: Any, **kw: Any) -> Any:
+        return type("R", (), {"bundles": (1, 2), "examined": 2, "rejected": ()})()
+
+    monkeypatch.setattr(mb, "scan_source", scan)
+
+
+async def test_prebuilt_scan_then_ingest_lands_unapproved(
+    tmp_path: Path, calls: Calls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _prebuilt_source(tmp_path)
+    seen: dict[str, Any] = {}
+
+    async def ingest(dal: Any, source: Any, result: Any, **kw: Any) -> Any:
+        seen["bundles"] = len(result.bundles)
+        seen["fetch_wasm"] = kw["fetch_wasm"]
+        seen["tenant"] = (kw["tenant_id"], kw["tenant_slug"])
+        return mb.IngestSummary(created=2)
+
+    monkeypatch.setattr(mb, "ingest_candidates", ingest)
+    _stub_scan(monkeypatch)
+    task = mb.launch_prebuilt_scan(
+        object(),
+        src,
+        tenant_id=3,
+        tenant_slug="t",  # type: ignore[arg-type]
+    )
+    assert not task.done()  # never awaited on the request path
+    summary = await task
+    assert summary is not None and summary.created == 2
+    assert seen["bundles"] == 2 and seen["tenant"] == (3, "t")
+    assert seen["fetch_wasm"] is mb.fetch_candidate_wasm
+    assert calls.statuses == [] and task not in mb._TASKS  # no failure recorded
+
+
+async def test_prebuilt_scan_rejection_returns_none_no_ingest(
+    tmp_path: Path, calls: Calls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _prebuilt_source(tmp_path)
+
+    async def reject(*a: Any, **k: Any) -> None:
+        raise ScanRejectedError("guard", "nope")
+
+    async def ingest(*a: Any, **k: Any) -> None:
+        raise AssertionError("must not ingest after a rejected scan")
+
+    monkeypatch.setattr(mb, "scan_source", reject)
+    monkeypatch.setattr(mb, "ingest_candidates", ingest)
+    assert await mb.scan_and_ingest_prebuilt(object(), src, tenant_id=1, tenant_slug="t") is None  # type: ignore[arg-type]
+
+
+async def test_prebuilt_ingest_refusal_is_error_not_stuck_pending(
+    tmp_path: Path, calls: Calls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _prebuilt_source(tmp_path)
+
+    async def ingest(*a: Any, **k: Any) -> None:
+        raise ApiError("disabled", 409, "CONFLICT")
+
+    monkeypatch.setattr(mb, "ingest_candidates", ingest)
+    _stub_scan(monkeypatch)
+    task = mb.launch_prebuilt_scan(object(), src, tenant_id=1, tenant_slug="t")  # type: ignore[arg-type]
+    assert await task is None
+    assert (SourceStatus.ERROR, "prebuilt_ingest:CONFLICT") in calls.statuses
+
+
+async def test_prebuilt_crash_becomes_error(
+    tmp_path: Path, calls: Calls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _prebuilt_source(tmp_path)
+
+    async def crash(*a: Any, **k: Any) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mb, "scan_and_ingest_prebuilt", crash)
+    task = mb.launch_prebuilt_scan(object(), src, tenant_id=1, tenant_slug="t")  # type: ignore[arg-type]
+    assert await task is None
+    assert (SourceStatus.ERROR, "prebuilt_run:unexpected_error") in calls.statuses
+
+
+async def test_fetch_candidate_wasm_reads_file_and_rejects_missing(tmp_path: Path) -> None:
+    f = tmp_path / "a.wasm"
+    f.write_bytes(b"\0asm")
+    ok = type("C", (), {"wasm_path": str(f)})()
+    assert await mb.fetch_candidate_wasm(ok) == b"\0asm"  # type: ignore[arg-type]
+    with pytest.raises(OSError):
+        await mb.fetch_candidate_wasm(type("C", (), {"wasm_path": None})())  # type: ignore[arg-type]

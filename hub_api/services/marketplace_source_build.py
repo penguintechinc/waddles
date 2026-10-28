@@ -1,4 +1,4 @@
-"""Async scan + sandbox build + ingest orchestration for SANDBOX marketplace sources (G1).
+"""Async scan + (sandbox build) + ingest orchestration for external marketplace sources (G1/G2b).
 
 ONE shared entry point, `scan_build_and_ingest`, used by BOTH triggers (add-source initial scan
 and rescan / approve-update) via `launch_sandbox_scan`::
@@ -11,6 +11,9 @@ Builds take minutes, so callers never await it on a request thread: `launch_sand
 tracked background task. Every failure (builder not configured, gate refusal, scan rejection, build
 failure/timeout, unexpected error) lands as source status ERROR with a sanitized `last_scan_error`
 plus a log line -- never silent. Nothing here approves, signs or installs.
+
+PREBUILT sources use the same launch/error scaffolding (`launch_prebuilt_scan`): PENDING_SCAN ->
+scan -> `ingest_candidates` (no build) -> ACTIVE, so an add never sits in PENDING_SCAN forever.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,9 +43,12 @@ from services.marketplace_source_ingest import (
     OUTCOME_NEEDS_APPROVAL,
     OUTCOME_REJECTED,
     OUTCOME_SKIPPED_IDENTICAL,
+    IngestSummary,
     _existing_digest,
+    ingest_candidates,
 )
 from services.marketplace_source_scanner import (
+    BundleCandidate,
     ScanRejectedError,
     bundle_tarball_path,
     scan_source,
@@ -179,30 +185,107 @@ async def scan_build_and_ingest(
     return summary
 
 
-def launch_sandbox_scan(
-    dal: AsyncDB, source: SourceRecord, **kwargs: Any
-) -> asyncio.Task[SandboxRunSummary | None]:
-    """Spawn `scan_build_and_ingest` as a tracked background task (never blocks a request).
+def _launch(
+    dal: AsyncDB,
+    source: SourceRecord,
+    run: Callable[[], Awaitable[Any]],
+    *,
+    label: str,
+) -> asyncio.Task[Any]:
+    """Spawn `run` as a tracked background task (the shared launch + crash->ERROR scaffolding).
 
     Any escaped exception is logged and recorded as status ERROR so a crash cannot leave the
     source stuck in PENDING_SCAN.
     """
 
-    async def _run() -> SandboxRunSummary | None:
+    async def _guarded() -> Any:
         try:
-            return await scan_build_and_ingest(dal, source, **kwargs)
+            return await run()
         except Exception:
             logger.exception(
-                "marketplace sandbox task crashed",
+                "marketplace %s task crashed",
+                label,
                 extra={"source_public_id": str(source.public_id)},
             )
-            await _fail(dal, source, "sandbox_run:unexpected_error")
+            await _fail(dal, source, f"{label}_run:unexpected_error")
             return None
 
-    task = asyncio.create_task(_run())
+    task = asyncio.create_task(_guarded())
     _TASKS.add(task)
     task.add_done_callback(_TASKS.discard)
     return task
+
+
+def launch_sandbox_scan(
+    dal: AsyncDB, source: SourceRecord, **kwargs: Any
+) -> asyncio.Task[SandboxRunSummary | None]:
+    """Spawn `scan_build_and_ingest` as a tracked background task (never blocks a request)."""
+    return _launch(
+        dal, source, lambda: scan_build_and_ingest(dal, source, **kwargs), label="sandbox"
+    )
+
+
+async def fetch_candidate_wasm(candidate: BundleCandidate) -> bytes:
+    """Read a candidate's committed prebuilt artifact (scan-time temp tree is already guarded)."""
+    if candidate.wasm_path is None:
+        raise OSError("no prebuilt artifact")
+    return await asyncio.to_thread(Path(candidate.wasm_path).read_bytes)
+
+
+async def scan_and_ingest_prebuilt(
+    dal: AsyncDB,
+    source: SourceRecord,
+    *,
+    tenant_id: int,
+    tenant_slug: str,
+    requested_by: int | None = None,
+    valkey_client: Any | None = None,
+) -> IngestSummary | None:
+    """Scan a PREBUILT source at its pinned SHA and ingest each bundle (no build, unapproved).
+
+    `scan_source` already marks ERROR + audits on a rejection (returns None here); an ingest
+    failure (disabled/unknown source, unexpected error) is recorded as ERROR via `_fail`.
+    """
+    sid = str(source.public_id)
+    with tempfile.TemporaryDirectory(prefix="mktscan-") as workdir:
+        try:
+            result = await scan_source(
+                source, workdir=Path(workdir), dal=dal, actor_id=requested_by
+            )
+        except ScanRejectedError as exc:
+            logger.warning(
+                "marketplace prebuilt scan rejected",
+                extra={"source_public_id": sid, "reason": exc.reason},
+            )
+            return None
+        try:
+            summary = await ingest_candidates(
+                dal,
+                source,
+                result,
+                fetch_wasm=fetch_candidate_wasm,
+                tenant_id=tenant_id,
+                tenant_slug=tenant_slug,
+                requested_by=requested_by,
+                valkey_client=valkey_client,
+            )
+        except ApiError as exc:
+            await _fail(dal, source, f"prebuilt_ingest:{exc.code}")
+            return None
+    logger.info(
+        "marketplace prebuilt run complete",
+        extra={"source_public_id": sid, "examined": result.examined, "created": summary.created},
+    )
+    return summary
+
+
+def launch_prebuilt_scan(
+    dal: AsyncDB, source: SourceRecord, **kwargs: Any
+) -> asyncio.Task[IngestSummary | None]:
+    """Spawn `scan_and_ingest_prebuilt` as a tracked background task (never blocks a request)."""
+    return _launch(
+        dal, source, lambda: scan_and_ingest_prebuilt(dal, source, **kwargs), label="prebuilt"
+    )
 
 
 async def mark_pending_scan(dal: AsyncDB, source: SourceRecord) -> SourceRecord:
@@ -212,7 +295,10 @@ async def mark_pending_scan(dal: AsyncDB, source: SourceRecord) -> SourceRecord:
 
 __all__ = [
     "SandboxRunSummary",
+    "fetch_candidate_wasm",
+    "launch_prebuilt_scan",
     "launch_sandbox_scan",
     "mark_pending_scan",
+    "scan_and_ingest_prebuilt",
     "scan_build_and_ingest",
 ]

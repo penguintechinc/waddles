@@ -39,15 +39,20 @@ from services.marketplace_source_service import (
     SourceStatus,
     list_sources,
     record_pending_update,
+    update_status,
 )
 from services.url_guard import validate_outbound_url
 
 logger = logging.getLogger(__name__)
 
 AUDIT_ACTION = "marketplace_source_update_available"
+REWRITE_AUDIT_ACTION = "marketplace_source_history_rewritten"
 _REF_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._/@+-]{0,254}$")
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA_LINE_RE = re.compile(r"^([0-9a-f]{40})\t(\S+)$")
 _LS_REMOTE_TIMEOUT_S = 30.0
+_ANCESTRY_FETCH_TIMEOUT_S = 120.0
+_ANCESTRY_MAX_BYTES = 256 * 1024 * 1024
 _CHECKED_STATUSES = (SourceStatus.ACTIVE, SourceStatus.NEEDS_APPROVAL)
 
 
@@ -56,6 +61,7 @@ class UpdateOutcome(StrEnum):
 
     UNCHANGED = "unchanged"
     PENDING = "pending"
+    HISTORY_REWRITTEN = "history_rewritten"
     SKIPPED = "skipped"
     ERROR = "error"
 
@@ -69,6 +75,7 @@ class RescanSummary:
     pending: int
     skipped: int
     errors: int
+    history_rewritten: int = 0
 
 
 def _pick_sha(output: str, ref: str) -> str | None:
@@ -84,6 +91,29 @@ def _pick_sha(output: str, ref: str) -> str | None:
     return None
 
 
+async def _egress(source: SourceRecord) -> tuple[str, str | None, bool]:
+    """Validate the URL and resolve (remote, proxy, local-test) for hardened git egress.
+
+    Shared by `ls-remote` and the ancestry fetch so neither opens an unhardened git path: https +
+    SSRF guard, and direct egress is denied unless the git-proxy is configured (or the test
+    transport is on).
+    """
+    local = _scanner._test_remote is not None
+    try:
+        await validate_outbound_url(source.git_url or "", allowed_schemes=("https",))
+    except ApiError as exc:
+        raise ScanRejectedError("url_rejected", str(exc.message)) from exc
+    proxy = os.environ.get(PROXY_ENV)
+    if not proxy and not local:
+        raise ScanRejectedError(
+            "no_egress_proxy", f"{PROXY_ENV} is not configured (direct egress denied)"
+        )
+    remote = _scanner._test_remote if local and _scanner._test_remote else source.git_url
+    if remote is None:
+        raise ScanRejectedError("no_url", "source has no git_url")
+    return remote, proxy, local
+
+
 async def resolve_latest_commit(source: SourceRecord) -> str:
     """Resolve the commit `source.ref` points at now, through the git-proxy, with no clone.
 
@@ -94,17 +124,7 @@ async def resolve_latest_commit(source: SourceRecord) -> str:
         raise ScanRejectedError("no_url", "source has no git_url/ref")
     if not _REF_RE.fullmatch(source.ref):
         raise ScanRejectedError("bad_ref", "ref contains unsupported characters")
-    local = _scanner._test_remote is not None
-    try:
-        await validate_outbound_url(source.git_url, allowed_schemes=("https",))
-    except ApiError as exc:
-        raise ScanRejectedError("url_rejected", str(exc.message)) from exc
-    proxy = os.environ.get(PROXY_ENV)
-    if not proxy and not local:
-        raise ScanRejectedError(
-            "no_egress_proxy", f"{PROXY_ENV} is not configured (direct egress denied)"
-        )
-    remote = _scanner._test_remote if local and _scanner._test_remote else source.git_url
+    remote, proxy, local = await _egress(source)
     limits = GuardLimits(clone_timeout_s=_LS_REMOTE_TIMEOUT_S)
     with tempfile.TemporaryDirectory(prefix="mktupd-") as tmp:
         root = Path(tmp)
@@ -126,11 +146,91 @@ async def resolve_latest_commit(source: SourceRecord) -> str:
     return sha
 
 
+async def is_pin_reachable(source: SourceRecord, new_tip: str) -> bool:
+    """True when `source.pinned_commit_sha` is an ancestor of `new_tip` (a fast-forward).
+
+    Bounded fetch of `new_tip`'s COMMIT history only (`--filter=tree:0`, no blobs/trees) through the
+    same hardened git argv/env/proxy path as the scanner, into a throwaway repo with a wall-clock
+    deadline and a disk-size cap (both fail loud as `ScanRejectedError`), then
+    `git merge-base <pin> <tip>` == pin. A pin missing from the fetched history (force-push or
+    GC'd) is "not reachable".
+    """
+    pinned = source.pinned_commit_sha
+    if pinned is None or not _SHA_RE.fullmatch(new_tip):
+        raise ScanRejectedError("bad_sha", "pinned/new commit is not a 40-hex SHA")
+    remote, proxy, local = await _egress(source)
+    px = None if local else proxy
+    limits = GuardLimits(
+        clone_timeout_s=_ANCESTRY_FETCH_TIMEOUT_S, max_total_bytes=_ANCESTRY_MAX_BYTES
+    )
+    with tempfile.TemporaryDirectory(prefix="mktanc-") as tmp:
+        root = Path(tmp) / "repo"
+        root.mkdir()
+        env = _git_env(Path(tmp), proxy=px)
+        deadline = time.monotonic() + _ANCESTRY_FETCH_TIMEOUT_S
+
+        async def git(*args: str, ok: tuple[int, ...] = (0,), watch: Path | None = None) -> str:
+            return await _run_git(
+                _git_argv(*args, proxy=px, local=local),
+                cwd=root, env=env, limits=limits, deadline=deadline, watch=watch,
+                ok_returncodes=ok,
+            )  # fmt: skip
+
+        await git("init", "--quiet")
+        await git("remote", "add", "origin", remote)
+        await git("fetch", "--quiet", "--filter=tree:0", "--no-tags", "--no-recurse-submodules",
+                  "origin", new_tip, watch=root)  # fmt: skip
+        tip = (await git("rev-parse", "FETCH_HEAD^{commit}")).strip()
+        if tip != new_tip:
+            raise ScanRejectedError("sha_mismatch", "fetched commit does not equal the new tip")
+        present = await git("rev-parse", "--verify", "--quiet", f"{pinned}^{{commit}}", ok=(0, 1))
+        if present.strip() != pinned:
+            return False
+        base = await git("merge-base", pinned, new_tip, ok=(0, 1))
+        return base.strip() == pinned
+
+
+async def _flag_history_rewrite(dal: AsyncDB, source: SourceRecord, new_tip: str) -> bool:
+    """Set status ERROR (pin/pending/bundles untouched) and audit once; True when we flipped it."""
+    sid = str(source.public_id)
+    try:
+        await update_status(
+            dal,
+            source.public_id,
+            SourceStatus.ERROR,
+            last_scan_error="history_rewritten: pinned commit is no longer reachable from ref",
+            scanned=True,
+        )
+    except ApiError as exc:
+        if exc.status_code == 409:  # disabled concurrently: nothing to flag
+            return False
+        raise
+    logger.error(
+        "marketplace source upstream history rewritten; pin retained, source set to ERROR",
+        extra={"source_public_id": sid, "new_tip": new_tip},
+    )
+    try:
+        await bundle_audit.record(
+            dal,
+            actor_id=None,
+            action=REWRITE_AUDIT_ACTION,
+            target_type="marketplace_source",
+            target_id=sid,
+            details={"pinned_commit_sha": source.pinned_commit_sha, "new_tip": new_tip},
+        )
+    except Exception:
+        logger.exception("marketplace source rewrite alert failed", extra={"source_public_id": sid})
+    return True
+
+
 async def check_source_for_update(dal: AsyncDB, source: SourceRecord) -> UpdateOutcome:
     """Check one source; record `pending_commit_sha` + notify admins when upstream moved.
 
-    Skips built-in, un-pinned and non-ACTIVE/NEEDS_APPROVAL (incl. DISABLED) sources. Never
-    advances the pin, scans, builds or installs. Per-source failures return `ERROR`, never raise.
+    A force-push / history rewrite (pinned commit no longer an ancestor of the new tip, or gone)
+    sets status ERROR with the pin untouched, audits once and returns `HISTORY_REWRITTEN`; ERROR
+    sources are not re-checked, so it never re-alerts. Skips built-in, un-pinned and
+    non-ACTIVE/NEEDS_APPROVAL (incl. DISABLED) sources. Never advances the pin, scans, builds or
+    installs. Per-source failures return `ERROR`, never raise.
     """
     if (
         source.is_builtin
@@ -144,6 +244,10 @@ async def check_source_for_update(dal: AsyncDB, source: SourceRecord) -> UpdateO
             latest = await resolve_latest_commit(source)
             if latest == source.pinned_commit_sha or latest == source.pending_commit_sha:
                 return UpdateOutcome.UNCHANGED
+            reachable = await is_pin_reachable(source, latest)
+            if not reachable:
+                flagged = await _flag_history_rewrite(dal, source, latest)
+                return UpdateOutcome.HISTORY_REWRITTEN if flagged else UpdateOutcome.UNCHANGED
             updated = await record_pending_update(dal, source.public_id, latest_sha=latest)
     except (ScanRejectedError, ApiError) as exc:
         logger.warning(
@@ -198,4 +302,5 @@ async def rescan_all(dal: AsyncDB) -> RescanSummary:
         pending=tally[UpdateOutcome.PENDING],
         skipped=tally[UpdateOutcome.SKIPPED],
         errors=tally[UpdateOutcome.ERROR],
+        history_rewritten=tally[UpdateOutcome.HISTORY_REWRITTEN],
     )

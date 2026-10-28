@@ -21,7 +21,6 @@ Found and mounted by `routers/v1.py`'s auto-discovery via `BLUEPRINTS`.
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import logging
 import re
@@ -49,9 +48,16 @@ from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, unprocessable
 from services.marketplace_publisher_attestation import fingerprint_publisher_key
 from services.marketplace_sandbox_warning import WARNING_HASH
-from services.marketplace_source_build import launch_sandbox_scan, mark_pending_scan
+from services.marketplace_source_build import (
+    fetch_candidate_wasm as _fetch_wasm,
+)
+from services.marketplace_source_build import (
+    launch_prebuilt_scan,
+    launch_sandbox_scan,
+    mark_pending_scan,
+)
 from services.marketplace_source_ingest import ingest_candidates
-from services.marketplace_source_scanner import BundleCandidate, ScanRejectedError, scan_source
+from services.marketplace_source_scanner import ScanRejectedError, scan_source
 from services.marketplace_source_service import BuildMode, SandboxAck, SourceRecord, SourceStatus
 from services.url_guard import validate_outbound_url
 
@@ -309,6 +315,8 @@ async def add_source(
         return _err(exc)
     if mode == BuildMode.SANDBOX:
         await _kick_sandbox_build(record)
+    else:
+        _kick_prebuilt_scan(record)  # row is already PENDING_SCAN from create_source
     _count("add", "ok")
     logger.info(
         "marketplace source: added",
@@ -422,11 +430,23 @@ async def _kick_sandbox_build(record: SourceRecord) -> None:
     _count("build", "launched")
 
 
-async def _fetch_wasm(candidate: BundleCandidate) -> bytes:
-    """Read a candidate's committed prebuilt artifact (scan-time temp tree is already guarded)."""
-    if candidate.wasm_path is None:
-        raise OSError("no prebuilt artifact")
-    return await asyncio.to_thread(Path(candidate.wasm_path).read_bytes)
+def _kick_prebuilt_scan(record: SourceRecord) -> None:
+    """Launch the PREBUILT source's background scan + unapproved ingest (no build).
+
+    Same tracked-task + crash->ERROR scaffolding as the sandbox path, so an add can never sit in
+    PENDING_SCAN forever waiting for a manual rescan.
+    """
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # nosec B101 - tenant_middleware ran first
+    launch_prebuilt_scan(
+        _install_dal(),
+        record,
+        tenant_id=ctx.tenant_id,
+        tenant_slug=ctx.tenant_slug,
+        requested_by=get_current_user_id(request),
+        valkey_client=current_app.config.get("valkey_client"),
+    )
+    _count("scan", "launched")
 
 
 @sources_bp.route("/<public_id>/rescan", methods=["POST"])

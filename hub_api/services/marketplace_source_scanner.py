@@ -172,8 +172,13 @@ async def _run_git(
     limits: GuardLimits,
     deadline: float,
     watch: Path | None = None,
+    ok_returncodes: tuple[int, ...] = (0,),
 ) -> str:
-    """Run git (no shell) with a wall-clock deadline and an optional disk-size monitor."""
+    """Run git (no shell) with a wall-clock deadline and an optional disk-size monitor.
+
+    `ok_returncodes` lets a caller treat a documented non-zero exit (e.g. `rev-parse --quiet`
+    "absent" = 1) as a normal answer; anything else still raises `git_failed`.
+    """
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise ScanRejectedError("clone_timeout", "scan wall-clock budget exhausted")
@@ -215,7 +220,7 @@ async def _run_git(
             proc.kill()
         await proc.wait()
         await asyncio.gather(mon, comm, return_exceptions=True)
-    if proc.returncode != 0:
+    if proc.returncode not in ok_returncodes:
         # https-only, no auth: stderr carries no credentials; keep only its last line.
         raise ScanRejectedError(
             "git_failed",
