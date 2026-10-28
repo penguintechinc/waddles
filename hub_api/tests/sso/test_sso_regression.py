@@ -42,8 +42,8 @@ from blueprints.v1.sso import (
 )
 from services import sso_http, sso_saml, sso_service, sso_telemetry
 from services.sso_types import (
-    FLAG_SSO_ENTERPRISE,
-    FLAG_SSO_GOOGLE,
+    FLAG_SSO_CUSTOM,
+    FLAG_SSO_SAML,
     SCOPE_SSO_ADMIN,
     flag_for_protocol,
 )
@@ -58,12 +58,14 @@ SSO_SOURCES = sorted([*(HUB_API / "services").glob("sso_*.py"), HUB_API / "bluep
 class TestTierAndScopeAlignment:
     def test_catalog_maps_the_two_flags_to_the_documented_tiers(self) -> None:
         assert FEATURE_MIN_TIERS["waddles.auth.sso_saml"] == "enterprise"
-        assert FEATURE_MIN_TIERS["waddles.auth.sso_google"] == "professional"
+        assert FEATURE_MIN_TIERS["waddles.auth.sso_custom"] == "professional"
+        assert "waddles.auth.sso_google" not in FEATURE_MIN_TIERS
 
     def test_protocols_map_to_the_catalog_flags(self) -> None:
-        assert flag_for_protocol("saml") == flag_for_protocol("oidc") == FLAG_SSO_ENTERPRISE
-        assert flag_for_protocol("google") == FLAG_SSO_GOOGLE
-        assert {FLAG_SSO_ENTERPRISE, FLAG_SSO_GOOGLE} <= set(FEATURE_MIN_TIERS)
+        assert flag_for_protocol("saml") == FLAG_SSO_SAML
+        assert flag_for_protocol("oidc") == FLAG_SSO_CUSTOM
+        assert flag_for_protocol("google") is None
+        assert {FLAG_SSO_SAML, FLAG_SSO_CUSTOM} <= set(FEATURE_MIN_TIERS)
 
     def test_only_the_tenant_admin_bundle_grants_the_sso_scope(self) -> None:
         assert SCOPE_SSO_ADMIN in SCOPE_BUNDLES["tenant"]["admin"]

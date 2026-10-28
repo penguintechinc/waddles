@@ -32,8 +32,8 @@ export default function PersonalAccessToken() {
         tokenApi.getPAT(),
         tokenApi.getPATScopes(),
       ]);
-      setToken(patRes.token || null);
-      setScopes(scopesRes.scopes || []);
+      setToken(patRes.data?.pat || null);
+      setScopes(scopesRes.data?.scopes || []);
     } catch (err) {
       setError(err.message || 'Failed to load token data.');
     } finally {
@@ -72,7 +72,7 @@ export default function PersonalAccessToken() {
         scope_ceiling: selectedScopes.length ? selectedScopes : null,
       };
       const res = await tokenApi.createPAT(payload);
-      setNewTokenValue(res.token);
+      setNewTokenValue(res.data.token);
       setShowCreateModal(false);
       setCopied(false);
       setShowSuccessModal(true);
@@ -245,14 +245,14 @@ export default function PersonalAccessToken() {
                     <p className="text-xs text-gold-400 uppercase tracking-wide mb-2">{category}</p>
                     <div className="space-y-1.5">
                       {categoryScopes.map((scope) => (
-                        <label key={scope.key} className="flex items-start gap-2.5 cursor-pointer">
+                        <label key={scope.scope_key} className="flex items-start gap-2.5 cursor-pointer">
                           <input
                             type="checkbox"
-                            checked={selectedScopes.includes(scope.key)}
-                            onChange={() => toggleScope(scope.key)}
+                            checked={selectedScopes.includes(scope.scope_key)}
+                            onChange={() => toggleScope(scope.scope_key)}
                             className="mt-0.5 accent-gold-400"
                           />
-                          <span className="text-sm text-sky-100">{scope.key}</span>
+                          <span className="text-sm text-sky-100">{scope.scope_key}</span>
                           {scope.description && (
                             <span className="text-xs text-navy-400 ml-1">{scope.description}</span>
                           )}

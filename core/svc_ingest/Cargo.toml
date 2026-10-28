@@ -101,7 +101,18 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # constructs a `Delivered` (it never reads a stage stream), so this bump
 # is a pure no-op for this crate's own call sites; taken anyway to stay on
 # the same finalized spine rev as svc_process/svc_action.
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ce638ec24f0bca0e2afd7655b99d1f9162030156", package = "penguin-spine", version = "=0.2.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
+# `penguin-bundle-host`: the host-API wire codec + `ExportKind::Connector*`
+# (0.3.0) `connector::wire_invoker` speaks to the bundle executor. Same pinned
+# rev as `core/bundle_executor` (the other end of the wire) -- the two must
+# move in lockstep, since a peer on an older crate rejects an unknown export
+# kind as a malformed frame. Git `rev` pin (immutable), `version` for
+# `cargo deny`'s wildcard ban -- see the dependency-pattern note above.
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "eef86927d015f530c14d8ed54d311494c1a8000d", package = "penguin-bundle-host", version = "=0.3.0" }
+# Standard base64 for the binary-safe frame/handshake bytes in the connector
+# wire payloads (JSON carries them as base64). Already resolved transitively;
+# same exact version `core/bundle_executor` pins on the other end.
+base64 = "=0.22.1"
 # `penguin-licensing`: the `waddles.core.rust-data-plane` feature-flag gate
 # on the receive/produce/outbound-drain loops (spec S13.5) -- see
 # `try_start_license_client`/`rust_data_plane_enabled` in `src/lib.rs`.
@@ -164,7 +175,7 @@ redis = { version = "=1.7.0", default-features = false, features = [
 # `penguin-spine`'s own (private) `ensure_crypto_provider_installed` uses
 # internally -- exact version match so both refer to the same compiled
 # `CryptoProvider` type.
-rustls = { version = "=0.23.46", default-features = false, features = [
+rustls = { version = "=0.23.45", default-features = false, features = [
     "std",
     "ring",
 ] }
@@ -183,12 +194,6 @@ sha2 = "=0.10.9"
 # security-sensitive check. Already resolves to this exact version
 # transitively (via `hmac`/`digest`, confirmed in `Cargo.lock`).
 subtle = "=2.6.1"
-
-# Dataplane scope-resolver machine-JWT client (`src/scope_resolver.rs`): bootstraps
-# with the pod's projected SA token, caches/refreshes the hub-api-issued EdDSA
-# machine JWT. Same-repo path dependency, so the Docker build context is `core/`
-# (see Dockerfile.rust) exactly like core/svc_process.
-service_auth = { path = "../service_auth", version = "=0.1.0" }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"

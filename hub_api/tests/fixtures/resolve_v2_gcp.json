@@ -1,0 +1,23 @@
+{
+  "accessToken": null,
+  "communityId": 7,
+  "connectionId": 12,
+  "endpoint": {
+    "function": "my-func",
+    "project": "fake-project-1",
+    "region": "us-central1",
+    "url": null
+  },
+  "expiresAt": null,
+  "kind": 4,
+  "metadata": {},
+  "provider": "gcp_function",
+  "secret": {
+    "fields": {
+      "clientEmail": "svc@fake-project.example",
+      "privateKey": "FAKE-PRIVATE-KEY"
+    },
+    "scheme": 5
+  },
+  "success": true
+}

@@ -20,6 +20,7 @@ privileged port, runs as `USER appuser` in the Dockerfile.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from flask_core import (
@@ -39,6 +40,7 @@ from flask_core.token_revocation import get_token_revocation
 from pydal import Field
 from quart import Quart, request
 from quart_schema import Info, QuartSchema
+from werkzeug.exceptions import HTTPException
 
 from blueprints import register_blueprints
 from blueprints.service_jwt_bp import service_jwt_bp
@@ -52,6 +54,7 @@ from services.ban_suppression import run_purge_loop
 from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
+from services.community_common import api_error
 from services.envelope.runtime import build_envelope_runtime
 from services.identity_resolution_service import run_uuid_availability_monitor
 from services.object_storage_kms import get_object_storage_sse
@@ -59,11 +62,33 @@ from services.rate_limiting import install_rate_limiting
 from services.schema import (
     bind_ai_routing_tables,
     bind_lifecycle_tables,
+    bind_marketplace_billing_tables,
+    bind_marketplace_module_tables,
     bind_music_tables,
     bind_platform_tables,
     bind_token_billing_tables,
 )
 from services.session_cookie import bearer_token_from_cookie
+
+logger = logging.getLogger(__name__)
+
+
+def _install_error_handlers(app: Quart) -> None:
+    """Install the app-wide unhandled-exception handler (gh-893 defense-in-depth).
+
+    Without it Quart answers any unhandled exception with a raw HTML 500
+    page. This logs the full exception (never swallowed) and returns the
+    standard JSON error envelope instead; the exception text is NOT echoed
+    to the client. `HTTPException`s (404/405/413/...) keep their own behavior.
+    """
+
+    @app.errorhandler(Exception)
+    async def _unhandled(exc: Exception) -> Any:
+        """Log the exception, then return the JSON 500 envelope."""
+        if isinstance(exc, HTTPException):
+            return exc
+        logger.exception("unhandled_exception path=%s method=%s", request.path, request.method)
+        return api_error("An unexpected error occurred", 500)
 
 
 def _bind_reference_tables(dal: Any) -> None:
@@ -108,6 +133,12 @@ def _bind_reference_tables(dal: Any) -> None:
         migrate=False,
     )
     bind_platform_tables(dal)
+    # Shared marketplace/module table family (hub_modules, reviews,
+    # installations, marketplace_catalog, subscriptions, settings, discount
+    # tables) -- defined exactly once here; domain binders never redefine them.
+    bind_marketplace_module_tables(dal)
+    # Billing-only tables (payments, premium subs) -- bound once at startup.
+    bind_marketplace_billing_tables(dal)
     # App Bundle 3-tier lifecycle (marketplace_lifecycle group) -- append-only
     # per hub_api/PORTING.md's per-group isolation note; see
     # services/schema.py::bind_lifecycle_tables's own docstring.
@@ -234,6 +265,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     install_audit_hooks(app)
 
     app.before_request(bridge_session_cookie_to_bearer)
+    _install_error_handlers(app)
 
     # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- bootstrap.py's schema
     # check/fresh-install creation, exposed as a dedicated `/ready` route rather
@@ -290,6 +322,8 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # fails closed with 503) rather than crashing hub-api's whole app
         # factory -- most non-prod/local deployments never call
         # /internal/service-token at all.
+        app.config["SPIFFE_PEER_TRUST"] = cfg.spiffe_peer_trust
+        app.config["SPIFFE_PEER_ID_HEADER"] = cfg.spiffe_peer_id_header
         try:
             identities = load_identities_from_env(env=cfg.deployment_env)
             issuer = load_issuer_from_env(identities)

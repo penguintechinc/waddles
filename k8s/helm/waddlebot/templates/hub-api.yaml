@@ -49,7 +49,7 @@ spec:
         # API, see critical-rules.md Data Plane) now exists; no longer the shared
         # pipeline.pythonBaseImage skeleton placeholder. Bare module name "hub-api" is the
         # alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
         # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Every deploy
         # now carries a unique per-deploy global.imageTag (alpha SHA8, beta beta-<epoch>), so
         # the old hardcoded Always (a workaround for a stale same-tag `alpha` push) is
@@ -129,6 +129,14 @@ spec:
         # templates/_service_jwt.tpl::waddlebot.serviceJwtIdentitiesJson.
         - name: SERVICE_JWT_IDENTITIES
           value: {{ include "waddlebot.serviceJwtIdentitiesJson" . | quote }}
+        # HIGH-2 SPIFFE-readiness (hub_api/services/machine_auth.py). OFF by default: when ON,
+        # hub-api trusts the peer-identity header below as a verified SVID, so the edge MUST
+        # strip it on non-mTLS traffic and a per-identity community allow-list must exist first
+        # (X-Connection-Community is NOT an entitlement check) -- docs/PROVIDER_CONNECTIONS.md.
+        - name: SPIFFE_PEER_TRUST
+          value: {{ .Values.pipeline.hubApi.spiffePeerTrust | default false | quote }}
+        - name: SPIFFE_PEER_ID_HEADER
+          value: {{ .Values.pipeline.hubApi.spiffePeerIdHeader | default "X-Spiffe-Peer-Id" | quote }}
         - name: MODULE_NAME
           value: "hub-api"
         - name: PIPELINE_STAGE
@@ -228,12 +236,12 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL_TLS
+              key: VALKEY_DURABLE_URL_TLS
         - name: VALKEY_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: REDIS_PASSWORD
+              key: VALKEY_DURABLE_PASSWORD
         {{- end }}
         {{- if .Values.modules.bot.enabled }}
         - name: MODULE_LOAD_BOT
