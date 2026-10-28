@@ -30,11 +30,14 @@ opaque reverse-proxy body that was never hub-api's row to begin with.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 #: Mirrors `config/index.js`'s `analyticsCore` -> `ANALYTICS_CORE_API_URL` env var + default.
 _DEFAULT_BASE_URL = "http://analytics-core:8040"
@@ -68,16 +71,17 @@ class ProxyResult:
     """Outcome of a proxied call -- either a relayed success or a masked failure.
 
     `ok=False` covers every downstream non-2xx response AND transport
-    failure (timeout/connection error) identically -- matching
-    `analyticsService.js`'s axios calls, which throw in both cases and let
-    `errorHandler.js` collapse them to the same envelope (see
-    `blueprints/v1/analytics.py`'s module docstring, "Known inherited
-    behavior").
+    failure (timeout/connection error). `transport_error` distinguishes the
+    latter (no HTTP response) so `analytics_service._upstream_error` can map
+    transport failures, upstream 5xx, and 401/403/other 4xx -> 502 while
+    re-wrapping client-meaningful 4xx {400,404,409,422,429} (gh-894).
     """
 
     ok: bool
     status_code: int
     body: Any
+    #: True when no HTTP response was received (connect error / timeout).
+    transport_error: bool = False
 
 
 class AnalyticsCoreProxyClient:
@@ -114,11 +118,16 @@ class AnalyticsCoreProxyClient:
         try:
             async with httpx.AsyncClient(timeout=self._config.timeout_seconds) as client:
                 response = await client.get(url, params=query, headers=headers)
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "analytics_proxy_transport_error path=%s error_type=%s",
+                path,
+                type(exc).__name__,
+            )
             # Network failure / timeout -- axios's rejected-promise branch,
             # collapsed the same way errorHandler.js does (see module
             # docstring): no downstream status code to relay.
-            return ProxyResult(ok=False, status_code=502, body=None)
+            return ProxyResult(ok=False, status_code=502, body=None, transport_error=True)
 
         try:
             data: Any = response.json()

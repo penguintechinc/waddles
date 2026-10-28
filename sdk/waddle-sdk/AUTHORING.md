@@ -181,8 +181,131 @@ check, and vice versa (`critical-rules.md` Feature Flags & License Tiers).
   invocations could race (see `bundles/python/poll`, `loyalty`, `inventory`), and compensate a
   failed second step of a two-step write before raising. Host limits to design within: 64 `kv`
   and 64 `db` ops per invocation, 8 KiB per text column, 10,000 `kv` keys per community.
+- **A bundle that moves money must be replay-safe (`waddle_sdk.event_dedupe`).** The pipeline is
+  at-least-once. The host makes `economy.wager`/`transfer` idempotent per event, but your own `kv`
+  side effects (a pot credit, a counter, a cap) are not -- a redelivered event double-credits them.
+  The money flow runs in `transform` (see the stage-split rule below), which reads
+  `event.payload["message_id"]` (the platform's own id: chatter-proof and identical on every
+  redelivery; the WIT `context.message-id` is empty today and is NOT used) and derives
+  `event_id_from_payload(payload, platform=...)` (raises `EventIdError` when
+  absent -- fail loud, move nothing), drops the event silently if `is_fresh(event.occurred_at)` is
+  False (too old to dedupe; a missing/garbled stamp raises `EventIdError` too), skips silently if
+  `already_seen(...)` (a read-only courtesy, NOT the guard), and calls `claim(...)` AFTER its cheap
+  per-actor gates (the atomic `increment` cooldown, funds) and BEFORE the first mutation
+  (at-most-once: a crash loses one play, it can never repeat one). `claim` is ONE atomic
+  `community_kv.increment("<ns>.seen.<digest>", 1, SEEN_TTL_SECONDS)`: `1` = first delivery,
+  anything more = skip. It is race-free (no get-then-set window) and needs no cooldown to be safe;
+  the marker's TTL is the dedupe horizon and the age fence guarantees no event outlives it.
+  Per-event keys are only sustainable because the `kv` host reclaims a key's quota unit when its
+  TTL lapses (`core/bundle_host_kv`, commit `4ad3eaae` -- before it every TTL'd key leaked a unit
+  and a marker per event killed the bundle after 10,000 events). Claim AFTER the cooldown so an
+  actor on cooldown cannot mint markers; a full quota raises (fail closed). See
+  `bundles/python/jackpot`, `steal`, `defuse`.
+- **`economy`/`identity`/`reputation`/`ai` run in `transform`; `dispatch` only relays.** The host
+  serves those four capabilities to the process stage only (`core/svc_process`); the action stage
+  (`core/svc_action`) has no handler for them and is the only one that serves `relay`. A bundle that
+  settles money or resolves an actor inside `dispatch` passes every host-native test against a
+  stage-blind fake and fails on a real host. Do the whole command in `transform` and return the
+  finished reply (`payload = {"channel_id", "text"}`); `dispatch` relays `payload["text"]`. The
+  process stage cannot `relay`, so a failure notice travels as a `failure` marker on the reply
+  event: `dispatch` relays the text, then raises. Test against `waddle_sdk.testing.StageGuard`
+  (`process_only` / `action_only` wrap the fakes, `two_stage` drives the real split, `assert_clean`
+  fails a test that crossed it); `scripts/ci/tests/test_bundle_stage_gate.py` fails any bundle
+  whose `dispatch` can reach such a call. See `bundles/python/blackjack`, `steal`, `prediction`.
+- **Outcome randomness is `random.SystemRandom()`, never the module-level `random`.**
+  componentize-py freezes the interpreter state into the build snapshot, and the module-level
+  `random` functions share one Mersenne Twister seeded at import (= build time): every instance
+  replays the same stream, so a "random" win, roll or pick is fixed and predictable. Keep a module
+  `_RNG = random.SystemRandom()` (no state: it reads OS entropy / `wasi:random` per call) and draw
+  from it; patch `app._RNG.<fn>` in tests. A hash of public inputs (the clock, a counter) is no
+  substitute -- whoever picks the moment predicts it.
+  `scripts/ci/tests/test_bundle_rng_gate.py` fails a game bundle that uses module-level `random`.
+- **A bundle that relays an LLM completion must guard its lead
+  (`waddle_sdk.safe_text.guard_leading_command`).** A reply that STARTS with `/`, `.` (Twitch/IRC
+  bot commands) or `!` (re-triggers other bots) is executed, not read. After `sanitize_user_text`
+  and after any emoji/label you put in front of the completion, pass the FINAL reply through
+  `guard_leading_command`; a bundle whose reply always sits behind a fixed visible prefix may be
+  allow-listed instead. `scripts/ci/tests/test_ai_output_lead_gate.py` fails any `ai.generate`
+  bundle that neither calls the guard nor is allow-listed, and drives each with a hostile
+  completion.
 
-## 5. Worked Examples
+## 5. Echoing User Text: `waddle_sdk.safe_text`
+
+Any text a bundle puts into a reply that did not come from the bundle's own source is
+**untrusted** — a chatter's argument, the caller's `event.actor` name, a value read back out of
+`kv`/`db` (a mod-set blurb, a stored quote), an HTTP/LLM response. The host's egress pass acts on
+two kinds of markup inside it, so unsanitized text is an injection vector:
+
+| Markup in untrusted text | What the host does | Effect |
+|---|---|---|
+| `{user:<token>}` | `core/egress_detokenizer` resolves it to a display name | forge a mention of any user, probe which tokens exist |
+| `@everyone` `@here` `<@id>` `<@&role>` `<#channel>` `<!here>` `@name` | the platform turns it into a ping (the Discord send path sets no `allowed_mentions`) | mass-ping / harass |
+
+```python
+from waddle_sdk.safe_text import sanitize_user_text
+
+reply = f"{sanitize_user_text(username)} says: {sanitize_user_text(rest)}"
+```
+
+- **Wrap every untrusted interpolation, LAST** — after translate/reverse/case-mangling/LLM
+  post-processing, immediately before it enters the reply string. A later transform can rebuild
+  markup the sanitizer removed.
+- **Never wrap bundle-emitted text.** A `{user:<token>}` placeholder the bundle builds itself for a
+  legitimate mention is trusted; build it separately and concatenate it with already-sanitized text.
+- **Keeping the user's own mentions.** The host replaces a mention the user typed (`@bob`,
+  `<@123>`) with a minted `{user:<token>}` before the bundle sees it; the default sanitizer
+  escapes those too (the reader sees the literal placeholder). To keep them resolving to names,
+  pass the tokens the host minted for this message — and only those:
+  `sanitize_user_text(text, allow_tokens=identity.mention_tokens(event.payload["text"]))`. Never
+  derive `allow_tokens` from LLM, HTTP or stored text. Matching is exact and whole-token: only a
+  complete, unescaped `{user:<token>}` already present in the text stays live (nothing is rebuilt
+  from fragments, nested braces or control-split text). `allow_tokens` takes a list/set/tuple —
+  a bare `str` raises `TypeError` (its characters would become one-character tokens).
+- **Idempotent and cheap** — wrapping twice is harmless; ordinary text, URLs (`@name` inside a link
+  is left alone) and `user@host` come back byte-identical. The link exemption is for a bare
+  `@name` ONLY: `{user:<tok>}` is escaped inside a URL like anywhere else (the egress pass has no
+  URL awareness), mass mentions (`@everyone`/`@here`) are defanged inside one, and a URL never
+  extends across an allow-listed placeholder (its display name can hold `<`, `>` or spaces), so
+  `https://x/{user:tok}/@bob` gets no exemption for the `@bob` after the placeholder.
+  Braces and backslashes are escaped
+  (`\{`, `\}`, `\\`) and the egress pass removes that escaping again, so the reader still sees
+  exactly what was typed; every other change is an invisible zero-width space after a mention
+  sigil (and, only next to an allow-listed mention, between it and a following word/`#`/`>`:
+  the resolved display name is user-controlled and could otherwise complete a ping). Newlines and
+  tabs are seen through — the host strips them from the final Twitch text, so `@<TAB>name` is a
+  mention. A non-`str` raises `TypeError` — handle a missing payload field before sanitizing.
+- **Bundles that must call it** (sweep list, `bundles/python/<name>`):
+  - echo-family — `echo`, `choose`, `vote`, `wheel`, `count`, `dailycounter`, `alias`, `quote`,
+    `birthday`, `remind`, `countdown`, `poll`, `event`, `ticket`, `lfg`, `music`, `weather`
+  - stored-text readers — `about`, `rules`, `announce`, `memories`, `pronouns`, `command`, `lurk`,
+    `shoutout`, `joke`, `dadjoke`, `compliment`, `trivia`
+  - links — `bookmark`, `socials`, `discord`, `donate`, `merch`
+  - caller/target name — `first`, `raffle`, `heist`, `gamble`, `fish`, `coinflip`, `slots`,
+    `roulette`, `rps`, `duel`, `love`, `social`, `greeter`, `inventory`, `loyalty`, `rank`
+  - batch bundles, wrapped — `translate`, `say`, `ask`, `rephrase`, `sentiment`, `summarize`,
+    `tldr`, `define`, `eli5` (model output / typed text), `rate`, `reverse`, `uwu`, `mock`,
+    `clap`, `emojify` (typed text, sanitized AFTER the transform), `steal`, `defuse`, `jackpot`
+    (`event.actor` label: the host-minted `{user:<token>}` is allow-listed, anything else is
+    sanitized). Still to wrap when they land — `giveaway`, `faq`
+  - not needed (no untrusted text reaches the reply) — `advice`, `bot`, `catfact`, `chat`,
+    `cringe`, `death`, `dice`, `dogfact`, `eightball`, `fortune`, `guess`, `hangman`, `hello`,
+    `hype`, `iq`, `label`, `lastseen`, `mood`, `pyping`, `rip`, `roast`, `roll`, `scramble`, `secret`,
+    `ship`, `time`, `uptime`, `waddle`, `winner`; batch bundles that emit only static text, a
+    validated number/sign, or a bundle-built `{user:<token>}` for an exactly-matched single mention
+    — `affirmation`, `fact`, `horoscope`, `riddle`, `numberfact`, `truthordare`, `wouldyourather`,
+    `commands`, `top`, `wordcount`, `kiss`, `pat`, `poke`, `dance`, `pickup`, `motivate`,
+    `vibecheck`, `insult`, `yomama` (wrapping their `{user:<token>}` would print the placeholder
+    literally); `boop`/`hug`/`slap`/`wave`/`highfive` only interpolate a
+    `[A-Za-z0-9_.-]{1,32}`-validated target (wrapping is optional hardening)
+
+See `tests/test_safe_text.py` and `tests/test_safe_text_differential.py`: the oracle is a port of
+the detokenizer grammar, pinned to the real Rust by a digest both sides must reproduce
+(`core/egress_detokenizer/tests/fixtures/sanitizer_parity.txt`; `cargo test -p egress_detokenizer`
+runs the Rust half), and a mutation of any rule (brace escaping, lone-backslash pairing, control
+stripping, allow-list scan, each mention rule) fails it. Change the detokenizer grammar and the
+pin fails until the oracle and the pin are regenerated together.
+
+## 6. Worked Examples
 
 | Command | Grammar exercised |
 |---|---|

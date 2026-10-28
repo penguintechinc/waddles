@@ -19,11 +19,22 @@ For each catalog entry this produces, under `dist/` (relative to CWD):
 per bundle -- same destination filenames as before, just produced generically.
 
 Every Python bundle shares the same SDK entry point (`waddle_sdk._component_entry`,
-PR #382) and the same `-d wit/waddle-bundle -w stage` WIT world -- these are fixed
-conventions, not catalog fields, because they have never varied across a single bundle to
-date; `source_dir` IS a catalog field (added alongside this script) because the bundle
-directory name is not safely derivable from `app_id`/`artifact_path` for every future
-bundle.
+PR #382) -- a fixed convention, not a catalog field, because it has never varied;
+`source_dir` IS a catalog field (added alongside this script) because the bundle directory
+name is not safely derivable from `app_id`/`artifact_path` for every future bundle.
+
+**WIT world (`wit_world`, optional catalog field, default `stage`).** The world is chosen at
+BUILD time -- the executor's runtime linker serves every world family, so it never picks one.
+A bundle built against the default `stage` world has NO `economy`/`ai`/`identity`/
+`reputation`/`overlay`/`streaming` host imports: its SDK facades (`waddle_sdk.economy`, `.ai`,
+`.identity`, `.reputation`) find no binding and degrade or raise at the first call -- the same
+silent-degrade failure mode as the flags saga (PR #608). Those capabilities exist only in
+`world stage-next` (`wit/waddle-bundle/stage.wit`), so a catalog row must say
+`wit_world: stage-next` for a bundle that declares one of their permissions. The world is NOT
+auto-derived from the permissions (explicit beats magic: the built artifact's world is visible
+in the catalog diff), but it IS cross-checked against them: a row whose `hub-manifest.yaml`
+declares a stage-next-only permission while the row resolves to `stage` FAILS the build
+(`resolve_wit_world`), so the foot-gun cannot ship. Every other bundle stays on `stage`.
 
 Fail-loud throughout (general.md/critical-rules.md Fail-Loud Code Paths): a missing
 `source_dir`, a missing source/manifest directory, a componentize-py failure, or zero
@@ -48,7 +59,22 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CATALOG_PATH = REPO_ROOT / "bundles" / "core-bundles.yaml"
 SDK_SRC = REPO_ROOT / "sdk" / "waddle-sdk" / "src"
 WIT_WORLD_DIR = REPO_ROOT / "wit" / "waddle-bundle"
-WIT_WORLD_NAME = "stage"
+WIT_WORLD_STAGE = "stage"
+WIT_WORLD_STAGE_NEXT = "stage-next"
+#: The only worlds a catalog row may name (`wit_world`); `stage-v2` is deliberately absent --
+#: no Python bundle is built against the numeric-scope world yet.
+VALID_WIT_WORLDS = frozenset({WIT_WORLD_STAGE, WIT_WORLD_STAGE_NEXT})
+#: Permission-id prefixes whose host import exists ONLY in `world stage-next`
+#: (`wit/waddle-bundle/stage.wit`: `economy`, `ai`, `identity`, `reputation`, `overlay`,
+#: `streaming-lifecycle`). A manifest declaring any of them needs a stage-next build.
+STAGE_NEXT_PERMISSION_PREFIXES = (
+    "ai.",
+    "economy.",
+    "identity.",
+    "overlay.",
+    "reputation.",
+    "streaming.",
+)
 # Every first-party Python bundle points componentize-py at this same shared SDK entry
 # module (PR #382, fix/python-sdk-two-export-entry) -- a fixed convention, not a per-bundle
 # catalog field, because it has never varied.
@@ -73,6 +99,49 @@ def _load_python_bundles() -> list[dict[str, Any]]:
             "expected at least one (e.g. waddles.core.example.pyping)"
         )
     return python_entries
+
+
+def _permission_ids(manifest: dict[str, Any]) -> list[str]:
+    """Return the permission ids a parsed `hub-manifest.yaml` declares (V2 dicts or bare strings)."""
+    ids: list[str] = []
+    for item in manifest.get("permissions") or []:
+        raw = item.get("id") if isinstance(item, dict) else item
+        if isinstance(raw, str):
+            ids.append(raw)
+    return ids
+
+
+def required_wit_world(permission_ids: list[str]) -> str:
+    """Return the minimum WIT world a bundle declaring `permission_ids` must be built against."""
+    if any(pid.startswith(STAGE_NEXT_PERMISSION_PREFIXES) for pid in permission_ids):
+        return WIT_WORLD_STAGE_NEXT
+    return WIT_WORLD_STAGE
+
+
+def resolve_wit_world(app_id: str, declared: object, permission_ids: list[str]) -> str:
+    """Return the WIT world to build `app_id` against, failing loud on an unsafe declaration.
+
+    `declared` is the catalog row's optional `wit_world` (None -> `stage`). A declaration the
+    manifest's permissions contradict (stage-next-only permission, world `stage`) raises: the
+    component would compile and publish fine, then lose the capability at runtime.
+    """
+    world = WIT_WORLD_STAGE if declared is None else declared
+    if not isinstance(world, str) or world not in VALID_WIT_WORLDS:
+        raise BuildError(
+            f"{app_id}: catalog field wit_world must be one of {sorted(VALID_WIT_WORLDS)}, "
+            f"got {world!r}"
+        )
+    if required_wit_world(permission_ids) == WIT_WORLD_STAGE_NEXT and world != WIT_WORLD_STAGE_NEXT:
+        offending = sorted(
+            pid for pid in permission_ids if pid.startswith(STAGE_NEXT_PERMISSION_PREFIXES)
+        )
+        raise BuildError(
+            f"{app_id}: hub-manifest.yaml declares stage-next-only permission(s) {offending} "
+            f"but the catalog row resolves to wit_world={world!r} -- add "
+            f"`wit_world: {WIT_WORLD_STAGE_NEXT}` to its bundles/core-bundles.yaml entry, "
+            "otherwise the built component has no such host import"
+        )
+    return world
 
 
 def _build_one(entry: dict[str, Any]) -> str:
@@ -119,6 +188,9 @@ def _build_one(entry: dict[str, Any]) -> str:
     if not bundle_manifest.is_file():
         raise BuildError(f"{app_id}: missing manifest file {bundle_manifest}")
 
+    manifest = yaml.safe_load(bundle_manifest.read_text(encoding="utf-8")) or {}
+    wit_world = resolve_wit_world(app_id, entry.get("wit_world"), _permission_ids(manifest))
+
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     out_wasm = DIST_DIR / artifact_path
 
@@ -127,7 +199,7 @@ def _build_one(entry: dict[str, Any]) -> str:
         "-d",
         str(WIT_WORLD_DIR.relative_to(REPO_ROOT)),
         "-w",
-        WIT_WORLD_NAME,
+        wit_world,
         "componentize",
         "-p",
         str(SDK_SRC.relative_to(REPO_ROOT)),

@@ -162,7 +162,7 @@ def test_every_canned_answer_is_reachable_and_emoji_prefixed(
 ) -> None:
     import app
 
-    monkeypatch.setattr(app.random, "choice", lambda _seq: answer)
+    monkeypatch.setattr(app._RNG, "choice", lambda _seq: answer)
     result = _run(transform(_sample_event("!8ball ready?")))
     assert result is not None
     assert result.payload["text"] == f"\U0001f3b1 {answer}"

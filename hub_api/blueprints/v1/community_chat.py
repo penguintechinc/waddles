@@ -51,8 +51,8 @@ FEATURE_COMMUNITY_CHAT = "waddles.community.chat"
 
 
 @chat_bp.route("/<int:community_id>/chat/history", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.chat:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.chat:read")  # type: ignore[misc]
 @validate_response(ChatHistoryResponse)
 async def chat_history(community_id: int) -> ChatHistoryResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/chat/history` -- paginated message history."""
@@ -75,8 +75,8 @@ async def chat_history(community_id: int) -> ChatHistoryResponse | tuple[dict[st
 
 
 @chat_bp.route("/<int:community_id>/chat/channels", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("community.chat:read")  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.chat:read")  # type: ignore[misc]
 @validate_response(ChatChannelsResponse)
 async def chat_channels(community_id: int) -> ChatChannelsResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/chat/channels` -- distinct channels + activity."""

@@ -210,8 +210,8 @@ class ShoutoutHistoryResponse:
 
 
 @bot_bp.route("/<int:community_id>/shoutout/config", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SHOUTOUT_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SHOUTOUT_READ)  # type: ignore[misc]
 @validate_response(ShoutoutConfigResponse)
 async def get_shoutout_config(community_id: int) -> Any:
     """`api.js` `getShoutoutConfig` -- `GET /api/v1/admin/:communityId/shoutout/config`."""
@@ -225,8 +225,8 @@ async def get_shoutout_config(community_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/shoutout/config", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SHOUTOUT_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SHOUTOUT_WRITE)  # type: ignore[misc]
 @validate_request(ShoutoutConfigRequest)
 @validate_response(ShoutoutConfigResponse)
 async def update_shoutout_config(data: ShoutoutConfigRequest, community_id: int) -> Any:
@@ -253,8 +253,8 @@ async def update_shoutout_config(data: ShoutoutConfigRequest, community_id: int)
 
 
 @bot_bp.route("/<int:community_id>/shoutout/creators", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SHOUTOUT_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SHOUTOUT_READ)  # type: ignore[misc]
 @validate_response(ShoutoutCreatorsResponse)
 async def get_shoutout_creators(community_id: int) -> Any:
     """`api.js` `getShoutoutCreators` -- `GET /api/v1/admin/:communityId/shoutout/creators`."""
@@ -266,8 +266,8 @@ async def get_shoutout_creators(community_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/shoutout/creators", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SHOUTOUT_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SHOUTOUT_WRITE)  # type: ignore[misc]
 @validate_request(ShoutoutCreatorRequest)
 async def add_shoutout_creator(data: ShoutoutCreatorRequest, community_id: int) -> Any:
     """`api.js` `addShoutoutCreator` -- `POST /api/v1/admin/:communityId/shoutout/creators`.
@@ -303,8 +303,8 @@ async def add_shoutout_creator(data: ShoutoutCreatorRequest, community_id: int) 
 
 
 @bot_bp.route("/<int:community_id>/shoutout/creators/<int:creator_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SHOUTOUT_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SHOUTOUT_WRITE)  # type: ignore[misc]
 @validate_response(ShoutoutMessageResponse)
 async def remove_shoutout_creator(community_id: int, creator_id: int) -> Any:
     """`api.js` `removeShoutoutCreator` -- `DELETE .../shoutout/creators/:creatorId`."""
@@ -320,8 +320,8 @@ async def remove_shoutout_creator(community_id: int, creator_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/shoutout/history", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SHOUTOUT_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SHOUTOUT_READ)  # type: ignore[misc]
 @validate_response(ShoutoutHistoryResponse)
 async def get_shoutout_history(community_id: int) -> Any:
     """`api.js` `getShoutoutHistory` -- `GET /api/v1/admin/:communityId/shoutout/history`."""
@@ -395,8 +395,8 @@ def _chatter_dto(config: dict[str, Any]) -> AIChatterConfigDTO:
 
 
 @bot_bp.route("/<int:community_id>/ai-chatter/config", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_AI_CHATTER_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_AI_CHATTER_READ)  # type: ignore[misc]
 @validate_response(AIChatterConfigResponse)
 async def get_ai_chatter_config(community_id: int) -> Any:
     """`api.js` `getAIChatterConfig` -- proxy passthrough, see module docstring."""
@@ -408,8 +408,8 @@ async def get_ai_chatter_config(community_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/ai-chatter/config", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_AI_CHATTER_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_AI_CHATTER_WRITE)  # type: ignore[misc]
 @validate_request(AIChatterConfigRequest)
 @validate_response(AIChatterConfigResponse)
 async def update_ai_chatter_config(data: AIChatterConfigRequest, community_id: int) -> Any:
@@ -592,8 +592,8 @@ async def _check_optional_community(community_id: int | None) -> tuple[dict[str,
 
 
 @bot_bp.route("/ai-knowledge/sources", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_AI_KNOWLEDGE_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_AI_KNOWLEDGE_READ)  # type: ignore[misc]
 @validate_response(KnowledgeSourcesResponse)
 async def list_knowledge_sources() -> Any:
     """`aiKnowledgeController.listSources` -- `GET .../ai-knowledge/sources?communityId=`."""
@@ -606,8 +606,8 @@ async def list_knowledge_sources() -> Any:
 
 
 @bot_bp.route("/ai-knowledge/sources", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[misc]
 @validate_request(KnowledgeSourceCreateRequest)
 @validate_response(KnowledgeSourceResponse, 201)
 async def create_knowledge_source(data: KnowledgeSourceCreateRequest) -> Any:
@@ -652,8 +652,8 @@ async def _index_source_background(dal: Any, source_id: int) -> None:
 
 
 @bot_bp.route("/ai-knowledge/sources/<int:source_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[misc]
 @validate_request(KnowledgeSourceUpdateRequest)
 @validate_response(KnowledgeSourceResponse)
 async def update_knowledge_source(data: KnowledgeSourceUpdateRequest, source_id: int) -> Any:
@@ -674,8 +674,8 @@ async def update_knowledge_source(data: KnowledgeSourceUpdateRequest, source_id:
 
 
 @bot_bp.route("/ai-knowledge/sources/<int:source_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
 async def delete_knowledge_source(source_id: int) -> Any:
     """`aiKnowledgeController.deleteSource` -- `DELETE /api/v1/admin/ai-knowledge/sources/:id`."""
@@ -687,8 +687,8 @@ async def delete_knowledge_source(source_id: int) -> Any:
 
 
 @bot_bp.route("/ai-knowledge/sources/<int:source_id>/reindex", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[misc]
 @validate_response(ReindexResponse)
 async def reindex_source(source_id: int) -> Any:
     """`aiKnowledgeController.reindexSource` -- responds immediately, indexes async."""
@@ -710,8 +710,8 @@ def _suggestion_dto(suggestion: bot_ai_knowledge.TicketSuggestion) -> TicketSugg
 
 
 @bot_bp.route("/ai-knowledge/search", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_AI_KNOWLEDGE_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_AI_KNOWLEDGE_READ)  # type: ignore[misc]
 @validate_request(KnowledgeSearchRequest)
 @validate_response(KnowledgeSearchResponse)
 async def search_knowledge_base(data: KnowledgeSearchRequest) -> Any:
@@ -752,8 +752,8 @@ async def search_knowledge_base(data: KnowledgeSearchRequest) -> Any:
 
 
 @bot_bp.route("/ai-knowledge/suggest", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[misc]
 @validate_request(SuggestRequest)
 @validate_response(SuggestResponse, 200)
 @validate_response(SuggestResponse, 201)
@@ -780,8 +780,8 @@ async def suggest_for_ticket(data: SuggestRequest) -> Any:
 
 
 @bot_bp.route("/ai-knowledge/suggestions/<int:suggestion_id>/feedback", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[misc]
 @validate_request(SuggestionFeedbackRequest)
 @validate_response(SuggestionFeedbackResponse)
 async def submit_suggestion_feedback(data: SuggestionFeedbackRequest, suggestion_id: int) -> Any:
@@ -922,8 +922,8 @@ class CommandLogResponse:
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_response(ServersResponse)
 async def list_rcon_servers(community_id: int) -> Any:
     """`api.js` `rconApi.listServers` -- `GET .../:communityId/rcon/servers` (admin view)."""
@@ -935,8 +935,8 @@ async def list_rcon_servers(community_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(ServerCreateRequest)
 @validate_response(ServerResponse, 201)
 async def create_rcon_server(data: ServerCreateRequest, community_id: int) -> Any:
@@ -968,8 +968,8 @@ async def create_rcon_server(data: ServerCreateRequest, community_id: int) -> An
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(ServerUpdateRequest)
 @validate_response(ServerResponse)
 async def update_rcon_server(data: ServerUpdateRequest, community_id: int, server_id: int) -> Any:
@@ -1003,8 +1003,8 @@ async def update_rcon_server(data: ServerUpdateRequest, community_id: int, serve
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>", methods=["DELETE"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def delete_rcon_server(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.deleteServer` -- `DELETE .../:communityId/rcon/servers/:serverId`."""
@@ -1019,8 +1019,8 @@ async def delete_rcon_server(community_id: int, server_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/test", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(TestConnectionRequest)
 async def test_rcon_connection(
     data: TestConnectionRequest, community_id: int, server_id: int
@@ -1038,8 +1038,8 @@ async def test_rcon_connection(
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/command", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(ExecuteCommandRequest)
 async def execute_rcon_command(
     data: ExecuteCommandRequest, community_id: int, server_id: int
@@ -1057,8 +1057,8 @@ async def execute_rcon_command(
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/kick", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(KickPlayerRequest)
 async def kick_rcon_player(data: KickPlayerRequest, community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.kickPlayer` -- proxy passthrough, see module docstring."""
@@ -1079,8 +1079,8 @@ async def kick_rcon_player(data: KickPlayerRequest, community_id: int, server_id
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/ban", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(BanPlayerRequest)
 async def ban_rcon_player(data: BanPlayerRequest, community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.banPlayer` -- proxy passthrough, see module docstring."""
@@ -1102,8 +1102,8 @@ async def ban_rcon_player(data: BanPlayerRequest, community_id: int, server_id: 
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/channels", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 async def get_rcon_channels(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getChannels` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
@@ -1113,8 +1113,8 @@ async def get_rcon_channels(community_id: int, server_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/move", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(MoveUserRequest)
 async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.moveUser` -- proxy passthrough, see module docstring."""
@@ -1130,8 +1130,8 @@ async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: in
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/message", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(SendMessageRequest)
 async def send_rcon_message(data: SendMessageRequest, community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.sendMessage` -- proxy passthrough, see module docstring."""
@@ -1152,8 +1152,8 @@ async def send_rcon_message(data: SendMessageRequest, community_id: int, server_
 
 
 @bot_bp.route("/<int:community_id>/rcon/log", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_response(CommandLogResponse)
 async def get_rcon_command_log(community_id: int) -> Any:
     """`api.js` `rconApi.getCommandLog` -- `GET /api/v1/admin/:communityId/rcon/log`."""
@@ -1175,8 +1175,8 @@ async def get_rcon_command_log(community_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/policy", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 async def get_rcon_access_policy(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getAccessPolicy` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
@@ -1186,8 +1186,8 @@ async def get_rcon_access_policy(community_id: int, server_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/policy", methods=["PUT"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 async def update_rcon_access_policy(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.updateAccessPolicy` -- proxy passthrough, see module docstring.
 
@@ -1203,8 +1203,8 @@ async def update_rcon_access_policy(community_id: int, server_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/enforce", methods=["POST"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 async def trigger_rcon_enforcement(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.triggerEnforcement` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
@@ -1214,8 +1214,8 @@ async def trigger_rcon_enforcement(community_id: int, server_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/access-log", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 async def get_rcon_access_log(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getAccessLog` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
@@ -1232,8 +1232,8 @@ async def get_rcon_access_log(community_id: int, server_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/rcon/info", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 @validate_response(ServersMemberResponse)
 async def list_rcon_info(community_id: int) -> Any:
     """`api.js` `rconApi.listInfo` -- `GET .../rcon/info` (member view, reuses `listServers`)."""
@@ -1245,8 +1245,8 @@ async def list_rcon_info(community_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/rcon/info/<int:server_id>/status", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getServerStatus` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
@@ -1256,8 +1256,8 @@ async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
 
 
 @bot_bp.route("/<int:community_id>/rcon/info/<int:server_id>/players", methods=["GET"])
-@tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope(_SERVER_MANAGER_READ)  # type: ignore[untyped-decorator]
+@tenant_middleware  # type: ignore[misc]
+@require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 async def get_rcon_player_list(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getPlayerList` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)

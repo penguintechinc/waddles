@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-sentiment"
+version = "1.0.0"
+description = "`!sentiment <text>` -> AI: classify the mood of the caller's short text via the ai.generate host capability."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

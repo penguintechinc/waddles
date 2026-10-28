@@ -46,7 +46,9 @@ SYSTEM_BUNDLES = frozenset({"pyping"})
 
 FLAG_KEY_RE = re.compile(r'^FLAG_KEY = "waddles\.command-[\w-]+"[ \t]*\n', re.M)
 GUARD_RE = re.compile(
-    r"^[ \t]+if not await feature_enabled\(FLAG_KEY, default=False\):[ \t]*\n[ \t]+return None[ \t]*\n",
+    r"^[ \t]+if not await feature_enabled\(FLAG_KEY, default=False\):[ \t]*\n"
+    r"(?:[ \t]+log\.debug\(\"[\w.]+\"\)[ \t]*\n)?"
+    r"[ \t]+return None[ \t]*\n",
     re.M,
 )
 IMPORT_LINE = "from waddle_sdk.flask_core.feature_flags import feature_enabled\n"
@@ -296,7 +298,7 @@ def _bump(version: str) -> str:
 
 
 FLAGS_READ_YAML_RE = re.compile(
-    r"^[ \t]*- id: flags\.read[ \t]*\n(?:[ \t]+justification:.*\n)?", re.M
+    r"^[ \t]*- id: [\"']?flags\.read[\"']?[ \t]*\n(?:[ \t]+justification:.*\n)?", re.M
 )
 
 
@@ -308,7 +310,7 @@ def _drop_flags_read(text: str) -> str:
     return new
 
 
-def _edit_manifests(name: str, do_drop: bool, result: BundleResult) -> None:
+def _edit_manifests(name: str, do_drop: bool, result: BundleResult, bump: bool = True) -> None:
     bdir = BUNDLES_DIR / name
     bundle_yaml = bdir / "bundle.yaml"
     hub = bdir / "hub-manifest.yaml"
@@ -327,7 +329,7 @@ def _edit_manifests(name: str, do_drop: bool, result: BundleResult) -> None:
     if len(set(vers.values())) != 1:
         raise ValueError(f"version drift across files: {vers}")
     old = next(iter(vers.values()))
-    new = _bump(old)
+    new = _bump(old) if bump else old
 
     note = (
         f"# {new}: activation-gated only -- removed the in-bundle waddles.command-{name} "
@@ -335,28 +337,31 @@ def _edit_manifests(name: str, do_drop: bool, result: BundleResult) -> None:
     )
     writes: list[tuple[Path, str]] = []
     by = _read(bundle_yaml)
-    by = re.sub(r"^version: " + re.escape(old) + r"[ \t]*$", note + f"version: {new}", by, flags=re.M)
-    by = re.sub(r'^(  tested_with: )"' + re.escape(old) + '"', rf'\1"{new}"', by, flags=re.M)
-    by = re.sub(r'^(  min_version: )"' + re.escape(old) + '"', rf'\1"{new}"', by, flags=re.M)
+    if bump:
+        by = re.sub(r"^version: " + re.escape(old) + r"[ \t]*$", note + f"version: {new}", by, flags=re.M)
+        by = re.sub(r'^(  tested_with: )"' + re.escape(old) + '"', rf'\1"{new}"', by, flags=re.M)
+        by = re.sub(r'^(  min_version: )"' + re.escape(old) + '"', rf'\1"{new}"', by, flags=re.M)
     if do_drop:
         by = _drop_flags_read(by)
     writes.append((bundle_yaml, by))
 
     hb = _read(hub)
-    hb = re.sub(r"^version: " + re.escape(old) + r"[ \t]*$", f"version: {new}", hb, flags=re.M)
+    if bump:
+        hb = re.sub(r"^version: " + re.escape(old) + r"[ \t]*$", f"version: {new}", hb, flags=re.M)
     if do_drop:
         hb = _drop_flags_read(hb)
     writes.append((hub, hb))
 
     pp = _read(pyproj)
-    pp = pp.replace(f'version = "{old}"', f'version = "{new}"', 1)
-    writes.append((pyproj, pp))
+    if bump:
+        pp = pp.replace(f'version = "{old}"', f'version = "{new}"', 1)
+        writes.append((pyproj, pp))
 
     cat = _read(CATALOG)
     row = re.compile(
         r"(- app_id: waddles\.core\.example\." + re.escape(name) + r"\n    version: )\"([^\"]+)\""
     )
-    found = row.findall(cat)
+    found = row.findall(cat) if bump else []
     if len(found) == 1 and found[0][1] != old:
         raise ValueError(f"core-bundles.yaml row for {name} is @ {found[0][1]}, files say {old}")
     if len(found) > 1:
@@ -367,7 +372,9 @@ def _edit_manifests(name: str, do_drop: bool, result: BundleResult) -> None:
         result.notes.append("not in core-bundles.yaml (build-only/inert)")
     for wpath, wtext in writes:
         wpath.write_text(wtext, encoding="utf-8")
-    result.notes.append(f"{old}->{new}{' (flags.read dropped)' if do_drop else ''}")
+    result.notes.append(
+        f"{old}->{new}{' (flags.read dropped)' if do_drop else ''}{'' if bump else ' (no bump)'}"
+    )
 
 
 README_FLAG_ROW_RE = re.compile(r"^\| Flag \| `waddles\.command-[\w-]+` \(default OFF\) \|[ \t]*\n", re.M)
@@ -423,7 +430,7 @@ def _edit_readme(name: str, do_drop: bool, result: BundleResult) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def apply_bundle(name: str, drop_flags: bool) -> BundleResult:
+def apply_bundle(name: str, drop_flags: bool, bump: bool = True) -> BundleResult:
     """Edit one guarded bundle in place; any failure leaves it classified `skipped`."""
     result = classify(name)
     if result.state != "guarded":
@@ -438,7 +445,7 @@ def apply_bundle(name: str, drop_flags: bool) -> BundleResult:
             result.notes.append("kept flags.read (still reads license tier)")
         new = _prose(stripped, do_drop)
         ast.parse(new)  # still valid Python
-        _edit_manifests(name, do_drop, result)
+        _edit_manifests(name, do_drop, result, bump)
     except (ValueError, SyntaxError) as exc:
         return BundleResult(name, "skipped", f"apply failed ({exc}); manual handling")
     app.write_text(new, encoding="utf-8")
@@ -492,6 +499,7 @@ def _fix_test_imports(name: str) -> None:
         t2 = re.sub(r"^[ \t]+FLAG_KEY,[ \t]*\n", "", t, flags=re.M)
         t2 = re.sub(r"^from app import FLAG_KEY[ \t]*\n", "", t2, flags=re.M)
         t2 = re.sub(r"(from app import [^\n(]*?), FLAG_KEY\b", r"\1", t2)
+        t2 = re.sub(r"(from app import )FLAG_KEY, ", r"\1", t2)
         if t2 != t:
             tpath.write_text(t2, encoding="utf-8")
 
@@ -554,6 +562,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--apply", action="store_true", help="edit the guarded bundles in place")
     ap.add_argument("--drop-flags-read", action="store_true", help="also drop the flags.read permission")
+    ap.add_argument(
+        "--no-bump",
+        action="store_true",
+        help="keep the version (for bundles never published/seeded; skips the catalog row too)",
+    )
     ap.add_argument("--prune-tests", action="store_true", help="delete obsolete flag-off tests (needs --apply first)")
     ap.add_argument("--only", default="", help="comma-separated bundle names")
     args = ap.parse_args()
@@ -569,7 +582,7 @@ def main() -> int:
 
     out: list[BundleResult] = []
     if args.apply:
-        out = [apply_bundle(r.name, args.drop_flags_read) for r in results if r.state == "guarded"]
+        out = [apply_bundle(r.name, args.drop_flags_read, not args.no_bump) for r in results if r.state == "guarded"]
         print(f"\napplied: {sum(r.state == 'edited' for r in out)} edited, "
               f"{sum(r.state == 'skipped' for r in out)} skipped (of {len(out)} guarded)")
     if args.prune_tests:

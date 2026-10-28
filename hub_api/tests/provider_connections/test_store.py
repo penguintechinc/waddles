@@ -187,3 +187,411 @@ class TestDecoding:
 
     def test_unused_metadata_import_is_the_mirror_builder(self) -> None:
         assert isinstance(build_pc_metadata(), MetaData)
+
+
+# --------------------------------------------------------------------------
+# Static-secret kinds (migration 0064): sealing, secrecy, lifecycle
+# --------------------------------------------------------------------------
+
+import json  # noqa: E402
+from uuid import UUID  # noqa: E402
+
+from sqlalchemy import CheckConstraint, event  # noqa: E402
+
+from services.platform_integrations_crypto import PlatformCredentialCryptoError  # noqa: E402
+from services.provider_connections.errors import (  # noqa: E402
+    InvalidConnectionInput,
+    StaticScopeRequired,
+    UnknownProvider,
+)
+from services.provider_connections.kinds import ConnectionKind  # noqa: E402
+from services.provider_connections.vault import PlatformKeyVault  # noqa: E402
+from tests.provider_connections.support import (  # noqa: E402
+    STATIC_BEARER,
+    STATIC_URL,
+    create_static,
+    open_row,
+    row_aad,
+    set_column,
+)
+
+AWS_BODY = {
+    "provider": "aws_lambda",
+    "scheme": 4,
+    "document": {"access_key_id": "AKIAEXAMPLE", "secret_access_key": "wJalrEXAMPLEKEY"},
+    "metadata": {"region": "us-east-1", "function": "waddles-hook"},
+}
+GCP_BODY = {
+    "provider": "gcp_function",
+    "scheme": 5,
+    "document": {"client_email": "sa@p.iam.gserviceaccount.com", "private_key": "PEMBODY"},
+    "metadata": {"project": "my-project-1", "region": "us-central1", "function": "hook"},
+}
+
+
+def _meta(row: dict[str, Any]) -> dict[str, Any]:
+    """A raw row's ``resource_metadata`` (sqlite hands the JSON column back as text)."""
+    value = row["resource_metadata"]
+    return json.loads(value) if isinstance(value, str) else dict(value)
+
+
+def _kw(body: dict[str, Any]) -> dict[str, Any]:
+    return {k: body[k] for k in ("provider", "scheme", "document", "metadata")}
+
+
+class TestStaticCreate:
+    async def test_create_static_connection_seals_secret_with_row_bound_aad(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        view = await create_static(pc_static_service, pc_db)
+        (row,) = await raw_rows(pc_db, "platform_connections")
+        whole = json.dumps({k: str(v) for k, v in row.items()})
+        assert STATIC_BEARER not in whole  # not even in the row's text form
+        assert row["sealed_secret"] != json.dumps({"token": STATIC_BEARER})
+        assert row["access_token"] is None and row["refresh_token"] is None
+        assert (row["connection_kind"], row["seal_version"]) == (2, 1)
+        assert row["platform"] == row["resource_type"] == "external_http"
+        assert (
+            row["resource_id"]
+            == str(UUID(row["public_id"]))
+            == str(view.binding.connection.public_id)
+        )
+        assert json.loads(open_row(row, "sealed_secret")) == {"token": STATIC_BEARER}
+        # non-secret target facts only
+        assert _meta(row)["url"] == STATIC_URL
+        assert _meta(row)["secret_scheme"] == 1
+        assert STATIC_BEARER not in json.dumps(_meta(row))
+        assert view.usable and view.capabilities == ["dispatch"]
+        assert view.binding.connection.connection_kind == int(ConnectionKind.EXTERNAL_HTTP)
+
+    async def test_the_ciphertext_opens_only_under_its_own_row_identity(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        await create_static(pc_static_service, pc_db, metadata={"url": "https://a.example.com"})
+        await create_static(pc_static_service, pc_db, metadata={"url": "https://b.example.com"})
+        first, second = await raw_rows(pc_db, "platform_connections")
+        vault = PlatformKeyVault()
+        with pytest.raises(Exception) as swapped:  # noqa: PT011 - VaultCorrupt, asserted below
+            vault.open(first["sealed_secret"], aad=row_aad(second), seal_version=1)
+        assert type(swapped.value).__name__ == "VaultCorrupt"
+        # and a stripped (no-AAD) open fails too: the row-bound key is domain-separated
+        with pytest.raises(PlatformCredentialCryptoError):
+            from services.platform_integrations_crypto import decrypt_value
+
+            decrypt_value(first["sealed_secret"])
+
+    @pytest.mark.parametrize("body", [AWS_BODY, GCP_BODY], ids=["aws_lambda", "gcp_function"])
+    async def test_aws_and_gcp_kinds_store_their_target_and_seal_their_key(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any, body: dict[str, Any]
+    ) -> None:
+        view = await create_static(pc_static_service, pc_db, **_kw(body))
+        (row,) = await raw_rows(pc_db, "platform_connections")
+        kind = {"aws_lambda": 3, "gcp_function": 4}[body["provider"]]
+        assert row["connection_kind"] == kind == view.binding.connection.connection_kind
+        assert json.loads(open_row(row, "sealed_secret")) == body["document"]
+        for key, value in body["metadata"].items():
+            assert _meta(row)[key] == value
+        for secret in body["document"].values():
+            assert secret not in json.dumps(
+                {k: str(v) for k, v in row.items() if k != "sealed_secret"}
+            )
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"provider": "nope"}, None),
+            ({"provider": "twitch"}, "OAuth"),
+            ({"scheme": 99}, "unknown secret scheme"),
+            ({"scheme": 4}, "not supported"),
+            ({"document": {"token": "x", "extra": "y"}}, "unknown"),
+            ({"document": {}}, "missing"),
+            ({"metadata": {"url": "http://x.example"}}, "https"),
+            ({"metadata": {"url": "https://10.0.0.1/x"}}, "private"),
+            ({"metadata": {"url": "https://ok.example\n"}}, "format"),
+            ({"metadata": {}}, "required"),
+            ({"metadata": {"url": STATIC_URL, "extra": "x"}}, "unknown"),
+        ],
+    )
+    async def test_bad_input_is_refused_and_nothing_is_stored(
+        self,
+        pc_static_service: ProviderConnectionService,
+        pc_db: Any,
+        overrides: dict[str, Any],
+        message: str | None,
+    ) -> None:
+        expected: type[Exception] = UnknownProvider if message is None else InvalidConnectionInput
+        with pytest.raises(expected) as info:
+            await create_static(pc_static_service, pc_db, **overrides)
+        if message is not None:
+            assert message in info.value.args[0]
+        assert STATIC_BEARER not in str(info.value)
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    async def test_a_foreign_community_is_not_found_and_stores_nothing(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        with pytest.raises(ConnectionNotFound):
+            await create_static(
+                pc_static_service, pc_db, community_id=pc_db.seed.other_community_id
+            )
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    async def test_an_oauth_create_refuses_a_static_provider(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        with pytest.raises(InvalidConnectionInput, match="secret document"):
+            await pc_static_service.create(
+                tenant_id=pc_db.seed.tenant_id,
+                community_id=pc_db.seed.community_id,
+                actor_user_id=None,
+                provider="external_http",
+                access_token="tok",
+                refresh_token=None,
+                metadata={"url": STATIC_URL},
+                enabled=True,
+            )
+        assert pc_static_service.provider_kind("external_http") is ConnectionKind.EXTERNAL_HTTP
+        assert pc_static_service.provider_kind("twitch") is ConnectionKind.PLATFORM_OAUTH
+        with pytest.raises(UnknownProvider):
+            pc_static_service.provider_kind("nope")
+
+
+class TestStaticSecrecy:
+    async def test_static_connection_secret_never_in_admin_views_or_sql(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        view = await create_static(pc_static_service, pc_db)
+        cid = view.binding.connection.id
+        statements: list[str] = []
+
+        def capture(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+            statements.append(statement)
+
+        engine = pc_db.install_dal.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            scope = {"tenant_id": pc_db.seed.tenant_id, "community_id": pc_db.seed.community_id}
+            listed = await pc_static_service.list(**scope)
+            got = await pc_static_service.get(connection_id=cid, **scope)
+            await pc_static_service.update(
+                connection_id=cid,
+                actor_user_id=1,
+                enabled=False,
+                metadata=None,
+                access_token=None,
+                refresh_token=None,
+                **scope,
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+        assert statements  # the scan below must examine something
+        for sql in statements:
+            assert "sealed_secret" not in sql, sql
+        for shown in (view, got, listed[0]):
+            assert STATIC_BEARER not in repr(shown)
+        assert STATIC_BEARER not in repr(view.binding.connection)
+
+    def test_sealed_secrets_repr_hides_the_static_ciphertext(self) -> None:
+        sealed = store.SealedSecrets(
+            access_token=None, refresh_token=None, seal_version=1, sealed_secret="CIPHERTEXT-S"
+        )
+        assert "CIPHERTEXT" not in repr(sealed)
+
+
+class TestStaticLifecycle:
+    async def test_toggle_works_but_editing_the_link_is_refused(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        view = await create_static(pc_static_service, pc_db)
+        scope = {"tenant_id": pc_db.seed.tenant_id, "community_id": pc_db.seed.community_id}
+        cid = view.binding.connection.id
+        off = await pc_static_service.update(
+            connection_id=cid,
+            actor_user_id=1,
+            enabled=False,
+            metadata=None,
+            access_token=None,
+            refresh_token=None,
+            **scope,
+        )
+        assert off.binding.grant.enabled is False
+        for change in ({"metadata": {"url": "https://other.example.com"}}, {"access_token": "x"}):
+            args = {"enabled": None, "metadata": None, "access_token": None, "refresh_token": None}
+            args.update(change)
+            with pytest.raises(InvalidConnectionInput, match="static-secret"):
+                await pc_static_service.update(connection_id=cid, actor_user_id=1, **args, **scope)
+        (row,) = await raw_rows(pc_db, "platform_connections")
+        assert _meta(row)["url"] == STATIC_URL  # untouched
+
+    async def test_resolve_opens_a_static_row_through_its_own_branch(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        view = await create_static(pc_static_service, pc_db)
+        with pytest.raises(StaticScopeRequired):  # fail-closed by default
+            await pc_static_service.resolve(
+                community_id=pc_db.seed.community_id, connection_id=view.binding.connection.id
+            )
+        resolved = await pc_static_service.resolve(
+            community_id=pc_db.seed.community_id,
+            connection_id=view.binding.connection.id,
+            static_allowed=True,
+        )
+        assert resolved.access_token is None and resolved.kind == 2
+        assert resolved.secret_fields == {"token": STATIC_BEARER}
+        assert STATIC_BEARER not in repr(resolved)  # fields are excluded from repr
+
+    async def test_delete_purges_the_sealed_secret(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        view = await create_static(pc_static_service, pc_db)
+        assert await pc_static_service.delete(
+            tenant_id=pc_db.seed.tenant_id,
+            community_id=pc_db.seed.community_id,
+            connection_id=view.binding.connection.id,
+        )
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    async def test_the_data_plane_list_carries_target_facts_and_never_the_secret(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        await create_static(pc_static_service, pc_db)
+        page = await pc_static_service.list_for_dataplane(
+            provider="external_http", capability="dispatch", after=0, limit=10
+        )
+        (item,) = page.items
+        assert item.metadata == {"url": STATIC_URL, "secret_scheme": 1}
+        assert item.resource_type == "external_http" and item.capabilities == ["dispatch"]
+        assert STATIC_BEARER not in repr(item)
+
+    async def test_two_connections_to_the_same_url_are_distinct_rows(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        await create_static(pc_static_service, pc_db)
+        await create_static(pc_static_service, pc_db)
+        rows = await raw_rows(pc_db, "platform_connections")
+        assert len({r["public_id"] for r in rows}) == 2
+
+
+class TestStaticStore:
+    async def test_an_oauth_insert_defaults_to_kind_1_and_reads_it_back(
+        self, pc_service: ProviderConnectionService, pc_db: Any, bot_tokens: Any
+    ) -> None:
+        view = await create_twitch(pc_service, pc_db, bot_tokens)
+        assert view.binding.connection.connection_kind == 1
+        (row,) = await raw_rows(pc_db, "platform_connections")
+        assert row["sealed_secret"] is None and row["connection_kind"] == 1
+
+    async def test_a_resolve_state_loads_the_sealed_secret_for_static_rows_only(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        view = await create_static(pc_static_service, pc_db)
+        state = await store.read_resolve_state(
+            pc_db.install_dal,
+            community_id=pc_db.seed.community_id,
+            connection_id=view.binding.connection.id,
+        )
+        assert (
+            state is not None and state.secrets.sealed_secret and state.secrets.access_token is None
+        )
+        assert state.connection.connection_kind == 2
+
+    async def test_the_database_mirror_rejects_an_out_of_range_kind(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        view = await create_static(pc_static_service, pc_db)
+        with pytest.raises(Exception, match="CHECK|constraint"):
+            await set_column(
+                pc_db, "platform_connections", view.binding.connection.id, connection_kind=9
+            )
+
+    async def test_missing_0064_columns_fail_loudly_naming_the_migration(
+        self, tmp_path: Any
+    ) -> None:
+        db = AsyncDB(f"sqlite://{tmp_path / 'no0064.db'}", pool_size=1)
+        metadata = build_pc_metadata()
+        table = metadata.tables["platform_connections"]
+        for constraint in list(table.constraints):  # the shape CHECK names the column we remove
+            if isinstance(constraint, CheckConstraint) and "sealed_secret" in str(
+                constraint.sqltext
+            ):
+                table.constraints.discard(constraint)
+        table._columns.remove(table.c.sealed_secret)  # noqa: SLF001 - simulate a pre-0064 schema
+        async with db.engine.begin() as conn:
+            await conn.run_sync(metadata.create_all)
+            await conn.execute(
+                text("CREATE TABLE communities (id INTEGER PRIMARY KEY, tenant_id INTEGER)")
+            )
+        await db.reflect()
+        try:
+            with pytest.raises(SchemaMissing, match="0064_connection_kinds") as info:
+                await store.list_bindings(db, tenant_id=1, community_id=1)
+            assert "sealed_secret" in info.value.message
+        finally:
+            await db.close()
+
+
+class TestStaticServiceHardening:
+    async def test_the_flag_is_enforced_inside_the_service_not_only_the_blueprint(
+        self,
+        pc_static_service: ProviderConnectionService,
+        pc_db: Any,
+        entitlements: Any,
+    ) -> None:
+        from services.provider_connections.errors import FeatureNotEnabled
+
+        entitlements.flag_off("waddles.integrations.static_connections")
+        with pytest.raises(FeatureNotEnabled):
+            await create_static(pc_static_service, pc_db)
+        entitlements.flag_off("waddles.integrations.provider_connections")  # unrelated flag
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    async def test_the_free_tier_is_refused_by_the_service(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any, entitlements: Any
+    ) -> None:
+        from services.provider_connections.errors import FeatureNotEnabled
+
+        entitlements.set_tier("free")
+        with pytest.raises(FeatureNotEnabled):
+            await create_static(pc_static_service, pc_db)
+
+    async def test_the_stored_url_is_the_canonical_form(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        await create_static(
+            pc_static_service, pc_db, metadata={"url": "https://OK.Example:443/Path?q=1"}
+        )
+        (row,) = await raw_rows(pc_db, "platform_connections")
+        assert _meta(row)["url"] == "https://ok.example:443/Path?q=1"
+
+    async def test_obfuscated_loopback_is_refused_and_nothing_is_stored(
+        self, pc_static_service: ProviderConnectionService, pc_db: Any
+    ) -> None:
+        for host in ("2130706433", "0x7f.0.0.1", "127.1", "017700000001", "%31%32%37.0.0.1"):
+            with pytest.raises(InvalidConnectionInput):
+                await create_static(pc_static_service, pc_db, metadata={"url": f"https://{host}/"})
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    async def test_create_routes_through_the_adapter_credential_check(
+        self, pc_db: Any, entitlements: Any, clock: Any
+    ) -> None:
+        """The protocol methods are the single source of truth: if one rejects, nothing is stored."""
+        from services.provider_connections.adapter import AdapterRegistry
+        from services.provider_connections.errors import CredentialsRejected
+        from services.provider_connections.static_secret import ExternalHttpAdapter
+
+        class Rejecting(ExternalHttpAdapter):
+            async def validate_credentials(self, credentials: Any) -> Any:
+                raise CredentialsRejected("adapter said no")
+
+        service = ProviderConnectionService(
+            pc_db.install_dal, AdapterRegistry([Rejecting()]), PlatformKeyVault(), clock=clock
+        )
+        with pytest.raises(CredentialsRejected):
+            await create_static(service, pc_db)
+        assert await raw_rows(pc_db, "platform_connections") == []
+
+    async def test_insert_connection_requires_an_explicit_kind(self, pc_db: Any) -> None:
+        import inspect
+
+        param = inspect.signature(store.insert_connection).parameters["connection_kind"]
+        assert param.default is inspect.Parameter.empty
