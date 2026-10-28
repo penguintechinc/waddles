@@ -3,7 +3,7 @@
  */
 import { afterAll, describe, it } from 'vitest';
 
-import api, { userApi, analyticsApi, streamApi, workflowApi, calendarApi, inventoryApi, tokenApi, joinRequestApi, userOAuthApi, passkeyApi, interactionApi, rconApi, tenantApi, rolesApi, channelPermissionsApi, superadminTenantApi, bundleApi, bundleAdminApi } from '../api';
+import api, { userApi, analyticsApi, streamApi, workflowApi, calendarApi, inventoryApi, tokenApi, userOAuthApi, passkeyApi, interactionApi, rconApi, tenantApi, rolesApi, channelPermissionsApi, superadminTenantApi, bundleApi, bundleAdminApi } from '../api';
 import { assertContractRow, recordRequests, type ContractRow } from '../../test/apiContract';
 
 const rec = recordRequests(api);
@@ -115,14 +115,6 @@ const TOKENAPI_ROWS: readonly ContractRow[] = [
   ['listCATs(communityId)', 'GET /api/v1/admin/{communityId}/tokens/cats'],
   ['createCAT(communityId, data)', 'POST /api/v1/admin/{communityId}/tokens/cats', { body: '@data' }],
   ['revokeCAT(communityId, tokenId)', 'DELETE /api/v1/admin/{communityId}/tokens/cats/{tokenId}'],
-];
-
-const JOINREQUESTAPI_ROWS: readonly ContractRow[] = [
-  ['submit(communityId, data)', 'POST /community/{communityId}/join-requests', { body: '@data' }],
-  ['getMine(communityId)', 'GET /community/{communityId}/join-requests/mine'],
-  ['list(communityId)', 'GET /admin/{communityId}/join-requests'],
-  ['approve(communityId, requestId)', 'PUT /admin/{communityId}/join-requests/{requestId}/approve'],
-  ['reject(communityId, requestId)', 'PUT /admin/{communityId}/join-requests/{requestId}/reject'],
 ];
 
 const USEROAUTHAPI_ROWS: readonly ContractRow[] = [
@@ -267,12 +259,6 @@ describe('inventoryApi request contract', () => {
 describe('tokenApi request contract', () => {
   for (const row of TOKENAPI_ROWS) {
     it(row[0], () => assertContractRow(tokenApi, row, rec.calls));
-  }
-});
-
-describe('joinRequestApi request contract', () => {
-  for (const row of JOINREQUESTAPI_ROWS) {
-    it(row[0], () => assertContractRow(joinRequestApi, row, rec.calls));
   }
 });
 

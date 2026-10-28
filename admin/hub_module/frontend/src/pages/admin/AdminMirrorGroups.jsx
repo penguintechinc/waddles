@@ -355,6 +355,7 @@ function AdminMirrorGroups() {
                         </div>
                         <div className="flex items-center space-x-3">
                           <select
+                            aria-label="Member sync direction"
                             value={member.direction}
                             onChange={(e) => handleUpdateMemberDirection(member.id, e.target.value)}
                             className="input text-sm py-1"

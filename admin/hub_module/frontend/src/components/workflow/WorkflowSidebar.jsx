@@ -33,6 +33,7 @@ function WorkflowSidebar({ workflows, activeWorkflowId, onSelectWorkflow, onCrea
         <div className="relative">
           <MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-navy-400" />
           <input
+            aria-label="Search workflows"
             type="text"
             placeholder="Search workflows..."
             value={searchQuery}
@@ -54,6 +55,7 @@ function WorkflowSidebar({ workflows, activeWorkflowId, onSelectWorkflow, onCrea
             {filteredWorkflows.map((workflow) => (
               <div
                 key={workflow.id}
+                data-click-delegate
                 className={`p-3 rounded-lg cursor-pointer transition-colors group ${
                   activeWorkflowId === workflow.id
                     ? 'bg-gold-500/20 border border-gold-500/30'
@@ -66,7 +68,7 @@ function WorkflowSidebar({ workflows, activeWorkflowId, onSelectWorkflow, onCrea
                     <div className="flex items-center space-x-2 mb-1">
                       <DocumentDuplicateIcon className="w-4 h-4 text-navy-400 flex-shrink-0" />
                       <h3 className="text-sm font-medium text-white truncate">
-                        {workflow.name}
+                        <button type="button" aria-current={activeWorkflowId === workflow.id ? "true" : undefined} className="max-w-full truncate text-left hover:underline focus-visible:underline">{workflow.name}</button>
                       </h3>
                     </div>
                     {workflow.description && (

@@ -505,7 +505,7 @@ mod identity_scope_tests {
     fn scripted_bridge(responder: Responder) -> (Arc<HostBridge>, Recorded) {
         let (exec_io, stage_io) = tokio::io::duplex(64 * 1024);
         let (mut exec_reader, mut exec_writer) = tokio::io::split(exec_io);
-        let (writer_tx, mut writer_rx) = mpsc::unbounded_channel();
+        let (writer_tx, mut writer_rx) = mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
         let connection = crate::wire::Connection::new(writer_tx);
 
         tokio::spawn(async move {

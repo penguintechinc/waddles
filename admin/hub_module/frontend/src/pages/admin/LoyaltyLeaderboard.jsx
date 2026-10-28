@@ -219,6 +219,7 @@ function LoyaltyLeaderboard() {
 
       <div className="flex flex-col md:flex-row gap-4 mb-6">
         <input
+          aria-label="Filter by platform user id"
           type="search"
           placeholder="Filter by platform user id..."
           value={search}
@@ -227,6 +228,7 @@ function LoyaltyLeaderboard() {
           className="input flex-1"
         />
         <select
+          aria-label="Filter by platforms"
           value={platformFilter}
           onChange={(e) => setPlatformFilter(e.target.value)}
           data-testid="loyalty-platform-filter"
@@ -239,6 +241,7 @@ function LoyaltyLeaderboard() {
           <option value="youtube">YouTube</option>
         </select>
         <select
+          aria-label="Rows to show"
           value={limit}
           onChange={(e) => setLimit(parseInt(e.target.value, 10))}
           data-testid="loyalty-limit"

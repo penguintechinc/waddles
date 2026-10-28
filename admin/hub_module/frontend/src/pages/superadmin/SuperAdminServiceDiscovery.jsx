@@ -81,9 +81,9 @@ const StatusBadge = ({ status }) => {
     healthy: { icon: Check, color: 'text-emerald-400', bg: 'bg-emerald-500/20', label: 'Healthy' },
     unhealthy: { icon: X, color: 'text-red-400', bg: 'bg-red-500/20', label: 'Unhealthy' },
     degraded: { icon: AlertCircle, color: 'text-yellow-400', bg: 'bg-yellow-500/20', label: 'Degraded' },
-    unknown: { icon: AlertCircle, color: 'text-gray-400', bg: 'bg-gray-500/20', label: 'Unknown' },
+    unknown: { icon: AlertCircle, color: 'text-fg-muted', bg: 'bg-navy-500/20', label: 'Unknown' },
     starting: { icon: Loader2, color: 'text-blue-400', bg: 'bg-blue-500/20', label: 'Starting' },
-    stopped: { icon: Pause, color: 'text-gray-400', bg: 'bg-gray-500/20', label: 'Stopped' },
+    stopped: { icon: Pause, color: 'text-fg-muted', bg: 'bg-navy-500/20', label: 'Stopped' },
   };
 
   const config = configs[status] || configs.unknown;
@@ -100,7 +100,7 @@ const StatusBadge = ({ status }) => {
 // Response time indicator
 const ResponseTimeIndicator = ({ ms }) => {
   if (ms === null || ms === undefined) {
-    return <span className="text-gray-500">--</span>;
+    return <span className="text-fg-muted">--</span>;
   }
 
   let color = 'text-emerald-400';
@@ -282,7 +282,7 @@ const ServiceDetailsModal = ({ service, onClose }) => {
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-navy-800 rounded-2xl border border-navy-700 w-full max-w-2xl max-h-[80vh] overflow-hidden">
+      <div role="dialog" aria-modal="true" aria-labelledby="super-admin-service-discovery-dialog-1-title" className="bg-navy-800 rounded-2xl border border-navy-700 w-full max-w-2xl max-h-[80vh] overflow-hidden">
         <div className="p-6 border-b border-navy-700">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
@@ -290,7 +290,7 @@ const ServiceDetailsModal = ({ service, onClose }) => {
                 <Server className={`w-6 h-6 ${category.color}`} />
               </div>
               <div>
-                <h2 className="text-xl font-bold text-white">{service.name}</h2>
+                <h2 id="super-admin-service-discovery-dialog-1-title" className="text-xl font-bold text-white">{service.name}</h2>
                 <p className="text-sm text-navy-400">{service.description}</p>
               </div>
             </div>
@@ -610,20 +610,22 @@ export default function SuperAdminServiceDiscovery() {
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-navy-400" />
           <input
+            aria-label="Search services"
             type="text"
             placeholder="Search services..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 bg-navy-800 border border-navy-700 rounded-xl text-white placeholder-navy-400 focus:outline-none focus:border-sky-500"
+            className="w-full pl-10 pr-4 py-2.5 bg-navy-800 border border-navy-700 rounded-xl text-white placeholder-navy-400 focus:border-sky-500"
           />
         </div>
 
         <div className="flex items-center space-x-2">
           <Filter className="w-5 h-5 text-navy-400" />
           <select
+            aria-label="Filter by status"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-4 py-2.5 bg-navy-800 border border-navy-700 rounded-xl text-white focus:outline-none focus:border-sky-500"
+            className="px-4 py-2.5 bg-navy-800 border border-navy-700 rounded-xl text-white focus:border-sky-500"
           >
             <option value="all">All Status</option>
             <option value="healthy">Healthy</option>

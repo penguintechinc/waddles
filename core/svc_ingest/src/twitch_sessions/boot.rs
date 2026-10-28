@@ -116,6 +116,9 @@ pub fn try_start_twitch_sessions(
     config: &Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
+    dek_provider: crate::identity_crypto::ConfiguredDekProvider<
+        crate::identity_crypto::UnimplementedMachineJwtProvider,
+    >,
 ) -> anyhow::Result<()> {
     let cli = &config.cli;
     validate_dynamic_prereqs(cli, publish::scope_resolver_installed())?;
@@ -191,13 +194,15 @@ pub fn try_start_twitch_sessions(
         let runner = RealRunner::new(
             resolver.clone(),
             Arc::new(appender),
-            metrics,
+            metrics.clone(),
             Arc::new(keyring),
             active_kid,
             scope,
             host,
             port,
             tls,
+            Arc::new(dek_provider),
+            Arc::new(metrics.identity_encryption_total.clone()),
         )
         .with_session_metrics(session_metrics.clone())
         .with_resolve_timeout(resolve_timeout);

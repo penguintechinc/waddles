@@ -50,6 +50,7 @@ pub mod hop;
 pub mod host_api;
 pub mod http;
 pub mod identity;
+pub mod identity_crypto;
 pub mod license;
 pub mod metrics_facade;
 pub mod pii_tokenize;

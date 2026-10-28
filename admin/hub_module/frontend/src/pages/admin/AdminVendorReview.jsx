@@ -391,8 +391,9 @@ export default function AdminVendorReview() {
                 )}
 
                 <div className="form-group">
-                  <label>Message/Notes</label>
+                  <label htmlFor="admin-vendor-review-message-notes">Message/Notes</label>
                   <textarea
+                    id="admin-vendor-review-message-notes"
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
                     rows="4"

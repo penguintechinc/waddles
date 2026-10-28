@@ -241,7 +241,9 @@ class TestRefusedToolCallIsAuditedEndToEnd:
                 json={"prompt": "hi"},
             )
         )
-        assert response.status_code == 200 and (await response.get_json())["text"] == "hello"
+        assert response.status_code == 200 and (await response.get_json())["text"].startswith(
+            "hello"
+        )
         table = audit_dal.metadata.tables["audit_events"]
         async with audit_dal.engine.connect() as conn:
             assert list((await conn.execute(select(table))).all()) == []

@@ -301,6 +301,7 @@ jobs:
             alembic/tests/test_legacy_sql_ownership.py \
             alembic/tests/test_0060_port_legacy_sql_097_102.py \
             alembic/tests/test_0061_port_legacy_sql_103_codec.py \
+            alembic/tests/test_0001_baseline_fresh_replay.py \
             -v -rs -p no:cacheprovider
 
       # This repo's real-Postgres alembic history starts at migration 0020 --

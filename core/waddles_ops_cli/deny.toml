@@ -1,0 +1,72 @@
+# cargo-deny configuration for bundle-compiler.
+# Run: cargo deny check  (advisories + licenses + bans + sources)
+# See rules/critical-rules.md Dependency Pinning + rules/general.md Supply
+# Chain Security for the policy this enforces. Shape mirrors
+# core/svc_streaming/deny.toml.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+version = 2
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Permissive OSS licenses only -- no copyleft beyond MPL-2.0 (file-level,
+# not viral), no unlicensed/unknown crates.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+exceptions = []
+
+[licenses.private]
+# `bundle-compiler` itself is `publish = false` and internal/proprietary
+# (Cargo.toml `license = "Proprietary"`, not a recognized SPDX identifier
+# by design) -- `ignore = true` tells cargo-deny to skip license-checking
+# non-published crates rather than misreport this crate itself as
+# "unlicensed". Third-party dependency licenses are still fully checked.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+allow-workspace = false
+deny = [
+    { crate = "openssl", reason = "rustls only -- no C OpenSSL dependency, no OpenSSL CVE exposure" },
+    { crate = "openssl-sys", reason = "rustls only -- no C OpenSSL dependency, no OpenSSL CVE exposure" },
+    { crate = "native-tls", reason = "rustls only" },
+]
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# `penguin-bundle-host` (Cargo.toml) -- landed M1 crate, pinned by exact
+# commit `rev`, not by branch. See Cargo.toml's dependency comment.
+allow-git = ["https://github.com/penguintechinc/penguin-libs.git"]
+
+[sources.allow-org]
+github = ["penguintechinc"]
+gitlab = []
+bitbucket = []

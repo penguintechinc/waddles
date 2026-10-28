@@ -188,6 +188,49 @@ spec:
             - port: {{ .Values.egressProxy.port | quote }}
               protocol: TCP
 ---
+# Discord gateway egress for svc-ingest-rust ONLY (additive to dataplane-egress-deny; Cilium
+# policies union). toFQDNs needs the DNS lookups proxied (rules.dns), so this policy carries
+# its own kube-dns rule with a matchPattern -- the shared deny CNP's DNS rule is untouched.
+# Scoped: 443/TCP to the named Discord hosts only, no blanket world egress.
+{{- if .Values.egressPolicy.discordGateway.enabled }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-ingest-discord-egress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: svc-ingest-rust
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: UDP
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: TCP
+          rules:
+            dns:
+              {{- range .Values.egressPolicy.discordGateway.fqdns }}
+              - matchName: {{ . | quote }}
+              {{- end }}
+    - toFQDNs:
+        {{- range .Values.egressPolicy.discordGateway.fqdns }}
+        - matchName: {{ . | quote }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+{{- end }}
+---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:

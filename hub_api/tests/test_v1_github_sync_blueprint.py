@@ -163,7 +163,19 @@ class TestCreateConnection:
         assert conn["vendor_id"] is None
         assert conn["token_masked"] == "****1234"
         assert "encrypted_token" not in conn
-        assert "webhook_secret" in conn  # server-generated, not the raw token
+        # regression: one-time reveal on create only; never in list
+        assert conn["webhook_secret"]
+        assert conn["webhook_secret_set"] is True
+        listed = await client.get(
+            f"/api/v1/{COMMUNITY_ID}/github-sync/connections", headers=headers
+        )
+        assert listed.status_code == 200
+        rows = (await listed.get_json())["data"]
+        assert len(rows) == 1
+        for row in rows:
+            assert "webhook_secret" not in row
+            assert row["webhook_secret_set"] is True
+        assert conn["webhook_secret"] not in json.dumps(rows)
 
 
 class TestDeleteConnection:

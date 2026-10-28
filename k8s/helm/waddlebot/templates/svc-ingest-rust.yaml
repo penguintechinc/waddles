@@ -197,9 +197,9 @@ spec:
               name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: TWITCH_OAUTH_TOKEN
               optional: true
-        - name: TWITCH_NICK
+        - name: TWITCH_IRC_NICK
           value: {{ .Values.oauth.twitch.nick | default "" | quote }}
-        - name: TWITCH_CHANNELS
+        - name: TWITCH_IRC_CHANNEL
           value: {{ .Values.oauth.twitch.channels | default "" | quote }}
         {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:

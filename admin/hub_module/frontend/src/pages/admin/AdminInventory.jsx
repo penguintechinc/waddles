@@ -11,7 +11,7 @@ const ITEM_TYPES = ['general', 'equipment', 'resource', 'consumable'];
 
 const CLAIM_STATUS_COLORS = {
   active: 'bg-green-500/20 text-green-300 border-green-500/30',
-  returned: 'bg-gray-500/20 text-gray-300 border-gray-500/30',
+  returned: 'bg-navy-500/20 text-fg-secondary border-navy-500/30',
   overdue: 'bg-red-500/20 text-red-300 border-red-500/30',
 };
 
@@ -225,6 +225,7 @@ function AdminInventory() {
           <div className="flex items-center gap-3 bg-navy-900 border border-navy-700 rounded-lg p-4">
             <MagnifyingGlassIcon className="w-5 h-5 text-navy-400" />
             <input
+              aria-label="Search by name or category"
               type="text"
               placeholder="Search by name or category..."
               value={itemSearch}
@@ -293,6 +294,7 @@ function AdminInventory() {
           <div className="flex items-center gap-3 bg-navy-900 border border-navy-700 rounded-lg p-4">
             <FunnelIcon className="w-5 h-5 text-navy-400" />
             <select
+              aria-label="Filter by statuses"
               value={claimStatusFilter}
               onChange={(e) => setClaimStatusFilter(e.target.value)}
               className="bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm"
@@ -355,31 +357,31 @@ function AdminInventory() {
       {/* Create / Edit Item Modal */}
       {showItemModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg">
-            <h2 className="text-lg font-bold text-sky-100 mb-4">{editingItem ? 'Edit Item' : 'Add Inventory Item'}</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-inventory-dialog-1-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-lg">
+            <h2 id="admin-inventory-dialog-1-title" className="text-lg font-bold text-sky-100 mb-4">{editingItem ? 'Edit Item' : 'Add Inventory Item'}</h2>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm text-navy-400 mb-1">Name <span className="text-red-400">*</span></label>
-                <input type="text" name="name" value={itemForm.name} onChange={handleItemFormChange} placeholder="Item name" className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm" />
+                <label htmlFor="admin-inventory-input" className="block text-sm text-navy-400 mb-1">Name <span className="text-red-400">*</span></label>
+                <input id="admin-inventory-input" type="text" name="name" value={itemForm.name} onChange={handleItemFormChange} placeholder="Item name" className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm" />
               </div>
               <div>
-                <label className="block text-sm text-navy-400 mb-1">Description</label>
-                <textarea name="description" value={itemForm.description} onChange={handleItemFormChange} placeholder="Optional description" rows={3} className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm resize-none" />
+                <label htmlFor="admin-inventory-description" className="block text-sm text-navy-400 mb-1">Description</label>
+                <textarea id="admin-inventory-description" name="description" value={itemForm.description} onChange={handleItemFormChange} placeholder="Optional description" rows={3} className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm resize-none" />
               </div>
               <div>
-                <label className="block text-sm text-navy-400 mb-1">Type</label>
-                <select name="item_type" value={itemForm.item_type} onChange={handleItemFormChange} className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm">
+                <label htmlFor="admin-inventory-type" className="block text-sm text-navy-400 mb-1">Type</label>
+                <select id="admin-inventory-type" name="item_type" value={itemForm.item_type} onChange={handleItemFormChange} className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm">
                   {ITEM_TYPES.map((t) => <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>)}
                 </select>
               </div>
               <div>
-                <label className="block text-sm text-navy-400 mb-1">Category</label>
-                <input type="text" name="category" value={itemForm.category} onChange={handleItemFormChange} placeholder="e.g. Tools, Supplies" className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm" />
+                <label htmlFor="admin-inventory-category" className="block text-sm text-navy-400 mb-1">Category</label>
+                <input id="admin-inventory-category" type="text" name="category" value={itemForm.category} onChange={handleItemFormChange} placeholder="e.g. Tools, Supplies" className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm" />
               </div>
               {!editingItem && (
                 <div>
-                  <label className="block text-sm text-navy-400 mb-1">Initial Quantity</label>
-                  <input type="number" name="quantity" value={itemForm.quantity} onChange={handleItemFormChange} min={1} className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm" />
+                  <label htmlFor="admin-inventory-initial-quantity" className="block text-sm text-navy-400 mb-1">Initial Quantity</label>
+                  <input id="admin-inventory-initial-quantity" type="number" name="quantity" value={itemForm.quantity} onChange={handleItemFormChange} min={1} className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm" />
                 </div>
               )}
               {itemFormError && <p className="text-red-400 text-sm">{itemFormError}</p>}
@@ -397,17 +399,17 @@ function AdminInventory() {
       {/* Stock +/- Modal */}
       {stockModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-sm">
-            <h2 className="text-lg font-bold text-sky-100 mb-1">{stockModal.direction === 'add' ? 'Add Stock' : 'Remove Stock'}</h2>
+          <div role="dialog" aria-modal="true" aria-labelledby="admin-inventory-dialog-2-title" className="bg-navy-900 border border-navy-700 rounded-xl p-6 w-full max-w-sm">
+            <h2 id="admin-inventory-dialog-2-title" className="text-lg font-bold text-sky-100 mb-1">{stockModal.direction === 'add' ? 'Add Stock' : 'Remove Stock'}</h2>
             <p className="text-sm text-navy-400 mb-4">{stockModal.item.name}</p>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm text-navy-400 mb-1">Quantity</label>
-                <input type="number" value={stockForm.quantity} onChange={(e) => setStockForm((p) => ({ ...p, quantity: e.target.value }))} min={1} className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm" />
+                <label htmlFor="admin-inventory-quantity" className="block text-sm text-navy-400 mb-1">Quantity</label>
+                <input id="admin-inventory-quantity" type="number" value={stockForm.quantity} onChange={(e) => setStockForm((p) => ({ ...p, quantity: e.target.value }))} min={1} className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm" />
               </div>
               <div>
-                <label className="block text-sm text-navy-400 mb-1">Notes</label>
-                <input type="text" value={stockForm.notes} onChange={(e) => setStockForm((p) => ({ ...p, notes: e.target.value }))} placeholder="Optional notes" className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm" />
+                <label htmlFor="admin-inventory-notes" className="block text-sm text-navy-400 mb-1">Notes</label>
+                <input id="admin-inventory-notes" type="text" value={stockForm.notes} onChange={(e) => setStockForm((p) => ({ ...p, notes: e.target.value }))} placeholder="Optional notes" className="w-full bg-navy-800 border border-navy-600 text-sky-200 rounded-lg px-3 py-2 text-sm" />
               </div>
               {stockError && <p className="text-red-400 text-sm">{stockError}</p>}
             </div>

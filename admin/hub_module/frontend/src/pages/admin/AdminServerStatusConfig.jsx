@@ -81,9 +81,9 @@ function AdminServerStatusConfig() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-sky-100 mb-2">Polling Interval (seconds)</label>
-          <input type="number" value={config.pollingIntervalSeconds} onChange={(e) => setConfig({ ...config, pollingIntervalSeconds: parseInt(e.target.value) || 30 })} min={30} max={3600}
-            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:outline-none focus:border-gold-500" />
+          <label htmlFor="admin-server-status-config-polling-interval-seconds" className="block text-sm font-medium text-sky-100 mb-2">Polling Interval (seconds)</label>
+          <input id="admin-server-status-config-polling-interval-seconds" type="number" value={config.pollingIntervalSeconds} onChange={(e) => setConfig({ ...config, pollingIntervalSeconds: parseInt(e.target.value) || 30 })} min={30} max={3600}
+            className="w-32 px-3 py-2 bg-navy-900 border border-navy-700 rounded-lg text-sky-100 focus:border-gold-500" />
           <p className="text-xs text-navy-400 mt-1">How often to check server status (30-3600s)</p>
         </div>
 
@@ -107,15 +107,15 @@ function AdminServerStatusConfig() {
             <div className="space-y-3">
               {config.servers.map((server, index) => (
                 <div key={index} className="flex items-center gap-2 bg-navy-900 p-3 rounded-lg">
-                  <input type="text" value={server.name} onChange={(e) => updateServer(index, 'name', e.target.value)} placeholder="Name"
-                    className="flex-1 px-2 py-1 bg-navy-800 border border-navy-700 rounded text-sky-100 text-sm focus:outline-none focus:border-gold-500" />
-                  <input type="text" value={server.host} onChange={(e) => updateServer(index, 'host', e.target.value)} placeholder="Host"
-                    className="flex-1 px-2 py-1 bg-navy-800 border border-navy-700 rounded text-sky-100 text-sm focus:outline-none focus:border-gold-500" />
-                  <input type="text" value={server.port} onChange={(e) => updateServer(index, 'port', e.target.value)} placeholder="Port"
-                    className="w-20 px-2 py-1 bg-navy-800 border border-navy-700 rounded text-sky-100 text-sm focus:outline-none focus:border-gold-500" />
-                  <input type="text" value={server.game} onChange={(e) => updateServer(index, 'game', e.target.value)} placeholder="Game"
-                    className="w-28 px-2 py-1 bg-navy-800 border border-navy-700 rounded text-sky-100 text-sm focus:outline-none focus:border-gold-500" />
-                  <button onClick={() => removeServer(index)} className="p-1 text-red-400 hover:text-red-300"><TrashIcon className="w-4 h-4" /></button>
+                  <input aria-label="Name" type="text" value={server.name} onChange={(e) => updateServer(index, 'name', e.target.value)} placeholder="Name"
+                    className="flex-1 px-2 py-1 bg-navy-800 border border-navy-700 rounded text-sky-100 text-sm focus:border-gold-500" />
+                  <input aria-label="Host" type="text" value={server.host} onChange={(e) => updateServer(index, 'host', e.target.value)} placeholder="Host"
+                    className="flex-1 px-2 py-1 bg-navy-800 border border-navy-700 rounded text-sky-100 text-sm focus:border-gold-500" />
+                  <input aria-label="Port" type="text" value={server.port} onChange={(e) => updateServer(index, 'port', e.target.value)} placeholder="Port"
+                    className="w-20 px-2 py-1 bg-navy-800 border border-navy-700 rounded text-sky-100 text-sm focus:border-gold-500" />
+                  <input aria-label="Game" type="text" value={server.game} onChange={(e) => updateServer(index, 'game', e.target.value)} placeholder="Game"
+                    className="w-28 px-2 py-1 bg-navy-800 border border-navy-700 rounded text-sky-100 text-sm focus:border-gold-500" />
+                  <button aria-label={`Delete server ${index + 1}`} onClick={() => removeServer(index)} className="p-1 text-red-400 hover:text-red-300"><TrashIcon className="w-4 h-4" /></button>
                 </div>
               ))}
             </div>

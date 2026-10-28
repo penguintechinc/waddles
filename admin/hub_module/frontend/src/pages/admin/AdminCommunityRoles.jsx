@@ -129,50 +129,54 @@ function RoleForm({ initial, onSave, onCancel, saving }) {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
         <div>
-          <label className="block text-sm font-medium text-navy-300 mb-1">
+          <label htmlFor="admin-community-roles-name-lowercase" className="block text-sm font-medium text-navy-300 mb-1">
             Name <span className="text-navy-500 font-normal">(lowercase)</span>
           </label>
           <input
+            id="admin-community-roles-name-lowercase"
             type="text"
             required
             value={form.name}
             onChange={handleNameChange}
-            className="bg-navy-900 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:outline-none focus:border-sky-500"
+            className="bg-navy-900 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:border-sky-500"
             placeholder="e.g. moderator"
           />
         </div>
         <div>
-          <label className="block text-sm font-medium text-navy-300 mb-1">Display Name</label>
+          <label htmlFor="admin-community-roles-display-name" className="block text-sm font-medium text-navy-300 mb-1">Display Name</label>
           <input
+            id="admin-community-roles-display-name"
             type="text"
             required
             value={form.displayName}
             onChange={(e) => set('displayName', e.target.value)}
-            className="bg-navy-900 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:outline-none focus:border-sky-500"
+            className="bg-navy-900 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:border-sky-500"
             placeholder="e.g. Moderator"
           />
         </div>
         <div className="sm:col-span-2">
-          <label className="block text-sm font-medium text-navy-300 mb-1">Description</label>
+          <label htmlFor="admin-community-roles-description" className="block text-sm font-medium text-navy-300 mb-1">Description</label>
           <textarea
+            id="admin-community-roles-description"
             value={form.description}
             onChange={(e) => set('description', e.target.value)}
             rows={2}
-            className="bg-navy-900 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:outline-none focus:border-sky-500 resize-none"
+            className="bg-navy-900 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:border-sky-500 resize-none"
             placeholder="Optional description"
           />
         </div>
         <div>
-          <label className="block text-sm font-medium text-navy-300 mb-1">
+          <label htmlFor="admin-community-roles-priority-0-49" className="block text-sm font-medium text-navy-300 mb-1">
             Priority <span className="text-navy-500 font-normal">(0–49)</span>
           </label>
           <input
+            id="admin-community-roles-priority-0-49"
             type="number"
             min={0}
             max={49}
             value={form.priority}
             onChange={(e) => set('priority', Math.max(0, Math.min(49, parseInt(e.target.value, 10) || 0)))}
-            className="bg-navy-900 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:outline-none focus:border-sky-500"
+            className="bg-navy-900 border border-navy-600 text-sky-100 rounded-lg px-3 py-2 w-full focus:border-sky-500"
           />
         </div>
       </div>

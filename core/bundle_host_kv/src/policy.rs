@@ -1,10 +1,10 @@
 //! Startup check: bundle `kv` requires a Valkey `maxmemory-policy` that
-//! never evicts the per-app `count_key` under memory pressure (low-severity
-//! fix, security review of PR #425). `KvScope::count_key` carries no TTL
+//! never evicts the per-app live index under memory pressure (low-severity
+//! fix, security review of PR #425). `KvScope::live_key` carries no TTL
 //! (`crate::KvHost` never sets one on it), so it is a **non-volatile**
 //! key -- safe under `noeviction` or any `volatile-*` policy (those only
 //! ever evict keys that *do* have a TTL), but an `allkeys-*` policy evicts
-//! non-volatile keys too. Losing `count_key` while live
+//! non-volatile keys too. Losing the index while live
 //! `bundlekv:...:data:*` keys survive silently resets the app's key-count
 //! quota to zero, letting it exceed [`crate::MAX_KEYS_PER_APP`] one
 //! eviction at a time -- [`crate::backend::reconcile`] is the
@@ -13,7 +13,7 @@
 //! fixes the Valkey config rather than relying on the backstop.
 
 /// The Valkey `maxmemory-policy` family that is genuinely unsafe for this
-/// crate's non-volatile `count_key`.
+/// crate's non-volatile `live_key` index.
 fn is_unsafe_policy(policy: &str) -> bool {
     policy.starts_with("allkeys-")
 }
@@ -21,9 +21,9 @@ fn is_unsafe_policy(policy: &str) -> bool {
 /// Outcome of [`check_maxmemory_policy`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyCheck {
-    /// `noeviction` or a `volatile-*` policy -- `count_key` is safe.
+    /// `noeviction` or a `volatile-*` policy -- the live index is safe.
     Compliant(String),
-    /// An `allkeys-*` policy -- `count_key` can be evicted.
+    /// An `allkeys-*` policy -- the live index can be evicted.
     Violation(String),
     /// `CONFIG GET` failed or returned an unexpected shape (e.g. a managed
     /// Valkey offering that restricts `CONFIG GET`) -- logged at `WARN`,
@@ -77,7 +77,7 @@ pub fn log_and_record(check: &PolicyCheck) {
             tracing::error!(
                 maxmemory_policy = %policy,
                 "kv capability: Valkey maxmemory-policy is an allkeys-* eviction policy -- the \
-                 per-app storage.kv key-count quota counter can be evicted under memory \
+                 per-app storage.kv key-count quota index can be evicted under memory \
                  pressure, silently resetting the quota; set maxmemory-policy to noeviction (or \
                  a volatile-* policy) on this Valkey instance"
             );

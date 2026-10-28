@@ -3149,6 +3149,13 @@ egressPolicy:
     - "192.168.0.0/16"
     - "100.64.0.0/10"    # CGNAT / some cloud-internal ranges
     - "fc00::/7"         # ULA v6
+  # Scoped Discord gateway egress for svc-ingest-rust (toFQDNs, 443/TCP only).
+  discordGateway:
+    enabled: true
+    fqdns:
+      - gateway.discord.gg
+      - discord.com
+      - cdn.discord.com
   # Components (app.kubernetes.io/component label values) subject to the
   # egress default-deny. Extend as more Rust dataplane Deployments land.
   dataPlaneComponents:

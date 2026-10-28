@@ -1,15 +1,13 @@
-import { useParams } from 'react-router-dom';
+import { Navigate, useParams } from 'react-router-dom';
 
+/**
+ * Community settings live in the admin panel (profile, roles, domains, ...).
+ * This route is linked from the member dashboard's "Community Admin" group, so it
+ * forwards there instead of rendering a stub.
+ */
 function CommunitySettings() {
   const { id } = useParams();
-  return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">Community Settings</h1>
-      <div className="card p-6">
-        <p className="text-slate-600">Settings for community {id} - Coming soon</p>
-      </div>
-    </div>
-  );
+  return <Navigate to={`/admin/${id}/profile`} replace />;
 }
 
 export default CommunitySettings;
