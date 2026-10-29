@@ -154,7 +154,13 @@ jobs:
           # "linkify"), so the vulnerable code path is unreachable here.
           # Review by 2026-12-31: re-grep for `linkify` before renewing, and
           # drop this once upstream publishes a fix or bleach is replaced.
-          IGNORES="--ignore-vuln PYSEC-2022-252 --ignore-vuln GHSA-g75f-g53v-794x"
+          #
+          # PYSEC-2026-2633/2634/2635/2636 (mem0ai 0.1.115, core/ai_researcher_module):
+          # mem0ai is used library-only with a Qdrant vector store; advisories
+          # assessed not reachable. Only 2636 has a fix (pre-release 2.0.0b2
+          # major bump) - deliberately not adopted. Real exit is migrating
+          # memories to WaddleAI. Tracking: #959. Review by 2027-01-27.
+          IGNORES="--ignore-vuln PYSEC-2022-252 --ignore-vuln GHSA-g75f-g53v-794x --ignore-vuln PYSEC-2026-2633 --ignore-vuln PYSEC-2026-2634 --ignore-vuln PYSEC-2026-2635 --ignore-vuln PYSEC-2026-2636"
 
           gated=0; ungated=0; gated_bad=0; ungated_bad=0
           for f in $(find . -name requirements.txt \
