@@ -364,6 +364,13 @@ pub trait DekProvider: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> impl std::future::Future<Output = Result<(Dek, u32), DekUnavailableError>> + Send;
+
+    /// Cache lifetime the broker granted for the DEK most recently returned
+    /// for `tenant_id` (already clamped to [`DEFAULT_DEK_CACHE_TTL`]).
+    /// `None` means no per-response grant; callers use their own TTL.
+    fn granted_ttl(&self, _tenant_id: &str) -> Option<Duration> {
+        None
+    }
 }
 
 struct CacheEntry {
@@ -427,13 +434,18 @@ impl<D: DekProvider> DekProvider for TtlCachedDekProvider<D> {
             }
         }
         let (dek, dek_version) = self.inner.get_dek(tenant_id).await?;
+        // Honour the broker's per-response TTL, never exceeding this cache's ceiling.
+        let ttl = self
+            .inner
+            .granted_ttl(tenant_id)
+            .map_or(self.ttl, |granted| granted.min(self.ttl));
         let mut cache = self.cache.lock().expect("cache mutex poisoned");
         cache.insert(
             tenant_id.to_string(),
             CacheEntry {
                 dek: dek.clone(),
                 dek_version,
-                expires_at: Instant::now() + self.ttl,
+                expires_at: Instant::now() + ttl,
             },
         );
         Ok((dek, dek_version))
@@ -628,6 +640,8 @@ pub struct HubApiDekProvider<J: MachineJwtProvider> {
     /// This process's own identity in the broker's AAD-bound context
     /// (`"svc-ingest"`/`"svc-process"`) -- never a secret, just a label.
     service_id: String,
+    /// Per-tenant broker-granted TTL of the last successful resolution.
+    granted_ttls: Mutex<HashMap<String, Duration>>,
 }
 
 impl<J: MachineJwtProvider + Clone> Clone for HubApiDekProvider<J> {
@@ -637,6 +651,8 @@ impl<J: MachineJwtProvider + Clone> Clone for HubApiDekProvider<J> {
             hub_api_url: self.hub_api_url.clone(),
             jwt_provider: self.jwt_provider.clone(),
             service_id: self.service_id.clone(),
+            // A clone re-learns grants on its first resolution per tenant.
+            granted_ttls: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -678,11 +694,19 @@ impl<J: MachineJwtProvider> HubApiDekProvider<J> {
             hub_api_url: hub_api_url.into(),
             jwt_provider,
             service_id: service_id.into(),
+            granted_ttls: Mutex::new(HashMap::new()),
         }
     }
 }
 
 impl<J: MachineJwtProvider> DekProvider for HubApiDekProvider<J> {
+    fn granted_ttl(&self, tenant_id: &str) -> Option<Duration> {
+        self.granted_ttls
+            .lock()
+            .ok()
+            .and_then(|m| m.get(tenant_id).copied())
+    }
+
     async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
         let unavailable = |reason: String| DekUnavailableError {
             tenant_id: tenant_id.to_string(),
@@ -735,7 +759,11 @@ impl<J: MachineJwtProvider> DekProvider for HubApiDekProvider<J> {
         .map_err(&unavailable)?;
 
         let ttl = Duration::from_secs(body.ttl_seconds).min(DEFAULT_DEK_CACHE_TTL);
-        let _ = ttl; // TODO(#442): thread a per-response TTL through once TtlCachedDekProvider accepts one; today's fixed construction-time TTL is documented as the ceiling this clamp already enforces.
+        // A poisoned lock only loses the per-response hint; the cache falls
+        // back to its own (equal-or-larger) ceiling TTL -- no DEK is exposed.
+        if let Ok(mut granted) = self.granted_ttls.lock() {
+            granted.insert(tenant_id.to_string(), ttl);
+        }
         Ok((Zeroizing::new(dek_bytes), body.dek_version))
     }
 }
@@ -1234,6 +1262,32 @@ mod tests {
         let dek = test_dek();
         let err = decrypt_identity_value(&obj, &dek, "acme", "s", "actor", "e").unwrap_err();
         assert!(matches!(err, IdentityCryptoError::Format(_)));
+    }
+
+    #[tokio::test]
+    async fn ttl_cached_provider_honours_broker_granted_ttl() {
+        // regression: gh-442 -- per-response TTL was computed then discarded.
+        struct ShortGrant(std::sync::atomic::AtomicU32);
+        impl DekProvider for ShortGrant {
+            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
+            }
+            fn granted_ttl(&self, _tenant_id: &str) -> Option<Duration> {
+                Some(Duration::from_millis(1))
+            }
+        }
+        let provider = TtlCachedDekProvider::new(
+            ShortGrant(std::sync::atomic::AtomicU32::new(0)),
+            Duration::from_secs(60),
+        );
+        provider.get_dek("acme").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        provider.get_dek("acme").await.unwrap();
+        assert_eq!(
+            provider.inner.0.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
     }
 
     #[tokio::test]

@@ -125,8 +125,18 @@ impl PlatformSigner {
 
     /// Loads the signer from `BUNDLE_SIGNING_PRIVATE_KEY` / `BUNDLE_SIGNING_KEY_ID`.
     pub fn from_env() -> Result<Self, SigningError> {
-        let seed = std::env::var(PRIVATE_KEY_ENV).unwrap_or_default();
-        let id = std::env::var(KEY_ID_ENV).unwrap_or_default();
+        // Unset -> empty -> `new` rejects with `KeyUnavailable`; a present but
+        // non-unicode value is a distinct, explicit `KeyInvalid` error.
+        let read = |name: &'static str| match std::env::var(name) {
+            Ok(v) => Ok(v),
+            Err(std::env::VarError::NotPresent) => Ok(String::new()),
+            Err(std::env::VarError::NotUnicode(_)) => Err(SigningError::KeyInvalid(
+                name,
+                "is not valid unicode".into(),
+            )),
+        };
+        let seed = read(PRIVATE_KEY_ENV)?;
+        let id = read(KEY_ID_ENV)?;
         Self::new(&seed, &id)
     }
 
