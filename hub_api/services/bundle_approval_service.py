@@ -119,6 +119,7 @@ from services.bundle_manifest_v2 import (
     Limits,
     _infer_kind,
     parse_command_declarations,
+    parse_exported_tools,
     parse_permission_declarations,
 )
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
@@ -216,6 +217,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         supported_platforms=supported_platforms,
         command_declarations=command_declarations,
         kind=raw.get("kind") or _infer_kind(raw["app_id"], raw["module"]),
+        exported_tools=parse_exported_tools(raw.get("exported_tools")),
     )
 
 
@@ -229,6 +231,9 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
 #: string, so hub-api and the data plane must agree on it byte-for-byte.
 KV_PERMISSION_ID = "storage.kv"
 
+#: Derived capability marking a service bundle that exports MCP tools.
+MCP_TOOLS_CAPABILITY = "mcp.tools"
+
 
 def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
     """The host capabilities a manifest's declared shape implies -- see this module's scope note."""
@@ -241,6 +246,8 @@ def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
         caps.add("relay")
     if KV_PERMISSION_ID in manifest.permissions:
         caps.add(KV_PERMISSION_ID)
+    if manifest.kind == "service" and manifest.exported_tools:
+        caps.add(MCP_TOOLS_CAPABILITY)
     return frozenset(caps)
 
 

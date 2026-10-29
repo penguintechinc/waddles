@@ -152,6 +152,17 @@ class PermissionDeclaration:
 
 
 @dataclass(slots=True, frozen=True)
+class ExportedTool:
+    """One MCP tool a service bundle exports (spec Sec5.1): name, JSON schemas, access, risk."""
+
+    name: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    access: str
+    risk: str
+
+
+@dataclass(slots=True, frozen=True)
 class BundleManifestV2:
     """A validated `bundle.yaml` v2 manifest -- the shape every downstream reader consumes."""
 
@@ -204,6 +215,8 @@ class BundleManifestV2:
     # "service" (platform plumbing). Optional additive field on schema v2;
     # absent in the manifest -> inferred by `_infer_kind`. Defaulted last.
     kind: str = ""
+    # Exported MCP tools (service bundles only; `app_cannot_export_tools`).
+    exported_tools: tuple[ExportedTool, ...] = ()
 
     def supports_platform(self, platform: str) -> bool:
         """Return True when this bundle may run on `platform` (absent field = every platform)."""
@@ -380,6 +393,71 @@ def parse_command_declarations(
             CommandDeclaration(name=name, types=types, platforms=platforms, description=description)
         )
     return tuple(declarations)
+
+
+_TOOL_ACCESS = frozenset({"read", "write"})
+_TOOL_RISK = frozenset({"normal", "dangerous"})
+_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
+
+
+def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
+    """Validate the optional `exported_tools:` list; absent (`None`) parses to no tools.
+
+    Each entry is `{name, input_schema, output_schema, access?, risk?}` with
+    `access` defaulting to `read` and `risk` to `normal`. Raises
+    `ManifestV2Error` with a tool-specific reason code on any violation.
+    """
+    if raw_entries is None:
+        return ()
+    _require(
+        isinstance(raw_entries, list), "invalid_exported_tools", "exported_tools must be a list"
+    )
+    tools: list[ExportedTool] = []
+    seen: set[str] = set()
+    for entry in raw_entries:
+        _require(
+            isinstance(entry, dict),
+            "invalid_exported_tools",
+            "each exported_tools entry must be a mapping",
+        )
+        name = entry.get("name")
+        _require(
+            isinstance(name, str) and bool(_TOOL_NAME_RE.fullmatch(name)),
+            "invalid_tool_name",
+            "tool name must match [a-z][a-z0-9_.]{0,63}",
+        )
+        assert isinstance(name, str)  # narrowed by _require above, for mypy
+        _require(name not in seen, "duplicate_exported_tool", f"tool {name!r} declared twice")
+        seen.add(name)
+        access = entry.get("access", "read")
+        _require(
+            access in _TOOL_ACCESS,
+            "invalid_tool_access",
+            f"tool {name!r}: access must be one of {sorted(_TOOL_ACCESS)}",
+        )
+        risk = entry.get("risk", "normal")
+        _require(
+            risk in _TOOL_RISK,
+            "invalid_tool_risk",
+            f"tool {name!r}: risk must be one of {sorted(_TOOL_RISK)}",
+        )
+        input_schema = entry.get("input_schema")
+        output_schema = entry.get("output_schema")
+        _require(
+            isinstance(input_schema, dict) and isinstance(output_schema, dict),
+            "invalid_tool_schema",
+            f"tool {name!r}: input_schema and output_schema must both be mappings",
+        )
+        tools.append(
+            ExportedTool(
+                name=name,
+                input_schema=dict(input_schema),
+                output_schema=dict(output_schema),
+                access=access,
+                risk=risk,
+            )
+        )
+    return tuple(tools)
 
 
 def _parse_consumes(
@@ -790,6 +868,13 @@ def parse_bundle_manifest_v2(
     )
     kind = raw_kind or _infer_kind(raw["app_id"], raw["module"])
 
+    exported_tools = parse_exported_tools(raw.get("exported_tools"))
+    _require(
+        not exported_tools or kind == "service",
+        "app_cannot_export_tools",
+        "only a kind: service bundle may declare exported_tools",
+    )
+
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -821,4 +906,5 @@ def parse_bundle_manifest_v2(
         supported_platforms=supported_platforms,
         command_declarations=command_declarations,
         kind=kind,
+        exported_tools=exported_tools,
     )

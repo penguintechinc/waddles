@@ -427,3 +427,83 @@ def test_kind_survives_reparse_trusted() -> None:
     raw = {**_VALID_MANIFEST, "kind": "service"}
     assert _reparse_trusted(raw).kind == "service"
     assert _reparse_trusted(dict(_VALID_MANIFEST)).kind == "app"
+
+
+_SCHEMA = {"type": "object", "properties": {}}
+
+
+def _tool(name: str = "lookup", **over: object) -> dict:
+    return {
+        "name": name,
+        "input_schema": _SCHEMA,
+        "output_schema": _SCHEMA,
+        "access": "read",
+        "risk": "normal",
+        **over,
+    }
+
+
+def test_exported_tools_service_parses() -> None:
+    manifest = _parse(
+        {
+            "kind": "service",
+            "exported_tools": [_tool("a"), _tool("b", access="write", risk="dangerous")],
+        }
+    )
+    tools = manifest.exported_tools  # type: ignore[attr-defined]
+    assert [t.name for t in tools] == ["a", "b"]
+    assert (tools[1].access, tools[1].risk) == ("write", "dangerous")
+    assert tools[0].input_schema == _SCHEMA
+
+
+def test_exported_tools_default_empty() -> None:
+    assert _parse({}).exported_tools == ()  # type: ignore[attr-defined]
+
+
+def test_app_cannot_export_tools() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"kind": "app", "exported_tools": [_tool()]})
+    assert exc.value.reason == "app_cannot_export_tools"
+
+
+def test_exported_tools_bad_access() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"kind": "service", "exported_tools": [_tool(access="admin")]})
+    assert exc.value.reason == "invalid_tool_access"
+
+
+def test_exported_tools_bad_risk() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"kind": "service", "exported_tools": [_tool(risk="spicy")]})
+    assert exc.value.reason == "invalid_tool_risk"
+
+
+def test_exported_tools_duplicate_name() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"kind": "service", "exported_tools": [_tool("x"), _tool("x")]})
+    assert exc.value.reason == "duplicate_exported_tool"
+
+
+@pytest.mark.parametrize("missing", ["input_schema", "output_schema"])
+def test_exported_tools_missing_schema(missing: str) -> None:
+    entry = _tool()
+    del entry[missing]
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"kind": "service", "exported_tools": [entry]})
+    assert exc.value.reason == "invalid_tool_schema"
+
+
+def test_exported_tools_survive_reparse_trusted() -> None:
+    from services.bundle_approval_service import _reparse_trusted
+
+    raw = {**_VALID_MANIFEST, "kind": "service", "exported_tools": [_tool("a")]}
+    assert [t.name for t in _reparse_trusted(raw).exported_tools] == ["a"]
+
+
+def test_exported_tools_derive_capability() -> None:
+    from services.bundle_approval_service import _derive_capabilities
+
+    with_tools = _parse({"kind": "service", "exported_tools": [_tool()]})
+    without = _parse({"kind": "service"})
+    assert "mcp.tools" in _derive_capabilities(with_tools)  # type: ignore[arg-type]
+    assert "mcp.tools" not in _derive_capabilities(without)  # type: ignore[arg-type]
