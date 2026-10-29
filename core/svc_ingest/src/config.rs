@@ -383,7 +383,16 @@ impl Config {
             // Default `"production"` (never `"alpha"`/`"local"`) -- an
             // unset `WADDLES_ENV` must never accidentally satisfy
             // `LocalDevDekProvider`'s environment gate, fail closed.
-            waddles_env: std::env::var("WADDLES_ENV").unwrap_or_else(|_| "production".to_string()),
+            waddles_env: match std::env::var("WADDLES_ENV") {
+                Ok(v) => v,
+                Err(std::env::VarError::NotPresent) => "production".to_string(),
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    return Err(ConfigError::InvalidValue {
+                        field: "WADDLES_ENV",
+                        reason: "is not valid unicode".to_string(),
+                    })
+                }
+            },
         })
     }
 

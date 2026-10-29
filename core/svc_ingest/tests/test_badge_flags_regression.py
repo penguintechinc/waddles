@@ -331,6 +331,17 @@ PLATFORMS = [
 ]
 
 
+class _LocalFakeDekProvider:
+    """In-memory DekProvider for test isolation."""
+
+    def __init__(self, *, version: int = 1) -> None:
+        self.version = version
+
+    async def get_dek(self, tenant_id: str, *, dek_version: int | None = None) -> tuple[bytes, int]:
+        key = tenant_id.encode("utf-8").ljust(32, b"\0")[:32]
+        return key, dek_version if dek_version is not None else self.version
+
+
 def _runner(redis_client: Any, http_client_factory: Any, app_id: str, module: str) -> IngestRunner:
     bundles = [
         {
@@ -353,7 +364,12 @@ def _runner(redis_client: Any, http_client_factory: Any, app_id: str, module: st
         stage="ingest",
         jwt_provider=lambda: "t",
     )
-    return IngestRunner(poller=poller, redis_client=redis_client, tenant_slug=TENANT)
+    return IngestRunner(
+        poller=poller,
+        redis_client=redis_client,
+        tenant_slug=TENANT,
+        dek_provider=_LocalFakeDekProvider(),
+    )
 
 
 class TestRealPathThroughIngestRunner:

@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.example.birthday
 name: Community Birthday Bundle (Python)
-version: 1.0.0
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -43,8 +43,6 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-user birthdays (keyed by user UUID, month-day only) and a per-day index"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-birthday feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []

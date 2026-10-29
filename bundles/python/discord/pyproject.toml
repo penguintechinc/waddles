@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-discord"
-version = "1.0.0"
+version = "1.0.3"
 description = "`!discord` invite-link bundle (KV-backed, v2 port)."
 requires-python = ">=3.13"
 dependencies = []

@@ -26,6 +26,7 @@ FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcb
 WORKDIR /build
 COPY svc_ingest/Cargo.toml svc_ingest/Cargo.lock ./svc_ingest/
 COPY svc_ingest/src ./svc_ingest/src
+COPY circuit_breaker ./circuit_breaker
 COPY service_auth ./service_auth
 COPY discord_mentions ./discord_mentions
 COPY connection_resolver ./connection_resolver

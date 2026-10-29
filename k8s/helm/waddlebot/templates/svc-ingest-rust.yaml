@@ -197,10 +197,17 @@ spec:
               name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: TWITCH_OAUTH_TOKEN
               optional: true
+        {{- /* Static pair is a FATAL conflict with INGEST_DYNAMIC_CONNECTIONS; render only when the flag is off AND a value is set. */}}
+        {{- if not .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        {{- if .Values.oauth.twitch.nick }}
         - name: TWITCH_IRC_NICK
-          value: {{ .Values.oauth.twitch.nick | default "" | quote }}
+          value: {{ .Values.oauth.twitch.nick | quote }}
+        {{- end }}
+        {{- if .Values.oauth.twitch.channels }}
         - name: TWITCH_IRC_CHANNEL
-          value: {{ .Values.oauth.twitch.channels | default "" | quote }}
+          value: {{ .Values.oauth.twitch.channels | quote }}
+        {{- end }}
+        {{- end }}
         {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/health" "port" "http") | nindent 8 }}
         livenessProbe:
           httpGet:

@@ -96,9 +96,21 @@ fn parse_tenant(s: &str) -> Result<i128, String> {
 
 fn init_tracing() {
     // LOG_LEVEL mirrors hub-api's env; logs go to stderr so stdout stays machine-parseable.
-    let level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into());
-    let filter = tracing_subscriber::EnvFilter::try_new(&level)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let level = match std::env::var("LOG_LEVEL") {
+        Ok(v) => v,
+        Err(std::env::VarError::NotPresent) => "info".to_string(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            eprintln!("waddles-ops: LOG_LEVEL is not valid unicode; using \"info\"");
+            "info".to_string()
+        }
+    };
+    let filter = match tracing_subscriber::EnvFilter::try_new(&level) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("waddles-ops: invalid LOG_LEVEL {level:?} ({e}); using \"info\"");
+            tracing_subscriber::EnvFilter::new("info")
+        }
+    };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)

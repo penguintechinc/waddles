@@ -75,12 +75,24 @@ make_sandbox() {
   mkdir -p "$d/scripts/lib" "$d/bin"
   cp "$REPO_ROOT/scripts/lint.sh" "$d/scripts/lint.sh"
   cp "$REPO_ROOT/scripts/lib/checks.sh" "$d/scripts/lib/checks.sh"
+  # lint.sh verifies the flake8 version against this pin before counting; without it every
+  # fake dies at the version check, so crash/finding cases would "pass" for the wrong reason.
+  cp "$REPO_ROOT/requirements-lint.txt" "$d/requirements-lint.txt"
   printf 'x = 1\n' > "$d/app.py"
   # The copied scripts/*.sh make shellcheck applicable; a clean fake keeps this
   # sandbox about flake8 alone (and needs no real shellcheck on the runner).
   printf '#!/bin/sh\nexit 0\n' > "$d/bin/shellcheck"
   chmod +x "$d/bin/shellcheck"
   echo "$d"
+}
+
+# fake_flake8 <sandbox> <body>: answers --version with the pinned version so the run reaches
+# the code path under test instead of dying on the version check.
+fake_flake8() {
+  local pin
+  pin=$(sed -n 's/^flake8==\([0-9.]*\).*/\1/p' "$REPO_ROOT/requirements-lint.txt")
+  printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "%s (mccabe: fake)"; exit 0; }\n%s\n' "$pin" "$2" > "$1/bin/flake8"
+  chmod +x "$1/bin/flake8"
 }
 
 run_lint() {
@@ -91,18 +103,15 @@ run_lint() {
 }
 
 d=$(make_sandbox)
-printf '#!/bin/sh\necho "Traceback: plugin import failed" >&2\nexit 1\n' > "$d/bin/flake8"
-chmod +x "$d/bin/flake8"
+fake_flake8 "$d" 'echo "Traceback: plugin import failed" >&2; exit 1'
 expect nonzero "flake8 that crashes (exit 1, no stdout) FAILS lint" "$(run_lint "$d")"
 
 d=$(make_sandbox)
-printf '#!/bin/sh\necho "app.py:1:1: E999 seeded"\nexit 0\n' > "$d/bin/flake8"
-chmod +x "$d/bin/flake8"
+fake_flake8 "$d" 'echo "app.py:1:1: E999 seeded"; exit 0'
 expect nonzero "flake8 reporting a new finding (baseline 0) FAILS lint" "$(run_lint "$d")"
 
 d=$(make_sandbox)
-printf '#!/bin/sh\nexit 0\n' > "$d/bin/flake8"
-chmod +x "$d/bin/flake8"
+fake_flake8 "$d" 'exit 0'
 rc=$(run_lint "$d")
 expect zero "flake8 clean run PASSES lint" "$rc"
 if grep -q '1 file(s)' "$d/out" || grep -q 'PASS    flake8' "$d/out"; then

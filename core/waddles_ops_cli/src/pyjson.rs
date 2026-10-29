@@ -3,7 +3,8 @@
 //!
 //! This is the serialization the tamper-evident audit chain hashes, so it must match CPython
 //! to the byte: keys sorted by code point, no whitespace, every character outside
-//! `0x20..=0x7e` escaped (`\uXXXX`, lowercase hex, non-BMP as a UTF-16 surrogate pair), and the
+//! `0x20..=0x7e` escaped (a backslash-u escape with four lowercase hex digits, non-BMP as a
+//! UTF-16 surrogate pair), and the
 //! short escapes `\" \\ \n \r \t \b \f`. `serde_json::to_string` cannot be used: it emits raw
 //! UTF-8 and escapes `0x7f`/U+2028 differently.
 //!

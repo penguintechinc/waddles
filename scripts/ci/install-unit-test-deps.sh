@@ -45,8 +45,18 @@ PIP=("$PYTHON_BIN" -m pip install --disable-pip-version-check)
 echo "[install-unit-test-deps] penguin-dal (libs/flask_core's undeclared runtime import)"
 "${PIP[@]}" "penguin-dal==0.4.0"
 
-echo "[install-unit-test-deps] core/identity_core_module + editable libs/flask_core"
-"${PIP[@]}" -r core/identity_core_module/requirements.txt -e libs/flask_core
+# pip rejects an editable requirement in any call that enables hash-checking
+# ("editable requirement ... cannot be installed when requiring hashes"), so
+# the hash-pinned deps and the editable package are separate calls.
+# --no-deps on the editable install: every dependency was already installed
+# hash-verified from the two requirements.txt files above it, so nothing
+# unhashed is resolved from the index.
+echo "[install-unit-test-deps] core/identity_core_module (hash-pinned deps)"
+"${PIP[@]}" --require-hashes -r core/identity_core_module/requirements.txt
+echo "[install-unit-test-deps] libs/flask_core (hash-pinned deps)"
+"${PIP[@]}" --require-hashes -r libs/flask_core/requirements.txt
+echo "[install-unit-test-deps] editable libs/flask_core"
+"${PIP[@]}" --no-deps -e libs/flask_core
 
 # core/workflow_core_module's requirements.txt is hash-pinned
 # (--generate-hashes, like libs/waddle_transports below) -- installed

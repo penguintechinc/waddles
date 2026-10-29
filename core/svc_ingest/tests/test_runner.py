@@ -346,7 +346,7 @@ class TestIdentityFieldEncryption:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_ingest:normalize",
+                    "entrypoint": "builtin_handlers.echo_ingest:normalize",
                     "spec": {},
                     "config": {},
                 }
@@ -402,7 +402,7 @@ class TestIdentityFieldEncryption:
                 {
                     "appId": APP_ID,
                     "communityId": None,
-                    "entrypoint": "bundles.echo_ingest:normalize",
+                    "entrypoint": "builtin_handlers.echo_ingest:normalize",
                     "spec": {},
                     "config": {},
                 }

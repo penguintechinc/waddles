@@ -31,8 +31,9 @@ let poolMetrics = {
   erroredQueries: 0,
 };
 
-// Update pool metrics periodically
-setInterval(() => {
+// Update pool metrics periodically. The timer is unref'd so a monitoring loop
+// never keeps the process (or a test runner) alive after shutdown.
+const metricsTimer = setInterval(() => {
   poolMetrics.totalConnections = pool.totalCount;
   poolMetrics.idleConnections = pool.idleCount;
   poolMetrics.activeConnections = pool.totalCount - pool.idleCount;
@@ -43,6 +44,7 @@ setInterval(() => {
     logger.warn('Database pool under pressure', poolMetrics);
   }
 }, 60000); // Every 60 seconds
+metricsTimer.unref();
 
 // Connection event handlers
 pool.on('connect', (client) => {

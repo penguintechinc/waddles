@@ -19,8 +19,7 @@ JSON array of UUIDs (the index `today` reads, as `kv` has no list/scan). "Today"
 own `occurred_at` (UTC); an unparseable timestamp fails LOUD (ERROR log + error reply).
 
 Logs are PII-free: op, counts, exception-type names -- never a date, UUID or username. Corrupt
-stored data raises `_KvFailure`, never a silent default. Gated behind the PostHog flag
-``waddles.command-birthday``.
+stored data raises `_KvFailure`, never a silent default. Activation-gated only -- no feature flag.
 """
 
 from __future__ import annotations
@@ -32,10 +31,8 @@ import uuid
 from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-birthday"
 COMMAND = "!birthday"
 
 USER_PREFIX = "birthday.user."
@@ -91,7 +88,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("birthday.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 def _actor_uuid(event: PlatformEvent) -> str:
@@ -225,7 +222,7 @@ async def _handle(rest: str, event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!birthday` and build the reply.
 
-    Cheap-skip (exact first-token match) comes before the flag check; a `kv` failure is logged
+    Cheap-skip (exact first-token match) comes first; a `kv` failure is logged
     loudly (PII-free) and answered with an error reply, never swallowed into a default.
     """
     text = event.payload.get("text")
@@ -233,8 +230,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:
