@@ -1936,3 +1936,102 @@ def test_ingest_source_id_matches_svc_ingest_conventions() -> None:
     assert seeder.ingest_source_id("discord", "dg-123") == "dg-123"
     assert seeder.ingest_source_id("twitch", "#PenguinzPlays") == "tw-penguinzplays"
     assert seeder.ingest_source_id("slack", "T1") == "T1"
+
+
+# ---------------------------------------------------------------------------
+# bundle.yaml / hub-manifest.yaml agreement (bundle-mcp P1 Task 7)
+# ---------------------------------------------------------------------------
+
+
+async def test_seed_one_refuses_when_manifest_files_disagree_on_kind(
+    install_dal: Any, tmp_path: Path
+) -> None:
+    entry = _write_bundle(tmp_path)
+    entry = CatalogEntry(
+        app_id=entry.app_id,
+        version=entry.version,
+        language=entry.language,
+        manifest_path=entry.manifest_path,
+        artifact_path=entry.artifact_path,
+        activation_targets=entry.activation_targets,
+        source_dir="src",
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "bundle.yaml").write_text(
+        yaml.safe_dump({**_MANIFEST, "kind": "service"}), encoding="utf-8"
+    )
+
+    with pytest.raises(CoreBundleSeederError, match="disagree on 'kind'"):
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+
+async def test_seed_one_matching_manifest_files_seed(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_validator_and_storage(monkeypatch)
+    hub = {**_MANIFEST, "kind": "service"}
+    entry = _write_bundle(tmp_path, manifest=hub)
+    entry = CatalogEntry(
+        app_id=entry.app_id,
+        version=entry.version,
+        language=entry.language,
+        manifest_path=entry.manifest_path,
+        artifact_path=entry.artifact_path,
+        activation_targets=entry.activation_targets,
+        source_dir="src",
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "bundle.yaml").write_text(yaml.safe_dump(hub), encoding="utf-8")
+
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    assert results
+    assert {r.app_id for r in results} == {entry.app_id}
+    assert all(r.version == entry.version for r in results)
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+
+
+async def test_agreement_check_warns_when_bundle_yaml_absent(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    entry = CatalogEntry(
+        app_id="waddles.core.x.default",
+        version="1.0.0",
+        language="python",
+        manifest_path="m.yaml",
+        artifact_path="a.wasm",
+        activation_targets=(),
+        source_dir="nope",
+    )
+    with caplog.at_level("WARNING"):
+        seeder._assert_manifest_files_agree(entry, tmp_path, {"kind": "app"})
+    assert "core_bundle_agreement_check_skipped" in caplog.text
+
+
+@pytest.mark.parametrize("bad", [None, [], "x"])
+def test_agreement_check_rejects_non_mapping_manifest(tmp_path: Path, bad: Any) -> None:
+    entry = CatalogEntry(
+        app_id="waddles.core.x.default",
+        version="1.0.0",
+        language="python",
+        manifest_path="m.yaml",
+        artifact_path="a.wasm",
+        activation_targets=(),
+        source_dir="src",
+    )
+    with pytest.raises(CoreBundleSeederError, match="not a mapping"):
+        seeder._assert_manifest_files_agree(entry, tmp_path, bad)
+
+
+def test_real_catalog_bundle_yaml_and_hub_manifest_agree() -> None:
+    """Every real core bundle's two manifest files agree (denominator asserted > 0)."""
+    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+    checked = 0
+    for entry in load_catalog(bundles_dir / "core-bundles.yaml"):
+        sdk = bundles_dir / entry.source_dir / "bundle.yaml"
+        if not entry.source_dir or not sdk.is_file():
+            continue
+        hub = yaml.safe_load((bundles_dir / entry.source_dir / "hub-manifest.yaml").read_text())
+        seeder._assert_manifest_files_agree(entry, bundles_dir, hub)
+        checked += 1
+    assert checked > 0

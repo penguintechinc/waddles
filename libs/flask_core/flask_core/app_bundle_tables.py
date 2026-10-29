@@ -77,6 +77,8 @@ def init_app_bundle_tables(dal: Any) -> None:
         dal.Field("homepage_url", "string"),
         dal.Field("notice", "string"),
         dal.Field("category", "string"),
+        # migration 0068 -- denormalized kind (nullable; manifest is source of truth).
+        dal.Field("kind", "string"),
         primarykey=["app_id"],
         migrate=False,
     )

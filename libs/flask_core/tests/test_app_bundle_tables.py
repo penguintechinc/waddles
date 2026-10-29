@@ -151,7 +151,8 @@ def db_via_module():
             alternative_to TEXT DEFAULT '[]',
             homepage_url TEXT,
             notice TEXT,
-            category TEXT
+            category TEXT,
+            kind TEXT
         );
         """
     )

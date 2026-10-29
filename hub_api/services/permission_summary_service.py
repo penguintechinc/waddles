@@ -38,7 +38,7 @@ def build_permission_summary(
     if manifest.artifact == "prebuilt":
         unusual.append("prebuilt_artifact")
 
-    return {
+    summary: dict[str, Any] = {
         "streams": list(grant_labels),
         "egress": [{"host": rule.host, "methods": list(rule.methods)} for rule in manifest.egress],
         "database": [{"table": table, "readWrite": "read_write"} for table in manifest.data_tables],
@@ -53,6 +53,15 @@ def build_permission_summary(
         "entitlement": {"minTier": min_tier, "flagKey": flag_key},
         "unusual": unusual,
     }
+    # Exported MCP tools are consent-relevant (a widened access/risk must force
+    # re-approval). Added only when present so pre-existing bundles' hashes
+    # are unchanged.
+    if manifest.exported_tools:
+        summary["exportedTools"] = sorted(
+            ({"name": t.name, "access": t.access, "risk": t.risk} for t in manifest.exported_tools),
+            key=lambda t: t["name"],
+        )
+    return summary
 
 
 def canonical_json(summary: dict[str, Any]) -> str:

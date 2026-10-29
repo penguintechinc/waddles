@@ -185,6 +185,18 @@ REASON_INVALID_HOMEPAGE_URL = "invalid_homepage_url"
 REASON_INVALID_ALTERNATIVE_TO = "invalid_alternative_to"
 REASON_INVALID_NOTICE = "invalid_notice"
 REASON_INVALID_CATEGORY = "invalid_category"
+REASON_INVALID_KIND = "invalid_kind"
+
+# Optional `kind` field. Deliberately duplicates hub_api's
+# bundle_manifest_v2._infer_kind (flask_core must not import hub_api).
+KNOWN_KINDS = ("app", "service")
+
+
+def _infer_kind(app_id: str, module: str) -> str:
+    """Return the default `kind` ("app") when absent; inference never grants "service"."""
+    del app_id, module
+    return "app"
+
 
 _REQUIRED_STR_FIELDS = ("app_id", "name", "version", "feature", "module", "provider")
 
@@ -296,6 +308,7 @@ class AppManifest:
     homepage_url: Optional[str] = None
     notice: Optional[str] = None
     category: Optional[str] = None
+    kind: str = "app"  # 'app' | 'service'
 
 
 def _require_str(data: Dict[str, Any], key: str) -> str:
@@ -584,6 +597,13 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
             f"{category!r} is not one of {sorted(MARKETPLACE_CATEGORIES)}",
         )
 
+    raw_kind = data.get("kind")
+    if raw_kind is not None and raw_kind not in KNOWN_KINDS:
+        raise ManifestError(
+            REASON_INVALID_KIND, f"kind {raw_kind!r} is not one of {list(KNOWN_KINDS)}"
+        )
+    kind = raw_kind or _infer_kind(app_id, module)
+
     return AppManifest(
         app_id=app_id,
         name=name,
@@ -608,4 +628,5 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
         homepage_url=homepage_url,
         notice=notice,
         category=category,
+        kind=kind,
     )

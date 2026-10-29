@@ -19,6 +19,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import quote
 
 from flask_core.app_manifest import KNOWN_MODULES
 from flask_core.bundle_attribution import (
@@ -152,6 +153,26 @@ class PermissionDeclaration:
 
 
 @dataclass(slots=True, frozen=True)
+class ExportedTool:
+    """One MCP tool a service bundle exports (spec Sec5.1): name, JSON schemas, access, risk."""
+
+    name: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    access: str
+    risk: str
+
+
+@dataclass(slots=True, frozen=True)
+class RequestedTool:
+    """One MCP tool a bundle requests to call on another bundle (spec Sec5.2)."""
+
+    target_app_id: str
+    tool: str
+    access: str
+
+
+@dataclass(slots=True, frozen=True)
 class BundleManifestV2:
     """A validated `bundle.yaml` v2 manifest -- the shape every downstream reader consumes."""
 
@@ -200,6 +221,18 @@ class BundleManifestV2:
     # Slash-command registry (phase 1) -- the validated `commands:` block.
     # Defaulted last so hand-built manifests in existing fixtures keep working.
     command_declarations: tuple[CommandDeclaration, ...] = ()
+    # Bundle-MCP-tools framework (spec Sec5.1) -- "app" (user-facing) or
+    # "service" (platform plumbing). Optional additive field on schema v2;
+    # absent in the manifest -> inferred by `_infer_kind`. Defaulted last.
+    kind: str = ""
+    # Exported MCP tools (service bundles only; `app_cannot_export_tools`).
+    exported_tools: tuple[ExportedTool, ...] = ()
+    # Tools this bundle requests from other bundles (app AND service kinds).
+    requested_tools: tuple[RequestedTool, ...] = ()
+    # Server-side trust decision made by the install path (never read from the
+    # manifest): True only for the core seeder / trusted reparse. Gates the
+    # service-only `mcp.tools` capability.
+    trusted_source: bool = False
 
     def supports_platform(self, platform: str) -> bool:
         """Return True when this bundle may run on `platform` (absent field = every platform)."""
@@ -237,6 +270,19 @@ def _parse_supported_platforms(
         if entry not in seen:
             seen.append(entry)
     return tuple(seen)
+
+
+_VALID_KINDS = ("app", "service")
+
+
+def _infer_kind(app_id: str, module: str) -> str:
+    """Return the default `kind` ("app") when absent.
+
+    Inference NEVER grants "service": service authority is reachable only via an explicit
+    `kind: service` from a trusted source, so a forged namespace/module cannot escalate.
+    """
+    del app_id, module
+    return "app"
 
 
 def _require(condition: bool, reason: str, detail: str) -> None:
@@ -363,6 +409,135 @@ def parse_command_declarations(
             CommandDeclaration(name=name, types=types, platforms=platforms, description=description)
         )
     return tuple(declarations)
+
+
+_TOOL_ACCESS = frozenset({"read", "write"})
+_TOOL_RISK = frozenset({"normal", "dangerous"})
+_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
+
+
+def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
+    """Validate the optional `exported_tools:` list; absent (`None`) parses to no tools.
+
+    Each entry is `{name, input_schema, output_schema, access, risk}` with
+    `access` and `risk` both REQUIRED (no default -- a defaulted access would
+    mislabel a write tool read-only and fail-open the access gate). Raises
+    `ManifestV2Error` with a tool-specific reason code on any violation.
+    """
+    if raw_entries is None:
+        return ()
+    _require(
+        isinstance(raw_entries, list), "invalid_exported_tools", "exported_tools must be a list"
+    )
+    tools: list[ExportedTool] = []
+    seen: set[str] = set()
+    for entry in raw_entries:
+        _require(
+            isinstance(entry, dict),
+            "invalid_exported_tools",
+            "each exported_tools entry must be a mapping",
+        )
+        name = entry.get("name")
+        _require(
+            isinstance(name, str) and bool(_TOOL_NAME_RE.fullmatch(name)),
+            "invalid_tool_name",
+            "tool name must match [a-z][a-z0-9_.]{0,63}",
+        )
+        assert isinstance(name, str)  # narrowed by _require above, for mypy
+        _require(name not in seen, "duplicate_exported_tool", f"tool {name!r} declared twice")
+        seen.add(name)
+        access = entry.get("access")
+        _require(
+            access in _TOOL_ACCESS,
+            "invalid_tool_access",
+            f"tool {name!r}: access must be one of {sorted(_TOOL_ACCESS)}",
+        )
+        risk = entry.get("risk")
+        _require(
+            risk in _TOOL_RISK,
+            "invalid_tool_risk",
+            f"tool {name!r}: risk must be one of {sorted(_TOOL_RISK)}",
+        )
+        input_schema = entry.get("input_schema")
+        output_schema = entry.get("output_schema")
+        _require(
+            isinstance(input_schema, dict) and isinstance(output_schema, dict),
+            "invalid_tool_schema",
+            f"tool {name!r}: input_schema and output_schema must both be mappings",
+        )
+        tools.append(
+            ExportedTool(
+                name=name,
+                input_schema=dict(input_schema),
+                output_schema=dict(output_schema),
+                access=access,
+                risk=risk,
+            )
+        )
+    return tuple(tools)
+
+
+def parse_requested_tools(raw_entries: Any, *, own_app_id: str) -> tuple[RequestedTool, ...]:
+    """Validate the optional `requested_tools:` list; absent (`None`) parses to none.
+
+    Each entry is `{target_app_id, tool, access}`; both bundle kinds may request.
+    Rejects self-reference (when `own_app_id` is given), duplicate `(target, tool)`
+    and a non-read/write `access`. Raises `ManifestV2Error` with a block-specific code.
+    """
+    if raw_entries is None:
+        return ()
+    _require(
+        isinstance(raw_entries, list), "invalid_requested_tools", "requested_tools must be a list"
+    )
+    out: list[RequestedTool] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in raw_entries:
+        _require(
+            isinstance(entry, dict),
+            "invalid_requested_tools",
+            "each requested_tools entry must be a mapping",
+        )
+        target = entry.get("target_app_id")
+        _require(
+            isinstance(target, str) and bool(_APP_ID_RE.fullmatch(target)),
+            "invalid_requested_tools",
+            "requested tool target_app_id must be a valid app_id",
+        )
+        tool = entry.get("tool")
+        _require(
+            isinstance(tool, str) and bool(_TOOL_NAME_RE.fullmatch(tool)),
+            "invalid_requested_tools",
+            "requested tool name must match [a-z][a-z0-9_.]{0,63}",
+        )
+        assert isinstance(target, str) and isinstance(tool, str)  # narrowed, for mypy
+        _require(
+            target != own_app_id,
+            "tool_self_reference",
+            f"bundle requests its own tool {tool!r}",
+        )
+        _require(
+            (target, tool) not in seen,
+            "duplicate_requested_tool",
+            f"tool {target}:{tool} requested twice",
+        )
+        seen.add((target, tool))
+        access = entry.get("access")
+        _require(
+            access in _TOOL_ACCESS,
+            "invalid_tool_access",
+            f"requested tool {tool!r}: access must be one of {sorted(_TOOL_ACCESS)}",
+        )
+        out.append(RequestedTool(target_app_id=target, tool=tool, access=access))
+    return tuple(out)
+
+
+def requested_tool_permission_id(rt: RequestedTool) -> str:
+    """Derive the delimiter-safe `tool.call:<target>:<tool>` permission id.
+
+    The target app_id is percent-encoded (no safe chars) so its dots/colons can
+    never be confused with the `:` field separators; tool names cannot contain `:`.
+    """
+    return f"tool.call:{quote(rt.target_app_id, safe='')}:{rt.tool}"
 
 
 def _parse_consumes(
@@ -558,8 +733,15 @@ def parse_bundle_manifest_v2(
     known_custom_platforms: frozenset[str],
     allow_wildcard_consumes: bool,
     allow_prebuilt: bool,
+    trusted_source: bool = False,
 ) -> BundleManifestV2:
-    """Parse+validate `raw` (a `yaml.safe_load`-d manifest). Raises `ManifestV2Error` on failure."""
+    """Parse+validate `raw` (a `yaml.safe_load`-d manifest); `ManifestV2Error` on failure.
+
+    `trusted_source` is the SERVER-SIDE decision that the caller is a trusted
+    install path (core seeder / platform admin); it alone authorizes
+    `kind: service` and `exported_tools`. Fail-closed default False -- nothing
+    the manifest says about itself (provider, app_id, module) confers it.
+    """
     for key in (
         "schema_version",
         "app_id",
@@ -765,6 +947,34 @@ def parse_bundle_manifest_v2(
     _require(8 <= memory_mb <= _MAX_MEMORY_MB, "limit_out_of_range", f"memory_mb={memory_mb}")
     _require(1 <= egress_rps <= _MAX_EGRESS_RPS, "limit_out_of_range", f"egress_rps={egress_rps}")
 
+    raw_kind = raw.get("kind")
+    _require(
+        raw_kind is None or raw_kind in _VALID_KINDS,
+        "invalid_kind",
+        f"kind must be one of {_VALID_KINDS}, got {raw_kind!r}",
+    )
+    if raw_kind == "service":
+        _require(
+            trusted_source,
+            "untrusted_service_kind",
+            "kind: service may only be declared via a trusted install path",
+        )
+    kind = raw_kind or _infer_kind(raw["app_id"], raw["module"])
+
+    exported_tools = parse_exported_tools(raw.get("exported_tools"))
+    _require(
+        not exported_tools or kind == "service",
+        "app_cannot_export_tools",
+        "only a kind: service bundle may declare exported_tools",
+    )
+    _require(
+        not exported_tools or trusted_source,
+        "untrusted_service_kind",
+        "exported_tools may only be declared via a trusted install path",
+    )
+
+    requested_tools = parse_requested_tools(raw.get("requested_tools"), own_app_id=raw["app_id"])
+
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -795,4 +1005,8 @@ def parse_bundle_manifest_v2(
         category=category,
         supported_platforms=supported_platforms,
         command_declarations=command_declarations,
+        kind=kind,
+        exported_tools=exported_tools,
+        requested_tools=requested_tools,
+        trusted_source=trusted_source,
     )

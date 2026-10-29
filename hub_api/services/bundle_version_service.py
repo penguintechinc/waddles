@@ -218,6 +218,7 @@ async def create_version(
     known_custom_platforms: frozenset[str],
     allow_wildcard_consumes: bool,
     allow_prebuilt: bool,
+    trusted_source: bool = False,
 ) -> Any:
     """Validate and persist a new bundle version upload at status `UPLOADED`.
 
@@ -241,6 +242,7 @@ async def create_version(
             known_custom_platforms=known_custom_platforms,
             allow_wildcard_consumes=allow_wildcard_consumes,
             allow_prebuilt=allow_prebuilt,
+            trusted_source=trusted_source,
         )
     except ManifestV2Error as exc:
         status_code = 403 if exc.reason == "prebuilt_not_allowed" else 400

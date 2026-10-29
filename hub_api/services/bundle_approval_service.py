@@ -117,8 +117,11 @@ from services.bundle_manifest_v2 import (
     ConsumeRule,
     EgressRule,
     Limits,
+    _infer_kind,
     parse_command_declarations,
+    parse_exported_tools,
     parse_permission_declarations,
+    parse_requested_tools,
 )
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, conflict, not_found
@@ -214,6 +217,12 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         category=raw.get("category"),
         supported_platforms=supported_platforms,
         command_declarations=command_declarations,
+        kind=raw.get("kind") or _infer_kind(raw["app_id"], raw["module"]),
+        exported_tools=parse_exported_tools(raw.get("exported_tools")),
+        requested_tools=parse_requested_tools(raw.get("requested_tools"), own_app_id=raw["app_id"]),
+        # Already-ingested, already-validated blob (see docstring) -- it passed
+        # the trusted-source gate at ingest, so keep its service capability.
+        trusted_source=True,
     )
 
 
@@ -227,6 +236,9 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
 #: string, so hub-api and the data plane must agree on it byte-for-byte.
 KV_PERMISSION_ID = "storage.kv"
 
+#: Derived capability marking a service bundle that exports MCP tools.
+MCP_TOOLS_CAPABILITY = "mcp.tools"
+
 
 def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
     """The host capabilities a manifest's declared shape implies -- see this module's scope note."""
@@ -239,6 +251,8 @@ def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
         caps.add("relay")
     if KV_PERMISSION_ID in manifest.permissions:
         caps.add(KV_PERMISSION_ID)
+    if manifest.kind == "service" and manifest.exported_tools and manifest.trusted_source:
+        caps.add(MCP_TOOLS_CAPABILITY)
     return frozenset(caps)
 
 
@@ -292,6 +306,136 @@ async def _tenant_slug(install_dal: AsyncDB, tenant_id: int) -> str:
     if row is None or not row.slug:
         raise ApiError(f"tenant {tenant_id} has no slug configured", 500, "tenant_slug_missing")
     return str(row.slug)
+
+
+async def _validate_requested_tool_targets(
+    install_dal: AsyncDB,
+    *,
+    requested_tools: tuple[Any, ...],
+    tenant_id: int,
+    activated_by: int | None,
+    app_id: str,
+    version: str,
+) -> None:
+    """Refuse a `requested_tools` target that is missing or is not a `service` bundle.
+
+    Invocation matrix: app->app tool calls are forbidden, only a `service`
+    may be a tool target (a `service` requesting a `service` tool is fine --
+    the caller's kind is irrelevant). Enforced at activation, not manifest
+    parse, because the target's kind is only known once it is in the catalog.
+    The target must also be available to THIS tenant (`bundle_tenant_availability`),
+    mirroring `_validate_routes_to`. Target kind is the denormalized
+    `app_catalog.kind`; pre-0068 rows with a NULL kind fall back to the same
+    inference the manifest parser uses.
+    """
+    for req in requested_tools:
+        target_app_id = req.target_app_id
+        rows = await install_dal(install_dal.app_catalog.app_id == target_app_id).select()
+        row = rows.first()
+        available = (
+            await install_dal(
+                (install_dal.bundle_tenant_availability.app_id == target_app_id)
+                & (install_dal.bundle_tenant_availability.tenant_id == tenant_id)
+                & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
+            ).select()
+            if row is not None
+            else None
+        )
+        if row is None:
+            reason = "tool_target_not_found"
+            detail = f"requested tool target {target_app_id!r} does not exist in the app catalog"
+        elif not available:
+            reason = "tool_target_cross_tenant"
+            detail = f"requested tool target {target_app_id!r} is not available in this tenant"
+        else:
+            # Fail closed: a NULL catalog kind is "app" (rejected), never inferred.
+            kind = row.kind or "app"
+            if kind == "service":
+                continue
+            reason = "tool_target_not_service"
+            detail = (
+                f"requested tool target {target_app_id!r} is kind {kind!r}; "
+                "only a service bundle may be a tool target"
+            )
+        await bundle_audit.record(
+            install_dal,
+            actor_id=activated_by,
+            action="tool_target_refused",
+            target_type="app_install_approvals",
+            target_id=f"{app_id}@{version}",
+            details={"target_app_id": target_app_id, "reason": reason},
+        )
+        raise ApiError(detail, 422, reason)
+
+
+async def _validate_manifest_activation(
+    install_dal: AsyncDB,
+    *,
+    manifest: BundleManifestV2,
+    tenant_id: int,
+    activated_by: int | None,
+    app_id: str,
+    version: str,
+) -> None:
+    """Run EVERY manifest-level activation check (routes_to + requested_tools targets).
+
+    The single shared gate every activation entry point calls, so the two
+    checks can never be present on one path and missing on another.
+    """
+    if manifest.routes_to:
+        await _validate_routes_to(
+            install_dal,
+            routes_to=manifest.routes_to,
+            tenant_id=tenant_id,
+            activated_by=activated_by,
+            app_id=app_id,
+            version=version,
+        )
+    if manifest.requested_tools:
+        await _validate_requested_tool_targets(
+            install_dal,
+            requested_tools=manifest.requested_tools,
+            tenant_id=tenant_id,
+            activated_by=activated_by,
+            app_id=app_id,
+            version=version,
+        )
+
+
+async def validate_current_install_activation(
+    install_dal: AsyncDB, *, tenant_id: int, app_id: str, activated_by: int | None
+) -> None:
+    """Run the shared manifest activation gate against `app_id`'s current global install.
+
+    For the legacy `app_catalog`-based activation path (marketplace lifecycle),
+    which has no version-pinned approval flow. A catalog-only app with no
+    installed v2 manifest has nothing to validate (no-op).
+    """
+    install_rows = await install_dal(
+        (install_dal.app_global_installs.app_id == app_id)
+        & (install_dal.app_global_installs.superseded_by == None)  # noqa: E711
+        & (install_dal.app_global_installs.revoked_at == None)  # noqa: E711
+    ).select()
+    install = install_rows.first()
+    if install is None:
+        return
+    version = str(install.version)
+    upload = (
+        await install_dal(
+            (install_dal.app_version_uploads.app_id == app_id)
+            & (install_dal.app_version_uploads.version == version)
+        ).select()
+    ).first()
+    if upload is None:
+        return
+    await _validate_manifest_activation(
+        install_dal,
+        manifest=_reparse_trusted(upload.manifest_json),
+        tenant_id=tenant_id,
+        activated_by=activated_by,
+        app_id=app_id,
+        version=version,
+    )
 
 
 async def _validate_routes_to(
@@ -389,6 +533,9 @@ def classify_diff(new_summary: dict[str, Any], previous_summary: dict[str, Any] 
         parts |= {f"table:{t['table']}" for t in summary.get("database", [])}
         parts |= {f"cap:{c}" for c in summary.get("capabilities", [])}
         parts |= {f"route:{r}" for r in summary.get("routesTo", [])}
+        parts |= {
+            f"tool:{t['name']}:{t['access']}:{t['risk']}" for t in summary.get("exportedTools", [])
+        }
         return parts
 
     new_set, old_set = _flatten(new_summary), _flatten(previous_summary)
@@ -1062,15 +1209,14 @@ async def activate_tenant_wide_with_warnings(
         raise not_found(f"version {version} of {app_id} not found")
 
     manifest = _reparse_trusted(upload.manifest_json)
-    if manifest.routes_to:
-        await _validate_routes_to(
-            install_dal,
-            routes_to=manifest.routes_to,
-            tenant_id=tenant_id,
-            activated_by=activated_by,
-            app_id=app_id,
-            version=version,
-        )
+    await _validate_manifest_activation(
+        install_dal,
+        manifest=manifest,
+        tenant_id=tenant_id,
+        activated_by=activated_by,
+        app_id=app_id,
+        version=version,
+    )
 
     summary, computed_hash = await get_permission_summary(
         install_dal, app_id=app_id, version=version
@@ -1218,15 +1364,14 @@ async def activate_for_community_with_warnings(
         raise not_found(f"version {version} of {app_id} not found")
 
     manifest = _reparse_trusted(upload.manifest_json)
-    if manifest.routes_to:
-        await _validate_routes_to(
-            install_dal,
-            routes_to=manifest.routes_to,
-            tenant_id=tenant_id,
-            activated_by=activated_by,
-            app_id=app_id,
-            version=version,
-        )
+    await _validate_manifest_activation(
+        install_dal,
+        manifest=manifest,
+        tenant_id=tenant_id,
+        activated_by=activated_by,
+        app_id=app_id,
+        version=version,
+    )
 
     summary, computed_hash = await get_permission_summary(
         install_dal, app_id=app_id, version=version

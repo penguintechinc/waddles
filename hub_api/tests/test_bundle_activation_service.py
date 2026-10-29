@@ -24,7 +24,7 @@ from services.bundle_approval_service import (
     deactivate_for_community,
     deactivate_tenant_wide,
 )
-from services.bundle_install_dal import raw_sql_rows
+from services.bundle_install_dal import raw_sql_rows, raw_sql_write
 from services.errors import ApiError
 from services.tenant_app_availability_service import set_available
 from tests.conftest import TENANT_SLUG
@@ -511,6 +511,287 @@ async def test_activate_for_community_allows_a_same_tenant_routes_to_target(
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     result = await _activate(install_dal, community_id=community_id)
     assert result.app_id == "waddles.socials.music.default"
+
+
+async def _seed_music_with_requested_tools(
+    install_dal: Any, *, caller_kind: str, targets: list[str]
+) -> None:
+    """Seed + globally install the caller bundle with a `requested_tools` block."""
+    manifest = {
+        "schema_version": 2,
+        "app_id": "waddles.socials.music.default",
+        "name": "Music Station",
+        "version": "3.0.2",
+        "feature": "waddles.socials.music",
+        "module": "socials",
+        "provider": "builtin",
+        "language": "python",
+        "artifact": "source",
+        "kind": caller_kind,
+        "requested_tools": [
+            {"target_app_id": t, "tool": "do_thing", "access": "read"} for t in targets
+        ],
+        "stages": {
+            "process": {
+                "entry": "x:y",
+                "consumes": [{"platform": "twitch", "event_types": ["chat.message"]}],
+            }
+        },
+    }
+    now = datetime.now(UTC)
+    version_id = await install_dal.app_versions.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.2",
+        artifact_digest="sha256:" + "c" * 64,
+        language="python",
+        artifact_kind="source",
+        scan_status="scanned",
+    )
+    await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.2",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status="PUBLISHED",
+        manifest_json=manifest,
+        app_version_id=version_id,
+        created_at=now,
+        updated_at=now,
+    )
+    from services.bundle_approval_service import install_version_globally
+
+    await install_version_globally(
+        install_dal, app_id="waddles.socials.music.default", version="3.0.2", installed_by=1
+    )
+    await set_available(
+        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+    )
+
+
+async def _make_target_available(install_dal: Any, *, app_id: str, tenant_id: int = 1) -> None:
+    """Mark a catalog target available to a tenant (raw SQL: composite-PK table)."""
+    await raw_sql_write(
+        install_dal,
+        "INSERT INTO bundle_tenant_availability (tenant_id, app_id, available, updated_at)"
+        " VALUES (:t, :a, :av, :u)",
+        {"t": tenant_id, "a": app_id, "av": True, "u": datetime.now(UTC)},
+    )
+
+
+def _insert_catalog_target(
+    bundle_install_db: Any, *, app_id: str, kind: str | None, module: str = "socials"
+) -> None:
+    dal = bundle_install_db.dal
+    dal.app_catalog.insert(
+        app_id=app_id,
+        name="Target",
+        manifest_version="3.0.0",
+        module=module,
+        feature=".".join(app_id.split(".")[:3]),
+        provider="builtin",
+        execution_model="native",
+        is_default=False,
+        platform_compatibility={"tested_with": "3.0.0", "min_version": None, "max_version": None},
+        status="active",
+        stages={},
+        kind=kind,
+    )
+    dal.commit()
+
+
+@pytest.mark.parametrize(
+    ("caller_kind", "target_kind", "allowed"),
+    [
+        ("app", "app", False),
+        ("app", "service", True),
+        ("service", "service", True),
+        ("service", "app", False),
+    ],
+)
+async def test_activate_enforces_tool_target_must_be_service(
+    bundle_install_db: Any,
+    install_dal: Any,
+    caller_kind: str,
+    target_kind: str,
+    allowed: bool,
+) -> None:
+    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind=target_kind)
+    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind=caller_kind, targets=["waddles.core.tools.default"]
+    )
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    if allowed:
+        result = await _activate(install_dal, community_id=community_id)
+        assert result.app_id == "waddles.socials.music.default"
+        return
+    with pytest.raises(ApiError) as excinfo:
+        await _activate(install_dal, community_id=community_id)
+    assert excinfo.value.code == "tool_target_not_service"
+
+
+async def test_activate_refuses_a_requested_tool_target_available_only_in_another_tenant(
+    bundle_install_db: Any, install_dal: Any
+) -> None:
+    other_tenant_id = int(
+        bundle_install_db.dal.tenants.insert(
+            slug="other-corp2", display_name="Other Corp", is_active=True
+        )
+    )
+    bundle_install_db.dal.commit()
+    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind="service")
+    await _make_target_available(
+        install_dal, app_id="waddles.core.tools.default", tenant_id=other_tenant_id
+    )
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+    )
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    with pytest.raises(ApiError) as excinfo:
+        await _activate(install_dal, community_id=community_id)
+    assert excinfo.value.code == "tool_target_cross_tenant"
+
+
+@pytest.mark.parametrize(("target_kind", "allowed"), [("app", False), ("service", True)])
+async def test_marketplace_lifecycle_activate_bundle_enforces_tool_target_gate(
+    bundle_install_db: Any, install_dal: Any, target_kind: str, allowed: bool
+) -> None:
+    """The legacy `marketplace_lifecycle_service.activate_bundle` path runs the same gate."""
+    from services.marketplace_lifecycle_service import activate_bundle
+
+    dal = bundle_install_db.dal
+    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind=target_kind)
+    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+    )
+    _insert_catalog_target(bundle_install_db, app_id="waddles.socials.music.default", kind="app")
+    dal.app_tenant_availability.insert(
+        tenant_id=1, app_id="waddles.socials.music.default", available=True
+    )
+    dal.commit()
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+
+    async def _go() -> Any:
+        return await activate_bundle(
+            bundle_install_db,
+            dal,
+            community_id=int(community_id),
+            tenant_id=1,
+            app_id="waddles.socials.music.default",
+            config=None,
+            activated_by=1,
+            install_dal=install_dal,
+        )
+
+    if allowed:
+        assert await _go() is not None
+        return
+    with pytest.raises(ApiError) as excinfo:
+        await _go()
+    assert excinfo.value.code == "tool_target_not_service"
+
+
+async def test_null_kind_target_fails_closed_as_app(
+    bundle_install_db: Any, install_dal: Any
+) -> None:
+    """A NULL catalog kind is "app" (never inferred service, even in the core namespace)."""
+    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind=None)
+    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+    )
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    with pytest.raises(ApiError) as excinfo:
+        await _activate(install_dal, community_id=community_id)
+    assert excinfo.value.code == "tool_target_not_service"
+
+
+async def test_app_target_in_old_heuristic_module_is_not_a_tool_target(
+    bundle_install_db: Any, install_dal: Any
+) -> None:
+    """An `app` whose module sat in the retired service-module heuristic is still refused."""
+    _insert_catalog_target(
+        bundle_install_db, app_id="waddles.core.tools.default", kind="app", module="core"
+    )
+    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+    )
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    with pytest.raises(ApiError) as excinfo:
+        await _activate(install_dal, community_id=community_id)
+    assert excinfo.value.code == "tool_target_not_service"
+
+
+async def test_matrix_refusal_writes_tool_target_refused_audit_row(
+    bundle_install_db: Any, install_dal: Any
+) -> None:
+    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind="app")
+    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+    )
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    with pytest.raises(ApiError):
+        await _activate(install_dal, community_id=community_id)
+    rows = await raw_sql_rows(
+        install_dal,
+        "SELECT details FROM audit_log WHERE action = :a",
+        {"a": "tool_target_refused"},
+    )
+    audit_row = rows.first()
+    assert audit_row is not None
+    details = audit_row["details"]
+    if isinstance(details, str):
+        details = json.loads(details)
+    assert details["reason"] == "tool_target_not_service"
+    assert details["target_app_id"] == "waddles.core.tools.default"
+
+
+async def test_activate_tenant_wide_refuses_missing_tool_target(install_dal: Any) -> None:
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.core.nope.default"]
+    )
+    with pytest.raises(ApiError) as excinfo:
+        await activate_tenant_wide(
+            install_dal,
+            tenant_id=1,
+            app_id="waddles.socials.music.default",
+            activated_by=1,
+        )
+    assert excinfo.value.code == "tool_target_not_found"
+
+
+async def test_activate_refuses_a_requested_tool_target_that_does_not_exist(
+    install_dal: Any,
+) -> None:
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.core.nope.default"]
+    )
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    with pytest.raises(ApiError) as excinfo:
+        await _activate(install_dal, community_id=community_id)
+    assert excinfo.value.code == "tool_target_not_found"
+
+
+async def test_activate_tenant_wide_enforces_tool_target_must_be_service(
+    bundle_install_db: Any, install_dal: Any
+) -> None:
+    _insert_catalog_target(bundle_install_db, app_id="waddles.socials.other.default", kind="app")
+    await _make_target_available(install_dal, app_id="waddles.socials.other.default")
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.socials.other.default"]
+    )
+    with pytest.raises(ApiError) as excinfo:
+        await activate_tenant_wide(
+            install_dal,
+            tenant_id=1,
+            app_id="waddles.socials.music.default",
+            activated_by=1,
+        )
+    assert excinfo.value.code == "tool_target_not_service"
 
 
 async def test_activate_for_community_audits_a_routes_to_refusal(install_dal: Any) -> None:
