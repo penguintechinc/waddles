@@ -53,13 +53,16 @@ count_vulnerable_locks() {
   for f in $locks; do
     # PYSEC-2022-252: deep-translator PyPI account takeover, no fixed version
     # published, so every release since 1.8.5 is flagged in perpetuity.
+    # PYSEC-2026-2633..2636: mem0ai 0.1.115, library-only w/ Qdrant, assessed
+    # unreachable; exit = WaddleAI memory migration. Tracking #959, review 2027-01-27.
     if [ "$PY_AUDIT_313" = "1" ]; then
       uv run --quiet --python 3.13 --with pip-audit pip-audit -r "$f" \
         --no-deps --progress-spinner off --ignore-vuln PYSEC-2022-252 \
+        --ignore-vuln PYSEC-2026-2633 --ignore-vuln PYSEC-2026-2634 --ignore-vuln PYSEC-2026-2635 --ignore-vuln PYSEC-2026-2636 \
         >/dev/null 2>&1 || { echo "  vulnerable: $f" >&2; bad=$((bad + 1)); }
     else
       pip-audit -r "$f" --no-deps --progress-spinner off \
-        --ignore-vuln PYSEC-2022-252 >/dev/null 2>&1 \
+        --ignore-vuln PYSEC-2022-252 --ignore-vuln PYSEC-2026-2633 --ignore-vuln PYSEC-2026-2634 --ignore-vuln PYSEC-2026-2635 --ignore-vuln PYSEC-2026-2636 >/dev/null 2>&1 \
         || { echo "  vulnerable: $f" >&2; bad=$((bad + 1)); }
     fi
   done
