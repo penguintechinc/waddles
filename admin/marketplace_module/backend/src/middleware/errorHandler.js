@@ -22,6 +22,7 @@ export class AppError extends Error {
  */
 export const errors = {
   badRequest: (message = 'Bad request') => new AppError(message, 400, 'BAD_REQUEST'),
+  validation: (message = 'Validation failed') => new AppError(message, 400, 'VALIDATION_ERROR'),
   unauthorized: (message = 'Unauthorized') => new AppError(message, 401, 'UNAUTHORIZED'),
   forbidden: (message = 'Forbidden') => new AppError(message, 403, 'FORBIDDEN'),
   notFound: (message = 'Not found') => new AppError(message, 404, 'NOT_FOUND'),
