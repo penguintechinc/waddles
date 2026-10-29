@@ -30,14 +30,30 @@ def test_absent_kind_inferred_app() -> None:
 
 
 @pytest.mark.parametrize("module", ["core", "integrations"])
-def test_absent_kind_inferred_service_for_platform_module(module: str) -> None:
+def test_absent_kind_never_inferred_service(module: str) -> None:
     data = {
         **_BASE,
         "module": module,
         "feature": f"waddles.{module}.x",
         "app_id": f"waddles.{module}.x.y",
     }
-    assert parse_manifest(data).kind == "service"
+    assert parse_manifest(data).kind == "app"
+
+
+def test_core_namespace_and_integrations_module_default_app() -> None:
+    core = {**_BASE, "app_id": "waddles.core.x.y", "feature": "waddles.core.x"}
+    assert parse_manifest(core).kind == "app"
+    assert (
+        parse_manifest(
+            {
+                **_BASE,
+                "module": "integrations",
+                "feature": "waddles.integrations.x",
+                "app_id": "waddles.integrations.x.y",
+            }
+        ).kind
+        == "app"
+    )
 
 
 def test_invalid_kind_rejected() -> None:

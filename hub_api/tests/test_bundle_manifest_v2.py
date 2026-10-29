@@ -402,9 +402,8 @@ def test_kind_explicit_service() -> None:
     assert _parse_trusted({"kind": "service"}).kind == "service"  # type: ignore[attr-defined]
 
 
-def test_kind_defaults_inferred() -> None:
-    expected = _infer_kind(_VALID_MANIFEST["app_id"], _VALID_MANIFEST["module"])
-    assert _parse({}).kind == expected  # type: ignore[attr-defined]
+def test_kind_defaults_to_app() -> None:
+    assert _parse({}).kind == "app"  # type: ignore[attr-defined]
 
 
 def test_kind_invalid() -> None:
@@ -416,14 +415,15 @@ def test_kind_invalid() -> None:
 @pytest.mark.parametrize(
     ("app_id", "module", "expected"),
     [
-        ("waddles.core.auth", "auth", "service"),
-        ("waddles.x.y", "reputation", "service"),
-        ("waddles.x.y", "economy", "service"),
-        ("waddles.x.y", "connector", "service"),
+        ("waddles.core.auth", "auth", "app"),
+        ("waddles.x.y", "core", "app"),
+        ("waddles.x.y", "reputation", "app"),
+        ("waddles.x.y", "economy", "app"),
+        ("waddles.x.y", "connector", "app"),
         ("waddles.socials.music.default", "socials", "app"),
     ],
 )
-def test_infer_kind_heuristic(app_id: str, module: str, expected: str) -> None:
+def test_infer_kind_never_grants_service(app_id: str, module: str, expected: str) -> None:
     assert _infer_kind(app_id, module) == expected
 
 
@@ -571,10 +571,21 @@ def test_untrusted_caller_with_tools_rejected_even_when_core_namespace() -> None
 def test_untrusted_inferred_service_grants_no_tools_or_capability() -> None:
     from services.bundle_approval_service import _derive_capabilities
 
-    # Inferred kind (core module) is display-only; no trust, no mcp.tools.
+    # Absent kind is always "app" (inference never grants service); no trust, no mcp.tools.
     m = _parse(
         {"module": "core", "feature": "waddles.core.music", "app_id": "waddles.core.music.default"}
     )
+    assert m.kind == "app"  # type: ignore[attr-defined]
+    assert (
+        _parse(
+            {
+                "module": "integrations",
+                "feature": "waddles.integrations.x",
+                "app_id": "waddles.integrations.x.default",
+            }
+        ).kind
+        == "app"
+    )  # type: ignore[attr-defined]
     assert m.trusted_source is False  # type: ignore[attr-defined]
     assert "mcp.tools" not in _derive_capabilities(m)  # type: ignore[arg-type]
     with pytest.raises(ManifestV2Error) as exc:
@@ -586,7 +597,7 @@ def test_untrusted_inferred_service_grants_no_tools_or_capability() -> None:
                 "exported_tools": [_tool()],
             }
         )
-    assert exc.value.reason == "untrusted_service_kind"
+    assert exc.value.reason == "app_cannot_export_tools"
 
 
 def test_trusted_service_kind_allowed_with_mcp_tools() -> None:
@@ -697,9 +708,37 @@ def test_requested_tool_permission_id_no_collision() -> None:
     assert a != b
 
 
+def test_explicit_service_trusted_stays_service_core_namespace() -> None:
+    m = _parse_trusted(
+        {
+            "kind": "service",
+            "module": "core",
+            "feature": "waddles.core.music",
+            "app_id": "waddles.core.music.default",
+        }
+    )
+    assert m.kind == "service"  # type: ignore[attr-defined]
+
+
+def test_untrusted_explicit_service_kind_rejected_untrusted_service_kind() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"kind": "service"})
+    assert exc.value.reason == "untrusted_service_kind"
+
+
+@pytest.mark.parametrize(
+    ("target", "tool"),
+    [("waddles.svc:evil.default", "balance"), ("waddles.svc.economy.default", "bal:ance")],
+)
+def test_requested_tools_colon_in_names_rejected(target: str, tool: str) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"requested_tools": [_rt(target=target, tool=tool)]})
+    assert exc.value.reason == "invalid_requested_tools"
+
+
 def test_tool_self_reference() -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({"requested_tools": [_rt(target="waddles.socials.music.default")]})
+        _parse({"requested_tools": [_rt(target=_VALID_MANIFEST["app_id"])]})
     assert exc.value.reason == "tool_self_reference"
 
 

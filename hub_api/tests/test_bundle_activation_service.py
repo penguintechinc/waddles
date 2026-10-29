@@ -579,13 +579,15 @@ async def _make_target_available(install_dal: Any, *, app_id: str, tenant_id: in
     )
 
 
-def _insert_catalog_target(bundle_install_db: Any, *, app_id: str, kind: str | None) -> None:
+def _insert_catalog_target(
+    bundle_install_db: Any, *, app_id: str, kind: str | None, module: str = "socials"
+) -> None:
     dal = bundle_install_db.dal
     dal.app_catalog.insert(
         app_id=app_id,
         name="Target",
         manifest_version="3.0.0",
-        module="socials",
+        module=module,
         feature=".".join(app_id.split(".")[:3]),
         provider="builtin",
         execution_model="native",
@@ -689,6 +691,77 @@ async def test_marketplace_lifecycle_activate_bundle_enforces_tool_target_gate(
     with pytest.raises(ApiError) as excinfo:
         await _go()
     assert excinfo.value.code == "tool_target_not_service"
+
+
+async def test_null_kind_target_fails_closed_as_app(
+    bundle_install_db: Any, install_dal: Any
+) -> None:
+    """A NULL catalog kind is "app" (never inferred service, even in the core namespace)."""
+    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind=None)
+    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+    )
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    with pytest.raises(ApiError) as excinfo:
+        await _activate(install_dal, community_id=community_id)
+    assert excinfo.value.code == "tool_target_not_service"
+
+
+async def test_app_target_in_old_heuristic_module_is_not_a_tool_target(
+    bundle_install_db: Any, install_dal: Any
+) -> None:
+    """An `app` whose module sat in the retired service-module heuristic is still refused."""
+    _insert_catalog_target(
+        bundle_install_db, app_id="waddles.core.tools.default", kind="app", module="core"
+    )
+    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+    )
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    with pytest.raises(ApiError) as excinfo:
+        await _activate(install_dal, community_id=community_id)
+    assert excinfo.value.code == "tool_target_not_service"
+
+
+async def test_matrix_refusal_writes_tool_target_refused_audit_row(
+    bundle_install_db: Any, install_dal: Any
+) -> None:
+    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind="app")
+    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+    )
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    with pytest.raises(ApiError):
+        await _activate(install_dal, community_id=community_id)
+    rows = await raw_sql_rows(
+        install_dal,
+        "SELECT details FROM audit_log WHERE action = :a",
+        {"a": "tool_target_refused"},
+    )
+    audit_row = rows.first()
+    assert audit_row is not None
+    details = audit_row["details"]
+    if isinstance(details, str):
+        details = json.loads(details)
+    assert details["reason"] == "tool_target_not_service"
+    assert details["target_app_id"] == "waddles.core.tools.default"
+
+
+async def test_activate_tenant_wide_refuses_missing_tool_target(install_dal: Any) -> None:
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["waddles.core.nope.default"]
+    )
+    with pytest.raises(ApiError) as excinfo:
+        await activate_tenant_wide(
+            install_dal,
+            tenant_id=1,
+            app_id="waddles.socials.music.default",
+            activated_by=1,
+        )
+    assert excinfo.value.code == "tool_target_not_found"
 
 
 async def test_activate_refuses_a_requested_tool_target_that_does_not_exist(

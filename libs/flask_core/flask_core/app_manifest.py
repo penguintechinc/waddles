@@ -190,15 +190,11 @@ REASON_INVALID_KIND = "invalid_kind"
 # Optional `kind` field. Deliberately duplicates hub_api's
 # bundle_manifest_v2._infer_kind (flask_core must not import hub_api).
 KNOWN_KINDS = ("app", "service")
-_SERVICE_MODULES = frozenset(
-    {"core", "connector", "connectors", "integrations", "economy", "reputation"}
-)
 
 
 def _infer_kind(app_id: str, module: str) -> str:
-    """Infer `kind` when absent: platform namespaces/modules are "service", else "app"."""
-    if app_id.startswith("waddles.core.") or module in _SERVICE_MODULES:
-        return "service"
+    """Return the default `kind` ("app") when absent; inference never grants "service"."""
+    del app_id, module
     return "app"
 
 

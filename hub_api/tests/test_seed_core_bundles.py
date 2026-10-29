@@ -1986,6 +1986,41 @@ async def test_seed_one_matching_manifest_files_seed(
     results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
 
     assert results
+    assert {r.app_id for r in results} == {entry.app_id}
+    assert all(r.version == entry.version for r in results)
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+
+
+async def test_agreement_check_warns_when_bundle_yaml_absent(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    entry = CatalogEntry(
+        app_id="waddles.core.x.default",
+        version="1.0.0",
+        language="python",
+        manifest_path="m.yaml",
+        artifact_path="a.wasm",
+        activation_targets=(),
+        source_dir="nope",
+    )
+    with caplog.at_level("WARNING"):
+        seeder._assert_manifest_files_agree(entry, tmp_path, {"kind": "app"})
+    assert "core_bundle_agreement_check_skipped" in caplog.text
+
+
+@pytest.mark.parametrize("bad", [None, [], "x"])
+def test_agreement_check_rejects_non_mapping_manifest(tmp_path: Path, bad: Any) -> None:
+    entry = CatalogEntry(
+        app_id="waddles.core.x.default",
+        version="1.0.0",
+        language="python",
+        manifest_path="m.yaml",
+        artifact_path="a.wasm",
+        activation_targets=(),
+        source_dir="src",
+    )
+    with pytest.raises(CoreBundleSeederError, match="not a mapping"):
+        seeder._assert_manifest_files_agree(entry, tmp_path, bad)
 
 
 def test_real_catalog_bundle_yaml_and_hub_manifest_agree() -> None:

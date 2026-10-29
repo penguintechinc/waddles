@@ -348,7 +348,8 @@ async def _validate_requested_tool_targets(
             reason = "tool_target_cross_tenant"
             detail = f"requested tool target {target_app_id!r} is not available in this tenant"
         else:
-            kind = row.kind or _infer_kind(target_app_id, str(row.module or ""))
+            # Fail closed: a NULL catalog kind is "app" (rejected), never inferred.
+            kind = row.kind or "app"
             if kind == "service":
                 continue
             reason = "tool_target_not_service"

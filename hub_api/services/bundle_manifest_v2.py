@@ -273,13 +273,15 @@ def _parse_supported_platforms(
 
 
 _VALID_KINDS = ("app", "service")
-_SERVICE_MODULES = frozenset({"core", "connector", "connectors", "economy", "reputation"})
 
 
 def _infer_kind(app_id: str, module: str) -> str:
-    """Infer `kind` when absent: platform namespaces/modules are "service", else "app"."""
-    if app_id.startswith("waddles.core.") or module in _SERVICE_MODULES:
-        return "service"
+    """Return the default `kind` ("app") when absent.
+
+    Inference NEVER grants "service": service authority is reachable only via an explicit
+    `kind: service` from a trusted source, so a forged namespace/module cannot escalate.
+    """
+    del app_id, module
     return "app"
 
 
@@ -475,9 +477,7 @@ def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
     return tuple(tools)
 
 
-def parse_requested_tools(
-    raw_entries: Any, *, own_app_id: str | None = None
-) -> tuple[RequestedTool, ...]:
+def parse_requested_tools(raw_entries: Any, *, own_app_id: str) -> tuple[RequestedTool, ...]:
     """Validate the optional `requested_tools:` list; absent (`None`) parses to none.
 
     Each entry is `{target_app_id, tool, access}`; both bundle kinds may request.
@@ -511,7 +511,7 @@ def parse_requested_tools(
         )
         assert isinstance(target, str) and isinstance(tool, str)  # narrowed, for mypy
         _require(
-            own_app_id is None or target != own_app_id,
+            target != own_app_id,
             "tool_self_reference",
             f"bundle requests its own tool {tool!r}",
         )

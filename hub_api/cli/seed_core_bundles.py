@@ -850,10 +850,18 @@ def _assert_manifest_files_agree(
     let the two enforce different capability surfaces. Skipped when the sibling `bundle.yaml`
     is not on disk (the built core-bundles image flattens only the hub manifest).
     """
+    if not isinstance(hub_raw, Mapping):
+        raise CoreBundleSeederError(f"{entry.app_id}: hub-manifest.yaml is empty or not a mapping")
     if not entry.source_dir:
+        logger.warning(
+            "core_bundle_agreement_check_skipped app_id=%s reason=no_source_dir", entry.app_id
+        )
         return
     sdk_path = bundles_dir / entry.source_dir / "bundle.yaml"
     if not sdk_path.is_file():
+        logger.warning(
+            "core_bundle_agreement_check_skipped app_id=%s reason=bundle_yaml_absent", entry.app_id
+        )
         return
     sdk_raw = yaml.safe_load(sdk_path.read_text(encoding="utf-8")) or {}
     for key in _AGREEMENT_KEYS:
