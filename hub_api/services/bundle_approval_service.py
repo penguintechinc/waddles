@@ -308,6 +308,50 @@ async def _tenant_slug(install_dal: AsyncDB, tenant_id: int) -> str:
     return str(row.slug)
 
 
+async def _validate_requested_tool_targets(
+    install_dal: AsyncDB,
+    *,
+    requested_tools: tuple[Any, ...],
+    activated_by: int | None,
+    app_id: str,
+    version: str,
+) -> None:
+    """Refuse a `requested_tools` target that is missing or is not a `service` bundle.
+
+    Invocation matrix: app->app tool calls are forbidden, only a `service`
+    may be a tool target (a `service` requesting a `service` tool is fine --
+    the caller's kind is irrelevant). Enforced at activation, not manifest
+    parse, because the target's kind is only known once it is in the catalog.
+    Target kind is the denormalized `app_catalog.kind`; pre-0068 rows with a
+    NULL kind fall back to the same inference the manifest parser uses.
+    """
+    for req in requested_tools:
+        target_app_id = req.target_app_id
+        rows = await install_dal(install_dal.app_catalog.app_id == target_app_id).select()
+        row = rows.first()
+        if row is None:
+            reason = "tool_target_not_found"
+            detail = f"requested tool target {target_app_id!r} does not exist in the app catalog"
+        else:
+            kind = row.kind or _infer_kind(target_app_id, str(row.module or ""))
+            if kind == "service":
+                continue
+            reason = "tool_target_not_service"
+            detail = (
+                f"requested tool target {target_app_id!r} is kind {kind!r}; "
+                "only a service bundle may be a tool target"
+            )
+        await bundle_audit.record(
+            install_dal,
+            actor_id=activated_by,
+            action="tool_target_refused",
+            target_type="app_install_approvals",
+            target_id=f"{app_id}@{version}",
+            details={"target_app_id": target_app_id, "reason": reason},
+        )
+        raise ApiError(detail, 422, reason)
+
+
 async def _validate_routes_to(
     install_dal: AsyncDB,
     *,
@@ -1088,6 +1132,14 @@ async def activate_tenant_wide_with_warnings(
             app_id=app_id,
             version=version,
         )
+    if manifest.requested_tools:
+        await _validate_requested_tool_targets(
+            install_dal,
+            requested_tools=manifest.requested_tools,
+            activated_by=activated_by,
+            app_id=app_id,
+            version=version,
+        )
 
     summary, computed_hash = await get_permission_summary(
         install_dal, app_id=app_id, version=version
@@ -1240,6 +1292,14 @@ async def activate_for_community_with_warnings(
             install_dal,
             routes_to=manifest.routes_to,
             tenant_id=tenant_id,
+            activated_by=activated_by,
+            app_id=app_id,
+            version=version,
+        )
+    if manifest.requested_tools:
+        await _validate_requested_tool_targets(
+            install_dal,
+            requested_tools=manifest.requested_tools,
             activated_by=activated_by,
             app_id=app_id,
             version=version,
