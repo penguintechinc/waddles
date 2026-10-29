@@ -1,56 +1,53 @@
 /**
  * SSRF guard for vendor-controlled URLs: https-only, DNS-resolved, and rejects
- * private/loopback/link-local/CGNAT/metadata addresses. Used at module write
- * time and again immediately before every outbound vendor fetch.
+ * non-public addresses (classified by the maintained ipaddr.js range tables). Used at module
+ * write time; outbound vendor fetches additionally pin the socket to validated IPs via pinnedAgent.
  */
 import dns from 'node:dns';
 import net from 'node:net';
+import ipaddr from 'ipaddr.js';
+import { Agent } from 'undici';
 import { errors } from '../middleware/errorHandler.js';
 
-/** Returns true when the IPv4 address is in a non-public range. */
-function isBlockedV4(ip) {
-  const [a, b] = ip.split('.').map(Number);
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) || // CGNAT 100.64/10
-    (a === 169 && b === 254) || // link-local + cloud metadata
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 192 && b === 0) || // 192.0.0/24 + 192.0.2/24
-    (a === 198 && (b === 18 || b === 19)) || // benchmarking
-    a >= 224 // multicast + reserved + broadcast
-  );
-}
-
-/** Returns true when the IPv6 address is in a non-public range. */
-function isBlockedV6(ip) {
-  const lower = ip.toLowerCase().split('%')[0];
-  const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) return isBlockedV4(mapped[1]);
-  const hexMapped = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (hexMapped) {
-    const hi = parseInt(hexMapped[1], 16);
-    const lo = parseInt(hexMapped[2], 16);
-    return isBlockedV4(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
-  }
-  if (lower === '::' || lower === '::1') return true;
-  const first = parseInt(lower.split(':')[0] || '0', 16);
-  return (
-    (first & 0xfe00) === 0xfc00 || // fc00::/7 unique-local (incl. fd00::/8)
-    (first & 0xffc0) === 0xfe80 || // fe80::/10 link-local
-    (first & 0xff00) === 0xff00 // multicast
-  );
-}
-
-/** True when the literal IP (v4 or v6) must never be contacted. */
+/**
+ * True when the literal IP (v4 or v6) must never be contacted. Only ipaddr.js `unicast` is
+ * allowed. IPv4-mapped IPv6 is unwrapped and judged as IPv4; every other v4-embedding transition
+ * form (NAT64 64:ff9b::/96, 6to4 2002::/16, Teredo 2001::/32, ::/96, 100::/64 discard, ...) has a
+ * non-unicast range name and is refused.
+ */
 export function isBlockedIp(ip) {
-  const family = net.isIP(ip);
-  if (family === 4) return isBlockedV4(ip);
-  if (family === 6) return isBlockedV6(ip);
-  return true;
+  if (typeof ip !== 'string' || !ipaddr.isValid(ip)) return true;
+  let addr = ipaddr.parse(ip);
+  if (addr.kind() === 'ipv6' && addr.isIPv4MappedAddress()) addr = addr.toIPv4Address();
+  // Deprecated IPv4-compatible ::/96 (e.g. ::7f00:1) is reported as unicast by ipaddr.js; refuse it.
+  if (addr.kind() === 'ipv6' && addr.parts.slice(0, 6).every((p) => p === 0)) return true;
+  return addr.range() !== 'unicast';
 }
+
+/**
+ * dns.lookup-compatible resolver for undici's `connect.lookup`. Every resolved address is
+ * validated and ONLY validated addresses are handed to the socket, so the connection is pinned to
+ * the IP that was checked (no resolve-then-reconnect rebinding window). TLS SNI/Host still use
+ * the original hostname because undici passes the hostname, not the address, to TLS.
+ */
+export function guardedLookup(hostname, options, callback) {
+  const opts = typeof options === 'function' ? {} : options || {};
+  const cb = typeof options === 'function' ? options : callback;
+  dns.lookup(hostname, { ...opts, all: true, verbatim: true }, (err, results) => {
+    if (err) return cb(err);
+    const list = Array.isArray(results) ? results : [];
+    if (list.length === 0 || list.some((r) => isBlockedIp(r.address))) {
+      const e = new Error(`Blocked address for ${hostname}`);
+      e.code = 'ESSRFBLOCKED';
+      return cb(e);
+    }
+    if (opts.all) return cb(null, list);
+    return cb(null, list[0].address, list[0].family);
+  });
+}
+
+/** Shared undici Agent whose sockets can only connect to addresses accepted by guardedLookup. */
+export const pinnedAgent = new Agent({ connect: { lookup: guardedLookup } });
 
 /** Synchronous shape check: https scheme, no credentials, has a hostname. Returns the URL. */
 export function parseHttpsUrl(raw, label = 'URL') {
@@ -72,6 +69,7 @@ export function parseHttpsUrl(raw, label = 'URL') {
 /**
  * Full validation: shape + DNS resolution; every resolved address must be public.
  * Throws a 400 AppError on any violation. Returns the parsed URL and resolved addresses.
+ * Literal-IP hosts bypass DNS entirely, so this check is the guard for them.
  */
 export async function assertSafeUrl(raw, label = 'URL') {
   const url = parseHttpsUrl(raw, label);
@@ -95,4 +93,4 @@ export async function assertSafeUrl(raw, label = 'URL') {
   return { url, addresses };
 }
 
-export default { assertSafeUrl, parseHttpsUrl, isBlockedIp };
+export default { assertSafeUrl, parseHttpsUrl, isBlockedIp, guardedLookup, pinnedAgent };

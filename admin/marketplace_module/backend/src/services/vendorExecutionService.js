@@ -1,13 +1,12 @@
 /**
  * Vendor Execution Service — proxy command execution to vendor modules
  */
-// Node >=18 (see package.json engines) ships a global fetch; node-fetch was never a dependency.
-const fetch = (...args) => globalThis.fetch(...args);
+import { fetch as undiciFetch } from 'undici';
 import crypto from 'crypto';
 import { query } from '../config/database.js';
 import { logger } from '../utils/logger.js';
 import { errors } from '../middleware/errorHandler.js';
-import { assertSafeUrl } from '../utils/safeUrl.js';
+import { assertSafeUrl, pinnedAgent } from '../utils/safeUrl.js';
 
 export const MAX_TIMEOUT_MS = 10000;
 export const DEFAULT_TIMEOUT_MS = 5000;
@@ -58,6 +57,11 @@ async function readBodyCapped(resp, maxBytes) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/**
+ * Vendor response keys are not yet allowlisted (consumer contract pending) — tracked in
+ * https://github.com/penguintechinc/waddles/issues/960. Until then only prototype-pollution
+ * keys are dropped.
+ */
 /** Drops prototype-pollution keys and rejects non-object vendor payloads. */
 function sanitizeVendorData(data) {
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
@@ -79,7 +83,8 @@ async function vendorFetch(rawUrl, init, timeoutMs, { requireOk }) {
   await assertSafeUrl(rawUrl, 'Vendor URL');
   const signal = globalThis.AbortSignal.timeout(clampTimeout(timeoutMs));
 
-  const resp = await fetch(rawUrl, { ...init, redirect: 'manual', signal });
+  // dispatcher pins the socket to the IP validated in guardedLookup (closes the DNS-rebinding TOCTOU)
+  const resp = await undiciFetch(rawUrl, { ...init, redirect: 'manual', signal, dispatcher: pinnedAgent });
 
   if (resp.status >= 300 && resp.status < 400) {
     throw new Error(`Vendor module attempted a redirect (${resp.status})`);

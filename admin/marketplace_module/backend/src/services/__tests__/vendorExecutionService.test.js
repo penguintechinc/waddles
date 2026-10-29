@@ -6,7 +6,12 @@ import dns from 'node:dns';
 const query = jest.fn();
 jest.unstable_mockModule('../../config/database.js', () => ({ query, default: { query } }));
 
+const fetchMock = jest.fn();
+const actualUndici = await import('undici');
+jest.unstable_mockModule('undici', () => ({ ...actualUndici, default: actualUndici, fetch: fetchMock }));
+
 const svc = await import('../vendorExecutionService.js');
+const { pinnedAgent } = await import('../../utils/safeUrl.js');
 
 const base = { id: 3, webhook_url: 'https://vendor.example.com/hook', webhook_secret: 'shh', webhook_timeout_ms: 1000, communication_model: 'webhook_push' };
 
@@ -14,18 +19,14 @@ const base = { id: 3, webhook_url: 'https://vendor.example.com/hook', webhook_se
 const json = (obj, init = {}) => new Response(JSON.stringify(obj), { status: 200, ...init });
 
 describe('vendorExecutionService', () => {
-  const realFetch = globalThis.fetch;
-  let fetchMock;
   let lookup;
 
   beforeEach(() => {
     query.mockReset();
-    fetchMock = jest.fn();
-    globalThis.fetch = fetchMock;
+    fetchMock.mockReset();
     lookup = jest.spyOn(dns.promises, 'lookup').mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
   });
   afterEach(() => {
-    globalThis.fetch = realFetch;
     lookup.mockRestore();
   });
 
@@ -53,6 +54,7 @@ describe('vendorExecutionService', () => {
     expect(init.headers['X-WaddleBot-Signature']).toBe(`sha256=${expectedSig}`);
     expect(init.headers['X-WaddleBot-Module-Id']).toBe('3');
     expect(init.redirect).toBe('manual');
+    expect(init.dispatcher).toBe(pinnedAgent);
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
