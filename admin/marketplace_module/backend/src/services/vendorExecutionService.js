@@ -77,7 +77,7 @@ function sanitizeVendorData(data) {
  */
 async function vendorFetch(rawUrl, init, timeoutMs, { requireOk }) {
   await assertSafeUrl(rawUrl, 'Vendor URL');
-  const signal = AbortSignal.timeout(clampTimeout(timeoutMs));
+  const signal = globalThis.AbortSignal.timeout(clampTimeout(timeoutMs));
 
   const resp = await fetch(rawUrl, { ...init, redirect: 'manual', signal });
 
