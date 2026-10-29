@@ -6,7 +6,7 @@ protobuf>=5.29.6
 pydal==20241111.1
 psycopg2-binary==2.9.12
 aiohttp>=3.13.4
-pyjwt==2.13.0
+pyjwt>=2.15.0
 cryptography>=46.0.6
 python-dateutil==2.8.2
 python-json-logger==2.0.7
