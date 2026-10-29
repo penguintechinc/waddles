@@ -4,6 +4,14 @@
 import { query, transaction } from '../config/database.js';
 import { logger } from '../utils/logger.js';
 import { errors } from '../middleware/errorHandler.js';
+import { assertSafeUrl } from '../utils/safeUrl.js';
+import { clampTimeout } from './vendorExecutionService.js';
+
+/** Validates every vendor-controlled outbound URL present in a module payload (SSRF guard). */
+async function validateVendorUrls({ webhookUrl, apiBaseUrl }) {
+  if (webhookUrl != null) await assertSafeUrl(webhookUrl, 'webhookUrl');
+  if (apiBaseUrl != null) await assertSafeUrl(apiBaseUrl, 'apiBaseUrl');
+}
 
 /**
  * Converts a display name to a URL-safe slug.
@@ -263,6 +271,9 @@ export async function createVendorModule(userId, moduleData) {
     integrationType = 'command_handler',
   } = moduleData;
 
+  await validateVendorUrls({ webhookUrl, apiBaseUrl });
+  const safeTimeoutMs = clampTimeout(webhookTimeoutMs);
+
   let slug = slugify(name);
 
   let result;
@@ -283,7 +294,7 @@ export async function createVendorModule(userId, moduleData) {
        RETURNING id, slug, created_at AS "createdAt"`,
       [
         sellerId, name, slug, description, category, webhookUrl, webhookSecret,
-        webhookTimeoutMs, triggerCommands, triggerEvents, requestedScopes,
+        safeTimeoutMs, triggerCommands, triggerEvents, requestedScopes,
         responseTypes, pricingType, priceCents, pricingModel, billingPeriod,
         currency, communicationModel, authType, JSON.stringify(authConfig), apiBaseUrl,
         integrationType,
@@ -308,7 +319,7 @@ export async function createVendorModule(userId, moduleData) {
          RETURNING id, slug, created_at AS "createdAt"`,
         [
           sellerId, name, slug, description, category, webhookUrl, webhookSecret,
-          webhookTimeoutMs, triggerCommands, triggerEvents, requestedScopes,
+          safeTimeoutMs, triggerCommands, triggerEvents, requestedScopes,
           responseTypes, pricingType, priceCents, pricingModel, billingPeriod,
           currency, communicationModel, authType, JSON.stringify(authConfig), apiBaseUrl,
           integrationType,
@@ -367,16 +378,29 @@ export async function updateVendorModule(userId, moduleId, updates) {
   const values = [];
   let paramIndex = 1;
 
+  await validateVendorUrls({
+    webhookUrl: updates.webhookUrl,
+    apiBaseUrl: updates.apiBaseUrl,
+  });
+
   for (const [jsKey, dbColumn] of Object.entries(allowedFields)) {
     if (jsKey in updates) {
       setClauses.push(`${dbColumn} = $${paramIndex}`);
-      values.push(updates[jsKey]);
+      values.push(jsKey === 'webhookTimeoutMs' ? clampTimeout(updates[jsKey]) : updates[jsKey]);
       paramIndex++;
     }
   }
 
   if (setClauses.length === 0) {
     return { success: true };
+  }
+
+  // Endpoint/credential changes on an approved module force re-review.
+  const reviewSensitive = [
+    'webhookUrl', 'apiBaseUrl', 'webhookSecret', 'authType', 'authConfig', 'communicationModel',
+  ];
+  if (reviewSensitive.some((k) => k in updates)) {
+    setClauses.push(`status = CASE WHEN status = 'approved' THEN 'pending' ELSE status END`);
   }
 
   setClauses.push(`updated_at = NOW()`);

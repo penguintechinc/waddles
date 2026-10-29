@@ -7,6 +7,18 @@ import crypto from 'crypto';
 import { query } from '../config/database.js';
 import { logger } from '../utils/logger.js';
 import { errors } from '../middleware/errorHandler.js';
+import { assertSafeUrl } from '../utils/safeUrl.js';
+
+export const MAX_TIMEOUT_MS = 10000;
+export const DEFAULT_TIMEOUT_MS = 5000;
+export const MAX_RESPONSE_BYTES = 1024 * 1024;
+
+/** Clamps a vendor-supplied timeout into (0, MAX_TIMEOUT_MS], defaulting when invalid. */
+export function clampTimeout(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_TIMEOUT_MS;
+  return Math.min(n, MAX_TIMEOUT_MS);
+}
 
 export async function getModuleConfig(moduleId) {
   const { rows } = await query(
@@ -19,6 +31,71 @@ export async function getModuleConfig(moduleId) {
   );
 
   return rows[0] || null;
+}
+
+/** Reads a response body as a stream, aborting once it exceeds maxBytes. */
+async function readBodyCapped(resp, maxBytes) {
+  const declared = Number(resp.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error('Vendor response too large');
+  }
+  if (!resp.body || typeof resp.body.getReader !== 'function') {
+    throw new Error('Vendor response has no readable body');
+  }
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error('Vendor response too large');
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/** Drops prototype-pollution keys and rejects non-object vendor payloads. */
+function sanitizeVendorData(data) {
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Vendor module returned an invalid response');
+  }
+  const clean = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+    clean[k] = v;
+  }
+  return clean;
+}
+
+/**
+ * SSRF-safe vendor call: re-validates the URL + DNS at fetch time, refuses redirects,
+ * and keeps one timeout signal active through the (size-capped) body read.
+ */
+async function vendorFetch(rawUrl, init, timeoutMs, { requireOk }) {
+  await assertSafeUrl(rawUrl, 'Vendor URL');
+  const signal = AbortSignal.timeout(clampTimeout(timeoutMs));
+
+  const resp = await fetch(rawUrl, { ...init, redirect: 'manual', signal });
+
+  if (resp.status >= 300 && resp.status < 400) {
+    throw new Error(`Vendor module attempted a redirect (${resp.status})`);
+  }
+  if (requireOk && !resp.ok) {
+    throw new Error(`Vendor module returned ${resp.status}`);
+  }
+
+  const text = await readBodyCapped(resp, MAX_RESPONSE_BYTES);
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error('Vendor module returned invalid JSON');
+  }
+  return sanitizeVendorData(parsed);
 }
 
 export async function executeCommand(moduleId, payload) {
@@ -37,27 +114,20 @@ export async function executeCommand(moduleId, payload) {
       .update(JSON.stringify(payload))
       .digest('hex');
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), module.webhook_timeout_ms || 5000);
-
-    const resp = await fetch(module.webhook_url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-WaddleBot-Signature': `sha256=${sig}`,
-        'X-WaddleBot-Module-Id': String(moduleId),
+    data = await vendorFetch(
+      module.webhook_url,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-WaddleBot-Signature': `sha256=${sig}`,
+          'X-WaddleBot-Module-Id': String(moduleId),
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    if (!resp.ok) {
-      throw new Error(`Vendor module returned ${resp.status}`);
-    }
-
-    data = await resp.json();
+      module.webhook_timeout_ms,
+      { requireOk: true }
+    );
   } else if (module.communication_model === 'rest_pull') {
     let authHeaders;
 
@@ -73,16 +143,19 @@ export async function executeCommand(moduleId, payload) {
       authHeaders = { 'X-WaddleBot-Signature': `sha256=${sig}` };
     }
 
-    const resp = await fetch(module.api_base_url + '/execute', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authHeaders,
+    data = await vendorFetch(
+      module.api_base_url + '/execute',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-    });
-
-    data = await resp.json();
+      module.webhook_timeout_ms,
+      { requireOk: true }
+    );
   }
 
   const durationMs = Date.now() - start;

@@ -94,10 +94,12 @@ export function requireSuperAdmin(req, res, next) {
 }
 
 /**
- * Require community admin role (owner, admin, or moderator)
+ * Require community admin role (owner, admin, or moderator).
+ * The community id comes from the route param, or from the request body for
+ * body-addressed routes (premium /subscribe and /cancel) — the same value the controller uses.
  */
 export async function requireCommunityAdmin(req, res, next) {
-  const communityId = parseInt(req.params.communityId, 10);
+  const communityId = parseInt(req.params?.communityId ?? req.body?.communityId, 10);
 
   if (isNaN(communityId)) {
     return next(errors.badRequest('Invalid community ID'));
