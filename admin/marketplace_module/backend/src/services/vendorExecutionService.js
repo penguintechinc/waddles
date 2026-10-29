@@ -1,9 +1,8 @@
 /**
  * Vendor Execution Service — proxy command execution to vendor modules
  */
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+// Node >=18 (see package.json engines) ships a global fetch; node-fetch was never a dependency.
+const fetch = (...args) => globalThis.fetch(...args);
 import crypto from 'crypto';
 import { query } from '../config/database.js';
 import { logger } from '../utils/logger.js';
