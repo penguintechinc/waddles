@@ -1,5 +1,34 @@
 components:
   schemas:
+    AIChatterConfigDTO:
+      description: AIChatter config -- exact field set (unknown keys dropped).
+      properties:
+        enabled:
+          default: false
+          title: Enabled
+          type: boolean
+        max_per_user_per_window:
+          default: 2
+          title: Max Per User Per Window
+          type: integer
+        max_responses_per_window:
+          default: 10
+          title: Max Responses Per Window
+          type: integer
+        min_message_length:
+          default: 10
+          title: Min Message Length
+          type: integer
+        response_probability:
+          default: 0.3
+          title: Response Probability
+          type: number
+        window_seconds:
+          default: 600
+          title: Window Seconds
+          type: integer
+      title: AIChatterConfigDTO
+      type: object
     ActivationDTO:
       description: 'Response DTO: one `app_activations` row, joined to its `app_catalog`
         metadata.'
@@ -4470,6 +4499,66 @@ components:
       - fields
       title: SecretDTO
       type: object
+    SellerDTO:
+      description: Vendor's own seller row (payout/revenue = financial data).
+      properties:
+        createdAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Createdat
+        description:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Description
+        displayName:
+          title: Displayname
+          type: string
+        id:
+          title: Id
+          type: integer
+        isVerified:
+          title: Isverified
+          type: boolean
+        payoutMethod:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Payoutmethod
+        totalRevenueCents:
+          title: Totalrevenuecents
+          type: integer
+        totalSubscribers:
+          title: Totalsubscribers
+          type: integer
+        updatedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updatedat
+        userId:
+          title: Userid
+          type: integer
+        websiteUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Websiteurl
+      required:
+      - id
+      - userId
+      - displayName
+      - description
+      - websiteUrl
+      - payoutMethod
+      - totalRevenueCents
+      - totalSubscribers
+      - isVerified
+      - createdAt
+      - updatedAt
+      title: SellerDTO
+      type: object
     Server:
       description: Response DTO -- one `server_status_configs` row, admin view (host/port
         visible).
@@ -5794,6 +5883,52 @@ components:
       - username
       title: UserDTO
       type: object
+    VendorRequestDTO:
+      description: Vendor-role request as its requester sees it (no contact PII).
+      properties:
+        companyName:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Companyname
+        id:
+          title: Id
+          type: integer
+        rejectionReason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Rejectionreason
+        requestId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Requestid
+        requestedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Requestedat
+        reviewedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Reviewedat
+        status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Status
+      required:
+      - id
+      title: VendorRequestDTO
+      type: object
 info:
   title: hub-api
   version: 0.1.0
@@ -6289,8 +6424,23 @@ paths:
         schema:
           type: integer
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response body -- AIChatter config envelope.
+                properties:
+                  config:
+                    $ref: '#/components/schemas/AIChatterConfigDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - config
+                title: AIChatterConfigResponse
+                type: object
+          description: Response body -- AIChatter config envelope.
       summary: '`api.js` `getAIChatterConfig` -- proxy passthrough, see module docstring.'
     put:
       description: ''
@@ -6346,8 +6496,23 @@ paths:
               title: AIChatterConfigRequest
               type: object
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response body -- AIChatter config envelope.
+                properties:
+                  config:
+                    $ref: '#/components/schemas/AIChatterConfigDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - config
+                title: AIChatterConfigResponse
+                type: object
+          description: Response body -- AIChatter config envelope.
       summary: '`api.js` `updateAIChatterConfig` -- proxy passthrough, see module
         docstring.'
   /api/v1/admin/{community_id}/ai/byok-keys:
@@ -18661,24 +18826,78 @@ paths:
       operationId: get_get_vendor_profile
       parameters: []
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`{success, seller}` envelope for the vendor-profile
+                  routes.'
+                properties:
+                  seller:
+                    anyOf:
+                    - $ref: '#/components/schemas/SellerDTO'
+                    - type: 'null'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - seller
+                title: SellerResponse
+                type: object
+          description: '`{success, seller}` envelope for the vendor-profile routes.'
       summary: '`GET /api/v1/marketplace/vendor/profile`.'
     post:
       description: ''
       operationId: post_create_vendor_profile
       parameters: []
       responses:
-        default:
-          description: Undocumented response
+        '201':
+          content:
+            application/json:
+              schema:
+                description: '`{success, seller}` envelope for the vendor-profile
+                  routes.'
+                properties:
+                  seller:
+                    anyOf:
+                    - $ref: '#/components/schemas/SellerDTO'
+                    - type: 'null'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - seller
+                title: SellerResponse
+                type: object
+          description: '`{success, seller}` envelope for the vendor-profile routes.'
       summary: '`POST /api/v1/marketplace/vendor/profile`.'
     put:
       description: ''
       operationId: put_update_vendor_profile
       parameters: []
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`{success, seller}` envelope for the vendor-profile
+                  routes.'
+                properties:
+                  seller:
+                    anyOf:
+                    - $ref: '#/components/schemas/SellerDTO'
+                    - type: 'null'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - seller
+                title: SellerResponse
+                type: object
+          description: '`{success, seller}` envelope for the vendor-profile routes.'
       summary: '`PUT /api/v1/marketplace/vendor/profile`.'
   /api/v1/marketplace/vendor/request:
     get:
@@ -18686,16 +18905,64 @@ paths:
       operationId: get_get_vendor_request
       parameters: []
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`{success, request}` envelope for the vendor-request
+                  routes.'
+                properties:
+                  message:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Message
+                  request:
+                    anyOf:
+                    - $ref: '#/components/schemas/VendorRequestDTO'
+                    - type: 'null'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - request
+                title: VendorRequestResponse
+                type: object
+          description: '`{success, request}` envelope for the vendor-request routes.'
       summary: '`GET /api/v1/marketplace/vendor/request`.'
     post:
       description: ''
       operationId: post_create_vendor_request
       parameters: []
       responses:
-        default:
-          description: Undocumented response
+        '201':
+          content:
+            application/json:
+              schema:
+                description: '`{success, request}` envelope for the vendor-request
+                  routes.'
+                properties:
+                  message:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Message
+                  request:
+                    anyOf:
+                    - $ref: '#/components/schemas/VendorRequestDTO'
+                    - type: 'null'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - request
+                title: VendorRequestResponse
+                type: object
+          description: '`{success, request}` envelope for the vendor-request routes.'
       summary: '`POST /api/v1/marketplace/vendor/request`.'
   /api/v1/marketplace/webhooks/paypal:
     post:
@@ -18877,6 +19144,109 @@ paths:
                 type: object
           description: Response DTO for `GET /api/v1/modules/<id>/subscriptions`.
       summary: '`GET /api/v1/modules/<id>/subscriptions` -- superadmin only.'
+  /api/v1/one-time-secrets:
+    post:
+      description: ''
+      operationId: post_create_secret
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: Body for create. Target is a `hub_users.uuid` -- never
+                a username.
+              properties:
+                communityId:
+                  title: Communityid
+                  type: integer
+                message:
+                  title: Message
+                  type: string
+                targetUserUuid:
+                  format: uuid
+                  title: Targetuseruuid
+                  type: string
+                ttlSeconds:
+                  default: 86400
+                  title: Ttlseconds
+                  type: integer
+              required:
+              - communityId
+              - targetUserUuid
+              - message
+              title: CreateSecretRequest
+              type: object
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Create result; `token` is the only time the link token
+                  is ever returned.
+                properties:
+                  expiresAt:
+                    title: Expiresat
+                    type: string
+                  secretId:
+                    title: Secretid
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  token:
+                    title: Token
+                    type: string
+                required:
+                - success
+                - secretId
+                - token
+                - expiresAt
+                title: CreateSecretResponse
+                type: object
+          description: Create result; `token` is the only time the link token is ever
+            returned.
+      summary: Store an encrypted one-time secret for the target user; return the
+        link token once.
+  /api/v1/one-time-secrets/pull:
+    post:
+      description: ''
+      operationId: post_pull_secret
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: Body for pull.
+              properties:
+                token:
+                  title: Token
+                  type: string
+              required:
+              - token
+              title: PullSecretRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Pull result -- the secret message, delivered once.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - message
+                title: PullSecretResponse
+                type: object
+          description: Pull result -- the secret message, delivered once.
+      summary: Return the secret once to the linked target user, then delete it.
   /api/v1/platform/audit-log:
     get:
       description: ''
@@ -20527,9 +20897,11 @@ paths:
     put:
       description: '
 
-        NOT `@validate_request`/`@validate_response` -- Node''s `updateHubSettings`
+        NOT `@validate_request` (the response IS validated against
 
-        accepts an arbitrary flat key/value body (`for (const [key, value] of
+        `HubSettingsResponse`) -- Node''s `updateHubSettings` accepts an
+
+        arbitrary flat key/value body (`for (const [key, value] of
 
         Object.entries(req.body))`), not a fixed shape; quart-schema''s
 
@@ -20541,8 +20913,26 @@ paths:
       operationId: put_update_hub_settings
       parameters: []
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for hub settings.
+                properties:
+                  data:
+                    additionalProperties:
+                      type: string
+                    title: Data
+                    type: object
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - data
+                title: HubSettingsResponse
+                type: object
+          description: Response DTO for hub settings.
       summary: Update hub settings.
   /api/v1/superadmin/tenants:
     get:
