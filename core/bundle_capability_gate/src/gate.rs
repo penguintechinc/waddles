@@ -25,6 +25,7 @@ use crate::quota::{QuotaDenial, QuotaLedger};
 use crate::resource::{
     resolve_kv_key_prefix, resolve_object_prefix, resolve_overlay, resolve_table,
     AppScopedResource, AuthorizedCall, EconomyTarget, ResolvedResource, ResourceRef, ScopeKind,
+    ToolCallTarget,
 };
 use crate::scope::{GrantScopeKey, InvokeScope};
 
@@ -162,7 +163,20 @@ impl CapabilityGate {
                 if !family.is_tool_scoped() {
                     return Err(self.deny(scope, &permission, Denied::ResourceScopeMismatch));
                 }
-                ResolvedResource::ToolTarget(target.clone())
+                // Confused-deputy guard: bind the resolved target to the
+                // GRANT, never to the bundle-supplied ref. Only `access` is
+                // taken from the caller.
+                let PermissionId::ToolCall { target: t, tool: n } = &permission else {
+                    return Err(self.deny(scope, &permission, Denied::ResourceScopeMismatch));
+                };
+                if *t != target.target_app_id || *n != target.tool {
+                    return Err(self.deny(scope, &permission, Denied::ResourceScopeMismatch));
+                }
+                ResolvedResource::ToolTarget(ToolCallTarget {
+                    target_app_id: t.clone(),
+                    tool: n.clone(),
+                    access: target.access,
+                })
             }
         };
 

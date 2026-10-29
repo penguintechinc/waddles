@@ -118,3 +118,32 @@ fn authorize_tool_ref_with_non_tool_id_is_scope_mismatch() {
         .unwrap_err();
     assert_eq!(err, Denied::ResourceScopeMismatch);
 }
+
+#[test]
+fn authorize_tool_target_app_differs_from_grant_is_mismatch() {
+    let mut t = target();
+    t.target_app_id = "svc.other".to_string();
+    let err = gate(true)
+        .authorize(&scope(), id(), ResourceRef::ToolScoped(t))
+        .unwrap_err();
+    assert_eq!(err, Denied::ResourceScopeMismatch);
+}
+
+#[test]
+fn authorize_tool_name_differs_from_grant_is_mismatch() {
+    let mut t = target();
+    t.tool = "other_tool".to_string();
+    let err = gate(true)
+        .authorize(&scope(), id(), ResourceRef::ToolScoped(t))
+        .unwrap_err();
+    assert_eq!(err, Denied::ResourceScopeMismatch);
+}
+
+#[test]
+fn authorize_tool_ref_with_non_tool_id_and_no_grant_is_denied() {
+    let other = PermissionId::parse("storage.kv").unwrap();
+    let err = gate(false)
+        .authorize(&scope(), other, ResourceRef::ToolScoped(target()))
+        .unwrap_err();
+    assert_eq!(err, Denied::NotGranted);
+}
