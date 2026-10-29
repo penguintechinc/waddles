@@ -235,7 +235,7 @@ class PayPalService {
         },
         body: 'grant_type=client_credentials',
         redirect: 'error',
-        signal: AbortSignal.timeout(10000),
+        signal: globalThis.AbortSignal.timeout(10000),
       });
       if (!tokenResp.ok) {
         throw new Error(`PayPal token request failed (${tokenResp.status})`);
@@ -250,7 +250,7 @@ class PayPalService {
         },
         body: JSON.stringify(verifyRequest),
         redirect: 'error',
-        signal: AbortSignal.timeout(10000),
+        signal: globalThis.AbortSignal.timeout(10000),
       });
       if (!verifyResp.ok) {
         throw new Error(`PayPal verification request failed (${verifyResp.status})`);
