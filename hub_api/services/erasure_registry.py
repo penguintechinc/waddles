@@ -300,6 +300,7 @@ RULES: tuple[Rule, ...] = (
     delete("memories_reminders", hub("user_id")),
     delete("music_playlists", hub("created_by_user_id")),
     delete("music_song_request_votes", hub("user_id")),
+    delete("one_time_secrets", uuid("target_user_uuid")),
     delete("platform_admins", hub("user_id")),
     delete("player_game_inventory", hub("user_id")),
     delete("player_game_loadouts", hub("user_id")),
