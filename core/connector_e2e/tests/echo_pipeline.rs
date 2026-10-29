@@ -39,6 +39,22 @@ impl svc_ingest::identity_crypto::DekProvider for FakeDekProvider {
     }
 }
 
+/// Decrypts one identity field the sink envelope-encrypted, using the
+/// harness's fixed DEK and the exact `(tenant, stream, field, event_id)` AAD.
+fn decrypt_field(value: &str, stream: &str, field: &str, event_id: &str) -> String {
+    let obj: svc_ingest::identity_crypto::JsonEnvelope =
+        serde_json::from_str(value).expect("identity field is a JSON envelope");
+    svc_ingest::identity_crypto::decrypt_identity_value(
+        &obj,
+        &svc_ingest::identity_crypto::Dek::new([9u8; 32]),
+        "acme",
+        stream,
+        field,
+        event_id,
+    )
+    .expect("envelope decrypts under the fixed DEK")
+}
+
 /// Test-only identity-encryption counter the sink requires.
 fn test_identity_metrics() -> prometheus::IntCounterVec {
     prometheus::IntCounterVec::new(
@@ -230,9 +246,23 @@ async fn echo_frame_flows_transport_to_executor_to_published_event() {
         assert_eq!(stream, "waddles:t:acme:c:main:src:echo:src-1:events");
         assert_eq!(env.event.platform, "echo");
         assert_eq!(env.event.event_type, "message");
-        assert_eq!(env.event.actor.as_deref(), Some("alice"));
+        // The sink's real identity-encryption path envelope-encrypts the
+        // actor and the handle-bearing `text` before XADD; decrypt with the
+        // same fixed DEK to prove the plaintext survived the round trip and
+        // that nothing identity-bearing sits plaintext on the stream.
+        let actor = env.event.actor.as_deref().expect("actor present");
+        assert_ne!(actor, "alice", "actor must be ciphertext on the stream");
         assert_eq!(
-            env.event.payload["text"], "hello world",
+            decrypt_field(actor, stream, "actor", &env.event_id),
+            "alice"
+        );
+        let text = env.event.payload["text"]
+            .as_str()
+            .expect("text is a string");
+        assert_ne!(text, "hello world", "text must be ciphertext on the stream");
+        assert_eq!(
+            decrypt_field(text, stream, "text", &env.event_id),
+            "hello world",
             "Echo trims the text"
         );
         assert_eq!(env.session_id.as_deref(), Some("conn-1"));
