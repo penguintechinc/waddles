@@ -217,6 +217,10 @@ class BundleManifestV2:
     kind: str = ""
     # Exported MCP tools (service bundles only; `app_cannot_export_tools`).
     exported_tools: tuple[ExportedTool, ...] = ()
+    # Server-side trust decision made by the install path (never read from the
+    # manifest): True only for the core seeder / trusted reparse. Gates the
+    # service-only `mcp.tools` capability.
+    trusted_source: bool = False
 
     def supports_platform(self, platform: str) -> bool:
         """Return True when this bundle may run on `platform` (absent field = every platform)."""
@@ -257,9 +261,7 @@ def _parse_supported_platforms(
 
 
 _VALID_KINDS = ("app", "service")
-_SERVICE_MODULES = frozenset(
-    {"core", "connector", "connectors", "integrations", "economy", "reputation"}
-)
+_SERVICE_MODULES = frozenset({"core", "connector", "connectors", "economy", "reputation"})
 
 
 def _infer_kind(app_id: str, module: str) -> str:
@@ -267,15 +269,6 @@ def _infer_kind(app_id: str, module: str) -> str:
     if app_id.startswith("waddles.core.") or module in _SERVICE_MODULES:
         return "service"
     return "app"
-
-
-def is_trusted_service_source(provider: str, app_id: str, module: str) -> bool:
-    """True when a manifest comes from a trusted platform source that may be `kind: service`.
-
-    Trusted = builtin provider, the `waddles.core.` namespace, or a known
-    service module. A vendor manifest must never self-declare service kind.
-    """
-    return provider == "builtin" or app_id.startswith("waddles.core.") or module in _SERVICE_MODULES
 
 
 def _require(condition: bool, reason: str, detail: str) -> None:
@@ -663,8 +656,15 @@ def parse_bundle_manifest_v2(
     known_custom_platforms: frozenset[str],
     allow_wildcard_consumes: bool,
     allow_prebuilt: bool,
+    trusted_source: bool = False,
 ) -> BundleManifestV2:
-    """Parse+validate `raw` (a `yaml.safe_load`-d manifest). Raises `ManifestV2Error` on failure."""
+    """Parse+validate `raw` (a `yaml.safe_load`-d manifest); `ManifestV2Error` on failure.
+
+    `trusted_source` is the SERVER-SIDE decision that the caller is a trusted
+    install path (core seeder / platform admin); it alone authorizes
+    `kind: service` and `exported_tools`. Fail-closed default False -- nothing
+    the manifest says about itself (provider, app_id, module) confers it.
+    """
     for key in (
         "schema_version",
         "app_id",
@@ -878,9 +878,9 @@ def parse_bundle_manifest_v2(
     )
     if raw_kind == "service":
         _require(
-            is_trusted_service_source(raw["provider"], raw["app_id"], raw["module"]),
+            trusted_source,
             "untrusted_service_kind",
-            "kind: service may only be declared by a builtin/platform bundle",
+            "kind: service may only be declared via a trusted install path",
         )
     kind = raw_kind or _infer_kind(raw["app_id"], raw["module"])
 
@@ -889,6 +889,11 @@ def parse_bundle_manifest_v2(
         not exported_tools or kind == "service",
         "app_cannot_export_tools",
         "only a kind: service bundle may declare exported_tools",
+    )
+    _require(
+        not exported_tools or trusted_source,
+        "untrusted_service_kind",
+        "exported_tools may only be declared via a trusted install path",
     )
 
     return BundleManifestV2(
@@ -923,4 +928,5 @@ def parse_bundle_manifest_v2(
         command_declarations=command_declarations,
         kind=kind,
         exported_tools=exported_tools,
+        trusted_source=trusted_source,
     )

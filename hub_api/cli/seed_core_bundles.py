@@ -630,6 +630,8 @@ async def _resolve_or_publish_version(
             # tenant-configurable `platform_settings.bundles.allow_prebuilt`
             # toggle (that gate exists for vendor/tenant-uploaded bundles).
             allow_prebuilt=True,
+            # The seeder is the trusted, in-cluster core-bundle install path.
+            trusted_source=True,
         )
 
     try:
@@ -864,6 +866,7 @@ async def seed_one(
         known_custom_platforms=frozenset(),
         allow_wildcard_consumes=False,
         allow_prebuilt=True,
+        trusted_source=True,
     )
     if manifest.version != entry.version:
         raise CoreBundleSeederError(

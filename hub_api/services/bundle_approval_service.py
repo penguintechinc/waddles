@@ -118,7 +118,6 @@ from services.bundle_manifest_v2 import (
     EgressRule,
     Limits,
     _infer_kind,
-    is_trusted_service_source,
     parse_command_declarations,
     parse_exported_tools,
     parse_permission_declarations,
@@ -219,6 +218,9 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         command_declarations=command_declarations,
         kind=raw.get("kind") or _infer_kind(raw["app_id"], raw["module"]),
         exported_tools=parse_exported_tools(raw.get("exported_tools")),
+        # Already-ingested, already-validated blob (see docstring) -- it passed
+        # the trusted-source gate at ingest, so keep its service capability.
+        trusted_source=True,
     )
 
 
@@ -247,11 +249,7 @@ def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
         caps.add("relay")
     if KV_PERMISSION_ID in manifest.permissions:
         caps.add(KV_PERMISSION_ID)
-    if (
-        manifest.kind == "service"
-        and manifest.exported_tools
-        and is_trusted_service_source(manifest.provider, manifest.app_id, manifest.module)
-    ):
+    if manifest.kind == "service" and manifest.exported_tools and manifest.trusted_source:
         caps.add(MCP_TOOLS_CAPABILITY)
     return frozenset(caps)
 

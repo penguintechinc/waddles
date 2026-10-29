@@ -41,7 +41,13 @@ def _parse(overrides: dict, **kwargs: object) -> object:
         known_custom_platforms=kwargs.get("known_custom_platforms", frozenset()),  # type: ignore[arg-type]
         allow_wildcard_consumes=kwargs.get("allow_wildcard_consumes", False),  # type: ignore[arg-type]
         allow_prebuilt=kwargs.get("allow_prebuilt", True),  # type: ignore[arg-type]
+        trusted_source=bool(kwargs.get("trusted_source", False)),
     )
+
+
+def _parse_trusted(overrides: dict) -> object:
+    """Parse as a trusted install path (core seeder) would."""
+    return _parse(overrides, trusted_source=True)
 
 
 def test_valid_manifest_parses() -> None:
@@ -393,7 +399,7 @@ def test_consumes_platform_outside_supported_platforms_rejected() -> None:
 
 
 def test_kind_explicit_service() -> None:
-    assert _parse({"kind": "service"}).kind == "service"  # type: ignore[attr-defined]
+    assert _parse_trusted({"kind": "service"}).kind == "service"  # type: ignore[attr-defined]
 
 
 def test_kind_defaults_inferred() -> None:
@@ -444,7 +450,7 @@ def _tool(name: str = "lookup", **over: object) -> dict:
 
 
 def test_exported_tools_service_parses() -> None:
-    manifest = _parse(
+    manifest = _parse_trusted(
         {
             "kind": "service",
             "exported_tools": [_tool("a"), _tool("b", access="write", risk="dangerous")],
@@ -468,19 +474,19 @@ def test_app_cannot_export_tools() -> None:
 
 def test_exported_tools_bad_access() -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({"kind": "service", "exported_tools": [_tool(access="admin")]})
+        _parse_trusted({"kind": "service", "exported_tools": [_tool(access="admin")]})
     assert exc.value.reason == "invalid_tool_access"
 
 
 def test_exported_tools_bad_risk() -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({"kind": "service", "exported_tools": [_tool(risk="spicy")]})
+        _parse_trusted({"kind": "service", "exported_tools": [_tool(risk="spicy")]})
     assert exc.value.reason == "invalid_tool_risk"
 
 
 def test_exported_tools_duplicate_name() -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({"kind": "service", "exported_tools": [_tool("x"), _tool("x")]})
+        _parse_trusted({"kind": "service", "exported_tools": [_tool("x"), _tool("x")]})
     assert exc.value.reason == "duplicate_exported_tool"
 
 
@@ -489,7 +495,7 @@ def test_exported_tools_missing_schema(missing: str) -> None:
     entry = _tool()
     del entry[missing]
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({"kind": "service", "exported_tools": [entry]})
+        _parse_trusted({"kind": "service", "exported_tools": [entry]})
     assert exc.value.reason == "invalid_tool_schema"
 
 
@@ -503,8 +509,8 @@ def test_exported_tools_survive_reparse_trusted() -> None:
 def test_exported_tools_derive_capability() -> None:
     from services.bundle_approval_service import _derive_capabilities
 
-    with_tools = _parse({"kind": "service", "exported_tools": [_tool()]})
-    without = _parse({"kind": "service"})
+    with_tools = _parse_trusted({"kind": "service", "exported_tools": [_tool()]})
+    without = _parse_trusted({"kind": "service"})
     assert "mcp.tools" in _derive_capabilities(with_tools)  # type: ignore[arg-type]
     assert "mcp.tools" not in _derive_capabilities(without)  # type: ignore[arg-type]
 
@@ -516,61 +522,103 @@ def test_exported_tools_access_risk_required(missing: str, reason: str) -> None:
     entry = _tool()
     del entry[missing]
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({"kind": "service", "exported_tools": [entry]})
+        _parse_trusted({"kind": "service", "exported_tools": [entry]})
     assert exc.value.reason == reason
 
 
 @pytest.mark.parametrize("bad", ["Upper", "1abc", "has space", ""])
 def test_exported_tools_bad_name(bad: str) -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({"kind": "service", "exported_tools": [_tool(bad)]})
+        _parse_trusted({"kind": "service", "exported_tools": [_tool(bad)]})
     assert exc.value.reason == "invalid_tool_name"
 
 
 @pytest.mark.parametrize("bad", ["notalist", {"name": "x"}, ["notadict"]])
 def test_exported_tools_invalid_shape(bad: object) -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({"kind": "service", "exported_tools": bad})
+        _parse_trusted({"kind": "service", "exported_tools": bad})
     assert exc.value.reason == "invalid_exported_tools"
 
 
 _VENDOR = {"provider": "thirdparty", "author": "Vendor", "license": "MIT"}
 
 
-def test_untrusted_explicit_service_kind_rejected() -> None:
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {**_VENDOR, "kind": "service"},
+        {"kind": "service"},  # builtin provider forged in the manifest: still untrusted
+        {
+            "kind": "service",
+            "module": "core",
+            "app_id": "waddles.core.x.default",
+            "feature": "waddles.core.x",
+        },
+    ],
+)
+def test_untrusted_caller_explicit_service_kind_rejected(overrides: dict) -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({**_VENDOR, "kind": "service", "exported_tools": [_tool()]})
+        _parse(overrides)
     assert exc.value.reason == "untrusted_service_kind"
 
 
-def test_untrusted_explicit_service_kind_without_tools_rejected() -> None:
+def test_untrusted_caller_with_tools_rejected_even_when_core_namespace() -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({**_VENDOR, "kind": "service"})
+        _parse({"kind": "service", "exported_tools": [_tool()]})
     assert exc.value.reason == "untrusted_service_kind"
 
 
-def test_trusted_builtin_service_kind_allowed() -> None:
-    assert _parse({"kind": "service"}).kind == "service"  # type: ignore[attr-defined]
+def test_untrusted_inferred_service_grants_no_tools_or_capability() -> None:
+    from services.bundle_approval_service import _derive_capabilities
+
+    # Inferred kind (core module) is display-only; no trust, no mcp.tools.
+    m = _parse(
+        {"module": "core", "feature": "waddles.core.music", "app_id": "waddles.core.music.default"}
+    )
+    assert m.trusted_source is False  # type: ignore[attr-defined]
+    assert "mcp.tools" not in _derive_capabilities(m)  # type: ignore[arg-type]
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            {
+                "module": "core",
+                "feature": "waddles.core.music",
+                "app_id": "waddles.core.music.default",
+                "exported_tools": [_tool()],
+            }
+        )
+    assert exc.value.reason == "untrusted_service_kind"
+
+
+def test_trusted_service_kind_allowed_with_mcp_tools() -> None:
+    from services.bundle_approval_service import _derive_capabilities
+
+    m = _parse_trusted({"kind": "service", "exported_tools": [_tool()]})
+    assert m.kind == "service"  # type: ignore[attr-defined]
+    assert "mcp.tools" in _derive_capabilities(m)  # type: ignore[arg-type]
 
 
 def test_vendor_explicit_app_kind_still_allowed() -> None:
     assert _parse({**_VENDOR, "kind": "app"}).kind == "app"  # type: ignore[attr-defined]
 
 
-def test_derive_capability_requires_trusted_source() -> None:
+def test_derive_capability_requires_trusted_flag() -> None:
     import dataclasses
 
     from services.bundle_approval_service import _derive_capabilities
 
-    m = _parse({"kind": "service", "exported_tools": [_tool()]})
-    forged = dataclasses.replace(m, provider="thirdparty")  # type: ignore[type-var]
+    m = _parse_trusted({"kind": "service", "exported_tools": [_tool()]})
+    forged = dataclasses.replace(m, trusted_source=False)  # type: ignore[type-var]
     assert "mcp.tools" not in _derive_capabilities(forged)
+
+
+def test_integrations_module_not_inferred_service() -> None:
+    assert _infer_kind("waddles.integrations.x.default", "integrations") == "app"
 
 
 def _tool_summary(*tools: dict) -> dict:
     from services.permission_summary_service import build_permission_summary
 
-    m = _parse({"kind": "service", "exported_tools": list(tools)})
+    m = _parse_trusted({"kind": "service", "exported_tools": list(tools)})
     return build_permission_summary(
         m,  # type: ignore[arg-type]
         grant_labels=[],
