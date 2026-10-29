@@ -79,7 +79,7 @@ bytes = "=1.12.1"
 # `runtime-tokio` is already `webrtc`'s default feature (mirrors this crate's
 # sole async runtime, see rules/backend-rust.md); pinned explicitly so a
 # future default-feature change upstream can't silently swap it.
-webrtc = { version = "=0.20.5", default-features = false, features = ["runtime-tokio"] }
+webrtc = { version = "=0.21.1", default-features = false, features = ["runtime-tokio"] }
 # `rtc` and `async-trait` -- NOT new supply-chain surface: both are already
 # transitively resolved at these exact versions/checksums in Cargo.lock via
 # `webrtc` above. They are required as *direct* dependencies because
@@ -94,7 +94,7 @@ webrtc = { version = "=0.20.5", default-features = false, features = ["runtime-t
 # the trait itself is declared. Exceeds this chunk's stated "features only"
 # Cargo.toml scope -- flagged explicitly in the S6 completion report rather
 # than silently expanded; the alternative is code that cannot compile.
-rtc = "=0.20.5"
+rtc = "=0.21.1"
 async-trait = "=0.1.92"
 ffmpeg-sidecar = "=2.7.0"
 hls_m3u8 = "=0.7.0"
