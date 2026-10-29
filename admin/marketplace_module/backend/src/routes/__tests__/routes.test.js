@@ -149,11 +149,19 @@ describe('route auth boundaries', () => {
       }
     });
 
-    it('premium subscribe/cancel currently reject every non-super-admin caller (communityId is read from the body, the guard needs a path param)', async () => {
+    it('premium subscribe/cancel let community admins through (regression: communityId is read from the body)', async () => {
       installDb({ memberRole: 'community-owner' });
       for (const path of ['/api/v1/premium/subscribe', '/api/v1/premium/cancel']) {
         const res = await as(request(app).post(path), userToken).send({ communityId: 1 });
-        expect(res.status).toBe(400);
+        expect([400, 403]).not.toContain(res.status);
+      }
+    });
+
+    it('premium subscribe/cancel still reject plain members and a missing communityId', async () => {
+      installDb({ memberRole: 'member' });
+      for (const path of ['/api/v1/premium/subscribe', '/api/v1/premium/cancel']) {
+        expect((await as(request(app).post(path), userToken).send({ communityId: 1 })).status).toBe(403);
+        expect((await as(request(app).post(path), userToken).send({})).status).toBe(400);
       }
     });
 

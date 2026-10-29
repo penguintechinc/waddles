@@ -87,6 +87,18 @@ describe('auth middleware', () => {
       return next.mock.calls[0][0];
     };
 
+    it('reads the community id from the body when there is no path param (premium routes)', async () => {
+      query.mockResolvedValueOnce({ rows: [{ role: 'community-owner' }] });
+      const next = jest.fn();
+      const req = { params: {}, body: { communityId: 7 }, user: { id: 1 } };
+      await auth.requireCommunityAdmin(req, {}, next);
+      expect(next.mock.calls[0][0]).toBeUndefined();
+      expect(query.mock.calls.at(-1)[1][0]).toBe(7);
+      const bad = jest.fn();
+      await auth.requireCommunityAdmin({ params: {}, body: {}, user: { id: 1 } }, {}, bad);
+      expect(bad.mock.calls[0][0].statusCode).toBe(400);
+    });
+
     it('rejects an invalid community id', async () => {
       const next = jest.fn();
       await auth.requireCommunityAdmin({ params: { communityId: 'x' }, user: { id: 1 } }, {}, next);
