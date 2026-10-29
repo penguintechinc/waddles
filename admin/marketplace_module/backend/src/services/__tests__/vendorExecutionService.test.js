@@ -1,3 +1,4 @@
+/* global Response, AbortSignal, ReadableStream, TextEncoder */
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
