@@ -617,3 +617,45 @@ def test_identity_resolve_catalog_id_mirrors_the_rust_catalog() -> None:
     ).read_text()
     assert 'Self::IdentityResolve => "identity.resolve"' in rust
     assert "identity.resolve" in STATIC_PERMISSIONS
+
+
+def test_tool_call_risk_mirrors_the_rust_catalog() -> None:
+    """`tool.call` is Dangerous in BOTH the Rust gate and the Python catalog (drift guard)."""
+    from services.bundle_permission_catalog import resolve_risk
+
+    rust = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "core"
+        / "bundle_capability_gate"
+        / "src"
+        / "permission.rs"
+    ).read_text()
+    start = rust.index("Self::ToolCall => CatalogEntry {")
+    entry = rust[start : rust.index("notes:", start)]
+    assert "risk: Risk::Dangerous" in entry
+    assert resolve_risk("tool.call:waddles.economy.wallet.default:get_balance") == "dangerous"
+
+
+def test_tool_call_declaration_parses_as_dangerous() -> None:
+    manifest = _parse(
+        [
+            {
+                "id": "tool.call:waddles.economy.wallet.default:get_balance",
+                "justification": "reads the caller's balance",
+            }
+        ]
+    )
+    (decl,) = manifest.permission_declarations  # type: ignore[attr-defined]
+    assert decl.risk == "dangerous"
+
+
+def test_tool_call_declaration_requires_justification() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse([{"id": "tool.call:waddles.economy.wallet.default:get_balance"}])
+    assert "missing_justification" in str(exc.value)
+
+
+def test_malformed_tool_call_declaration_is_unknown_permission() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse([{"id": "tool.call:not-an-app:get_balance", "justification": "x"}])
+    assert "unknown_permission" in str(exc.value)

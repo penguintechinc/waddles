@@ -230,3 +230,39 @@ def test_net_http_private_ip_rejects_cluster_service_and_node_cidrs(cluster_cidr
 
 def test_net_http_private_ip_unaffected_outside_cluster_cidrs(cluster_cidrs: None) -> None:
     assert is_valid_private_ip_or_cidr("10.99.0.0/16")
+
+
+# --- bundle-MCP-tools P2: tool.call mirror (Rust Risk::Dangerous) ---
+
+_TOOL_TARGET = "waddles.economy.wallet.default"
+
+
+@pytest.mark.parametrize("tool", ["get_balance", "a", "wallet.transfer_v2", "a" * 64])
+def test_tool_call_is_dangerous_with_family(tool: str) -> None:
+    pid = f"tool.call:{_TOOL_TARGET}:{tool}"
+    assert resolve_risk(pid) == "dangerous"
+    assert permission_family(pid) == "tool.call"
+
+
+@pytest.mark.parametrize(
+    "pid",
+    [
+        "tool.call",
+        "tool.call:",
+        f"tool.call:{_TOOL_TARGET}",
+        f"tool.call:{_TOOL_TARGET}:",
+        f"tool.call:{_TOOL_TARGET}:Get",
+        f"tool.call:{_TOOL_TARGET}:1abc",
+        f"tool.call:{_TOOL_TARGET}:" + "a" * 65,
+        f"tool.call:{_TOOL_TARGET}:get\n",
+        f"tool.call:{_TOOL_TARGET}:get:extra",
+        "tool.call:waddles.a.b:get",
+        "tool.call:waddles.a.b.c.d:get",
+        "tool.call:other.a.b.c:get",
+        "tool.call:waddles.A.b.c:get",
+        "tool.call:waddles.a.b.c%3Ad:get",
+        "tool.call:waddles.a.b.-c:get",
+    ],
+)
+def test_malformed_tool_call_is_unknown(pid: str) -> None:
+    assert resolve_risk(pid) is None

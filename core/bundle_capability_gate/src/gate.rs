@@ -25,6 +25,7 @@ use crate::quota::{QuotaDenial, QuotaLedger};
 use crate::resource::{
     resolve_kv_key_prefix, resolve_object_prefix, resolve_overlay, resolve_table,
     AppScopedResource, AuthorizedCall, EconomyTarget, ResolvedResource, ResourceRef, ScopeKind,
+    ToolCallTarget,
 };
 use crate::scope::{GrantScopeKey, InvokeScope};
 
@@ -158,6 +159,25 @@ impl CapabilityGate {
                 }
                 ResolvedResource::EconomyTarget(*target)
             }
+            ResourceRef::ToolScoped(target) => {
+                if !family.is_tool_scoped() {
+                    return Err(self.deny(scope, &permission, Denied::ResourceScopeMismatch));
+                }
+                // Confused-deputy guard: bind the resolved target to the
+                // GRANT, never to the bundle-supplied ref. Only `access` is
+                // taken from the caller.
+                let PermissionId::ToolCall { target: t, tool: n } = &permission else {
+                    return Err(self.deny(scope, &permission, Denied::ResourceScopeMismatch));
+                };
+                if *t != target.target_app_id || *n != target.tool {
+                    return Err(self.deny(scope, &permission, Denied::ResourceScopeMismatch));
+                }
+                ResolvedResource::ToolTarget(ToolCallTarget {
+                    target_app_id: t.clone(),
+                    tool: n.clone(),
+                    access: target.access,
+                })
+            }
         };
 
         // `economy.*` (issue #714) has its own quota family, so it settles
@@ -186,7 +206,9 @@ impl CapabilityGate {
         // `Descriptive`, a plain rate limit for `CallsPerWindow`).
         let delta = match &resource {
             ResourceRef::ReputationScoped(target) => target.delta,
-            ResourceRef::AppScoped(_) | ResourceRef::EconomyScoped(_) => None,
+            ResourceRef::AppScoped(_)
+            | ResourceRef::EconomyScoped(_)
+            | ResourceRef::ToolScoped(_) => None,
         };
 
         if let Some(delta) = delta {
@@ -216,7 +238,9 @@ impl CapabilityGate {
 
             let target_user = match &resource {
                 ResourceRef::ReputationScoped(t) => t.target_user,
-                ResourceRef::AppScoped(_) | ResourceRef::EconomyScoped(_) => {
+                ResourceRef::AppScoped(_)
+                | ResourceRef::EconomyScoped(_)
+                | ResourceRef::ToolScoped(_) => {
                     unreachable!("delta is only Some for ReputationScoped")
                 }
             };
@@ -1296,3 +1320,7 @@ mod tests {
 #[cfg(test)]
 #[path = "gate_economy_tests.rs"]
 mod economy_tests;
+
+#[cfg(test)]
+#[path = "gate_tool_tests.rs"]
+mod tool_tests;

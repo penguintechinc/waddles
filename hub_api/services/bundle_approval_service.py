@@ -122,6 +122,7 @@ from services.bundle_manifest_v2 import (
     parse_exported_tools,
     parse_permission_declarations,
     parse_requested_tools,
+    requested_tool_declarations,
 )
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, conflict, not_found
@@ -181,6 +182,11 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         known_custom_platforms=declared_custom,
         supported_platforms=supported_platforms,
     )
+    requested_tools = parse_requested_tools(raw.get("requested_tools"), own_app_id=raw["app_id"])
+    declared_ids = {d.id for d in permission_declarations}
+    permission_declarations = permission_declarations + tuple(
+        d for d in requested_tool_declarations(requested_tools) if d.id not in declared_ids
+    )
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -219,7 +225,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         command_declarations=command_declarations,
         kind=raw.get("kind") or _infer_kind(raw["app_id"], raw["module"]),
         exported_tools=parse_exported_tools(raw.get("exported_tools")),
-        requested_tools=parse_requested_tools(raw.get("requested_tools"), own_app_id=raw["app_id"]),
+        requested_tools=requested_tools,
         # Already-ingested, already-validated blob (see docstring) -- it passed
         # the trusted-source gate at ingest, so keep its service capability.
         trusted_source=True,
@@ -535,6 +541,10 @@ def classify_diff(new_summary: dict[str, Any], previous_summary: dict[str, Any] 
         parts |= {f"route:{r}" for r in summary.get("routesTo", [])}
         parts |= {
             f"tool:{t['name']}:{t['access']}:{t['risk']}" for t in summary.get("exportedTools", [])
+        }
+        parts |= {
+            f"calls:{t['target']}:{t['tool']}:{t['access']}"
+            for t in summary.get("requestedTools", [])
         }
         return parts
 

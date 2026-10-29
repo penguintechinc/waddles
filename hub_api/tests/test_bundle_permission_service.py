@@ -520,3 +520,43 @@ async def test_check_upgrade_reconsent_blocks_on_new_permission(install_dal: Any
         new_version="2.0.0",
     )
     assert may_auto_upgrade is False
+
+
+async def test_requested_tool_becomes_version_pinned_permission_request(install_dal: Any) -> None:
+    """A manifest `requested_tool` is written as an app_permission_requests row (tool.call id)."""
+    from services.bundle_manifest_v2 import requested_tool_permission_id
+
+    raw = {
+        **_MANIFEST_RAW,
+        "requested_tools": [
+            {"target_app_id": "waddles.services.lookup.default", "tool": "search", "access": "read"}
+        ],
+    }
+    manifest = parse_bundle_manifest_v2(
+        raw, known_custom_platforms=frozenset(), allow_wildcard_consumes=False, allow_prebuilt=True
+    )
+    (rt,) = manifest.requested_tools
+    tool_id = requested_tool_permission_id(rt)
+    assert tool_id in {d.id for d in manifest.permission_declarations}
+    # Dangerous -> must be acknowledged like any other dangerous id.
+    with pytest.raises(ApiError):
+        await svc.record_permission_requests(
+            install_dal,
+            app_id=_APP_ID,
+            version=_VERSION,
+            declarations=manifest.permission_declarations,
+            approved_by=1,
+            approved_permissions=frozenset({"ai.generate"}),
+        )
+    await svc.record_permission_requests(
+        install_dal,
+        app_id=_APP_ID,
+        version=_VERSION,
+        declarations=manifest.permission_declarations,
+        approved_by=1,
+        approved_permissions=frozenset({"ai.generate", tool_id}),
+    )
+    ids = await svc.get_approved_permission_ids(install_dal, app_id=_APP_ID, version=_VERSION)
+    assert tool_id in ids
+    other = await svc.get_approved_permission_ids(install_dal, app_id=_APP_ID, version="9.9.9")
+    assert tool_id not in other

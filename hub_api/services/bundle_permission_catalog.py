@@ -153,6 +153,13 @@ _CHAT_SEND_RE = re.compile(r"^chat\.send:(?P<platform>[a-z0-9_-]+)$")
 _CHAT_DELETE_RE = re.compile(r"^chat\.delete:(?P<platform>[a-z0-9_-]+)$")
 _DM_SEND_RE = re.compile(r"^dm\.send:(?P<platform>[a-z0-9_-]+)$")
 _MODERATION_RE = re.compile(r"^moderation\.(?P<platform>[a-z0-9_-]+)$")
+# `tool.call:<target_app_id>:<tool>` -- mirrors Rust `permission.rs`
+# (`validate_tool_target` / `validate_tool_name`) and `bundle_manifest_v2`'s
+# `_APP_ID_RE` / `_TOOL_NAME_RE`. Matched with `.fullmatch` (no `$`, which
+# would accept a trailing newline); `:` can't appear in a segment so the split is unambiguous.
+_TOOL_CALL_RE = re.compile(
+    r"tool\.call:(?P<target>waddles(?:\.[a-z0-9][a-z0-9_-]*){3}):(?P<tool>[a-z][a-z0-9_.]{0,63})"
+)
 _NET_HTTP_FQDN_RE = re.compile(r"^net\.http\.fqdn:(?P<host>.+)$")
 _NET_HTTP_PUBLIC_IP_RE = re.compile(r"^net\.http\.public-ip:(?P<ip>.+)$")
 _NET_HTTP_PRIVATE_IP_RE = re.compile(r"^net\.http\.private-ip:(?P<value>.+)$")
@@ -178,6 +185,10 @@ def resolve_risk(permission_id: str) -> Risk | None:
     """
     if permission_id in STATIC_PERMISSIONS:
         return STATIC_PERMISSIONS[permission_id]
+
+    # `tool.call` is `dangerous` -- mirrors Rust `Risk::Dangerous`. Keep in sync.
+    if _TOOL_CALL_RE.fullmatch(permission_id):
+        return "dangerous"
 
     match = _NET_HTTP_FQDN_RE.match(permission_id)
     if match and is_valid_fqdn(match.group("host")):
@@ -225,6 +236,8 @@ def permission_family(permission_id: str) -> str:
     for prefix in NET_HTTP_PREFIXES:
         if permission_id.startswith(prefix):
             return prefix.rstrip(":")
+    if _TOOL_CALL_RE.fullmatch(permission_id):
+        return "tool.call"
     if _CHAT_SEND_RE.match(permission_id):
         return "chat.send"
     if _CHAT_DELETE_RE.match(permission_id):

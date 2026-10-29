@@ -391,8 +391,9 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     tenant_id: i32,
     community_id: i32,
     /// The resolved `app_versions.id` for the caller's configured bundle
-    /// version -- see `crate::spine::ProcessDeps::app_version`'s doc. `0`
-    /// when no bundle version is configured.
+    /// version -- see `crate::spine::ProcessDeps::app_version`'s doc. `0` is
+    /// the fail-closed unresolved-digest sentinel (an unresolved digest falls
+    /// to `0` in `spine.rs`), which matches no real grant.
     app_version: i64,
     /// See [`Self::with_kv`]'s doc; `None` until it is called (a bundle
     /// sees `not_implemented` rather than this loop failing to start if
@@ -2519,6 +2520,87 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "not_granted");
+    }
+
+    /// Builds a `tool.call` authorize outcome through `caps.gate_scope()`
+    /// against a gate holding a tool grant seeded under `grant_version`.
+    fn authorize_tool_call_at(
+        caps_version: i64,
+        grant_version: i64,
+    ) -> Result<(), bundle_capability_gate::Denied> {
+        use bundle_capability_gate::resource::{ToolAccess, ToolCallTarget};
+        use bundle_capability_gate::{
+            GrantScopeKey, GrantSet, GrantedPermission, PermissionId, ResourceRef,
+        };
+        let id = PermissionId::ToolCall {
+            target: "svc.target".to_string(),
+            tool: "do_thing".to_string(),
+        };
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey {
+                tenant_id: 7,
+                community_id: 3,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version: grant_version,
+            },
+            GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants: std::collections::HashMap::from([(
+                    id.canonical_id(),
+                    GrantedPermission {
+                        permission_id: id.canonical_id(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        let gate = CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        );
+        let caps: StageCapabilities<FakeKvBackend> = StageCapabilities::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            7,
+            3,
+            caps_version,
+            test_egress(),
+            permissive_gate(),
+        );
+        gate.authorize(
+            &caps.gate_scope(),
+            id,
+            ResourceRef::ToolScoped(ToolCallTarget {
+                target_app_id: "svc.target".to_string(),
+                tool: "do_thing".to_string(),
+                access: ToolAccess::Write,
+            }),
+        )
+        .map(|_| ())
+    }
+
+    /// Bundle-MCP-tools P2 T5: a tool.call grant issued for the REAL
+    /// `app_versions.id` N authorizes under N.
+    #[test]
+    fn tool_call_grant_for_version_n_authorizes_under_n() {
+        authorize_tool_call_at(42, 42).expect("grant pinned to 42 allows scope 42");
+    }
+
+    /// The fail-closed `0` sentinel (unresolved version) and a stale
+    /// version never authorize a tool.call grant pinned to the real id.
+    #[test]
+    fn tool_call_grant_fails_closed_on_zero_or_stale_version() {
+        for v in [0, 41] {
+            assert_eq!(
+                authorize_tool_call_at(v, 42).unwrap_err(),
+                bundle_capability_gate::Denied::NotGranted,
+                "version {v} must not match a grant pinned to 42"
+            );
+        }
     }
 
     /// A minimal in-memory [`KvBackend`] fake, mirroring

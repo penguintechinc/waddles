@@ -289,6 +289,9 @@ pub enum PermissionFamily {
     /// definition only; host-side enforcement (actually registering the
     /// export per grant) is a later task.
     StreamingLifecycleSubscribe,
+    /// `tool.call:<target_app_id>:<tool>` -- invoke a named tool exported by
+    /// another bundle (bundle-MCP-tools P2).  `Dangerous`.
+    ToolCall,
 }
 
 /// One row of the catalog table (spec SS1).
@@ -333,6 +336,7 @@ impl PermissionFamily {
         Self::PlatformLog,
         Self::InteractionPiiReceive,
         Self::StreamingLifecycleSubscribe,
+        Self::ToolCall,
     ];
 
     /// The static catalog id prefix -- for a parameterized family
@@ -368,6 +372,7 @@ impl PermissionFamily {
             Self::PlatformLog => "platform.log",
             Self::InteractionPiiReceive => "interaction.pii.receive",
             Self::StreamingLifecycleSubscribe => "streaming.lifecycle.subscribe",
+            Self::ToolCall => "tool.call",
         }
     }
 
@@ -386,13 +391,20 @@ impl PermissionFamily {
                 | Self::ChatDelete
                 | Self::DmSend
                 | Self::Moderation
+                | Self::ToolCall
         )
     }
 
     /// spec SS5.2: `AppScoped` permissions have their resource derived
     /// server-side from `(tenant, community, app_id)` alone.
     pub fn is_app_scoped(&self) -> bool {
-        !self.is_reputation_scoped() && !self.is_economy_scoped()
+        !self.is_reputation_scoped() && !self.is_economy_scoped() && !self.is_tool_scoped()
+    }
+
+    /// bundle-MCP-tools P2: `tool.call` carries its own resource shape
+    /// ([`crate::resource::ToolCallTarget`]).
+    pub fn is_tool_scoped(&self) -> bool {
+        matches!(self, Self::ToolCall)
     }
 
     /// issue #714: `economy.*` carries its own resource shape
@@ -661,6 +673,18 @@ impl PermissionFamily {
                 },
                 notes: "issue #714; amount metered against the SENDER; declared params.max_amount clamped to the per-call ceiling",
             },
+            Self::ToolCall => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Db,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(1),
+                },
+                notes: "bundle-MCP-tools P2; target+tool encoded in the id, op `tool.call`; \
+                        a service tool call is security-sensitive so every grant needs an \
+                        explicit reviewer ack",
+            },
             Self::IdentityResolve => CatalogEntry {
                 family: *self,
                 risk: Risk::Normal,
@@ -777,6 +801,12 @@ pub enum PermissionId {
     PlatformLog,
     InteractionPiiReceive,
     StreamingLifecycleSubscribe,
+    /// `tool.call:<target_app_id>:<tool>` -- invoke one named MCP-style tool
+    /// exported by another bundle/service (bundle-MCP-tools framework P2).
+    ToolCall {
+        target: String,
+        tool: String,
+    },
 }
 
 /// Platforms compiled into this build's relay/moderation providers (spec
@@ -840,6 +870,7 @@ impl PermissionId {
             Self::PlatformLog => PermissionFamily::PlatformLog,
             Self::InteractionPiiReceive => PermissionFamily::InteractionPiiReceive,
             Self::StreamingLifecycleSubscribe => PermissionFamily::StreamingLifecycleSubscribe,
+            Self::ToolCall { .. } => PermissionFamily::ToolCall,
         }
     }
 
@@ -863,6 +894,7 @@ impl PermissionId {
             Self::ChatDelete(platform) => format!("chat.delete:{platform}"),
             Self::DmSend(platform) => format!("dm.send:{platform}"),
             Self::Moderation(platform) => format!("moderation.{platform}"),
+            Self::ToolCall { target, tool } => format!("tool.call:{target}:{tool}"),
             other => other.family().id_prefix().to_string(),
         }
     }
@@ -895,6 +927,42 @@ impl PermissionId {
             return Err(ParsePermissionIdError::InvalidHost(host.to_string()));
         }
         Ok(())
+    }
+
+    /// `tool.call` target: the 4-segment `waddles.<a>.<b>.<c>` app id
+    /// (`hub_api` `_APP_ID_RE`). Every char is RFC-3986 unreserved, so Python's
+    /// `quote(app_id, safe='')` (P1's `requested_tool_permission_id`) is the
+    /// identity on a valid id and no percent-encoding exists on the wire; a
+    /// `%`/`:` therefore can never be valid and is rejected.
+    fn validate_tool_target(target: &str) -> Result<(), ParsePermissionIdError> {
+        let err = || ParsePermissionIdError::UnknownPermission(format!("tool.call:{target}"));
+        let segment_ok = |s: &str| {
+            let mut chars = s.chars();
+            matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
+                && chars
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        };
+        let parts: Vec<&str> = target.split('.').collect();
+        if parts.len() == 4 && parts[0] == "waddles" && parts[1..].iter().all(|p| segment_ok(p)) {
+            Ok(())
+        } else {
+            Err(err())
+        }
+    }
+
+    /// `tool.call` tool name: `^[a-z][a-z0-9_.]{0,63}$` (`hub_api` `_TOOL_NAME_RE`).
+    fn validate_tool_name(tool: &str) -> Result<(), ParsePermissionIdError> {
+        let mut chars = tool.chars();
+        let ok = tool.len() <= 64
+            && matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.');
+        if ok {
+            Ok(())
+        } else {
+            Err(ParsePermissionIdError::UnknownPermission(format!(
+                "tool.call:<target>:{tool}"
+            )))
+        }
     }
 
     fn validate_public_ip(value: &str) -> Result<(), ParsePermissionIdError> {
@@ -966,6 +1034,24 @@ impl PermissionId {
         if let Some(platform) = raw.strip_prefix("moderation.") {
             Self::validate_platform(platform)?;
             return Ok(Self::Moderation(platform.to_string()));
+        }
+        if let Some(rest) = raw.strip_prefix("tool.call:") {
+            let (target, tool) =
+                rest.rsplit_once(':')
+                    .ok_or(ParsePermissionIdError::MissingParam {
+                        family: "tool.call",
+                    })?;
+            Self::validate_tool_target(target)?;
+            Self::validate_tool_name(tool)?;
+            return Ok(Self::ToolCall {
+                target: target.to_string(),
+                tool: tool.to_string(),
+            });
+        }
+        if raw == "tool.call" {
+            return Err(ParsePermissionIdError::MissingParam {
+                family: "tool.call",
+            });
         }
         if raw == "net.http.fqdn" || raw == "net.http.public-ip" || raw == "net.http.private-ip" {
             return Err(ParsePermissionIdError::MissingParam {
@@ -1322,8 +1408,63 @@ mod tests {
                 family.is_app_scoped(),
                 family.is_reputation_scoped(),
                 family.is_economy_scoped(),
+                family.is_tool_scoped(),
             ];
             assert_eq!(classes.iter().filter(|c| **c).count(), 1, "{family:?}");
         }
+    }
+
+    #[test]
+    fn tool_call_round_trips_a_real_p1_encoded_id() {
+        // P1's quote(app_id, safe='') is the identity on a valid app id.
+        for raw in [
+            "tool.call:waddles.core.economy.default:get_balance",
+            "tool.call:waddles.core.example_echo.v2:a.b_c",
+            "tool.call:waddles.some-vendor.x1.y_2:t",
+        ] {
+            let id = PermissionId::parse(raw).unwrap();
+            assert_eq!(id.canonical_id(), raw);
+            assert_eq!(id.family(), PermissionFamily::ToolCall);
+            assert_eq!(id.risk(), Risk::Dangerous);
+        }
+        assert_eq!(
+            PermissionId::parse("tool.call:waddles.core.economy.default:get_balance").unwrap(),
+            PermissionId::ToolCall {
+                target: "waddles.core.economy.default".into(),
+                tool: "get_balance".into()
+            }
+        );
+    }
+
+    #[test]
+    fn tool_call_rejects_malformed_ids() {
+        for raw in [
+            "tool.call",
+            "tool.call:",
+            "tool.call:x",
+            "tool.call::get",
+            "tool.call:waddles.core.economy.default:",
+            "tool.call:waddles.core.economy.default:Get",
+            "tool.call:waddles.core.economy.default:1get",
+            "tool.call:waddles.core:get",
+            "tool.call:waddles%2Ecore.economy.default:get",
+            "tool.call:a:waddles.core.economy.default:get",
+            "tool.call:other.core.economy.default:get",
+        ] {
+            assert!(PermissionId::parse(raw).is_err(), "{raw} must be rejected");
+        }
+        let long = format!("tool.call:waddles.core.economy.default:a{}", "b".repeat(64));
+        assert!(PermissionId::parse(&long).is_err());
+    }
+
+    #[test]
+    fn tool_call_catalog_entry_shape() {
+        let e = PermissionFamily::ToolCall.catalog_entry();
+        assert_eq!(e.family, PermissionFamily::ToolCall);
+        assert_eq!(e.risk, Risk::Dangerous);
+        assert_eq!(e.capability_kind, CapabilityKind::Db);
+        assert!(PermissionFamily::ToolCall.is_parameterized());
+        assert!(PermissionFamily::ALL.contains(&PermissionFamily::ToolCall));
+        assert_eq!(PermissionFamily::ToolCall.id_prefix(), "tool.call");
     }
 }
