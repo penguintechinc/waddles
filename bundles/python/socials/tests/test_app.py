@@ -1,4 +1,4 @@
-"""Host-native tests for the `socials` bundle (fake `kv`/`flags`/`relay`/`log` host)."""
+"""Host-native tests for the `socials` bundle (fake `kv`/`relay`/`log` host)."""
 
 from __future__ import annotations
 
@@ -23,14 +23,12 @@ class _Host:
         self.kv = kv
         self.relay_calls: list[tuple[str, Any]] = []
         self.log_calls: list[tuple[int, str, str]] = []
-        self.flag = True
 
 
 @pytest.fixture
 def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
     h = _Host(install_fake_kv_host(monkeypatch))
     wit = sys.modules["wit_world"]
-    wit.imports.flags = types.SimpleNamespace(enabled=lambda key, default_value: h.flag)  # type: ignore[attr-defined]
     wit.imports.relay = types.SimpleNamespace(  # type: ignore[attr-defined]
         push=lambda provider, msg: h.relay_calls.append((provider, msg))
     )
@@ -82,12 +80,6 @@ def _say(text: str, **kw: Any) -> str:
 
 def _blob(host: _Host) -> str:
     return " ".join(f"{msg} {fields}" for _, msg, fields in host.log_calls)
-
-
-def test_flag_off_suppresses(host: _Host) -> None:
-    host.flag = False
-    assert _run(transform(_event("!socials list"))) is None
-    assert host.kv.calls == []
 
 
 def test_non_matching_ignored(host: _Host) -> None:

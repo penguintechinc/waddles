@@ -12,7 +12,7 @@ Platform names are lowercase `[a-z0-9_-]`; URLs are http/https only (no credenti
 
 Logs are PII-free: op, counts, exception-type names -- never a platform name or URL. A corrupt
 stored blob raises `_KvFailure` (logged at ERROR, answered with an error reply), never a
-silent default. Gated behind the PostHog flag ``waddles.command-socials``.
+silent default. Activation-gated only -- no feature flag.
 """
 
 from __future__ import annotations
@@ -23,10 +23,8 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-socials"
 COMMAND = "!socials"
 
 LINKS_KEY = "socials.links"
@@ -81,7 +79,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("socials.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 def validate_url(raw: str, *, hosts: tuple[str, ...] = ()) -> str | None:
@@ -199,7 +197,7 @@ async def _handle(rest: str, event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!socials` and build the reply.
 
-    Cheap-skip (exact first-token match) comes before the flag check; a `kv` failure is logged
+    Cheap-skip (exact first-token match) comes first; a `kv` failure is logged
     loudly (PII-free) and answered with an error reply, never swallowed into a default.
     """
     text = event.payload.get("text")
@@ -207,8 +205,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:
