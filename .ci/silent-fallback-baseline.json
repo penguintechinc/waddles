@@ -3645,6 +3645,30 @@
       "line_hash": "376f928376a5c74c",
       "justification": "Identical already-baselined pattern as core/svc_streaming/src/telemetry.rs:111 (gh-605) -- same rationale as the entry above: RUST_LOG/EnvFilter unset simply means \"default to info\", not an error, and no tracing subscriber exists yet to log to at this point in init().",
       "status": "sanctioned-by-design"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/guild_pairing.py",
+      "line": 340,
+      "line_hash": "8993464278beb845",
+      "justification": "`except ApiError as exc: return _err(exc)` is the explicit, structured error mapping used by every hub_api v1 blueprint: the service layer raises ApiError (status + code + message) and the route renders it as the HTTP error response with that status. The error is surfaced to the caller, not swallowed or defaulted; identical shape to the already-baselined sibling handlers in the same blueprint family.",
+      "status": "sanctioned-by-design"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/one_time_secrets.py",
+      "line": 115,
+      "line_hash": "58480615d686f575",
+      "justification": "`except ApiError as exc: return _err(exc)` is the explicit, structured error mapping used by every hub_api v1 blueprint: the service layer raises ApiError (status + code + message) and the route renders it as the HTTP error response with that status. The error is surfaced to the caller, not swallowed or defaulted; identical shape to the already-baselined sibling handlers in the same blueprint family.",
+      "status": "sanctioned-by-design"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/one_time_secrets.py",
+      "line": 149,
+      "line_hash": "2cf501e304c3732d",
+      "justification": "`except ApiError as exc: return _err(exc)` is the explicit, structured error mapping used by every hub_api v1 blueprint: the service layer raises ApiError (status + code + message) and the route renders it as the HTTP error response with that status. The error is surfaced to the caller, not swallowed or defaulted; identical shape to the already-baselined sibling handlers in the same blueprint family.",
+      "status": "sanctioned-by-design"
     }
   ]
 }
