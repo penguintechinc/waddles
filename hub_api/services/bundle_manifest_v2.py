@@ -269,6 +269,15 @@ def _infer_kind(app_id: str, module: str) -> str:
     return "app"
 
 
+def is_trusted_service_source(provider: str, app_id: str, module: str) -> bool:
+    """True when a manifest comes from a trusted platform source that may be `kind: service`.
+
+    Trusted = builtin provider, the `waddles.core.` namespace, or a known
+    service module. A vendor manifest must never self-declare service kind.
+    """
+    return provider == "builtin" or app_id.startswith("waddles.core.") or module in _SERVICE_MODULES
+
+
 def _require(condition: bool, reason: str, detail: str) -> None:
     """Raise `ManifestV2Error(reason, detail)` when `condition` is false."""
     if not condition:
@@ -867,6 +876,12 @@ def parse_bundle_manifest_v2(
         "invalid_kind",
         f"kind must be one of {_VALID_KINDS}, got {raw_kind!r}",
     )
+    if raw_kind == "service":
+        _require(
+            is_trusted_service_source(raw["provider"], raw["app_id"], raw["module"]),
+            "untrusted_service_kind",
+            "kind: service may only be declared by a builtin/platform bundle",
+        )
     kind = raw_kind or _infer_kind(raw["app_id"], raw["module"])
 
     exported_tools = parse_exported_tools(raw.get("exported_tools"))

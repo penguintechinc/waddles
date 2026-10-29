@@ -532,3 +532,76 @@ def test_exported_tools_invalid_shape(bad: object) -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse({"kind": "service", "exported_tools": bad})
     assert exc.value.reason == "invalid_exported_tools"
+
+
+_VENDOR = {"provider": "thirdparty", "author": "Vendor", "license": "MIT"}
+
+
+def test_untrusted_explicit_service_kind_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({**_VENDOR, "kind": "service", "exported_tools": [_tool()]})
+    assert exc.value.reason == "untrusted_service_kind"
+
+
+def test_untrusted_explicit_service_kind_without_tools_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({**_VENDOR, "kind": "service"})
+    assert exc.value.reason == "untrusted_service_kind"
+
+
+def test_trusted_builtin_service_kind_allowed() -> None:
+    assert _parse({"kind": "service"}).kind == "service"  # type: ignore[attr-defined]
+
+
+def test_vendor_explicit_app_kind_still_allowed() -> None:
+    assert _parse({**_VENDOR, "kind": "app"}).kind == "app"  # type: ignore[attr-defined]
+
+
+def test_derive_capability_requires_trusted_source() -> None:
+    import dataclasses
+
+    from services.bundle_approval_service import _derive_capabilities
+
+    m = _parse({"kind": "service", "exported_tools": [_tool()]})
+    forged = dataclasses.replace(m, provider="thirdparty")  # type: ignore[type-var]
+    assert "mcp.tools" not in _derive_capabilities(forged)
+
+
+def _tool_summary(*tools: dict) -> dict:
+    from services.permission_summary_service import build_permission_summary
+
+    m = _parse({"kind": "service", "exported_tools": list(tools)})
+    return build_permission_summary(
+        m,  # type: ignore[arg-type]
+        grant_labels=[],
+        component_capabilities=frozenset(),
+        min_tier="free",
+        flag_key="f",
+        allow_private_hosts=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ([_tool("a")], [_tool("a"), _tool("b")]),
+        ([_tool("a")], [_tool("a", access="write")]),
+        ([_tool("a")], [_tool("a", risk="dangerous")]),
+    ],
+)
+def test_tool_change_changes_hash_and_widens(old: list, new: list) -> None:
+    from services.bundle_approval_service import classify_diff
+    from services.permission_summary_service import permission_hash
+
+    old_s, new_s = _tool_summary(*old), _tool_summary(*new)
+    assert permission_hash(old_s) != permission_hash(new_s)
+    assert classify_diff(new_s, old_s) == "widened"
+
+
+def test_tool_removal_narrows_and_order_is_hash_stable() -> None:
+    from services.bundle_approval_service import classify_diff
+    from services.permission_summary_service import permission_hash
+
+    ab, ba = _tool_summary(_tool("a"), _tool("b")), _tool_summary(_tool("b"), _tool("a"))
+    assert permission_hash(ab) == permission_hash(ba)
+    assert classify_diff(_tool_summary(_tool("a")), ab) == "narrowed"

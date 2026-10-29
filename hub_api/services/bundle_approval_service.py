@@ -118,6 +118,7 @@ from services.bundle_manifest_v2 import (
     EgressRule,
     Limits,
     _infer_kind,
+    is_trusted_service_source,
     parse_command_declarations,
     parse_exported_tools,
     parse_permission_declarations,
@@ -246,7 +247,11 @@ def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
         caps.add("relay")
     if KV_PERMISSION_ID in manifest.permissions:
         caps.add(KV_PERMISSION_ID)
-    if manifest.kind == "service" and manifest.exported_tools:
+    if (
+        manifest.kind == "service"
+        and manifest.exported_tools
+        and is_trusted_service_source(manifest.provider, manifest.app_id, manifest.module)
+    ):
         caps.add(MCP_TOOLS_CAPABILITY)
     return frozenset(caps)
 
@@ -398,6 +403,9 @@ def classify_diff(new_summary: dict[str, Any], previous_summary: dict[str, Any] 
         parts |= {f"table:{t['table']}" for t in summary.get("database", [])}
         parts |= {f"cap:{c}" for c in summary.get("capabilities", [])}
         parts |= {f"route:{r}" for r in summary.get("routesTo", [])}
+        parts |= {
+            f"tool:{t['name']}:{t['access']}:{t['risk']}" for t in summary.get("exportedTools", [])
+        }
         return parts
 
     new_set, old_set = _flatten(new_summary), _flatten(previous_summary)
