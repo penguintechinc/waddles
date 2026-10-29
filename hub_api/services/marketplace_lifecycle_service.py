@@ -298,6 +298,7 @@ async def install_bundle(
         homepage_url=manifest.homepage_url,
         notice=manifest.notice,
         category=manifest.category,
+        kind=manifest.kind,
     )
     dal.commit()
     row = dal(dal.app_catalog.app_id == manifest.app_id).select().first()
