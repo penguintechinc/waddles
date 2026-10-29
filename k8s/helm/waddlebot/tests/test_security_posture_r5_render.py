@@ -391,7 +391,14 @@ class TestDefaultDenyEgress:
 
     def test_https_fqdn_pin(self) -> None:
         docs = _render("values-production.yaml", ["egressPolicy.httpsFqdns[0].matchName=license.penguintech.io"])
-        rules = [r for c in _cnps(docs) for r in c["spec"].get("egress") or [] if "toFQDNs" in r]
+        # The dedicated svc-ingest Discord-gateway policy legitimately pins its own Discord FQDNs
+        # (egressPolicy.discordGateway); it is asserted separately and excluded from the pin check.
+        discord = [c for c in _cnps(docs) if c["metadata"]["name"].endswith("-ingest-discord-egress")]
+        for c in discord:
+            fq = [m["matchName"] for r in c["spec"]["egress"] if "toFQDNs" in r for m in r["toFQDNs"]]
+            assert fq and all("discord" in n for n in fq), fq
+        rules = [r for c in _cnps(docs) if c not in discord
+                 for r in c["spec"].get("egress") or [] if "toFQDNs" in r]
         assert rules, "httpsFqdns set but no toFQDNs rule rendered"
         assert all(r["toFQDNs"] == [{"matchName": "license.penguintech.io"}] for r in rules)
         # FQDN rules need the DNS proxy: the DNS rule must carry a dns rules block.
