@@ -94,13 +94,53 @@ export function requireSuperAdmin(req, res, next) {
 }
 
 /**
- * Require community admin role (owner, admin, or moderator)
+ * Strictly parses one community-id candidate: a JSON number that is a positive safe integer,
+ * or a string of ASCII digits only. Arrays, objects, "123abc", floats and unsafe ints yield null.
+ */
+export function parseCommunityId(value) {
+  let n;
+  if (typeof value === 'number') {
+    n = value;
+  } else if (typeof value === 'string' && /^\d+$/.test(value)) {
+    n = Number(value);
+  } else {
+    return null;
+  }
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * Resolves the single authoritative community id for a request. Path param and body value are
+ * both validated; if both are present they must agree (no gate-vs-action differential).
+ * Returns the integer, or null when absent/invalid/mismatched.
+ */
+function resolveCommunityId(req) {
+  const hasParam = req.params?.communityId !== undefined;
+  const hasBody = req.body?.communityId !== undefined;
+  if (!hasParam && !hasBody) return null;
+  const fromParam = hasParam ? parseCommunityId(req.params.communityId) : undefined;
+  const fromBody = hasBody ? parseCommunityId(req.body.communityId) : undefined;
+  if (fromParam === null || fromBody === null) return null;
+  if (hasParam && hasBody && fromParam !== fromBody) return null;
+  return hasParam ? fromParam : fromBody;
+}
+
+/**
+ * Require community admin role (owner, admin, or moderator).
+ * The id is strictly validated, then normalized onto req.communityId / req.params / req.body so
+ * controllers act on exactly the value that was authorized — they must never re-parse it.
  */
 export async function requireCommunityAdmin(req, res, next) {
-  const communityId = parseInt(req.params.communityId, 10);
+  const communityId = resolveCommunityId(req);
 
-  if (isNaN(communityId)) {
+  if (communityId === null) {
     return next(errors.badRequest('Invalid community ID'));
+  }
+
+  req.communityId = communityId;
+  if (req.params?.communityId !== undefined) req.params.communityId = String(communityId);
+  if (req.body && typeof req.body === 'object' && req.body.communityId !== undefined) {
+    req.body.communityId = communityId;
   }
 
   // Super admins have access to all communities

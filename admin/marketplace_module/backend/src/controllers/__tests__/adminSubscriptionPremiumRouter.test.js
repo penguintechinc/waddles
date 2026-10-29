@@ -220,26 +220,30 @@ describe('premiumController', () => {
   it('getSubscriptionStatus combines the subscription and seat count', async () => {
     premium.getSubscriptionStatus.mockResolvedValue({ s: 1 });
     premium.getCurrentSeatCount.mockResolvedValue(3);
-    expect((await call(premiumCtl.getSubscriptionStatus, { params: { communityId: '3' } })).res.json).toHaveBeenCalledWith({ success: true, subscription: { s: 1 }, currentSeatCount: 3 });
+    expect((await call(premiumCtl.getSubscriptionStatus, { params: { communityId: '3' }, communityId: 3 })).res.json).toHaveBeenCalledWith({ success: true, subscription: { s: 1 }, currentSeatCount: 3 });
     premium.getSubscriptionStatus.mockImplementationOnce(boom);
-    expect((await call(premiumCtl.getSubscriptionStatus, { params: { communityId: '3' } })).next).toHaveBeenCalled();
+    expect((await call(premiumCtl.getSubscriptionStatus, { params: { communityId: '3' }, communityId: 3 })).next).toHaveBeenCalled();
   });
 
   it('subscribePremium defaults to stripe', async () => {
     premium.subscribeCommunityPremium.mockResolvedValue({ checkoutUrl: 'u' });
-    const { res } = await call(premiumCtl.subscribePremium, { body: { communityId: 3, successUrl: 's', cancelUrl: 'c' } });
+    const { res } = await call(premiumCtl.subscribePremium, { communityId: 3, body: { communityId: 3, successUrl: 's', cancelUrl: 'c' } });
     expect(premium.subscribeCommunityPremium).toHaveBeenCalledWith(3, 'stripe', 's', 'c');
     expect(res.json).toHaveBeenCalledWith({ success: true, checkoutUrl: 'u' });
     premium.subscribeCommunityPremium.mockImplementationOnce(boom);
-    expect((await call(premiumCtl.subscribePremium, { body: {} })).next).toHaveBeenCalled();
+    expect((await call(premiumCtl.subscribePremium, { communityId: 3, body: {} })).next).toHaveBeenCalled();
+    // never re-parses the body: without the gate's normalized id it fails loudly
+    const bypass = await call(premiumCtl.subscribePremium, { body: { communityId: '3abc' } });
+    expect(bypass.next.mock.calls[0][0].statusCode).toBe(400);
   });
 
   it('cancelPremium defaults to cancel-at-period-end', async () => {
     premium.cancelCommunityPremium.mockResolvedValue({ cancelAtPeriodEnd: true });
-    await call(premiumCtl.cancelPremium, { body: { communityId: 3 } });
+    await call(premiumCtl.cancelPremium, { communityId: 3, body: { communityId: 3 } });
     expect(premium.cancelCommunityPremium).toHaveBeenCalledWith(3, false);
     premium.cancelCommunityPremium.mockImplementationOnce(boom);
-    expect((await call(premiumCtl.cancelPremium, { body: {} })).next).toHaveBeenCalled();
+    expect((await call(premiumCtl.cancelPremium, { communityId: 3, body: {} })).next).toHaveBeenCalled();
+    expect((await call(premiumCtl.cancelPremium, { body: { communityId: 3 } })).next.mock.calls[0][0].statusCode).toBe(400);
   });
 });
 

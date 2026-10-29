@@ -107,9 +107,70 @@ describe('PayPalService', () => {
       }
     });
 
-    it('accepts a structurally complete webhook (current behaviour: header presence only)', async () => {
-      process.env.PAYPAL_WEBHOOK_ID = 'wh';
-      expect(await svc.verifyWebhookSignature(headers, { e: 1 })).toBe(true);
+    describe('against the PayPal verify API', () => {
+      const realFetch = globalThis.fetch;
+      const okHeaders = { ...headers, 'paypal-cert-url': 'https://api.paypal.com/v1/notifications/certs/CERT' };
+      let fetchMock;
+      beforeEach(() => {
+        process.env.PAYPAL_WEBHOOK_ID = 'wh';
+        process.env.PAYPAL_CLIENT_ID = 'cid';
+        process.env.PAYPAL_CLIENT_SECRET = 'sec';
+        fetchMock = jest.fn();
+        globalThis.fetch = fetchMock;
+      });
+      afterEach(() => {
+        globalThis.fetch = realFetch;
+        delete process.env.PAYPAL_MODE;
+      });
+
+      it('accepts only when PayPal answers SUCCESS (and sends the event + webhook id)', async () => {
+        fetchMock
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'T' }) })
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ verification_status: 'SUCCESS' }) });
+        expect(await svc.verifyWebhookSignature(okHeaders, { e: 1 })).toBe(true);
+        const [url, init] = fetchMock.mock.calls[1];
+        expect(url).toBe('https://api-m.sandbox.paypal.com/v1/notifications/verify-webhook-signature');
+        expect(init.redirect).toBe('error');
+        expect(JSON.parse(init.body)).toMatchObject({ webhook_id: 'wh', webhook_event: { e: 1 } });
+      });
+
+      it('rejects a FAILURE verdict, forged signature never returns true', async () => {
+        fetchMock
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'T' }) })
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ verification_status: 'FAILURE' }) });
+        expect(await svc.verifyWebhookSignature(okHeaders, {})).toBe(false);
+      });
+
+      it('uses the live API in production mode', async () => {
+        process.env.PAYPAL_MODE = 'production';
+        fetchMock
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'T' }) })
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ verification_status: 'SUCCESS' }) });
+        await svc.verifyWebhookSignature(okHeaders, {});
+        expect(fetchMock.mock.calls[0][0]).toBe('https://api-m.paypal.com/v1/oauth2/token');
+      });
+
+      it.each([
+        ['token endpoint fails', () => fetchMock.mockResolvedValueOnce({ ok: false, status: 500 })],
+        ['verify endpoint fails', () => fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'T' }) }).mockResolvedValueOnce({ ok: false, status: 500 })],
+        ['network error', () => fetchMock.mockRejectedValue(new Error('net'))],
+      ])('fails closed when the %s', async (_n, arrange) => {
+        arrange();
+        expect(await svc.verifyWebhookSignature(okHeaders, {})).toBe(false);
+      });
+
+      it('fails closed without PAYPAL_WEBHOOK_ID, credentials, or with a non-PayPal cert_url', async () => {
+        delete process.env.PAYPAL_WEBHOOK_ID;
+        expect(await svc.verifyWebhookSignature(okHeaders, {})).toBe(false);
+        process.env.PAYPAL_WEBHOOK_ID = 'wh';
+        delete process.env.PAYPAL_CLIENT_ID;
+        expect(await svc.verifyWebhookSignature(okHeaders, {})).toBe(false);
+        process.env.PAYPAL_CLIENT_ID = 'cid';
+        for (const bad of ['https://evil.example.com/cert', 'http://api.paypal.com/c', 'https://paypal.com.evil.io/c']) {
+          expect(await svc.verifyWebhookSignature({ ...headers, 'paypal-cert-url': bad }, {})).toBe(false);
+        }
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
     });
   });
 

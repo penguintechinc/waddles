@@ -87,6 +87,60 @@ describe('auth middleware', () => {
       return next.mock.calls[0][0];
     };
 
+    it('reads the community id from the body when there is no path param (premium routes)', async () => {
+      query.mockResolvedValueOnce({ rows: [{ role: 'community-owner' }] });
+      const next = jest.fn();
+      const req = { params: {}, body: { communityId: 7 }, user: { id: 1 } };
+      await auth.requireCommunityAdmin(req, {}, next);
+      expect(next.mock.calls[0][0]).toBeUndefined();
+      expect(query.mock.calls.at(-1)[1][0]).toBe(7);
+      const bad = jest.fn();
+      await auth.requireCommunityAdmin({ params: {}, body: {}, user: { id: 1 } }, {}, bad);
+      expect(bad.mock.calls[0][0].statusCode).toBe(400);
+    });
+
+    it('normalizes the validated id onto req (communityId, params, body)', async () => {
+      query.mockResolvedValueOnce({ rows: [{ role: 'community-owner' }] });
+      const req = { params: {}, body: { communityId: '0007' }, user: { id: 1 } };
+      const next = jest.fn();
+      await auth.requireCommunityAdmin(req, {}, next);
+      expect(next.mock.calls[0][0]).toBeUndefined();
+      expect([req.communityId, req.body.communityId]).toEqual([7, 7]);
+      expect(query.mock.calls.at(-1)[1][0]).toBe(7);
+      const r2 = { params: { communityId: '12' }, user: { isSuperAdmin: true } };
+      await auth.requireCommunityAdmin(r2, {}, jest.fn());
+      expect([r2.communityId, r2.params.communityId]).toEqual([12, '12']);
+    });
+
+    it.each([
+      ['trailing junk', { params: { communityId: '123abc' } }],
+      ['body trailing junk', { params: {}, body: { communityId: '123abc' } }],
+      ['array in body', { params: {}, body: { communityId: [1] } }],
+      ['array in params', { params: { communityId: ['1'] } }],
+      ['object in body', { params: {}, body: { communityId: { toString: () => '1' } } }],
+      ['params/body mismatch', { params: { communityId: '1' }, body: { communityId: 2 } }],
+      ['params valid, body junk', { params: { communityId: '1' }, body: { communityId: '1abc' } }],
+      ['non-safe integer number', { params: {}, body: { communityId: 2 ** 53 } }],
+      ['non-safe integer string', { params: { communityId: '9007199254740993' } }],
+      ['float', { params: {}, body: { communityId: 1.5 } }],
+      ['negative', { params: { communityId: '-1' } }],
+      ['zero', { params: { communityId: '0' } }],
+      ['null body value', { params: {}, body: { communityId: null } }],
+      ['hex string', { params: { communityId: '0x10' } }],
+    ])('rejects parser-differential input: %s', async (_n, partial) => {
+      const next = jest.fn();
+      await auth.requireCommunityAdmin({ user: { isSuperAdmin: true }, ...partial }, {}, next);
+      expect(next.mock.calls[0][0].statusCode).toBe(400);
+    });
+
+    it('accepts agreeing params and body', async () => {
+      const req = { params: { communityId: '5' }, body: { communityId: 5 }, user: { isSuperAdmin: true } };
+      const next = jest.fn();
+      await auth.requireCommunityAdmin(req, {}, next);
+      expect(next.mock.calls[0][0]).toBeUndefined();
+      expect(req.communityId).toBe(5);
+    });
+
     it('rejects an invalid community id', async () => {
       const next = jest.fn();
       await auth.requireCommunityAdmin({ params: { communityId: 'x' }, user: { id: 1 } }, {}, next);

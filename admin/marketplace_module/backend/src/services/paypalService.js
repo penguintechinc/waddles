@@ -171,7 +171,17 @@ class PayPalService {
   }
 
   /**
-   * Verify webhook signature
+   * PayPal REST API base URL for the configured mode.
+   * @returns {string}
+   */
+  getApiBase() {
+    return process.env.PAYPAL_MODE === 'production'
+      ? 'https://api-m.paypal.com'
+      : 'https://api-m.sandbox.paypal.com';
+  }
+
+  /**
+   * Verify webhook signature via PayPal's verify-webhook-signature API (fail-closed)
    * @param {Object} headers - Request headers
    * @param {Object} body - Request body
    * @returns {Promise<boolean>} Verification result
@@ -190,7 +200,16 @@ class PayPalService {
         throw new Error('Missing required webhook headers');
       }
 
-      // Create verification request
+      if (!webhookId) {
+        throw new Error('PAYPAL_WEBHOOK_ID not configured');
+      }
+
+      // Defense in depth: the cert must be hosted by PayPal (PayPal re-checks it server-side).
+      const certHost = new URL(certUrl);
+      if (certHost.protocol !== 'https:' || !/(^|\.)paypal\.com$/.test(certHost.hostname)) {
+        throw new Error('Untrusted PayPal cert_url');
+      }
+
       const verifyRequest = {
         auth_algo: authAlgo,
         cert_url: certUrl,
@@ -201,16 +220,44 @@ class PayPalService {
         webhook_event: body,
       };
 
-      // Note: PayPal SDK doesn't have built-in webhook verification
-      // You would need to implement this using PayPal's REST API
-      // For now, we'll return true and log the verification data
-      console.log('PayPal webhook verification data:', verifyRequest);
+      const base = this.getApiBase();
+      const clientId = process.env.PAYPAL_CLIENT_ID;
+      const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
+      if (!clientId || !clientSecret) {
+        throw new Error('PayPal credentials not configured');
+      }
 
-      // In production, you should make a POST request to:
-      // https://api.paypal.com/v1/notifications/verify-webhook-signature
-      // with the verifyRequest data
+      const tokenResp = await globalThis.fetch(`${base}/v1/oauth2/token`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: 'grant_type=client_credentials',
+        redirect: 'error',
+        signal: globalThis.AbortSignal.timeout(10000),
+      });
+      if (!tokenResp.ok) {
+        throw new Error(`PayPal token request failed (${tokenResp.status})`);
+      }
+      const { access_token: accessToken } = await tokenResp.json();
 
-      return true;
+      const verifyResp = await globalThis.fetch(`${base}/v1/notifications/verify-webhook-signature`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(verifyRequest),
+        redirect: 'error',
+        signal: globalThis.AbortSignal.timeout(10000),
+      });
+      if (!verifyResp.ok) {
+        throw new Error(`PayPal verification request failed (${verifyResp.status})`);
+      }
+      const result = await verifyResp.json();
+
+      return result.verification_status === 'SUCCESS';
     } catch (error) {
       console.error('PayPal webhook verification error:', error);
       return false;

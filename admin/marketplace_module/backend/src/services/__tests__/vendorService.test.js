@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
+import dns from 'node:dns';
 
 const query = jest.fn();
 jest.unstable_mockModule('../../config/database.js', () => ({ query, transaction: jest.fn(), default: { query } }));
@@ -8,7 +9,12 @@ const svc = await import('../vendorService.js');
 const dup = Object.assign(new Error('dup'), { code: '23505' });
 
 describe('vendorService', () => {
-  beforeEach(() => query.mockReset());
+  let lookup;
+  beforeEach(() => {
+    query.mockReset();
+    lookup = jest.spyOn(dns.promises, 'lookup').mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+  });
+  afterEach(() => lookup.mockRestore());
 
   it('getVendorProfile returns the profile or null', async () => {
     query.mockResolvedValueOnce({ rows: [{ id: 1 }] });
@@ -115,12 +121,54 @@ describe('vendorService', () => {
     });
     it('writes only allow-listed columns (status cannot be self-approved)', async () => {
       query.mockResolvedValueOnce({ rows: [{ id: 1 }] }).mockResolvedValueOnce({ rows: [] });
-      await svc.updateVendorModule(9, 1, { name: 'n', webhookUrl: 'u', status: 'approved' });
+      await svc.updateVendorModule(9, 1, { name: 'n', webhookUrl: 'https://vendor.example.com/h', status: 'approved' });
       const [sql, values] = query.mock.calls[1];
       expect(sql).toContain('name = $1');
       expect(sql).toContain('webhook_url = $2');
-      expect(sql).not.toContain('status');
-      expect(values).toEqual(['n', 'u', 1]);
+      expect(values).toEqual(['n', 'https://vendor.example.com/h', 1]);
+    });
+    it('does not touch status when only non-sensitive fields change', async () => {
+      query.mockResolvedValueOnce({ rows: [{ id: 1 }] }).mockResolvedValueOnce({ rows: [] });
+      await svc.updateVendorModule(9, 1, { name: 'n', status: 'approved' });
+      expect(query.mock.calls[1][0]).not.toContain('status');
+    });
+    it.each([['webhookUrl', 'https://vendor.example.com/h'], ['apiBaseUrl', 'https://vendor.example.com'], ['webhookSecret', 's'], ['authType', 'hmac'], ['authConfig', {}], ['communicationModel', 'rest_pull']])(
+      'changing %s on an approved module resets it to pending re-review',
+      async (key, val) => {
+        query.mockResolvedValueOnce({ rows: [{ id: 1 }] }).mockResolvedValueOnce({ rows: [] });
+        await svc.updateVendorModule(9, 1, { [key]: val });
+        expect(query.mock.calls[1][0]).toContain("status = CASE WHEN status = 'approved' THEN 'pending' ELSE status END");
+      }
+    );
+    it('rejects unsafe URLs on update before any write', async () => {
+      query.mockResolvedValueOnce({ rows: [{ id: 1 }] });
+      await expect(svc.updateVendorModule(9, 1, { webhookUrl: 'http://vendor.example.com' })).rejects.toMatchObject({ statusCode: 400 });
+      query.mockResolvedValueOnce({ rows: [{ id: 1 }] });
+      await expect(svc.updateVendorModule(9, 1, { apiBaseUrl: 'https://169.254.169.254' })).rejects.toMatchObject({ statusCode: 400 });
+      lookup.mockResolvedValue([{ address: '10.0.0.1', family: 4 }]);
+      query.mockResolvedValueOnce({ rows: [{ id: 1 }] });
+      await expect(svc.updateVendorModule(9, 1, { webhookUrl: 'https://rebind.example.com' })).rejects.toMatchObject({ statusCode: 400 });
+      expect(query).toHaveBeenCalledTimes(3);
+    });
+    it('clamps webhookTimeoutMs server-side', async () => {
+      query.mockResolvedValueOnce({ rows: [{ id: 1 }] }).mockResolvedValueOnce({ rows: [] });
+      await svc.updateVendorModule(9, 1, { webhookTimeoutMs: 999999 });
+      expect(query.mock.calls[1][1]).toEqual([10000, 1]);
+    });
+  });
+
+  describe('createVendorModule SSRF + timeout hardening', () => {
+    it('rejects http, private and metadata URLs before inserting', async () => {
+      for (const bad of [{ webhookUrl: 'http://v.example.com' }, { webhookUrl: 'https://169.254.169.254/' }, { apiBaseUrl: 'https://10.0.0.1' }]) {
+        query.mockResolvedValueOnce({ rows: [{ id: 5 }] });
+        await expect(svc.createVendorModule(9, { name: 'x', ...bad })).rejects.toMatchObject({ statusCode: 400 });
+      }
+      expect(query.mock.calls.every(([sql]) => !sql.includes('INSERT'))).toBe(true);
+    });
+    it('clamps the timeout written on create', async () => {
+      query.mockResolvedValueOnce({ rows: [{ id: 5 }] }).mockResolvedValueOnce({ rows: [{ id: 1, slug: 'x' }] });
+      await svc.createVendorModule(9, { name: 'x', webhookUrl: 'https://v.example.com/h', webhookTimeoutMs: 600000 });
+      expect(query.mock.calls[1][1][7]).toBe(10000);
     });
   });
 

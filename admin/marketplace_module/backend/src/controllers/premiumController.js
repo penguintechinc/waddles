@@ -1,4 +1,13 @@
 import * as premiumService from '../services/premiumService.js';
+import { errors } from '../middleware/errorHandler.js';
+
+/** Returns the community id normalized by requireCommunityAdmin; fails loudly if the gate was skipped. */
+function authorizedCommunityId(req) {
+  if (!Number.isSafeInteger(req.communityId)) {
+    throw errors.badRequest('Invalid community ID');
+  }
+  return req.communityId;
+}
 
 export async function getPricing(req, res, next) {
   try {
@@ -28,7 +37,7 @@ export async function getPricing(req, res, next) {
 
 export async function getSubscriptionStatus(req, res, next) {
   try {
-    const communityId = parseInt(req.params.communityId);
+    const communityId = authorizedCommunityId(req);
     const [subscription, currentSeatCount] = await Promise.all([
       premiumService.getSubscriptionStatus(communityId),
       premiumService.getCurrentSeatCount(communityId),
@@ -42,7 +51,8 @@ export async function getSubscriptionStatus(req, res, next) {
 
 export async function subscribePremium(req, res, next) {
   try {
-    const { communityId, provider = 'stripe', successUrl, cancelUrl } = req.body;
+    const communityId = authorizedCommunityId(req);
+    const { provider = 'stripe', successUrl, cancelUrl } = req.body;
     const result = await premiumService.subscribeCommunityPremium(
       communityId,
       provider,
@@ -58,7 +68,8 @@ export async function subscribePremium(req, res, next) {
 
 export async function cancelPremium(req, res, next) {
   try {
-    const { communityId, immediately = false } = req.body;
+    const communityId = authorizedCommunityId(req);
+    const { immediately = false } = req.body;
     const result = await premiumService.cancelCommunityPremium(communityId, immediately);
 
     return res.json({ success: true, ...result });
