@@ -312,6 +312,7 @@ async def _validate_requested_tool_targets(
     install_dal: AsyncDB,
     *,
     requested_tools: tuple[Any, ...],
+    tenant_id: int,
     activated_by: int | None,
     app_id: str,
     version: str,
@@ -322,16 +323,30 @@ async def _validate_requested_tool_targets(
     may be a tool target (a `service` requesting a `service` tool is fine --
     the caller's kind is irrelevant). Enforced at activation, not manifest
     parse, because the target's kind is only known once it is in the catalog.
-    Target kind is the denormalized `app_catalog.kind`; pre-0068 rows with a
-    NULL kind fall back to the same inference the manifest parser uses.
+    The target must also be available to THIS tenant (`bundle_tenant_availability`),
+    mirroring `_validate_routes_to`. Target kind is the denormalized
+    `app_catalog.kind`; pre-0068 rows with a NULL kind fall back to the same
+    inference the manifest parser uses.
     """
     for req in requested_tools:
         target_app_id = req.target_app_id
         rows = await install_dal(install_dal.app_catalog.app_id == target_app_id).select()
         row = rows.first()
+        available = (
+            await install_dal(
+                (install_dal.bundle_tenant_availability.app_id == target_app_id)
+                & (install_dal.bundle_tenant_availability.tenant_id == tenant_id)
+                & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
+            ).select()
+            if row is not None
+            else None
+        )
         if row is None:
             reason = "tool_target_not_found"
             detail = f"requested tool target {target_app_id!r} does not exist in the app catalog"
+        elif not available:
+            reason = "tool_target_cross_tenant"
+            detail = f"requested tool target {target_app_id!r} is not available in this tenant"
         else:
             kind = row.kind or _infer_kind(target_app_id, str(row.module or ""))
             if kind == "service":
@@ -350,6 +365,76 @@ async def _validate_requested_tool_targets(
             details={"target_app_id": target_app_id, "reason": reason},
         )
         raise ApiError(detail, 422, reason)
+
+
+async def _validate_manifest_activation(
+    install_dal: AsyncDB,
+    *,
+    manifest: BundleManifestV2,
+    tenant_id: int,
+    activated_by: int | None,
+    app_id: str,
+    version: str,
+) -> None:
+    """Run EVERY manifest-level activation check (routes_to + requested_tools targets).
+
+    The single shared gate every activation entry point calls, so the two
+    checks can never be present on one path and missing on another.
+    """
+    if manifest.routes_to:
+        await _validate_routes_to(
+            install_dal,
+            routes_to=manifest.routes_to,
+            tenant_id=tenant_id,
+            activated_by=activated_by,
+            app_id=app_id,
+            version=version,
+        )
+    if manifest.requested_tools:
+        await _validate_requested_tool_targets(
+            install_dal,
+            requested_tools=manifest.requested_tools,
+            tenant_id=tenant_id,
+            activated_by=activated_by,
+            app_id=app_id,
+            version=version,
+        )
+
+
+async def validate_current_install_activation(
+    install_dal: AsyncDB, *, tenant_id: int, app_id: str, activated_by: int | None
+) -> None:
+    """Run the shared manifest activation gate against `app_id`'s current global install.
+
+    For the legacy `app_catalog`-based activation path (marketplace lifecycle),
+    which has no version-pinned approval flow. A catalog-only app with no
+    installed v2 manifest has nothing to validate (no-op).
+    """
+    install_rows = await install_dal(
+        (install_dal.app_global_installs.app_id == app_id)
+        & (install_dal.app_global_installs.superseded_by == None)  # noqa: E711
+        & (install_dal.app_global_installs.revoked_at == None)  # noqa: E711
+    ).select()
+    install = install_rows.first()
+    if install is None:
+        return
+    version = str(install.version)
+    upload = (
+        await install_dal(
+            (install_dal.app_version_uploads.app_id == app_id)
+            & (install_dal.app_version_uploads.version == version)
+        ).select()
+    ).first()
+    if upload is None:
+        return
+    await _validate_manifest_activation(
+        install_dal,
+        manifest=_reparse_trusted(upload.manifest_json),
+        tenant_id=tenant_id,
+        activated_by=activated_by,
+        app_id=app_id,
+        version=version,
+    )
 
 
 async def _validate_routes_to(
@@ -1123,23 +1208,14 @@ async def activate_tenant_wide_with_warnings(
         raise not_found(f"version {version} of {app_id} not found")
 
     manifest = _reparse_trusted(upload.manifest_json)
-    if manifest.routes_to:
-        await _validate_routes_to(
-            install_dal,
-            routes_to=manifest.routes_to,
-            tenant_id=tenant_id,
-            activated_by=activated_by,
-            app_id=app_id,
-            version=version,
-        )
-    if manifest.requested_tools:
-        await _validate_requested_tool_targets(
-            install_dal,
-            requested_tools=manifest.requested_tools,
-            activated_by=activated_by,
-            app_id=app_id,
-            version=version,
-        )
+    await _validate_manifest_activation(
+        install_dal,
+        manifest=manifest,
+        tenant_id=tenant_id,
+        activated_by=activated_by,
+        app_id=app_id,
+        version=version,
+    )
 
     summary, computed_hash = await get_permission_summary(
         install_dal, app_id=app_id, version=version
@@ -1287,23 +1363,14 @@ async def activate_for_community_with_warnings(
         raise not_found(f"version {version} of {app_id} not found")
 
     manifest = _reparse_trusted(upload.manifest_json)
-    if manifest.routes_to:
-        await _validate_routes_to(
-            install_dal,
-            routes_to=manifest.routes_to,
-            tenant_id=tenant_id,
-            activated_by=activated_by,
-            app_id=app_id,
-            version=version,
-        )
-    if manifest.requested_tools:
-        await _validate_requested_tool_targets(
-            install_dal,
-            requested_tools=manifest.requested_tools,
-            activated_by=activated_by,
-            app_id=app_id,
-            version=version,
-        )
+    await _validate_manifest_activation(
+        install_dal,
+        manifest=manifest,
+        tenant_id=tenant_id,
+        activated_by=activated_by,
+        app_id=app_id,
+        version=version,
+    )
 
     summary, computed_hash = await get_permission_summary(
         install_dal, app_id=app_id, version=version

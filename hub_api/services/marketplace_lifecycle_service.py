@@ -42,7 +42,7 @@ from flask_core.app_manifest import AppManifest, ManifestError, parse_manifest
 from flask_core.app_registry import AppRegistry, RegistryError, get_registry
 from penguin_dal import AsyncDB
 
-from services import bundle_audit
+from services import bundle_approval_service, bundle_audit
 from services import bundle_permission_service as perm_svc
 from services.errors import ApiError, conflict, not_found
 
@@ -621,6 +621,11 @@ async def activate_bundle(
         raise _from_tier_error(exc) from exc
 
     candidate = await ensure_registered(dal, app_id, registry=registry)
+
+    if install_dal is not None:
+        await bundle_approval_service.validate_current_install_activation(
+            install_dal, tenant_id=tenant_id, app_id=app_id, activated_by=activated_by
+        )
 
     await _guard_community_reconsent(
         install_dal,
