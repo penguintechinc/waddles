@@ -134,9 +134,10 @@ pub enum PublishError {
     /// documented gap: `penguin_spine::SpineClient` exposes no raw
     /// Valkey-list write primitive today (it is `XADD`/`XREADGROUP`-only,
     /// see `src/outbound.rs`'s own doc comment on why the Twitch relay
-    /// queue uses a *direct* `redis` client instead) -- wiring a
-    /// `{stream}:identity_deadletter` `LPUSH` here is `// TODO(M5)`,
-    /// tracked alongside this crate's other documented crate-gap TODOs.
+    /// queue uses a *direct* `redis` client instead). The event is
+    /// surfaced to the caller as this error (fail closed, never silently
+    /// dropped); a `{stream}:identity_deadletter` `LPUSH` is a later-
+    /// milestone enhancement, not a stub on this path.
     #[error("identity-field dek unavailable, event held (never written plaintext): {0}")]
     DekUnavailable(#[from] DekUnavailableError),
 }
@@ -1457,7 +1458,8 @@ mod tests {
                 &test_identity_metrics(),
             )
             .await
-            .unwrap_or_else(|e| panic!("case {:?}: publish_event failed: {e}", case.name));
+            .map_err(|e| format!("case {:?}: publish_event failed: {e}", case.name))
+            .expect("table case must publish");
 
             let calls = appender.calls.lock().unwrap();
             let serialized = serde_json::to_string(&calls[0].1).unwrap();
