@@ -1,0 +1,408 @@
+version: 2
+updates:
+- package-ecosystem: cargo
+  directories:
+  - /bundles/rust/example
+  - /bundles/rust/ping
+  - /core/bundle_active_set
+  - /core/bundle_capability_gate
+  - /core/bundle_compiler
+  - /core/bundle_executor
+  - /core/bundle_host_db
+  - /core/bundle_host_economy
+  - /core/bundle_host_http
+  - /core/bundle_host_kv
+  - /core/bundle_host_reputation
+  - /core/circuit_breaker
+  - /core/connection_resolver
+  - /core/connector_e2e
+  - /core/discord_mentions
+  - /core/egress_assertion
+  - /core/egress_detokenizer
+  - /core/egress_proxy
+  - /core/hub_client
+  - /core/overlay_auth
+  - /core/overlay_schema
+  - /core/service_auth
+  - /core/svc_action
+  - /core/svc_ingest
+  - /core/svc_presentation
+  - /core/svc_process
+  - /core/svc_streaming
+  - /core/twitch_helix
+  - /core/waddles_ops_cli
+  - /sdk/waddle-sdk-rs
+  schedule:
+    interval: weekly
+  groups:
+    all-dependencies:
+      applies-to: version-updates
+      patterns:
+      - '*'
+    security:
+      applies-to: security-updates
+      patterns:
+      - '*'
+- package-ecosystem: docker
+  directories:
+  - /action/interactive/ai_interaction_module
+  - /action/interactive/alias_interaction_module
+  - /action/interactive/calendar_interaction_module
+  - /action/interactive/clip_interaction_module
+  - /action/interactive/inventory_interaction_module
+  - /action/interactive/lfg_interaction_module
+  - /action/interactive/loyalty_interaction_module
+  - /action/interactive/memories_interaction_module
+  - /action/interactive/presence_module
+  - /action/interactive/server_manager_interaction_module
+  - /action/interactive/server_status_interaction_module
+  - /action/interactive/shoutout_interaction_module
+  - /action/interactive/spotify_interaction_module
+  - /action/interactive/translate_interaction_module
+  - /action/interactive/welcome_interaction_module
+  - /action/interactive/youtube_music_interaction_module
+  - /action/pushing/discord_action_module
+  - /action/pushing/gcp_functions_action_module
+  - /action/pushing/googlechat_action_module
+  - /action/pushing/lambda_action_module
+  - /action/pushing/mattermost_action_module
+  - /action/pushing/openwhisk_action_module
+  - /action/pushing/slack_action_module
+  - /action/pushing/teams_action_module
+  - /action/pushing/twitch_action_module
+  - /action/pushing/youtube_action_module
+  - /admin/hub_module
+  - /admin/marketplace_module
+  - /bundles
+  - /bundles/csharp/csping
+  - /bundles/csharp/superpenguin-roll
+  - /core/ai_researcher_module
+  - /core/analytics_core_module
+  - /core/browser_source_core_module
+  - /core/bundle_compiler/assets/csharp
+  - /core/bundle_executor
+  - /core/community_module
+  - /core/credential_manager_module
+  - /core/egress_proxy
+  - /core/engagement_module
+  - /core/identity_core_module
+  - /core/labels_core_module
+  - /core/module_rtc
+  - /core/reputation_module
+  - /core/security_core_module
+  - /core/svc_action
+  - /core/svc_ingest
+  - /core/svc_presentation
+  - /core/svc_process
+  - /core/svc_streaming
+  - /core/video_proxy_module
+  - /core/workflow_core_module
+  - /hub_api
+  - /migrations
+  - /processing/router_module
+  - /services/action-platforms
+  - /services/action-serverless
+  - /services/core-community
+  - /services/core-data
+  - /services/core-identity
+  - /services/interactive-gaming
+  - /services/interactive-media
+  - /services/interactive-productivity
+  - /services/interactive-social
+  - /services/trigger-streaming
+  - /services/trigger-webhooks
+  - /trigger/receiver/discord_module
+  - /trigger/receiver/googlechat_module
+  - /trigger/receiver/kick_module_flask
+  - /trigger/receiver/mattermost_module
+  - /trigger/receiver/slack_module
+  - /trigger/receiver/teams_module
+  - /trigger/receiver/twitch_module
+  - /trigger/receiver/youtube_live_module
+  schedule:
+    interval: weekly
+  groups:
+    all-dependencies:
+      applies-to: version-updates
+      patterns:
+      - '*'
+    security:
+      applies-to: security-updates
+      patterns:
+      - '*'
+- package-ecosystem: github-actions
+  directories:
+  - /
+  schedule:
+    interval: weekly
+  groups:
+    all-dependencies:
+      applies-to: version-updates
+      patterns:
+      - '*'
+    security:
+      applies-to: security-updates
+      patterns:
+      - '*'
+- package-ecosystem: gomod
+  directories:
+  - /core/module_rtc
+  schedule:
+    interval: weekly
+  groups:
+    all-dependencies:
+      applies-to: version-updates
+      patterns:
+      - '*'
+    security:
+      applies-to: security-updates
+      patterns:
+      - '*'
+- package-ecosystem: npm
+  directories:
+  - /
+  - /admin/hub_module/backend
+  - /admin/hub_module/frontend
+  - /admin/hub_module/webui-server
+  - /admin/marketplace_module/backend
+  - /bundles/javascript/example
+  - /sdk/waddle-sdk-js
+  - /tests/api/hub-backend
+  - /tests/e2e
+  - /tests/integration
+  - /tests/screenshots
+  - /tests/smoke
+  - /website
+  schedule:
+    interval: weekly
+  groups:
+    all-dependencies:
+      applies-to: version-updates
+      patterns:
+      - '*'
+    security:
+      applies-to: security-updates
+      patterns:
+      - '*'
+- package-ecosystem: pip
+  directories:
+  - /
+  - /action/interactive/ai_interaction_module
+  - /action/interactive/alias_interaction_module
+  - /action/interactive/calendar_interaction_module
+  - /action/interactive/clip_interaction_module
+  - /action/interactive/inventory_interaction_module
+  - /action/interactive/lfg_interaction_module
+  - /action/interactive/loyalty_interaction_module
+  - /action/interactive/memories_interaction_module
+  - /action/interactive/presence_module
+  - /action/interactive/server_manager_interaction_module
+  - /action/interactive/server_status_interaction_module
+  - /action/interactive/shoutout_interaction_module
+  - /action/interactive/spotify_interaction_module
+  - /action/interactive/translate_interaction_module
+  - /action/interactive/welcome_interaction_module
+  - /action/interactive/youtube_music_interaction_module
+  - /action/pushing/discord_action_module
+  - /action/pushing/gcp_functions_action_module
+  - /action/pushing/googlechat_action_module
+  - /action/pushing/lambda_action_module
+  - /action/pushing/mattermost_action_module
+  - /action/pushing/openwhisk_action_module
+  - /action/pushing/slack_action_module
+  - /action/pushing/teams_action_module
+  - /action/pushing/twitch_action_module
+  - /action/pushing/youtube_action_module
+  - /bundles/python/about
+  - /bundles/python/advice
+  - /bundles/python/affirmation
+  - /bundles/python/alias
+  - /bundles/python/announce
+  - /bundles/python/ask
+  - /bundles/python/bingo
+  - /bundles/python/birthday
+  - /bundles/python/blackjack
+  - /bundles/python/bookmark
+  - /bundles/python/boop
+  - /bundles/python/bot
+  - /bundles/python/catfact
+  - /bundles/python/chat
+  - /bundles/python/chatguard
+  - /bundles/python/choose
+  - /bundles/python/clap
+  - /bundles/python/coinflip
+  - /bundles/python/command
+  - /bundles/python/commands
+  - /bundles/python/compliment
+  - /bundles/python/count
+  - /bundles/python/countdown
+  - /bundles/python/counter
+  - /bundles/python/cringe
+  - /bundles/python/customcommand
+  - /bundles/python/dadjoke
+  - /bundles/python/dailycounter
+  - /bundles/python/dance
+  - /bundles/python/death
+  - /bundles/python/define
+  - /bundles/python/defuse
+  - /bundles/python/dice
+  - /bundles/python/discord
+  - /bundles/python/dogfact
+  - /bundles/python/donate
+  - /bundles/python/duel
+  - /bundles/python/echo
+  - /bundles/python/eightball
+  - /bundles/python/eli5
+  - /bundles/python/emojify
+  - /bundles/python/event
+  - /bundles/python/fact
+  - /bundles/python/faq
+  - /bundles/python/first
+  - /bundles/python/fish
+  - /bundles/python/fortune
+  - /bundles/python/gamble
+  - /bundles/python/giveaway
+  - /bundles/python/greeter
+  - /bundles/python/guess
+  - /bundles/python/hangman
+  - /bundles/python/heist
+  - /bundles/python/hello
+  - /bundles/python/highfive
+  - /bundles/python/horoscope
+  - /bundles/python/hug
+  - /bundles/python/hype
+  - /bundles/python/hypetrain
+  - /bundles/python/insult
+  - /bundles/python/inventory
+  - /bundles/python/iq
+  - /bundles/python/jackpot
+  - /bundles/python/joke
+  - /bundles/python/keywordgiveaway
+  - /bundles/python/kiss
+  - /bundles/python/label
+  - /bundles/python/lastseen
+  - /bundles/python/level
+  - /bundles/python/lfg
+  - /bundles/python/lottery
+  - /bundles/python/love
+  - /bundles/python/loyalty
+  - /bundles/python/lurk
+  - /bundles/python/memories
+  - /bundles/python/merch
+  - /bundles/python/mock
+  - /bundles/python/mood
+  - /bundles/python/motivate
+  - /bundles/python/music
+  - /bundles/python/numberfact
+  - /bundles/python/pat
+  - /bundles/python/pickup
+  - /bundles/python/poke
+  - /bundles/python/poll
+  - /bundles/python/prediction
+  - /bundles/python/pronouns
+  - /bundles/python/pyping
+  - /bundles/python/queue
+  - /bundles/python/quote
+  - /bundles/python/raffle
+  - /bundles/python/rank
+  - /bundles/python/rate
+  - /bundles/python/remind
+  - /bundles/python/rephrase
+  - /bundles/python/reverse
+  - /bundles/python/riddle
+  - /bundles/python/rip
+  - /bundles/python/roast
+  - /bundles/python/roll
+  - /bundles/python/roulette
+  - /bundles/python/rps
+  - /bundles/python/rules
+  - /bundles/python/say
+  - /bundles/python/scramble
+  - /bundles/python/secret
+  - /bundles/python/sentiment
+  - /bundles/python/ship
+  - /bundles/python/shoutout
+  - /bundles/python/slap
+  - /bundles/python/slots
+  - /bundles/python/social
+  - /bundles/python/socials
+  - /bundles/python/steal
+  - /bundles/python/summarize
+  - /bundles/python/ticket
+  - /bundles/python/time
+  - /bundles/python/timer
+  - /bundles/python/tldr
+  - /bundles/python/top
+  - /bundles/python/translate
+  - /bundles/python/trivia
+  - /bundles/python/truthordare
+  - /bundles/python/uptime
+  - /bundles/python/uwu
+  - /bundles/python/vibecheck
+  - /bundles/python/vote
+  - /bundles/python/waddle
+  - /bundles/python/wave
+  - /bundles/python/weather
+  - /bundles/python/wheel
+  - /bundles/python/winner
+  - /bundles/python/wordcount
+  - /bundles/python/wouldyourather
+  - /bundles/python/yomama
+  - /core/ai_researcher_module
+  - /core/analytics_core_module
+  - /core/browser_source_core_module
+  - /core/community_module
+  - /core/credential_manager_module
+  - /core/engagement_module
+  - /core/identity_core_module
+  - /core/labels_core_module
+  - /core/reputation_module
+  - /core/security_core_module
+  - /core/svc_action
+  - /core/svc_ingest
+  - /core/svc_presentation
+  - /core/svc_process
+  - /core/svc_streaming
+  - /core/unified_music_module
+  - /core/video_proxy_module
+  - /core/workflow_core_module
+  - /hub_api
+  - /libs/flask_core
+  - /libs/moderation_module
+  - /libs/module_sdk/security
+  - /libs/waddle_transports
+  - /processing/router_module
+  - /scripts/ci/tests
+  - /sdk/waddle-sdk
+  - /services/action-platforms
+  - /services/action-serverless
+  - /services/core-community
+  - /services/core-community/libs/module_sdk/security
+  - /services/core-data
+  - /services/core-identity
+  - /services/interactive-gaming
+  - /services/interactive-media
+  - /services/interactive-productivity
+  - /services/interactive-social
+  - /services/trigger-streaming
+  - /services/trigger-webhooks
+  - /tests/unit
+  - /trigger/receiver/discord_module
+  - /trigger/receiver/googlechat_module
+  - /trigger/receiver/kick_module_flask
+  - /trigger/receiver/mattermost_module
+  - /trigger/receiver/slack_module
+  - /trigger/receiver/teams_module
+  - /trigger/receiver/twitch_module
+  - /trigger/receiver/youtube_live_module
+  schedule:
+    interval: weekly
+  groups:
+    all-dependencies:
+      applies-to: version-updates
+      patterns:
+      - '*'
+    security:
+      applies-to: security-updates
+      patterns:
+      - '*'
