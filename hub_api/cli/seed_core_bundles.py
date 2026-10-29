@@ -309,6 +309,9 @@ class CatalogEntry:
     manifest_path: str
     artifact_path: str
     activation_targets: tuple[ActivationTarget, ...] = field(default_factory=tuple)
+    # Bundle dir relative to the bundles root (e.g. `python/about`); "" = unknown, which skips
+    # the bundle.yaml/hub-manifest.yaml agreement check (the built image has no bundle.yaml).
+    source_dir: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -384,6 +387,7 @@ def load_catalog(catalog_path: Path) -> tuple[CatalogEntry, ...]:
                 manifest_path=item["manifest_path"],
                 artifact_path=item["artifact_path"],
                 activation_targets=targets or (ActivationTarget(tenant_slug="global"),),
+                source_dir=str(item.get("source_dir") or ""),
             )
         )
     return tuple(entries)
@@ -834,6 +838,32 @@ async def seed_platform_connection(
     return ConnectionResult(platform=connection.platform, source_id=ingest_id, outcome=outcome)
 
 
+_AGREEMENT_KEYS = ("kind", "exported_tools", "requested_tools")
+
+
+def _assert_manifest_files_agree(
+    entry: CatalogEntry, bundles_dir: Path, hub_raw: Mapping[str, Any]
+) -> None:
+    """Fail loud when `bundle.yaml` and `hub-manifest.yaml` disagree on kind/tool blocks.
+
+    The SDK compiler reads `bundle.yaml`, the hub gate reads `hub-manifest.yaml`; a drift would
+    let the two enforce different capability surfaces. Skipped when the sibling `bundle.yaml`
+    is not on disk (the built core-bundles image flattens only the hub manifest).
+    """
+    if not entry.source_dir:
+        return
+    sdk_path = bundles_dir / entry.source_dir / "bundle.yaml"
+    if not sdk_path.is_file():
+        return
+    sdk_raw = yaml.safe_load(sdk_path.read_text(encoding="utf-8")) or {}
+    for key in _AGREEMENT_KEYS:
+        if sdk_raw.get(key) != hub_raw.get(key):
+            raise CoreBundleSeederError(
+                f"{entry.app_id}: bundle.yaml and hub-manifest.yaml disagree on {key!r} "
+                f"(bundle.yaml={sdk_raw.get(key)!r}, hub-manifest.yaml={hub_raw.get(key)!r})"
+            )
+
+
 async def seed_one(
     install_dal: AsyncDB,
     entry: CatalogEntry,
@@ -861,8 +891,10 @@ async def seed_one(
     component_bytes = (bundles_dir / entry.artifact_path).read_bytes()
     digest_hex = hashlib.sha256(component_bytes).hexdigest()
 
+    hub_raw = yaml.safe_load(manifest_bytes)
+    _assert_manifest_files_agree(entry, bundles_dir, hub_raw)
     manifest = parse_bundle_manifest_v2(
-        yaml.safe_load(manifest_bytes),
+        hub_raw,
         known_custom_platforms=frozenset(),
         allow_wildcard_consumes=False,
         allow_prebuilt=True,
