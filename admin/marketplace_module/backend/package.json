@@ -37,7 +37,7 @@
     "pg-hstore": "2.3.4",
     "redis": "4.7.1",
     "stripe": "14.25.0",
-    "undici": "6.21.3",
+    "undici": "6.29.1",
     "xss": "1.0.15"
   },
   "devDependencies": {
