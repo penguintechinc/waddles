@@ -403,8 +403,9 @@ _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
 def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
     """Validate the optional `exported_tools:` list; absent (`None`) parses to no tools.
 
-    Each entry is `{name, input_schema, output_schema, access?, risk?}` with
-    `access` defaulting to `read` and `risk` to `normal`. Raises
+    Each entry is `{name, input_schema, output_schema, access, risk}` with
+    `access` and `risk` both REQUIRED (no default -- a defaulted access would
+    mislabel a write tool read-only and fail-open the access gate). Raises
     `ManifestV2Error` with a tool-specific reason code on any violation.
     """
     if raw_entries is None:
@@ -429,13 +430,13 @@ def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
         assert isinstance(name, str)  # narrowed by _require above, for mypy
         _require(name not in seen, "duplicate_exported_tool", f"tool {name!r} declared twice")
         seen.add(name)
-        access = entry.get("access", "read")
+        access = entry.get("access")
         _require(
             access in _TOOL_ACCESS,
             "invalid_tool_access",
             f"tool {name!r}: access must be one of {sorted(_TOOL_ACCESS)}",
         )
-        risk = entry.get("risk", "normal")
+        risk = entry.get("risk")
         _require(
             risk in _TOOL_RISK,
             "invalid_tool_risk",

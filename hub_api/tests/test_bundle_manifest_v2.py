@@ -507,3 +507,28 @@ def test_exported_tools_derive_capability() -> None:
     without = _parse({"kind": "service"})
     assert "mcp.tools" in _derive_capabilities(with_tools)  # type: ignore[arg-type]
     assert "mcp.tools" not in _derive_capabilities(without)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("missing", "reason"), [("access", "invalid_tool_access"), ("risk", "invalid_tool_risk")]
+)
+def test_exported_tools_access_risk_required(missing: str, reason: str) -> None:
+    entry = _tool()
+    del entry[missing]
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"kind": "service", "exported_tools": [entry]})
+    assert exc.value.reason == reason
+
+
+@pytest.mark.parametrize("bad", ["Upper", "1abc", "has space", ""])
+def test_exported_tools_bad_name(bad: str) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"kind": "service", "exported_tools": [_tool(bad)]})
+    assert exc.value.reason == "invalid_tool_name"
+
+
+@pytest.mark.parametrize("bad", ["notalist", {"name": "x"}, ["notadict"]])
+def test_exported_tools_invalid_shape(bad: object) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"kind": "service", "exported_tools": bad})
+    assert exc.value.reason == "invalid_exported_tools"
