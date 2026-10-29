@@ -391,8 +391,9 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     tenant_id: i32,
     community_id: i32,
     /// The resolved `app_versions.id` for the caller's configured bundle
-    /// version -- see `crate::spine::ProcessDeps::app_version`'s doc. `0`
-    /// when no bundle version is configured.
+    /// version -- see `crate::spine::ProcessDeps::app_version`'s doc. `0` is
+    /// the fail-closed unresolved-digest sentinel (an unresolved digest falls
+    /// to `0` in `spine.rs`), which matches no real grant.
     app_version: i64,
     /// See [`Self::with_kv`]'s doc; `None` until it is called (a bundle
     /// sees `not_implemented` rather than this loop failing to start if
