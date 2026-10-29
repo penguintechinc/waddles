@@ -117,6 +117,7 @@ from services.bundle_manifest_v2 import (
     ConsumeRule,
     EgressRule,
     Limits,
+    _infer_kind,
     parse_command_declarations,
     parse_permission_declarations,
 )
@@ -214,6 +215,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         category=raw.get("category"),
         supported_platforms=supported_platforms,
         command_declarations=command_declarations,
+        kind=raw.get("kind") or _infer_kind(raw["app_id"], raw["module"]),
     )
 
 

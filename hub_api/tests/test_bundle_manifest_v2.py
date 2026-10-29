@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from services.bundle_manifest_v2 import ManifestV2Error, parse_bundle_manifest_v2
+from services.bundle_manifest_v2 import (
+    ManifestV2Error,
+    _infer_kind,
+    parse_bundle_manifest_v2,
+)
 
 _VALID_MANIFEST = {
     "schema_version": 2,
@@ -386,3 +390,40 @@ def test_consumes_platform_outside_supported_platforms_rejected() -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse({"supported_platforms": ["discord"]})  # base manifest consumes twitch
     assert exc.value.reason == "consumes_platform_unsupported"
+
+
+def test_kind_explicit_service() -> None:
+    assert _parse({"kind": "service"}).kind == "service"  # type: ignore[attr-defined]
+
+
+def test_kind_defaults_inferred() -> None:
+    expected = _infer_kind(_VALID_MANIFEST["app_id"], _VALID_MANIFEST["module"])
+    assert _parse({}).kind == expected  # type: ignore[attr-defined]
+
+
+def test_kind_invalid() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"kind": "widget"})
+    assert exc.value.reason == "invalid_kind"
+
+
+@pytest.mark.parametrize(
+    ("app_id", "module", "expected"),
+    [
+        ("waddles.core.auth", "auth", "service"),
+        ("waddles.x.y", "reputation", "service"),
+        ("waddles.x.y", "economy", "service"),
+        ("waddles.x.y", "connector", "service"),
+        ("waddles.socials.music.default", "socials", "app"),
+    ],
+)
+def test_infer_kind_heuristic(app_id: str, module: str, expected: str) -> None:
+    assert _infer_kind(app_id, module) == expected
+
+
+def test_kind_survives_reparse_trusted() -> None:
+    from services.bundle_approval_service import _reparse_trusted
+
+    raw = {**_VALID_MANIFEST, "kind": "service"}
+    assert _reparse_trusted(raw).kind == "service"
+    assert _reparse_trusted(dict(_VALID_MANIFEST)).kind == "app"

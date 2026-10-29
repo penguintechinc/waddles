@@ -200,6 +200,10 @@ class BundleManifestV2:
     # Slash-command registry (phase 1) -- the validated `commands:` block.
     # Defaulted last so hand-built manifests in existing fixtures keep working.
     command_declarations: tuple[CommandDeclaration, ...] = ()
+    # Bundle-MCP-tools framework (spec Sec5.1) -- "app" (user-facing) or
+    # "service" (platform plumbing). Optional additive field on schema v2;
+    # absent in the manifest -> inferred by `_infer_kind`. Defaulted last.
+    kind: str = ""
 
     def supports_platform(self, platform: str) -> bool:
         """Return True when this bundle may run on `platform` (absent field = every platform)."""
@@ -237,6 +241,19 @@ def _parse_supported_platforms(
         if entry not in seen:
             seen.append(entry)
     return tuple(seen)
+
+
+_VALID_KINDS = ("app", "service")
+_SERVICE_MODULES = frozenset(
+    {"core", "connector", "connectors", "integrations", "economy", "reputation"}
+)
+
+
+def _infer_kind(app_id: str, module: str) -> str:
+    """Infer `kind` when absent: platform namespaces/modules are "service", else "app"."""
+    if app_id.startswith("waddles.core.") or module in _SERVICE_MODULES:
+        return "service"
+    return "app"
 
 
 def _require(condition: bool, reason: str, detail: str) -> None:
@@ -765,6 +782,14 @@ def parse_bundle_manifest_v2(
     _require(8 <= memory_mb <= _MAX_MEMORY_MB, "limit_out_of_range", f"memory_mb={memory_mb}")
     _require(1 <= egress_rps <= _MAX_EGRESS_RPS, "limit_out_of_range", f"egress_rps={egress_rps}")
 
+    raw_kind = raw.get("kind")
+    _require(
+        raw_kind is None or raw_kind in _VALID_KINDS,
+        "invalid_kind",
+        f"kind must be one of {_VALID_KINDS}, got {raw_kind!r}",
+    )
+    kind = raw_kind or _infer_kind(raw["app_id"], raw["module"])
+
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -795,4 +820,5 @@ def parse_bundle_manifest_v2(
         category=category,
         supported_platforms=supported_platforms,
         command_declarations=command_declarations,
+        kind=kind,
     )
