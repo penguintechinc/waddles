@@ -223,7 +223,7 @@ function AdminCalendarEvents() {
         </div>
       )}
 
-      {events.length === 0 ? (
+      {events.length === 0 && error ? null : events.length === 0 ? (
         <div className="card p-8 text-center">
           <CalendarDaysIcon className="h-16 w-16 text-fg-muted mx-auto mb-4" />
           <p className="text-fg-muted">No events yet. Create your first event!</p>

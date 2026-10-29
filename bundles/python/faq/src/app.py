@@ -12,8 +12,7 @@ limit). Keys are lowercase `[a-z0-9_-]` and may not collide with the verbs `set`
 command), and may not contain control characters.
 
 Logs are PII-free: op, counts, exception-type names -- never a key or answer. A corrupt stored
-blob raises `_KvFailure` (ERROR log + error reply), never a silent default. Gated behind the
-PostHog flag ``waddles.command-faq``.
+blob raises `_KvFailure` (ERROR log + error reply), never a silent default. Activation-gated only -- no feature flag.
 """
 
 from __future__ import annotations
@@ -23,10 +22,8 @@ import re
 from typing import Any, cast
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-faq"
 COMMAND = "!faq"
 
 ENTRIES_KEY = "faq.entries"
@@ -82,7 +79,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("faq.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 async def _load() -> dict[str, str]:
@@ -200,7 +197,7 @@ async def _handle(rest: str, event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!faq` and build the reply.
 
-    Cheap-skip (exact first-token match) comes before the flag check; a `kv` failure is logged
+    Cheap-skip (exact first-token match) comes first; a `kv` failure is logged
     loudly (PII-free) and answered with an error reply, never swallowed into a default.
     """
     text = event.payload.get("text")
@@ -208,8 +205,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:

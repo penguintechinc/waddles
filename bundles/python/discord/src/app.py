@@ -10,8 +10,7 @@ URLs on `discord.gg`, `discord.com` or `discordapp.com` are accepted, so a compr
 careless mod cannot turn the command into an arbitrary-link poster.
 
 Logs are PII-free: op and exception-type names only -- never the URL. A non-UTF-8 stored value
-raises `_KvFailure` (ERROR log + error reply), never a silent default. Gated behind the
-PostHog flag ``waddles.command-discord``.
+raises `_KvFailure` (ERROR log + error reply), never a silent default. Activation-gated only -- no feature flag.
 """
 
 from __future__ import annotations
@@ -20,10 +19,8 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 
 from waddle_sdk import kv, log, relay
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-FLAG_KEY = "waddles.command-discord"
 COMMAND = "!discord"
 
 INVITE_KEY = "discord.invite"
@@ -75,7 +72,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("discord.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 def validate_url(raw: str, *, hosts: tuple[str, ...] = ()) -> str | None:
@@ -158,7 +155,7 @@ async def _handle(rest: str, event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognise `!discord` and build the reply.
 
-    Cheap-skip (exact first-token match) comes before the flag check; a `kv` failure is logged
+    Cheap-skip (exact first-token match) comes first; a `kv` failure is logged
     loudly (PII-free) and answered with an error reply, never swallowed into a default.
     """
     text = event.payload.get("text")
@@ -166,8 +163,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     if head.lower() != COMMAND:
-        return None
-    if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
     try:
