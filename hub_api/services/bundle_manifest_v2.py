@@ -540,6 +540,32 @@ def requested_tool_permission_id(rt: RequestedTool) -> str:
     return f"tool.call:{quote(rt.target_app_id, safe='')}:{rt.tool}"
 
 
+def requested_tool_declarations(
+    requested_tools: tuple[RequestedTool, ...],
+) -> tuple[PermissionDeclaration, ...]:
+    """Fold each requested tool into a `tool.call:<target>:<tool>` permission declaration.
+
+    This makes a requested tool an ordinary permission id so it flows through the
+    existing approval -> `app_permission_requests` -> community-grant path (and the
+    dangerous-ack gate) with no parallel flow. Duplicates collapse to one id.
+    """
+    seen: dict[str, PermissionDeclaration] = {}
+    for rt in requested_tools:
+        pid = requested_tool_permission_id(rt)
+        risk = resolve_risk(pid)
+        _require(risk is not None, "unknown_permission", f"{pid!r}")
+        assert risk is not None  # nosec B101 -- _require already raised above otherwise
+        seen.setdefault(
+            pid,
+            PermissionDeclaration(
+                id=pid,
+                risk=risk,
+                justification=f"Calls tool {rt.tool!r} on {rt.target_app_id!r} ({rt.access})",
+            ),
+        )
+    return tuple(seen.values())
+
+
 def _parse_consumes(
     raw_rules: list[dict[str, Any]],
     *,
@@ -974,6 +1000,10 @@ def parse_bundle_manifest_v2(
     )
 
     requested_tools = parse_requested_tools(raw.get("requested_tools"), own_app_id=raw["app_id"])
+    declared_ids = {d.id for d in permission_declarations}
+    permission_declarations = permission_declarations + tuple(
+        d for d in requested_tool_declarations(requested_tools) if d.id not in declared_ids
+    )
 
     return BundleManifestV2(
         schema_version=raw["schema_version"],

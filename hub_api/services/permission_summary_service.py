@@ -61,6 +61,16 @@ def build_permission_summary(
             ({"name": t.name, "access": t.access, "risk": t.risk} for t in manifest.exported_tools),
             key=lambda t: t["name"],
         )
+    # Requested (called) tools are consent-relevant too: adding/changing one
+    # must re-trigger approval. Present-only, same hash-stability rule.
+    if manifest.requested_tools:
+        summary["requestedTools"] = sorted(
+            (
+                {"target": t.target_app_id, "tool": t.tool, "access": t.access}
+                for t in manifest.requested_tools
+            ),
+            key=lambda t: (t["target"], t["tool"]),
+        )
     return summary
 
 
