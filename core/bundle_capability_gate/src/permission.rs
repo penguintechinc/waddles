@@ -398,7 +398,13 @@ impl PermissionFamily {
     /// spec SS5.2: `AppScoped` permissions have their resource derived
     /// server-side from `(tenant, community, app_id)` alone.
     pub fn is_app_scoped(&self) -> bool {
-        !self.is_reputation_scoped() && !self.is_economy_scoped()
+        !self.is_reputation_scoped() && !self.is_economy_scoped() && !self.is_tool_scoped()
+    }
+
+    /// bundle-MCP-tools P2: `tool.call` carries its own resource shape
+    /// ([`crate::resource::ToolCallTarget`]).
+    pub fn is_tool_scoped(&self) -> bool {
+        matches!(self, Self::ToolCall)
     }
 
     /// issue #714: `economy.*` carries its own resource shape
@@ -1402,6 +1408,7 @@ mod tests {
                 family.is_app_scoped(),
                 family.is_reputation_scoped(),
                 family.is_economy_scoped(),
+                family.is_tool_scoped(),
             ];
             assert_eq!(classes.iter().filter(|c| **c).count(), 1, "{family:?}");
         }

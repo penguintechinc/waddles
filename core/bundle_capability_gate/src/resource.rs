@@ -88,9 +88,29 @@ pub struct EconomyTarget {
     pub payout: Option<i64>,
 }
 
+/// Read vs. write intent of a service-tool call (bundle-MCP-tools P2).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ToolAccess {
+    Read,
+    Write,
+}
+
+/// The bundle-named target of a `tool.call` (bundle-MCP-tools P2). All three
+/// fields are bundle-supplied and re-validated by the host; the caller's
+/// tenant/community/app identity is never part of this type -- it comes from
+/// the host-asserted [`InvokeScope`] passed to `authorize()`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolCallTarget {
+    pub target_app_id: String,
+    pub tool: String,
+    pub access: ToolAccess,
+}
+
 /// What a capability implementation passes to `authorize()` (spec SS5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResourceRef {
+    /// `tool.call` (bundle-MCP-tools P2).
+    ToolScoped(ToolCallTarget),
     AppScoped(AppScopedResource),
     ReputationScoped(ReputationTarget),
     /// `economy.*` (issue #714).
@@ -122,6 +142,8 @@ pub enum ResolvedResource {
     ReputationTarget(ReputationTarget),
     /// An `economy.*` call whose named users are verified members.
     EconomyTarget(EconomyTarget),
+    /// A `tool.call` target that passed the scope-shape check.
+    ToolTarget(ToolCallTarget),
     /// See [`AppScopedResource::None`].
     None,
 }

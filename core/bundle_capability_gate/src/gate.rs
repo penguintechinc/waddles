@@ -158,6 +158,12 @@ impl CapabilityGate {
                 }
                 ResolvedResource::EconomyTarget(*target)
             }
+            ResourceRef::ToolScoped(target) => {
+                if !family.is_tool_scoped() {
+                    return Err(self.deny(scope, &permission, Denied::ResourceScopeMismatch));
+                }
+                ResolvedResource::ToolTarget(target.clone())
+            }
         };
 
         // `economy.*` (issue #714) has its own quota family, so it settles
@@ -186,7 +192,9 @@ impl CapabilityGate {
         // `Descriptive`, a plain rate limit for `CallsPerWindow`).
         let delta = match &resource {
             ResourceRef::ReputationScoped(target) => target.delta,
-            ResourceRef::AppScoped(_) | ResourceRef::EconomyScoped(_) => None,
+            ResourceRef::AppScoped(_)
+            | ResourceRef::EconomyScoped(_)
+            | ResourceRef::ToolScoped(_) => None,
         };
 
         if let Some(delta) = delta {
@@ -216,7 +224,9 @@ impl CapabilityGate {
 
             let target_user = match &resource {
                 ResourceRef::ReputationScoped(t) => t.target_user,
-                ResourceRef::AppScoped(_) | ResourceRef::EconomyScoped(_) => {
+                ResourceRef::AppScoped(_)
+                | ResourceRef::EconomyScoped(_)
+                | ResourceRef::ToolScoped(_) => {
                     unreachable!("delta is only Some for ReputationScoped")
                 }
             };
@@ -1296,3 +1306,7 @@ mod tests {
 #[cfg(test)]
 #[path = "gate_economy_tests.rs"]
 mod economy_tests;
+
+#[cfg(test)]
+#[path = "gate_tool_tests.rs"]
+mod tool_tests;
