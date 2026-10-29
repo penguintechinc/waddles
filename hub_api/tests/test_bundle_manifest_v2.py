@@ -653,3 +653,87 @@ def test_tool_removal_narrows_and_order_is_hash_stable() -> None:
     ab, ba = _tool_summary(_tool("a"), _tool("b")), _tool_summary(_tool("b"), _tool("a"))
     assert permission_hash(ab) == permission_hash(ba)
     assert classify_diff(_tool_summary(_tool("a")), ab) == "narrowed"
+
+
+def _rt(target: str = "waddles.svc.economy.default", tool: str = "balance", **over: object) -> dict:
+    return {"target_app_id": target, "tool": tool, "access": "read", **over}
+
+
+def test_requested_tools_parse_two_for_app() -> None:
+    m = _parse({"requested_tools": [_rt(), _rt(tool="spend", access="write")]})
+    got = [(r.target_app_id, r.tool, r.access) for r in m.requested_tools]  # type: ignore[attr-defined]
+    assert got == [
+        ("waddles.svc.economy.default", "balance", "read"),
+        ("waddles.svc.economy.default", "spend", "write"),
+    ]
+
+
+def test_requested_tools_default_empty() -> None:
+    assert _parse({}).requested_tools == ()  # type: ignore[attr-defined]
+
+
+def test_requested_tools_service_kind_may_request() -> None:
+    m = _parse_trusted({"kind": "service", "requested_tools": [_rt()]})
+    assert len(m.requested_tools) == 1  # type: ignore[attr-defined]
+
+
+def test_requested_tool_permission_id_round_trips_dotted_target() -> None:
+    from urllib.parse import unquote
+
+    from services.bundle_manifest_v2 import RequestedTool, requested_tool_permission_id
+
+    pid = requested_tool_permission_id(RequestedTool("a.b:c.d", "x.y", "read"))
+    prefix, target, tool = pid.split(":")
+    assert prefix == "tool.call"
+    assert unquote(target) == "a.b:c.d"
+    assert tool == "x.y"
+
+
+def test_requested_tool_permission_id_no_collision() -> None:
+    from services.bundle_manifest_v2 import RequestedTool, requested_tool_permission_id
+
+    a = requested_tool_permission_id(RequestedTool("a.b", "c", "read"))
+    b = requested_tool_permission_id(RequestedTool("a", "b.c", "read"))
+    assert a != b
+
+
+def test_tool_self_reference() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"requested_tools": [_rt(target="waddles.socials.music.default")]})
+    assert exc.value.reason == "tool_self_reference"
+
+
+def test_requested_tools_duplicate() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"requested_tools": [_rt(), _rt()]})
+    assert exc.value.reason == "duplicate_requested_tool"
+
+
+def test_requested_tools_bad_access() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"requested_tools": [_rt(access="admin")]})
+    assert exc.value.reason == "invalid_tool_access"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "x",
+        {"a": 1},
+        [1],
+        [{"tool": "t", "access": "read"}],
+        [_rt(tool="Bad Name")],
+        [_rt(target="")],
+    ],
+)
+def test_requested_tools_invalid_shape(bad: object) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"requested_tools": bad})
+    assert exc.value.reason == "invalid_requested_tools"
+
+
+def test_requested_tools_survive_reparse_trusted() -> None:
+    from services.bundle_approval_service import _reparse_trusted
+
+    raw = {**_VALID_MANIFEST, "requested_tools": [_rt()]}
+    assert [r.tool for r in _reparse_trusted(raw).requested_tools] == ["balance"]

@@ -19,6 +19,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import quote
 
 from flask_core.app_manifest import KNOWN_MODULES
 from flask_core.bundle_attribution import (
@@ -163,6 +164,15 @@ class ExportedTool:
 
 
 @dataclass(slots=True, frozen=True)
+class RequestedTool:
+    """One MCP tool a bundle requests to call on another bundle (spec Sec5.2)."""
+
+    target_app_id: str
+    tool: str
+    access: str
+
+
+@dataclass(slots=True, frozen=True)
 class BundleManifestV2:
     """A validated `bundle.yaml` v2 manifest -- the shape every downstream reader consumes."""
 
@@ -217,6 +227,8 @@ class BundleManifestV2:
     kind: str = ""
     # Exported MCP tools (service bundles only; `app_cannot_export_tools`).
     exported_tools: tuple[ExportedTool, ...] = ()
+    # Tools this bundle requests from other bundles (app AND service kinds).
+    requested_tools: tuple[RequestedTool, ...] = ()
     # Server-side trust decision made by the install path (never read from the
     # manifest): True only for the core seeder / trusted reparse. Gates the
     # service-only `mcp.tools` capability.
@@ -461,6 +473,71 @@ def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
             )
         )
     return tuple(tools)
+
+
+def parse_requested_tools(
+    raw_entries: Any, *, own_app_id: str | None = None
+) -> tuple[RequestedTool, ...]:
+    """Validate the optional `requested_tools:` list; absent (`None`) parses to none.
+
+    Each entry is `{target_app_id, tool, access}`; both bundle kinds may request.
+    Rejects self-reference (when `own_app_id` is given), duplicate `(target, tool)`
+    and a non-read/write `access`. Raises `ManifestV2Error` with a block-specific code.
+    """
+    if raw_entries is None:
+        return ()
+    _require(
+        isinstance(raw_entries, list), "invalid_requested_tools", "requested_tools must be a list"
+    )
+    out: list[RequestedTool] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in raw_entries:
+        _require(
+            isinstance(entry, dict),
+            "invalid_requested_tools",
+            "each requested_tools entry must be a mapping",
+        )
+        target = entry.get("target_app_id")
+        _require(
+            isinstance(target, str) and bool(_APP_ID_RE.fullmatch(target)),
+            "invalid_requested_tools",
+            "requested tool target_app_id must be a valid app_id",
+        )
+        tool = entry.get("tool")
+        _require(
+            isinstance(tool, str) and bool(_TOOL_NAME_RE.fullmatch(tool)),
+            "invalid_requested_tools",
+            "requested tool name must match [a-z][a-z0-9_.]{0,63}",
+        )
+        assert isinstance(target, str) and isinstance(tool, str)  # narrowed, for mypy
+        _require(
+            own_app_id is None or target != own_app_id,
+            "tool_self_reference",
+            f"bundle requests its own tool {tool!r}",
+        )
+        _require(
+            (target, tool) not in seen,
+            "duplicate_requested_tool",
+            f"tool {target}:{tool} requested twice",
+        )
+        seen.add((target, tool))
+        access = entry.get("access")
+        _require(
+            access in _TOOL_ACCESS,
+            "invalid_tool_access",
+            f"requested tool {tool!r}: access must be one of {sorted(_TOOL_ACCESS)}",
+        )
+        out.append(RequestedTool(target_app_id=target, tool=tool, access=access))
+    return tuple(out)
+
+
+def requested_tool_permission_id(rt: RequestedTool) -> str:
+    """Derive the delimiter-safe `tool.call:<target>:<tool>` permission id.
+
+    The target app_id is percent-encoded (no safe chars) so its dots/colons can
+    never be confused with the `:` field separators; tool names cannot contain `:`.
+    """
+    return f"tool.call:{quote(rt.target_app_id, safe='')}:{rt.tool}"
 
 
 def _parse_consumes(
@@ -896,6 +973,8 @@ def parse_bundle_manifest_v2(
         "exported_tools may only be declared via a trusted install path",
     )
 
+    requested_tools = parse_requested_tools(raw.get("requested_tools"), own_app_id=raw["app_id"])
+
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -928,5 +1007,6 @@ def parse_bundle_manifest_v2(
         command_declarations=command_declarations,
         kind=kind,
         exported_tools=exported_tools,
+        requested_tools=requested_tools,
         trusted_source=trusted_source,
     )
