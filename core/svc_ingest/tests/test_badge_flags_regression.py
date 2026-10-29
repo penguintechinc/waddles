@@ -353,7 +353,14 @@ def _runner(redis_client: Any, http_client_factory: Any, app_id: str, module: st
         stage="ingest",
         jwt_provider=lambda: "t",
     )
-    return IngestRunner(poller=poller, redis_client=redis_client, tenant_slug=TENANT)
+    from conftest import _FakeDekProvider
+
+    return IngestRunner(
+        poller=poller,
+        redis_client=redis_client,
+        tenant_slug=TENANT,
+        dek_provider=_FakeDekProvider(),
+    )
 
 
 class TestRealPathThroughIngestRunner:
