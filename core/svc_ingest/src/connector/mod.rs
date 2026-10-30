@@ -37,18 +37,22 @@
 pub mod driver;
 pub mod invoker;
 pub mod metrics;
+pub mod poll;
 pub(crate) mod ratelimit;
 pub mod registry;
 pub mod sink;
 pub mod transport;
+pub(crate) mod transport_common;
 pub mod types;
 pub mod webhook;
 pub mod webhook_verify;
 pub mod wire_invoker;
+pub mod ws;
 
 pub use driver::{ConnectionEnd, ConnectionReport, ConnectorDriver, DriverError, RunEnd};
 pub use invoker::{ConnectorInvokeError, ConnectorInvoker};
 pub use metrics::{register_connector_metrics, ConnectorMetrics};
+pub use poll::{PollAuth, PollConfig, PollTransport};
 pub use registry::{
     ConnectorRegistry, EventLimits, PinnedConnector, RegistryError, MAX_EVENTS_PER_FRAME,
 };
@@ -59,3 +63,4 @@ pub use sink::{
 pub use transport::{FrameDropReason, FrameOutcome, Transport, TransportError};
 pub use types::{ConnectionCtx, ConnectorEvent, ConnectorFrameError, Handshake, RawFrame};
 pub use wire_invoker::{AttachError, ExecutorLink, WireConnectorInvoker};
+pub use ws::{WsConfig, WsTransport};
