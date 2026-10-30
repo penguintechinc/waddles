@@ -48,5 +48,7 @@ jobs:
       crate_name: tool-invoke-e2e
       working_directory: core/tool_invoke_e2e
       # ring/aws-lc-sys need a C/C++ toolchain; cmake for aws-lc-sys.
-      extra_apt_packages: 'cmake build-essential'
-      extra_apt_reason: 'for aws-lc-sys/ring (cmake, C/C++ toolchain)'
+      # protoc: this crate reaches hub_client (via svc-process), whose
+      # build.rs runs tonic-prost-build and fails without protoc.
+      extra_apt_packages: 'cmake build-essential protobuf-compiler'
+      extra_apt_reason: 'for aws-lc-sys/ring (cmake, C/C++ toolchain) + hub_client (protoc)'
