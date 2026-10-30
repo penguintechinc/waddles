@@ -383,6 +383,7 @@ where
         config.db_reader_password.clone(),
         host_api_metrics,
         hub_client_conn,
+        app_version_snapshot.clone(),
     );
 
     let state = http::AppState::new(config.clone(), prom_registry, Arc::clone(&connections));
@@ -772,6 +773,8 @@ async fn build_stage_capabilities(
     license: Option<Arc<penguin_licensing::LicenseClient>>,
     db_reader_password: Option<config::Secret>,
     hub_client_conn: Option<Arc<hub_client::HubClient>>,
+    connections: Arc<host_api::ConnectionRegistry>,
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) -> Option<Arc<dyn capabilities::CapabilityHandler>> {
     let spine_cfg = match penguin_spine::SpineConfig::from_env() {
         Ok(c) => c,
@@ -906,6 +909,13 @@ async fn build_stage_capabilities(
     // default OFF (unseen/absent => inline path); this is the only
     // production wiring that makes the dispatcher path reachable.
     let caps = caps.with_egress_dispatcher_flag(flags::egress_dispatcher_flag());
+    // `tool.invoke` (bundle-MCP-tools P3b): resolves targets against the live
+    // active-version snapshot and runs the nested invoke on whichever executor
+    // connection is active at call time.
+    let caps = caps.with_tool(capabilities::ToolWiring {
+        connections,
+        snapshot: app_version_snapshot,
+    });
     Some(Arc::new(caps))
 }
 
@@ -930,6 +940,7 @@ fn try_start_host_api(
     db_reader_password: Option<config::Secret>,
     metrics: telemetry::HostApiMetrics,
     hub_client_conn: Option<Arc<hub_client::HubClient>>,
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) -> Arc<host_api::ConnectionRegistry> {
     let registry = Arc::new(host_api::ConnectionRegistry::new());
     registry.set_dead_letter_metric(metrics.dead_lettered_no_executor_total.clone());
@@ -951,6 +962,8 @@ fn try_start_host_api(
             license,
             db_reader_password,
             hub_client_conn,
+            Arc::clone(&registry_for_task),
+            app_version_snapshot,
         )
         .await
         .unwrap_or_else(|| Arc::new(capabilities::DenyAllCapabilities));
@@ -1499,6 +1512,7 @@ fn try_start_dispatch(
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                tools: Default::default(),
             }]);
         }
         // TODO(M3+): tenant/community scope is hardcoded to the

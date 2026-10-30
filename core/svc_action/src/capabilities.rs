@@ -63,11 +63,14 @@ use crate::flags::FeatureFlag;
 use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
+mod tool;
+pub use tool::ToolWiring;
+
 /// The `(tenant, community, app_id)` an in-flight `invoke` belongs to,
 /// resolved from the delivered envelope (spec §5.11: "Tenant and community
 /// come from the key, never from payload") and carried alongside that
 /// invoke's frame id for the lifetime of the call -- see the module doc.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InvokeScope {
     pub tenant: String,
     pub community: Option<String>,
@@ -102,6 +105,16 @@ pub struct InvokeScope {
     /// version, so this fails closed (denies every non-platform permission)
     /// rather than silently matching the wrong version's grants.
     pub app_version: i64,
+    /// The `tool.invoke` call chain INCLUDING this invoke's own app as the last
+    /// element (`[app_id]` for a top-level invocation; grown by one per nested
+    /// hop). Host-derived only -- never guest input. Empty for a scope built
+    /// outside the dispatch path, which `tool.invoke` treats as `[app_id]`.
+    pub tool_chain: Vec<String>,
+    /// When this invoke's executor budget runs out; bounds every nested
+    /// `tool.invoke` (`None` = unbounded outer; nested calls stay capped at 8s).
+    pub deadline_at: Option<std::time::Instant>,
+    /// The inbound trace context, forwarded onto nested tool-call invokes.
+    pub trace: Option<penguin_bundle_host::wire::TraceContext>,
 }
 
 impl InvokeScope {
@@ -856,6 +869,9 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// `None` until [`Self::with_egress_dispatcher_flag`] -- reads as OFF
     /// (fail-safe to the inline egress path).
     egress_dispatcher_flag: Option<Arc<dyn FeatureFlag>>,
+    /// `None` until [`Self::with_tool`] -- every `tool.*` call denies
+    /// `target_unavailable` in that state (never a silent no-op).
+    tool: Option<ToolWiring>,
 }
 
 /// The outbound PII-detokenization dependency: a live resolver over
@@ -900,6 +916,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             detokenize: None,
             stage_metrics: stage_metrics::stage_metrics(),
             egress_dispatcher_flag: None,
+            tool: None,
         }
     }
 
@@ -2433,6 +2450,12 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             // `db` is wired below (mirrors svc_process); `handle_db`
             // itself gate-checks FIRST (spec SS5) before consulting its
             // own feature-flag/wiring state.
+            // `tool.*` ops (bundle-MCP-tools P3b): bundle-to-bundle tool
+            // invocation -- own gate permission (`tool.call:<target>:<tool>`),
+            // own handler, never the `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("tool.") => {
+                self.handle_tool(scope, &call).await
+            }
             CapabilityKind::Db => self.handle_db(scope, &call).await,
             // `enabled` is wired to a real `penguin_licensing::
             // LicenseClient` (`crate::flags::resolve_flag`) -- see
@@ -2489,7 +2512,7 @@ mod tests {
     ///   accepts entries and never answers (the async-drop case).
     /// * `fail*` -- inject a Valkey outage on one primitive.
     #[derive(Default)]
-    struct FakeRelayQueue {
+    pub(super) struct FakeRelayQueue {
         pushed: Mutex<Vec<(String, String)>>,
         fail: bool,
         fail_key_exists: bool,
@@ -2717,7 +2740,7 @@ mod tests {
         }
     }
 
-    fn test_egress() -> Arc<EgressGuard> {
+    pub(super) fn test_egress() -> Arc<EgressGuard> {
         Arc::new(EgressGuard::new(
             Arc::new(crate::egress::ReqwestTransport::new()),
             crate::egress::EgressLimits {
@@ -2873,6 +2896,9 @@ mod tests {
             tenant_id: 7,
             community_id: 3,
             app_version: 1,
+            tool_chain: Vec::new(),
+            deadline_at: None,
+            trace: None,
         }
     }
 

@@ -92,7 +92,7 @@ pub fn instrument_name(documented: &str) -> &str {
 /// Host-call op names that may appear as the `op` label. Anything else is
 /// folded to `"other"` -- the op string comes straight off the guest's
 /// `host-call` frame and must never mint a new series.
-pub const KNOWN_OPS: [&str; 25] = [
+pub const KNOWN_OPS: [&str; 26] = [
     "get",
     "set",
     "delete",
@@ -117,6 +117,7 @@ pub const KNOWN_OPS: [&str; 25] = [
     "resolve_mention",
     "list",
     "count",
+    "invoke",
     "other",
 ];
 
@@ -124,8 +125,10 @@ pub const KNOWN_OPS: [&str; 25] = [
 /// the egress guard, a quota) refused it, as opposed to an operational
 /// failure. Folded into `result="denied"`; everything else non-ok is
 /// `result="error"`.
-const DENIED_CODES: [&str; 15] = [
+const DENIED_CODES: [&str; 17] = [
     "not_granted",
+    "forbidden",
+    "depth_exceeded",
     "quota_exceeded",
     "rate_limited",
     "resource_scope_mismatch",
@@ -199,6 +202,7 @@ pub fn host_call_labels(kind: CapabilityKind, op: &str) -> (&'static str, &'stat
             Some(("reputation", rest)) => ("reputation", rest),
             Some(("economy", rest)) => ("economy", rest),
             Some(("identity", rest)) => ("identity", rest),
+            Some(("tool", rest)) => ("tool", rest),
             _ => ("db", op),
         },
     };
