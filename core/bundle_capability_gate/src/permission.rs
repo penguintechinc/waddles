@@ -260,6 +260,12 @@ pub enum PermissionFamily {
     ReputationRead,
     ReputationCommunityWrite,
     ReputationTenantWrite,
+    /// `reputation.community.admin` -- the ADMIN-only absolute score override
+    /// (bundle-MCP-tools P5): sets a member's score outright, outside the
+    /// capped-delta quota. `Dangerous`: an admin must explicitly approve the
+    /// grant, and a bundle holding it is expected to expose it only to admin
+    /// callers.
+    ReputationCommunityAdmin,
     /// `economy.read` -- balance / max-bet / leaderboard reads (issue #714).
     EconomyRead,
     /// `economy.wager` -- atomic debit-stake/credit-payout (issue #714).
@@ -325,6 +331,7 @@ impl PermissionFamily {
         Self::ReputationRead,
         Self::ReputationCommunityWrite,
         Self::ReputationTenantWrite,
+        Self::ReputationCommunityAdmin,
         Self::EconomyRead,
         Self::EconomyWager,
         Self::EconomyTransfer,
@@ -361,6 +368,7 @@ impl PermissionFamily {
             Self::ReputationRead => "reputation.read",
             Self::ReputationCommunityWrite => "reputation.community.write",
             Self::ReputationTenantWrite => "reputation.tenant.write",
+            Self::ReputationCommunityAdmin => "reputation.community.admin",
             Self::EconomyRead => "economy.read",
             Self::EconomyWager => "economy.wager",
             Self::EconomyTransfer => "economy.transfer",
@@ -427,6 +435,7 @@ impl PermissionFamily {
             Self::ReputationRead
                 | Self::ReputationCommunityWrite
                 | Self::ReputationTenantWrite
+                | Self::ReputationCommunityAdmin
                 | Self::UsersProfileRead
         )
     }
@@ -641,6 +650,16 @@ impl PermissionFamily {
                 },
                 notes: "spec SS7; strictly a superset grant of community.write's bound",
             },
+            Self::ReputationCommunityAdmin => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Reputation,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(60),
+                },
+                notes: "ADMIN-only absolute score override (bundle-MCP-tools P5); rate-limited, ledgered as admin_override, clamped",
+            },
             Self::EconomyRead => CatalogEntry {
                 family: *self,
                 risk: Risk::Normal,
@@ -790,6 +809,7 @@ pub enum PermissionId {
     ReputationRead,
     ReputationCommunityWrite,
     ReputationTenantWrite,
+    ReputationCommunityAdmin,
     EconomyRead,
     EconomyWager,
     EconomyTransfer,
@@ -859,6 +879,7 @@ impl PermissionId {
             Self::ReputationRead => PermissionFamily::ReputationRead,
             Self::ReputationCommunityWrite => PermissionFamily::ReputationCommunityWrite,
             Self::ReputationTenantWrite => PermissionFamily::ReputationTenantWrite,
+            Self::ReputationCommunityAdmin => PermissionFamily::ReputationCommunityAdmin,
             Self::EconomyRead => PermissionFamily::EconomyRead,
             Self::EconomyWager => PermissionFamily::EconomyWager,
             Self::EconomyTransfer => PermissionFamily::EconomyTransfer,
@@ -1084,6 +1105,7 @@ impl PermissionId {
             "reputation.read" => Ok(Self::ReputationRead),
             "reputation.community.write" => Ok(Self::ReputationCommunityWrite),
             "reputation.tenant.write" => Ok(Self::ReputationTenantWrite),
+            "reputation.community.admin" => Ok(Self::ReputationCommunityAdmin),
             "economy.read" => Ok(Self::EconomyRead),
             "economy.wager" => Ok(Self::EconomyWager),
             "economy.transfer" => Ok(Self::EconomyTransfer),
@@ -1399,6 +1421,18 @@ mod tests {
             PermissionFamily::FlagsRead.expected_app_scoped_resource(),
             AppScopedResource::None
         );
+    }
+
+    #[test]
+    fn reputation_community_admin_is_dangerous_rate_limited_and_round_trips() {
+        let entry = PermissionFamily::ReputationCommunityAdmin.catalog_entry();
+        assert_eq!(entry.risk, Risk::Dangerous);
+        assert!(matches!(entry.default_quota, Quota::CallsPerWindow { .. }));
+        assert!(PermissionFamily::ReputationCommunityAdmin.is_reputation_scoped());
+        let id = PermissionId::parse("reputation.community.admin").unwrap();
+        assert_eq!(id, PermissionId::ReputationCommunityAdmin);
+        assert_eq!(id.canonical_id(), "reputation.community.admin");
+        assert_eq!(id.family(), PermissionFamily::ReputationCommunityAdmin);
     }
 
     #[test]

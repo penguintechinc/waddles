@@ -92,6 +92,20 @@ def test_python_catalog_matches_rust_catalog_for_outbound_families() -> None:
         assert resolve_risk(f"{family}:discord") == "dangerous"
 
 
+def test_reputation_community_admin_is_dangerous_and_mirrors_the_rust_catalog() -> None:
+    """The ADMIN-only override id is known, `dangerous`, and defined in the Rust gate catalog."""
+    from pathlib import Path
+
+    assert is_known_permission("reputation.community.admin")
+    assert resolve_risk("reputation.community.admin") == "dangerous"
+    # The read/write siblings keep their tiers (the admin id is a distinct grant).
+    assert resolve_risk("reputation.read") == "normal"
+    assert resolve_risk("reputation.community.write") == "dangerous"
+    rust = Path(__file__).resolve().parents[2] / "core/bundle_capability_gate/src/permission.rs"
+    if rust.exists():
+        assert '=> "reputation.community.admin"' in rust.read_text()
+
+
 def test_unknown_permission_id_resolves_to_none() -> None:
     assert resolve_risk("storage.nonexistent") is None
     assert not is_known_permission("storage.nonexistent")

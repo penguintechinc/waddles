@@ -61,10 +61,13 @@ pub enum ScopeKind {
 /// argument anywhere in the catalog -- it always names a *target*, never the
 /// scope the call executes under (spec SS5.1). `delta` is `Some` only for a
 /// `reputation.*.write` `adjust()` call; `None` for a read
-/// (`reputation.read`, `users.profile.read`).
+/// (`reputation.read`, `users.profile.read`). `target_user` is `None` only for
+/// a community-wide read (`reputation.leaderboard`) that names no user -- a
+/// delta call MUST name its target (the gate refuses `delta: Some` with no
+/// user as a resource-scope mismatch).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReputationTarget {
-    pub target_user: Uuid,
+    pub target_user: Option<Uuid>,
     pub scope_kind: ScopeKind,
     pub delta: Option<i32>,
 }
