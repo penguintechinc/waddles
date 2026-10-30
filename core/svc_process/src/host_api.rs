@@ -516,13 +516,12 @@ pub(crate) fn test_connection() -> Arc<Connection> {
 /// succeeds (the read loop continues in the background task the caller
 /// spawns) -- see [`accept_and_handshake`], the usual entry point.
 ///
-/// `pub(crate)` (not `pub`): `accept_and_handshake` is the only production
+/// `pub` as a harness seam: `accept_and_handshake` is the only production
 /// caller (it adds the TLS layer this function doesn't need to know
-/// about); `crate::execute`'s own tests call this directly over a plain
-/// in-memory duplex to build a real, handshaken [`Connection`] without a
-/// TLS handshake or a live executor process.
-#[cfg(test)]
-pub(crate) async fn run_connection<S>(
+/// about); unit tests and the real-path `core/tool_invoke_e2e` harness call
+/// this directly over a plain in-memory duplex to build a real, handshaken
+/// [`Connection`] without a TLS handshake or an executor process.
+pub async fn run_connection<S>(
     io: S,
     hello_ok: HelloOkBody,
     expected_sandbox_gvisor: bool,

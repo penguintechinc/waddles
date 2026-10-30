@@ -811,3 +811,57 @@ async fn tenant_isolation_cross_tenant_caller_forbidden_target_unavailable_tenan
         .collect();
     assert!(run_with(e).await.is_ok());
 }
+
+#[tokio::test]
+async fn every_tool_call_completion_emits_a_count_and_a_latency_point_with_pii_free_labels() {
+    let harness = crate::stage_metrics::test_support::Harness::new();
+    let metrics = Arc::new(crate::stage_metrics::StageMetrics::new(&harness.meter()));
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": {"balance": 5}}))).await;
+    let c = caps(&exec).with_stage_metrics(Arc::clone(&metrics));
+    run(&c, tool_call(SVC, "get_balance", None)).await.unwrap();
+    // A refusal after resolution keeps the verified labels...
+    let spent = caps_with(
+        world_rows(),
+        default_gate(),
+        Arc::clone(&exec.registry),
+        vec![APP.to_string()],
+        Some(Instant::now()),
+    )
+    .with_stage_metrics(Arc::clone(&metrics));
+    assert_eq!(
+        run(&spent, tool_call(SVC, "get_balance", None))
+            .await
+            .unwrap_err(),
+        "timeout"
+    );
+    // ...and one before resolution never leaks guest-supplied names.
+    assert_eq!(
+        run(&c, tool_call("evil.<script>", "x", None))
+            .await
+            .unwrap_err(),
+        "invalid_args"
+    );
+    let ok = [("target", SVC), ("tool", "get_balance"), ("outcome", "ok")];
+    assert_eq!(harness.count("waddles_tool_call_total", &ok), 1.0);
+    assert_eq!(harness.count("waddles_tool_call_latency_seconds", &ok), 1.0);
+    let refused = [
+        ("target", SVC),
+        ("tool", "get_balance"),
+        ("outcome", "timeout"),
+    ];
+    assert_eq!(harness.count("waddles_tool_call_total", &refused), 1.0);
+    let unresolved = [
+        ("target", "unresolved"),
+        ("tool", "unresolved"),
+        ("outcome", "invalid_args"),
+    ];
+    assert_eq!(harness.count("waddles_tool_call_total", &unresolved), 1.0);
+    for p in harness.points() {
+        assert!(
+            !p.attrs
+                .values()
+                .any(|v| v.contains("evil") || v.contains("u1")),
+            "guest-supplied value leaked into a label: {p:?}"
+        );
+    }
+}

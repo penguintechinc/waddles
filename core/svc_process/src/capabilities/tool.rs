@@ -30,6 +30,7 @@ use penguin_bundle_host::wire::{HostCallBody, HostResultError, TraceContext};
 
 use super::{denied, CapabilityHandler, StageCapabilities};
 use crate::host_api::ConnectionRegistry;
+use crate::stage_metrics;
 
 /// The per-invocation `tool.invoke` wiring: what resolves targets, which
 /// executor connection runs the nested call, and where this invocation sits in
@@ -111,7 +112,23 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
                 format!("tool op {:?} not supported", call.op),
             ));
         }
-        let outcome = self.run_tool_invoke(call).await;
+        let started = Instant::now();
+        // Set by `run_tool_invoke` once the target resolved: only then are the
+        // names host-verified and safe as metric labels.
+        let mut resolved: Option<(String, String)> = None;
+        let outcome = self.run_tool_invoke(call, &mut resolved).await;
+        let (target, tool) = resolved.unwrap_or_else(|| {
+            (
+                stage_metrics::TOOL_UNRESOLVED.to_string(),
+                stage_metrics::TOOL_UNRESOLVED.to_string(),
+            )
+        });
+        self.stage_metrics.record_tool_call(
+            &target,
+            &tool,
+            outcome.as_ref().map_or_else(ToolRefusal::code, |_| "ok"),
+            started.elapsed(),
+        );
         // PII-free: ids, tool name and outcome only -- never args.
         match &outcome {
             Ok(_) => tracing::debug!(
@@ -126,7 +143,11 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         outcome.map_err(|r| denied(r.code(), r.message()))
     }
 
-    async fn run_tool_invoke(&self, call: &HostCallBody) -> Result<serde_json::Value, ToolRefusal> {
+    async fn run_tool_invoke(
+        &self,
+        call: &HostCallBody,
+        resolved: &mut Option<(String, String)>,
+    ) -> Result<serde_json::Value, ToolRefusal> {
         let Some(ctx) = &self.tool else {
             return Err(ToolRefusal::TargetUnavailable(
                 "tool.invoke is not wired for this activation".to_string(),
@@ -143,6 +164,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             &self.gate,
             &self.gate_scope(),
         )?;
+        *resolved = Some((plan.target_app_id.clone(), plan.tool.clone()));
         tracing::debug!(
             app_id = %self.app_id, target = %plan.target_app_id, tool = %plan.tool,
             community_id = self.community_id, write = plan.write, depth = plan.next_chain.len() - 1,

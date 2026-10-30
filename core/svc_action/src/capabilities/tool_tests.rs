@@ -802,3 +802,36 @@ async fn tenant_isolation_cross_tenant_caller_forbidden_target_unavailable_tenan
         .await
         .is_ok());
 }
+
+#[tokio::test]
+async fn every_tool_call_completion_emits_a_count_and_a_latency_point() {
+    let w = world(
+        world_rows(),
+        default_gate(),
+        Behavior::Reply(serde_json::json!({"ok": {"balance": 5}})),
+        true,
+    )
+    .await;
+    run(&w, &app_scope(), tool_call(SVC, "get_balance", None))
+        .await
+        .unwrap();
+    assert_eq!(
+        run(&w, &app_scope(), tool_call("evil.<script>", "x", None))
+            .await
+            .unwrap_err(),
+        "invalid_args"
+    );
+    // The process-wide test harness (`stage_metrics()` under cfg(test)).
+    let h = crate::stage_metrics::test_support::shared();
+    let ok = [("target", SVC), ("tool", "get_balance"), ("outcome", "ok")];
+    assert!(h.count("waddles_tool_call_total", &ok) >= 1.0);
+    assert!(h.count("waddles_tool_call_latency_seconds", &ok) >= 1.0);
+    let unresolved = [("target", "unresolved"), ("outcome", "invalid_args")];
+    assert!(h.count("waddles_tool_call_total", &unresolved) >= 1.0);
+    assert!(
+        !h.points()
+            .iter()
+            .any(|p| p.attrs.values().any(|v| v.contains("evil"))),
+        "guest-supplied value leaked into a label"
+    );
+}

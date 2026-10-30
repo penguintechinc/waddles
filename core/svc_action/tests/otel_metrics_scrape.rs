@@ -137,6 +137,12 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
         Duration::from_millis(3),
     );
     metrics.record_host_call("kv", "get", "ok", Duration::from_micros(300));
+    metrics.record_tool_call(
+        "waddles.e2e.svc.one",
+        "echo",
+        "ok",
+        Duration::from_micros(500),
+    );
     metrics.record_bundle_load("waddles.scrape.test", "load", "ok", Duration::from_secs(1));
     metrics.record_attempts("waddles.scrape.test", "success", 1);
     metrics.record_batch(7);

@@ -940,8 +940,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// Test seam: routes this value's host-call timings into `metrics`
     /// instead of the process-wide set, so an assertion sees only the calls
     /// made through this instance.
-    #[cfg(test)]
-    pub(crate) fn with_stage_metrics(mut self, metrics: Arc<StageMetrics>) -> Self {
+    #[must_use]
+    pub fn with_stage_metrics(mut self, metrics: Arc<StageMetrics>) -> Self {
         self.stage_metrics = metrics;
         self
     }

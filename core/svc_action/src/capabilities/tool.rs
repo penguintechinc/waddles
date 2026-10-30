@@ -27,6 +27,7 @@ use penguin_bundle_host::wire::{HostCallBody, HostResultError};
 
 use super::{denied, InvokeScope, RelayQueue, StageCapabilities};
 use crate::host_api::ConnectionRegistry;
+use crate::stage_metrics;
 use bundle_host_kv::KvBackend;
 
 /// The process-wide `tool.invoke` wiring: the live active-version snapshot (the
@@ -61,7 +62,23 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 format!("tool op {:?} not supported", call.op),
             ));
         }
-        let outcome = self.run_tool_invoke(scope, call).await;
+        let started = Instant::now();
+        // Set by `run_tool_invoke` once the target resolved: only then are the
+        // names host-verified and safe as metric labels.
+        let mut resolved: Option<(String, String)> = None;
+        let outcome = self.run_tool_invoke(scope, call, &mut resolved).await;
+        let (target, tool) = resolved.unwrap_or_else(|| {
+            (
+                stage_metrics::TOOL_UNRESOLVED.to_string(),
+                stage_metrics::TOOL_UNRESOLVED.to_string(),
+            )
+        });
+        self.stage_metrics.record_tool_call(
+            &target,
+            &tool,
+            outcome.as_ref().map_or_else(ToolRefusal::code, |_| "ok"),
+            started.elapsed(),
+        );
         // PII-free: ids, tool name and outcome only -- never args.
         match &outcome {
             Ok(_) => tracing::debug!(
@@ -80,6 +97,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         &self,
         scope: &InvokeScope,
         call: &HostCallBody,
+        resolved: &mut Option<(String, String)>,
     ) -> Result<serde_json::Value, ToolRefusal> {
         let Some(wiring) = &self.tool else {
             return Err(ToolRefusal::TargetUnavailable(
@@ -104,6 +122,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             &self.gate,
             &scope.gate_scope(),
         )?;
+        *resolved = Some((plan.target_app_id.clone(), plan.tool.clone()));
         tracing::debug!(
             app_id = %scope.app_id, target = %plan.target_app_id, tool = %plan.tool,
             community_id = scope.community_id, write = plan.write, depth = plan.next_chain.len() - 1,
