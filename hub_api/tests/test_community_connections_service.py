@@ -503,7 +503,7 @@ class TestRowBoundSealing:
         def boom(*_a: Any, **_k: Any) -> bool:
             raise RuntimeError("lock timeout")
 
-        monkeypatch.setattr(svc, "_sync_reseal_legacy", boom)
+        monkeypatch.setattr(svc, "_reseal_legacy", boom)
         tokens = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "twitch")
         assert tokens is not None and tokens.access_token == "acc-legacy"
         assert _row(dal, COMMUNITY_ID, "twitch").seal_version == 0  # left for the reseal job

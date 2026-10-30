@@ -108,18 +108,14 @@ class TestScopeEnforcement:
         assert response.status_code == 403
 
     async def test_get_platform_configs_with_scope_returns_200(self, client: Any) -> None:
-        response = await client.get(
-            "/api/v1/superadmin/platform-config", headers=_admin_headers()
-        )
+        response = await client.get("/api/v1/superadmin/platform-config", headers=_admin_headers())
         assert response.status_code == 200
 
 
 class TestGetPlatformConfigs:
     async def test_masks_tokens(self, client: Any, platform_db: Any) -> None:
         _seed_bot_credential(platform_db)
-        response = await client.get(
-            "/api/v1/superadmin/platform-config", headers=_admin_headers()
-        )
+        response = await client.get("/api/v1/superadmin/platform-config", headers=_admin_headers())
         assert response.status_code == 200
         body = await response.get_json()
         assert body["count"] == 1
@@ -162,200 +158,136 @@ class TestUpdatePlatformConfig:
         assert response.status_code == 404
 
 
-class TestTestPlatformConnection:
-    async def test_no_credential_is_404(self, client: Any) -> None:
-        response = await client.post(
-            "/api/v1/superadmin/platform-config/twitch/test", headers=_admin_headers()
-        )
-        assert response.status_code == 404
+class TestListFilters:
+    """# regression: gh-969 -- filters on the metadata read (type/platform/invalid/empty)."""
 
-    async def test_no_access_token_is_valid(self, client: Any, platform_db: Any) -> None:
-        _seed_bot_credential(platform_db, platform="twitch", access_token=None)
-        response = await client.post(
-            "/api/v1/superadmin/platform-config/twitch/test", headers=_admin_headers()
+    async def test_filters_and_invalid_type(self, client: Any, platform_db: Any) -> None:
+        _seed_bot_credential(platform_db, platform="twitch")
+        for query, expected in (
+            ("", 1),
+            ("?integrationType=bot", 1),
+            ("?platform=twitch", 1),
+            ("?platform=discord", 0),
+            ("?integrationType=community_oauth", 0),
+        ):
+            r = await client.get(
+                f"/api/v1/superadmin/platform-config{query}", headers=_admin_headers()
+            )
+            assert r.status_code == 200 and (await r.get_json())["count"] == expected, query
+        bad = await client.get(
+            "/api/v1/superadmin/platform-config?integrationType=nope", headers=_admin_headers()
         )
-        assert response.status_code == 200
-        body = await response.get_json()
-        assert body["data"]["valid"] is True
+        assert bad.status_code == 400
 
-    def _patch_httpx(self, monkeypatch: Any, handler: Any) -> None:
-        """Replace `httpx.AsyncClient` with one wired to a `MockTransport` -- no real network."""
+
+class TestTestPlatformConnectionDelegatesToCredentialManager:
+    """# regression: gh-969 -- hub-api cannot read operator bot tokens (H-3).
+
+    `POST /platform-config/<platform>/test` is delegated to the credential manager (the
+    sanctioned operator-secret holder). hub-api sends the platform + the caller's bearer only,
+    never touches the bot token, and fails LOUD (503) when the credential manager is down.
+    """
+
+    URL_PREFIX = "http://credential-manager:8095/api/v1/credentials/"
+
+    def _patch_cm(self, monkeypatch: Any, handler: Any) -> list[httpx.Request]:
+        seen: list[httpx.Request] = []
         real_async_client = httpx.AsyncClient
 
+        def _recording(req: httpx.Request) -> httpx.Response:
+            seen.append(req)
+            return handler(req)
+
         def _factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
-            kwargs["transport"] = httpx.MockTransport(handler)
+            kwargs["transport"] = httpx.MockTransport(_recording)
             return real_async_client(*args, **kwargs)
 
         monkeypatch.setattr(httpx, "AsyncClient", _factory)
+        return seen
 
-    async def test_twitch_valid_token(
-        self, client: Any, platform_db: Any, monkeypatch: Any
-    ) -> None:
-        _seed_bot_credential(platform_db, platform="twitch")
-        self._patch_httpx(monkeypatch, lambda req: httpx.Response(200, json={}))
-        response = await client.post(
-            "/api/v1/superadmin/platform-config/twitch/test", headers=_admin_headers()
+    async def _post(
+        self, client: Any, platform: str = "twitch", headers: dict[str, str] | None = None
+    ) -> Any:
+        return await client.post(
+            f"/api/v1/superadmin/platform-config/{platform}/test",
+            headers=headers or _admin_headers(),
         )
-        body = await response.get_json()
-        assert body["data"]["valid"] is True
 
-    async def test_discord_invalid_token(
+    async def test_valid_verdict_forwards_caller_bearer_and_never_the_token(
         self, client: Any, platform_db: Any, monkeypatch: Any
     ) -> None:
-        _seed_bot_credential(platform_db, platform="discord")
-        self._patch_httpx(monkeypatch, lambda req: httpx.Response(401, json={}))
-        response = await client.post(
-            "/api/v1/superadmin/platform-config/discord/test", headers=_admin_headers()
+        _seed_bot_credential(platform_db, platform="twitch", access_token="CANARY-BOT-TOKEN")
+        seen = self._patch_cm(
+            monkeypatch,
+            lambda r: httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {"platform": "twitch", "valid": True, "error": None},
+                },
+            ),
         )
+        headers = _admin_headers()
+        response = await self._post(client, headers=headers)
         body = await response.get_json()
-        assert body["data"]["valid"] is False
-        assert "HTTP 401" in body["data"]["error"]
-
-    async def test_slack_ok_true(
-        self, client: Any, platform_db: Any, monkeypatch: Any
-    ) -> None:
-        _seed_bot_credential(platform_db, platform="slack")
-        self._patch_httpx(monkeypatch, lambda req: httpx.Response(200, json={"ok": True}))
-        response = await client.post(
-            "/api/v1/superadmin/platform-config/slack/test", headers=_admin_headers()
+        assert response.status_code == 200 and body["data"]["valid"] is True
+        assert len(seen) == 1
+        assert str(seen[0].url) == f"{self.URL_PREFIX}twitch/test" and seen[0].method == "POST"
+        assert seen[0].headers["authorization"] == headers["Authorization"]
+        assert b"CANARY-BOT-TOKEN" not in seen[0].content and "CANARY-BOT-TOKEN" not in str(
+            seen[0].url
         )
-        body = await response.get_json()
-        assert body["data"]["valid"] is True
 
-    async def test_slack_ok_false(
-        self, client: Any, platform_db: Any, monkeypatch: Any
-    ) -> None:
-        _seed_bot_credential(platform_db, platform="slack")
-        self._patch_httpx(monkeypatch, lambda req: httpx.Response(200, json={"ok": False}))
-        response = await client.post(
-            "/api/v1/superadmin/platform-config/slack/test", headers=_admin_headers()
+    async def test_invalid_verdict_is_relayed(self, client: Any, monkeypatch: Any) -> None:
+        self._patch_cm(
+            monkeypatch,
+            lambda r: httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {"platform": "discord", "valid": False, "error": "HTTP 401"},
+                },
+            ),
         )
-        body = await response.get_json()
-        assert body["data"]["valid"] is False
+        body = await (await self._post(client, "discord")).get_json()
+        assert body["data"]["valid"] is False and body["data"]["error"] == "HTTP 401"
 
-    async def test_youtube_valid_token(
-        self, client: Any, platform_db: Any, monkeypatch: Any
+    async def test_missing_credential_is_404(self, client: Any, monkeypatch: Any) -> None:
+        self._patch_cm(monkeypatch, lambda r: httpx.Response(404, json={"success": False}))
+        assert (await self._post(client)).status_code == 404
+
+    @pytest.mark.parametrize("status", [401, 403, 500, 502])
+    async def test_credential_manager_errors_are_a_loud_503(
+        self, client: Any, monkeypatch: Any, status: int
     ) -> None:
-        _seed_bot_credential(platform_db, platform="youtube")
-        self._patch_httpx(monkeypatch, lambda req: httpx.Response(200, json={}))
-        response = await client.post(
-            "/api/v1/superadmin/platform-config/youtube/test", headers=_admin_headers()
-        )
+        self._patch_cm(monkeypatch, lambda r: httpx.Response(status, json={}))
+        response = await self._post(client)
         body = await response.get_json()
-        assert body["data"]["valid"] is True
+        assert response.status_code == 503
+        assert body["error"]["code"] == "CREDENTIAL_MANAGER_UNAVAILABLE"
 
-    async def test_unknown_platform_defaults_valid(
-        self, client: Any, platform_db: Any, monkeypatch: Any
+    async def test_unreachable_credential_manager_is_a_loud_503_not_a_pass(
+        self, client: Any, monkeypatch: Any
     ) -> None:
-        _seed_bot_credential(platform_db, platform="storage")
-        self._patch_httpx(monkeypatch, lambda req: httpx.Response(200, json={}))
-        response = await client.post(
-            "/api/v1/superadmin/platform-config/storage/test", headers=_admin_headers()
-        )
-        body = await response.get_json()
-        assert body["data"]["valid"] is True
-
-    async def test_network_error_fails_closed(
-        self, client: Any, platform_db: Any, monkeypatch: Any
-    ) -> None:
-        _seed_bot_credential(platform_db, platform="twitch")
-
         def _raise(_req: Any) -> httpx.Response:
             raise httpx.ConnectError("boom")
 
-        self._patch_httpx(monkeypatch, _raise)
-        response = await client.post(
-            "/api/v1/superadmin/platform-config/twitch/test", headers=_admin_headers()
-        )
-        body = await response.get_json()
-        assert body["data"]["valid"] is False
+        self._patch_cm(monkeypatch, _raise)
+        response = await self._post(client)
+        assert response.status_code == 503
+        assert "valid" not in str(await response.get_json())
 
+    async def test_malformed_response_is_a_loud_503(self, client: Any, monkeypatch: Any) -> None:
+        self._patch_cm(monkeypatch, lambda r: httpx.Response(200, json={"nope": 1}))
+        assert (await self._post(client)).status_code == 503
 
-class TestTestPlatformConnectionDecryptsEncryptedCredentials:
-    """SECURITY (HIGH): `test_platform_connection()` must decrypt before sending to the provider.
-
-    `credential_manager_module`'s refresh service encrypts `access_token`
-    at rest and sets `is_encrypted = TRUE`; this group proves the
-    superadmin "test credential" feature sends the real, decrypted token
-    to the platform's own API -- not ciphertext -- via the SAME
-    `httpx.MockTransport` pattern `TestTestPlatformConnection` uses,
-    asserting on the actual `Authorization` header the mock transport
-    received.
-
-    Fail-first proof: with `platform_config_service.test_platform_connection`'s
-    `decrypt_if_needed(...)` call reverted to plain `row.access_token` (no
-    decryption at all), `test_encrypted_token_is_decrypted_before_send`
-    went red as expected (the mock transport observed the raw ciphertext
-    in the `Authorization` header, not the real token). Reverted after
-    confirming; see PR report for the exact before/after run.
-    """
-
-    # Fixed test-only AES key, not a real credential.
-    _KEY = "d4f9317783becee1a4415c1a1229b9258e7a90b768d72a9e2c7dc891af661df6"  # gitleaks:allow
-
-    def _encrypt_for_test(self, plaintext: str) -> str:
-        """Same AES-256-GCM wire format as `token_crypto`/`platform_integrations_crypto`."""
-        import base64
-        import os as _os
-
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-        key = bytes.fromhex(self._KEY)
-        iv = _os.urandom(12)
-        ciphertext_and_tag = AESGCM(key).encrypt(iv, plaintext.encode("utf-8"), None)
-        return base64.b64encode(iv + ciphertext_and_tag).decode("ascii")
-
-    def _patch_httpx(self, monkeypatch: Any, handler: Any) -> None:
-        real_async_client = httpx.AsyncClient
-
-        def _factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
-            kwargs["transport"] = httpx.MockTransport(handler)
-            return real_async_client(*args, **kwargs)
-
-        monkeypatch.setattr(httpx, "AsyncClient", _factory)
-
-    async def test_encrypted_token_is_decrypted_before_send(
-        self, client: Any, platform_db: Any, monkeypatch: Any
+    async def test_invalid_platform_is_400_and_never_calls_out(
+        self, client: Any, monkeypatch: Any
     ) -> None:
-        monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", self._KEY)
-        real_token = "real-plaintext-twitch-oauth-token"
-        encrypted_token = self._encrypt_for_test(real_token)
-        _seed_bot_credential(platform_db, platform="twitch", access_token=encrypted_token)
-
-        received_auth_header: dict[str, str] = {}
-
-        def _handler(req: httpx.Request) -> httpx.Response:
-            received_auth_header["value"] = req.headers.get("authorization", "")
-            return httpx.Response(200, json={})
-
-        self._patch_httpx(monkeypatch, _handler)
-        response = await client.post(
-            "/api/v1/superadmin/platform-config/twitch/test", headers=_admin_headers()
-        )
-        body = await response.get_json()
-        assert body["data"]["valid"] is True
-        assert real_token in received_auth_header["value"]
-
-    async def test_legacy_plaintext_token_still_works(
-        self, client: Any, platform_db: Any, monkeypatch: Any
-    ) -> None:
-        """A pre-fix row (`is_encrypted` not actually true ciphertext) still authenticates."""
-        monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", self._KEY)
-        _seed_bot_credential(platform_db, platform="twitch", access_token="tok_abc")
-
-        received_auth_header: dict[str, str] = {}
-
-        def _handler(req: httpx.Request) -> httpx.Response:
-            received_auth_header["value"] = req.headers.get("authorization", "")
-            return httpx.Response(200, json={})
-
-        self._patch_httpx(monkeypatch, _handler)
-        response = await client.post(
-            "/api/v1/superadmin/platform-config/twitch/test", headers=_admin_headers()
-        )
-        body = await response.get_json()
-        assert body["data"]["valid"] is True
-        assert "tok_abc" in received_auth_header["value"]
+        seen = self._patch_cm(monkeypatch, lambda r: httpx.Response(200, json={}))
+        assert (await self._post(client, "..%2Fx")).status_code in (400, 404)
+        assert (await self._post(client, "UPPER")).status_code == 400
+        assert seen == []
 
 
 class TestHubSettings:
