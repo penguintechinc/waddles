@@ -31,6 +31,13 @@ use thiserror::Error;
 /// `bundle_tool_call::IDEMPOTENCY_ARG` and the Python SDK).
 pub const IDEMPOTENCY_ARG: &str = "__idempotency_key";
 
+/// Reserved top-level args field carrying the HOST-VERIFIED actor + scopes
+/// (`{"actor": <uuid|null>, "scopes": [..]}`; must match
+/// `bundle_tool_call::CTX_ARG` and the Python SDK). The host overwrites any
+/// caller-supplied value; the registry strips it and exposes it read-only via
+/// [`ToolContext`]. A bundle must never read an actor/scope from its own args.
+pub const CTX_ARG: &str = "__ctx";
+
 /// Mirrors WIT `tool.tool-error`, plus [`ToolError::NoTransport`] (SDK-local:
 /// the bundle never installed a transport -- fail loud, never a silent no-op).
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -113,6 +120,22 @@ pub fn invoke_json<A: Serialize, R: DeserializeOwned>(
 pub struct ToolContext {
     /// The caller's idempotency key (stripped from the args), if supplied.
     pub idempotency_key: Option<String>,
+    /// The host-VERIFIED actor (community `user_uuid`) behind this call, or
+    /// `None` when the call is not user-originated / the host resolved no
+    /// actor. Host-asserted, never caller-suppliable.
+    pub actor: Option<String>,
+    /// The host-derived scopes of that actor (from their community role).
+    /// Empty when `actor` is `None`.
+    pub actor_scopes: Vec<String>,
+}
+
+impl ToolContext {
+    /// `true` only when a verified actor is present AND holds `scope`.
+    /// (Scope-restricted tools are already refused host-side before dispatch;
+    /// this is for finer, in-tool decisions on verified data.)
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.actor.is_some() && self.actor_scopes.iter().any(|s| s == scope)
+    }
 }
 
 type Handler = Arc<dyn Fn(&ToolContext, Value) -> Result<Value, ToolError> + Send + Sync>;
@@ -159,10 +182,40 @@ impl ToolRegistry {
                     ));
                 }
             }
+            match obj.remove(CTX_ARG) {
+                None | Some(Value::Null) => {}
+                Some(Value::Object(c)) => {
+                    // Host-written; any malformed shape is a host bug -> fail
+                    // loud, never a half-trusted context.
+                    let actor = match c.get("actor") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(a)) => Some(a.clone()),
+                        Some(_) => return Err(bad_ctx()),
+                    };
+                    let scopes = match c.get("scopes") {
+                        None | Some(Value::Null) => Vec::new(),
+                        Some(Value::Array(a)) => a
+                            .iter()
+                            .map(|v| v.as_str().map(str::to_string).ok_or_else(bad_ctx))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        Some(_) => return Err(bad_ctx()),
+                    };
+                    // Scopes without an actor are meaningless: drop them.
+                    if actor.is_some() {
+                        ctx.actor = actor;
+                        ctx.actor_scopes = scopes;
+                    }
+                }
+                Some(_) => return Err(bad_ctx()),
+            }
         }
         let out = handler(&ctx, value)?;
         serde_json::to_vec(&out).map_err(|e| ToolError::InvalidArgs(e.to_string()))
     }
+}
+
+fn bad_ctx() -> ToolError {
+    ToolError::InvalidArgs("malformed host context".to_string())
 }
 
 static GLOBAL: OnceLock<Mutex<ToolRegistry>> = OnceLock::new();
@@ -305,6 +358,65 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v, json!({"args": {"a": 1}, "key": "k-9"}));
+    }
+
+    fn ctx_registry() -> ToolRegistry {
+        let mut r = ToolRegistry::new();
+        r.register("who", |ctx, args| {
+            Ok(
+                json!({"args": args, "actor": ctx.actor, "scopes": ctx.actor_scopes,
+                      "admin": ctx.has_scope("community:admin")}),
+            )
+        });
+        r
+    }
+
+    #[test]
+    fn registry_exposes_the_verified_actor_and_strips_the_reserved_field() {
+        let out = ctx_registry()
+            .call(
+                "who",
+                br#"{"a":1,"__ctx":{"actor":"u-1","scopes":["community:admin"]}}"#,
+            )
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            v,
+            json!({"args": {"a": 1}, "actor": "u-1", "scopes": ["community:admin"], "admin": true})
+        );
+    }
+
+    #[test]
+    fn absent_ctx_means_no_actor_and_no_scopes() {
+        let out = ctx_registry().call("who", br#"{"a":1}"#).unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["actor"], Value::Null);
+        assert_eq!(v["scopes"], json!([]));
+        assert_eq!(v["admin"], false);
+    }
+
+    #[test]
+    fn scopes_without_an_actor_are_dropped_and_malformed_ctx_fails_loud() {
+        let out = ctx_registry()
+            .call(
+                "who",
+                br#"{"__ctx":{"actor":null,"scopes":["community:admin"]}}"#,
+            )
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["scopes"], json!([]));
+        assert_eq!(v["admin"], false);
+        for bad in [
+            br#"{"__ctx":5}"#.as_slice(),
+            br#"{"__ctx":{"actor":5}}"#,
+            br#"{"__ctx":{"actor":"u","scopes":[1]}}"#,
+            br#"{"__ctx":{"actor":"u","scopes":"x"}}"#,
+        ] {
+            assert!(matches!(
+                ctx_registry().call("who", bad),
+                Err(ToolError::InvalidArgs(_))
+            ));
+        }
     }
 
     #[test]

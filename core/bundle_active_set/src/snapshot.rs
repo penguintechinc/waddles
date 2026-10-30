@@ -256,6 +256,7 @@ mod tests {
             exported: vec![crate::tools::ExportedToolInfo {
                 name: "t".to_string(),
                 write: false,
+                required_scope: None,
             }],
             requested: Vec::new(),
         };

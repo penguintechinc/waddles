@@ -540,7 +540,9 @@ def classify_diff(new_summary: dict[str, Any], previous_summary: dict[str, Any] 
         parts |= {f"cap:{c}" for c in summary.get("capabilities", [])}
         parts |= {f"route:{r}" for r in summary.get("routesTo", [])}
         parts |= {
-            f"tool:{t['name']}:{t['access']}:{t['risk']}" for t in summary.get("exportedTools", [])
+            f"tool:{t['name']}:{t['access']}:{t['risk']}"
+            + (f":scope={t['requiredScope']}" if t.get("requiredScope") else "")
+            for t in summary.get("exportedTools", [])
         }
         parts |= {
             f"calls:{t['target']}:{t['tool']}:{t['access']}"

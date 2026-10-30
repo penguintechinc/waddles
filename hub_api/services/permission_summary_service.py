@@ -58,7 +58,7 @@ def build_permission_summary(
     # are unchanged.
     if manifest.exported_tools:
         summary["exportedTools"] = sorted(
-            ({"name": t.name, "access": t.access, "risk": t.risk} for t in manifest.exported_tools),
+            (_exported_tool_summary(t) for t in manifest.exported_tools),
             key=lambda t: t["name"],
         )
     # Requested (called) tools are consent-relevant too: adding/changing one
@@ -72,6 +72,14 @@ def build_permission_summary(
             key=lambda t: (t["target"], t["tool"]),
         )
     return summary
+
+
+def _exported_tool_summary(tool: Any) -> dict[str, Any]:
+    """Consent-summary entry for one exported tool; `requiredScope` only when set (hash-stable)."""
+    entry: dict[str, Any] = {"name": tool.name, "access": tool.access, "risk": tool.risk}
+    if tool.required_scope is not None:
+        entry["requiredScope"] = tool.required_scope
+    return entry
 
 
 def canonical_json(summary: dict[str, Any]) -> str:

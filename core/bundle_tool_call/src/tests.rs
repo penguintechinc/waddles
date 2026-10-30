@@ -89,6 +89,7 @@ fn service(exports: &[(&str, bool)]) -> ToolManifestInfo {
             .map(|(n, w)| ExportedToolInfo {
                 name: (*n).to_string(),
                 write: *w,
+                required_scope: None,
             })
             .collect(),
         requested: Vec::new(),
@@ -156,7 +157,15 @@ fn plan(
 ) -> Result<ToolPlan, ToolRefusal> {
     let caller = *chain.last().unwrap();
     let chain: Vec<String> = chain.iter().map(|s| s.to_string()).collect();
-    plan_tool_call(caller, &chain, r, snap, gate, &gate_scope(caller))
+    plan_tool_call(
+        caller,
+        &chain,
+        r,
+        snap,
+        gate,
+        &gate_scope(caller),
+        &ActorContext::none(),
+    )
 }
 
 #[test]
@@ -591,4 +600,139 @@ fn idem_plan_carries_host_derived_principal() {
         (w.tenant_id, w.community_id, w.caller_app_id.as_str()),
         (7, 3, APP)
     );
+}
+
+// ---- verified actor / required_scope (P3c) ----
+
+fn admin_world() -> (ActiveVersionSnapshot, CapabilityGate) {
+    let mut svc_tools = service(&[("get_balance", false), ("adjust", true)]);
+    svc_tools.exported.push(ExportedToolInfo {
+        name: "admin_op".to_string(),
+        write: true,
+        required_scope: Some("community:admin".to_string()),
+    });
+    let snap = snapshot(vec![
+        row(
+            APP,
+            11,
+            DIGEST,
+            requests(&[(SVC, "adjust", true), (SVC, "admin_op", true)]),
+        ),
+        row(SVC, 22, DIGEST, svc_tools),
+    ]);
+    (snap, gate_with(APP, &[(SVC, "adjust"), (SVC, "admin_op")]))
+}
+
+fn plan_as(actor: &ActorContext, tool: &str) -> Result<ToolPlan, ToolRefusal> {
+    let (snap, gate) = admin_world();
+    let chain = vec![APP.to_string()];
+    plan_tool_call(
+        APP,
+        &chain,
+        req(SVC, tool, Some("k-1")),
+        &snap,
+        &gate,
+        &gate_scope(APP),
+        actor,
+    )
+}
+
+#[test]
+fn role_scope_map_is_cumulative_and_fails_closed() {
+    assert_eq!(scopes_for_role("member"), ["community:member"]);
+    assert!(scopes_for_role("community-owner").contains(&"community:admin"));
+    assert!(scopes_for_role("community-admin").contains(&"community:moderate"));
+    assert!(!scopes_for_role("moderator").contains(&"community:admin"));
+    assert!(!scopes_for_role("vip").contains(&"community:moderate"));
+    for bad in ["", "admin", "COMMUNITY-ADMIN", "root"] {
+        assert!(scopes_for_role(bad).is_empty(), "{bad:?}");
+    }
+}
+
+#[test]
+fn scope_gate_admits_admin_and_owner_refuses_the_rest_host_side() {
+    for role in ["community-admin", "community-owner"] {
+        let a = ActorContext::for_role("00000000-0000-4000-8000-000000000001", role);
+        assert!(plan_as(&a, "admin_op").is_ok(), "{role}");
+    }
+    for role in ["moderator", "vip", "member", "", "bogus"] {
+        let a = ActorContext::for_role("00000000-0000-4000-8000-000000000001", role);
+        let err = plan_as(&a, "admin_op").unwrap_err();
+        assert_eq!(err.code(), "forbidden", "{role}");
+    }
+}
+
+#[test]
+fn scope_gate_refuses_no_actor_and_scopes_without_actor() {
+    assert_eq!(
+        plan_as(&ActorContext::none(), "admin_op")
+            .unwrap_err()
+            .code(),
+        "forbidden"
+    );
+    // Scopes alone (no verified actor uuid) never satisfy the gate.
+    let forged = ActorContext {
+        actor: None,
+        scopes: vec!["community:admin".to_string()],
+    };
+    assert_eq!(
+        plan_as(&forged, "admin_op").unwrap_err().code(),
+        "forbidden"
+    );
+}
+
+#[test]
+fn non_scoped_tools_are_unaffected_by_the_actor() {
+    assert!(plan_as(&ActorContext::none(), "adjust").is_ok());
+}
+
+#[test]
+fn required_scope_of_reports_the_declared_scope() {
+    let (snap, _) = admin_world();
+    let gs = gate_scope(APP);
+    assert_eq!(
+        required_scope_of(&snap, &gs, SVC, "admin_op").as_deref(),
+        Some("community:admin")
+    );
+    assert_eq!(required_scope_of(&snap, &gs, SVC, "adjust"), None);
+    assert_eq!(required_scope_of(&snap, &gs, "nope", "adjust"), None);
+}
+
+#[test]
+fn ctx_is_host_populated_and_a_guest_supplied_ctx_is_overwritten() {
+    let a = ActorContext::for_role("00000000-0000-4000-8000-000000000001", "community-admin");
+    let mut p = plan_as(&a, "admin_op").unwrap();
+    // The guest tries to name an actor / scope via the reserved field.
+    p.args = serde_json::json!({
+        "x": 1,
+        "__ctx": {"actor": "ffffffff-ffff-4fff-8fff-ffffffffffff", "scopes": ["community:owner"]}
+    });
+    let out = nested_payload(&p).unwrap();
+    assert_eq!(
+        out["args"][CTX_ARG]["actor"],
+        "00000000-0000-4000-8000-000000000001"
+    );
+    assert!(!out["args"][CTX_ARG]["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s == "community:owner"));
+}
+
+#[test]
+fn guest_supplied_ctx_is_stripped_when_there_is_no_verified_actor() {
+    let mut p = plan_as(&ActorContext::none(), "adjust").unwrap();
+    p.args = serde_json::json!({"x": 1, "__ctx": {"actor": "evil", "scopes": ["community:owner"]}});
+    let out = nested_payload(&p).unwrap();
+    assert!(out["args"].get(CTX_ARG).is_none());
+    assert_eq!(out["args"]["x"], 1);
+}
+
+#[test]
+fn actor_with_non_object_args_is_rejected() {
+    let a = ActorContext::for_role("00000000-0000-4000-8000-000000000001", "member");
+    let mut p = plan_as(&a, "adjust").unwrap();
+    p.args = serde_json::json!([1]);
+    p.idempotency_key = None;
+    assert!(nested_payload(&p).is_err());
 }

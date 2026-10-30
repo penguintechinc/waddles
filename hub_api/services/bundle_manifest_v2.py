@@ -161,6 +161,10 @@ class ExportedTool:
     output_schema: dict[str, Any]
     access: str
     risk: str
+    # Host-verified actor scope the CALLER must hold (enforced by the stage
+    # gate before dispatch; see `bundle_tool_call::scopes_for_role`). `None` =
+    # unrestricted. Must be one of `TOOL_REQUIRED_SCOPES`.
+    required_scope: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -413,6 +417,17 @@ def parse_command_declarations(
 
 _TOOL_ACCESS = frozenset({"read", "write"})
 _TOOL_RISK = frozenset({"normal", "dangerous"})
+# Closed vocabulary of actor scopes a tool may require; mirrors the host-side
+# role->scope map in `core/bundle_tool_call` (`scopes_for_role`).
+TOOL_REQUIRED_SCOPES = frozenset(
+    {
+        "community:member",
+        "community:vip",
+        "community:moderate",
+        "community:admin",
+        "community:owner",
+    }
+)
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
 
 
@@ -421,7 +436,9 @@ def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
 
     Each entry is `{name, input_schema, output_schema, access, risk}` with
     `access` and `risk` both REQUIRED (no default -- a defaulted access would
-    mislabel a write tool read-only and fail-open the access gate). Raises
+    mislabel a write tool read-only and fail-open the access gate); optional
+    `required_scope` restricts the tool to callers whose host-verified role
+    carries that scope. Raises
     `ManifestV2Error` with a tool-specific reason code on any violation.
     """
     if raw_entries is None:
@@ -458,6 +475,13 @@ def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
             "invalid_tool_risk",
             f"tool {name!r}: risk must be one of {sorted(_TOOL_RISK)}",
         )
+        required_scope = entry.get("required_scope")
+        _require(
+            required_scope is None
+            or (isinstance(required_scope, str) and required_scope in TOOL_REQUIRED_SCOPES),
+            "invalid_tool_required_scope",
+            f"tool {name!r}: required_scope must be one of {sorted(TOOL_REQUIRED_SCOPES)}",
+        )
         input_schema = entry.get("input_schema")
         output_schema = entry.get("output_schema")
         _require(
@@ -472,6 +496,7 @@ def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
                 output_schema=dict(output_schema),
                 access=access,
                 risk=risk,
+                required_scope=required_scope,
             )
         )
     return tuple(tools)

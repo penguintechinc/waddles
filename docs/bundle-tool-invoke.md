@@ -41,6 +41,37 @@ Design: `docs/superpowers/specs/2026-10-29-bundle-mcp-tools-framework.md`; wire/
 | Idempotency key namespaced by (tenant, community, caller app) before it reaches the target | `scoped_idempotency_key` |
 | PII-free: logs/metrics carry ids, tool name, outcome — never args; guest-supplied names are never metric labels (`unresolved`) | `handle_tool`, `record_tool_call` |
 
+## Verified actor and scope-restricted (admin) tools
+
+A tool may declare `required_scope` in its manifest `exported_tools` entry (one of `community:member|vip|moderate|admin|owner`).
+The HOST enforces it before dispatch, so a confused-deputy caller bundle cannot attest an admin actor itself:
+
+1. `handle_tool` (svc_process) resolves the invocation's actor from the MAC-verified event's platform account
+   (`InvocationIdentity`) to the community `user_uuid` AND reads that member's community role through the PII-free
+   `community_member_identities` view (`MemberDirectory::role_for`, alembic 0069). Only for scope-restricted tools; the
+   role is cached per invocation.
+2. The role maps to scopes through the FIXED host-side map `bundle_tool_call::scopes_for_role`:
+
+   | role | scopes |
+   |---|---|
+   | `community-owner` | member, vip, moderate, admin, owner |
+   | `community-admin` | member, vip, moderate, admin |
+   | `moderator` | member, moderate |
+   | `vip` | member, vip |
+   | `member` | member |
+   | anything else / no role | none |
+
+3. `plan_tool_call` refuses (`forbidden`) unless the verified actor holds the tool's `required_scope`. Fail closed: no actor
+   (scheduled/system event), unlinked/inactive member, missing role, unknown role, directory failure, or no identity wiring
+   all refuse. svc_action has no identity wiring yet, so it refuses every scope-restricted tool (wiring it is a follow-up).
+4. The verified actor + scopes ride to the target in the reserved args field `__ctx` (`{"actor", "scopes"}`); the host strips
+   any caller-supplied `__ctx` and, when it verified an actor, overwrites it. The SDK strips it and exposes it read-only
+   (`ToolContext.actor` / `actor_scopes` in Rust; `actor=` / `actor_scopes=` handler kwargs in Python). Tools must read the
+   actor from there, never from their own args.
+
+Latency/availability: one indexed read per scope-restricted call (cached for the rest of the invocation, 3 s timeout);
+a slow or failing directory fails CLOSED (refused), never open.
+
 Same-stage only: the target must be loaded on the invoking stage's executor; a cross-stage target fails loudly as
 `target_unavailable`.
 

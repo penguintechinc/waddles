@@ -484,6 +484,25 @@ def test_exported_tools_bad_risk() -> None:
     assert exc.value.reason == "invalid_tool_risk"
 
 
+def test_exported_tool_required_scope_parses_and_defaults_to_none() -> None:
+    manifest = _parse_trusted(
+        {
+            "kind": "service",
+            "exported_tools": [_tool("a"), _tool("b", required_scope="community:admin")],
+        }
+    )
+    a, b = manifest.exported_tools  # type: ignore[attr-defined]
+    assert a.required_scope is None
+    assert b.required_scope == "community:admin"
+
+
+@pytest.mark.parametrize("bad", ["admin", "", "community:root", 5, ["community:admin"]])
+def test_exported_tool_required_scope_outside_vocabulary_is_rejected(bad: object) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse_trusted({"kind": "service", "exported_tools": [_tool(required_scope=bad)]})
+    assert exc.value.reason == "invalid_tool_required_scope"
+
+
 def test_exported_tools_duplicate_name() -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse_trusted({"kind": "service", "exported_tools": [_tool("x"), _tool("x")]})

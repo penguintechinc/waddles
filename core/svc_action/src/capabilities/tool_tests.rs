@@ -62,6 +62,7 @@ fn manifest(
             .map(|(n, w)| ExportedToolInfo {
                 name: (*n).to_string(),
                 write: *w,
+                required_scope: None,
             })
             .collect(),
         requested: requests
@@ -835,4 +836,49 @@ async fn every_tool_call_completion_emits_a_count_and_a_latency_point() {
             .any(|p| p.attrs.values().any(|v| v.contains("evil"))),
         "guest-supplied value leaked into a label"
     );
+}
+
+#[tokio::test]
+async fn scope_restricted_tools_are_refused_on_the_action_stage_with_a_clear_reason() {
+    let mut svc = manifest(true, &[("get_balance", false)], &[]);
+    svc.exported.push(ExportedToolInfo {
+        name: "admin_op".to_string(),
+        write: true,
+        required_scope: Some("community:admin".to_string()),
+    });
+    let rows = vec![
+        row(
+            APP,
+            APP_VERSION,
+            manifest(
+                false,
+                &[],
+                &[(SVC, "get_balance", false), (SVC, "admin_op", true)],
+            ),
+        ),
+        row(SVC, 22, svc),
+    ];
+    let w = world(
+        rows,
+        gate(&[
+            (APP, APP_VERSION, SVC, "get_balance"),
+            (APP, APP_VERSION, SVC, "admin_op"),
+        ]),
+        Behavior::Reply(serde_json::json!({"ok": 1})),
+        true,
+    )
+    .await;
+    // The guest also tries to smuggle its own scope in the args.
+    let mut call = tool_call(SVC, "admin_op", Some("k-1"));
+    call.args["args"] = serde_json::json!({"__ctx": {"actor": "x", "scopes": ["community:owner"]}});
+    let err = w.caps.handle(&app_scope(), call).await.unwrap_err();
+    assert_eq!(err.code, "forbidden");
+    assert!(err.message.contains("action stage"), "{}", err.message);
+    assert!(recorded(&w).is_empty(), "the target must never run");
+
+    // Ordinary tools are unaffected, and no `__ctx` is ever forwarded here.
+    run(&w, &app_scope(), tool_call(SVC, "get_balance", None))
+        .await
+        .unwrap();
+    assert!(recorded(&w)[0].payload["args"].get("__ctx").is_none());
 }
