@@ -27,6 +27,126 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions: []
+# Tools this service exposes through tool-provider.call; identical in hub-manifest.yaml and
+# bundle.yaml (the seeder's agreement check fails on drift).
+exported_tools:
+- name: get_score
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      user: &id001
+        type: string
+        format: uuid
+    required:
+    - user
+    additionalProperties: false
+  output_schema: &id002
+    type: object
+    properties:
+      user: *id001
+      score:
+        type: integer
+      tier:
+        type: string
+- name: get_many
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      users:
+        type: array
+        items: *id001
+        minItems: 1
+        maxItems: 100
+    required:
+    - users
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      entries:
+        type: array
+        items: *id002
+- name: adjust
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      user: *id001
+      event:
+        enum:
+        - win
+        - loss
+        - loyalty
+    required:
+    - user
+    - event
+    additionalProperties: false
+  output_schema: *id002
+- name: override
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      actor: *id001
+      user: *id001
+      absolute_score:
+        type: integer
+      reason:
+        type: string
+    required:
+    - actor
+    - user
+    - absolute_score
+    additionalProperties: false
+  output_schema: *id002
+- name: leaderboard
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      entries:
+        type: array
+        items: *id002
+- name: rep
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      user: *id001
+    required:
+    - user
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      user: *id001
+      score:
+        type: integer
+      tier:
+        type: string
+      next_tier:
+        type:
+        - object
+        - 'null'
+      text:
+        type: string
 config_schema: {}
 compatible_with: []
 incompatible_with: []
