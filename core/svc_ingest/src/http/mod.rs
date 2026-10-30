@@ -17,6 +17,7 @@
 
 pub mod eventsub;
 pub mod health;
+pub mod webhook;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -46,6 +47,10 @@ pub struct AppState {
     /// unconditionally and responds `503` in that case, matching every
     /// other fixed-platform receiver's graceful-degradation contract.
     pub eventsub: Option<Arc<eventsub::EventSubState>>,
+    /// Generic registered-webhook ingress (`crate::http::webhook`, P6a);
+    /// `None` until the route registry is wired -- the route then answers
+    /// `503` (fail loud), never an unverified accept.
+    pub webhook: Option<Arc<crate::connector::webhook::WebhookIngress>>,
     /// Per-receiver spine-connect readiness, shared with `crate::lib`'s
     /// `try_start_twitch_irc`/`try_start_discord`/`try_start_twitch_outbound`
     /// -- backs `GET /readyz` (`crate::http::health::readyz`). Regression:
@@ -69,8 +74,25 @@ impl AppState {
             request_metrics,
             started_at: Instant::now(),
             eventsub: None,
+            webhook: None,
             receiver_readiness: Arc::new(crate::ReceiverReadiness::new()),
         }
+    }
+}
+
+/// Bounded metric/trace label for a request path: fixed routes pass through,
+/// parameterized routes collapse to their template (so a webhook route key or
+/// callback key never becomes a label), everything else is `unmatched`.
+pub(crate) fn metric_path(path: &str) -> String {
+    const FIXED: [&str; 4] = ["/health", "/healthz", "/readyz", "/eventsub/twitch/webhook"];
+    if FIXED.contains(&path) {
+        path.to_string()
+    } else if path.starts_with("/intake/webhook/") {
+        "/intake/webhook/{route_key}".to_string()
+    } else if path.starts_with("/eventsub/twitch/webhook/") {
+        "/eventsub/twitch/webhook/{callback_key}".to_string()
+    } else {
+        "unmatched".to_string()
     }
 }
 
@@ -80,7 +102,7 @@ impl AppState {
 /// least one request (the `up` gauge covers the window before that).
 async fn record_http_metrics(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let method = req.method().to_string();
-    let path = req.uri().path().to_string();
+    let path = metric_path(req.uri().path());
     let start = Instant::now();
     let response = next.run(req).await;
     let status = response.status().as_u16().to_string();
@@ -99,9 +121,11 @@ async fn record_http_metrics(State(state): State<AppState>, req: Request, next: 
 
 /// Builds the control-plane router: `/health` and `/healthz`.
 ///
+/// The generic registered-webhook intake (`POST /intake/webhook/{route_key}`,
+/// [`webhook`]) mounts here.
+///
 /// // TODO(M5): connectors/intake -- blocked on M1 penguin-connectors +
-/// // M2 (compiler/SDKs/hub-api hooks). The generic webhook intake
-/// // (`POST /intake/webhook/{tenant}/{source}`), the JWT intake
+/// // M2 (compiler/SDKs/hub-api hooks). The JWT intake
 /// // (`POST /intake/events`), and the six platform normalizers/receivers
 /// // mount into this router once those crates land -- see spec S4.1,
 /// // S10. Nothing here fakes that surface: an unmounted route 404s,
@@ -117,11 +141,21 @@ pub fn router(state: AppState) -> Router {
     // `eventsub`'s module doc for why it's a separately-built, merged-in
     // `Router` rather than folded into the routes above.
     base.merge(eventsub::router(state.clone()))
+        .merge(webhook::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state,
             record_http_metrics,
         ))
-        .layer(TraceLayer::new_for_http())
+        // Span carries the bounded template, never the raw URI (route keys).
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|req: &Request<axum::body::Body>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %req.method(),
+                    path = %metric_path(req.uri().path()),
+                )
+            }),
+        )
 }
 
 /// Builds the secondary Prometheus metrics router, bound to its own port
@@ -132,4 +166,23 @@ pub fn metrics_router(state: AppState) -> Router {
     Router::new()
         .route("/metrics", get(health::metrics))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod metric_path_tests {
+    use super::metric_path;
+
+    #[test]
+    fn label_is_the_template_never_the_raw_path() {
+        assert_eq!(
+            metric_path("/intake/webhook/super-secret-route-key"),
+            "/intake/webhook/{route_key}"
+        );
+        assert_eq!(
+            metric_path("/eventsub/twitch/webhook/cb123"),
+            "/eventsub/twitch/webhook/{callback_key}"
+        );
+        assert_eq!(metric_path("/healthz"), "/healthz");
+        assert_eq!(metric_path("/random/attacker/path-1"), "unmatched");
+    }
 }

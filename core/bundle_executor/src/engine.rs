@@ -222,7 +222,7 @@ pub const EPOCH_TICK: Duration = Duration::from_millis(50);
 /// as a public constant, so this is a literal that must be bumped
 /// alongside Cargo.toml's `wasmtime`/`wasmtime-wasi` version pins --
 /// `tests` below assert it matches `Cargo.toml`.
-pub const WASMTIME_VERSION: &str = "49.0.4";
+pub const WASMTIME_VERSION: &str = "49.0.5";
 
 /// Spawns the task that advances `engine`'s epoch every [`EPOCH_TICK`].
 ///
