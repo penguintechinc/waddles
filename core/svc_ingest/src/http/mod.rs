@@ -17,6 +17,7 @@
 
 pub mod eventsub;
 pub mod health;
+pub mod webhook;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -46,6 +47,10 @@ pub struct AppState {
     /// unconditionally and responds `503` in that case, matching every
     /// other fixed-platform receiver's graceful-degradation contract.
     pub eventsub: Option<Arc<eventsub::EventSubState>>,
+    /// Generic registered-webhook ingress (`crate::http::webhook`, P6a);
+    /// `None` until the route registry is wired -- the route then answers
+    /// `503` (fail loud), never an unverified accept.
+    pub webhook: Option<Arc<crate::connector::webhook::WebhookIngress>>,
     /// Per-receiver spine-connect readiness, shared with `crate::lib`'s
     /// `try_start_twitch_irc`/`try_start_discord`/`try_start_twitch_outbound`
     /// -- backs `GET /readyz` (`crate::http::health::readyz`). Regression:
@@ -69,6 +74,7 @@ impl AppState {
             request_metrics,
             started_at: Instant::now(),
             eventsub: None,
+            webhook: None,
             receiver_readiness: Arc::new(crate::ReceiverReadiness::new()),
         }
     }
@@ -99,9 +105,11 @@ async fn record_http_metrics(State(state): State<AppState>, req: Request, next: 
 
 /// Builds the control-plane router: `/health` and `/healthz`.
 ///
+/// The generic registered-webhook intake (`POST /intake/webhook/{route_key}`,
+/// [`webhook`]) mounts here.
+///
 /// // TODO(M5): connectors/intake -- blocked on M1 penguin-connectors +
-/// // M2 (compiler/SDKs/hub-api hooks). The generic webhook intake
-/// // (`POST /intake/webhook/{tenant}/{source}`), the JWT intake
+/// // M2 (compiler/SDKs/hub-api hooks). The JWT intake
 /// // (`POST /intake/events`), and the six platform normalizers/receivers
 /// // mount into this router once those crates land -- see spec S4.1,
 /// // S10. Nothing here fakes that surface: an unmounted route 404s,
@@ -117,6 +125,7 @@ pub fn router(state: AppState) -> Router {
     // `eventsub`'s module doc for why it's a separately-built, merged-in
     // `Router` rather than folded into the routes above.
     base.merge(eventsub::router(state.clone()))
+        .merge(webhook::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state,
             record_http_metrics,

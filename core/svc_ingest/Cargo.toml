@@ -195,6 +195,10 @@ sha2 = "=0.10.9"
 # security-sensitive check. Already resolves to this exact version
 # transitively (via `hmac`/`digest`, confirmed in `Cargo.lock`).
 subtle = "=2.6.1"
+# Ed25519 verification for the generic webhook `Scheme::Ed25519`
+# (`connector::webhook_verify`). Already in the lockfile via rustls; pinned
+# directly because this module calls it.
+ring = "=0.17.14"
 # Identity-field envelope encryption (`src/identity_crypto.rs`) --
 # AES-256-GCM (`aes-gcm`), per-tenant DEK derivation for the dev/alpha
 # fallback provider (`hkdf`), the JSON envelope's nonce/ciphertext encoding
