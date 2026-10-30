@@ -46,6 +46,8 @@ pub(crate) fn record_call(op: &'static str, outcome: &'static str, seconds: f64)
 }
 
 /// Records the absolute size of one applied adjustment.
-pub(crate) fn record_applied_delta(abs: u32) {
+pub(crate) fn record_applied_delta(abs: u64) {
+    // Display-only histogram: saturate rather than overflow the u32 range.
+    let abs = u32::try_from(abs).unwrap_or(u32::MAX);
     instruments().delta_abs.record(f64::from(abs), &[]);
 }

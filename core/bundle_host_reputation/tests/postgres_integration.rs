@@ -19,8 +19,9 @@ use bundle_capability_gate::{
     HostInvokeScopeBuilder, MembershipCheck, ScopeKind, SnapshotMembership, TenantTier,
 };
 use bundle_host_reputation::{
-    connect, load_membership, ConnectConfig, PostgresReputationStore, ReputationCaps,
-    ReputationError, ReputationScope, ReputationStore,
+    connect, load_membership, ConnectConfig, IdempotencyKey, PostgresReputationStore,
+    ReputationCaps, ReputationError, ReputationScope, ReputationStore, ScoreEntry, MAX_BATCH,
+    MAX_LEADERBOARD_LIMIT, MAX_SCORE, MIN_SCORE,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use testcontainers::core::logs::LogSource;
@@ -37,6 +38,7 @@ const REP_PASSWORD: &str = "waddles_bundle_reputation_test_pw";
 const APP_ID: &str = "waddles.core.test-reputation";
 const OTHER_APP_ID: &str = "waddles.core.other-reputation";
 const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_store.sql");
+const HOST_OPS_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_host_ops.sql");
 
 const TENANT: i32 = 1;
 const COMMUNITY: i32 = 10;
@@ -213,6 +215,9 @@ async fn fixture() -> Fixture {
     exec(&su, SHIPPED_DDL).await;
     // Shipped DDL is idempotent: a second application must succeed.
     exec(&su, SHIPPED_DDL).await;
+    // Host-ops DDL (alembic 0069) runs after it, also idempotent.
+    exec(&su, HOST_OPS_DDL).await;
+    exec(&su, HOST_OPS_DDL).await;
 
     let member = Uuid::new_v4();
     exec(
@@ -820,4 +825,720 @@ async fn membership_loader_returns_only_this_tenants_active_identified_members()
     assert!(snapshot.is_member(&scope, f.member, ScopeKind::Community));
     assert!(!snapshot.is_member(&scope, departed, ScopeKind::Community));
     assert!(!snapshot.is_member(&scope, t2_member, ScopeKind::Community));
+}
+
+// ---------------------------------------------------------------------------
+// P5 Task 1: score clamp + admin override
+// ---------------------------------------------------------------------------
+
+fn key(k: &str) -> IdempotencyKey {
+    IdempotencyKey::new(k).unwrap()
+}
+
+async fn set_balance(f: &Fixture, user: Uuid, balance: i64) {
+    exec(
+        &f.su,
+        &format!(
+            "INSERT INTO bundle_reputation_scores (tenant_id, community_id, user_uuid, balance) \
+             VALUES ({TENANT}, {COMMUNITY}, '{user}', {balance}) \
+             ON CONFLICT (community_id, user_uuid) DO UPDATE SET balance = {balance}"
+        ),
+    )
+    .await;
+}
+
+async fn scalar_text(conn: &DatabaseConnection, sql: &str) -> String {
+    conn.query_one_raw(Statement::from_string(sea_orm::DbBackend::Postgres, sql))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index::<String>(0)
+        .unwrap()
+}
+
+/// The DB CHECK is the backstop under the store's clamp: no writer, however
+/// privileged, can persist an out-of-range score.
+#[tokio::test]
+async fn the_score_range_check_rejects_an_out_of_range_balance() {
+    let f = fixture().await;
+    for bad in [MAX_SCORE + 1, MIN_SCORE - 1] {
+        let err = f
+            .su
+            .execute_unprepared(&format!(
+                "INSERT INTO bundle_reputation_scores (tenant_id, community_id, user_uuid, balance) \
+                 VALUES ({TENANT}, {COMMUNITY}, '{}', {bad})",
+                f.member
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ck_bundle_reputation_scores_balance_range"),
+            "{err}"
+        );
+    }
+}
+
+/// An adjust that would cross the bound is clamped, ledgered with the APPLIED
+/// delta (reconciles with the balance) and the REQUESTED one (which is what
+/// the caps meter), and a call already pinned at the bound still consumes quota.
+#[tokio::test]
+async fn adjust_clamps_at_the_bounds_and_the_ledger_reconciles() {
+    let f = fixture().await;
+    set_balance(&f, f.member, MAX_SCORE - 2).await;
+    assert_eq!(
+        f.store
+            .adjust(&scope(), f.member, 5, "win", caps(100))
+            .await,
+        Ok(MAX_SCORE)
+    );
+    assert_eq!(
+        scalar_i64(
+            &f.su,
+            "SELECT delta::BIGINT FROM bundle_reputation_adjustments ORDER BY id DESC LIMIT 1"
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        scalar_i64(
+            &f.su,
+            "SELECT requested_value FROM bundle_reputation_adjustments ORDER BY id DESC LIMIT 1"
+        )
+        .await,
+        5
+    );
+    // Pinned at the bound: no movement, but the call is ledgered and metered.
+    assert_eq!(
+        f.store
+            .adjust(&scope(), f.member, 5, "win", caps(100))
+            .await,
+        Ok(MAX_SCORE)
+    );
+    assert_eq!(ledger_count(&f).await, 2);
+    // ...so a cap of 10 is now exhausted (5 + 5), not unbounded.
+    assert_eq!(
+        f.store.adjust(&scope(), f.member, 1, "win", caps(10)).await,
+        Err(ReputationError::DailyCapExceeded { cap: 10 })
+    );
+    set_balance(&f, f.member, MIN_SCORE + 1).await;
+    assert_eq!(
+        f.store
+            .adjust(&scope(), f.member, -5, "loss", caps(100))
+            .await,
+        Ok(MIN_SCORE)
+    );
+}
+
+#[tokio::test]
+async fn override_sets_an_absolute_score_and_ledgers_admin_override() {
+    let f = fixture().await;
+    f.store
+        .adjust(&scope(), f.member, 3, "win", caps(100))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .override_score(&scope(), f.member, 250, "admin.fix", &key("e1:override:0"))
+            .await,
+        Ok(250)
+    );
+    assert_eq!(f.store.get(&scope(), f.member).await, Ok(250));
+    let sql = "SELECT kind FROM bundle_reputation_adjustments ORDER BY id DESC LIMIT 1";
+    assert_eq!(scalar_text(&f.su, sql).await, "admin_override");
+    assert_eq!(
+        scalar_i64(
+            &f.su,
+            "SELECT delta::BIGINT FROM bundle_reputation_adjustments ORDER BY id DESC LIMIT 1"
+        )
+        .await,
+        247
+    );
+    assert_eq!(
+        scalar_i64(
+            &f.su,
+            "SELECT balance_after FROM bundle_reputation_adjustments ORDER BY id DESC LIMIT 1"
+        )
+        .await,
+        250
+    );
+    // Negative absolute scores are legal.
+    assert_eq!(
+        f.store
+            .override_score(&scope(), f.member, -40, "admin.fix", &key("e1:override:1"))
+            .await,
+        Ok(-40)
+    );
+}
+
+#[tokio::test]
+async fn override_clamps_an_absurd_absolute_score() {
+    let f = fixture().await;
+    assert_eq!(
+        f.store
+            .override_score(&scope(), f.member, i64::MAX, "admin.fix", &key("k1"))
+            .await,
+        Ok(MAX_SCORE)
+    );
+    assert_eq!(
+        f.store
+            .override_score(&scope(), f.member, i64::MIN, "admin.fix", &key("k2"))
+            .await,
+        Ok(MIN_SCORE)
+    );
+    assert_eq!(f.store.get(&scope(), f.member).await, Ok(MIN_SCORE));
+}
+
+/// An override is an admin action, not a capped delta: it neither trips nor
+/// consumes the rolling-24h adjust caps.
+#[tokio::test]
+async fn override_is_outside_the_daily_caps_and_does_not_consume_them() {
+    let f = fixture().await;
+    f.store
+        .override_score(&scope(), f.member, 900, "admin.fix", &key("k1"))
+        .await
+        .unwrap();
+    // A 900-point override left the user's whole adjust budget intact.
+    assert_eq!(
+        f.store
+            .adjust(&scope(), f.member, 5, "win", caps2(5, 5))
+            .await,
+        Ok(905)
+    );
+    // ...and an override still works with the budget fully spent.
+    assert_eq!(
+        f.store
+            .override_score(&scope(), f.member, 1, "admin.fix", &key("k2"))
+            .await,
+        Ok(1)
+    );
+}
+
+#[tokio::test]
+async fn override_rejects_non_members_and_bad_reasons_writing_nothing() {
+    let f = fixture().await;
+    let stranger = Uuid::new_v4();
+    assert_eq!(
+        f.store
+            .override_score(&scope(), stranger, 5, "admin.fix", &key("k1"))
+            .await,
+        Err(ReputationError::NotAMember)
+    );
+    let other_comm_user = add_member(&f, OTHER_COMMUNITY).await;
+    assert_eq!(
+        f.store
+            .override_score(&scope(), other_comm_user, 5, "admin.fix", &key("k2"))
+            .await,
+        Err(ReputationError::NotAMember)
+    );
+    assert!(matches!(
+        f.store
+            .override_score(&scope(), f.member, 5, "Bad Reason", &key("k3"))
+            .await,
+        Err(ReputationError::Invalid(_))
+    ));
+    assert_eq!(ledger_count(&f).await, 0);
+}
+
+#[tokio::test]
+async fn override_is_idempotent_on_its_key_and_conflicts_on_changed_parameters() {
+    let f = fixture().await;
+    let k = key("evt-9:override:0");
+    assert_eq!(
+        f.store
+            .override_score(&scope(), f.member, 77, "admin.fix", &k)
+            .await,
+        Ok(77)
+    );
+    // Something else moves the score; the replay must NOT re-apply.
+    f.store
+        .adjust(&scope(), f.member, 2, "win", caps(100))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .override_score(&scope(), f.member, 77, "admin.fix", &k)
+            .await,
+        Ok(77),
+        "a replay answers with the original result"
+    );
+    assert_eq!(
+        f.store.get(&scope(), f.member).await,
+        Ok(79),
+        "and moves nothing"
+    );
+    assert_eq!(ledger_count(&f).await, 2);
+    assert_eq!(
+        f.store
+            .override_score(&scope(), f.member, 78, "admin.fix", &k)
+            .await,
+        Err(ReputationError::IdempotencyConflict)
+    );
+    // Same key, different user -> conflict as well.
+    let other = add_member(&f, COMMUNITY).await;
+    assert_eq!(
+        f.store
+            .override_score(&scope(), other, 77, "admin.fix", &k)
+            .await,
+        Err(ReputationError::IdempotencyConflict)
+    );
+    // Another app's identical key is a different scope: independent.
+    let other_app = ReputationScope {
+        app_id: OTHER_APP_ID.to_string(),
+        ..scope()
+    };
+    assert_eq!(
+        f.store
+            .override_score(&other_app, f.member, 5, "admin.fix", &k)
+            .await,
+        Ok(5)
+    );
+}
+
+#[tokio::test]
+async fn override_is_atomic_a_failing_ledger_insert_rolls_back_the_score() {
+    let f = fixture().await;
+    let bad = ReputationScope {
+        app_id: "waddles.unknown.not-in-catalog".to_string(),
+        ..scope()
+    };
+    let err = f
+        .store
+        .override_score(&bad, f.member, 9, "admin.fix", &key("k"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ReputationError::Backend(_)), "{err:?}");
+    assert_eq!(f.store.get(&scope(), f.member).await, Ok(0));
+    assert_eq!(
+        scalar_i64(&f.su, "SELECT COUNT(*) FROM bundle_reputation_scores").await,
+        0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P5 Task 1: adjust_many
+// ---------------------------------------------------------------------------
+
+async fn score_of(f: &Fixture, user: Uuid) -> i64 {
+    f.store.get(&scope(), user).await.unwrap()
+}
+
+#[tokio::test]
+async fn adjust_many_applies_every_item_in_one_transaction_with_a_ledger_row_each() {
+    let f = fixture().await;
+    let b = add_member(&f, COMMUNITY).await;
+    let c = add_member(&f, COMMUNITY).await;
+    let items = [(f.member, 3), (b, -2), (c, 1)];
+    f.store
+        .adjust_many(
+            &scope(),
+            &items,
+            "game.round",
+            caps(10),
+            &key("e1:adjust_many:0"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(score_of(&f, f.member).await, 3);
+    assert_eq!(score_of(&f, b).await, -2);
+    assert_eq!(score_of(&f, c).await, 1);
+    assert_eq!(ledger_count(&f).await, 3);
+    assert_eq!(
+        scalar_i64(&f.su, "SELECT COUNT(*) FROM bundle_reputation_adjustments WHERE kind = 'adjust' AND idempotency_key = 'e1:adjust_many:0'").await,
+        3
+    );
+}
+
+/// All-or-nothing: the second item breaches ITS per-user cap, so the first
+/// (which fit) must not land either.
+#[tokio::test]
+async fn adjust_many_is_atomic_when_any_item_breaches_the_per_user_cap() {
+    let f = fixture().await;
+    let b = add_member(&f, COMMUNITY).await;
+    f.store
+        .adjust(&scope(), b, 4, "win", caps(100))
+        .await
+        .unwrap(); // b has 4/5 used
+    let before = ledger_count(&f).await;
+    let err = f
+        .store
+        .adjust_many(&scope(), &[(f.member, 1), (b, 3)], "r", caps(5), &key("k1"))
+        .await
+        .unwrap_err();
+    assert_eq!(err, ReputationError::DailyCapExceeded { cap: 5 });
+    assert_eq!(
+        score_of(&f, f.member).await,
+        0,
+        "the in-cap item rolled back too"
+    );
+    assert_eq!(score_of(&f, b).await, 4);
+    assert_eq!(ledger_count(&f).await, before);
+}
+
+/// The batch's TOTAL counts against the per-scope cap (not each item alone).
+#[tokio::test]
+async fn adjust_many_counts_the_batch_total_against_the_scope_cap() {
+    let f = fixture().await;
+    let b = add_member(&f, COMMUNITY).await;
+    let c = add_member(&f, COMMUNITY).await;
+    let items = [(f.member, 4), (b, 4), (c, 4)]; // 12 total, each under the user cap
+    assert_eq!(
+        f.store
+            .adjust_many(&scope(), &items, "r", caps2(10, 11), &key("k1"))
+            .await,
+        Err(ReputationError::ScopeQuotaExceeded { cap: 11 })
+    );
+    assert_eq!(ledger_count(&f).await, 0);
+    f.store
+        .adjust_many(&scope(), &items, "r", caps2(10, 12), &key("k2"))
+        .await
+        .unwrap();
+    // The scope window now holds 12: even one more point is refused.
+    assert_eq!(
+        f.store
+            .adjust(&scope(), f.member, 1, "r", caps2(100, 12))
+            .await,
+        Err(ReputationError::ScopeQuotaExceeded { cap: 12 })
+    );
+}
+
+/// The 24h per-user cap still binds across the batch AND single adjusts, and a
+/// prior admin override neither trips nor feeds it.
+#[tokio::test]
+async fn adjust_many_shares_the_rolling_24h_window_with_adjust_and_ignores_overrides() {
+    let f = fixture().await;
+    f.store
+        .override_score(&scope(), f.member, 500, "admin.fix", &key("o"))
+        .await
+        .unwrap();
+    f.store
+        .adjust_many(&scope(), &[(f.member, 5)], "r", caps(5), &key("k1"))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store.adjust(&scope(), f.member, 1, "r", caps(5)).await,
+        Err(ReputationError::DailyCapExceeded { cap: 5 })
+    );
+    assert_eq!(
+        f.store
+            .adjust_many(&scope(), &[(f.member, 1)], "r", caps(5), &key("k2"))
+            .await,
+        Err(ReputationError::DailyCapExceeded { cap: 5 })
+    );
+}
+
+#[tokio::test]
+async fn adjust_many_rejects_non_members_dupes_zero_empty_and_oversize_writing_nothing() {
+    let f = fixture().await;
+    let b = add_member(&f, COMMUNITY).await;
+    let foreign = add_member(&f, OTHER_COMMUNITY).await;
+    assert_eq!(
+        f.store
+            .adjust_many(
+                &scope(),
+                &[(f.member, 1), (foreign, 1)],
+                "r",
+                caps(9),
+                &key("k1")
+            )
+            .await,
+        Err(ReputationError::NotAMember),
+        "one cross-community user fails the whole batch"
+    );
+    assert_eq!(
+        f.store
+            .adjust_many(
+                &scope(),
+                &[(f.member, 1), (Uuid::new_v4(), 1)],
+                "r",
+                caps(9),
+                &key("k2")
+            )
+            .await,
+        Err(ReputationError::NotAMember)
+    );
+    for bad in [
+        vec![(f.member, 1), (f.member, 2)],
+        vec![(f.member, 0)],
+        vec![],
+        (0..=MAX_BATCH).map(|_| (b, 1)).collect(),
+    ] {
+        assert!(
+            matches!(
+                f.store
+                    .adjust_many(&scope(), &bad, "r", caps(9), &key("k3"))
+                    .await,
+                Err(ReputationError::Invalid(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    assert!(matches!(
+        f.store
+            .adjust_many(&scope(), &[(b, 1)], "Bad Reason", caps(9), &key("k4"))
+            .await,
+        Err(ReputationError::Invalid(_))
+    ));
+    assert_eq!(ledger_count(&f).await, 0);
+    assert_eq!(
+        scalar_i64(&f.su, "SELECT COUNT(*) FROM bundle_reputation_scores").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn adjust_many_is_idempotent_on_its_key_and_conflicts_on_a_changed_batch() {
+    let f = fixture().await;
+    let b = add_member(&f, COMMUNITY).await;
+    let items = [(f.member, 2), (b, 3)];
+    let k = key("evt-3:adjust_many:0");
+    f.store
+        .adjust_many(&scope(), &items, "r", caps(10), &k)
+        .await
+        .unwrap();
+    // Replay (any order of the same items): a no-op success.
+    f.store
+        .adjust_many(&scope(), &[(b, 3), (f.member, 2)], "r", caps(10), &k)
+        .await
+        .unwrap();
+    assert_eq!(score_of(&f, f.member).await, 2);
+    assert_eq!(score_of(&f, b).await, 3);
+    assert_eq!(ledger_count(&f).await, 2);
+    for changed in [
+        vec![(f.member, 2), (b, 4)],
+        vec![(f.member, 2)],
+        vec![(f.member, 2), (b, 3), (add_member(&f, COMMUNITY).await, 1)],
+    ] {
+        assert_eq!(
+            f.store
+                .adjust_many(&scope(), &changed, "r", caps(10), &k)
+                .await,
+            Err(ReputationError::IdempotencyConflict),
+            "{changed:?}"
+        );
+    }
+    assert_eq!(ledger_count(&f).await, 2);
+}
+
+#[tokio::test]
+async fn adjust_many_clamps_per_item_at_the_bounds() {
+    let f = fixture().await;
+    let b = add_member(&f, COMMUNITY).await;
+    set_balance(&f, f.member, MAX_SCORE - 1).await;
+    set_balance(&f, b, MIN_SCORE + 1).await;
+    f.store
+        .adjust_many(
+            &scope(),
+            &[(f.member, 5), (b, -5)],
+            "r",
+            caps(10),
+            &key("k"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(score_of(&f, f.member).await, MAX_SCORE);
+    assert_eq!(score_of(&f, b).await, MIN_SCORE);
+}
+
+#[tokio::test]
+async fn adjust_many_is_atomic_a_failing_ledger_insert_rolls_back_every_score() {
+    let f = fixture().await;
+    let b = add_member(&f, COMMUNITY).await;
+    let bad = ReputationScope {
+        app_id: "waddles.unknown.not-in-catalog".to_string(),
+        ..scope()
+    };
+    let err = f
+        .store
+        .adjust_many(&bad, &[(f.member, 1), (b, 1)], "r", caps(9), &key("k"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ReputationError::Backend(_)), "{err:?}");
+    assert_eq!(
+        scalar_i64(&f.su, "SELECT COUNT(*) FROM bundle_reputation_scores").await,
+        0
+    );
+}
+
+/// Overlapping concurrent batches across two replicas: no deadlock (uniform
+/// lock order), and the per-user cap is never exceeded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_overlapping_adjust_many_never_deadlock_or_exceed_the_cap() {
+    let f = fixture().await;
+    let b = add_member(&f, COMMUNITY).await;
+    let s1 = Arc::new(fresh_replica(&f).await);
+    let s2 = Arc::new(fresh_replica(&f).await);
+    let mut tasks = Vec::new();
+    for i in 0..16 {
+        let store = if i % 2 == 0 {
+            Arc::clone(&s1)
+        } else {
+            Arc::clone(&s2)
+        };
+        let (m, other) = (f.member, b);
+        tasks.push(tokio::spawn(async move {
+            // Opposite item order per task: a naive lock order would deadlock.
+            let items = if i % 3 == 0 {
+                [(m, 1), (other, 1)]
+            } else {
+                [(other, 1), (m, 1)]
+            };
+            let k = IdempotencyKey::new(format!("race:{i}")).unwrap();
+            store
+                .adjust_many(&scope(), &items, "race", caps(6), &k)
+                .await
+        }));
+    }
+    let (mut ok, mut capped) = (0, 0);
+    for t in tasks {
+        match t.await.unwrap() {
+            Ok(()) => ok += 1,
+            Err(ReputationError::DailyCapExceeded { .. }) => capped += 1,
+            Err(other) => panic!("unexpected: {other:?}"),
+        }
+    }
+    assert_eq!(ok, 6);
+    assert_eq!(capped, 10);
+    assert_eq!(score_of(&f, f.member).await, 6);
+    assert_eq!(score_of(&f, b).await, 6);
+}
+
+// ---------------------------------------------------------------------------
+// P5 Task 1: get_many + leaderboard
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_many_returns_request_order_dedupes_and_reports_zero_for_unscored_members() {
+    let f = fixture().await;
+    let b = add_member(&f, COMMUNITY).await;
+    let c = add_member(&f, COMMUNITY).await;
+    f.store
+        .adjust(&scope(), f.member, 4, "r", caps(10))
+        .await
+        .unwrap();
+    f.store
+        .adjust(&scope(), b, -3, "r", caps(10))
+        .await
+        .unwrap();
+    let got = f
+        .store
+        .get_many(&scope(), &[b, c, f.member, b])
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        vec![
+            ScoreEntry { user: b, score: -3 },
+            ScoreEntry { user: c, score: 0 },
+            ScoreEntry {
+                user: f.member,
+                score: 4
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn get_many_is_bounded_and_fail_closed_on_non_members_and_other_communities() {
+    let f = fixture().await;
+    let foreign = add_member(&f, OTHER_COMMUNITY).await;
+    assert_eq!(
+        f.store.get_many(&scope(), &[f.member, foreign]).await,
+        Err(ReputationError::NotAMember),
+        "community isolation: a user of another community is not readable here"
+    );
+    assert_eq!(
+        f.store
+            .get_many(&scope(), &[f.member, Uuid::new_v4()])
+            .await,
+        Err(ReputationError::NotAMember)
+    );
+    assert!(matches!(
+        f.store.get_many(&scope(), &[]).await,
+        Err(ReputationError::Invalid(_))
+    ));
+    let oversize: Vec<Uuid> = (0..=MAX_BATCH).map(|_| Uuid::new_v4()).collect();
+    assert!(matches!(
+        f.store.get_many(&scope(), &oversize).await,
+        Err(ReputationError::Invalid(_))
+    ));
+    // Exactly MAX_BATCH distinct members is accepted (one round-trip).
+    let mut many = Vec::new();
+    for _ in 0..MAX_BATCH {
+        many.push(add_member(&f, COMMUNITY).await);
+    }
+    assert_eq!(
+        f.store.get_many(&scope(), &many).await.unwrap().len(),
+        MAX_BATCH
+    );
+}
+
+#[tokio::test]
+async fn get_many_treats_a_departed_member_as_a_non_member() {
+    let f = fixture().await;
+    let b = add_member(&f, COMMUNITY).await;
+    exec(
+        &f.su,
+        &format!("UPDATE community_members SET left_at = NOW() WHERE user_uuid = '{b}'"),
+    )
+    .await;
+    assert_eq!(
+        f.store.get_many(&scope(), &[f.member, b]).await,
+        Err(ReputationError::NotAMember)
+    );
+}
+
+#[tokio::test]
+async fn leaderboard_is_ordered_limited_community_isolated_and_active_only() {
+    let f = fixture().await;
+    let mut users = vec![f.member];
+    for _ in 0..4 {
+        users.push(add_member(&f, COMMUNITY).await);
+    }
+    for (i, u) in users.iter().enumerate() {
+        // scores 10, 20, 30, 40, 50
+        set_balance(&f, *u, 10 * (i as i64 + 1)).await;
+    }
+    // A foreign community's higher scorer must never appear.
+    let foreign = add_member(&f, OTHER_COMMUNITY).await;
+    exec(&f.su, &format!(
+        "INSERT INTO bundle_reputation_scores (tenant_id, community_id, user_uuid, balance) VALUES ({OTHER_TENANT}, {OTHER_COMMUNITY}, '{foreign}', 999)")).await;
+    // A departed member must not appear either.
+    exec(
+        &f.su,
+        &format!(
+            "UPDATE community_members SET left_at = NOW() WHERE user_uuid = '{}'",
+            users[4]
+        ),
+    )
+    .await;
+
+    let top = f.store.leaderboard(&scope(), 100).await.unwrap();
+    let scores: Vec<i64> = top.iter().map(|e| e.score).collect();
+    assert_eq!(scores, vec![40, 30, 20, 10]);
+    assert!(top.iter().all(|e| e.user != foreign && e.user != users[4]));
+
+    let two = f.store.leaderboard(&scope(), 2).await.unwrap();
+    assert_eq!(
+        two.iter().map(|e| e.score).collect::<Vec<_>>(),
+        vec![40, 30]
+    );
+}
+
+#[tokio::test]
+async fn leaderboard_breaks_ties_by_user_uuid_and_rejects_bad_limits() {
+    let f = fixture().await;
+    let b = add_member(&f, COMMUNITY).await;
+    set_balance(&f, f.member, 7).await;
+    set_balance(&f, b, 7).await;
+    let top = f.store.leaderboard(&scope(), 10).await.unwrap();
+    let mut expect = [f.member, b];
+    expect.sort();
+    assert_eq!(top.iter().map(|e| e.user).collect::<Vec<_>>(), expect);
+    for bad in [0, MAX_LEADERBOARD_LIMIT + 1] {
+        assert!(matches!(
+            f.store.leaderboard(&scope(), bad).await,
+            Err(ReputationError::Invalid(_))
+        ));
+    }
 }
