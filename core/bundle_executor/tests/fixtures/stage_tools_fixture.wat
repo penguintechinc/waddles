@@ -7,11 +7,11 @@
     (local.set $p (global.get $bump))
     (global.set $bump (i32.add (global.get $bump) (local.get 3)))
     (local.get $p))
-  ;; call(name: string, args: list<u8>) -> result<list<u8>, tool-error>
-  ;; returns ptr to [disc u8 @0][list ptr @4][list len @8]: ok(empty list)
+;; call(name: string, args: list<u8>) -> result<list<u8>, tool-error>
+  ;; echoes args: returns ptr to [disc u8 @0][list ptr @4][list len @8] = ok(args)
   (func (export "waddle:bundle/tool-provider@1.0.0#call") (param i32 i32 i32 i32) (result i32)
     (i32.store8 (i32.const 512) (i32.const 0))
-    (i32.store (i32.const 516) (i32.const 0))
-    (i32.store (i32.const 520) (i32.const 0))
+    (i32.store (i32.const 516) (local.get 2))
+    (i32.store (i32.const 520) (local.get 3))
     (i32.const 512))
 )

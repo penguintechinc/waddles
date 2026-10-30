@@ -325,6 +325,9 @@ pub fn build_linker(engine: &Engine) -> Result<Linker<ExecState>, ExecutorError>
     Stage::add_to_linker::<_, HasExecState>(&mut linker, |s| s)?;
     link_stage_next_imports(&mut linker)?;
     link_stage_v2_imports(&mut linker)?;
+    // Shared stage linker serves `stage-tools` providers too (inert for any
+    // component that does not import `tool`).
+    link_stage_tools_imports(&mut linker)?;
 
     Ok(linker)
 }

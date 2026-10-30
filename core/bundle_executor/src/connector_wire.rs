@@ -365,7 +365,7 @@ async fn dispatch(
         }
         // Rejected by `invoke` before dispatch; kept total so adding an
         // export is a compile error here, never a silent drop.
-        ExportKind::Transform | ExportKind::Dispatch => Err(error_body(
+        ExportKind::Transform | ExportKind::Dispatch | ExportKind::ToolCall => Err(error_body(
             ErrorCode::ExportMissing,
             format!("{} is not a connector export", export.as_str()),
         )),
@@ -404,7 +404,11 @@ mod tests {
     #[tokio::test]
     async fn a_stage_export_is_refused_by_the_connector_router() {
         let router = ConnectorRouter::new();
-        for export in [ExportKind::Transform, ExportKind::Dispatch] {
+        for export in [
+            ExportKind::Transform,
+            ExportKind::Dispatch,
+            ExportKind::ToolCall,
+        ] {
             let err = router
                 .invoke(body(export, serde_json::json!({})))
                 .await

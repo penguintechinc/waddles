@@ -1569,8 +1569,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-bundle-host"
-version = "0.3.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=0b97183fa7ae7c91464bd6539821ad0a091d5764#0b97183fa7ae7c91464bd6539821ad0a091d5764"
+version = "0.4.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=76741cb520b6e06be1a2792ff4a1af5e55920811#76741cb520b6e06be1a2792ff4a1af5e55920811"
 dependencies = [
  "regex",
  "serde",

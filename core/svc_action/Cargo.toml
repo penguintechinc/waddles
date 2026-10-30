@@ -88,7 +88,7 @@ penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", re
 # `src/host_api.rs`. Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # (PR penguintechinc/penguin-libs#93, same commit `core/bundle_executor`
 # pins).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0b97183fa7ae7c91464bd6539821ad0a091d5764", package = "penguin-bundle-host", version = "=0.3.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "76741cb520b6e06be1a2792ff4a1af5e55920811", package = "penguin-bundle-host", version = "=0.4.0" }
 # Spec SS13.5's two flags this crate gates on (`waddles.core.rust-data-plane`,
 # `waddles.core.bundle-egress`) -- see `src/flags.rs`. Pinned to the tip of
 # `release/rust-licensing/v0.1.x`.
