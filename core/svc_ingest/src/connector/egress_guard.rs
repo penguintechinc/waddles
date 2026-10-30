@@ -10,78 +10,98 @@
 //! documentation ranges are refused unless the EXACT ip is in the explicit
 //! allowlist the host config grants.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 /// DNS lookup ceiling.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Unwraps IPv4 embedded in v6 forms (mapped, compatible, NAT64, 6to4) so a
-/// v6 spelling cannot smuggle a forbidden v4 target.
-fn canonical(ip: IpAddr) -> IpAddr {
-    let IpAddr::V6(v6) = ip else { return ip };
-    let s = v6.segments();
+/// IPv4 embedded in a v6 spelling that must be judged by the v4 deny set:
+/// mapped `::ffff:0:0/96`, compatible `::/96`, NAT64 `64:ff9b::/96`. (6to4
+/// `2002::/16` is NOT unwrapped: it is denied outright, as in the source.)
+fn embedded_v4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
     if let Some(v4) = v6.to_ipv4_mapped() {
-        return IpAddr::V4(v4);
+        return Some(v4);
     }
-    let v4 = |hi: u16, lo: u16| {
-        let [a, b] = hi.to_be_bytes();
-        let [c, d] = lo.to_be_bytes();
-        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    let s = v6.segments();
+    let tail = || {
+        let [a, b] = s[6].to_be_bytes();
+        let [c, d] = s[7].to_be_bytes();
+        Ipv4Addr::new(a, b, c, d)
     };
     if s[..6] == [0, 0, 0, 0, 0, 0] && !v6.is_unspecified() && !v6.is_loopback() {
-        return v4(s[6], s[7]);
+        return Some(tail());
     }
     if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-        return v4(s[6], s[7]);
+        return Some(tail());
     }
-    if s[0] == 0x2002 {
-        return v4(s[1], s[2]);
-    }
-    ip
+    None
 }
 
-/// Why `ip` may not be dialed, or `None` when it is a public address.
+fn forbidden_v4(v: Ipv4Addr) -> Option<&'static str> {
+    let o = v.octets();
+    if v.is_loopback() {
+        Some("loopback")
+    } else if o[0] == 0 {
+        Some("unspecified")
+    } else if v.is_link_local() {
+        Some("link-local/metadata")
+    } else if v.is_private() {
+        Some("private")
+    } else if o[0] == 100 && (o[1] & 0xC0) == 64 {
+        Some("cgnat")
+    } else if v.is_multicast() || v == Ipv4Addr::BROADCAST || o[0] >= 240 {
+        Some("multicast/reserved")
+    } else if (o[0] == 192 && o[1] == 0 && o[2] == 0)
+        || (o[0] == 192 && o[1] == 88 && o[2] == 99)
+        || (o[0] == 198 && (o[1] & 0xFE) == 18)
+        || v.is_documentation()
+    {
+        Some("special-use")
+    } else {
+        None
+    }
+}
+
+/// Why `ip` may not be dialed, or `None` for a genuine global-unicast
+/// address. MUST stay in sync with
+/// `core/bundle_host_http::egress::is_forbidden_address` (same denylist;
+/// replicated, not depended on, to keep svc_ingest's build graph unchanged --
+/// factoring into one shared crate is a tracked follow-up). Where the two
+/// differ this one is stricter, never looser.
 #[must_use]
 pub(crate) fn forbidden_reason(ip: IpAddr) -> Option<&'static str> {
-    match canonical(ip) {
-        IpAddr::V4(v) => {
-            let o = v.octets();
-            if v.is_loopback() {
-                Some("loopback")
-            } else if o[0] == 0 {
-                Some("unspecified")
-            } else if v.is_link_local() {
-                Some("link-local/metadata")
-            } else if v.is_private() {
-                Some("private")
-            } else if o[0] == 100 && (o[1] & 0xC0) == 64 {
-                Some("cgnat")
-            } else if v.is_multicast() || v == Ipv4Addr::BROADCAST || o[0] >= 240 {
-                Some("multicast/reserved")
-            } else if (o[0] == 192 && o[1] == 0 && o[2] == 0)
-                || (o[0] == 198 && (o[1] & 0xFE) == 18)
-                || v.is_documentation()
-            {
-                Some("special-use")
-            } else {
-                None
-            }
-        }
+    match ip {
+        IpAddr::V4(v) => forbidden_v4(v),
         IpAddr::V6(v) => {
             let s = v.segments();
-            if v.is_loopback() {
-                Some("loopback")
-            } else if v.is_unspecified() {
+            let s0 = s[0];
+            if v.is_unspecified() {
                 Some("unspecified")
-            } else if v.is_multicast() {
+            } else if v.is_loopback() {
+                Some("loopback")
+            } else if (s0 & 0xFF00) == 0xFF00 {
                 Some("multicast")
-            } else if (s[0] & 0xFFC0) == 0xFE80 {
+            } else if (s0 & 0xFFC0) == 0xFE80 {
                 Some("link-local")
-            } else if (s[0] & 0xFE00) == 0xFC00 {
+            } else if (s0 & 0xFFC0) == 0xFEC0 {
+                Some("site-local")
+            } else if (s0 & 0xFE00) == 0xFC00 {
                 Some("unique-local")
-            } else if s[0] == 0x2001 && (s[1] == 0 || s[1] == 0xDB8) {
+            } else if s[..4] == [0x100, 0, 0, 0] {
+                Some("discard")
+            } else if s[..3] == [0x64, 0xff9b, 1] {
+                Some("local-nat64")
+            } else if s0 == 0x2001 && (s[1] < 0x200 || s[1] == 0x0db8) {
+                Some("special-use") // 2001::/23 + 2001:db8::/32
+            } else if s0 == 0x2002 {
+                Some("6to4")
+            } else if s0 == 0x3fff && s[1] < 0x1000 {
+                Some("documentation")
+            } else if s0 == 0x5f00 {
                 Some("special-use")
+            } else if let Some(v4) = embedded_v4(v) {
+                forbidden_v4(v4)
             } else {
                 None
             }

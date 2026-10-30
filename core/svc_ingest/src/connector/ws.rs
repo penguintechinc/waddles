@@ -487,6 +487,13 @@ mod tests {
             "wss://100.64.0.1/x",
             "wss://[::ffff:10.0.0.5]/x",
             "wss://localhost/x",
+            "wss://[2002:0808:0808::1]/x",
+            "wss://[2001:2::1]/x",
+            "wss://[100::1]/x",
+            "wss://[64:ff9b:1::1]/x",
+            "wss://[3fff::1]/x",
+            "wss://[fec0::1]/x",
+            "wss://192.88.99.1/x",
         ] {
             let mut c = cfg("127.0.0.1:1".parse().unwrap());
             c.url = u.into();

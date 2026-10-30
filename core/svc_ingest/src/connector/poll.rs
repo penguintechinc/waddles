@@ -160,6 +160,9 @@ impl<S: WebhookSecretSource> PollTransport<S> {
             .map_err(TransportError::Connect)?;
         let mut b = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Ambient HTTP(S)_PROXY would resolve/connect the host itself and
+            // bypass the pinned address.
+            .no_proxy()
             .timeout(self.cfg.request_timeout);
         if let Some(host) = self.url.host_str() {
             b = b.resolve(host, addr);
@@ -634,5 +637,48 @@ mod tests {
         let mut c = cfg(addr);
         c.max_drop_attempts = 0;
         assert!(PollTransport::new(c, s()).is_err());
+    }
+
+    #[tokio::test]
+    async fn ambient_proxy_env_does_not_bypass_pin() {
+        let (addr, srv) = start().await;
+        // A dead proxy: if honored the request would fail / not reach srv.
+        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:1");
+        std::env::set_var("http_proxy", "http://127.0.0.1:1");
+        let (mut t, _) = mk(addr);
+        let r = t.next_frame().await;
+        std::env::remove_var("HTTP_PROXY");
+        std::env::remove_var("http_proxy");
+        assert!(r.unwrap().is_some());
+        assert_eq!(
+            srv.seen.lock().unwrap().len(),
+            1,
+            "went to the pinned server"
+        );
+    }
+
+    #[tokio::test]
+    async fn newly_denied_ranges_refused_by_poll() {
+        let (addr, _s) = start().await;
+        for u in [
+            "https://[2002:0808:0808::1]/x",
+            "https://[2001:2::1]/x",
+            "https://[100::1]/x",
+            "https://[64:ff9b:1::1]/x",
+            "https://[3fff::1]/x",
+            "https://[fec0::1]/x",
+            "https://192.88.99.1/x",
+        ] {
+            let mut c = cfg(addr);
+            c.url = u.into();
+            c.allow_loopback_insecure = false;
+            c.egress_allow = vec![];
+            let mut t =
+                PollTransport::new(c, CountingSecrets(Arc::new(AtomicUsize::new(0)))).unwrap();
+            assert!(
+                matches!(t.next_frame().await, Err(TransportError::Connect(_))),
+                "{u}"
+            );
+        }
     }
 }
