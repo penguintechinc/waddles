@@ -412,7 +412,19 @@ async fn a_write_tool_carries_the_idempotency_key_and_passes_through_tool_errors
         .await
         .unwrap();
     assert_eq!(out, serde_json::json!({"tool_error": "Forbidden"}));
-    assert_eq!(recorded(&exec)[0].payload["idempotency_key"], "k-1");
+    // Principal-scoped (sha256 hex), never the caller's raw key; the same
+    // token rides top-level and in the forwarded args.
+    let fwd = recorded(&exec)[0].payload["idempotency_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(fwd, "k-1");
+    assert_eq!(fwd.len(), 64);
+    assert!(fwd.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(
+        recorded(&exec)[0].payload["args"]["__idempotency_key"],
+        fwd.as_str()
+    );
 }
 
 #[tokio::test]

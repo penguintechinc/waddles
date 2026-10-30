@@ -174,9 +174,9 @@ fn a_app_to_service_with_grant_and_matrix_is_authorized_and_pinned() {
         nested_payload(&w).unwrap(),
         serde_json::json!({
             "tool": "adjust",
-            "args": {"x": 1, "__idempotency_key": "k-1"},
+            "args": {"x": 1, "__idempotency_key": scoped_idempotency_key(7, 3, APP, "k-1")},
             "call_chain": [APP, SVC],
-            "idempotency_key": "k-1",
+            "idempotency_key": scoped_idempotency_key(7, 3, APP, "k-1"),
         })
     );
 }
@@ -492,7 +492,10 @@ fn idempotency_key_is_merged_into_forwarded_args() {
     let w = plan(&[APP], req(SVC, "adjust", Some("k-1")), &snap, &gate).unwrap();
     let p = nested_payload(&w).unwrap();
     assert_eq!(p["args"]["x"], 1);
-    assert_eq!(p["args"][IDEMPOTENCY_ARG], "k-1");
+    assert_eq!(
+        p["args"][IDEMPOTENCY_ARG],
+        scoped_idempotency_key(7, 3, APP, "k-1")
+    );
     assert_eq!(IDEMPOTENCY_ARG, "__idempotency_key");
 }
 
@@ -537,4 +540,55 @@ fn key_with_non_object_args_is_rejected() {
     let mut w = plan(&[APP], req(SVC, "adjust", Some("k-1")), &snap, &gate).unwrap();
     w.args = serde_json::json!([1, 2]);
     assert!(nested_payload(&w).is_err());
+}
+
+fn forwarded_key(tenant: i32, community: i32, caller: &str, raw: &str) -> String {
+    let (snap, gate) = world();
+    let mut w = plan(&[APP], req(SVC, "adjust", Some(raw)), &snap, &gate).unwrap();
+    // Host-derived principal fields, set as plan_tool_call would from the gate scope.
+    w.tenant_id = tenant;
+    w.community_id = community;
+    w.caller_app_id = caller.to_string();
+    nested_payload(&w).unwrap()["args"][IDEMPOTENCY_ARG]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn idem_a_same_principal_and_key_is_deterministic() {
+    assert_eq!(forwarded_key(7, 3, APP, "k"), forwarded_key(7, 3, APP, "k"));
+}
+
+#[test]
+fn idem_b_different_caller_gives_different_key() {
+    assert_ne!(
+        forwarded_key(7, 3, APP, "k"),
+        forwarded_key(7, 3, SVC2, "k")
+    );
+}
+
+#[test]
+fn idem_c_different_tenant_or_community_gives_different_key() {
+    let base = forwarded_key(7, 3, APP, "k");
+    assert_ne!(base, forwarded_key(8, 3, APP, "k"));
+    assert_ne!(base, forwarded_key(7, 4, APP, "k"));
+}
+
+#[test]
+fn idem_d_forwarded_key_is_namespaced_not_raw() {
+    let k = forwarded_key(7, 3, APP, "k");
+    assert_ne!(k, "k");
+    assert_eq!(k.len(), 64);
+    assert!(k.bytes().all(|b| b.is_ascii_hexdigit()));
+}
+
+#[test]
+fn idem_plan_carries_host_derived_principal() {
+    let (snap, gate) = world();
+    let w = plan(&[APP], req(SVC, "adjust", Some("k")), &snap, &gate).unwrap();
+    assert_eq!(
+        (w.tenant_id, w.community_id, w.caller_app_id.as_str()),
+        (7, 3, APP)
+    );
 }

@@ -193,6 +193,13 @@ pub struct ToolPlan {
     pub write: bool,
     /// The chain the nested invoke carries: the caller's chain plus the target.
     pub next_chain: Vec<String>,
+    /// Host-derived caller bundle (never from args): namespaces the forwarded
+    /// idempotency key so two principals' identical raw keys cannot collide.
+    pub caller_app_id: String,
+    /// Gate-scope tenant (host-derived) -- idempotency namespace component.
+    pub tenant_id: i32,
+    /// Gate-scope community (host-derived) -- idempotency namespace component.
+    pub community_id: i32,
 }
 
 /// Authorizes one validated request and resolves its target. Pure policy -- no
@@ -312,12 +319,37 @@ pub fn plan_tool_call(
         target_version: target_entry.version_id,
         write: exported.write,
         next_chain,
+        caller_app_id: caller_app_id.to_string(),
+        tenant_id,
+        community_id,
     })
 }
 
 /// Reserved top-level args field carrying the caller's idempotency key to the
 /// target guest (`tool-provider.call` has no key param). Callers may not set it.
 pub const IDEMPOTENCY_ARG: &str = "__idempotency_key";
+
+/// Principal-scoped, deterministic idempotency token:
+/// `hex(sha256(tenant 0x1f community 0x1f caller_app_id 0x1f raw_key))`.
+/// Same principal + raw key => same token (retry dedupes); any differing
+/// principal component => a different token. Fixed 64-char hex output.
+pub fn scoped_idempotency_key(
+    tenant_id: i32,
+    community_id: i32,
+    caller_app_id: &str,
+    raw_key: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(tenant_id.to_string().as_bytes());
+    h.update([0x1f]);
+    h.update(community_id.to_string().as_bytes());
+    h.update([0x1f]);
+    h.update(caller_app_id.as_bytes());
+    h.update([0x1f]);
+    h.update(raw_key.as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// The `InvokeBody.payload` for the nested `ExportKind::ToolCall` invoke.
 ///
@@ -336,7 +368,10 @@ pub fn nested_payload(plan: &ToolPlan) -> Result<serde_json::Value, ToolRefusal>
         return Err(bad("args may not set the reserved idempotency field"));
     }
     let mut args = plan.args.clone();
-    if let Some(key) = &plan.idempotency_key {
+    let forwarded_key = plan.idempotency_key.as_deref().map(|raw| {
+        scoped_idempotency_key(plan.tenant_id, plan.community_id, &plan.caller_app_id, raw)
+    });
+    if let Some(key) = &forwarded_key {
         let obj = args
             .as_object_mut()
             .ok_or_else(|| bad("args must be an object when an idempotency key is supplied"))?;
@@ -353,7 +388,7 @@ pub fn nested_payload(plan: &ToolPlan) -> Result<serde_json::Value, ToolRefusal>
         "tool": plan.tool,
         "args": args,
         "call_chain": plan.next_chain,
-        "idempotency_key": plan.idempotency_key,
+        "idempotency_key": forwarded_key,
     }))
 }
 

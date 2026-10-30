@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 serde_json = "=1.0.151"
 tracing = "=0.1.44"
+sha2 = "=0.10.9"
 bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
 # Reply interpretation (`Message`/`ErrorCode`) -- same pinned rev as the stages.
