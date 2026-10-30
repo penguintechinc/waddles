@@ -391,20 +391,19 @@ def test_draw_when_none_active(host: _Host) -> None:
     assert "nothing to draw" in _mod_say("!giveaway draw")
 
 
-def test_pick_winner_is_deterministic_for_same_seed_inputs_and_varies_with_clock() -> None:
+def test_pick_winner_draws_a_valid_entrant_and_is_not_pinned() -> None:
     entries = [f"{i:064x}" for i in range(50)]
-    assert _pick_winner(entries, _T0) == _pick_winner(entries, _T0)
-    winners = {_pick_winner(entries, _T0 + i) for i in range(200)}
-    assert len(winners) > 10  # seeded from the clock, so draws are not pinned to one entrant
+    winners = {_pick_winner(entries) for _ in range(300)}
     assert winners <= set(entries)
+    assert len(winners) > 10  # CSPRNG draw: spread over the entrants, not pinned to one
 
 
-def test_pick_winner_depends_on_entries() -> None:
-    a = [f"{i:064x}" for i in range(20)]
-    b = [f"{i:064x}" for i in range(1, 21)]
-    assert {_pick_winner(a, _T0 + i) for i in range(50)} != {
-        _pick_winner(b, _T0 + i) for i in range(50)
-    }
+def test_pick_winner_uses_system_random() -> None:
+    import random
+
+    import app as app_mod
+
+    assert isinstance(app_mod._RNG, random.SystemRandom)
 
 
 # --- cancel / status --------------------------------------------------------------------

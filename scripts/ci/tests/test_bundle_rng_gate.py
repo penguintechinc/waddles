@@ -43,7 +43,7 @@ GAME_BUNDLES = frozenset(
     {
         "jackpot", "gamble", "slots", "roulette", "heist", "duel", "steal", "defuse",
         "blackjack", "dice", "roll", "coinflip", "rps", "wheel", "fish", "guess",
-        "prediction", "lottery", "bingo", "keywordgiveaway", "raffle", "winner",
+        "prediction", "lottery", "bingo", "keywordgiveaway", "giveaway", "raffle", "winner",
         "hangman", "trivia", "scramble", "eightball", "choose", "customcommand",
     }
 )  # fmt: skip
@@ -128,7 +128,7 @@ def test_denominator_the_scan_found_the_bundles() -> None:
     needing_the_fix = {
         "jackpot", "gamble", "slots", "roulette", "heist", "duel", "steal", "defuse", "blackjack",
         "dice", "roll", "coinflip", "rps", "wheel", "fish", "guess", "lottery", "bingo",
-        "keywordgiveaway", "raffle", "winner", "hangman", "trivia", "scramble", "eightball",
+        "keywordgiveaway", "giveaway", "raffle", "winner", "hangman", "trivia", "scramble", "eightball",
         "choose", "customcommand",
     }  # fmt: skip
     missing = sorted(n for n in needing_the_fix if SCAN[n].system_random == 0)

@@ -38,12 +38,11 @@ lock capability, and the viewer simply re-enters (the dedupe makes that safe).
 
 Randomness
 ----------
-Same primitive as `slots`/`duel`/`raffle` -- Python's `random` -- but through a private
-``random.Random`` instance seeded from the host clock plus the entries (`_pick_winner`). A
-componentize-py snapshot freezes the *module-level* `random` state at build time, so relying on
-it would replay the same sequence in every fresh instance; seeding from `clock.now_millis()` and
-the stored entrants makes each draw depend on when it happens and who entered. This is a
-community giveaway, not a security decision -- the seed is not secret (ruff S311 is waived).
+Same primitive as `raffle`/`winner`/`slots`: a module-level ``random.SystemRandom()`` (`_RNG`,
+the OS CSPRNG -- `wasi:random` in the component), so the draw is unpredictable and cannot be
+reconstructed from observable inputs (clock, entrant list). SystemRandom holds no seeded state,
+so the componentize-py build snapshot has nothing to freeze. A value-distributing draw must be
+fair, hence never a seeded Mersenne Twister.
 The winner is announced as the entrant's pseudonym tag (`hash[:8]`) because only hashes are
 stored (same PII trade-off as `raffle`: a viewer can recognise their own tag, resolving it to a
 display name needs the PII-tokenization pipeline).
@@ -76,6 +75,10 @@ from waddle_sdk import clock, kv, log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 #: The single `kv` key this bundle owns (community-scoped by the host; `.`, never `:`).
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions or a seeded `random.Random`: predictable / frozen into the build snapshot.
+_RNG = random.SystemRandom()
+
 ACTIVE_KEY = "giveaway.active"
 
 _GIVEAWAY_HEAD = "!giveaway"
@@ -173,14 +176,12 @@ def _pseudonym(platform: str, author: str) -> str:
     return hashlib.sha256(f"{platform}\x1f{author}".encode()).hexdigest()
 
 
-def _pick_winner(entries: list[str], now_ms: int) -> str:
-    """Pick one entrant with a `random.Random` seeded from the clock plus the entries.
+def _pick_winner(entries: list[str]) -> str:
+    """Pick one entrant uniformly with the OS CSPRNG (`_RNG`).
 
-    See the module docstring's Randomness section. Isolated so tests can pin the seed inputs.
+    See the module docstring's Randomness section. Isolated so tests can patch the draw.
     """
-    digest = hashlib.sha256(f"{now_ms}|{'|'.join(entries)}".encode()).digest()
-    rng = random.Random(int.from_bytes(digest, "big"))
-    return rng.choice(entries)
+    return _RNG.choice(entries)
 
 
 async def _kv_get(key: str) -> bytes | None:
@@ -288,7 +289,7 @@ async def _handle_draw() -> str:
         return f"{_NO_ACTIVE_MSG} -- nothing to draw"
     if not giveaway.entries:
         return "no entries yet -- nobody has used !enter (use !giveaway cancel to close it)"
-    winner = _pick_winner(giveaway.entries, clock.now_millis())
+    winner = _pick_winner(giveaway.entries)
     await _kv_delete(ACTIVE_KEY)
     log.info("giveaway.drawn", entries=len(giveaway.entries))
     return (
