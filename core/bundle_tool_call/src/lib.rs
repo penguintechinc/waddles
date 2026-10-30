@@ -239,7 +239,10 @@ pub fn plan_tool_call(
     }
 
     // 2. The caller's own approved manifest must request this exact tool.
-    let caller_entry = snapshot.tool_entry(caller_app_id);
+    // Scoped to the GATE's own `(tenant, community)` -- never a flattened,
+    // cross-tenant lookup. No row for this scope => no caller facts => forbidden.
+    let (tenant_id, community_id) = (gate_scope.tenant_id(), gate_scope.community_id());
+    let caller_entry = snapshot.tool_entry_in_scope(tenant_id, community_id, caller_app_id);
     let requested_write = caller_entry
         .as_ref()
         .and_then(|e| {
@@ -274,9 +277,11 @@ pub fn plan_tool_call(
     .map_err(|d| ToolRefusal::NotGranted(d.to_string()))?;
 
     // 4. Resolve + matrix.
-    let target_entry = snapshot.tool_entry(&req.target).ok_or_else(|| {
-        ToolRefusal::TargetUnavailable("the target is not active in this scope".to_string())
-    })?;
+    let target_entry = snapshot
+        .tool_entry_in_scope(tenant_id, community_id, &req.target)
+        .ok_or_else(|| {
+            ToolRefusal::TargetUnavailable("the target is not active in this scope".to_string())
+        })?;
     let exported = target_entry.tools.exported_tool(&req.tool).ok_or_else(|| {
         ToolRefusal::Forbidden(
             "the target is not a service exporting this tool (app-to-app calls are forbidden)"

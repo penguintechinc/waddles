@@ -144,8 +144,27 @@ async fn world(
     behavior: Behavior,
     with_connection: bool,
 ) -> World {
+    let entries = rows
+        .into_iter()
+        .map(|r| (TENANT_ID, COMMUNITY_ID, r))
+        .collect();
+    world_scoped(entries, gate, behavior, with_connection).await
+}
+
+/// Like [`world`] but each row is installed in its own `(tenant, community)`.
+async fn world_scoped(
+    entries: Vec<(i32, i32, ActiveBundleRow)>,
+    gate: Arc<CapabilityGate>,
+    behavior: Behavior,
+    with_connection: bool,
+) -> World {
     let snapshot = ActiveVersionSnapshot::new();
-    snapshot.update(&rows);
+    snapshot.update_scoped_all(
+        &entries
+            .into_iter()
+            .map(|(t, c, r)| ((t, c, r.app_id.clone()), r))
+            .collect(),
+    );
     let registry = Arc::new(ConnectionRegistry::new());
     let caps = Arc::new(
         StageCapabilities::new(
@@ -716,4 +735,58 @@ async fn unwired_tool_and_unknown_op_fail_loudly() {
     let mut call = tool_call(SVC, "get_balance", None);
     call.op = "tool.discover".to_string();
     assert_eq!(run(&w, &app_scope(), call).await.unwrap_err(), "unknown_op");
+}
+
+// regression: tenant-isolation -- caller/target facts resolve per tenant scope.
+#[tokio::test]
+async fn tenant_isolation_cross_tenant_caller_forbidden_target_unavailable_tenant_wide_ok() {
+    let ok = || Behavior::Reply(serde_json::json!({"ok": 1}));
+    let rows = world_rows();
+    let caller = |r: &ActiveBundleRow| r.app_id == APP;
+
+    // (a) caller installed only in ANOTHER tenant -> forbidden.
+    let entries = rows
+        .iter()
+        .cloned()
+        .map(|r| (if caller(&r) { 8 } else { TENANT_ID }, COMMUNITY_ID, r))
+        .collect();
+    let w = world_scoped(entries, default_gate(), ok(), true).await;
+    assert_eq!(
+        run(&w, &app_scope(), tool_call(SVC, "get_balance", None))
+            .await
+            .unwrap_err(),
+        "forbidden"
+    );
+
+    // (b) target installed only in ANOTHER tenant -> target_unavailable.
+    let entries = rows
+        .iter()
+        .cloned()
+        .map(|r| (if r.app_id == SVC { 8 } else { TENANT_ID }, COMMUNITY_ID, r))
+        .collect();
+    let w = world_scoped(entries, default_gate(), ok(), true).await;
+    assert_eq!(
+        run(&w, &app_scope(), tool_call(SVC, "get_balance", None))
+            .await
+            .unwrap_err(),
+        "target_unavailable"
+    );
+    assert!(recorded(&w).is_empty());
+
+    // (c) same-tenant happy path still works.
+    let w = world(rows.clone(), default_gate(), ok(), true).await;
+    assert!(run(&w, &app_scope(), tool_call(SVC, "get_balance", None))
+        .await
+        .is_ok());
+
+    // (d) tenant-wide (community 0) service reachable from a community call.
+    let entries = rows
+        .iter()
+        .cloned()
+        .map(|r| (TENANT_ID, if r.app_id == SVC { 0 } else { COMMUNITY_ID }, r))
+        .collect();
+    let w = world_scoped(entries, default_gate(), ok(), true).await;
+    assert!(run(&w, &app_scope(), tool_call(SVC, "get_balance", None))
+        .await
+        .is_ok());
 }

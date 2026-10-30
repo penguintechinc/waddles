@@ -112,7 +112,7 @@ fn requests(reqs: &[(&str, &str, bool)]) -> ToolManifestInfo {
 
 fn snapshot(rows: Vec<ActiveBundleRow>) -> ActiveVersionSnapshot {
     let s = ActiveVersionSnapshot::new();
-    s.update(&rows);
+    s.update_scope(7, 3, &rows);
     s
 }
 
@@ -272,15 +272,19 @@ fn f_unknown_or_deactivated_target_is_target_unavailable() {
 fn f_target_resolves_to_the_live_digest_after_a_hot_swap() {
     let (snap, gate) = world();
     let new_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    snap.update(&[
-        row(
-            APP,
-            11,
-            DIGEST,
-            requests(&[(SVC, "get_balance", false), (SVC, "adjust", true)]),
-        ),
-        row(SVC, 33, new_digest, service(&[("get_balance", false)])),
-    ]);
+    snap.update_scope(
+        7,
+        3,
+        &[
+            row(
+                APP,
+                11,
+                DIGEST,
+                requests(&[(SVC, "get_balance", false), (SVC, "adjust", true)]),
+            ),
+            row(SVC, 33, new_digest, service(&[("get_balance", false)])),
+        ],
+    );
     let p = plan(&[APP], req(SVC, "get_balance", None), &snap, &gate).unwrap();
     assert_eq!(
         (p.target_version, p.target_digest.as_str()),
@@ -395,4 +399,89 @@ fn interpret_reply_maps_envelopes_and_executor_errors() {
             .code(),
         "target_unavailable"
     );
+}
+
+/// Builds a snapshot with `rows` installed in `(tenant, community)` only.
+fn snapshot_in(tenant: i32, community: i32, rows: Vec<ActiveBundleRow>) -> ActiveVersionSnapshot {
+    let s = ActiveVersionSnapshot::new();
+    s.update_scope(tenant, community, &rows);
+    s
+}
+
+fn caller_row() -> ActiveBundleRow {
+    row(
+        APP,
+        11,
+        DIGEST,
+        requests(&[(SVC, "get_balance", false), (SVC, "adjust", true)]),
+    )
+}
+
+fn svc_row() -> ActiveBundleRow {
+    row(
+        SVC,
+        22,
+        DIGEST,
+        service(&[("get_balance", false), ("adjust", true)]),
+    )
+}
+
+// regression: tenant-isolation -- (a) a caller installed only in ANOTHER
+// tenant never satisfies the caller lookup.
+#[test]
+fn tenant_a_caller_in_a_different_tenant_is_forbidden() {
+    let snap = ActiveVersionSnapshot::new();
+    snap.update_scope(8, 3, &[caller_row()]);
+    snap.update_scope(7, 3, &[svc_row()]);
+    let gate = gate_with(APP, &[(SVC, "get_balance")]);
+    let err = plan(&[APP], req(SVC, "get_balance", None), &snap, &gate).unwrap_err();
+    assert_eq!(err.code(), "forbidden");
+}
+
+// (b) a target installed only in ANOTHER tenant is target_unavailable.
+#[test]
+fn tenant_b_target_in_a_different_tenant_is_target_unavailable() {
+    let snap = ActiveVersionSnapshot::new();
+    snap.update_scope(7, 3, &[caller_row()]);
+    snap.update_scope(8, 3, &[svc_row()]);
+    let gate = gate_with(APP, &[(SVC, "get_balance")]);
+    let err = plan(&[APP], req(SVC, "get_balance", None), &snap, &gate).unwrap_err();
+    assert_eq!(err.code(), "target_unavailable");
+}
+
+// (c) same-tenant caller + target still resolves, even with an unrelated
+// look-alike installed in another tenant.
+#[test]
+fn tenant_c_same_tenant_caller_and_target_resolve() {
+    let snap = ActiveVersionSnapshot::new();
+    snap.update_scope(7, 3, &[caller_row(), svc_row()]);
+    snap.update_scope(
+        8,
+        3,
+        &[row(
+            SVC,
+            99,
+            "sha256:other",
+            service(&[("get_balance", false)]),
+        )],
+    );
+    let gate = gate_with(APP, &[(SVC, "get_balance")]);
+    let p = plan(&[APP], req(SVC, "get_balance", None), &snap, &gate).unwrap();
+    assert_eq!((p.target_version, p.target_digest.as_str()), (22, DIGEST));
+}
+
+// (d) a tenant-wide (community = 0) service resolves from a community-scoped
+// call; a community-0 service in ANOTHER tenant does not.
+#[test]
+fn tenant_d_tenant_wide_service_resolves_from_a_community_scoped_call() {
+    let snap = snapshot_in(7, 3, vec![caller_row()]);
+    snap.update_scope(7, 0, &[svc_row()]);
+    let gate = gate_with(APP, &[(SVC, "get_balance")]);
+    let p = plan(&[APP], req(SVC, "get_balance", None), &snap, &gate).unwrap();
+    assert_eq!(p.target_version, 22);
+
+    let other = snapshot_in(7, 3, vec![caller_row()]);
+    other.update_scope(8, 0, &[svc_row()]);
+    let err = plan(&[APP], req(SVC, "get_balance", None), &other, &gate).unwrap_err();
+    assert_eq!(err.code(), "target_unavailable");
 }

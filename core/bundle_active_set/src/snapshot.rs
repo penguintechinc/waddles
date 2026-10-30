@@ -45,10 +45,27 @@ pub struct ToolTargetEntry {
     pub tools: ToolManifestInfo,
 }
 
+/// Scope-preserving map -- `(tenant_id, community_id, app_id) -> entry`.
+/// Never collapses two tenants' rows for the same `app_id`.
+type ScopedMap = HashMap<(i32, i32, String), ActiveEntry>;
+
 /// Cheap, `Clone`-able handle over a shared `app_id -> (digest,
-/// version_id)` map -- see the module doc.
+/// version_id)` map -- see the module doc. Also carries a scope-preserving
+/// map ([`Self::tool_entry_in_scope`]) used for every `tool.invoke`
+/// authorization decision, so tool facts never resolve across tenants.
 #[derive(Clone, Default)]
-pub struct ActiveVersionSnapshot(Arc<RwLock<ActiveMap>>);
+pub struct ActiveVersionSnapshot {
+    flat: Arc<RwLock<ActiveMap>>,
+    scoped: Arc<RwLock<ScopedMap>>,
+}
+
+fn entry_of(row: &ActiveBundleRow) -> ActiveEntry {
+    ActiveEntry {
+        digest: row.digest.clone(),
+        version_id: row.version_id,
+        tools: row.tools.clone(),
+    }
+}
 
 impl ActiveVersionSnapshot {
     pub fn new() -> Self {
@@ -65,23 +82,14 @@ impl ActiveVersionSnapshot {
     pub fn update(&self, rows: &[ActiveBundleRow]) {
         let map = rows
             .iter()
-            .map(|row| {
-                (
-                    row.app_id.clone(),
-                    ActiveEntry {
-                        digest: row.digest.clone(),
-                        version_id: row.version_id,
-                        tools: row.tools.clone(),
-                    },
-                )
-            })
+            .map(|row| (row.app_id.clone(), entry_of(row)))
             .collect();
         // A poisoned lock (a panic elsewhere while holding the write
         // guard) recovers with the poisoned map rather than propagating --
         // a stale snapshot must never become permanently unusable. Logged
         // at WARN (not silently swallowed) since a panic elsewhere while
         // holding this lock is itself a real, actionable bug.
-        let mut guard = match self.0.write() {
+        let mut guard = match self.flat.write() {
             Ok(guard) => guard,
             Err(e) => {
                 tracing::warn!(
@@ -102,7 +110,7 @@ impl ActiveVersionSnapshot {
     /// the poison-recovery log so every read call site logs identically
     /// instead of swallowing the underlying panic's error silently.
     fn read_lock(&self) -> RwLockReadGuard<'_, ActiveMap> {
-        match self.0.read() {
+        match self.flat.read() {
             Ok(guard) => guard,
             Err(e) => {
                 tracing::warn!(
@@ -152,15 +160,69 @@ impl ActiveVersionSnapshot {
             .map(|e| (e.digest.clone(), e.version_id))
     }
 
+    /// Replaces ONE `(tenant_id, community_id)` scope's entries in the
+    /// scope-preserving map with `rows` (other scopes untouched) -- the
+    /// single-scope loader path (`bundle_loader::run_tick`).
+    pub fn update_scope(&self, tenant_id: i32, community_id: i32, rows: &[ActiveBundleRow]) {
+        let mut guard = self.scoped_write();
+        guard.retain(|(t, c, _), _| !(*t == tenant_id && *c == community_id));
+        for row in rows {
+            guard.insert((tenant_id, community_id, row.app_id.clone()), entry_of(row));
+        }
+    }
+
+    /// Replaces the WHOLE scope-preserving map from `scoped_active_rows`'s
+    /// `(tenant_id, community_id, app_id)`-keyed output -- the multi-scope
+    /// changelog-consumer path. Wholesale: a dropped row stops resolving.
+    pub fn update_scoped_all(&self, rows: &HashMap<(i32, i32, String), ActiveBundleRow>) {
+        let map = rows
+            .iter()
+            .map(|(k, row)| (k.clone(), entry_of(row)))
+            .collect();
+        *self.scoped_write() = map;
+    }
+
+    fn scoped_write(&self) -> std::sync::RwLockWriteGuard<'_, ScopedMap> {
+        match self.scoped.write() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(error = %e, "ActiveVersionSnapshot scoped lock poisoned -- recovering");
+                e.into_inner()
+            }
+        }
+    }
+
     /// Resolves `app_id`'s CURRENT platform-installed `(digest, version_id,
-    /// tool facts)` for a `tool.invoke` target lookup -- `None` when the app
-    /// is not active in this scope (unknown / deactivated / stale: the
-    /// caller must fail closed as `target-unavailable`).
-    pub fn tool_entry(&self, app_id: &str) -> Option<ToolTargetEntry> {
-        self.read_lock().get(app_id).map(|e| ToolTargetEntry {
-            digest: e.digest.clone(),
-            version_id: e.version_id,
-            tools: e.tools.clone(),
+    /// tool facts)` for a `tool.invoke` caller/target lookup, **scoped to
+    /// `(tenant_id, community_id)`** -- never another tenant's row. Tries the
+    /// exact `(tenant, community)` scope first, then the SAME tenant's
+    /// tenant-wide `community = 0` scope (service bundles are installed
+    /// tenant-wide, so a community-scoped call can still reach them). `None`
+    /// when neither exists: the caller must fail closed.
+    pub fn tool_entry_in_scope(
+        &self,
+        tenant_id: i32,
+        community_id: i32,
+        app_id: &str,
+    ) -> Option<ToolTargetEntry> {
+        let guard = match self.scoped.read() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(error = %e, "ActiveVersionSnapshot scoped lock poisoned -- recovering");
+                e.into_inner()
+            }
+        };
+        let hit = guard
+            .get(&(tenant_id, community_id, app_id.to_string()))
+            .or_else(|| {
+                (community_id != 0)
+                    .then(|| guard.get(&(tenant_id, 0, app_id.to_string())))
+                    .flatten()
+            })?;
+        Some(ToolTargetEntry {
+            digest: hit.digest.clone(),
+            version_id: hit.version_id,
+            tools: hit.tools.clone(),
         })
     }
 }
@@ -197,13 +259,37 @@ mod tests {
             }],
             requested: Vec::new(),
         };
-        snap.update(&[r]);
-        let e = snap.tool_entry("waddles.core.a.svc").unwrap();
+        snap.update_scope(7, 3, &[r]);
+        let e = snap
+            .tool_entry_in_scope(7, 3, "waddles.core.a.svc")
+            .unwrap();
         assert_eq!((e.digest.as_str(), e.version_id), ("sha256:aa", 5));
         assert!(e.tools.exported_tool("t").is_some());
-        assert!(snap.tool_entry("waddles.core.missing.svc").is_none());
-        snap.update(&[]);
-        assert!(snap.tool_entry("waddles.core.a.svc").is_none());
+        assert!(snap
+            .tool_entry_in_scope(7, 3, "waddles.core.missing.svc")
+            .is_none());
+        snap.update_scope(7, 3, &[]);
+        assert!(snap
+            .tool_entry_in_scope(7, 3, "waddles.core.a.svc")
+            .is_none());
+    }
+
+    /// Regression (tenant isolation): the same `app_id` in another tenant
+    /// never resolves; a same-tenant `community = 0` row does.
+    #[test]
+    fn tool_entry_in_scope_never_crosses_tenants_and_falls_back_to_tenant_wide() {
+        let snap = ActiveVersionSnapshot::new();
+        snap.update_scope(8, 3, &[row("svc", "sha256:other", 9)]);
+        assert!(snap.tool_entry_in_scope(7, 3, "svc").is_none());
+        assert!(snap.tool_entry_in_scope(7, 0, "svc").is_none());
+        snap.update_scope(7, 0, &[row("svc", "sha256:mine", 4)]);
+        let e = snap.tool_entry_in_scope(7, 3, "svc").unwrap();
+        assert_eq!((e.digest.as_str(), e.version_id), ("sha256:mine", 4));
+        // An exact community row wins over the tenant-wide one.
+        snap.update_scope(7, 3, &[row("svc", "sha256:exact", 5)]);
+        assert_eq!(snap.tool_entry_in_scope(7, 3, "svc").unwrap().version_id, 5);
+        // update_scope of one scope leaves the others intact.
+        assert_eq!(snap.tool_entry_in_scope(8, 3, "svc").unwrap().version_id, 9);
     }
 
     #[test]

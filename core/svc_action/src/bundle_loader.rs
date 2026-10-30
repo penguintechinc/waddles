@@ -279,6 +279,7 @@ pub async fn run_tick(
     // SS5.1) must see a superseded digest stop resolving the instant the
     // active set moves, not just after this tick's load/unload completes.
     snapshot.update(&active);
+    snapshot.update_scope(tenant_id, community_id, &active);
     // Coordinator fix on PR #425: refresh every active app's declared-
     // capability snapshot on every tick, not just the diffed to_load set
     // -- a manifest re-approval that changes `summary_json.capabilities`

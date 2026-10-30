@@ -301,8 +301,29 @@ fn caps_with(
     chain: Vec<String>,
     deadline: Option<Instant>,
 ) -> StageCapabilities {
+    let entries = rows
+        .into_iter()
+        .map(|r| (TENANT_ID, COMMUNITY_ID, r))
+        .collect();
+    caps_scoped(entries, gate, registry, chain, deadline)
+}
+
+/// Like [`caps_with`] but each row is installed in its own `(tenant, community)`.
+fn caps_scoped(
+    entries: Vec<(i32, i32, ActiveBundleRow)>,
+    gate: Arc<CapabilityGate>,
+    registry: Arc<ConnectionRegistry>,
+    chain: Vec<String>,
+    deadline: Option<Instant>,
+) -> StageCapabilities {
     let snapshot = ActiveVersionSnapshot::new();
-    snapshot.update(&rows);
+    let rows: Vec<ActiveBundleRow> = entries.iter().map(|(_, _, r)| r.clone()).collect();
+    snapshot.update_scoped_all(
+        &entries
+            .into_iter()
+            .map(|(t, c, r)| ((t, c, r.app_id.clone()), r))
+            .collect(),
+    );
     // The running app's own platform-installed version (grants are pinned to it).
     let version = rows
         .iter()
@@ -727,4 +748,54 @@ async fn a_malformed_target_envelope_never_becomes_a_success() {
             .unwrap_err(),
         "target_unavailable"
     );
+}
+
+// regression: tenant-isolation -- caller/target facts resolve per tenant scope.
+#[tokio::test]
+async fn tenant_isolation_cross_tenant_caller_forbidden_target_unavailable_tenant_wide_ok() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    let rows = world_rows();
+    let run_with = |entries: Vec<(i32, i32, ActiveBundleRow)>| {
+        let c = caps_scoped(
+            entries,
+            default_gate(),
+            Arc::clone(&exec.registry),
+            vec![APP.to_string()],
+            None,
+        );
+        async move { run(&c, tool_call(SVC, "get_balance", None)).await }
+    };
+
+    // (a) caller installed only in ANOTHER tenant -> forbidden.
+    let e = rows
+        .iter()
+        .cloned()
+        .map(|r| (if r.app_id == APP { 8 } else { TENANT_ID }, COMMUNITY_ID, r))
+        .collect();
+    assert_eq!(run_with(e).await.unwrap_err(), "forbidden");
+
+    // (b) target installed only in ANOTHER tenant -> target_unavailable.
+    let e = rows
+        .iter()
+        .cloned()
+        .map(|r| (if r.app_id == SVC { 8 } else { TENANT_ID }, COMMUNITY_ID, r))
+        .collect();
+    assert_eq!(run_with(e).await.unwrap_err(), "target_unavailable");
+    assert!(recorded(&exec).is_empty(), "never reached the executor");
+
+    // (c) same-tenant happy path.
+    let e = rows
+        .iter()
+        .cloned()
+        .map(|r| (TENANT_ID, COMMUNITY_ID, r))
+        .collect();
+    assert!(run_with(e).await.is_ok());
+
+    // (d) tenant-wide (community 0) service reachable from a community call.
+    let e = rows
+        .iter()
+        .cloned()
+        .map(|r| (TENANT_ID, if r.app_id == SVC { 0 } else { COMMUNITY_ID }, r))
+        .collect();
+    assert!(run_with(e).await.is_ok());
 }

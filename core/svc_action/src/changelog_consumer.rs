@@ -443,6 +443,8 @@ async fn apply_active_set(
     // doc warns about, since that bug was about the executor load/unload
     // signaling above, which stays scope-preserving via `plan_scoped`.
     app_version_snapshot.update(&active.values().cloned().collect::<Vec<_>>());
+    // Scope-preserving feed: tool.invoke resolves per (tenant, community).
+    app_version_snapshot.update_scoped_all(&active);
     for active_set in state.by_scope.values() {
         for (app_id, reason) in &active_set.excluded {
             excluded_metric
@@ -1187,12 +1189,9 @@ pub async fn run(
     // Seed `app_version_snapshot` from the same startup full read, before
     // the first tick -- see `apply_active_set`'s doc for why flattening
     // onto `app_id` here is safe.
-    app_version_snapshot.update(
-        &bundle_active_set::scoped_active_rows(&state.by_scope)
-            .values()
-            .cloned()
-            .collect::<Vec<_>>(),
-    );
+    let seed_rows = bundle_active_set::scoped_active_rows(&state.by_scope);
+    app_version_snapshot.update(&seed_rows.values().cloned().collect::<Vec<_>>());
+    app_version_snapshot.update_scoped_all(&seed_rows);
 
     let mut poll_tick = tokio::time::interval(poll_interval);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
