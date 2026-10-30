@@ -171,10 +171,10 @@ fn a_app_to_service_with_grant_and_matrix_is_authorized_and_pinned() {
     let w = plan(&[APP], req(SVC, "adjust", Some("k-1")), &snap, &gate).unwrap();
     assert!(w.write);
     assert_eq!(
-        nested_payload(&w),
+        nested_payload(&w).unwrap(),
         serde_json::json!({
             "tool": "adjust",
-            "args": {"x": 1},
+            "args": {"x": 1, "__idempotency_key": "k-1"},
             "call_chain": [APP, SVC],
             "idempotency_key": "k-1",
         })
@@ -484,4 +484,57 @@ fn tenant_d_tenant_wide_service_resolves_from_a_community_scoped_call() {
     other.update_scope(8, 0, &[svc_row()]);
     let err = plan(&[APP], req(SVC, "get_balance", None), &other, &gate).unwrap_err();
     assert_eq!(err.code(), "target_unavailable");
+}
+
+#[test]
+fn idempotency_key_is_merged_into_forwarded_args() {
+    let (snap, gate) = world();
+    let w = plan(&[APP], req(SVC, "adjust", Some("k-1")), &snap, &gate).unwrap();
+    let p = nested_payload(&w).unwrap();
+    assert_eq!(p["args"]["x"], 1);
+    assert_eq!(p["args"][IDEMPOTENCY_ARG], "k-1");
+    assert_eq!(IDEMPOTENCY_ARG, "__idempotency_key");
+}
+
+#[test]
+fn absent_idempotency_key_leaves_args_untouched() {
+    let (snap, gate) = world();
+    let r = plan(&[APP], req(SVC, "get_balance", None), &snap, &gate).unwrap();
+    let p = nested_payload(&r).unwrap();
+    assert_eq!(p["args"], serde_json::json!({"x": 1}));
+    assert!(p["args"].get(IDEMPOTENCY_ARG).is_none());
+}
+
+#[test]
+fn merge_rechecks_the_size_bound() {
+    let (snap, gate) = world();
+    let mut w = plan(&[APP], req(SVC, "adjust", Some("k-1")), &snap, &gate).unwrap();
+    // Exactly at the bound before the merge; the merged key pushes it over.
+    let pad = MAX_ARGS_BYTES
+        - serde_json::to_vec(&serde_json::json!({"p": ""}))
+            .unwrap()
+            .len();
+    w.args = serde_json::json!({"p": "a".repeat(pad)});
+    assert_eq!(serde_json::to_vec(&w.args).unwrap().len(), MAX_ARGS_BYTES);
+    let err = nested_payload(&w).unwrap_err();
+    assert_eq!(err.code(), "invalid_args", "{err:?}");
+}
+
+#[test]
+fn caller_supplied_reserved_field_is_rejected() {
+    let (snap, gate) = world();
+    let mut w = plan(&[APP], req(SVC, "adjust", Some("k-1")), &snap, &gate).unwrap();
+    w.args = serde_json::json!({"__idempotency_key": "spoof"});
+    assert!(nested_payload(&w).is_err());
+    let mut r = plan(&[APP], req(SVC, "get_balance", None), &snap, &gate).unwrap();
+    r.args = serde_json::json!({"__idempotency_key": "spoof"});
+    assert!(nested_payload(&r).is_err());
+}
+
+#[test]
+fn key_with_non_object_args_is_rejected() {
+    let (snap, gate) = world();
+    let mut w = plan(&[APP], req(SVC, "adjust", Some("k-1")), &snap, &gate).unwrap();
+    w.args = serde_json::json!([1, 2]);
+    assert!(nested_payload(&w).is_err());
 }

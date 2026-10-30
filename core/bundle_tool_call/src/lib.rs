@@ -315,14 +315,46 @@ pub fn plan_tool_call(
     })
 }
 
+/// Reserved top-level args field carrying the caller's idempotency key to the
+/// target guest (`tool-provider.call` has no key param). Callers may not set it.
+pub const IDEMPOTENCY_ARG: &str = "__idempotency_key";
+
 /// The `InvokeBody.payload` for the nested `ExportKind::ToolCall` invoke.
-pub fn nested_payload(plan: &ToolPlan) -> serde_json::Value {
-    serde_json::json!({
+///
+/// When an idempotency key is present it is merged into the forwarded args
+/// under [`IDEMPOTENCY_ARG`], and the merged args are re-encoded and re-checked
+/// against [`MAX_ARGS_BYTES`] so the bound holds for what the target receives.
+/// A caller-supplied reserved field (spoofing) or a key with non-object args is
+/// `invalid_args`.
+pub fn nested_payload(plan: &ToolPlan) -> Result<serde_json::Value, ToolRefusal> {
+    let bad = |m: &str| ToolRefusal::InvalidArgs(m.to_string());
+    if plan
+        .args
+        .as_object()
+        .is_some_and(|o| o.contains_key(IDEMPOTENCY_ARG))
+    {
+        return Err(bad("args may not set the reserved idempotency field"));
+    }
+    let mut args = plan.args.clone();
+    if let Some(key) = &plan.idempotency_key {
+        let obj = args
+            .as_object_mut()
+            .ok_or_else(|| bad("args must be an object when an idempotency key is supplied"))?;
+        obj.insert(
+            IDEMPOTENCY_ARG.to_string(),
+            serde_json::Value::String(key.clone()),
+        );
+        let encoded = serde_json::to_vec(&args).map_err(|_| bad("args are not encodable JSON"))?;
+        if encoded.len() > MAX_ARGS_BYTES {
+            return Err(bad("args exceed the maximum size"));
+        }
+    }
+    Ok(serde_json::json!({
         "tool": plan.tool,
-        "args": plan.args,
+        "args": args,
         "call_chain": plan.next_chain,
         "idempotency_key": plan.idempotency_key,
-    })
+    }))
 }
 
 /// The nested call's host deadline: `min(remaining outer deadline, 8s)`. A

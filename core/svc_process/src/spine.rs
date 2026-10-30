@@ -530,13 +530,14 @@ pub async fn invoke_tool_call(
     let deadline_ms = u64::try_from(deadline.as_millis())
         .unwrap_or(u64::MAX)
         .max(1);
+    let payload = bundle_tool_call::nested_payload(plan)?;
     let started = std::time::Instant::now();
     let invoke = conn.invoke(
         InvokeBody {
             app_id: plan.target_app_id.clone(),
             digest: plan.target_digest.clone(),
             export: ExportKind::ToolCall,
-            payload: bundle_tool_call::nested_payload(plan),
+            payload,
             deadline_ms,
             trace,
         },
