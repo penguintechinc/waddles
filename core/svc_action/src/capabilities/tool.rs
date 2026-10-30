@@ -146,6 +146,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             community: scope.community.clone(),
             app_id: plan.target_app_id.clone(),
             origin_channel_id: scope.origin_channel_id.clone(),
+            origin_platform: scope.origin_platform.clone(),
             tenant_id: scope.tenant_id,
             community_id: scope.community_id,
             app_version: plan.target_version,
