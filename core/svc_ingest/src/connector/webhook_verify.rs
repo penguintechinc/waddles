@@ -134,6 +134,22 @@ impl SignedTemplate {
         Ok(Self(parts))
     }
 
+    /// Rejects adjacent variable-length placeholders with no literal
+    /// separator: byte boundaries could shift (`id|body`) and still yield the
+    /// same signed string. A pair involving `{ts}` is allowed -- the
+    /// timestamp must parse as a fixed-format value inside the replay window,
+    /// so it cannot absorb arbitrary bytes (this keeps the Twitch
+    /// `{id}{ts}{body}` preset valid).
+    fn reject_ambiguous(&self) -> Result<(), String> {
+        for w in self.0.windows(2) {
+            let ph = |p: &Part| !matches!(p, Part::Lit(_));
+            if ph(&w[0]) && ph(&w[1]) && w[0] != Part::Ts && w[1] != Part::Ts {
+                return Err("adjacent placeholders need a literal separator".into());
+            }
+        }
+        Ok(())
+    }
+
     fn needs_id(&self) -> bool {
         self.0.contains(&Part::Id)
     }
@@ -246,9 +262,16 @@ fn check_window(ts: i64, now: i64, window_secs: u64) -> Result<(), VerifyError> 
     Ok(())
 }
 
-fn sig_digest_id(sig: &[u8]) -> String {
-    hex_encode(&Sha256::digest(sig))
+/// Dedup id = digest of the exact signed message. Everything in it is covered
+/// by the signature (no unsigned header or attacker-chosen signature bytes can
+/// change it), so a replay cannot dodge dedup by varying an id header or by
+/// prepending junk signature candidates.
+fn signed_message_id(message: &[u8]) -> String {
+    hex_encode(&Sha256::digest(message))
 }
+
+/// Max `v1=` entries accepted in a Stripe-style header.
+pub const MAX_STRIPE_V1: usize = 4;
 
 impl Scheme {
     /// The Twitch EventSub scheme expressed as a generic HMAC route:
@@ -269,15 +292,15 @@ impl Scheme {
 
     /// Structural validation at registration time (fail loud, not per-request).
     pub fn validate(&self) -> Result<(), String> {
-        match self {
-            Self::HmacSha256(s) if s.template.needs_id() && s.id_header.is_none() => {
-                Err("template uses {id} but no id_header configured".into())
-            }
-            Self::Ed25519(s) if s.template.needs_id() && s.id_header.is_none() => {
-                Err("template uses {id} but no id_header configured".into())
-            }
-            _ => Ok(()),
+        let (template, id_header) = match self {
+            Self::HmacSha256(s) => (&s.template, &s.id_header),
+            Self::Ed25519(s) => (&s.template, &s.id_header),
+            Self::Stripe(_) => return Ok(()),
+        };
+        if template.needs_id() && id_header.is_none() {
+            return Err("template uses {id} but no id_header configured".into());
         }
+        template.reject_ambiguous()
     }
 
     /// Phase 1 -- no secret: headers, timestamp window, signed string.
@@ -302,7 +325,7 @@ impl Scheme {
                     .ok_or(VerifyError::BadSignature)?;
                 let sig = s.encoding.decode(hex).ok_or(VerifyError::BadSignature)?;
                 let message = s.template.render(id.unwrap_or(""), ts_raw, body);
-                let dedup_id = id.map_or_else(|| sig_digest_id(&sig), str::to_owned);
+                let dedup_id = signed_message_id(&message);
                 Ok(Prepared {
                     kind: PreparedKind::Hmac {
                         message,
@@ -324,7 +347,7 @@ impl Scheme {
                     .decode(sig_raw)
                     .ok_or(VerifyError::BadSignature)?;
                 let message = s.template.render(id.unwrap_or(""), ts_raw, body);
-                let dedup_id = id.map_or_else(|| sig_digest_id(&sig), str::to_owned);
+                let dedup_id = signed_message_id(&message);
                 Ok(Prepared {
                     kind: PreparedKind::Ed25519 {
                         message,
@@ -338,10 +361,19 @@ impl Scheme {
                 let raw = header_str(headers, &s.signature_header)?;
                 let mut t: Option<&str> = None;
                 let mut candidates = Vec::new();
+                let mut v1_seen = 0usize;
                 for item in raw.split(',') {
                     match item.trim().split_once('=') {
-                        Some(("t", v)) => t = Some(v),
+                        Some(("t", v)) => {
+                            if t.replace(v).is_some() {
+                                return Err(VerifyError::BadSignature);
+                            }
+                        }
                         Some(("v1", v)) => {
+                            v1_seen += 1;
+                            if v1_seen > MAX_STRIPE_V1 {
+                                return Err(VerifyError::BadSignature);
+                            }
                             if let Some(d) = decode_hex(v) {
                                 candidates.push(d);
                             }
@@ -362,7 +394,7 @@ impl Scheme {
                 message.extend_from_slice(t.as_bytes());
                 message.push(b'.');
                 message.extend_from_slice(body);
-                let dedup_id = sig_digest_id(&candidates[0]);
+                let dedup_id = signed_message_id(&message);
                 Ok(Prepared {
                     kind: PreparedKind::Hmac {
                         message,
@@ -669,7 +701,7 @@ mod tests {
             .prepare(&h, b"{\"x\":1}", WINDOW, now_for("twitch"))
             .unwrap();
         assert!(p.check(&secret).is_ok());
-        assert_eq!(p.dedup_id, "msg-1");
+        assert_eq!(p.dedup_id.len(), 64);
     }
 
     #[test]
@@ -689,6 +721,75 @@ mod tests {
         };
         s.template = SignedTemplate::parse("{id}{ts}{body}").unwrap();
         assert!(Scheme::HmacSha256(s).validate().is_err());
+        assert!(Scheme::twitch_eventsub().validate().is_ok());
+    }
+
+    #[test]
+    fn replay_with_a_new_unsigned_id_header_keeps_the_same_dedup_id() {
+        // Template omits {id}; the id header is NOT signed.
+        let spec = |_: ()| HmacSpec {
+            signature_header: HeaderName::from_static("x-sig"),
+            timestamp_header: HeaderName::from_static("x-ts"),
+            id_header: Some(HeaderName::from_static("x-id")),
+            template: SignedTemplate::parse("{ts}.{body}").unwrap(),
+            signature_prefix: String::new(),
+            encoding: Encoding::Hex,
+            timestamp_format: TimestampFormat::UnixSeconds,
+        };
+        let s = Scheme::HmacSha256(spec(()));
+        let msg = format!("{NOW}.x");
+        let sig = hmac_hex(SECRET, msg.as_bytes());
+        let mk = |id: &str| {
+            hdrs(&[
+                ("x-ts", NOW.to_string()),
+                ("x-sig", sig.clone()),
+                ("x-id", id.to_string()),
+            ])
+        };
+        let a = s.prepare(&mk("one"), b"x", WINDOW, NOW).unwrap();
+        let b = s.prepare(&mk("two"), b"x", WINDOW, NOW).unwrap();
+        assert!(a.check(SECRET).is_ok() && b.check(SECRET).is_ok());
+        assert_eq!(a.dedup_id, b.dedup_id);
+    }
+
+    #[test]
+    fn stripe_prepended_junk_v1_keeps_the_same_dedup_id_and_cap_is_enforced() {
+        let (s, secret, h) = signed("stripe", b"x", NOW);
+        let real = h.get("stripe-signature").unwrap().to_str().unwrap();
+        let junk = hdrs(&[(
+            "stripe-signature",
+            format!("v1=00ff,{}", real.replace("v1=deadbeef,", "")),
+        )]);
+        let a = s.prepare(&h, b"x", WINDOW, NOW).unwrap();
+        let b = s.prepare(&junk, b"x", WINDOW, NOW).unwrap();
+        assert!(a.check(&secret).is_ok() && b.check(&secret).is_ok());
+        assert_eq!(a.dedup_id, b.dedup_id);
+        let many = hdrs(&[(
+            "stripe-signature",
+            format!("t={NOW},v1=00,v1=01,v1=02,v1=03,v1=04"),
+        )]);
+        assert!(s.prepare(&many, b"x", WINDOW, NOW).is_err());
+        let two_t = hdrs(&[("stripe-signature", format!("t={NOW},t={NOW},v1=00"))]);
+        assert!(s.prepare(&two_t, b"x", WINDOW, NOW).is_err());
+    }
+
+    #[test]
+    fn adjacent_variable_placeholders_are_rejected_at_validate() {
+        let mk = |t: &str| {
+            Scheme::HmacSha256(HmacSpec {
+                signature_header: HeaderName::from_static("x-sig"),
+                timestamp_header: HeaderName::from_static("x-ts"),
+                id_header: Some(HeaderName::from_static("x-id")),
+                template: SignedTemplate::parse(t).unwrap(),
+                signature_prefix: String::new(),
+                encoding: Encoding::Hex,
+                timestamp_format: TimestampFormat::UnixSeconds,
+            })
+        };
+        assert!(mk("{id}{body}{ts}").validate().is_err());
+        assert!(mk("{ts}{body}{id}").validate().is_err());
+        assert!(mk("{id}.{body}.{ts}").validate().is_ok());
+        assert!(mk("{id}{ts}{body}").validate().is_ok());
         assert!(Scheme::twitch_eventsub().validate().is_ok());
     }
 }

@@ -119,14 +119,62 @@ pub enum RegistryError {
     /// The bundle trying to bind is not the route's owner.
     #[error("owner mismatch")]
     OwnerMismatch,
+    /// The caller is not authorized for the route's community.
+    #[error("community mismatch")]
+    CommunityMismatch,
 }
+
+/// Failed-verification budget per source per rate window, and the cap on
+/// distinct tracked sources (overflow shares one bucket; bounded memory).
+pub const MAX_FAILURES_PER_SOURCE: u32 = 20;
+const MAX_TRACKED_SOURCES: usize = 4096;
 
 struct RouteEntry {
     route: WebhookRoute,
+    /// Limiter charged only by VERIFIED deliveries (`route.rate_limit`).
     window: Mutex<(Instant, u32)>,
+    /// Per-source failed-verification counters: unauthenticated callers can
+    /// only exhaust their OWN budget, never the verified budget.
+    failures: Mutex<HashMap<String, (Instant, u32)>>,
 }
 
 impl RouteEntry {
+    fn bucket<'a>(map: &HashMap<String, (Instant, u32)>, source: &'a str) -> &'a str {
+        if map.contains_key(source) || map.len() < MAX_TRACKED_SOURCES {
+            source
+        } else {
+            "~overflow"
+        }
+    }
+
+    /// True when `source` has spent its failure budget (pre-auth, cheap).
+    fn source_blocked(&self, source: &str, now: Instant) -> bool {
+        let Ok(map) = self.failures.lock() else {
+            return true;
+        };
+        let key = Self::bucket(&map, source);
+        map.get(key).is_some_and(|(start, n)| {
+            now.saturating_duration_since(*start) < self.route.rate_limit.per
+                && *n >= MAX_FAILURES_PER_SOURCE
+        })
+    }
+
+    fn charge_failure(&self, source: &str, now: Instant) {
+        let Ok(mut map) = self.failures.lock() else {
+            return;
+        };
+        if map.len() >= MAX_TRACKED_SOURCES {
+            let per = self.route.rate_limit.per;
+            map.retain(|_, (start, _)| now.saturating_duration_since(*start) < per);
+        }
+        let key = Self::bucket(&map, source).to_string();
+        let e = map.entry(key).or_insert((now, 0));
+        if now.saturating_duration_since(e.0) >= self.route.rate_limit.per {
+            *e = (now, 0);
+        }
+        e.1 = e.1.saturating_add(1);
+    }
+
     fn admit(&self, now: Instant) -> bool {
         // Poisoned lock => fail closed (reject).
         let Ok(mut w) = self.window.lock() else {
@@ -283,28 +331,62 @@ impl WebhookIngress {
     }
 
     /// Registers (or replaces) a route after validation.
-    pub fn register(&self, route: WebhookRoute) -> Result<(), RegistryError> {
+    ///
+    /// `authorized_community` is the community the (trusted, host
+    /// control-plane) caller has authorized for this registration. This API
+    /// is host-internal -- it is not reachable from a guest/bundle or any
+    /// HTTP route -- but is nonetheless fail-closed: a route whose
+    /// `secret_ref.community_id` differs from `authorized_community` is
+    /// rejected, and an existing route key can only be replaced by the
+    /// community that owns it (no cross-community takeover).
+    pub fn register(
+        &self,
+        route: WebhookRoute,
+        authorized_community: i64,
+    ) -> Result<(), RegistryError> {
         route.validate()?;
+        if route.secret_ref.community_id != authorized_community {
+            return Err(RegistryError::CommunityMismatch);
+        }
         let entry = Arc::new(RouteEntry {
             window: Mutex::new((Instant::now(), 0)),
+            failures: Mutex::new(HashMap::new()),
             route,
         });
         let mut g = self
             .routes
             .write()
             .map_err(|_| RegistryError::Invalid("registry poisoned".into()))?;
+        if let Some(existing) = g.get(&entry.route.route_key) {
+            if existing.route.secret_ref.community_id != authorized_community {
+                return Err(RegistryError::CommunityMismatch);
+            }
+        }
         g.insert(entry.route.route_key.clone(), entry);
         Ok(())
     }
 
-    /// Removes a route and its transport binding.
-    pub fn unregister(&self, route_key: &str) {
+    /// Removes a route and its transport binding; only the owning community
+    /// may remove it.
+    pub fn unregister(
+        &self,
+        route_key: &str,
+        authorized_community: i64,
+    ) -> Result<(), RegistryError> {
+        match self.entry(route_key) {
+            Some(e) if e.route.secret_ref.community_id != authorized_community => {
+                return Err(RegistryError::CommunityMismatch)
+            }
+            None => return Err(RegistryError::Unknown),
+            Some(_) => {}
+        }
         if let Ok(mut g) = self.routes.write() {
             g.remove(route_key);
         }
         if let Ok(mut g) = self.bound.write() {
             g.remove(route_key);
         }
+        Ok(())
     }
 
     /// Binds a [`WebhookTransport`] for `platform` to `route_key`. Refused
@@ -341,7 +423,8 @@ impl WebhookIngress {
         self.routes.read().ok()?.get(route_key).cloned()
     }
 
-    /// Handles one request for `route_key`. `now_unix` is injected for tests.
+    /// Handles one request with no source attribution (no per-source
+    /// failure throttle). `now_unix` is injected for tests.
     pub async fn handle(
         &self,
         route_key: &str,
@@ -349,7 +432,23 @@ impl WebhookIngress {
         body: &[u8],
         now_unix: i64,
     ) -> WebhookOutcome {
-        let outcome = self.handle_inner(route_key, headers, body, now_unix).await;
+        self.handle_from(route_key, None, headers, body, now_unix)
+            .await
+    }
+
+    /// Handles one request. `source` is an opaque caller identity (peer IP)
+    /// used ONLY to throttle that source's failed verifications.
+    pub async fn handle_from(
+        &self,
+        route_key: &str,
+        source: Option<&str>,
+        headers: &HeaderMap,
+        body: &[u8],
+        now_unix: i64,
+    ) -> WebhookOutcome {
+        let outcome = self
+            .handle_inner(route_key, source, headers, body, now_unix)
+            .await;
         if let Some(c) = &self.requests {
             c.with_label_values(&[outcome.label()]).inc();
         }
@@ -361,6 +460,7 @@ impl WebhookIngress {
     async fn handle_inner(
         &self,
         route_key: &str,
+        source: Option<&str>,
         headers: &HeaderMap,
         body: &[u8],
         now_unix: i64,
@@ -369,9 +469,18 @@ impl WebhookIngress {
             return WebhookOutcome::NotFound;
         };
         let route = &entry.route;
-        if !entry.admit(Instant::now()) {
+        let now = Instant::now();
+        // Pre-auth: a source that already burned its failure budget is
+        // refused cheaply, before any secret fetch. It can only starve itself.
+        if source.is_some_and(|s| entry.source_blocked(s, now)) {
             return WebhookOutcome::RateLimited;
         }
+        let fail = |o: WebhookOutcome| {
+            if let Some(s) = source {
+                entry.charge_failure(s, now);
+            }
+            o
+        };
         if body.len() > route.body_limit {
             return WebhookOutcome::TooLarge;
         }
@@ -381,44 +490,58 @@ impl WebhookIngress {
                 .prepare(headers, body, route.replay_window.as_secs(), now_unix)
             {
                 Ok(p) => p,
-                Err(_) => return WebhookOutcome::Rejected,
+                Err(_) => return fail(WebhookOutcome::Rejected),
             };
         // Secret by ROUTE KEY's secret_ref, per call, scoped to this block so
         // it zeroizes on drop and never crosses an await after the check.
         let verified = {
             let secret = match self.secrets.resolve(route.secret_ref).await {
                 Ok(s) => s,
-                Err(SecretError::Missing) => return WebhookOutcome::Rejected,
+                Err(SecretError::Missing) => return fail(WebhookOutcome::Rejected),
                 Err(SecretError::Unavailable) => return WebhookOutcome::Unavailable,
             };
             prepared.check(secret.expose())
         };
         if verified.is_err() {
-            return WebhookOutcome::Rejected;
+            return fail(WebhookOutcome::Rejected);
         }
-        // Dedup only AFTER the signature verifies so an unauthenticated
-        // caller cannot poison the dedup namespace.
+        // Verified traffic is charged to the route's own budget, which
+        // unauthenticated requests can never spend.
+        if !entry.admit(now) {
+            return WebhookOutcome::RateLimited;
+        }
+        // Reserve queue capacity and re-check the owner binding BEFORE
+        // marking dedup: a delivery we cannot dispatch must stay
+        // redeliverable, never be recorded as seen.
+        let permit = {
+            let tx = {
+                let Ok(g) = self.bound.read() else {
+                    return WebhookOutcome::Unavailable;
+                };
+                match g.get(route_key) {
+                    // Owner re-check at dispatch: a route re-registered to a
+                    // different owner is never driven into the old binding.
+                    Some(b) if b.owner == route.owner_bundle => b.tx.clone(),
+                    _ => return WebhookOutcome::Unavailable,
+                }
+            };
+            match tx.try_reserve_owned() {
+                Ok(p) => p,
+                Err(_) => return WebhookOutcome::Unavailable,
+            }
+        };
+        // Dedup (keyed on the digest of the verified SIGNED message) only
+        // AFTER the signature verifies, so an unauthenticated caller cannot
+        // poison the dedup namespace. Dropping `permit` on Duplicate/Err
+        // releases the reserved slot.
         let key = format!("wh:{}:{}", route.route_key, prepared.dedup_id);
         match self.dedup.first_seen(&key).await {
             Ok(true) => {}
             Ok(false) => return WebhookOutcome::Duplicate,
             Err(()) => return WebhookOutcome::Unavailable,
         }
-        let tx = {
-            let Ok(g) = self.bound.read() else {
-                return WebhookOutcome::Unavailable;
-            };
-            match g.get(route_key) {
-                // Owner re-check at dispatch: a route re-registered to a
-                // different owner is never driven into the old binding.
-                Some(b) if b.owner == route.owner_bundle => b.tx.clone(),
-                _ => return WebhookOutcome::Unavailable,
-            }
-        };
-        match tx.try_send(body.to_vec()) {
-            Ok(()) => WebhookOutcome::Accepted,
-            Err(_) => WebhookOutcome::Unavailable,
-        }
+        permit.send(body.to_vec());
+        WebhookOutcome::Accepted
     }
 
     /// Per-route hard body cap used by the HTTP layer's coarse limit.
@@ -584,7 +707,7 @@ mod tests {
     #[tokio::test]
     async fn valid_request_is_dispatched_to_the_owner_as_the_exact_verified_body() {
         let (ing, _) = ingress(Some(SECRET));
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         let mut t = ing.bind_transport(KEY, "acme").unwrap();
         let body = b"{\"hello\":1}";
         let out = ing.handle(KEY, &signed_headers(body), body, NOW).await;
@@ -602,7 +725,7 @@ mod tests {
     #[tokio::test]
     async fn tampered_body_is_rejected_and_nothing_is_dispatched() {
         let (ing, _) = ingress(Some(SECRET));
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         let mut t = ing.bind_transport(KEY, "acme").unwrap();
         let h = signed_headers(b"original");
         let out = ing.handle(KEY, &h, b"tampered", NOW).await;
@@ -613,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn replayed_request_is_deduplicated_and_not_redispatched() {
         let (ing, _) = ingress(Some(SECRET));
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         let mut t = ing.bind_transport(KEY, "acme").unwrap();
         let h = signed_headers(b"x");
         assert_eq!(
@@ -631,7 +754,7 @@ mod tests {
     #[tokio::test]
     async fn stale_timestamp_is_rejected_before_the_secret_is_fetched() {
         let (ing, s) = ingress(Some(SECRET));
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         let _t = ing.bind_transport(KEY, "acme").unwrap();
         let h = signed_headers(b"x");
         let out = ing.handle(KEY, &h, b"x", NOW + 10_000).await;
@@ -642,7 +765,7 @@ mod tests {
     #[tokio::test]
     async fn missing_secret_fails_closed() {
         let (ing, _) = ingress(None);
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         let mut t = ing.bind_transport(KEY, "acme").unwrap();
         let out = ing.handle(KEY, &signed_headers(b"x"), b"x", NOW).await;
         assert_eq!(out, WebhookOutcome::Rejected);
@@ -652,7 +775,7 @@ mod tests {
     #[tokio::test]
     async fn empty_secret_fails_closed() {
         let (ing, _) = ingress(Some(""));
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         let _t = ing.bind_transport(KEY, "acme").unwrap();
         let out = ing.handle(KEY, &signed_headers(b"x"), b"x", NOW).await;
         assert_eq!(out, WebhookOutcome::Rejected);
@@ -666,7 +789,7 @@ mod tests {
             fail: Some(SecretError::Unavailable),
         });
         let ing = WebhookIngress::new(s, Arc::new(MemDedup::default()), None);
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         let mut t = ing.bind_transport(KEY, "acme").unwrap();
         let out = ing.handle(KEY, &signed_headers(b"x"), b"x", NOW).await;
         assert_eq!(out, WebhookOutcome::Unavailable);
@@ -685,7 +808,7 @@ mod tests {
             ..Default::default()
         });
         let ing = WebhookIngress::new(s, d, None);
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         let mut t = ing.bind_transport(KEY, "acme").unwrap();
         let out = ing.handle(KEY, &signed_headers(b"x"), b"x", NOW).await;
         assert_eq!(out, WebhookOutcome::Unavailable);
@@ -695,7 +818,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_owner_bind_is_refused_and_reowned_route_is_not_driven() {
         let (ing, _) = ingress(Some(SECRET));
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         assert_eq!(
             ing.bind_transport(KEY, "mallory").err(),
             Some(RegistryError::OwnerMismatch)
@@ -707,7 +830,8 @@ mod tests {
         // Bound to acme, then the route is re-registered to another owner:
         // dispatch must refuse rather than feed acme's transport.
         let mut t = ing.bind_transport(KEY, "acme").unwrap();
-        ing.register(route(KEY, "other", generic_hmac())).unwrap();
+        ing.register(route(KEY, "other", generic_hmac()), 7)
+            .unwrap();
         let out = ing.handle(KEY, &signed_headers(b"x"), b"x", NOW).await;
         assert_eq!(out, WebhookOutcome::Unavailable);
         assert!(t.rx.try_recv().is_err());
@@ -716,14 +840,17 @@ mod tests {
     #[tokio::test]
     async fn routes_are_isolated_by_key_scheme_and_secret_ref() {
         let (ing, _) = ingress(Some(SECRET));
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
-        ing.register(route(
-            "route-key-bbbb2222",
-            "globex",
-            Scheme::Stripe(StripeSpec {
-                signature_header: HeaderName::from_static("stripe-signature"),
-            }),
-        ))
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
+        ing.register(
+            route(
+                "route-key-bbbb2222",
+                "globex",
+                Scheme::Stripe(StripeSpec {
+                    signature_header: HeaderName::from_static("stripe-signature"),
+                }),
+            ),
+            7,
+        )
         .unwrap();
         let _a = ing.bind_transport(KEY, "acme").unwrap();
         let mut b = ing.bind_transport("route-key-bbbb2222", "globex").unwrap();
@@ -739,7 +866,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_body_is_rejected_before_any_secret_fetch() {
         let (ing, s) = ingress(Some(SECRET));
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         let _t = ing.bind_transport(KEY, "acme").unwrap();
         let big = vec![b'a'; 1025];
         let out = ing.handle(KEY, &signed_headers(&big), &big, NOW).await;
@@ -755,7 +882,7 @@ mod tests {
             max: 2,
             per: Duration::from_secs(3600),
         };
-        ing.register(r).unwrap();
+        ing.register(r, 7).unwrap();
         let _t = ing.bind_transport(KEY, "acme").unwrap();
         let mut outs = Vec::new();
         for i in 0..4 {
@@ -772,13 +899,14 @@ mod tests {
                 WebhookOutcome::RateLimited
             ]
         );
-        assert_eq!(*s.calls.lock().unwrap(), 2);
+        // Verified-only charge: every request still resolved the secret.
+        assert_eq!(*s.calls.lock().unwrap(), 4);
     }
 
     #[tokio::test]
     async fn unbound_route_and_unknown_route_are_loud() {
         let (ing, _) = ingress(Some(SECRET));
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         assert_eq!(
             ing.handle(KEY, &signed_headers(b"x"), b"x", NOW).await,
             WebhookOutcome::Unavailable
@@ -808,7 +936,7 @@ mod tests {
             encoding: Encoding::Hex,
             timestamp_format: TimestampFormat::UnixSeconds,
         });
-        ing.register(route(KEY, "acme", scheme)).unwrap();
+        ing.register(route(KEY, "acme", scheme), 7).unwrap();
         let mut t = ing.bind_transport(KEY, "acme").unwrap();
         let body = b"payload";
         let msg = [NOW.to_string().as_bytes(), body].concat();
@@ -830,26 +958,26 @@ mod tests {
     fn registration_validation_rejects_bad_routes() {
         let (ing, _) = ingress(Some(SECRET));
         let mut r = route("short", "acme", generic_hmac());
-        assert!(ing.register(r.clone()).is_err());
+        assert!(ing.register(r.clone(), 7).is_err());
         r = route(KEY, "", generic_hmac());
-        assert!(ing.register(r).is_err());
+        assert!(ing.register(r, 7).is_err());
         let mut r = route(KEY, "acme", generic_hmac());
         r.replay_window = Duration::from_secs(10_000);
-        assert!(ing.register(r).is_err());
+        assert!(ing.register(r, 7).is_err());
         let mut r = route(KEY, "acme", generic_hmac());
         r.body_limit = HARD_MAX_BODY_BYTES + 1;
-        assert!(ing.register(r).is_err());
+        assert!(ing.register(r, 7).is_err());
         let mut r = route(KEY, "acme", generic_hmac());
         r.rate_limit.max = 0;
-        assert!(ing.register(r).is_err());
+        assert!(ing.register(r, 7).is_err());
         let r = route("bad key with spaces!", "acme", generic_hmac());
-        assert!(ing.register(r).is_err());
+        assert!(ing.register(r, 7).is_err());
     }
 
     #[tokio::test]
     async fn transport_handshake_refuses_secret_substitution_and_closes() {
         let (ing, _) = ingress(Some(SECRET));
-        ing.register(route(KEY, "acme", generic_hmac())).unwrap();
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
         let mut t = ing.bind_transport(KEY, "acme").unwrap();
         assert_eq!(t.platform(), "acme");
         assert!(t
@@ -939,5 +1067,102 @@ mod tests {
         let id = opaque_source_id(KEY);
         assert!(id.starts_with("wh-") && !id.contains(KEY));
         assert_eq!(id, opaque_source_id(KEY));
+    }
+
+    #[tokio::test]
+    async fn dispatch_failure_does_not_mark_dedup_so_redelivery_is_accepted() {
+        let (ing, _) = ingress(Some(SECRET));
+        let mut r = route(KEY, "acme", generic_hmac());
+        r.rate_limit.max = 10_000;
+        ing.register(r, 7).unwrap();
+        let h = signed_headers(b"x");
+        // Unbound: dispatch impossible -> 503, dedup untouched.
+        assert_eq!(
+            ing.handle(KEY, &h, b"x", NOW).await,
+            WebhookOutcome::Unavailable
+        );
+        let mut t = ing.bind_transport(KEY, "acme").unwrap();
+        // Redelivery now succeeds (not Duplicate).
+        assert_eq!(
+            ing.handle(KEY, &h, b"x", NOW).await,
+            WebhookOutcome::Accepted
+        );
+        assert!(t.rx.try_recv().is_ok());
+        // Queue full also leaves dedup unmarked.
+        for i in 0..FRAME_QUEUE_DEPTH {
+            let b = format!("f{i}");
+            let hh = signed_headers(b.as_bytes());
+            assert_eq!(
+                ing.handle(KEY, &hh, b.as_bytes(), NOW).await,
+                WebhookOutcome::Accepted
+            );
+        }
+        let hf = signed_headers(b"full");
+        assert_eq!(
+            ing.handle(KEY, &hf, b"full", NOW).await,
+            WebhookOutcome::Unavailable
+        );
+        while t.rx.try_recv().is_ok() {}
+        assert_eq!(
+            ing.handle(KEY, &hf, b"full", NOW).await,
+            WebhookOutcome::Accepted
+        );
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_failures_cannot_block_a_verified_delivery() {
+        let (ing, _) = ingress(Some(SECRET));
+        let mut r = route(KEY, "acme", generic_hmac());
+        r.rate_limit = RateLimit {
+            max: 5,
+            per: Duration::from_secs(3600),
+        };
+        ing.register(r, 7).unwrap();
+        let mut t = ing.bind_transport(KEY, "acme").unwrap();
+        let bad = signed_headers(b"orig");
+        for _ in 0..MAX_FAILURES_PER_SOURCE + 10 {
+            let _ = ing
+                .handle_from(KEY, Some("1.1.1.1"), &bad, b"forged", NOW)
+                .await;
+        }
+        // The attacker is now throttled...
+        assert_eq!(
+            ing.handle_from(KEY, Some("1.1.1.1"), &bad, b"forged", NOW)
+                .await,
+            WebhookOutcome::RateLimited
+        );
+        // ...but a different source's verified delivery still goes through
+        // and the route's verified budget is untouched.
+        let good = signed_headers(b"real");
+        assert_eq!(
+            ing.handle_from(KEY, Some("2.2.2.2"), &good, b"real", NOW)
+                .await,
+            WebhookOutcome::Accepted
+        );
+        assert!(t.rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn cross_community_register_and_takeover_are_rejected() {
+        let (ing, _) = ingress(Some(SECRET));
+        // secret_ref community is 7; caller authorized for 8.
+        assert_eq!(
+            ing.register(route(KEY, "acme", generic_hmac()), 8).err(),
+            Some(RegistryError::CommunityMismatch)
+        );
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
+        // Another community registers a route reusing the key: refused.
+        let mut other = route(KEY, "evil", generic_hmac());
+        other.secret_ref.community_id = 8;
+        assert_eq!(
+            ing.register(other, 8).err(),
+            Some(RegistryError::CommunityMismatch)
+        );
+        assert_eq!(
+            ing.unregister(KEY, 8).err(),
+            Some(RegistryError::CommunityMismatch)
+        );
+        assert!(ing.unregister(KEY, 7).is_ok());
+        assert_eq!(ing.unregister(KEY, 7).err(), Some(RegistryError::Unknown));
     }
 }

@@ -6,7 +6,12 @@
 //! registration data. Every rejection is content-free and uniform.
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use std::net::SocketAddr;
+
+type ConnectInfoRejection =
+    <ConnectInfo<SocketAddr> as axum::extract::FromRequestParts<AppState>>::Rejection;
+
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -41,6 +46,7 @@ fn render(outcome: WebhookOutcome) -> Response {
 async fn intake(
     State(state): State<AppState>,
     Path(route_key): Path<String>,
+    peer: Result<ConnectInfo<SocketAddr>, ConnectInfoRejection>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -48,9 +54,18 @@ async fn intake(
         tracing::warn!("generic webhook ingress not configured; rejecting delivery");
         return render(WebhookOutcome::Unavailable);
     };
+    // Peer IP (when the server provides ConnectInfo) is used only to
+    // throttle that source's failed verifications.
+    let source = peer.ok().map(|ConnectInfo(a)| a.ip().to_string());
     render(
         ingress
-            .handle(&route_key, &headers, &body, chrono::Utc::now().timestamp())
+            .handle_from(
+                &route_key,
+                source.as_deref(),
+                &headers,
+                &body,
+                chrono::Utc::now().timestamp(),
+            )
             .await,
     )
 }
@@ -103,29 +118,32 @@ mod tests {
             return (st, None);
         }
         let ing = WebhookIngress::new(Arc::new(Sec), Arc::new(Dd), None);
-        ing.register(WebhookRoute {
-            route_key: "route-key-http-1".into(),
-            owner_bundle: "acme".into(),
-            scheme: Scheme::HmacSha256(HmacSpec {
-                signature_header: HeaderName::from_static("x-sig"),
-                timestamp_header: HeaderName::from_static("x-ts"),
-                id_header: None,
-                template: SignedTemplate::parse("{ts}.{body}").unwrap(),
-                signature_prefix: String::new(),
-                encoding: Encoding::Hex,
-                timestamp_format: TimestampFormat::UnixSeconds,
-            }),
-            secret_ref: ConnectionRef {
-                community_id: 1,
-                connection_id: 2,
+        ing.register(
+            WebhookRoute {
+                route_key: "route-key-http-1".into(),
+                owner_bundle: "acme".into(),
+                scheme: Scheme::HmacSha256(HmacSpec {
+                    signature_header: HeaderName::from_static("x-sig"),
+                    timestamp_header: HeaderName::from_static("x-ts"),
+                    id_header: None,
+                    template: SignedTemplate::parse("{ts}.{body}").unwrap(),
+                    signature_prefix: String::new(),
+                    encoding: Encoding::Hex,
+                    timestamp_format: TimestampFormat::UnixSeconds,
+                }),
+                secret_ref: ConnectionRef {
+                    community_id: 1,
+                    connection_id: 2,
+                },
+                replay_window: Duration::from_secs(300),
+                rate_limit: RateLimit {
+                    max: 100,
+                    per: Duration::from_secs(60),
+                },
+                body_limit: 64,
             },
-            replay_window: Duration::from_secs(300),
-            rate_limit: RateLimit {
-                max: 100,
-                per: Duration::from_secs(60),
-            },
-            body_limit: 64,
-        })
+            1,
+        )
         .unwrap();
         let t = ing.bind_transport("route-key-http-1", "acme").unwrap();
         st.webhook = Some(Arc::new(ing));

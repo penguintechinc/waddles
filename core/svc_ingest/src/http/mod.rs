@@ -80,13 +80,29 @@ impl AppState {
     }
 }
 
+/// Bounded metric/trace label for a request path: fixed routes pass through,
+/// parameterized routes collapse to their template (so a webhook route key or
+/// callback key never becomes a label), everything else is `unmatched`.
+pub(crate) fn metric_path(path: &str) -> String {
+    const FIXED: [&str; 4] = ["/health", "/healthz", "/readyz", "/eventsub/twitch/webhook"];
+    if FIXED.contains(&path) {
+        path.to_string()
+    } else if path.starts_with("/intake/webhook/") {
+        "/intake/webhook/{route_key}".to_string()
+    } else if path.starts_with("/eventsub/twitch/webhook/") {
+        "/eventsub/twitch/webhook/{callback_key}".to_string()
+    } else {
+        "unmatched".to_string()
+    }
+}
+
 /// Records every request into [`AppState::request_metrics`]: a labeled
 /// counter and a latency histogram. Applied to the whole control-plane
 /// router so `/metrics` always has data once the service has served at
 /// least one request (the `up` gauge covers the window before that).
 async fn record_http_metrics(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let method = req.method().to_string();
-    let path = req.uri().path().to_string();
+    let path = metric_path(req.uri().path());
     let start = Instant::now();
     let response = next.run(req).await;
     let status = response.status().as_u16().to_string();
@@ -130,7 +146,16 @@ pub fn router(state: AppState) -> Router {
             state,
             record_http_metrics,
         ))
-        .layer(TraceLayer::new_for_http())
+        // Span carries the bounded template, never the raw URI (route keys).
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|req: &Request<axum::body::Body>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %req.method(),
+                    path = %metric_path(req.uri().path()),
+                )
+            }),
+        )
 }
 
 /// Builds the secondary Prometheus metrics router, bound to its own port
@@ -141,4 +166,23 @@ pub fn metrics_router(state: AppState) -> Router {
     Router::new()
         .route("/metrics", get(health::metrics))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod metric_path_tests {
+    use super::metric_path;
+
+    #[test]
+    fn label_is_the_template_never_the_raw_path() {
+        assert_eq!(
+            metric_path("/intake/webhook/super-secret-route-key"),
+            "/intake/webhook/{route_key}"
+        );
+        assert_eq!(
+            metric_path("/eventsub/twitch/webhook/cb123"),
+            "/eventsub/twitch/webhook/{callback_key}"
+        );
+        assert_eq!(metric_path("/healthz"), "/healthz");
+        assert_eq!(metric_path("/random/attacker/path-1"), "unmatched");
+    }
 }
