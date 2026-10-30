@@ -143,6 +143,10 @@ No `dm.*` permission family exists in source.
 | Error | `denied(string)`, `not-a-member`, `daily-cap-exceeded`, `invalid(string)`, `unavailable(string)`, `backend(string)` |
 | Caps (catalog) | Per call \|delta\| ≤5; per user rolling-24h ≤5; per community rolling-24h ≤50 |
 | `reputation.tenant.write` | Per scope rolling-24h ≤200; CATALOG-ONLY in #741 (no WIT op maps to it) |
+| P5 ops (bundle-MCP-tools) | `override-score(user, absolute-score: s64, reason) -> result<s64, error>` — ADMIN-ONLY, needs `reputation.community.admin` (Dangerous, 10 calls/min), absolute score clamped to ±1,000,000, ledgered `admin_override`, outside the daily caps; `adjust-many(adjustments: list<adjustment>, reason) -> result<_, error>` — one txn, every item gated as a `community.write` delta + capped, ≤100 items, no duplicate users, all-or-nothing; `get-many(users: list<string>) -> result<list<score-entry>, error>` — ≤100 users, any non-member fails the call; `leaderboard(limit: u32) -> result<list<score-entry>, error>` — 1..=100, active members with a score row, ties by user id |
+| Idempotency | `override` and `adjust-many` are keyed host-side by `<event_id>:reputation_override\|reputation_adjust_many:<ordinal>` (ledger `idempotency_key`): a redelivered event applies once, a replay with changed parameters is `denied("idempotency_conflict")`; no event id → `not_implemented` |
+| Clamp | Every write is clamped into ±1,000,000 (`MIN_SCORE`/`MAX_SCORE`); DB CHECK `ck_bundle_reputation_scores_balance_range` (alembic 0069) is the backstop. Caps meter the REQUESTED magnitude, so a call pinned at a bound still consumes quota |
+| Scope | Community-scoped only. The tenant-wide / FICO reputation is a separate legacy system, NOT exposed here (follow-up) |
 | Target | `user` must parse as UUID; community/tenant/app from scope only |
 | Membership | `SnapshotMembership` pre-filter at call time; re-checked inside write transaction (`membership.rs`) |
 | Reason | `[a-z0-9._:-]`, ≤100 chars, machine code, never PII |

@@ -379,6 +379,45 @@ interface reputation {
   /// (`[a-z0-9._:-]`, <= 100 chars) recorded in the audit ledger -- never
   /// free text or PII.
   adjust: func(user: string, delta: s32, reason: string) -> result<s64, error>;
+
+  /// One `(user, delta)` item of an [`adjust-many`] batch.
+  record adjustment {
+    user: string,
+    delta: s32,
+  }
+
+  /// One member's community score (UUID only).
+  record score-entry {
+    user: string,
+    score: s64,
+  }
+
+  /// ADMIN-ONLY: sets `user`'s community score to the ABSOLUTE `absolute-score`
+  /// (clamped into the store's score range) and returns the NEW score. Not a
+  /// capped delta -- it needs the dedicated `reputation.community.admin`
+  /// grant (denied `not_granted` without it) and neither trips nor consumes
+  /// the per-user/per-scope daily caps. Ledgered as `admin_override`. The
+  /// host keys it by event id + ordinal, so a redelivered event applies it
+  /// ONCE (a replay with different parameters is `denied("idempotency_conflict")`).
+  /// Named `override-score` because `override` is a reserved word in Rust
+  /// bindings.
+  override-score: func(user: string, absolute-score: s64, reason: string) -> result<s64, error>;
+
+  /// Atomically adds each `delta` to its user's score in ONE transaction:
+  /// all land or none do. Every item is gated and capped exactly like
+  /// [`adjust`] (per-call bound, per-user and per-community daily caps; the
+  /// batch total counts against the community cap). 1..=100 items, no
+  /// duplicate users. Idempotent per event id + ordinal like `override-score`.
+  adjust-many: func(adjustments: list<adjustment>, reason: string) -> result<_, error>;
+
+  /// Scores for up to 100 users in one round-trip, in request order
+  /// (duplicates collapsed). Any user who is not a member of this community
+  /// fails the whole call with `not-a-member` (fail-closed).
+  get-many: func(users: list<string>) -> result<list<score-entry>, error>;
+
+  /// The top `limit` (1..=100) active members by score, highest first (ties
+  /// by user id). Members never adjusted (implicit 0) are not listed.
+  leaderboard: func(limit: u32) -> result<list<score-entry>, error>;
 }
 
 /// The shared community currency (issue #714), cloned from `reputation`'s

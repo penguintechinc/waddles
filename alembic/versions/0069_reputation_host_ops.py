@@ -24,7 +24,12 @@ down_revision = "0068_app_catalog_kind"
 branch_labels = None
 depends_on = None
 
-_SQL_PATH = Path(__file__).resolve().parents[2] / "scripts" / "db" / "bundle_reputation_host_ops.sql"
+_SQL_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "db"
+    / "bundle_reputation_host_ops.sql"
+)
 
 
 def upgrade() -> None:
@@ -41,7 +46,9 @@ def downgrade() -> None:
         "DROP CONSTRAINT IF EXISTS ck_bundle_reputation_adjustments_kind"
     )
     for col in ("idempotency_key", "balance_after", "requested_value", "kind"):
-        op.execute(f"ALTER TABLE bundle_reputation_adjustments DROP COLUMN IF EXISTS {col}")
+        op.execute(
+            f"ALTER TABLE bundle_reputation_adjustments DROP COLUMN IF EXISTS {col}"
+        )
     op.execute(
         "ALTER TABLE bundle_reputation_scores "
         "DROP CONSTRAINT IF EXISTS ck_bundle_reputation_scores_balance_range"

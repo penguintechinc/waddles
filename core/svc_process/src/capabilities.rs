@@ -1334,6 +1334,10 @@ impl<K: KvBackend> StageCapabilities<K> {
         let is_adjust = match call.op.as_str() {
             "reputation.get" => false,
             "reputation.adjust" => true,
+            "reputation.override"
+            | "reputation.adjust_many"
+            | "reputation.get_many"
+            | "reputation.leaderboard" => return self.handle_reputation_ext(call).await,
             other => {
                 return Err(denied(
                     "unknown_op",
@@ -1387,7 +1391,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                 &self.gate_scope(),
                 permission,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: user,
+                    target_user: Some(user),
                     scope_kind: ScopeKind::Community,
                     delta,
                 }),
@@ -1424,6 +1428,290 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
         .map_err(reputation_error_to_host)?;
         Ok(serde_json::json!({ "balance": balance }))
+    }
+
+    /// Authorizes one reputation permission through the gate (the shared
+    /// first step of every `reputation.*` extension op). `target_user` is the
+    /// user acted on (`None` for a community-wide read), `delta` is `Some`
+    /// only for a capped write.
+    fn authorize_reputation(
+        &self,
+        permission: PermissionId,
+        target_user: Option<uuid::Uuid>,
+        delta: Option<i32>,
+    ) -> Result<(), HostResultError> {
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                permission,
+                ResourceRef::ReputationScoped(ReputationTarget {
+                    target_user,
+                    scope_kind: ScopeKind::Community,
+                    delta,
+                }),
+            )
+            .map(|_| ())
+            .map_err(denied_from_gate)
+    }
+
+    /// `reputation.override` / `adjust_many` / `get_many` / `leaderboard`
+    /// (bundle-MCP-tools P5 Task 1), the host-cap ops that sit beside
+    /// `get`/`adjust`. Same fail-loud order as [`Self::handle_reputation`]:
+    /// (1) argument parsing (bounded batches, UUIDs, machine-code reason);
+    /// (2) a real community; (3) for the two MUTATING ops, claim the
+    /// idempotency ordinal (before the gate, so no refusal shifts later
+    /// calls' keys -- the economy's rule); (4) **the gate authorizes FIRST**:
+    /// `override` needs the dedicated ADMIN permission
+    /// (`reputation.community.admin`, `not_granted` without it), `adjust_many`
+    /// authorizes EVERY item as a capped `reputation.community.write` delta,
+    /// the reads authorize `reputation.read` (per user for `get_many`);
+    /// (5) wiring/flag; (6) the store -- its own transaction re-checks
+    /// membership, clamps, and enforces the durable caps. A backend failure is
+    /// indeterminate, so the ordinal is handed back and the guest's retry
+    /// re-presents the same key. Scope is always the host-derived one.
+    async fn handle_reputation_ext(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        enum Op {
+            Override {
+                user: uuid::Uuid,
+                absolute: i64,
+                reason: String,
+            },
+            AdjustMany {
+                items: Vec<(uuid::Uuid, i32)>,
+                reason: String,
+            },
+            GetMany(Vec<uuid::Uuid>),
+            Leaderboard(u32),
+        }
+
+        fn user_of(v: &serde_json::Value, what: &str) -> Result<uuid::Uuid, HostResultError> {
+            v.as_str()
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .ok_or_else(|| denied("invalid_args", format!("{what} must be a UUID string")))
+        }
+        fn reason_of(args: &serde_json::Value) -> Result<String, HostResultError> {
+            let reason = args
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| denied("invalid_args", "reason must be a string"))?;
+            bundle_host_reputation::validate_reason(reason).map_err(reputation_error_to_host)?;
+            Ok(reason.to_string())
+        }
+        fn batch_len_err() -> HostResultError {
+            denied(
+                "invalid_args",
+                format!(
+                    "batch must hold 1..={} entries",
+                    bundle_host_reputation::MAX_BATCH
+                ),
+            )
+        }
+
+        let args = &call.args;
+        let op = match call.op.as_str() {
+            "reputation.override" => Op::Override {
+                user: user_of(args.get("user").unwrap_or(&serde_json::Value::Null), "user")?,
+                absolute: args
+                    .get("absolute_score")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| denied("invalid_args", "absolute_score must be an integer"))?,
+                reason: reason_of(args)?,
+            },
+            "reputation.adjust_many" => {
+                let arr = args
+                    .get("adjustments")
+                    .and_then(|v| v.as_array())
+                    .filter(|a| (1..=bundle_host_reputation::MAX_BATCH).contains(&a.len()))
+                    .ok_or_else(batch_len_err)?;
+                let mut seen = std::collections::HashSet::new();
+                let mut items = Vec::with_capacity(arr.len());
+                for entry in arr {
+                    let user = user_of(
+                        entry.get("user").unwrap_or(&serde_json::Value::Null),
+                        "user",
+                    )?;
+                    let delta = entry
+                        .get("delta")
+                        .and_then(|v| v.as_i64())
+                        .and_then(|v| i32::try_from(v).ok())
+                        .ok_or_else(|| denied("invalid_args", "delta must be an i32"))?;
+                    bundle_host_reputation::validate_delta(delta)
+                        .map_err(reputation_error_to_host)?;
+                    if !seen.insert(user) {
+                        return Err(denied("invalid_args", "a user may appear once per batch"));
+                    }
+                    items.push((user, delta));
+                }
+                Op::AdjustMany {
+                    items,
+                    reason: reason_of(args)?,
+                }
+            }
+            "reputation.get_many" => {
+                let arr = args
+                    .get("users")
+                    .and_then(|v| v.as_array())
+                    .filter(|a| (1..=bundle_host_reputation::MAX_BATCH).contains(&a.len()))
+                    .ok_or_else(batch_len_err)?;
+                Op::GetMany(
+                    arr.iter()
+                        .map(|v| user_of(v, "users[]"))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            }
+            "reputation.leaderboard" => Op::Leaderboard(
+                args.get("limit")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| (1..=bundle_host_reputation::MAX_LEADERBOARD_LIMIT).contains(v))
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            format!(
+                                "limit must be 1..={}",
+                                bundle_host_reputation::MAX_LEADERBOARD_LIMIT
+                            ),
+                        )
+                    })?,
+            ),
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("reputation op {other:?} not supported"),
+                ))
+            }
+        };
+
+        if self.community_id == 0 || self.community.is_none() {
+            return Err(denied(
+                "invalid_args",
+                "reputation is community-scoped; this activation has no community",
+            ));
+        }
+
+        // Claim the idempotency slot of a mutating op before the gate.
+        let kind: Option<&'static str> = match op {
+            Op::Override { .. } => Some("reputation_override"),
+            Op::AdjustMany { .. } => Some("reputation_adjust_many"),
+            Op::GetMany(_) | Op::Leaderboard(_) => None,
+        };
+        let claimed = kind.map(|kind| {
+            let slot = self
+                .invocation_identity
+                .as_deref()
+                .and_then(|inv| inv.reserve_mutation(kind))
+                .map(|(event_id, ordinal)| (event_id.to_string(), ordinal));
+            (kind, slot)
+        });
+
+        match &op {
+            Op::Override { user, .. } => self.authorize_reputation(
+                PermissionId::ReputationCommunityAdmin,
+                Some(*user),
+                None,
+            )?,
+            Op::AdjustMany { items, .. } => {
+                for (user, delta) in items {
+                    self.authorize_reputation(
+                        PermissionId::ReputationCommunityWrite,
+                        Some(*user),
+                        Some(*delta),
+                    )?;
+                }
+            }
+            Op::GetMany(users) => {
+                for user in users {
+                    self.authorize_reputation(PermissionId::ReputationRead, Some(*user), None)?;
+                }
+            }
+            Op::Leaderboard(_) => {
+                self.authorize_reputation(PermissionId::ReputationRead, None, None)?
+            }
+        }
+
+        let Some(wiring) = &self.reputation else {
+            return Err(denied(
+                "not_implemented",
+                "reputation capability is not provisioned in this deployment \
+                 (BUNDLE_REPUTATION_PASSWORD unset or connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "reputation capability is disabled (waddles.bundle-reputation-capability is OFF)",
+            ));
+        }
+
+        let mut key: Option<bundle_host_reputation::IdempotencyKey> = None;
+        let mut reservation: Option<(&InvocationIdentity, &'static str, u32)> = None;
+        if let Some((kind, slot)) = claimed {
+            let (Some(invocation), Some((event_id, ordinal))) =
+                (self.invocation_identity.as_deref(), slot)
+            else {
+                return Err(denied(
+                    "not_implemented",
+                    "this invocation carries no replay-stable event id; reputation mutations cannot be made idempotent",
+                ));
+            };
+            key = Some(
+                bundle_host_reputation::IdempotencyKey::for_event(&event_id, kind, ordinal)
+                    .map_err(reputation_error_to_host)?,
+            );
+            reservation = Some((invocation, kind, ordinal));
+        }
+
+        let scope = ReputationScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        };
+        let no_key = || denied("backend", "reputation mutation has no idempotency key");
+        let entries_json = |rows: Vec<bundle_host_reputation::ScoreEntry>| {
+            serde_json::json!({
+                "entries": rows
+                    .into_iter()
+                    .map(|r| serde_json::json!({ "user": r.user.to_string(), "score": r.score }))
+                    .collect::<Vec<_>>(),
+            })
+        };
+        let result = match &op {
+            Op::Override {
+                user,
+                absolute,
+                reason,
+            } => {
+                let key = key.as_ref().ok_or_else(no_key)?;
+                wiring
+                    .store
+                    .override_score(&scope, *user, *absolute, reason, key)
+                    .await
+                    .map(|balance| serde_json::json!({ "balance": balance }))
+            }
+            Op::AdjustMany { items, reason } => {
+                let key = key.as_ref().ok_or_else(no_key)?;
+                wiring
+                    .store
+                    .adjust_many(&scope, items, reason, reputation_caps(), key)
+                    .await
+                    .map(|()| serde_json::json!({}))
+            }
+            Op::GetMany(users) => wiring.store.get_many(&scope, users).await.map(entries_json),
+            Op::Leaderboard(limit) => wiring
+                .store
+                .leaderboard(&scope, *limit)
+                .await
+                .map(entries_json),
+        };
+        if let (Some((invocation, kind, ordinal)), Err(ReputationError::Backend(_))) =
+            (reservation, &result)
+        {
+            invocation.release_mutation(kind, ordinal);
+        }
+        result.map_err(reputation_error_to_host)
     }
 
     /// `http.send` (`wit/waddle-bundle/stage.wit` `interface http`) --
