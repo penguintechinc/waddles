@@ -171,6 +171,26 @@ fn global() -> &'static Mutex<ToolRegistry> {
     GLOBAL.get_or_init(|| Mutex::new(ToolRegistry::new()))
 }
 
+/// Locks the process-wide registry, recovering from poison LOUDLY: a
+/// poisoned lock only means a thread panicked while holding it (the map is
+/// still structurally valid), but the panic is worth a log line.
+fn lock_global() -> std::sync::MutexGuard<'static, ToolRegistry> {
+    match global().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            // A logging failure must never break tool dispatch. The host
+            // log import only exists inside the wasm component.
+            #[cfg(target_arch = "wasm32")]
+            let _ = crate::log::write(
+                crate::log::Level::Warn,
+                "tool registry lock was poisoned by a panicking thread; recovering",
+                &crate::log::Fields::new(),
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
 /// Registers `handler` for `name` in the process-wide registry.
 pub fn register_tool<F>(name: &str, handler: F)
 where
@@ -178,7 +198,7 @@ where
 {
     // A poisoned lock only means a registering thread panicked; the map is
     // still structurally valid, so recover it.
-    let mut g = global().lock().unwrap_or_else(|p| p.into_inner());
+    let mut g = lock_global();
     g.register(name, handler);
 }
 
@@ -186,7 +206,7 @@ where
 pub fn dispatch(name: &str, args: &[u8]) -> Result<Vec<u8>, ToolError> {
     // Clone-free: the handler runs under the lock only for the lookup via
     // `call`; handlers are sync and short, and must not call `register_tool`.
-    let g = global().lock().unwrap_or_else(|p| p.into_inner());
+    let g = lock_global();
     g.call(name, args)
 }
 

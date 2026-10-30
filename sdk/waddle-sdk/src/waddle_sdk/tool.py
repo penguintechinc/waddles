@@ -31,6 +31,8 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from waddle_sdk import log
+
 try:  # eager: forces componentize-py to wizen the binding -- see module docstring
     from wit_world.imports import tool as _tool_binding  # noqa: F401
 except (ImportError, AttributeError):  # host-side tests / non-stage-tools world
@@ -158,4 +160,6 @@ async def dispatch_envelope(name: str, args: bytes) -> bytes:
     try:
         return _encode({"ok": json.loads(await dispatch(name, args))})
     except ToolError as err:
+        # PII-free: tool name + typed code only, never args or message text.
+        log.warn("tool call returned tool_error", tool=name, code=err.code)
         return _encode({"tool_error": {"code": err.code, "message": err.message}})

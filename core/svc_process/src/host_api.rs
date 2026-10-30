@@ -277,11 +277,17 @@ struct InflightInvoke<'a> {
 
 impl Drop for InflightInvoke<'_> {
     fn drop(&mut self) {
-        self.conn
-            .invoke_scopes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.id);
+        let mut scopes = match self.conn.invoke_scopes.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    id = self.id,
+                    "invoke_scopes lock poisoned while releasing an in-flight invoke; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        scopes.remove(&self.id);
         self.conn.pending.cancel(self.id);
     }
 }

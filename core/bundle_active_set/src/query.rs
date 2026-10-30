@@ -437,7 +437,7 @@ pub(crate) fn assemble_active_set(
                 && (appr.community_id == Some(active.community_id)
                     || (appr.community_id.is_none() && active.community_id == 0))
         });
-        if approval.is_none() {
+        let Some(approval) = approval else {
             // Ops-visibility fix (security review): a bundle silently
             // losing its approval is a feature going dark, not routine
             // background noise -- this was `debug!` and easy to miss.
@@ -449,7 +449,7 @@ pub(crate) fn assemble_active_set(
             );
             excluded.push((active.app_id.clone(), ExclusionReason::NoApproval));
             continue;
-        }
+        };
 
         let Some(raw_digest) = version_row.artifact_digest.clone() else {
             tracing::warn!(
@@ -514,14 +514,8 @@ pub(crate) fn assemble_active_set(
                 derive_component_keys(&digest)
             }
         };
-        // `approval` is `Some` here -- the `None` arm above always
-        // `continue`s before this point.
-        let declared_capabilities = approval
-            .map(|appr| declared_capabilities_from_summary(&appr.summary_json))
-            .unwrap_or_default();
-        let tools = approval
-            .map(|appr| crate::tools::ToolManifestInfo::from_summary(&appr.summary_json))
-            .unwrap_or_default();
+        let declared_capabilities = declared_capabilities_from_summary(&approval.summary_json);
+        let tools = crate::tools::ToolManifestInfo::from_summary(&approval.summary_json);
         // Structural guard (regression: multi_tenant path sent bare-hex
         // digest to Invoke, UnknownBundle despite loaded bundle (alpha
         // 2026-10-03)): this is the ONE sanctioned production construction

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from typing import Any
 
 import pytest
+import wit_shapes
 
 import waddle_sdk.tool as tool
 from waddle_sdk.testing import FakeToolHost, install_fake_tool_host
@@ -17,6 +20,21 @@ def _run(coro: Any) -> Any:
     except StopIteration as stop:
         return stop.value
     raise AssertionError("tool coroutine unexpectedly suspended")
+
+
+@pytest.fixture
+def fake_log(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, str, str]]:
+    """Installs a fake `wit_world.imports.log`; returns the captured writes."""
+    calls: list[tuple[Any, str, str]] = []
+
+    def write(lvl: Any, message: str, fields_json: str) -> None:
+        calls.append((lvl, message, fields_json))
+
+    log_mod = types.SimpleNamespace(write=write, Level=wit_shapes.Level)
+    fake = types.ModuleType("wit_world")
+    fake.imports = types.SimpleNamespace(log=log_mod)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "wit_world", fake)
+    return calls
 
 
 @pytest.fixture
@@ -120,16 +138,19 @@ def test_malformed_args_raise_invalid_args() -> None:
         assert ei.value.code == "invalid_args"
 
 
-def test_handler_tool_error_passes_through_and_envelope_form() -> None:
+def test_handler_tool_error_passes_through_and_envelope_form(fake_log: Any) -> None:
     @tool.tool("deny")
     def deny(args: dict[str, Any], *, idempotency_key: str | None) -> Any:
         raise tool.ToolError("forbidden", "no")
 
     env = json.loads(_run(tool.dispatch_envelope("deny", b"{}")))
     assert env == {"tool_error": {"code": "forbidden", "message": "no"}}
+    # The tool_error is logged PII-free (tool + code only, never the message).
+    assert len(fake_log) == 1
+    assert json.loads(fake_log[0][2]) == {"tool": "deny", "code": "forbidden"}
 
 
-def test_envelope_ok_and_unknown() -> None:
+def test_envelope_ok_and_unknown(fake_log: Any) -> None:
     @tool.tool("one")
     def one(args: dict[str, Any], *, idempotency_key: str | None) -> Any:
         return 1

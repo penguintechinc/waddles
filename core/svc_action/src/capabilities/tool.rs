@@ -100,8 +100,15 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         resolved: &mut Option<(String, String)>,
     ) -> Result<serde_json::Value, ToolRefusal> {
         let Some(wiring) = &self.tool else {
+            // Production activations always call `with_tool`; reaching this
+            // means a capabilities value was built without tool wiring.
+            // Refuse (fail closed) and say so loudly.
+            tracing::error!(
+                "tool.invoke refused: capabilities were built without tool wiring (with_tool never called)"
+            );
             return Err(ToolRefusal::TargetUnavailable(
-                "tool.invoke is not wired for this activation".to_string(),
+                "tool.invoke is unavailable for this activation (no tool wiring configured)"
+                    .to_string(),
             ));
         };
         // A scope built outside the dispatch path carries no chain: treat it

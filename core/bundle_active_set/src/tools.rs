@@ -35,6 +35,47 @@ pub struct RequestedToolInfo {
     pub write: bool,
 }
 
+/// `Some(true)` for `access: write`, `Some(false)` for `access: read`,
+/// `None` for anything else (the entry is then dropped, fail closed).
+fn access_is_write(entry: &serde_json::Value) -> Option<bool> {
+    match entry.get("access").and_then(|v| v.as_str()) {
+        Some("write") => Some(true),
+        Some("read") => Some(false),
+        _ => None,
+    }
+}
+
+/// Parses the `key` array of a summary into tool infos. Fails closed (fewer
+/// facts, never more) but LOUD: a present-but-non-array value, or any entry
+/// dropped as malformed, is logged -- never silently swallowed. An absent
+/// key is the normal "declares none" case and logs nothing.
+fn parse_tool_list<T>(
+    summary: &serde_json::Value,
+    key: &str,
+    parse: impl Fn(&serde_json::Value) -> Option<T>,
+) -> Vec<T> {
+    let Some(raw) = summary.get(key) else {
+        return Vec::new();
+    };
+    let Some(list) = raw.as_array() else {
+        tracing::warn!(
+            key,
+            "approval summary tool list is not an array; treating as empty (fail closed)"
+        );
+        return Vec::new();
+    };
+    let parsed: Vec<T> = list.iter().filter_map(parse).collect();
+    if parsed.len() != list.len() {
+        tracing::warn!(
+            key,
+            declared = list.len(),
+            kept = parsed.len(),
+            "approval summary contained malformed tool entries; dropped (fail closed)"
+        );
+    }
+    parsed
+}
+
 /// The parsed tool facts of one approved bundle version -- see the module doc.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ToolManifestInfo {
@@ -55,46 +96,23 @@ impl ToolManifestInfo {
                 caps.iter()
                     .any(|c| c.as_str() == Some(MCP_TOOLS_CAPABILITY))
             });
-        let access_is_write = |entry: &serde_json::Value| -> Option<bool> {
-            match entry.get("access").and_then(|v| v.as_str()) {
-                Some("write") => Some(true),
-                Some("read") => Some(false),
-                _ => None,
-            }
-        };
         let exported = if is_tool_service {
-            summary
-                .get("exportedTools")
-                .and_then(|v| v.as_array())
-                .map(|list| {
-                    list.iter()
-                        .filter_map(|t| {
-                            Some(ExportedToolInfo {
-                                name: t.get("name")?.as_str()?.to_string(),
-                                write: access_is_write(t)?,
-                            })
-                        })
-                        .collect()
+            parse_tool_list(summary, "exportedTools", |t| {
+                Some(ExportedToolInfo {
+                    name: t.get("name")?.as_str()?.to_string(),
+                    write: access_is_write(t)?,
                 })
-                .unwrap_or_default()
+            })
         } else {
             Vec::new()
         };
-        let requested = summary
-            .get("requestedTools")
-            .and_then(|v| v.as_array())
-            .map(|list| {
-                list.iter()
-                    .filter_map(|t| {
-                        Some(RequestedToolInfo {
-                            target: t.get("target")?.as_str()?.to_string(),
-                            tool: t.get("tool")?.as_str()?.to_string(),
-                            write: access_is_write(t)?,
-                        })
-                    })
-                    .collect()
+        let requested = parse_tool_list(summary, "requestedTools", |t| {
+            Some(RequestedToolInfo {
+                target: t.get("target")?.as_str()?.to_string(),
+                tool: t.get("tool")?.as_str()?.to_string(),
+                write: access_is_write(t)?,
             })
-            .unwrap_or_default();
+        });
         Self {
             is_tool_service,
             exported,

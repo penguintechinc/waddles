@@ -149,8 +149,15 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         resolved: &mut Option<(String, String)>,
     ) -> Result<serde_json::Value, ToolRefusal> {
         let Some(ctx) = &self.tool else {
+            // Production activations always call `with_tool`; reaching this
+            // means a capabilities value was built without tool wiring.
+            // Refuse (fail closed) and say so loudly.
+            tracing::error!(
+                "tool.invoke refused: capabilities were built without tool wiring (with_tool never called)"
+            );
             return Err(ToolRefusal::TargetUnavailable(
-                "tool.invoke is not wired for this activation".to_string(),
+                "tool.invoke is unavailable for this activation (no tool wiring configured)"
+                    .to_string(),
             ));
         };
         // 1-5: validate, guard, matrix, gate, resolve. No executor slot is
