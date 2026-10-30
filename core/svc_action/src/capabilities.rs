@@ -85,6 +85,11 @@ pub struct InvokeScope {
     /// Twitch relay sends are pinned to it too (`pin_twitch_channel`); `None` for any invoke with no
     /// channel-bearing origin event.
     pub origin_channel_id: Option<String>,
+    /// The delivered envelope's own `event.source.platform` (host-derived,
+    /// same trust as `origin_channel_id`). A relay send is pinned to
+    /// `origin_channel_id` only when this names the SAME platform, so a
+    /// channel id from a different platform is never reinterpreted.
+    pub origin_platform: Option<String>,
     /// Numeric `tenants.id`/`communities.id` (spec
     /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     /// SS5.1/SS4 `GrantScopeKey`) -- resolved by `crate::dispatch::
@@ -562,16 +567,28 @@ fn canonical_irc_channel(raw: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// A canonical Twitch login: `^[a-z0-9_]{1,25}$`.
+fn is_twitch_login(c: &str) -> bool {
+    (1..=25).contains(&c.len())
+        && c.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// Resolves the Twitch send target host-side: always the origin channel.
-/// `requested` (bundle input) must be absent/empty or equal the origin;
-/// fail-closed otherwise, and when no IRC-nameable origin exists.
+/// The origin must be a `twitch` event whose channel is a valid, non-numeric
+/// Twitch login; `requested` (bundle input) must be absent/empty or equal
+/// it. Fail-closed otherwise.
 fn pin_twitch_channel(
+    origin_platform: Option<&str>,
     origin: Option<&str>,
     requested: Option<&str>,
 ) -> Result<String, ChannelPinRefusal> {
+    if origin_platform != Some("twitch") {
+        return Err(ChannelPinRefusal::NoOriginChannel);
+    }
     let origin = origin
         .map(canonical_irc_channel)
-        .filter(|c| !c.is_empty() && !c.chars().all(|ch| ch.is_ascii_digit()))
+        .filter(|c| is_twitch_login(c) && !c.chars().all(|ch| ch.is_ascii_digit()))
         .ok_or(ChannelPinRefusal::NoOriginChannel)?;
     match requested.map(canonical_irc_channel) {
         Some(r) if !r.is_empty() && r != origin => Err(ChannelPinRefusal::NotOwned),
@@ -1237,7 +1254,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 ))
             }
         };
-        let channel = match pin_twitch_channel(scope.origin_channel_id.as_deref(), requested) {
+        let channel = match pin_twitch_channel(
+            scope.origin_platform.as_deref(),
+            scope.origin_channel_id.as_deref(),
+            requested,
+        ) {
             Ok(c) => c,
             Err(reason) => {
                 tracing::warn!(
@@ -1578,6 +1599,12 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                     ),
                 )
             })?;
+            if scope.origin_platform.as_deref() != Some("discord") {
+                return Err(denied(
+                    "invalid_args",
+                    format!("discord {what} origin event is not a discord event"),
+                ));
+            }
             if !is_discord_snowflake(channel_id) {
                 return Err(denied(
                     "invalid_args",
@@ -1805,6 +1832,12 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 "discord relay requires an origin channel id on the delivered envelope",
             )
         })?;
+        if scope.origin_platform.as_deref() != Some("discord") {
+            return Err(denied(
+                "invalid_args",
+                "discord relay origin event is not a discord event",
+            ));
+        }
         if !is_discord_snowflake(channel_id) {
             return Err(denied(
                 "invalid_args",
@@ -2965,6 +2998,7 @@ mod tests {
             community: Some("main".to_string()),
             app_id: "waddles.bot.commands.default".to_string(),
             origin_channel_id: None,
+            origin_platform: None,
             tenant_id: 7,
             community_id: 3,
             app_version: 1,
@@ -2988,6 +3022,7 @@ mod tests {
     fn twitch_scope() -> InvokeScope {
         InvokeScope {
             origin_channel_id: Some("somechannel".to_string()),
+            origin_platform: Some("twitch".to_string()),
             ..scope()
         }
     }
@@ -2998,6 +3033,7 @@ mod tests {
     fn discord_scope() -> InvokeScope {
         InvokeScope {
             origin_channel_id: Some("123456789012345678".to_string()),
+            origin_platform: Some("discord".to_string()),
             ..scope()
         }
     }
@@ -3233,7 +3269,19 @@ mod tests {
     /// nothing is queued.
     #[tokio::test]
     async fn twitch_relay_refuses_bundle_supplied_non_owned_channel() {
-        for victim in ["#victimchannel", "victimchannel", "#SOMECHANNELX"] {
+        for victim in [
+            "#victimchannel",
+            "victimchannel",
+            "#SOMECHANNELX",
+            "s\u{043E}mechannel", // cyrillic o homoglyph
+            " somechannel",
+            "somechannel ",
+            "somechannel.",
+            "somechannel,victimchannel",
+            "somechannel victimchannel",
+            "#somechannel,#victimchannel",
+            "somechannel\u{200B}x",
+        ] {
             let caps = caps(FakeRelayQueue::default());
             let err = caps
                 .handle(
@@ -3253,6 +3301,221 @@ mod tests {
             );
             assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
         }
+    }
+
+    /// Very long names and `#`-only / non-string channels.
+    #[tokio::test]
+    async fn twitch_relay_long_hash_only_and_non_string_channels() {
+        // very long non-owned name: refused
+        let caps1 = caps(FakeRelayQueue::default());
+        let long = "a".repeat(4096);
+        let err = caps1
+            .handle(
+                &twitch_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    twitch_send(serde_json::json!({"channel": long, "text": "x"})),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "channel_not_owned");
+        assert!(caps1.relay_queue.pushed.lock().unwrap().is_empty());
+        // `#`-only carries no target: lands on the pinned channel, never elsewhere
+        let caps2 = caps(FakeRelayQueue::default());
+        caps2
+            .handle(
+                &twitch_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    twitch_send(serde_json::json!({"channel": "#", "text": "x"})),
+                ),
+            )
+            .await
+            .expect("pinned");
+        {
+            let pushed = caps2.relay_queue.pushed.lock().unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+            assert_eq!(parsed["channel"], "#somechannel");
+        }
+        // non-string channel values: typed invalid_args, nothing queued
+        for bad in [
+            serde_json::json!(5),
+            serde_json::json!(["victim"]),
+            serde_json::json!({"a": 1}),
+        ] {
+            let c = caps(FakeRelayQueue::default());
+            let err = c
+                .handle(
+                    &twitch_scope(),
+                    call(
+                        CapabilityKind::Relay,
+                        "send",
+                        twitch_send(serde_json::json!({"channel": bad, "text": "x"})),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "invalid_args");
+            assert!(c.relay_queue.pushed.lock().unwrap().is_empty());
+        }
+    }
+
+    /// A non-Twitch origin event (Slack/Mattermost id) is never reinterpreted
+    /// as a Twitch IRC channel, and bad-charset Twitch origins fail closed.
+    #[tokio::test]
+    async fn twitch_relay_refuses_non_twitch_or_malformed_origin() {
+        let cases = [
+            (Some("slack"), Some("C0123ABC")),
+            (Some("mattermost"), Some("abcdefghij0123456789klmnop")),
+            (None, Some("somechannel")),
+            (Some("twitch"), Some("own,victim")),
+            (Some("twitch"), Some("own victim")),
+            (Some("twitch"), Some(&"a".repeat(26)[..])),
+            (Some("twitch"), Some("ownér")),
+        ];
+        for (platform, origin) in cases {
+            let c = caps(FakeRelayQueue::default());
+            let sc = InvokeScope {
+                origin_platform: platform.map(str::to_string),
+                origin_channel_id: origin.map(str::to_string),
+                ..scope()
+            };
+            let err = c
+                .handle(
+                    &sc,
+                    call(
+                        CapabilityKind::Relay,
+                        "send",
+                        twitch_send(serde_json::json!({"text": "hi"})),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "channel_not_owned", "{platform:?} {origin:?}");
+            assert!(c.relay_queue.pushed.lock().unwrap().is_empty());
+        }
+    }
+
+    /// Discord symmetric guard: a snowflake-shaped origin from a non-discord
+    /// platform is refused for a Discord send.
+    #[tokio::test]
+    async fn discord_relay_refuses_non_discord_origin_platform() {
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let c = caps(FakeRelayQueue::with_live_drain())
+            .with_discord(transport.clone(), crate::config::Secret::new("t"));
+        let sc = InvokeScope {
+            origin_platform: Some("twitch".to_string()),
+            ..discord_scope()
+        };
+        let err = c
+            .handle(
+                &sc,
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "discord", "message_json": serde_json::json!({"text": "hi"}).to_string()}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    /// Captures every event's rendered fields, to prove the refusal log
+    /// carries ids/op/reason only.
+    #[derive(Default, Clone)]
+    struct FieldCapture(Arc<Mutex<Vec<String>>>);
+
+    impl tracing::field::Visit for FieldCapture {
+        fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+            self.0.lock().unwrap().push(format!("{}={v:?}", f.name()));
+        }
+    }
+
+    impl tracing::Subscriber for FieldCapture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            event.record(&mut self.clone());
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// The refusal emits a warn log + counter whose fields/labels never
+    /// contain the bundle-supplied or origin channel value.
+    #[tokio::test]
+    async fn twitch_relay_refusal_log_and_metric_leak_no_channel() {
+        let capture = FieldCapture::default();
+        let harness = crate::stage_metrics::test_support::Harness::new();
+        let recorder = crate::metrics_facade::OtelRecorder::new(harness.meter());
+        let c = caps(FakeRelayQueue::default());
+        // Tracing callsite interest is process-global and parallel tests race
+        // on it, so the warn can be dropped on a given attempt; retry until
+        // the event is observed (the refusal itself is asserted every time).
+        let mut attempts = 0;
+        let res = loop {
+            attempts += 1;
+            let res = {
+                let _log = tracing::subscriber::set_default(capture.clone());
+                tracing::callsite::rebuild_interest_cache();
+                let _m = metrics::set_default_local_recorder(&recorder);
+                c.handle(
+                    &twitch_scope(),
+                    call(
+                        CapabilityKind::Relay,
+                        "send",
+                        twitch_send(serde_json::json!({"channel": "#secretvictim", "text": "x"})),
+                    ),
+                )
+                .await
+            };
+            assert_eq!(res.as_ref().unwrap_err().code, "channel_not_owned");
+            if capture
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|f| f.starts_with("reason="))
+                || attempts >= 50
+            {
+                break res;
+            }
+        };
+        assert_eq!(res.unwrap_err().code, "channel_not_owned");
+        let fields = capture.0.lock().unwrap().join("\n");
+        assert!(
+            fields.contains("reason=\"not_owned\"") || fields.contains("reason=not_owned"),
+            "{fields}"
+        );
+        assert!(
+            fields.contains("tenant_id=7") && fields.contains("community_id=3"),
+            "{fields}"
+        );
+        assert!(
+            fields.contains("app_id=waddles.bot.commands.default"),
+            "{fields}"
+        );
+        for leaked in ["secretvictim", "somechannel"] {
+            assert!(!fields.contains(leaked), "log leaked channel: {fields}");
+        }
+        assert_eq!(
+            harness.count(
+                "waddles_relay_channel_pin_refused_total",
+                &[("provider", "twitch"), ("reason", "not_owned")]
+            ),
+            attempts as f64
+        );
     }
 
     /// An absent/empty/own-channel (any case, with/without `#`) send goes to
@@ -3286,6 +3549,7 @@ mod tests {
             let caps = caps(FakeRelayQueue::default());
             let sc = InvokeScope {
                 origin_channel_id: origin,
+                origin_platform: Some("twitch".to_string()),
                 ..scope()
             };
             let err = caps
@@ -3306,13 +3570,16 @@ mod tests {
 
     #[test]
     fn pin_twitch_channel_unit() {
-        assert_eq!(pin_twitch_channel(Some("#Abc"), None).unwrap(), "#abc");
         assert_eq!(
-            pin_twitch_channel(Some("abc"), Some("#other")),
+            pin_twitch_channel(Some("twitch"), Some("#Abc"), None).unwrap(),
+            "#abc"
+        );
+        assert_eq!(
+            pin_twitch_channel(Some("twitch"), Some("abc"), Some("#other")),
             Err(ChannelPinRefusal::NotOwned)
         );
         assert_eq!(
-            pin_twitch_channel(None, Some("abc")),
+            pin_twitch_channel(Some("twitch"), None, Some("abc")),
             Err(ChannelPinRefusal::NoOriginChannel)
         );
     }
@@ -3763,6 +4030,7 @@ mod tests {
     async fn discord_queued_ops_reject_bad_arguments_and_queue_nothing() {
         let bad_origin = InvokeScope {
             origin_channel_id: Some("not-a-snowflake".to_string()),
+            origin_platform: Some("discord".to_string()),
             ..scope()
         };
         let cases = [
@@ -4796,6 +5064,7 @@ mod tests {
             .with_discord(transport, crate::config::Secret::new("test-bot-token"));
         let bad_scope = InvokeScope {
             origin_channel_id: Some("not-a-snowflake".to_string()),
+            origin_platform: Some("discord".to_string()),
             ..scope()
         };
         let err = caps

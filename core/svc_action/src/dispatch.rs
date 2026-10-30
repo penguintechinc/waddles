@@ -506,6 +506,7 @@ pub async fn invoke_dispatch(
         // discord) -- `None` when the platform/event has no channel
         // concept. Never re-derived from anything a bundle returns.
         origin_channel_id: env.event.source.as_ref().and_then(|s| s.channel_id.clone()),
+        origin_platform: env.event.source.as_ref().map(|s| s.platform.clone()),
         tenant_id,
         community_id,
         // Resolved once at startup from the active-set row that loaded
