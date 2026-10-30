@@ -618,7 +618,12 @@ _MAX_REPUTATION_DELTA = 5
 #: gate re-clamps a declared bound to it, this is the approval-time check.
 _MAX_ECONOMY_AMOUNT = 1_000
 #: Declared per-call bound param name per money-moving economy permission.
-_ECONOMY_BOUND_PARAM = {"economy.wager": "max_bet", "economy.transfer": "max_amount"}
+_ECONOMY_BOUND_PARAM = {
+    "economy.wager": "max_bet",
+    "economy.transfer": "max_amount",
+    "economy.credit": "max_amount",
+    "economy.debit": "max_amount",
+}
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_.]*$")
 
 
@@ -737,12 +742,14 @@ def parse_permission_declarations(
                 f"{permission_id!r} requires params.{bound_param} as an integer in "
                 f"1..={_MAX_ECONOMY_AMOUNT}, got {declared!r}",
             )
-        for other_id, other_param in _ECONOMY_BOUND_PARAM.items():
-            if permission_id != other_id and other_param in params:
+        # A bound param is only valid on the permissions that declare it.
+        for other_param in set(_ECONOMY_BOUND_PARAM.values()):
+            if other_param in params and _ECONOMY_BOUND_PARAM.get(permission_id) != other_param:
+                owners = sorted(i for i, p in _ECONOMY_BOUND_PARAM.items() if p == other_param)
                 _require(
                     False,
                     "invalid_economy_bound",
-                    f"params.{other_param} is only valid for {other_id}",
+                    f"params.{other_param} is only valid for {' / '.join(owners)}",
                 )
 
         declarations.append(

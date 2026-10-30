@@ -498,6 +498,14 @@ def test_economy_ids_are_in_the_closed_catalog_with_the_expected_risk() -> None:
     assert resolve_risk("economy.wager") == "dangerous"
     assert resolve_risk("economy.transfer") == "dangerous"
     assert resolve_risk("economy.mint") is None
+    # P4 Task 1 compound-op families.
+    for compound in (
+        "economy.credit",
+        "economy.debit",
+        "economy.admin_adjust",
+        "economy.pot.pay",
+    ):
+        assert resolve_risk(compound) == "dangerous", compound
 
 
 def test_economy_read_needs_no_params_beyond_justification() -> None:
@@ -507,7 +515,12 @@ def test_economy_read_needs_no_params_beyond_justification() -> None:
 
 @pytest.mark.parametrize(
     ("permission_id", "param"),
-    [("economy.wager", "max_bet"), ("economy.transfer", "max_amount")],
+    [
+        ("economy.wager", "max_bet"),
+        ("economy.transfer", "max_amount"),
+        ("economy.credit", "max_amount"),
+        ("economy.debit", "max_amount"),
+    ],
 )
 def test_economy_money_moving_permissions_parse_with_a_declared_bound(
     permission_id: str, param: str
@@ -529,7 +542,12 @@ def test_economy_money_moving_permissions_parse_with_a_declared_bound(
 
 @pytest.mark.parametrize(
     ("permission_id", "param"),
-    [("economy.wager", "max_bet"), ("economy.transfer", "max_amount")],
+    [
+        ("economy.wager", "max_bet"),
+        ("economy.transfer", "max_amount"),
+        ("economy.credit", "max_amount"),
+        ("economy.debit", "max_amount"),
+    ],
 )
 @pytest.mark.parametrize("bad", [None, 0, -5, 1001, 10**9, "50", 1.5, True])
 def test_economy_money_moving_permissions_reject_a_missing_or_out_of_range_bound(
@@ -561,6 +579,32 @@ def test_economy_bound_params_are_rejected_on_the_wrong_permission() -> None:
         with pytest.raises(ManifestV2Error) as exc:
             _parse([{"id": permission_id, "justification": "x", "params": params}])
         assert exc.value.reason == "invalid_economy_bound", permission_id
+
+
+@pytest.mark.parametrize("permission_id", ["economy.admin_adjust", "economy.pot.pay"])
+def test_unmetered_compound_permissions_need_a_justification_and_take_no_bound(
+    permission_id: str,
+) -> None:
+    manifest = _parse([{"id": permission_id, "justification": "Service bundle."}])
+    assert manifest.permission_declarations[0].risk == "dangerous"  # type: ignore[attr-defined]
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse([{"id": permission_id}])
+    assert exc.value.reason == "missing_justification"
+    for param in ("max_amount", "max_bet"):
+        with pytest.raises(ManifestV2Error) as exc:
+            _parse([{"id": permission_id, "justification": "x", "params": {param: 5}}])
+        assert exc.value.reason == "invalid_economy_bound"
+
+
+def test_compound_permission_ids_mirror_the_rust_catalog() -> None:
+    from pathlib import Path
+
+    rust = Path(__file__).resolve().parents[2] / "core/bundle_capability_gate/src/permission.rs"
+    if not rust.exists():
+        pytest.skip("Rust catalog source not present in this checkout")
+    text = rust.read_text()
+    for pid in ("economy.credit", "economy.debit", "economy.admin_adjust", "economy.pot.pay"):
+        assert f'=> "{pid}"' in text, pid
 
 
 def test_economy_ceiling_mirrors_the_rust_catalog() -> None:

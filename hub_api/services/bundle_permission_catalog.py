@@ -126,6 +126,16 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "economy.read": "normal",
     "economy.wager": "dangerous",
     "economy.transfer": "dangerous",
+    #: Compound host-cap ops (P4 Task 1), `core/bundle_capability_gate`'s
+    #: `economy.credit`/`debit`/`admin_adjust`/`pot.pay` families. `credit` =
+    #: MINT (credit/batch-credit/exchange; mint-capped per call, per day and by
+    #: the community supply ceiling); `debit` = spend/burn of the actor's own
+    #: balance; `admin_adjust` = privileged set/delta of any member's balance;
+    #: `pot.pay` = multi-winner payout from the community pot. All `dangerous`.
+    "economy.credit": "dangerous",
+    "economy.debit": "dangerous",
+    "economy.admin_adjust": "dangerous",
+    "economy.pot.pay": "dangerous",
     #: Resolves the invocation's triggering actor (and an @mention target the
     #: triggering message carried) to the community `user_uuid` that
     #: `economy.*`/`reputation.*` name their targets by -- UUID-only, never a

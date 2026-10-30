@@ -164,6 +164,21 @@ count, and a replay (below) consumes nothing.
 | Transfers | one txn: both members verified live, both rows locked in uuid order (no opposite-direction deadlock), then one statement debits, credits and writes both ledger rows |
 | Ledger | `economy_ledger` is append-only for the runtime role; one row per movement, written in the same statement |
 
+### Compound ops (P4 Task 1)
+
+Additive `interface economy` functions (old compiled bundles keep working); each is ONE atomic host call, keyed `<event_id>:<kind>:<ordinal>` (kinds `credit`, `batch_credit`, `debit`, `conditional_debit`, `admin_adjust`, `pay_pot`, `exchange`), and gated by its own dangerous permission. Alembic `0069_economy_ledger_kinds` (DDL `scripts/db/bundle_economy_ledger_kinds.sql`) extends the ledger `kind` CHECK with `credit`, `debit`, `admin_adjust`, `pot_payout`, `exchange`.
+
+| Op (permission) | Semantics | Bounds |
+|---|---|---|
+| `credit(user, amount) -> s64` (`economy.credit`, `params.max_amount`) | MINT into any member; ledger `credit` | per call `max_amount`; durable rolling-24h mint caps (10k/user, 250k/community per app); community **supply ceiling** `SUM(balance)+amount <= max_supply` (default 1,000,000, host-computed, community-wide across apps, checked under a community advisory lock) -> `over-cap(<ceiling>)` |
+| `batch-credit(entries) -> ()` (`economy.credit`) | all-or-nothing mint, 1..=100 distinct members | same caps, per-user per entry and per-scope + supply on the TOTAL |
+| `debit(user, amount) -> s64`, `conditional-debit(user, amount, min-balance)` (`economy.debit`, `params.max_amount`) | spend/burn; `user` MUST be the actor (`actor_mismatch`); refuses with `insufficient-funds(balance)` and changes nothing if `balance - amount < min` | per call + rolling-24h spend caps; `CHECK(balance>=0)` backstop |
+| `admin-adjust(user, delta(s64) \| set(u64)) -> s64` (`economy.admin_adjust`) | privileged; ledger `admin_adjust`; the store takes `is_admin_authorized` from the stage (true only when the gate just authorized this grant), never a guest value | bypasses the daily earn windows; bounded by the supply ceiling; rate limited 10/s |
+| `pay-pot(winners) -> ()` (`economy.pot.pay`) | one transaction: debits the host-derived per-community POT account (the bundle never names it; only `pay_pot` may debit it; exempt from membership) and credits each distinct member winner their explicit amount; **no rounding, remainder stays in the pot**; `insufficient-funds(pot balance)` if `SUM > pot` | moves existing currency (no mint, no supply effect) |
+| `exchange(user, from-amount, rate-num, rate-den) -> s64` (`economy.credit`) | ledgers an idempotent CLAIM of `from-amount` external points (no external balance is kept) and credits `floor(from*num/den)`; `user` MUST be the actor | rate parts <= 1,000,000 and ratio <= 1000x; credit of 0 is `invalid`; per-call/24h/supply caps apply to the credited amount |
+
+Multi-row ops derive per-row ledger keys `<key>:m<i>` (rows in uuid order, so a replay is order-insensitive); a replay of the identical set is a no-op, any other set under the key is `idempotency_conflict`. Per-community alias/rate (e.g. `1000 waddlebucks : 500 points`) is bundle policy and is NOT in the host cap. The pot is funded by a path outside this task (see the economy spec).
+
 ### Operating the economy store
 
 | Item | Value |
