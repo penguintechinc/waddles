@@ -311,6 +311,7 @@ impl PostgresReputationStore {
                 [row]
                     if row.user == user.to_string()
                         && row.kind == "admin_override"
+                        && row.reason == reason
                         && row.requested == Some(absolute_score) =>
                 {
                     row.balance_after
@@ -366,7 +367,12 @@ impl PostgresReputationStore {
                 ));
             }
         }
-        let users: Vec<Uuid> = items.iter().map(|(u, _)| *u).collect();
+        // Sorted ONCE, before any row is touched: the score-row inserts and
+        // the row locks below both walk this order, so two batches naming the
+        // same (possibly absent) users in opposite order cannot deadlock on
+        // the (community, user) uniqueness conflict.
+        let mut users: Vec<Uuid> = items.iter().map(|(u, _)| *u).collect();
+        users.sort();
 
         let txn = self.begin().await?;
         require_members(&txn, scope, &users).await?;
@@ -381,6 +387,7 @@ impl PostgresReputationStore {
                     existing.iter().any(|row| {
                         row.user == user.to_string()
                             && row.kind == "adjust"
+                            && row.reason == reason
                             && row.requested == Some(i64::from(*delta))
                     })
                 });
@@ -596,6 +603,7 @@ struct LedgerRow<'a> {
 struct KeyedRow {
     user: String,
     kind: String,
+    reason: String,
     requested: Option<i64>,
     balance_after: Option<i64>,
 }
@@ -659,6 +667,8 @@ async fn ensure_score_rows(
     scope: &ReputationScope,
     users: &[Uuid],
 ) -> Result<(), ReputationError> {
+    let mut users = users.to_vec();
+    users.sort();
     let values = (3..3 + users.len())
         .map(|i| format!("(${i}::uuid)"))
         .collect::<Vec<_>>()
@@ -671,7 +681,7 @@ async fn ensure_score_rows(
     txn.execute_raw(stmt(
         &format!(
             "INSERT INTO bundle_reputation_scores (tenant_id, community_id, user_uuid) \
-             SELECT $1, $2, x.u FROM (VALUES {values}) AS x(u) \
+             SELECT $1, $2, x.u FROM (VALUES {values}) AS x(u) ORDER BY x.u \
              ON CONFLICT (community_id, user_uuid) DO NOTHING"
         ),
         v,
@@ -728,7 +738,7 @@ async fn keyed_rows(
 ) -> Result<Vec<KeyedRow>, ReputationError> {
     let rows = txn
         .query_all_raw(stmt(
-            "SELECT target_user_uuid, kind, requested_value, balance_after \
+            "SELECT target_user_uuid, kind, reason_code, requested_value, balance_after \
              FROM bundle_reputation_adjustments \
              WHERE tenant_id = $1 AND community_id = $2 AND app_id = $3 \
                AND idempotency_key = $4",
@@ -746,6 +756,7 @@ async fn keyed_rows(
             Ok(KeyedRow {
                 user: r.try_get("", "target_user_uuid").map_err(backend_err)?,
                 kind: r.try_get("", "kind").map_err(backend_err)?,
+                reason: r.try_get("", "reason_code").map_err(backend_err)?,
                 requested: r.try_get("", "requested_value").map_err(backend_err)?,
                 balance_after: r.try_get("", "balance_after").map_err(backend_err)?,
             })

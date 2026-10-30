@@ -7,11 +7,16 @@
 
 -- 1. Score clamp. The store clamps every write into this range; the CHECK is
 -- the backstop so no code path (or future writer) can persist an absurd score.
--- NOT VALID: enforced for every new/updated row without scanning legacy rows
--- (the per-user daily cap makes an out-of-range legacy row implausible, and
--- NOT VALID means a surprise one can never fail the migration).
+-- Any legacy out-of-range row is first CLAMPED into range (a deliberate
+-- one-off correction -- the per-user daily cap makes such a row implausible,
+-- and leaving one would make the next adjust silently drop it), then the
+-- constraint is validated so the invariant is real, not just for new writes.
 -- Keep -1000000 / 1000000 in lockstep with MIN_SCORE / MAX_SCORE in
 -- `core/bundle_host_reputation/src/lib.rs`.
+UPDATE bundle_reputation_scores
+   SET balance = LEAST(GREATEST(balance, -1000000), 1000000), updated_at = NOW()
+ WHERE balance NOT BETWEEN -1000000 AND 1000000;
+
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -20,7 +25,13 @@ BEGIN
     ) THEN
         ALTER TABLE bundle_reputation_scores
             ADD CONSTRAINT ck_bundle_reputation_scores_balance_range
-            CHECK (balance BETWEEN -1000000 AND 1000000) NOT VALID;
+            CHECK (balance BETWEEN -1000000 AND 1000000);
+    ELSIF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_bundle_reputation_scores_balance_range' AND NOT convalidated
+    ) THEN
+        ALTER TABLE bundle_reputation_scores
+            VALIDATE CONSTRAINT ck_bundle_reputation_scores_balance_range;
     END IF;
 END
 $$;

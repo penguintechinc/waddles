@@ -1542,3 +1542,120 @@ async fn leaderboard_breaks_ties_by_user_uuid_and_rejects_bad_limits() {
         ));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Review fixes: lock order, legacy rows, reason in idempotency
+// ---------------------------------------------------------------------------
+
+/// Two apps batching the SAME absent users in OPPOSITE order must both
+/// complete (rows are inserted/locked in one sorted order).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opposite_order_batches_over_absent_users_do_not_deadlock() {
+    let f = fixture().await;
+    let mut users = Vec::new();
+    for _ in 0..8 {
+        users.push(add_member(&f, COMMUNITY).await);
+    }
+    let s1 = Arc::new(fresh_replica(&f).await);
+    let s2 = Arc::new(fresh_replica(&f).await);
+    for round in 0..5 {
+        // Fresh absent users each round.
+        let mut round_users = Vec::new();
+        for _ in 0..8 {
+            round_users.push(add_member(&f, COMMUNITY).await);
+        }
+        let fwd: Vec<(Uuid, i32)> = round_users.iter().map(|u| (*u, 1)).collect();
+        let mut rev = fwd.clone();
+        rev.reverse();
+        let other_app = ReputationScope {
+            app_id: OTHER_APP_ID.to_string(),
+            ..scope()
+        };
+        let (a, b) = (Arc::clone(&s1), Arc::clone(&s2));
+        let t1 = tokio::spawn(async move {
+            a.adjust_many(&scope(), &fwd, "r", caps(5), &key(&format!("f{round}")))
+                .await
+        });
+        let t2 = tokio::spawn(async move {
+            b.adjust_many(&other_app, &rev, "r", caps(5), &key(&format!("r{round}")))
+                .await
+        });
+        let done = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            (t1.await.unwrap(), t2.await.unwrap())
+        })
+        .await
+        .expect("no deadlock");
+        assert_eq!(done.0, Ok(()));
+        assert_eq!(done.1, Ok(()));
+    }
+    let _ = users;
+}
+
+/// A legacy out-of-range row is CLAMPED by the migration and the constraint
+/// validated -- never silently dropped by a later adjust.
+#[tokio::test]
+async fn migration_clamps_legacy_out_of_range_rows_and_validates_the_check() {
+    let f = fixture().await;
+    exec(
+        &f.su,
+        "ALTER TABLE bundle_reputation_scores DROP CONSTRAINT ck_bundle_reputation_scores_balance_range",
+    )
+    .await;
+    set_balance(&f, f.member, 1_500_000).await;
+    let low = add_member(&f, COMMUNITY).await;
+    set_balance(&f, low, -2_000_000).await;
+    exec(&f.su, HOST_OPS_DDL).await;
+    assert_eq!(f.store.get(&scope(), f.member).await, Ok(MAX_SCORE));
+    assert_eq!(f.store.get(&scope(), low).await, Ok(MIN_SCORE));
+    assert_eq!(
+        scalar_text(
+            &f.su,
+            "SELECT convalidated::text FROM pg_constraint WHERE conname = 'ck_bundle_reputation_scores_balance_range'"
+        )
+        .await,
+        "true"
+    );
+    // The adjust now moves from the corrected value, not from 1.5M.
+    assert_eq!(
+        f.store.adjust(&scope(), f.member, -5, "r", caps(10)).await,
+        Ok(MAX_SCORE - 5)
+    );
+}
+
+/// The reason is part of the replayed operation's identity.
+#[tokio::test]
+async fn a_reused_key_with_a_changed_reason_is_an_idempotency_conflict() {
+    let f = fixture().await;
+    let k = key("evt:override:0");
+    f.store
+        .override_score(&scope(), f.member, 5, "admin.a", &k)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .override_score(&scope(), f.member, 5, "admin.a", &k)
+            .await,
+        Ok(5)
+    );
+    assert_eq!(
+        f.store
+            .override_score(&scope(), f.member, 5, "admin.b", &k)
+            .await,
+        Err(ReputationError::IdempotencyConflict)
+    );
+    let k2 = key("evt:adjust_many:0");
+    f.store
+        .adjust_many(&scope(), &[(f.member, 1)], "r.a", caps(10), &k2)
+        .await
+        .unwrap();
+    f.store
+        .adjust_many(&scope(), &[(f.member, 1)], "r.a", caps(10), &k2)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .adjust_many(&scope(), &[(f.member, 1)], "r.b", caps(10), &k2)
+            .await,
+        Err(ReputationError::IdempotencyConflict)
+    );
+}
