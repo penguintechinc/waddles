@@ -54,7 +54,7 @@ DEV_SUFFIX_ENV = "WADDLES_DEV_DB_ROLE_PW_SUFFIX"
 TIER_ENV = "WADDLES_DEPLOYMENT_TIER"
 #: Session GUC the dev suffix is staged into so legacy SQL (031) can read it.
 DEV_SUFFIX_GUC = "waddles.dev_db_role_pw_suffix"
-_PASSWORD_GUC = "waddles.svc_role_pw"  # noqa: S105 -- GUC name, not a credential
+_PASSWORD_GUC = "waddles.svc_role_pw"
 
 #: Tiers whose databases are shared/real: the dev-password suffix is refused here.
 SHARED_TIERS = frozenset({"alpha", "beta", "gamma", "production", "prod"})
@@ -62,6 +62,9 @@ SHARED_TIERS = frozenset({"alpha", "beta", "gamma", "production", "prod"})
 ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"})
 MIN_PASSWORD_LENGTH = 16
 _IDENT = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+#: A catalog `functions:` entry: a bare name (legacy -- EXECUTE on every overload of that name)
+#: or an exact signature `name(type, type[])` (EXECUTE on that one overload only; preferred).
+_FUNCTION_ENTRY = re.compile(r"^[a-z][a-z0-9_]{0,62}(\([a-z0-9_ \[\],]*\))?$")
 _URL_SAFE = re.compile(r"^[A-Za-z0-9._~-]+$")
 _BANNED_PASSWORD = re.compile(r"(?i)(changeme|change_me|replace_me|example|password|dev_)")
 
@@ -292,7 +295,7 @@ def load_catalog(
                 raise ServiceRoleError(f"{name}: member_of {group!r} not in external_groups")
         allow_tables = frozenset(_as_tuple(body.get("allow_tables")))
         functions = _as_tuple(body.get("functions"))
-        if not all(_IDENT.fullmatch(f) for f in functions):
+        if not all(_FUNCTION_ENTRY.fullmatch(f) for f in functions):
             raise ServiceRoleError(f"{name}: unsafe function name in {functions!r}")
         optional = frozenset(_as_tuple(body.get("optional_tables")))
         if not optional <= set(tables):
@@ -437,7 +440,7 @@ BEGIN
         EXECUTE format('ALTER ROLE %I WITH {attrs} PASSWORD %L', '{role}', pw);
     END IF;
 END $$;
-"""  # noqa: S608  # nosec B608 -- {role}/{attrs} are catalog-validated identifiers/literals
+"""  # nosec B608 -- {role}/{attrs} are catalog-validated identifiers/literals
         )
     )
     conn.execute(sa.text("SELECT set_config(:k, '', false)"), {"k": _PASSWORD_GUC})
@@ -677,11 +680,32 @@ def reconcile(
         _diff_relation_privileges(conn, spec.name, current_rel[spec.name], desired)
 
         for function in spec.functions:
+            if "(" in function:
+                # Exact signature (gh-969): grant on THAT overload only, so a later same-named
+                # overload can never inherit the grant. Absent = catalog drift (strict fails).
+                # Entries are catalog-validated by `_FUNCTION_ENTRY`, never user input.
+                oid = conn.execute(
+                    sa.text("SELECT to_regprocedure(:sig)::oid"), {"sig": f"public.{function}"}
+                ).scalar()
+                if oid is None:
+                    missing.append(function)
+                    continue
+                if not conn.execute(
+                    sa.text("SELECT has_function_privilege(:role, :oid, 'EXECUTE')"),
+                    {"role": spec.name, "oid": oid},
+                ).scalar():
+                    conn.execute(
+                        sa.text(
+                            "DO $$ BEGIN EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO "  # nosec B608
+                            f"{role}', {int(oid)}::oid::regprocedure); END $$"
+                        )
+                    )
+                continue
             # Function / role names are catalog-validated identifiers (load_catalog), never
             # user input. Only grants when EXECUTE is missing, so a steady state writes nothing.
             conn.execute(
                 sa.text(
-                    "DO $$ DECLARE f record; BEGIN "  # noqa: S608  # nosec B608
+                    "DO $$ DECLARE f record; BEGIN "  # nosec B608
                     "FOR f IN SELECT p.oid::regprocedure AS sig FROM pg_proc p "
                     f"WHERE p.proname = '{function}' AND p.pronamespace = 'public'::regnamespace "
                     f"AND NOT has_function_privilege('{spec.name}', p.oid, 'EXECUTE') LOOP "

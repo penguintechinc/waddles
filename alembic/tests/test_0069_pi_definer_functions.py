@@ -18,6 +18,8 @@ import contextlib
 import dataclasses
 import importlib.util
 import json
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,7 @@ import psycopg2.errors
 import pytest
 from pg_docker import (
     DOCKER_AVAILABLE,
+    REPO_ROOT,
     PgTestDatabase,
     alembic_cli,
     empty_postgres,
@@ -54,6 +57,8 @@ CANARY_ACCESS = "CANARY-ACCESS-TOKEN-xyz"
 CANARY_REFRESH = "CANARY-REFRESH-TOKEN-xyz"
 CANARY_SECRET = "CANARY-CLIENT-SECRET-xyz"
 CANARY_CFG = "CANARY-CONFIG-TOKEN-xyz"
+URL_CANARY = "https://hooks.example.com/cb?token=CANARY-URL-TOKEN-xyz"
+OWNER = "waddles_pi_definer"
 BOT_CANARY = "CANARY-BOT-TOKEN-xyz"
 
 
@@ -86,7 +91,7 @@ def _cur(db: PgTestDatabase, role: str | None = None) -> Iterator[Any]:
 
 @pytest.fixture(scope="module")
 def pg_db() -> Iterator[PgTestDatabase]:
-    """Fresh-replayed (empty DB -> head) container; seeded with one community + canary rows."""
+    """Fresh-replayed (empty DB -> head) container; two tenants/communities + canary rows."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
     passwords = throwaway_service_role_passwords()
@@ -99,20 +104,30 @@ def pg_db() -> Iterator[PgTestDatabase]:
         )
         db = dataclasses.replace(db, service_role_passwords=passwords)
         with _cur(db) as cur:
-            cur.execute(
-                "INSERT INTO tenants (slug, display_name) VALUES ('pi','PI') RETURNING id"
-            )
-            tenant = cur.fetchone()[0]
-            cur.execute(
-                "INSERT INTO communities (name, tenant_id) VALUES ('pi-c', %s) RETURNING id",
-                (tenant,),
-            )
-            community = cur.fetchone()[0]
+            ids = []
+            for slug, cname in (("pi", "pi-c"), ("pi-b", "pi-other")):
+                cur.execute(
+                    "INSERT INTO tenants (slug, display_name) VALUES (%s, %s) RETURNING id",
+                    (slug, slug),
+                )
+                tenant = cur.fetchone()[0]
+                cur.execute(
+                    "INSERT INTO communities (name, tenant_id) VALUES (%s, %s) RETURNING id",
+                    (cname, tenant),
+                )
+                ids.append((tenant, cur.fetchone()[0]))
             cur.execute(
                 "INSERT INTO platform_integrations (platform, integration_type, access_token, "
                 "refresh_token, client_id, client_secret, config_data) VALUES "
                 "('twitch','bot',%s,%s,'bot-client',%s,%s)",
-                (BOT_CANARY, BOT_CANARY, BOT_CANARY, json.dumps({"note": "bot"})),
+                (
+                    BOT_CANARY,
+                    BOT_CANARY,
+                    BOT_CANARY,
+                    json.dumps(
+                        {"note": "bot", "auth_code": CANARY_CFG, "url": URL_CANARY}
+                    ),
+                ),
             )
             cur.execute(
                 "INSERT INTO platform_integrations (platform, integration_type, community_id, "
@@ -120,14 +135,19 @@ def pg_db() -> Iterator[PgTestDatabase]:
                 "is_encrypted, seal_version) VALUES ('youtube','community_oauth',%s,%s,%s,"
                 "'cid',%s,%s,%s,TRUE,1)",
                 (
-                    community,
+                    ids[0][1],
                     CANARY_ACCESS,
                     CANARY_REFRESH,
                     CANARY_SECRET,
                     json.dumps(
                         {
                             "account_label": "Chan",
-                            "access_token": CANARY_CFG,
+                            # secrets under ARBITRARY keys / inside a value must never escape
+                            "auth_code": CANARY_CFG,
+                            "cookie": CANARY_CFG,
+                            "session_key": CANARY_CFG,
+                            "pem": CANARY_CFG,
+                            "callback": URL_CANARY,
                             "nested": {"client_secret": CANARY_CFG, "ok": 1},
                             "list": [{"refresh_token": CANARY_CFG, "keep": 2}],
                         }
@@ -135,12 +155,42 @@ def pg_db() -> Iterator[PgTestDatabase]:
                     ["a", "b"],
                 ),
             )
+            # non-string account_label (an object smuggling a secret) -> allowlist drops it
+            cur.execute(
+                "INSERT INTO platform_integrations (platform, integration_type, community_id, "
+                "access_token, config_data) VALUES ('slack','community_oauth',%s,'x',%s)",
+                (ids[0][1], json.dumps({"account_label": {"token": CANARY_CFG}})),
+            )
+        db_ids[db.dbname] = ids
         yield db
 
 
+db_ids: dict[str, list[tuple[int, int]]] = {}
+
+
+def _world(db: PgTestDatabase) -> tuple[int, int, int, int]:
+    """`(tenant_a, community_a, tenant_b, community_b)`."""
+    (ta, ca), (tb, cb) = db_ids[db.dbname]
+    return ta, ca, tb, cb
+
+
 def _community(db: PgTestDatabase) -> int:
+    return _world(db)[1]
+
+
+def _audit_rows(db: PgTestDatabase, since_id: int) -> list[tuple[Any, ...]]:
     with _cur(db) as cur:
-        cur.execute("SELECT id FROM communities WHERE name = 'pi-c'")
+        cur.execute(
+            "SELECT action, success, detail, db_user, platform, community_id "
+            "FROM credential_access_log WHERE id > %s ORDER BY id",
+            (since_id,),
+        )
+        return list(cur.fetchall())
+
+
+def _audit_mark(db: PgTestDatabase) -> int:
+    with _cur(db) as cur:
+        cur.execute("SELECT coalesce(max(id), 0) FROM credential_access_log")
         return int(cur.fetchone()[0])
 
 
@@ -150,30 +200,36 @@ class TestStatic:
         assert len(M.revision) <= 32
         assert M.down_revision == "0068_app_catalog_kind"
 
-    def test_catalog_lists_every_callable_function(self) -> None:
+    def test_catalog_lists_exactly_the_callable_signatures(self) -> None:
         listed = set(next(r for r in CATALOG.roles if r.name == HUB).functions)
-        callable_names = {sig.split("(")[0] for sig in M.CALLABLE_SIGNATURES}
-        assert len(callable_names) == 6
-        assert callable_names <= listed
-        assert not {sig.split("(")[0] for sig in M.HELPER_SIGNATURES} & listed
+        assert len(M.CALLABLE_SIGNATURES) == 6
+        assert set(M.CALLABLE_SIGNATURES) <= listed  # by exact SIGNATURE, not bare name
+        pi_entries = {f for f in listed if f.startswith("pi_")}
+        assert pi_entries == set(M.CALLABLE_SIGNATURES)
+        assert all("(" in f for f in pi_entries)
+        assert not {s.split("(")[0] for s in M.HELPER_SIGNATURES} & {
+            f.split("(")[0] for f in listed
+        }
 
     def test_every_definer_body_pins_search_path_and_no_dynamic_sql(self) -> None:
         sql = M._GROUP_A_SQL + M._GROUP_B_SQL
         assert sql.count("SECURITY DEFINER") == 6
         assert sql.count("SET search_path = pg_catalog, pg_temp") == 6
-        assert "EXECUTE" not in sql.replace("REVOKE", "").upper().replace(
-            "EXECUTE ON", ""
-        )
+        assert "EXECUTE format" not in sql and "EXECUTE '" not in sql
         assert "'bot'" not in M._GROUP_B_SQL.replace(
             "-- ", ""
         )  # lane is community_oauth only
+        body = M._GROUP_B_SQL.split("pi_community_secret_get")[1].split(
+            "pi_community_upsert"
+        )[0]
+        returns = body.split("RETURNS TABLE")[1].split("LANGUAGE")[0]
         for secret_col in ("client_secret", "client_id"):
-            # secret_get must not return them
-            body = M._GROUP_B_SQL.split("pi_community_secret_get")[1].split(
-                "pi_community_upsert"
-            )[0]
-            returns = body.split("RETURNS TABLE")[1].split("LANGUAGE")[0]
             assert secret_col not in returns
+
+    def test_no_caller_supplied_actor_parameter(self) -> None:
+        sql = M._GROUP_B_SQL
+        assert "p_actor" not in sql and "created_by_user_id" not in sql
+        assert "updated_by_user_id" not in sql
 
     def test_metadata_return_types_contain_no_secret_column(self) -> None:
         for fn in ("pi_list_metadata", "pi_community_status"):
@@ -185,6 +241,13 @@ class TestStatic:
                 "client_secret text",
             ):
                 assert forbidden not in returns, (fn, forbidden)
+
+    def test_config_is_an_allowlist_not_a_denylist(self) -> None:
+        sql = M._HELPERS_SQL
+        assert "pi_public_config" in sql and "account_label" in sql
+        assert (
+            "!~*" not in sql and "jsonb_object_agg" not in sql
+        )  # no key-name denylist
 
 
 @requires_docker
@@ -222,6 +285,52 @@ def test_hub_api_is_still_denied_the_table_directly(pg_db: PgTestDatabase) -> No
             "SELECT has_table_privilege(%s, 'platform_integrations', 'SELECT')", (HUB,)
         )
         assert cur.fetchone()[0] is False
+        # nor may it become the definer owner
+        cur.execute(
+            "SELECT count(*) FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.roleid "
+            "JOIN pg_roles m ON m.oid = am.member WHERE g.rolname = %s AND m.rolname = %s",
+            (OWNER, HUB),
+        )
+        assert cur.fetchone()[0] == 0
+    with _cur(pg_db, HUB) as cur, pytest.raises(psycopg2.Error):
+        cur.execute(f"SET ROLE {OWNER}")
+
+
+@requires_docker
+def test_definer_owner_is_a_dedicated_non_superuser_bypassrls_role(
+    pg_db: PgTestDatabase,
+) -> None:
+    with _cur(pg_db) as cur:
+        cur.execute(
+            "SELECT rolsuper, rolbypassrls, rolcanlogin, rolcreaterole, rolcreatedb, "
+            "rolreplication FROM pg_roles WHERE rolname = %s",
+            (OWNER,),
+        )
+        assert cur.fetchone() == (False, True, False, False, False, False)
+        cur.execute(
+            "SELECT p.proname, r.rolname, r.rolsuper FROM pg_proc p JOIN pg_roles r "
+            "ON r.oid = p.proowner WHERE p.proname LIKE 'pi\\_%' "
+            "AND p.pronamespace = 'public'::regnamespace"
+        )
+        rows = cur.fetchall()
+        assert len(rows) == len(M.CALLABLE_SIGNATURES) + len(M.HELPER_SIGNATURES)
+        assert {(r[1], r[2]) for r in rows} == {(OWNER, False)}
+        # least privilege: no DELETE, no other tables
+        for table, privs in (
+            ("platform_integrations", {"SELECT", "INSERT", "UPDATE"}),
+            ("credential_access_log", {"INSERT"}),
+            ("communities", {"SELECT"}),
+        ):
+            for priv in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+                cur.execute(
+                    "SELECT has_table_privilege(%s, %s, %s)",
+                    (OWNER, f"public.{table}", priv),
+                )
+                assert cur.fetchone()[0] is (priv in privs), (table, priv)
+        cur.execute(
+            "SELECT has_table_privilege(%s, 'public.hub_users', 'SELECT')", (OWNER,)
+        )
+        assert cur.fetchone()[0] is False
 
 
 @requires_docker
@@ -253,6 +362,23 @@ def test_only_hub_api_can_execute_the_callable_functions(pg_db: PgTestDatabase) 
                 )
                 assert cur.fetchone()[0] is False, (role, sig)
                 examined += 1
+        # exact ACL: grantees of every pi_* function are only {owner, (hub-api if callable)}
+        cur.execute(
+            "SELECT p.oid::regprocedure::text, array_agg(DISTINCT r.rolname) FROM pg_proc p, "
+            "LATERAL aclexplode(p.proacl) a JOIN pg_roles r ON r.oid = a.grantee "
+            "WHERE p.proname LIKE 'pi\\_%' AND p.pronamespace = 'public'::regnamespace "
+            "GROUP BY 1"
+        )
+        acls = dict(cur.fetchall())
+    assert len(acls) == len(M.CALLABLE_SIGNATURES) + len(M.HELPER_SIGNATURES)
+    for sig, grantees in acls.items():
+        callable_ = any(
+            sig.startswith(c.split("(")[0] + "(") for c in M.CALLABLE_SIGNATURES
+        )
+        assert set(grantees) == ({OWNER, HUB} if callable_ else {OWNER}), (
+            sig,
+            grantees,
+        )
     assert examined == (len(M.CALLABLE_SIGNATURES) + len(M.HELPER_SIGNATURES)) * len(
         CATALOG.names
     ) + len(M.CALLABLE_SIGNATURES)
@@ -280,8 +406,10 @@ def test_definer_functions_are_pinned(pg_db: PgTestDatabase) -> None:
 
 
 @requires_docker
-def test_metadata_functions_never_return_secrets(pg_db: PgTestDatabase) -> None:
-    """NEW secret-leak test: canary strings in every secret column + config_data never escape."""
+def test_metadata_never_returns_secrets_config_is_an_allowlist(
+    pg_db: PgTestDatabase,
+) -> None:
+    """Canaries in every secret column AND under arbitrary config keys / URL values never escape."""
     community = _community(pg_db)
     with _cur(pg_db, HUB) as cur:
         cur.execute("SELECT * FROM pi_list_metadata()")
@@ -292,7 +420,7 @@ def test_metadata_functions_never_return_secrets(pg_db: PgTestDatabase) -> None:
         status_cols = [d.name for d in cur.description]
         cur.execute("SELECT * FROM pi_list_metadata('bot', 'twitch')")
         bots = cur.fetchall()
-    assert len(listed) == 2 and len(status) == 1 and len(bots) == 1
+    assert len(listed) == 3 and len(status) == 2 and len(bots) == 1
     blob = json.dumps([listed, status, bots], default=str)
     for canary in (
         CANARY_ACCESS,
@@ -300,6 +428,7 @@ def test_metadata_functions_never_return_secrets(pg_db: PgTestDatabase) -> None:
         CANARY_SECRET,
         CANARY_CFG,
         BOT_CANARY,
+        URL_CANARY,
     ):
         assert canary not in blob, canary
     forbidden = {"access_token", "refresh_token", "client_secret"}
@@ -307,8 +436,16 @@ def test_metadata_functions_never_return_secrets(pg_db: PgTestDatabase) -> None:
     assert {"access_token_set", "refresh_token_set", "client_secret_set"} <= set(
         listed_cols
     )
-    cfg = status[0][status_cols.index("config_data")]
-    assert cfg == {"account_label": "Chan", "nested": {"ok": 1}, "list": [{"keep": 2}]}
+    by_platform = {
+        r[status_cols.index("platform")]: r[status_cols.index("config_data")]
+        for r in status
+    }
+    assert by_platform["youtube"] == {
+        "account_label": "Chan"
+    }  # ONLY the allowlisted key
+    assert by_platform["slack"] == {}  # non-string account_label dropped entirely
+    bot_cfg = bots[0][listed_cols.index("config_data")]
+    assert bot_cfg == {}  # bot row: `note`, `auth_code`, `url` are not allowlisted
     meta = dict(
         zip(listed_cols, next(r for r in listed if r[1] == "twitch"), strict=True)
     )
@@ -325,11 +462,7 @@ def test_secret_get_is_one_row_community_oauth_only_and_audited(
     pg_db: PgTestDatabase,
 ) -> None:
     community = _community(pg_db)
-    with _cur(pg_db) as cur:
-        cur.execute(
-            "SELECT count(*) FROM credential_access_log WHERE action = 'community_secret_read'"
-        )
-        before = cur.fetchone()[0]
+    mark = _audit_mark(pg_db)
     with _cur(pg_db, HUB) as cur:
         cur.execute(
             "SELECT * FROM pi_community_secret_get(%s, 'youtube')", (community,)
@@ -349,133 +482,247 @@ def test_secret_get_is_one_row_community_oauth_only_and_audited(
         # the bot row for the same platform family is NOT reachable through this lane
         cur.execute("SELECT * FROM pi_community_secret_get(%s, 'twitch')", (community,))
         assert cur.fetchall() == []
-        for bad in ((0, "youtube"), (community, "nope"), (-1, "twitch")):
-            with pytest.raises(psycopg2.Error, match="pi:"):
-                cur.execute("SELECT * FROM pi_community_secret_get(%s, %s)", bad)
-    with _cur(pg_db) as cur:
-        cur.execute(
-            "SELECT db_user, platform, community_id, success, detail FROM credential_access_log "
-            "WHERE action = 'community_secret_read' ORDER BY id"
-        )
-        rows = cur.fetchall()
-    assert len(rows) - before == 2
-    assert rows[-2] == (HUB, "youtube", community, True, None)
-    assert rows[-1] == (HUB, "twitch", community, False, None)
+        # refusals are RETURNED (empty), never raised -- so their audit row commits
+        for bad in ((0, "youtube"), (community, "nope<script>"), (-1, "twitch")):
+            cur.execute("SELECT * FROM pi_community_secret_get(%s, %s)", bad)
+            assert cur.fetchall() == []
+    rows = _audit_rows(pg_db, mark)
+    assert [(r[0], r[1], r[2]) for r in rows] == [
+        ("community_secret_read", True, "ok"),
+        ("community_secret_read", False, "not_found"),
+        ("community_secret_read", False, "invalid_args"),
+        ("community_secret_read", False, "invalid_args"),
+        ("community_secret_read", False, "invalid_args"),
+    ]
+    assert all(r[3] == HUB for r in rows)
+    assert rows[0][4:] == ("youtube", community) and rows[1][4:] == (
+        "twitch",
+        community,
+    )
+    assert rows[3][4] is None  # caller-supplied platform text is never logged
     assert CANARY_ACCESS not in json.dumps(rows, default=str)
 
 
 @requires_docker
-def test_writes_are_scoped_to_community_oauth_and_cannot_downgrade_seal(
+def test_foreign_community_is_rejected_in_the_database_and_audited(
     pg_db: PgTestDatabase,
 ) -> None:
-    community = _community(pg_db)
+    """Defence in depth: a validated tenant_id rejects another tenant's community IN SQL."""
+    ta, ca, tb, cb = _world(pg_db)
+    mark = _audit_mark(pg_db)
     with _cur(pg_db, HUB) as cur:
-        cur.execute(
-            "SELECT * FROM pi_community_upsert(%s,'slack','ct-1','rt-1',NULL,%s,'Slackers',1::smallint,NULL)",
-            (community, ["chat:write"]),
-        )
-        assert cur.fetchone()[1] == ["chat:write"]
-        with pytest.raises(psycopg2.Error, match="seal downgrade refused"):
-            cur.execute(
-                "SELECT * FROM pi_community_upsert(%s,'slack','ct-2','rt-2',NULL,'{}','x',0::smallint,NULL)",
-                (community,),
-            )
-        with pytest.raises(psycopg2.Error, match="access token is required"):
-            cur.execute(
-                "SELECT * FROM pi_community_upsert(%s,'slack','  ',NULL,NULL,'{}','x',1::smallint,NULL)",
-                (community,),
-            )
-        # compare-and-set: stale expected ciphertext -> false, nothing written
-        cur.execute(
-            "SELECT pi_community_set_sealed(%s,'slack','STALE','ct-3','rt-3',NULL,1::smallint,TRUE)",
-            (community,),
-        )
-        assert cur.fetchone()[0] is False
-        cur.execute(
-            "SELECT pi_community_set_sealed(%s,'slack','ct-1','ct-3',NULL,NULL,1::smallint,FALSE)",
-            (community,),
-        )
-        assert cur.fetchone()[0] is True
-        cur.execute(
-            "SELECT access_token, refresh_token FROM pi_community_secret_get(%s,'slack')",
-            (community,),
-        )
-        assert cur.fetchone() == ("ct-3", "rt-1")  # NULL refresh leaves the stored one
-        with pytest.raises(psycopg2.Error, match="seal downgrade refused"):
-            cur.execute(
-                "SELECT pi_community_set_sealed(%s,'slack','ct-3','ct-4',NULL,NULL,0::smallint,TRUE)",
-                (community,),
-            )
-        cur.execute("SELECT pi_community_disconnect(%s,'slack',NULL)", (community,))
-        assert cur.fetchone()[0] is True
-        cur.execute("SELECT pi_community_disconnect(%s,'slack',NULL)", (community,))
-        assert cur.fetchone()[0] is False
-        cur.execute("SELECT * FROM pi_community_secret_get(%s,'slack')", (community,))
+        # community B belongs to tenant B: every Group B call scoped to tenant A is refused
+        cur.execute("SELECT * FROM pi_community_secret_get(%s,'youtube',%s)", (cb, ta))
         assert cur.fetchall() == []
-    with _cur(pg_db) as cur:
-        # bot lane + the seeded youtube row are untouched by every write above
         cur.execute(
-            "SELECT access_token FROM platform_integrations WHERE integration_type = 'bot'"
+            "SELECT outcome, id FROM pi_community_upsert(%s,'youtube','x','y',NULL,'{}','l',"
+            "1::smallint,%s)",
+            (cb, ta),
         )
-        assert cur.fetchall() == [(BOT_CANARY,)]
+        assert cur.fetchone() == ("forbidden_tenant", None)
+        cur.execute("SELECT pi_community_disconnect(%s,'youtube',%s)", (cb, ta))
+        assert cur.fetchone()[0] == "forbidden_tenant"
         cur.execute(
-            "SELECT access_token, is_active FROM platform_integrations WHERE platform = 'slack'"
+            "SELECT pi_community_set_sealed(%s,'youtube','a','b',NULL,NULL,1::smallint,TRUE,%s)",
+            (cb, ta),
         )
-        assert cur.fetchall() == [(None, False)]
+        assert cur.fetchone()[0] == "forbidden_tenant"
+        cur.execute("SELECT * FROM pi_community_status(%s,NULL,%s)", (cb, ta))
+        assert cur.fetchall() == []
+        # the right tenant works; NULL (trusted system plane) works
+        cur.execute("SELECT * FROM pi_community_secret_get(%s,'youtube',%s)", (ca, ta))
+        assert len(cur.fetchall()) == 1
+        cur.execute("SELECT * FROM pi_community_status(%s,NULL,%s)", (ca, ta))
+        assert len(cur.fetchall()) == 2
+        cur.execute("SELECT * FROM pi_community_secret_get(%s,'youtube',NULL)", (ca,))
+        assert len(cur.fetchall()) == 1
+        # tenant A cannot read A's community by claiming tenant B either
+        cur.execute("SELECT * FROM pi_community_secret_get(%s,'youtube',%s)", (ca, tb))
+        assert cur.fetchall() == []
+    denied = [r for r in _audit_rows(pg_db, mark) if r[2] == "forbidden_tenant"]
+    assert [r[0] for r in denied] == [
+        "community_secret_read",
+        "community_upsert",
+        "community_disconnect",
+        "community_set_sealed",
+        "community_secret_read",
+    ]
+    assert all(r[1] is False and r[3] == HUB for r in denied)
+    with _cur(pg_db) as cur:  # nothing was written to community B
         cur.execute(
-            "SELECT count(*) FROM credential_access_log WHERE action LIKE 'community\\_%%' "
-            "AND db_user = %s AND platform = 'slack'",
-            (HUB,),
+            "SELECT count(*) FROM platform_integrations WHERE community_id = %s", (cb,)
         )
-        assert cur.fetchone()[0] == 5  # upsert, set_sealed, disconnect, 2x secret_get
+        assert cur.fetchone()[0] == 0
 
 
 @requires_docker
-def test_applies_to_an_existing_db_downgrade_then_upgrade(
+def test_writes_are_scoped_to_community_oauth_cannot_downgrade_and_every_call_is_audited(
     pg_db: PgTestDatabase,
 ) -> None:
-    """Existing-DB reach: from 0068 the revision re-creates + re-grants everything, idempotently."""
+    ta, community, _, _ = _world(pg_db)
+    mark = _audit_mark(pg_db)
+    expected: list[tuple[str, bool, str]] = []
+    with _cur(pg_db, HUB) as cur:
+
+        def upsert(
+            access: str, seal: int, label: str = "Slackers", plat: str = "slack"
+        ) -> Any:
+            cur.execute(
+                "SELECT * FROM pi_community_upsert(%s,%s,%s,%s,NULL,%s,%s,%s::smallint,%s)",
+                (community, plat, access, "rt-1", ["chat:write"], label, seal, ta),
+            )
+            return cur.fetchone()
+
+        r = upsert("ct-1", 1)
+        assert (
+            r[0] == "ok"
+            and r[2] == ["chat:write"]
+            and r[5] == {"account_label": "Slackers"}
+        )
+        expected.append(("community_upsert", True, "ok"))
+        assert upsert("ct-2", 0)[0] == "seal_downgrade"
+        expected.append(("community_upsert", False, "seal_downgrade"))
+        assert upsert("  ", 1)[0] == "invalid_args"
+        expected.append(("community_upsert", False, "invalid_args"))
+        assert upsert("ct-9", 1, plat="evil")[0] == "invalid_args"
+        expected.append(("community_upsert", False, "invalid_args"))
+
+        def sealed(expected_access: str, access: str, seal: int) -> str:
+            cur.execute(
+                "SELECT pi_community_set_sealed(%s,'slack',%s,%s,%s,NULL,%s::smallint,FALSE,%s)",
+                (community, expected_access, access, None, seal, ta),
+            )
+            return str(cur.fetchone()[0])
+
+        assert sealed("STALE", "ct-3", 1) == "stale"
+        expected.append(("community_set_sealed", False, "stale"))
+        assert sealed("ct-1", "ct-3", 1) == "ok"
+        expected.append(("community_set_sealed", True, "ok"))
+        assert sealed("ct-3", "ct-4", 0) == "seal_downgrade"
+        expected.append(("community_set_sealed", False, "seal_downgrade"))
+        assert sealed("ct-3", " ", 1) == "invalid_args"
+        expected.append(("community_set_sealed", False, "invalid_args"))
+        cur.execute(
+            "SELECT access_token, refresh_token FROM pi_community_secret_get(%s,'slack',%s)",
+            (community, ta),
+        )
+        assert cur.fetchone() == ("ct-3", "rt-1")  # NULL refresh leaves the stored one
+        expected.append(("community_secret_read", True, "ok"))
+        for want in ("ok", "not_found"):
+            cur.execute(
+                "SELECT pi_community_disconnect(%s,'slack',%s)", (community, ta)
+            )
+            assert cur.fetchone()[0] == want
+        expected += [
+            ("community_disconnect", True, "ok"),
+            ("community_disconnect", False, "not_found"),
+        ]
+        cur.execute("SELECT pi_community_disconnect(%s,'nope',%s)", (community, ta))
+        assert cur.fetchone()[0] == "invalid_args"
+        expected.append(("community_disconnect", False, "invalid_args"))
+        cur.execute(
+            "SELECT pi_community_set_sealed(%s,'slack','a','b',NULL,NULL,1::smallint,FALSE,%s)",
+            (community, ta),
+        )
+        assert cur.fetchone()[0] == "not_found"
+        expected.append(("community_set_sealed", False, "not_found"))
+    # EVERY call -- success, not found, stale, invalid, downgrade -- left exactly one audit row
+    rows = _audit_rows(pg_db, mark)
+    assert [(r[0], r[1], r[2]) for r in rows] == expected
+    assert len(rows) == len(expected) == 13
+    assert all(r[3] == HUB for r in rows)
+    with _cur(pg_db) as cur:
+        # bot lane + the seeded youtube row are untouched by every write above
+        cur.execute(
+            "SELECT access_token FROM platform_integrations WHERE integration_type='bot'"
+        )
+        assert cur.fetchall() == [(BOT_CANARY,)]
+        cur.execute(
+            "SELECT access_token, is_active, created_by_user_id, updated_by_user_id "
+            "FROM platform_integrations WHERE platform = 'slack' AND access_token IS NULL"
+        )
+        # no end-user attribution is persisted (the DB cannot verify it)
+        assert cur.fetchall() == [(None, False, None, None)]
+
+
+@requires_docker
+def test_applies_to_an_existing_db_downgrade_then_upgrade_and_drops_stray_overloads(
+    pg_db: PgTestDatabase,
+) -> None:
+    """Existing-DB reach + ACL rebuild: re-run re-creates, re-grants by signature, drops strays."""
     env = {PASSWORDS_ENV: json.dumps(pg_db.service_role_passwords)}
     alembic_cli("downgrade", "0068_app_catalog_kind", dsn=pg_db.dsn, env_overrides=env)
     with _cur(pg_db) as cur:
         cur.execute("SELECT count(*) FROM pg_proc WHERE proname LIKE 'pi\\_%'")
         assert cur.fetchone()[0] == 0
+        cur.execute("SELECT count(*) FROM pg_roles WHERE rolname = %s", (OWNER,))
+        assert cur.fetchone()[0] == 0
+        # a stray overload / look-alike granted broadly, left behind by "someone"
+        cur.execute(
+            "CREATE FUNCTION public.pi_list_metadata(integer) RETURNS int "
+            "LANGUAGE sql AS 'SELECT 1'"
+        )
+        cur.execute(
+            "GRANT EXECUTE ON FUNCTION public.pi_list_metadata(integer) TO PUBLIC"
+        )
     alembic_cli("upgrade", "head", dsn=pg_db.dsn, env_overrides=env)
     alembic_cli(
         "upgrade", "head", dsn=pg_db.dsn, env_overrides=env
     )  # no-op, still green
-    with _cur(pg_db, HUB) as cur:
-        cur.execute("SELECT count(*) FROM pi_list_metadata()")
-        assert cur.fetchone()[0] >= 2
-    # reconcile --strict (every migrate Job) re-grants a drifted EXECUTE
     with _cur(pg_db) as cur:
-        cur.execute(
-            f"REVOKE EXECUTE ON FUNCTION public.{M.CALLABLE_SIGNATURES[0]} FROM {HUB}"
-        )
-    import subprocess
-    import sys
-
-    from pg_docker import REPO_ROOT
-
-    subprocess.run(
-        [sys.executable, "scripts/db/service_roles.py", "reconcile", "--strict"],
-        cwd=REPO_ROOT,
-        env={
-            "DATABASE_URL": pg_db.dsn,
-            PASSWORDS_ENV: env[PASSWORDS_ENV],
-            "PATH": "/usr/bin:/bin",
-        },
-        check=True,
-        capture_output=True,
-    )
+        cur.execute("SELECT to_regprocedure('public.pi_list_metadata(integer)')")
+        assert (
+            cur.fetchone()[0] is None
+        )  # stray overload dropped, cannot inherit anything
     with _cur(pg_db, HUB) as cur:
         cur.execute("SELECT count(*) FROM pi_list_metadata()")
         assert cur.fetchone()[0] >= 2
 
 
 @requires_docker
-def test_migration_fails_loud_when_owner_would_be_subject_to_force_rls() -> None:
-    """The owner-bypass assertion: a non-bypass, non-owner migration role must be refused."""
+def test_reconcile_grants_by_exact_signature_not_bare_name(
+    pg_db: PgTestDatabase,
+) -> None:
+    sig0 = M.CALLABLE_SIGNATURES[0]
+    with _cur(pg_db) as cur:
+        cur.execute(f"REVOKE EXECUTE ON FUNCTION public.{sig0} FROM {HUB}")
+        # a same-named overload created later must NOT inherit hub-api's grant on reconcile
+        cur.execute(
+            "CREATE FUNCTION public.pi_list_metadata(bigint) RETURNS int "
+            "LANGUAGE sql AS 'SELECT 1'"
+        )
+        cur.execute(
+            "REVOKE EXECUTE ON FUNCTION public.pi_list_metadata(bigint) FROM PUBLIC"
+        )
+    subprocess.run(
+        [sys.executable, "scripts/db/service_roles.py", "reconcile", "--strict"],
+        cwd=REPO_ROOT,
+        env={
+            "DATABASE_URL": pg_db.dsn,
+            PASSWORDS_ENV: json.dumps(pg_db.service_role_passwords),
+            "PATH": "/usr/bin:/bin",
+        },
+        check=True,
+        capture_output=True,
+    )
+    with _cur(pg_db) as cur:
+        cur.execute(
+            "SELECT has_function_privilege(%s, %s::regprocedure, 'EXECUTE')",
+            (HUB, f"public.{sig0}"),
+        )
+        assert cur.fetchone()[0] is True  # drifted grant repaired
+        cur.execute(
+            "SELECT has_function_privilege(%s, 'public.pi_list_metadata(bigint)'::regprocedure, "
+            "'EXECUTE')",
+            (HUB,),
+        )
+        assert cur.fetchone()[0] is False  # overload did NOT inherit it
+        cur.execute("DROP FUNCTION public.pi_list_metadata(bigint)")
+
+
+@requires_docker
+def test_migration_fails_loud_without_a_superuser_owner() -> None:
+    """A non-superuser migration role is refused (cannot create BYPASSRLS / re-own)."""
     with empty_postgres("0069-rls") as db:
         alembic_cli("upgrade", "0068_app_catalog_kind", dsn=db.dsn)
         with _cur(db) as cur:
@@ -485,5 +732,5 @@ def test_migration_fails_loud_when_owner_would_be_subject_to_force_rls() -> None
             cur.execute("GRANT ALL ON ALL TABLES IN SCHEMA public TO pi_weak")
             cur.execute("GRANT ALL ON SCHEMA public TO pi_weak")
         weak = f"postgresql://pi_weak:pw@{db.host}:{db.port}/{db.dbname}"
-        with pytest.raises(RuntimeError, match="would be subject to RLS"):
+        with pytest.raises(RuntimeError, match="superuser|permission denied"):
             alembic_cli("upgrade", "head", dsn=weak)

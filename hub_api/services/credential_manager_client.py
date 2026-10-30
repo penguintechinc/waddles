@@ -7,17 +7,26 @@ superadmin "test connection" check -- is delegated to the credential manager
 platform name only and receives a verdict only; it never sees the token.
 
 The credential manager authorizes the call itself (`credentials:admin`): hub-api forwards the
-superadmin caller's own bearer token. Failure is LOUD: an unreachable/erroring/rejecting
-credential manager (it is not deployed on every environment, e.g. alpha) is a 503 with an
-explicit code -- never a silent "valid".
+superadmin caller's own bearer token. TRUST BOUNDARY: that bearer is only ever sent to an
+APPROVED origin -- `CREDENTIAL_MANAGER_URL` must be an `https://` URL, or an `http://` URL whose
+host is an in-cluster service name (single label, `*.svc`, `*.svc.cluster.local`); no userinfo,
+query, fragment, or IP/loopback literal, and `CREDENTIAL_MANAGER_ALLOWED_HOSTS` (comma list)
+narrows it further when set. Validation runs on every call, the client ignores proxy env
+(`trust_env=False`) and never follows redirects, so a mis-set URL cannot exfiltrate the token.
+(A service-to-service machine token would be preferable to forwarding the end-user bearer, but
+hub-api has no machine-token minting yet -- follow-up.) Failure is LOUD: an
+unreachable/erroring/rejecting credential manager (it is not deployed on every environment,
+e.g. alpha) is a 503 with an explicit code -- never a silent "valid".
 """
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import re
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -31,6 +40,43 @@ _PLATFORM = re.compile(r"[a-z0-9_-]{1,50}")
 UNAVAILABLE_CODE = "CREDENTIAL_MANAGER_UNAVAILABLE"
 
 
+class UntrustedOriginError(ValueError):
+    """`CREDENTIAL_MANAGER_URL` is not an approved origin; the bearer is never sent to it."""
+
+
+_IN_CLUSTER_SUFFIXES = (".svc", ".svc.cluster.local")
+
+
+def validate_origin(url: str, *, allowed_hosts: frozenset[str] | None = None) -> str:
+    """Return `url` (no trailing slash) if it is an approved origin, else raise.
+
+    https is always acceptable; plain http only for in-cluster service names. IP/loopback
+    literals, userinfo, query and fragment are rejected outright.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or not host:
+        raise UntrustedOriginError("credential manager URL must be http(s) with a host")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise UntrustedOriginError("credential manager URL must not carry userinfo/query/fragment")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        raise UntrustedOriginError("credential manager URL must be a DNS name, not an IP literal")
+    if host == "localhost" or host.endswith(".localhost"):
+        raise UntrustedOriginError("credential manager URL must not be loopback")
+    if parts.path not in ("", "/"):
+        raise UntrustedOriginError("credential manager URL must be an origin (no path)")
+    in_cluster = "." not in host or host.endswith(_IN_CLUSTER_SUFFIXES)
+    if parts.scheme == "http" and not in_cluster:
+        raise UntrustedOriginError("plain http is only allowed for in-cluster service names")
+    if allowed_hosts and host not in allowed_hosts:
+        raise UntrustedOriginError("credential manager host is not in the allowed-hosts list")
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 @dataclass(slots=True, frozen=True)
 class CredentialManagerConfig:
     """Where the credential manager lives; env-configured, never hardcoded in callers."""
@@ -41,8 +87,12 @@ class CredentialManagerConfig:
     @classmethod
     def from_env(cls) -> CredentialManagerConfig:
         """Build from `CREDENTIAL_MANAGER_URL` / `CREDENTIAL_MANAGER_TIMEOUT_S`."""
+        raw_hosts = os.getenv("CREDENTIAL_MANAGER_ALLOWED_HOSTS", "")
+        allowed = frozenset(h.strip().lower() for h in raw_hosts.split(",") if h.strip())
         return cls(
-            base_url=os.getenv("CREDENTIAL_MANAGER_URL", _DEFAULT_BASE_URL).rstrip("/"),
+            base_url=validate_origin(
+                os.getenv("CREDENTIAL_MANAGER_URL", _DEFAULT_BASE_URL), allowed_hosts=allowed
+            ),
             timeout_seconds=float(
                 os.getenv("CREDENTIAL_MANAGER_TIMEOUT_S", str(_DEFAULT_TIMEOUT_S))
             ),
@@ -65,10 +115,18 @@ async def test_bot_connection(
         raise bad_request("invalid platform")
     if not bearer_token:
         raise unauthorized("bearer token required")
-    cfg = config or CredentialManagerConfig.from_env()
+    try:
+        cfg = config or CredentialManagerConfig.from_env()
+        validate_origin(cfg.base_url)
+    except UntrustedOriginError as exc:
+        # The bearer is NOT sent anywhere: a mis-set URL is a loud 503, never a leak.
+        logger.error("credential_manager.untrusted_origin reason=%s", exc)
+        raise _unavailable("untrusted credential manager origin") from exc
     url = f"{cfg.base_url}/api/v1/credentials/{platform}/test"
     try:
-        async with httpx.AsyncClient(timeout=cfg.timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            timeout=cfg.timeout_seconds, trust_env=False, follow_redirects=False
+        ) as client:
             resp = await client.post(url, headers={"Authorization": f"Bearer {bearer_token}"})
     except httpx.HTTPError as exc:
         logger.error(

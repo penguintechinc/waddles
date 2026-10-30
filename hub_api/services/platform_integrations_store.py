@@ -22,8 +22,10 @@ from typing import Any
 COMMUNITY_OAUTH = "community_oauth"
 _ENGINES_POSTGRES = frozenset({"postgres", "postgresql"})
 
-#: `config_data` keys never returned by metadata reads (mirrors `pi_scrub_config` in SQL).
-_SECRET_KEY_FRAGMENTS = ("secret", "token", "passw", "credential", "private", "bearer")
+#: The ONLY `config_data` key any metadata read returns (mirrors `pi_public_config` in SQL): an
+#: ALLOWLIST, never a scrub of raw JSON -- a secret under any other key/value is dropped.
+_PUBLIC_CONFIG_KEY = "account_label"
+_PUBLIC_CONFIG_MAX = 200
 
 
 @dataclass(slots=True, frozen=True)
@@ -74,6 +76,15 @@ class SecretRow:
     seal_version: int
 
 
+class StoreRejectedError(RuntimeError):
+    """A definer function REFUSED the call (`outcome`: invalid_args / forbidden_tenant / ...)."""
+
+    def __init__(self, outcome: str) -> None:
+        """Carry the function's fixed-vocabulary outcome code (never caller data)."""
+        super().__init__(f"platform_integrations store rejected the call: {outcome}")
+        self.outcome = outcome
+
+
 class UnsupportedEngineError(RuntimeError):
     """The DAL's adapter is neither Postgres (definer functions) nor SQLite (dev table path)."""
 
@@ -91,19 +102,13 @@ def _is_pg(dal: Any) -> bool:
     raise UnsupportedEngineError(f"platform_integrations store: unsupported DB engine {engine!r}")
 
 
-def _scrub(value: Any) -> Any:
-    """Drop secret-looking keys recursively (SQLite mirror of `pi_scrub_config`)."""
-    if isinstance(value, dict):
-        return {
-            k: _scrub(v)
-            for k, v in value.items()
-            if not any(f in str(k).lower() for f in _SECRET_KEY_FRAGMENTS)
-            and "api_key" not in str(k).lower()
-            and "apikey" not in str(k).lower()
-        }
-    if isinstance(value, list):
-        return [_scrub(v) for v in value]
-    return value
+def _public_config(value: Any) -> dict[str, Any] | None:
+    """Allowlisted `config_data` (SQLite mirror of `pi_public_config`)."""
+    if value is None:
+        return None
+    if isinstance(value, dict) and isinstance(value.get(_PUBLIC_CONFIG_KEY), str):
+        return {_PUBLIC_CONFIG_KEY: value[_PUBLIC_CONFIG_KEY][:_PUBLIC_CONFIG_MAX]}
+    return {}
 
 
 def _call(dal: Any, sql: str, args: list[Any]) -> list[dict[str, Any]]:
@@ -166,7 +171,7 @@ def list_metadata(
             token_type=r.token_type,
             expires_at=r.expires_at,
             scopes=list(r.scopes) if r.scopes else [],
-            config_data=_scrub(r.config_data),
+            config_data=_public_config(r.config_data),
             is_active=bool(r.is_active),
             is_encrypted=bool(r.is_encrypted),
             created_at=r.created_at,
@@ -178,10 +183,19 @@ def list_metadata(
     ]
 
 
-def community_status(dal: Any, community_id: int, platform: str | None = None) -> list[StatusRow]:
-    """Active community_oauth rows' non-secret state for one community."""
+def community_status(
+    dal: Any, community_id: int, platform: str | None = None, *, tenant_id: int | None = None
+) -> list[StatusRow]:
+    """Active community_oauth rows' non-secret state for one community.
+
+    `tenant_id` (the VALIDATED request tenant) makes the DB reject a foreign community too.
+    """
     if _is_pg(dal):
-        rows = _call(dal, "SELECT * FROM pi_community_status(%s, %s)", [community_id, platform])
+        rows = _call(
+            dal,
+            "SELECT * FROM pi_community_status(%s, %s, %s)",
+            [community_id, platform, tenant_id],
+        )
         return [_status(r) for r in rows]
     t = _bind(dal)
     query = (
@@ -199,7 +213,7 @@ def community_status(dal: Any, community_id: int, platform: str | None = None) -
             scopes=list(r.scopes) if r.scopes else [],
             expires_at=r.expires_at,
             updated_at=r.updated_at,
-            config_data=_scrub(r.config_data),
+            config_data=_public_config(r.config_data),
         )
         for r in found
     ]
@@ -208,10 +222,19 @@ def community_status(dal: Any, community_id: int, platform: str | None = None) -
 # --------------------------------------------------------------- community OAuth lane (Group B)
 
 
-def get_secret(dal: Any, community_id: int, platform: str) -> SecretRow | None:
-    """Ciphertext of the one active `(community_id, platform)` community_oauth row (audited)."""
+def get_secret(
+    dal: Any, community_id: int, platform: str, *, tenant_id: int | None = None
+) -> SecretRow | None:
+    """Ciphertext of the one active `(community_id, platform)` community_oauth row (audited).
+
+    Every refusal (bad args, foreign tenant, no row) is an audited `None`.
+    """
     if _is_pg(dal):
-        rows = _call(dal, "SELECT * FROM pi_community_secret_get(%s, %s)", [community_id, platform])
+        rows = _call(
+            dal,
+            "SELECT * FROM pi_community_secret_get(%s, %s, %s)",
+            [community_id, platform, tenant_id],
+        )
         if not rows:
             return None
         r = rows[0]
@@ -249,9 +272,13 @@ def upsert(
     scopes: list[str],
     account_label: str | None,
     seal_version: int,
-    actor_user_id: int | None,
+    tenant_id: int | None = None,
 ) -> StatusRow:
-    """Insert-or-update the community's sealed OAuth row; refuses a seal downgrade."""
+    """Insert-or-update the community's sealed OAuth row; refuses a seal downgrade.
+
+    No actor is persisted: the DB cannot verify an end-user identity, so ownership columns are
+    never written from caller-supplied attribution.
+    """
     if _is_pg(dal):
         rows = _call(
             dal,
@@ -265,9 +292,11 @@ def upsert(
                 scopes,
                 account_label,
                 seal_version,
-                actor_user_id,
+                tenant_id,
             ],
         )
+        if rows[0]["outcome"] != "ok":
+            raise StoreRejectedError(str(rows[0]["outcome"]))
         return _status({**rows[0], "platform": platform})
     t = _bind(dal)
     now = datetime.now(UTC)
@@ -299,8 +328,6 @@ def upsert(
                     seal_version=seal_version,
                     created_at=now,
                     updated_at=now,
-                    created_by_user_id=actor_user_id,
-                    updated_by_user_id=actor_user_id,
                 )
             )
         else:
@@ -318,7 +345,6 @@ def upsert(
                 is_encrypted=True,
                 seal_version=seal_version,
                 updated_at=now,
-                updated_by_user_id=actor_user_id,
             )
         refreshed = dal(t.id == row_id).select().first()
         dal.commit()
@@ -330,19 +356,22 @@ def upsert(
         scopes=list(refreshed.scopes) if refreshed.scopes else [],
         expires_at=refreshed.expires_at,
         updated_at=refreshed.updated_at,
-        config_data=_scrub(refreshed.config_data),
+        config_data=_public_config(refreshed.config_data),
     )
 
 
-def disconnect(dal: Any, *, community_id: int, platform: str, actor_user_id: int | None) -> bool:
+def disconnect(dal: Any, *, community_id: int, platform: str, tenant_id: int | None = None) -> bool:
     """Deactivate the active row and null every secret; `False` when nothing was active."""
     if _is_pg(dal):
         rows = _call(
             dal,
-            "SELECT pi_community_disconnect(%s, %s, %s) AS ok",
-            [community_id, platform, actor_user_id],
+            "SELECT pi_community_disconnect(%s, %s, %s) AS outcome",
+            [community_id, platform, tenant_id],
         )
-        return bool(rows[0]["ok"])
+        outcome = str(rows[0]["outcome"])
+        if outcome not in ("ok", "not_found"):
+            raise StoreRejectedError(outcome)
+        return outcome == "ok"
     t = _bind(dal)
     try:
         row = dal(_active(t, community_id, platform)).select(limitby=(0, 1)).first()
@@ -358,7 +387,6 @@ def disconnect(dal: Any, *, community_id: int, platform: str, actor_user_id: int
             scopes=[],
             config_data=None,
             updated_at=datetime.now(UTC),
-            updated_by_user_id=actor_user_id,
         )
         dal.commit()
         return True
@@ -378,6 +406,7 @@ def set_sealed(
     expires_at: datetime | None,
     seal_version: int,
     touch_updated_at: bool,
+    tenant_id: int | None = None,
 ) -> bool:
     """Compare-and-set re-seal/refresh: `False` if the stored ciphertext changed meanwhile.
 
@@ -386,7 +415,8 @@ def set_sealed(
     if _is_pg(dal):
         rows = _call(
             dal,
-            "SELECT pi_community_set_sealed(%s, %s, %s, %s, %s, %s, %s::smallint, %s) AS ok",
+            "SELECT pi_community_set_sealed(%s, %s, %s, %s, %s, %s, %s::smallint, %s, %s) "
+            "AS outcome",
             [
                 community_id,
                 platform,
@@ -396,9 +426,13 @@ def set_sealed(
                 expires_at,
                 seal_version,
                 touch_updated_at,
+                tenant_id,
             ],
         )
-        return bool(rows[0]["ok"])
+        outcome = str(rows[0]["outcome"])
+        if outcome not in ("ok", "stale", "not_found"):
+            raise StoreRejectedError(outcome)
+        return outcome == "ok"
     t = _bind(dal)
     try:
         row = dal(_active(t, community_id, platform)).select(limitby=(0, 1)).first()

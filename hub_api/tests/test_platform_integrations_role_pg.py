@@ -114,7 +114,12 @@ def _seed_bot(db: PgTestDatabase) -> None:
         "INSERT INTO platform_integrations (platform, integration_type, access_token, "
         "refresh_token, client_id, client_secret, config_data) VALUES "
         "('twitch','bot',%s,%s,'bot-client',%s,%s::jsonb)",
-        (BOT_CANARY, BOT_CANARY, BOT_CANARY, f'{{"note": "n", "api_token": "{CFG_CANARY}"}}'),
+        (
+            BOT_CANARY,
+            BOT_CANARY,
+            BOT_CANARY,
+            f'{{"note": "n", "api_token": "{CFG_CANARY}", "auth_code": "{CFG_CANARY}"}}',
+        ),
     )
 
 
@@ -322,3 +327,61 @@ async def test_bot_lane_is_unreachable_through_the_community_functions(
         "SELECT access_token, is_active FROM platform_integrations WHERE integration_type='bot'",
     )
     assert bot == [(BOT_CANARY, True)]
+
+
+async def test_a_foreign_tenant_is_rejected_by_the_database_and_audited(
+    role_dal: AsyncDAL, pg_db: PgTestDatabase
+) -> None:
+    """Defence in depth: even if a foreign community_id slipped past the route, SQL refuses it."""
+    from services.errors import ApiError
+
+    ta = int(_owner(pg_db, "INSERT INTO tenants (slug) VALUES ('pi-ta') RETURNING id")[0][0])
+    tb = int(_owner(pg_db, "INSERT INTO tenants (slug) VALUES ('pi-tb') RETURNING id")[0][0])
+    cid = int(
+        _owner(
+            pg_db,
+            "INSERT INTO communities (name, tenant_id) VALUES ('pi-t', %s) RETURNING id",
+            (ta,),
+        )[0][0]
+    )
+    await svc.upsert_connection(
+        role_dal,
+        cid,
+        "youtube",
+        access_token="a",
+        refresh_token=None,
+        expires_at=None,
+        scopes=[],
+        account_label=None,
+        actor_user_id=7,
+        tenant_id=ta,
+    )
+    # no end-user attribution is persisted (spoofable, unverifiable by the DB)
+    assert _owner(
+        pg_db, "SELECT created_by_user_id, updated_by_user_id FROM platform_integrations"
+    ) == [(None, None)]
+    with pytest.raises(ApiError) as exc:
+        await svc.upsert_connection(
+            role_dal,
+            cid,
+            "youtube",
+            access_token="evil",
+            refresh_token=None,
+            expires_at=None,
+            scopes=[],
+            account_label=None,
+            actor_user_id=7,
+            tenant_id=tb,
+        )
+    assert exc.value.status_code == 404  # reveals nothing about other tenants
+    with pytest.raises(ApiError):
+        await svc.delete_connection(role_dal, cid, "youtube", 7, tenant_id=tb)
+    assert await svc.get_decrypted_tokens(role_dal, cid, "youtube", tenant_id=tb) is None
+    assert (await svc.get_decrypted_tokens(role_dal, cid, "youtube", tenant_id=ta)) is not None
+    still = await svc.get_decrypted_tokens(role_dal, cid, "youtube", tenant_id=ta)
+    assert still is not None and still.access_token == "a"  # the foreign write never landed
+    details = [
+        r[0]
+        for r in _owner(pg_db, "SELECT detail FROM credential_access_log WHERE success = FALSE")
+    ]
+    assert details.count("forbidden_tenant") == 3

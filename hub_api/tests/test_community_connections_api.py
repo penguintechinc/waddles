@@ -873,3 +873,108 @@ def test_no_service_key_import_in_community_connections() -> None:
     imported = {a.name for n in nodes if isinstance(n, ast.ImportFrom) for a in n.names}
     used = {n.id for n in nodes if isinstance(n, ast.Name)}
     assert "is_valid_service_key" not in imported | used
+
+
+class TestCommunityScopeInvariant:
+    """# regression: gh-969 -- hub-api invariant for the SECURITY DEFINER Group B calls.
+
+    `community_id` reaching `connections_svc` MUST come from the VALIDATED request scope, and the
+    validated tenant is passed through so the DB re-checks it. A request scoped to tenant A must
+    never cause a service/Group B call for tenant B's community.
+    """
+
+    @staticmethod
+    def _spies(monkeypatch: Any) -> dict[str, AsyncMock]:
+        spies = {
+            name: AsyncMock(return_value=[] if name == "list_connections" else True)
+            for name in (
+                "list_connections",
+                "delete_connection",
+                "upsert_connection",
+                "get_decrypted_tokens",
+                "store_refreshed_access_token",
+            )
+        }
+        for name, spy in spies.items():
+            monkeypatch.setattr(connections_module.connections_svc, name, spy)
+        spies["create_state"] = AsyncMock(return_value="state-token")
+        monkeypatch.setattr(connections_module.state_svc, "create_state", spies["create_state"])
+        monkeypatch.setattr(connections_module.providers_svc, "get_provider", lambda _n: _spec())
+        monkeypatch.setattr(
+            connections_module.providers_svc, "build_authorize_url", lambda *_a, **_k: "https://x"
+        )
+        return spies
+
+    async def test_foreign_tenant_request_reaches_no_group_b_call(
+        self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
+    ) -> None:
+        dal, community_id = community_db
+        _insert_other_tenant(dal)
+        spies = self._spies(monkeypatch)
+        read = user_auth_headers(user_id=1, scope="community.connections:read", tenant="other-corp")
+        write = user_auth_headers(
+            user_id=1, scope="community.connections:write", tenant="other-corp"
+        )
+        base = f"/api/v1/communities/{community_id}/connections"
+        assert (await client.get(base, headers=read)).status_code == 404
+        assert (await client.delete(f"{base}/youtube", headers=write)).status_code == 404
+        assert (await client.post(f"{base}/youtube/authorize", headers=write)).status_code == 404
+        assert all(spy.await_count == 0 for spy in spies.values()), {
+            n: s.await_count for n, s in spies.items()
+        }
+
+    async def test_validated_tenant_is_passed_to_every_user_reachable_call(
+        self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
+    ) -> None:
+        dal, community_id = community_db
+        tenant_id = int(dal.communities[community_id].tenant_id)
+        spies = self._spies(monkeypatch)
+        base = f"/api/v1/communities/{community_id}/connections"
+        read = user_auth_headers(user_id=1, scope="community.connections:read")
+        write = user_auth_headers(user_id=1, scope="community.connections:write")
+        assert (await client.get(base, headers=read)).status_code == 200
+        assert (await client.delete(f"{base}/youtube", headers=write)).status_code == 204
+        assert (await client.post(f"{base}/youtube/authorize", headers=write)).status_code == 200
+        assert spies["list_connections"].await_args.kwargs["tenant_id"] == tenant_id
+        assert spies["delete_connection"].await_args.kwargs["tenant_id"] == tenant_id
+        assert spies["create_state"].await_args.kwargs["tenant_id"] == tenant_id
+        # the community passed down is the validated path community, never anything else
+        assert spies["list_connections"].await_args.args[1] == community_id
+        assert spies["delete_connection"].await_args.args[1] == community_id
+
+    async def test_callback_passes_the_tenant_validated_when_the_flow_started(
+        self, client: Any, monkeypatch: Any
+    ) -> None:
+        spies = self._spies(monkeypatch)
+        payload = StatePayload(
+            community_id=7,
+            provider="youtube",
+            user_id=1,
+            redirect_uri=f"{CALLBACK_BASE}/api/v1/connections/callback/youtube",
+            code_verifier=None,
+            tenant_id=42,
+        )
+        monkeypatch.setattr(
+            connections_module.state_svc, "consume_state", AsyncMock(return_value=payload)
+        )
+        monkeypatch.setattr(
+            connections_module.providers_svc,
+            "exchange_code",
+            AsyncMock(
+                return_value=TokenResponse(
+                    access_token="a",
+                    refresh_token=None,
+                    expires_in=None,
+                    scopes=[],
+                    token_type="Bearer",  # noqa: S106
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            connections_module.providers_svc, "fetch_account_label", AsyncMock(return_value=None)
+        )
+        r = await client.get("/api/v1/connections/callback/youtube?state=s&code=c")
+        assert r.status_code == 200
+        kwargs = spies["upsert_connection"].await_args.kwargs
+        assert kwargs["tenant_id"] == 42
+        assert spies["upsert_connection"].await_args.args[1] == 7  # server-side state, not query

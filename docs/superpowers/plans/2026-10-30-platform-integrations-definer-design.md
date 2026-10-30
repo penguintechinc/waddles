@@ -141,3 +141,13 @@ Tests (all `# regression: gh-969`; Postgres via `alembic/tests/pg_docker.py`, th
 - SQLite (dev `DB_TYPE=sqlite`) has no roles, so `services/platform_integrations_store.py` implements the
   same contract on the pydal table there, selected by adapter engine (never a runtime fallback; other engines raise).
 - Minimal CI/test bootstrap gained `credential_access_log` (pg_docker.py + pr-validation.yml) because 0069 audits into it.
+
+## Review-round changes (external review of PR #971)
+| Finding | Change |
+|---|---|
+| `config_data` denylist leak | `pi_scrub_config` replaced by ALLOWLIST `pi_public_config` (only string `account_label`; audit found no other key written by any component). SQLite mirror `_public_config`. |
+| Group B caller authorization / spoofable actor | `community_id` always from validated scope (route `community_in_tenant`, signed OAuth `state`, community-bound machine JWT) with an invariant test; every Group B fn + `pi_community_status` takes the VALIDATED `p_tenant_id` and the DB rejects a community of another tenant (`communities.tenant_id`); NULL = trusted system plane. `p_actor_user_id` REMOVED -- no end-user attribution is persisted (DB cannot verify it). |
+| Audit gaps | Every Group B call audits success AND every refusal (`invalid_args`, `forbidden_tenant`, `not_found`, `stale`, `seal_downgrade`); refusals are RETURNED (`outcome`), not raised, so the audit row commits. Caller platform text is never logged. |
+| EXECUTE drift | catalog lists exact signatures; `service_roles.py` grants by `to_regprocedure` (bare names still work for legacy identity fns); migration drops stray `pi_*` overloads, re-owns, revokes PUBLIC + every non-owner grantee, then grants hub-api by signature. |
+| Bearer SSRF | `credential_manager_client.validate_origin`: https, or http only for in-cluster names; no userinfo/query/fragment/IP/loopback/path; optional `CREDENTIAL_MANAGER_ALLOWED_HOSTS`; `trust_env=False`, no redirects; bad origin = loud 503, bearer never sent. Machine-token minting does not exist in hub-api -> bearer forwarding kept, boundary documented (follow-up). |
+| Definer owner | dedicated `waddles_pi_definer` NOLOGIN NOSUPERUSER BYPASSRLS role owns every function; least-privilege table grants (no DELETE); superuser migrator asserted up front; hub-api cannot SET ROLE to it. |
