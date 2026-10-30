@@ -126,7 +126,18 @@ roles:
     deny_tables: [platform_integrations, credential_access_log, module_db_accounts, db_permission_templates]
     views:
       marketplace_catalog: [SELECT]
-    functions: [resolve_identity_uuid, erase_ephemeral_pseudonym_handles]
+    # gh-969: the ONLY path to platform_integrations (table stays in deny_tables). SECURITY
+    # DEFINER functions from 0069_pi_definer_functions -- metadata (never secrets) and the
+    # per-community OAuth ciphertext lane (never bot/user_oauth rows). Re-granted on reconcile.
+    functions:
+      - resolve_identity_uuid
+      - erase_ephemeral_pseudonym_handles
+      - pi_list_metadata
+      - pi_community_status
+      - pi_community_secret_get
+      - pi_community_upsert
+      - pi_community_disconnect
+      - pi_community_set_sealed
 
   # ------------------------------------------------------------ data plane (strict)
   waddles_svc_ingest:
