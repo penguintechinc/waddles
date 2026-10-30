@@ -170,6 +170,108 @@ impl economy::Host for ExecState {
             Err(e) => Err(economy_error_from(e)),
         }
     }
+
+    async fn credit(&mut self, user: String, amount: u64) -> Result<i64, economy::Error> {
+        let args = serde_json::json!({ "user": user, "amount": amount });
+        match call(self, CapabilityKind::Db, "economy.credit", args).await {
+            Ok(value) => decode_balance(value),
+            Err(e) => Err(economy_error_from(e)),
+        }
+    }
+
+    async fn batch_credit(
+        &mut self,
+        entries: Vec<economy::CreditEntry>,
+    ) -> Result<(), economy::Error> {
+        let args = serde_json::json!({ "entries": entries_json(&entries) });
+        match call(self, CapabilityKind::Db, "economy.batch_credit", args).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(economy_error_from(e)),
+        }
+    }
+
+    async fn debit(&mut self, user: String, amount: u64) -> Result<i64, economy::Error> {
+        let args = serde_json::json!({ "user": user, "amount": amount });
+        match call(self, CapabilityKind::Db, "economy.debit", args).await {
+            Ok(value) => decode_balance(value),
+            Err(e) => Err(economy_error_from(e)),
+        }
+    }
+
+    async fn conditional_debit(
+        &mut self,
+        user: String,
+        amount: u64,
+        min_balance: u64,
+    ) -> Result<i64, economy::Error> {
+        let args =
+            serde_json::json!({ "user": user, "amount": amount, "min_balance": min_balance });
+        match call(self, CapabilityKind::Db, "economy.conditional_debit", args).await {
+            Ok(value) => decode_balance(value),
+            Err(e) => Err(economy_error_from(e)),
+        }
+    }
+
+    async fn admin_adjust(
+        &mut self,
+        user: String,
+        adjust: economy::BalanceAdjust,
+    ) -> Result<i64, economy::Error> {
+        let args = admin_adjust_args(&user, &adjust);
+        match call(self, CapabilityKind::Db, "economy.admin_adjust", args).await {
+            Ok(value) => decode_balance(value),
+            Err(e) => Err(economy_error_from(e)),
+        }
+    }
+
+    async fn pay_pot(&mut self, winners: Vec<economy::CreditEntry>) -> Result<(), economy::Error> {
+        let args = serde_json::json!({ "winners": entries_json(&winners) });
+        match call(self, CapabilityKind::Db, "economy.pay_pot", args).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(economy_error_from(e)),
+        }
+    }
+
+    async fn exchange(
+        &mut self,
+        user: String,
+        from_amount: u64,
+        rate_num: u32,
+        rate_den: u32,
+    ) -> Result<i64, economy::Error> {
+        let args = serde_json::json!({
+            "user": user,
+            "from_amount": from_amount,
+            "rate_num": rate_num,
+            "rate_den": rate_den,
+        });
+        match call(self, CapabilityKind::Db, "economy.exchange", args).await {
+            Ok(value) => decode_balance(value),
+            Err(e) => Err(economy_error_from(e)),
+        }
+    }
+}
+
+/// Wire form of a `credit-entry` list (`[{user, amount}]`).
+fn entries_json(entries: &[economy::CreditEntry]) -> serde_json::Value {
+    serde_json::Value::Array(
+        entries
+            .iter()
+            .map(|e| serde_json::json!({ "user": e.user, "amount": e.amount }))
+            .collect(),
+    )
+}
+
+/// Wire args of an `admin-adjust`: `{user, mode: "delta"|"set", value}`.
+fn admin_adjust_args(user: &str, adjust: &economy::BalanceAdjust) -> serde_json::Value {
+    match adjust {
+        economy::BalanceAdjust::Delta(d) => {
+            serde_json::json!({ "user": user, "mode": "delta", "value": d })
+        }
+        economy::BalanceAdjust::Set(t) => {
+            serde_json::json!({ "user": user, "mode": "set", "value": t })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -299,5 +401,41 @@ mod tests {
                 Err(economy::Error::Backend(_))
             ));
         }
+    }
+
+    #[test]
+    fn compound_op_wire_args_and_error_codes() {
+        let e = vec![
+            economy::CreditEntry {
+                user: "u1".into(),
+                amount: 5,
+            },
+            economy::CreditEntry {
+                user: "u2".into(),
+                amount: 7,
+            },
+        ];
+        assert_eq!(
+            entries_json(&e),
+            serde_json::json!([{"user": "u1", "amount": 5}, {"user": "u2", "amount": 7}])
+        );
+        assert_eq!(
+            admin_adjust_args("u", &economy::BalanceAdjust::Delta(-3)),
+            serde_json::json!({"user": "u", "mode": "delta", "value": -3})
+        );
+        assert_eq!(
+            admin_adjust_args("u", &economy::BalanceAdjust::Set(9)),
+            serde_json::json!({"user": "u", "mode": "set", "value": 9})
+        );
+        // The stage's supply refusal rides `over_cap` with the ceiling.
+        assert!(matches!(
+            economy_error_from(denied("over_cap", "1000000")),
+            economy::Error::OverCap(1_000_000)
+        ));
+        // A non-admin caller surfaces as a typed denial, never a success.
+        assert!(matches!(
+            economy_error_from(denied("admin_required", "operation requires admin authorization")),
+            economy::Error::Denied(c) if c == "admin_required"
+        ));
     }
 }

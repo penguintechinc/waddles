@@ -486,6 +486,71 @@ interface economy {
 
   /// The community's top `limit` (1..=100) members by balance, highest first.
   leaderboard: func(limit: u32) -> result<list<entry>, error>;
+
+  // ---- Compound ops (P4 Task 1) -- ADDITIVE: bundles compiled against the
+  // functions above keep working; the host provides all of these. Each is ONE
+  // atomic host-capability call (never a multi-call read-modify-write), keyed
+  // idempotently by event + per-kind ordinal exactly like `wager`/`transfer`,
+  // and gated by its OWN permission (`economy.credit` / `economy.debit` /
+  // `economy.admin-adjust` / `economy.pot.pay`). The community, tenant and app
+  // are server-derived, never an argument. A refused call changes nothing.
+
+  /// One `(user, amount)` row of `batch-credit` / `pay-pot`. `user` is a UUID
+  /// string; `amount` is >= 1.
+  record credit-entry {
+    user: string,
+    amount: u64,
+  }
+
+  /// How `admin-adjust` changes a balance: add/subtract a non-zero `delta`, or
+  /// `set` the balance to an absolute value (>= 0).
+  variant balance-adjust {
+    delta(s64),
+    set(u64),
+  }
+
+  /// MINT: adds `amount` (>= 1) to `user` (any member); returns the NEW
+  /// balance. Needs `economy.credit`. Bounded per call (`max_amount`), by the
+  /// durable rolling-24h mint caps and by the community money-supply ceiling
+  /// (`over-cap` carries the ceiling when it is the supply that refuses).
+  credit: func(user: string, amount: u64) -> result<s64, error>;
+
+  /// MINT for several members in ONE all-or-nothing transaction (1..=100
+  /// distinct users, each within `max_amount`). Needs `economy.credit`; same
+  /// caps as `credit`, applied to the batch total.
+  batch-credit: func(entries: list<credit-entry>) -> result<_, error>;
+
+  /// SPEND/BURN: subtracts `amount` (>= 1) from `user`, who MUST be the
+  /// invocation's actor (`denied("actor_mismatch")` otherwise). Needs
+  /// `economy.debit`. `insufficient-funds` (carrying the balance) and no
+  /// change if the user holds less.
+  debit: func(user: string, amount: u64) -> result<s64, error>;
+
+  /// Like `debit`, but refuses (never partially applies) unless the balance
+  /// would stay >= `min-balance`.
+  conditional-debit: func(user: string, amount: u64, min-balance: u64) -> result<s64, error>;
+
+  /// PRIVILEGED: absolute-set or delta of any member's balance (ledger kind
+  /// `admin_adjust`). Needs `economy.admin_adjust`, an admin-reviewed grant;
+  /// bypasses the daily earn windows but is still bounded by the community
+  /// money-supply ceiling. Returns the NEW balance.
+  admin-adjust: func(user: string, adjust: balance-adjust) -> result<s64, error>;
+
+  /// Atomic multi-winner payout from the community POT (a host-derived
+  /// per-community account; the bundle never names it). Each winner is a
+  /// distinct member with an explicit amount >= 1; needs the pot to hold at
+  /// least the SUM (`insufficient-funds` carries the pot balance). No rounding:
+  /// any remainder stays in the pot. Needs `economy.pot.pay`. All winners are
+  /// paid or none are.
+  pay-pot: func(winners: list<credit-entry>) -> result<_, error>;
+
+  /// One-call cross-currency exchange: claims `from-amount` EXTERNAL points
+  /// (e.g. Twitch channel points; no external balance is kept) and credits
+  /// `floor(from-amount * rate-num / rate-den)` to `user`, who MUST be the
+  /// invocation's actor. The rate is bounded host-side (each part <= 1_000_000,
+  /// ratio <= 1000x) and an exchange that would credit nothing is `invalid`.
+  /// Needs `economy.credit`; mint-capped like `credit`. Returns the NEW balance.
+  exchange: func(user: string, from-amount: u64, rate-num: u32, rate-den: u32) -> result<s64, error>;
 }
 
 /// Resolves WHO an invocation is about to the community `user-uuid` that
