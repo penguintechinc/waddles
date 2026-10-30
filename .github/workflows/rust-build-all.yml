@@ -55,6 +55,7 @@ jobs:
           - svc_presentation
           - svc_process
           - svc_streaming
+          - tool_invoke_e2e
     defaults:
       run:
         working-directory: core/${{ matrix.crate }}

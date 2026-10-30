@@ -30,6 +30,7 @@ updates:
   - /core/svc_presentation
   - /core/svc_process
   - /core/svc_streaming
+  - /core/tool_invoke_e2e
   - /core/twitch_helix
   - /core/waddles_ops_cli
   - /sdk/waddle-sdk-rs

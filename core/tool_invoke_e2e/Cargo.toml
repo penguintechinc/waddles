@@ -1,0 +1,34 @@
+[package]
+name = "tool-invoke-e2e"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Real-path harness for the bundle-to-bundle `tool.invoke` framework (bundle-MCP-tools P3b). NOT a shipped service and has no Dockerfile: it links svc-process (the stage: the REAL `handle_tool` gate/matrix/guards and nested invoke) and bundle-executor (the REAL wasmtime executor) into ONE process joined by the host-API wire, and drives REAL componentized bundles (a caller app + provider services built from core/bundle_executor/tests/fixtures/tool-*-fixture-src) end to end. It lives in its own crate because svc-process must not depend on wasmtime and bundle-executor's dependency policy bans svc-process's HTTP/DB stack."
+
+[lib]
+name = "tool_invoke_e2e"
+path = "src/lib.rs"
+
+# Exact pins only; each matches the pin the crates under test already use.
+[dependencies]
+bundle-executor = { path = "../bundle_executor", version = "=0.1.0" }
+svc-process = { path = "../svc_process", version = "=0.1.0" }
+bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
+bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
+bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "76741cb520b6e06be1a2792ff4a1af5e55920811", package = "penguin-bundle-host", version = "=0.4.0" }
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+sha2 = "=0.10.9"
+serde_json = "=1.0.151"
+prometheus = "=0.14.0"
+opentelemetry = "=0.32.0"
+
+[dev-dependencies]
+opentelemetry_sdk = { version = "=0.32.1", features = ["testing"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

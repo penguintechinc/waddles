@@ -1,0 +1,60 @@
+package waddle:bundle@1.0.0;
+
+// `world stage-tools` (P3b bundle-to-bundle tool invoke). Own file so the FROZEN
+// `stage`/`stage-next`/`stage-v2` worlds in `stage.wit` stay untouched (their
+// records are baked into compiled components).
+
+/// Host import: call another bundle's exported tool. The stage is the sole
+/// authority -- it gates, resolves and runs the target under the target's OWN
+/// grants; the caller can never name the community/tenant/actor.
+interface tool {
+  variant tool-error {
+    /// No approved grant for this caller/target/tool.
+    not-granted,
+    /// Grant present but the kind matrix forbids it (e.g. app to app).
+    forbidden,
+    /// The host-computed remaining budget was exhausted.
+    timeout,
+    /// Nesting beyond the host depth cap.
+    depth-exceeded,
+    /// The target bundle has no free instance slot.
+    pool-exhausted,
+    /// Unknown, unloaded, stale or digest-mismatched target.
+    target-unavailable,
+    /// Malformed or oversized target/tool/args/idempotency-key.
+    invalid-args(string),
+  }
+
+  /// `args`/result are canonical JSON bytes. Writes require an
+  /// `idempotency-key` (retry-safe).
+  invoke: func(target: string, tool: string, args: list<u8>, idempotency-key: option<string>)
+    -> result<list<u8>, tool-error>;
+}
+
+/// Guest export: run one of this bundle's own exported tools.
+interface tool-provider {
+  use tool.{tool-error};
+  call: func(name: string, args: list<u8>) -> result<list<u8>, tool-error>;
+}
+
+/// `stage-v2`'s imports (numeric scope) plus `tool`; exports only
+/// `tool-provider`. Whoever extends `stage-v2` with a capability MUST mirror
+/// it here.
+world stage-tools {
+  import context-v2;
+  import http;
+  import kv;
+  import db;
+  import relay;
+  import %flags;
+  import log;
+  import clock;
+  import overlay;
+  import reputation;
+  import economy;
+  import identity;
+  import ai;
+  import tool;
+
+  export tool-provider;
+}

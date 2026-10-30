@@ -244,3 +244,27 @@ rm -f src/bindings.rs   # generated, not committed
 ```
 
 Built with `cargo-component` / `wit-bindgen-rt 0.44.0`, same toolchain as the fixtures above.
+
+## `tool_provider_fixture.wasm` / `tool_caller_fixture.wasm`
+
+Real `world stage-tools` components (bundle-MCP-tools P3b) driven by `core/tool_invoke_e2e` (the real-path
+`tool.invoke` e2e: real executor + svc-process `handle_tool`). Both use the Rust SDK (`sdk/waddle-sdk-rs`
+`ToolRegistry` / `invoke`) and adapt their OWN generated `stage-tools` bindings to its `ToolTransport` seam (the SDK's
+`bindings_glue` only carries the frozen `stage` world; it is dead-stripped from these builds). `wit/` holds verbatim
+copies of `wit/waddle-bundle/stage.wit` + `tool.wit`; refresh both whenever either changes.
+
+- **provider** (`tool-provider-fixture-src/`, a service): `echo` (read), `guarded` (WRITE; echoes the forwarded
+  idempotency key), `relay` (nested `tool.invoke` -- cycle/depth/self-call probes) and `slow` (spins; only the deadline ends it).
+- **caller** (`tool-caller-fixture-src/`, an app): `go` `{target, tool, args, key?}` forwards through the SDK client and returns
+  the host's typed outcome. (`stage-tools` is the only world with the `tool` import, so the app also exports
+  `tool-provider`; it is just the harness's entry point.)
+
+```bash
+cd tool-provider-fixture-src   # or tool-caller-fixture-src
+cp ../../../../../wit/waddle-bundle/stage.wit ../../../../../wit/waddle-bundle/tool.wit wit/
+cargo component build --release
+cp "${CARGO_TARGET_DIR:-target}/wasm32-wasip1/release/tool_provider_fixture.wasm" ../tool_provider_fixture.wasm
+rm -f src/bindings.rs   # generated, not committed
+```
+
+Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against `wit-bindgen-rt 0.44.0`.
