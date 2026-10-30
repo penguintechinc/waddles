@@ -170,7 +170,7 @@ def _envelope(payload: dict[str, Any], platform: str = "twitch") -> StageEnvelop
 
 
 @pytest.mark.parametrize(
-    "text", ["hello", "", "!raffle", "!giveaways", "giveaway", "!entering", "!enterx a"]
+    "text", ["hello", "", "!raffle", "!giveaways", "giveaway", "!entering", "!enterx a", "!enter"]
 )
 def test_non_matching_text_returns_none_without_kv(text: str, host: _Host) -> None:
     assert _run(transform(_event(text))) is None
@@ -185,7 +185,7 @@ def test_non_string_text_returns_none(text: Any, host: _Host) -> None:
 
 def test_command_match_is_case_and_whitespace_insensitive(host: _Host) -> None:
     assert "no giveaway" in _say("  !GiveAway   STATUS  ")
-    assert "no giveaway" in _say("!ENTER")
+    assert "no giveaway" in _say("!GIVEAWAY   ENTER")
 
 
 def test_key_satisfies_host_charset() -> None:
@@ -251,7 +251,7 @@ def test_humanize_duration(ms: int, expected: str) -> None:
 def test_start_by_mod_opens_giveaway(host: _Host) -> None:
     reply = _mod_say("!giveaway start 5m")
     assert "5m 0s" in reply
-    assert "!enter" in reply
+    assert "!giveaway enter" in reply
     assert host.state() == {"ends_at": _T0 + 300_000, "entries": []}
 
 
@@ -263,7 +263,7 @@ def test_start_by_broadcaster_opens_giveaway(host: _Host) -> None:
 
 def test_start_while_active_is_rejected_and_state_unchanged(host: _Host) -> None:
     _mod_say("!giveaway start 5m")
-    _say("!enter")
+    _say("!giveaway enter")
     before = host.kv.store[ACTIVE_KEY]
     host.now_ms = _T0 + 60_000
     reply = _mod_say("!giveaway start 1h")
@@ -291,7 +291,7 @@ def test_start_wrong_arity_replies_with_usage(text: str, host: _Host) -> None:
 
 def test_enter_adds_hashed_entry_once(host: _Host) -> None:
     _mod_say("!giveaway start 5m")
-    reply = _say("!enter", actor="viewer-1")
+    reply = _say("!giveaway enter", actor="viewer-1")
     assert "entered the giveaway" in reply
     assert "(1 entered)" in reply
     expected = hashlib.sha256(b"twitch\x1fviewer-1").hexdigest()
@@ -301,28 +301,31 @@ def test_enter_adds_hashed_entry_once(host: _Host) -> None:
 
 def test_enter_duplicate_is_rejected_without_growth(host: _Host) -> None:
     _mod_say("!giveaway start 5m")
-    _say("!enter")
-    reply = _say("!enter")
+    _say("!giveaway enter")
+    reply = _say("!giveaway enter")
     assert "already entered" in reply
     assert len(host.state()["entries"]) == 1
 
 
-def test_enter_alias_via_giveaway_enter(host: _Host) -> None:
+def test_enter_is_namespaced_and_bare_enter_is_ignored(host: _Host) -> None:
+    # regression: command-collision with raffle -- bare `!enter` belongs to raffle only.
     _mod_say("!giveaway start 5m")
+    assert _run(transform(_event("!enter"))) is None
+    assert host.state()["entries"] == []
     assert "entered the giveaway" in _say("!giveaway enter")
     assert len(host.state()["entries"]) == 1
 
 
 def test_distinct_users_and_platforms_get_distinct_entries(host: _Host) -> None:
     _mod_say("!giveaway start 5m")
-    _say("!enter", actor="u1")
-    _say("!enter", actor="u2")
-    _say("!enter", actor="u1", platform="discord")
+    _say("!giveaway enter", actor="u1")
+    _say("!giveaway enter", actor="u2")
+    _say("!giveaway enter", actor="u1", platform="discord")
     assert len(set(host.state()["entries"])) == 3
 
 
 def test_enter_when_none_active(host: _Host) -> None:
-    reply = _say("!enter")
+    reply = _say("!giveaway enter")
     assert "no giveaway is running" in reply
     assert ACTIVE_KEY not in host.kv.store
 
@@ -330,24 +333,24 @@ def test_enter_when_none_active(host: _Host) -> None:
 def test_enter_after_it_ended_is_rejected(host: _Host) -> None:
     _mod_say("!giveaway start 1m")
     host.now_ms = _T0 + 60_000  # exactly at the deadline == ended
-    assert "has ended" in _say("!enter")
+    assert "has ended" in _say("!giveaway enter")
     assert host.state()["entries"] == []
 
 
 def test_enter_without_actor_is_rejected(host: _Host) -> None:
     _mod_say("!giveaway start 5m")
-    assert "couldn't identify" in _say("!enter", actor=None)
+    assert "couldn't identify" in _say("!giveaway enter", actor=None)
     assert host.state()["entries"] == []
 
 
 def test_enter_with_trailing_text_is_usage(host: _Host) -> None:
-    assert "Usage:" in _say("!enter now please")
+    assert "Usage:" in _say("!giveaway enter now please")
     assert host.kv.calls == []
 
 
 def test_enter_cap_is_enforced(host: _Host) -> None:
     host.seed(_T0 + 60_000, [f"{i:064x}" for i in range(MAX_ENTRIES)])
-    assert "full" in _say("!enter")
+    assert "full" in _say("!giveaway enter")
     assert len(host.state()["entries"]) == MAX_ENTRIES
 
 
@@ -357,7 +360,7 @@ def test_enter_cap_is_enforced(host: _Host) -> None:
 def test_draw_picks_a_real_entrant_announces_and_closes(host: _Host) -> None:
     _mod_say("!giveaway start 5m")
     for user in ("u1", "u2", "u3"):
-        _say("!enter", actor=user)
+        _say("!giveaway enter", actor=user)
     entries = host.state()["entries"]
     reply = _mod_say("!giveaway draw")
     assert any(f"entrant {e[:8]}" in reply for e in entries)
@@ -411,11 +414,11 @@ def test_pick_winner_uses_system_random() -> None:
 
 def test_cancel_closes_without_drawing(host: _Host) -> None:
     _mod_say("!giveaway start 5m")
-    _say("!enter")
+    _say("!giveaway enter")
     reply = _mod_say("!giveaway cancel")
     assert "cancelled" in reply
     assert ACTIVE_KEY not in host.kv.store
-    assert "no giveaway is running" in _say("!enter")
+    assert "no giveaway is running" in _say("!giveaway enter")
 
 
 def test_cancel_when_none_active(host: _Host) -> None:
@@ -431,8 +434,8 @@ def test_cancel_recovers_a_corrupt_state(host: _Host) -> None:
 def test_status_running_and_ended_and_none(host: _Host) -> None:
     assert _say("!giveaway status") == "no giveaway is running right now"
     _mod_say("!giveaway start 5m")
-    _say("!enter", actor="u1")
-    _say("!enter", actor="u2")
+    _say("!giveaway enter", actor="u1")
+    _say("!giveaway enter", actor="u2")
     host.now_ms = _T0 + 90_000
     assert _say("!giveaway status") == "giveaway running: 2 entries, 3m 30s left"
     host.now_ms = _T0 + 300_000
@@ -500,7 +503,7 @@ def test_mod_commands_admit_real_booleans_only(host: _Host) -> None:
     ("op", "text", "badges"),
     [
         ("get", "!giveaway start 5m", _MOD),
-        ("get", "!enter", None),
+        ("get", "!giveaway enter", None),
         ("get", "!giveaway status", None),
         ("get", "!giveaway draw", _MOD),
         ("get", "!giveaway cancel", _MOD),
@@ -527,7 +530,7 @@ def test_kv_set_failure_on_start_and_enter_fails_loud(host: _Host) -> None:
     host.kv.fail_ops.clear()
     _mod_say("!giveaway start 5m")
     host.kv.fail_ops.add("set")
-    assert "Something went wrong" in _say("!enter")
+    assert "Something went wrong" in _say("!giveaway enter")
     assert host.state()["entries"] == []
 
 
@@ -560,7 +563,7 @@ def test_corrupt_state_fails_loud_and_is_not_overwritten(
 ) -> None:
     host.kv.store[ACTIVE_KEY] = raw
     for text, badges in (
-        ("!enter", None),
+        ("!giveaway enter", None),
         ("!giveaway status", None),
         ("!giveaway draw", _MOD),
         ("!giveaway start 5m", _MOD),
@@ -577,14 +580,14 @@ def test_corrupt_state_fails_loud_and_is_not_overwritten(
 
 def test_logs_never_contain_message_text_or_actor(host: _Host) -> None:
     _mod_say("!giveaway start 5m")
-    _say("!enter", actor="viewer-SECRETNAME")
-    _say("!enter", actor="viewer-SECRETNAME")
+    _say("!giveaway enter", actor="viewer-SECRETNAME")
+    _say("!giveaway enter", actor="viewer-SECRETNAME")
     _say("!giveaway start SECRETARG-9f3", badges=_MOD)
     _say("!giveaway bogus SECRETARG-9f3", badges=_MOD)
     _say("!giveaway draw", actor="viewer-SECRETNAME", badges=_NOBODY)
     _mod_say("!giveaway draw")
     host.kv.store[ACTIVE_KEY] = b"corrupt"
-    _say("!enter", actor="viewer-SECRETNAME")
+    _say("!giveaway enter", actor="viewer-SECRETNAME")
     assert host.log_calls  # denominator: logging actually happened
     blob = " ".join(f"{m} {f}" for _, m, f in host.log_calls)
     assert "SECRETARG" not in blob
@@ -637,12 +640,12 @@ def test_full_lifecycle_transform_then_dispatch(host: _Host) -> None:
         return str(host.relay_calls[-1][1]["text"])
 
     assert "open for 1m 0s" in roundtrip("!giveaway start 1m", actor="mod-1", badges=_MOD)
-    assert "(1 entered)" in roundtrip("!enter", actor="u1")
-    assert "(2 entered)" in roundtrip("!enter", actor="u2")
-    assert "already entered" in roundtrip("!enter", actor="u1")
+    assert "(1 entered)" in roundtrip("!giveaway enter", actor="u1")
+    assert "(2 entered)" in roundtrip("!giveaway enter", actor="u2")
+    assert "already entered" in roundtrip("!giveaway enter", actor="u1")
     assert "2 entries" in roundtrip("!giveaway status")
     host.now_ms = _T0 + 61_000
-    assert "has ended" in roundtrip("!enter", actor="u3")
+    assert "has ended" in roundtrip("!giveaway enter", actor="u3")
     assert "out of 2 entries" in roundtrip("!giveaway draw", actor="mod-1", badges=_MOD)
     assert "no giveaway is running" in roundtrip("!giveaway status")
     assert {c[1]["channel"] for c in host.relay_calls} == {"chan-1"}

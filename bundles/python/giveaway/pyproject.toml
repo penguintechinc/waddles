@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-giveaway"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!giveaway` -- timed free open-entry giveaway with one random draw (kv-backed state, host clock)."
 requires-python = ">=3.13"
 dependencies = []

@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.example.giveaway
 name: Giveaway Bundle (Python)
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -19,11 +19,11 @@ stages:
       - platform: twitch
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!giveaway", "!enter"]
+          command_prefix: ["!giveaway"]
       - platform: discord
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!giveaway", "!enter"]
+          command_prefix: ["!giveaway"]
     produces: []
     config: {}
     spec:

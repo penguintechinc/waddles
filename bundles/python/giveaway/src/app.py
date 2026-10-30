@@ -1,4 +1,4 @@
-"""`!giveaway` / `!enter` -> a timed, FREE open-entry giveaway with one random winner.
+"""`!giveaway` (incl. `!giveaway enter`) -> a timed, FREE open-entry giveaway with one random winner.
 
 Distinct from `raffle`: a raffle is mod-opened/closed by hand with no deadline, and its
 `draw` leaves the entrant list in place; a giveaway is **timed** (`!giveaway start 5m`), entry
@@ -12,7 +12,7 @@ Commands
   ``1h``), at least 1s and at most 24h. A bad duration gets an explicit reply. Only ONE giveaway
   per community at a time: a second ``start`` is rejected (also while an ended giveaway is still
   waiting for ``draw``/``cancel``).
-- ``!enter`` (alias ``!giveaway enter``) -- anyone, ONCE per giveaway (deduped by
+- ``!giveaway enter`` -- anyone, ONCE per giveaway (bare ``!enter`` is raffle's); deduped by
   ``sha256(platform + author)``). Replies if none is active, the caller already entered, or
   the giveaway's time is up.
 - ``!giveaway draw`` -- MOD-ONLY. Picks one random entrant, announces it, closes the giveaway.
@@ -32,7 +32,7 @@ One `kv` key per community, ``giveaway.active`` = JSON ``{"ends_at": <epoch ms>,
 tenant, community, app_id), so the key is a plain literal using ``.`` -- never ``:`` (the host's
 reserved separator, gh-631). The key is deleted when the giveaway is drawn or cancelled. Entries
 are capped at `MAX_ENTRIES` so the stored JSON stays under the host's `too_large` limit.
-`kv` has no compare-and-swap, so two `!enter`s processed concurrently could lose one entry
+`kv` has no compare-and-swap, so two `!giveaway enter`s processed concurrently could lose one entry
 (read-modify-write on one key); a lost free entry is the accepted trade-off against adding a
 lock capability, and the viewer simply re-enters (the dedupe makes that safe).
 
@@ -82,7 +82,6 @@ _RNG = random.SystemRandom()
 ACTIVE_KEY = "giveaway.active"
 
 _GIVEAWAY_HEAD = "!giveaway"
-_ENTER_HEAD = "!enter"
 
 _SECOND_MS = 1000
 _MINUTE_MS = 60 * _SECOND_MS
@@ -99,7 +98,7 @@ _UNIT_MS = {"s": _SECOND_MS, "m": _MINUTE_MS, "h": _HOUR_MS}
 _DURATION_RE = re.compile(r"(\d{1,6})([smh])", re.IGNORECASE)
 
 _USAGE = (
-    "Usage: !enter | !giveaway status | !giveaway start <5m|30s|1h> | "
+    "Usage: !giveaway enter | !giveaway status | !giveaway start <5m|30s|1h> | "
     "!giveaway draw | !giveaway cancel (start/draw/cancel are mod only)"
 )
 _PERMISSION_DENIED_MSG = "only moderators/broadcasters can do that"
@@ -259,11 +258,11 @@ async def _handle_start(duration_token: str) -> str:
         )
     await _save(Giveaway(ends_at=now_ms + duration_ms))
     log.info("giveaway.started", duration_ms=duration_ms)
-    return f"A giveaway is open for {humanize_duration(duration_ms)}! Type !enter to join."
+    return f"A giveaway is open for {humanize_duration(duration_ms)}! Type !giveaway enter to join."
 
 
 async def _handle_enter(platform: str, author: str | None) -> str:
-    """`!enter` -- add the caller to the active giveaway, once."""
+    """`!giveaway enter` -- add the caller to the active giveaway, once."""
     if not author:
         return "couldn't identify you, so you can't be entered"
     giveaway = await _load()
@@ -288,7 +287,9 @@ async def _handle_draw() -> str:
     if giveaway is None:
         return f"{_NO_ACTIVE_MSG} -- nothing to draw"
     if not giveaway.entries:
-        return "no entries yet -- nobody has used !enter (use !giveaway cancel to close it)"
+        return (
+            "no entries yet -- nobody has used !giveaway enter (use !giveaway cancel to close it)"
+        )
     winner = _pick_winner(giveaway.entries)
     await _kv_delete(ACTIVE_KEY)
     log.info("giveaway.drawn", entries=len(giveaway.entries))
@@ -322,8 +323,6 @@ async def _handle_cancel() -> str:
 
 def _resolve(head: str, rest: str) -> tuple[str, str]:
     """Map the head and trailing text onto `(command, argument)`; `usage` on a bad shape."""
-    if head == _ENTER_HEAD:
-        return ("usage", "") if rest else ("enter", "")
     verb, _, arg = rest.partition(" ")
     verb = verb.lower()
     arg = arg.strip()
@@ -350,7 +349,7 @@ async def _execute(command: str, arg: str, event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize the commands and build the reply.
 
-    Returns `None` for a non-chat payload or any message that is not `!giveaway`/`!enter`.
+    Returns `None` for a non-chat payload or any message that is not `!giveaway`.
     Activation is enforced by the runtime before this stage runs. Mod-only commands from a non-moderator are
     answered with a denial before any `kv` access. A bad duration replies with the parse error;
     a `kv` failure logs at ERROR and replies with an explicit failure notice.
@@ -360,7 +359,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     head = head.lower()
-    if head not in (_GIVEAWAY_HEAD, _ENTER_HEAD):
+    if head != _GIVEAWAY_HEAD:
         return None
 
     command, arg = _resolve(head, rest.strip())
