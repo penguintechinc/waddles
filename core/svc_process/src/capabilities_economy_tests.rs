@@ -151,6 +151,187 @@ impl EconomyStore for RecordingStore {
             self.next_unit.lock().unwrap().take().unwrap_or(Ok(()))
         })
     }
+    fn credit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: Uuid,
+        amount: i64,
+        max_amount: i64,
+        max_supply: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> bundle_host_economy::BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            self.keys.lock().unwrap().push(key.to_string());
+            self.record(
+                "credit",
+                scope,
+                vec![user],
+                vec![
+                    amount,
+                    max_amount,
+                    max_supply,
+                    caps.per_user_daily_max,
+                    caps.per_scope_daily_max,
+                ],
+            );
+            self.take_i64()
+        })
+    }
+    fn batch_credit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        entries: &'a [(Uuid, i64)],
+        max_amount: i64,
+        max_supply: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> bundle_host_economy::BoxFuture<'a, Result<(), EconomyError>> {
+        Box::pin(async move {
+            self.keys.lock().unwrap().push(key.to_string());
+            let mut nums = vec![
+                max_amount,
+                max_supply,
+                caps.per_user_daily_max,
+                caps.per_scope_daily_max,
+            ];
+            nums.extend(entries.iter().map(|(_, a)| *a));
+            self.record(
+                "batch_credit",
+                scope,
+                entries.iter().map(|(u, _)| *u).collect(),
+                nums,
+            );
+            self.next_unit.lock().unwrap().take().unwrap_or(Ok(()))
+        })
+    }
+    fn debit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: Uuid,
+        amount: i64,
+        max_amount: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> bundle_host_economy::BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            self.keys.lock().unwrap().push(key.to_string());
+            self.record(
+                "debit",
+                scope,
+                vec![user],
+                vec![
+                    amount,
+                    max_amount,
+                    caps.per_user_daily_max,
+                    caps.per_scope_daily_max,
+                ],
+            );
+            self.take_i64()
+        })
+    }
+    fn conditional_debit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: Uuid,
+        amount: i64,
+        min_balance: i64,
+        max_amount: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> bundle_host_economy::BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            self.keys.lock().unwrap().push(key.to_string());
+            self.record(
+                "conditional_debit",
+                scope,
+                vec![user],
+                vec![
+                    amount,
+                    min_balance,
+                    max_amount,
+                    caps.per_user_daily_max,
+                    caps.per_scope_daily_max,
+                ],
+            );
+            self.take_i64()
+        })
+    }
+    fn admin_adjust<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: Uuid,
+        adjust: bundle_host_economy::AdminAdjust,
+        max_supply: i64,
+        is_admin_authorized: bool,
+        key: &'a IdempotencyKey,
+    ) -> bundle_host_economy::BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            self.keys.lock().unwrap().push(key.to_string());
+            let (mode, value) = match adjust {
+                bundle_host_economy::AdminAdjust::Delta(d) => (0, d),
+                bundle_host_economy::AdminAdjust::Set(t) => (1, t),
+            };
+            self.record(
+                "admin_adjust",
+                scope,
+                vec![user],
+                vec![mode, value, max_supply, i64::from(is_admin_authorized)],
+            );
+            self.take_i64()
+        })
+    }
+    fn pay_pot<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        pot_source: Uuid,
+        winners: &'a [(Uuid, i64)],
+        key: &'a IdempotencyKey,
+    ) -> bundle_host_economy::BoxFuture<'a, Result<(), EconomyError>> {
+        Box::pin(async move {
+            self.keys.lock().unwrap().push(key.to_string());
+            let mut users = vec![pot_source];
+            users.extend(winners.iter().map(|(u, _)| *u));
+            self.record(
+                "pay_pot",
+                scope,
+                users,
+                winners.iter().map(|(_, a)| *a).collect(),
+            );
+            self.next_unit.lock().unwrap().take().unwrap_or(Ok(()))
+        })
+    }
+    fn exchange<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: Uuid,
+        from_amount: i64,
+        rate_num: i64,
+        rate_den: i64,
+        max_amount: i64,
+        max_supply: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> bundle_host_economy::BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            self.keys.lock().unwrap().push(key.to_string());
+            self.record(
+                "exchange",
+                scope,
+                vec![user],
+                vec![
+                    from_amount,
+                    rate_num,
+                    rate_den,
+                    max_amount,
+                    max_supply,
+                    caps.per_user_daily_max,
+                    caps.per_scope_daily_max,
+                ],
+            );
+            self.take_i64()
+        })
+    }
     fn leaderboard<'a>(
         &'a self,
         scope: &'a EconomyScope,
@@ -1464,4 +1645,346 @@ fn the_mutation_ordinals_are_per_kind_and_only_the_latest_can_be_given_back() {
     let bare = InvocationIdentity::new("twitch", None, vec![]);
     assert_eq!(bare.reserve_mutation("wager"), None);
     assert!(format!("{inv:?}").contains("has_event_id: true"));
+}
+
+// ---- P4 Task 1: compound ops -------------------------------------------------
+
+fn compound_grants() -> GrantSet {
+    grants(&[
+        ("economy.read", serde_json::json!({})),
+        ("economy.credit", serde_json::json!({"max_amount": 60})),
+        ("economy.debit", serde_json::json!({"max_amount": 70})),
+        ("economy.admin_adjust", serde_json::json!({})),
+        ("economy.pot.pay", serde_json::json!({})),
+    ])
+}
+
+fn compound_fixture() -> Fixture {
+    fixture_with(compound_grants(), true, true, Some(("main", COMMUNITY_ID)))
+}
+
+fn last_call(f: &Fixture) -> Recorded {
+    f.store.calls.lock().unwrap().last().cloned().unwrap()
+}
+
+#[tokio::test]
+async fn credit_reaches_the_store_with_host_derived_scope_cap_supply_and_key() {
+    let f = compound_fixture();
+    f.store.answer(Ok(77));
+    // Minting INTO another member is allowed (not actor-bound); guest-supplied
+    // scope / cap / supply fields are ignored.
+    let out = f
+        .caps
+        .handle(eco_call(
+            "economy.credit",
+            serde_json::json!({
+                "user": f.bob.to_string(), "amount": 25,
+                "tenant_id": 9, "app_id": "evil", "max_amount": 9_999, "max_supply": 9_999_999,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!({ "balance": 77 }));
+    let (op, scope, users, nums) = last_call(&f);
+    assert_eq!(op, "credit");
+    assert_eq!(scope, expected_scope());
+    assert_eq!(users, vec![f.bob]);
+    // amount, GRANT's max_amount (60), the host max supply, catalog daily caps.
+    assert_eq!(nums, vec![25, 60, 1_000_000, 10_000, 250_000]);
+    assert_eq!(f.store.keys(), vec![key(EVENT_ID, "credit", 0)]);
+}
+
+#[tokio::test]
+async fn compound_ops_each_need_their_own_grant_and_never_reach_the_store_without_it() {
+    let f = fixture(); // only read/wager/transfer
+    let (a, b) = (f.alice.to_string(), f.bob.to_string());
+    for (op, args) in [
+        (
+            "economy.credit",
+            serde_json::json!({"user": a, "amount": 1}),
+        ),
+        (
+            "economy.batch_credit",
+            serde_json::json!({"entries": [{"user": a, "amount": 1}]}),
+        ),
+        ("economy.debit", serde_json::json!({"user": a, "amount": 1})),
+        (
+            "economy.conditional_debit",
+            serde_json::json!({"user": a, "amount": 1, "min_balance": 0}),
+        ),
+        (
+            "economy.admin_adjust",
+            serde_json::json!({"user": b, "mode": "set", "value": 5}),
+        ),
+        (
+            "economy.pay_pot",
+            serde_json::json!({"winners": [{"user": b, "amount": 1}]}),
+        ),
+        (
+            "economy.exchange",
+            serde_json::json!({"user": a, "from_amount": 1, "rate_num": 1, "rate_den": 1}),
+        ),
+    ] {
+        assert_eq!(code_of(&f, op, args).await, "not_granted", "{op}");
+    }
+    assert_eq!(f.store.call_count(), 0);
+}
+
+#[tokio::test]
+async fn admin_adjust_passes_the_stage_admin_guarantee_only_through_its_own_grant() {
+    let f = compound_fixture();
+    f.store.answer(Ok(500));
+    f.caps
+        .handle(eco_call(
+            "economy.admin_adjust",
+            // A guest-supplied `is_admin_authorized` is just an ignored field.
+            serde_json::json!({"user": f.bob.to_string(), "mode": "set", "value": 500, "is_admin_authorized": false}),
+        ))
+        .await
+        .unwrap();
+    let (op, _, users, nums) = last_call(&f);
+    assert_eq!(op, "admin_adjust");
+    assert_eq!(users, vec![f.bob]);
+    // mode=set(1), value, host max supply, stage guarantee = true.
+    assert_eq!(nums, vec![1, 500, 1_000_000, 1]);
+    f.caps
+        .handle(eco_call(
+            "economy.admin_adjust",
+            serde_json::json!({"user": f.bob.to_string(), "mode": "delta", "value": -5}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(last_call(&f).3, vec![0, -5, 1_000_000, 1]);
+    assert_eq!(
+        f.store.keys(),
+        vec![
+            key(EVENT_ID, "admin_adjust", 0),
+            key(EVENT_ID, "admin_adjust", 1)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn admin_adjust_and_other_compound_args_are_validated_before_anything_runs() {
+    let f = compound_fixture();
+    let (a, b) = (f.alice.to_string(), f.bob.to_string());
+    for (op, args) in [
+        (
+            "economy.admin_adjust",
+            serde_json::json!({"user": b, "mode": "delta", "value": 0}),
+        ),
+        (
+            "economy.admin_adjust",
+            serde_json::json!({"user": b, "mode": "mint", "value": 5}),
+        ),
+        (
+            "economy.admin_adjust",
+            serde_json::json!({"user": b, "value": 5}),
+        ),
+        (
+            "economy.admin_adjust",
+            serde_json::json!({"user": b, "mode": "set", "value": -1}),
+        ),
+        (
+            "economy.credit",
+            serde_json::json!({"user": a, "amount": 0}),
+        ),
+        (
+            "economy.credit",
+            serde_json::json!({"user": "nope", "amount": 1}),
+        ),
+        ("economy.batch_credit", serde_json::json!({"entries": []})),
+        (
+            "economy.batch_credit",
+            serde_json::json!({"entries": [{"user": a, "amount": 0}]}),
+        ),
+        (
+            "economy.pay_pot",
+            serde_json::json!({"winners": [{"user": "x", "amount": 1}]}),
+        ),
+        (
+            "economy.conditional_debit",
+            serde_json::json!({"user": a, "amount": 1}),
+        ),
+        (
+            "economy.exchange",
+            serde_json::json!({"user": a, "from_amount": 1, "rate_num": 0, "rate_den": 1}),
+        ),
+    ] {
+        assert_eq!(
+            code_of(&compound_fixture(), op, args.clone()).await,
+            "invalid_args",
+            "{op} {args}"
+        );
+    }
+    let too_many: Vec<_> = (0..=bundle_host_economy::MAX_BATCH_ENTRIES)
+        .map(|_| serde_json::json!({"user": Uuid::new_v4().to_string(), "amount": 1}))
+        .collect();
+    assert_eq!(
+        code_of(
+            &f,
+            "economy.batch_credit",
+            serde_json::json!({"entries": too_many})
+        )
+        .await,
+        "invalid_args"
+    );
+    assert_eq!(f.store.call_count(), 0);
+}
+
+#[tokio::test]
+async fn debit_conditional_debit_and_exchange_are_actor_bound() {
+    let f = compound_fixture();
+    // bob is NOT the actor (alice is): every fund-pulling op is refused and
+    // never reaches the store.
+    let b = f.bob.to_string();
+    for (op, args) in [
+        ("economy.debit", serde_json::json!({"user": b, "amount": 5})),
+        (
+            "economy.conditional_debit",
+            serde_json::json!({"user": b, "amount": 5, "min_balance": 0}),
+        ),
+        (
+            "economy.exchange",
+            serde_json::json!({"user": b, "from_amount": 5, "rate_num": 2, "rate_den": 1}),
+        ),
+    ] {
+        assert_eq!(code_of(&f, op, args).await, "actor_mismatch", "{op}");
+    }
+    assert_eq!(f.store.call_count(), 0);
+    // The actor can spend / exchange their own.
+    let a = f.alice.to_string();
+    f.caps
+        .handle(eco_call(
+            "economy.debit",
+            serde_json::json!({"user": a, "amount": 5}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(last_call(&f).3, vec![5, 70, 10_000, 250_000]);
+    f.caps
+        .handle(eco_call(
+            "economy.conditional_debit",
+            serde_json::json!({"user": a, "amount": 5, "min_balance": 20}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(last_call(&f).3, vec![5, 20, 70, 10_000, 250_000]);
+    f.caps
+        .handle(eco_call(
+            "economy.exchange",
+            serde_json::json!({"user": a, "from_amount": 7, "rate_num": 1000, "rate_den": 500}),
+        ))
+        .await
+        .unwrap();
+    let (op, _, _, nums) = last_call(&f);
+    assert_eq!(op, "exchange");
+    assert_eq!(nums, vec![7, 1000, 500, 60, 1_000_000, 10_000, 250_000]);
+    assert_eq!(
+        f.store.keys(),
+        vec![
+            // The refused (actor_mismatch) attempts above each held ordinal 0.
+            key(EVENT_ID, "debit", 1),
+            key(EVENT_ID, "conditional_debit", 1),
+            key(EVENT_ID, "exchange", 1)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn pay_pot_uses_the_host_derived_pot_never_a_guest_named_source() {
+    let f = compound_fixture();
+    f.caps
+        .handle(eco_call(
+            "economy.pay_pot",
+            serde_json::json!({
+                "winners": [
+                    {"user": f.alice.to_string(), "amount": 30},
+                    {"user": f.bob.to_string(), "amount": 20},
+                ],
+                "pot_source": f.alice.to_string(),
+            }),
+        ))
+        .await
+        .unwrap();
+    let (op, scope, users, nums) = last_call(&f);
+    assert_eq!(op, "pay_pot");
+    assert_eq!(users[0], pot_account(&scope));
+    assert_ne!(users[0], f.alice);
+    assert_eq!(&users[1..], &[f.alice, f.bob]);
+    assert_eq!(nums, vec![30, 20]);
+    assert_eq!(f.store.keys(), vec![key(EVENT_ID, "pay_pot", 0)]);
+}
+
+#[tokio::test]
+async fn batch_credit_reaches_the_store_with_the_grant_cap_and_a_batch_key() {
+    let f = compound_fixture();
+    f.caps
+        .handle(eco_call(
+            "economy.batch_credit",
+            serde_json::json!({"entries": [
+                {"user": f.alice.to_string(), "amount": 4},
+                {"user": f.bob.to_string(), "amount": 6},
+            ]}),
+        ))
+        .await
+        .unwrap();
+    let (op, _, users, nums) = last_call(&f);
+    assert_eq!(op, "batch_credit");
+    assert_eq!(users, vec![f.alice, f.bob]);
+    assert_eq!(nums, vec![60, 1_000_000, 10_000, 250_000, 4, 6]);
+    assert_eq!(f.store.keys(), vec![key(EVENT_ID, "batch_credit", 0)]);
+}
+
+#[tokio::test]
+async fn compound_store_refusals_map_to_their_wire_codes() {
+    let f = compound_fixture();
+    f.store
+        .answer(Err(EconomyError::SupplyCapReached { cap: 1_000_000 }));
+    let err = f
+        .caps
+        .handle(eco_call(
+            "economy.credit",
+            serde_json::json!({"user": f.bob.to_string(), "amount": 5}),
+        ))
+        .await
+        .unwrap_err();
+    // Rides `over_cap` carrying the ceiling (WIT `over-cap(u64)`).
+    assert_eq!(
+        (err.code.as_str(), err.message.as_str()),
+        ("over_cap", "1000000")
+    );
+    f.store.answer(Err(EconomyError::NotAuthorized));
+    assert_eq!(
+        code_of(
+            &f,
+            "economy.admin_adjust",
+            serde_json::json!({"user": f.bob.to_string(), "mode": "set", "value": 1})
+        )
+        .await,
+        "admin_required"
+    );
+}
+
+#[test]
+fn compound_families_carry_durable_caps_and_the_default_supply() {
+    for family in [
+        PermissionFamily::EconomyCredit,
+        PermissionFamily::EconomyDebit,
+    ] {
+        assert_eq!(
+            economy_caps(family),
+            EconomyCaps {
+                per_user_daily_max: 10_000,
+                per_scope_daily_max: 250_000
+            }
+        );
+    }
+    // Admin / pot are call-rate gated, not amount-metered: caps fail closed to 0
+    // (the store never receives them for those ops).
+    assert_eq!(
+        economy_caps(PermissionFamily::EconomyAdminAdjust).per_user_daily_max,
+        0
+    );
+    assert_eq!(economy_max_supply(), 1_000_000);
 }

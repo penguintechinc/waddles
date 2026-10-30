@@ -67,7 +67,10 @@ use bundle_host_db::{
     CapabilitySnapshot as DbCapabilitySnapshot, DbError, DbHost, DbScope, DbValue, PostgresBackend,
     SchemaCache,
 };
-use bundle_host_economy::{EconomyCaps, EconomyError, EconomyScope, EconomyStore, IdempotencyKey};
+use bundle_host_economy::{
+    pot_account, AdminAdjust, EconomyCaps, EconomyError, EconomyScope, EconomyStore,
+    IdempotencyKey, DEFAULT_MAX_SUPPLY,
+};
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
@@ -190,6 +193,63 @@ fn economy_amount_arg(
                 format!("{key} must be an integer >= {min} and <= {}", i64::MAX),
             )
         })
+}
+
+/// The community money-supply ceiling a mint is bounded by (spec SS5.1: the
+/// total waddlebucks that may exist, default 1,000,000). Host-computed and
+/// passed into the store, never read from a guest argument. A per-community
+/// admin-settable value plugs in HERE later; until then every community gets
+/// the default.
+fn economy_max_supply() -> i64 {
+    DEFAULT_MAX_SUPPLY
+}
+
+/// Parses a `[{user, amount}]` list argument (`batch-credit` / `pay-pot`):
+/// every `user` a UUID string, every `amount` an in-range integer >= 1. The
+/// list length is bounded here AND by the store.
+fn economy_entries_arg(
+    args: &serde_json::Value,
+    key: &str,
+) -> Result<Vec<(uuid::Uuid, i64)>, HostResultError> {
+    let list = args
+        .get(key)
+        .and_then(|v| v.as_array())
+        .filter(|a| (1..=bundle_host_economy::MAX_BATCH_ENTRIES).contains(&a.len()))
+        .ok_or_else(|| {
+            denied(
+                "invalid_args",
+                format!(
+                    "{key} must be a list of 1..={} entries",
+                    bundle_host_economy::MAX_BATCH_ENTRIES
+                ),
+            )
+        })?;
+    list.iter()
+        .map(|e| {
+            Ok((
+                economy_user_arg(e, "user")?,
+                economy_amount_arg(e, "amount", 1)?,
+            ))
+        })
+        .collect()
+}
+
+/// The per-call amount bound (grant `max_amount` clamped to the catalog
+/// ceiling) and the idempotency key a keyed economy mutation needs, or the
+/// loud `backend` refusal when either is missing (a wiring bug, never silently
+/// defaulted).
+fn economy_cap_and_key<'a>(
+    family: PermissionFamily,
+    params: &serde_json::Value,
+    idempotency: &'a Option<IdempotencyKey>,
+) -> Result<(i64, &'a IdempotencyKey), HostResultError> {
+    let cap = family
+        .economy_amount_bound(params)
+        .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+    let key = idempotency
+        .as_ref()
+        .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
+    Ok((cap, key))
 }
 
 /// Reads a required UUID-string argument.
@@ -987,7 +1047,7 @@ impl<K: KvBackend> StageCapabilities<K> {
         // Each op carries exactly the users it names, so an op can never run
         // against a missing/defaulted user: the parse below either yields every
         // user an op needs or refuses the call.
-        #[derive(Clone, Copy)]
+        #[derive(Clone)]
         enum Op {
             Balance(uuid::Uuid),
             MaxBet(uuid::Uuid),
@@ -1002,15 +1062,42 @@ impl<K: KvBackend> StageCapabilities<K> {
                 amount: i64,
             },
             Leaderboard(u32),
+            // P4 Task 1 compound ops.
+            Credit {
+                user: uuid::Uuid,
+                amount: i64,
+            },
+            BatchCredit(Vec<(uuid::Uuid, i64)>),
+            Debit {
+                user: uuid::Uuid,
+                amount: i64,
+            },
+            ConditionalDebit {
+                user: uuid::Uuid,
+                amount: i64,
+                min_balance: i64,
+            },
+            AdminAdjust {
+                user: uuid::Uuid,
+                adjust: AdminAdjust,
+            },
+            PayPot(Vec<(uuid::Uuid, i64)>),
+            Exchange {
+                user: uuid::Uuid,
+                from_amount: i64,
+                rate_num: i64,
+                rate_den: i64,
+            },
         }
 
-        /// A money mover's claimed idempotency slot: the mutation kind, the
-        /// account whose funds it would move, and the `(event_id, ordinal)`
-        /// position it holds among the invocation's mutations (`None` when the
-        /// invocation has no replay-stable event id).
+        /// A mutation's claimed idempotency slot: the mutation kind, the
+        /// account whose funds it would move (`None` for the mints, the admin
+        /// adjust and the pot payout, which move no member's own funds), and the
+        /// `(event_id, ordinal)` position it holds among the invocation's
+        /// mutations (`None` when the invocation has no replay-stable event id).
         struct MutationClaim {
             kind: &'static str,
-            payer: uuid::Uuid,
+            payer: Option<uuid::Uuid>,
             slot: Option<(String, u32)>,
         }
 
@@ -1036,6 +1123,48 @@ impl<K: KvBackend> StageCapabilities<K> {
                 }
                 let amount = economy_amount_arg(args, "amount", 1)?;
                 Op::Transfer { from, to, amount }
+            }
+            "economy.credit" => Op::Credit {
+                user: economy_user_arg(args, "user")?,
+                amount: economy_amount_arg(args, "amount", 1)?,
+            },
+            "economy.batch_credit" => Op::BatchCredit(economy_entries_arg(args, "entries")?),
+            "economy.debit" => Op::Debit {
+                user: economy_user_arg(args, "user")?,
+                amount: economy_amount_arg(args, "amount", 1)?,
+            },
+            "economy.conditional_debit" => Op::ConditionalDebit {
+                user: economy_user_arg(args, "user")?,
+                amount: economy_amount_arg(args, "amount", 1)?,
+                min_balance: economy_amount_arg(args, "min_balance", 0)?,
+            },
+            "economy.admin_adjust" => {
+                let user = economy_user_arg(args, "user")?;
+                let adjust = match args.get("mode").and_then(|v| v.as_str()) {
+                    Some("delta") => {
+                        let d = args
+                            .get("value")
+                            .and_then(|v| v.as_i64())
+                            .filter(|d| *d != 0)
+                            .ok_or_else(|| {
+                                denied("invalid_args", "value must be a non-zero integer")
+                            })?;
+                        AdminAdjust::Delta(d)
+                    }
+                    Some("set") => AdminAdjust::Set(economy_amount_arg(args, "value", 0)?),
+                    _ => return Err(denied("invalid_args", "mode must be \"delta\" or \"set\"")),
+                };
+                Op::AdminAdjust { user, adjust }
+            }
+            "economy.pay_pot" => Op::PayPot(economy_entries_arg(args, "winners")?),
+            "economy.exchange" => {
+                let part = |key: &str| economy_amount_arg(args, key, 1);
+                Op::Exchange {
+                    user: economy_user_arg(args, "user")?,
+                    from_amount: part("from_amount")?,
+                    rate_num: part("rate_num")?,
+                    rate_den: part("rate_den")?,
+                }
             }
             "economy.leaderboard" => {
                 let limit = args
@@ -1080,9 +1209,20 @@ impl<K: KvBackend> StageCapabilities<K> {
         // account whose funds the call would move (a wager's player, a
         // transfer's sender) -- the one [`Self::bind_actor`] must tie to the
         // invocation's actor.
-        let claim: Option<MutationClaim> = match op {
-            Op::Wager { user, .. } => Some(("wager", user)),
-            Op::Transfer { from, .. } => Some(("transfer", from)),
+        let claim: Option<MutationClaim> = match &op {
+            Op::Wager { user, .. } => Some(("wager", Some(*user))),
+            Op::Transfer { from, .. } => Some(("transfer", Some(*from))),
+            // Spends and the exchange move the ACTOR's own funds: bound.
+            Op::Debit { user, .. } => Some(("debit", Some(*user))),
+            Op::ConditionalDebit { user, .. } => Some(("conditional_debit", Some(*user))),
+            Op::Exchange { user, .. } => Some(("exchange", Some(*user))),
+            // Mints, the admin adjust and the pot payout pay INTO accounts and
+            // never pull a member's funds: keyed, gated by their own grant, not
+            // actor-bound.
+            Op::Credit { .. } => Some(("credit", None)),
+            Op::BatchCredit(_) => Some(("batch_credit", None)),
+            Op::AdminAdjust { .. } => Some(("admin_adjust", None)),
+            Op::PayPot(_) => Some(("pay_pot", None)),
             Op::Balance(_) | Op::MaxBet(_) | Op::Leaderboard(_) => None,
         }
         .map(|(kind, payer)| {
@@ -1097,29 +1237,63 @@ impl<K: KvBackend> StageCapabilities<K> {
         // `max_bet` describes the WAGER capability's own limit, so it is
         // authorized under `economy.wager` (carrying no amount: it is rate
         // limited, not metered); balance/leaderboard are `economy.read`.
-        let (permission, amount, payout, target_user, counterparty) = match op {
-            Op::Balance(user) => (PermissionId::EconomyRead, None, None, Some(user), None),
+        let (permission, amount, payout, target_user, counterparty) = match &op {
+            Op::Balance(user) => (PermissionId::EconomyRead, None, None, Some(*user), None),
             Op::Leaderboard(_) => (PermissionId::EconomyRead, None, None, None, None),
-            Op::MaxBet(user) => (PermissionId::EconomyWager, None, None, Some(user), None),
+            Op::MaxBet(user) => (PermissionId::EconomyWager, None, None, Some(*user), None),
             Op::Wager {
                 user,
                 stake,
                 payout,
             } => (
                 PermissionId::EconomyWager,
-                Some(stake),
-                Some(payout),
-                Some(user),
+                Some(*stake),
+                Some(*payout),
+                Some(*user),
                 None,
             ),
             Op::Transfer { from, to, amount } => (
                 PermissionId::EconomyTransfer,
-                Some(amount),
+                Some(*amount),
                 None,
-                Some(from),
-                Some(to),
+                Some(*from),
+                Some(*to),
             ),
+            Op::Credit { user, amount } => (
+                PermissionId::EconomyCredit,
+                Some(*amount),
+                None,
+                Some(*user),
+                None,
+            ),
+            // Multi-user / derived-amount ops carry no gate amount (rate limited
+            // at the gate); the store's durable per-call, 24h and supply caps are
+            // authoritative for them.
+            Op::BatchCredit(_) => (PermissionId::EconomyCredit, None, None, None, None),
+            Op::Exchange { user, .. } => {
+                (PermissionId::EconomyCredit, None, None, Some(*user), None)
+            }
+            Op::Debit { user, amount } | Op::ConditionalDebit { user, amount, .. } => (
+                PermissionId::EconomyDebit,
+                Some(*amount),
+                None,
+                Some(*user),
+                None,
+            ),
+            Op::AdminAdjust { user, .. } => (
+                PermissionId::EconomyAdminAdjust,
+                None,
+                None,
+                Some(*user),
+                None,
+            ),
+            Op::PayPot(_) => (PermissionId::EconomyPotPay, None, None, None, None),
         };
+        // The stage's admin guarantee for the store: true ONLY when the gate
+        // just authorized the bundle's `economy.admin_adjust` grant for this
+        // very call (the `authorize` below returns early otherwise). Never a
+        // guest value.
+        let admin_gate_passed = matches!(permission, PermissionId::EconomyAdminAdjust);
         let family = permission.family();
         let authorized = self
             .gate
@@ -1166,7 +1340,9 @@ impl<K: KvBackend> StageCapabilities<K> {
             slot: claimed,
         }) = claim
         {
-            self.bind_actor(kind, payer).await?;
+            if let Some(payer) = payer {
+                self.bind_actor(kind, payer).await?;
+            }
             let (Some(invocation), Some((event_id, ordinal))) =
                 (self.invocation_identity.as_deref(), claimed)
             else {
@@ -1230,6 +1406,116 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .transfer(&scope, from, to, amount, cap, economy_caps(family), key)
                     .await
                     .map(|()| serde_json::json!({}))
+            }
+            Op::Credit { user, amount } => {
+                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                wiring
+                    .store
+                    .credit(
+                        &scope,
+                        user,
+                        amount,
+                        cap,
+                        economy_max_supply(),
+                        economy_caps(family),
+                        key,
+                    )
+                    .await
+                    .map(|balance| serde_json::json!({ "balance": balance }))
+            }
+            Op::BatchCredit(entries) => {
+                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                wiring
+                    .store
+                    .batch_credit(
+                        &scope,
+                        &entries,
+                        cap,
+                        economy_max_supply(),
+                        economy_caps(family),
+                        key,
+                    )
+                    .await
+                    .map(|()| serde_json::json!({}))
+            }
+            Op::Debit { user, amount } => {
+                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                wiring
+                    .store
+                    .debit(&scope, user, amount, cap, economy_caps(family), key)
+                    .await
+                    .map(|balance| serde_json::json!({ "balance": balance }))
+            }
+            Op::ConditionalDebit {
+                user,
+                amount,
+                min_balance,
+            } => {
+                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                wiring
+                    .store
+                    .conditional_debit(
+                        &scope,
+                        user,
+                        amount,
+                        min_balance,
+                        cap,
+                        economy_caps(family),
+                        key,
+                    )
+                    .await
+                    .map(|balance| serde_json::json!({ "balance": balance }))
+            }
+            Op::AdminAdjust { user, adjust } => {
+                let key = idempotency
+                    .as_ref()
+                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
+                wiring
+                    .store
+                    .admin_adjust(
+                        &scope,
+                        user,
+                        adjust,
+                        economy_max_supply(),
+                        admin_gate_passed,
+                        key,
+                    )
+                    .await
+                    .map(|balance| serde_json::json!({ "balance": balance }))
+            }
+            Op::PayPot(winners) => {
+                let key = idempotency
+                    .as_ref()
+                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
+                // The pot is host-derived (the bundle never names it).
+                wiring
+                    .store
+                    .pay_pot(&scope, pot_account(&scope), &winners, key)
+                    .await
+                    .map(|()| serde_json::json!({}))
+            }
+            Op::Exchange {
+                user,
+                from_amount,
+                rate_num,
+                rate_den,
+            } => {
+                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                wiring
+                    .store
+                    .exchange(
+                        &scope,
+                        user,
+                        from_amount,
+                        rate_num,
+                        rate_den,
+                        cap,
+                        economy_max_supply(),
+                        economy_caps(family),
+                        key,
+                    )
+                    .await
+                    .map(|balance| serde_json::json!({ "balance": balance }))
             }
             Op::Leaderboard(limit) => wiring.store.leaderboard(&scope, limit).await.map(|rows| {
                 serde_json::json!({
