@@ -23,6 +23,7 @@ use bundle_host_economy::{
     connect, load_membership, ConnectConfig, EconomyCaps, EconomyError, EconomyScope, EconomyStore,
     IdempotencyKey, LeaderboardEntry, PostgresEconomyStore, MAX_LEADERBOARD_LIMIT,
 };
+use bundle_host_economy::{pot_account, AdminAdjust};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use testcontainers::core::logs::LogSource;
 use testcontainers::core::wait::LogWaitStrategy;
@@ -40,6 +41,8 @@ const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_economy_store
 /// Alembic 0052's DDL, applied after the store DDL exactly as the migration
 /// chain does.
 const IDEMPOTENCY_DDL: &str = include_str!("../../../scripts/db/bundle_economy_idempotency.sql");
+/// Alembic 0069's DDL (compound-op ledger kinds), applied after the above.
+const LEDGER_KINDS_DDL: &str = include_str!("../../../scripts/db/bundle_economy_ledger_kinds.sql");
 
 const TENANT: i32 = 1;
 const COMMUNITY: i32 = 10;
@@ -150,9 +153,11 @@ async fn fixture() -> Fixture {
     .await;
     exec(&su, SHIPPED_DDL).await;
     exec(&su, IDEMPOTENCY_DDL).await;
+    exec(&su, LEDGER_KINDS_DDL).await;
     // Shipped DDL is idempotent: a second application must succeed.
     exec(&su, SHIPPED_DDL).await;
     exec(&su, IDEMPOTENCY_DDL).await;
+    exec(&su, LEDGER_KINDS_DDL).await;
 
     let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
     exec(
@@ -1730,4 +1735,1106 @@ async fn a_payout_window_rolls_off_after_24_hours() {
         .wager(&scope(), f.alice, 1, 40, 50, c, &key())
         .await
         .is_ok());
+}
+
+// ---- P4 Task 1: compound host-cap ops --------------------------------------
+
+const MAX_SUPPLY: i64 = 1_000_000;
+
+async fn add_member(f: &Fixture, community: i32) -> Uuid {
+    let u = Uuid::new_v4();
+    exec(
+        &f.su,
+        &format!(
+            "INSERT INTO community_members (community_id, user_uuid) VALUES ({community}, '{u}')"
+        ),
+    )
+    .await;
+    u
+}
+
+async fn balance_of(f: &Fixture, user: Uuid) -> i64 {
+    f.store.balance(&scope(), user).await.unwrap()
+}
+
+async fn ledger_kind_count(f: &Fixture, kind: &str) -> i64 {
+    scalar_i64(
+        &f.su,
+        &format!("SELECT COUNT(*) FROM economy_ledger WHERE kind = '{kind}'"),
+    )
+    .await
+}
+
+fn pot() -> Uuid {
+    pot_account(&scope())
+}
+
+// -- credit / batch_credit --
+
+#[tokio::test]
+async fn credit_mints_once_with_a_ledger_row_and_replays_idempotently() {
+    let f = fixture().await;
+    let k = key_of("credit:replay:0");
+    assert_eq!(
+        f.store
+            .credit(&scope(), f.alice, 40, 100, MAX_SUPPLY, caps(), &k)
+            .await,
+        Ok(40)
+    );
+    // Replay: same result, nothing moves, no second row.
+    assert_eq!(
+        f.store
+            .credit(&scope(), f.alice, 40, 100, MAX_SUPPLY, caps(), &k)
+            .await,
+        Ok(40)
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 40);
+    assert_eq!(ledger_kind_count(&f, "credit").await, 1);
+    // Same key, different amount / user: conflict, never applied.
+    assert_eq!(
+        f.store
+            .credit(&scope(), f.alice, 41, 100, MAX_SUPPLY, caps(), &k)
+            .await,
+        Err(EconomyError::IdempotencyConflict)
+    );
+    assert_eq!(
+        f.store
+            .credit(&scope(), f.bob, 40, 100, MAX_SUPPLY, caps(), &k)
+            .await,
+        Err(EconomyError::IdempotencyConflict)
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 40);
+    assert_eq!(balance_of(&f, f.bob).await, 0);
+}
+
+#[tokio::test]
+async fn credit_refusals_write_nothing() {
+    let f = fixture().await;
+    let outsider = Uuid::new_v4();
+    assert_eq!(
+        f.store
+            .credit(&scope(), outsider, 5, 100, MAX_SUPPLY, caps(), &key())
+            .await,
+        Err(EconomyError::NotAMember)
+    );
+    assert_eq!(
+        f.store
+            .credit(&scope(), f.alice, 101, 100, MAX_SUPPLY, caps(), &key())
+            .await,
+        Err(EconomyError::OverCap { cap: 100 })
+    );
+    assert!(matches!(
+        f.store
+            .credit(&scope(), f.alice, 0, 100, MAX_SUPPLY, caps(), &key())
+            .await,
+        Err(EconomyError::Invalid(_))
+    ));
+    assert_eq!(ledger_count(&f).await, 0);
+    assert_eq!(
+        scalar_i64(&f.su, "SELECT COUNT(*) FROM economy_balances").await,
+        0,
+        "a refused mint must not even create a balance row"
+    );
+}
+
+#[tokio::test]
+async fn credit_is_bound_by_the_durable_24h_mint_caps() {
+    let f = fixture().await;
+    let c = caps_of(50, 80);
+    f.store
+        .credit(&scope(), f.alice, 50, 100, MAX_SUPPLY, c, &key())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .credit(&scope(), f.alice, 1, 100, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::UserQuotaExceeded { cap: 50 })
+    );
+    // Per-scope: bob 30 more fits (80 total), then 1 more breaches.
+    f.store
+        .credit(&scope(), f.bob, 30, 100, MAX_SUPPLY, c, &key())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .credit(&scope(), f.bob, 1, 100, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::ScopeQuotaExceeded { cap: 80 })
+    );
+    // A different app has its own scope window.
+    let other_app = scope_of(TENANT, COMMUNITY, "waddles.core.other");
+    assert!(f
+        .store
+        .credit(&other_app, f.alice, 50, 100, MAX_SUPPLY, c, &key())
+        .await
+        .is_ok());
+    // The window rolls off.
+    exec(
+        &f.su,
+        "UPDATE economy_ledger SET occurred_at = NOW() - INTERVAL '25 hours'",
+    )
+    .await;
+    assert!(f
+        .store
+        .credit(&scope(), f.alice, 50, 100, MAX_SUPPLY, c, &key())
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn credit_is_bound_by_the_community_supply_cap_across_apps() {
+    let f = fixture().await;
+    fund(&f, f.alice, 90).await; // existing supply 90
+    assert_eq!(
+        f.store
+            .credit(&scope(), f.bob, 11, 100, 100, caps(), &key())
+            .await,
+        Err(EconomyError::SupplyCapReached { cap: 100 })
+    );
+    assert_eq!(balance_of(&f, f.bob).await, 0);
+    assert_eq!(
+        f.store
+            .credit(&scope(), f.bob, 10, 100, 100, caps(), &key())
+            .await,
+        Ok(10)
+    );
+    // At the ceiling: another APP minting is refused too (supply is per community).
+    let other_app = scope_of(TENANT, COMMUNITY, "waddles.core.other");
+    assert_eq!(
+        f.store
+            .credit(&other_app, f.bob, 1, 100, 100, caps(), &key())
+            .await,
+        Err(EconomyError::SupplyCapReached { cap: 100 })
+    );
+    // Burning frees headroom.
+    f.store
+        .debit(&scope(), f.alice, 5, 100, caps(), &key())
+        .await
+        .unwrap();
+    assert!(f
+        .store
+        .credit(&other_app, f.bob, 5, 100, 100, caps(), &key())
+        .await
+        .is_ok());
+    assert_eq!(total_balance(&f).await, 100);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_mints_from_two_apps_never_exceed_the_supply_cap() {
+    let f = fixture().await;
+    let store = Arc::new(PostgresEconomyStore::new(f.eco_conn.clone()));
+    let mut tasks = Vec::new();
+    for i in 0..40 {
+        let store = Arc::clone(&store);
+        let user = if i % 2 == 0 { f.alice } else { f.bob };
+        let app = if i % 3 == 0 {
+            "waddles.core.a"
+        } else {
+            "waddles.core.b"
+        };
+        tasks.push(tokio::spawn(async move {
+            store
+                .credit(
+                    &scope_of(TENANT, COMMUNITY, app),
+                    user,
+                    10,
+                    100,
+                    200,
+                    caps(),
+                    &key(),
+                )
+                .await
+        }));
+    }
+    let mut ok = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            Ok(_) => ok += 1,
+            Err(EconomyError::SupplyCapReached { .. }) => {}
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+    }
+    assert_eq!(ok, 20, "exactly cap/amount mints apply");
+    assert_eq!(
+        total_balance(&f).await,
+        200,
+        "supply never overshoots the cap"
+    );
+}
+
+#[tokio::test]
+async fn batch_credit_is_all_or_nothing_and_idempotent() {
+    let f = fixture().await;
+    let carol = add_member(&f, COMMUNITY).await;
+    let k = key_of("batch:one:0");
+    let entries = [(f.alice, 10), (f.bob, 20), (carol, 30)];
+    f.store
+        .batch_credit(&scope(), &entries, 100, MAX_SUPPLY, caps(), &k)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            balance_of(&f, f.alice).await,
+            balance_of(&f, f.bob).await,
+            balance_of(&f, carol).await
+        ),
+        (10, 20, 30)
+    );
+    assert_eq!(ledger_kind_count(&f, "credit").await, 3);
+    // Replay (also order-insensitive): nothing moves.
+    let reordered = [(carol, 30), (f.alice, 10), (f.bob, 20)];
+    f.store
+        .batch_credit(&scope(), &reordered, 100, MAX_SUPPLY, caps(), &k)
+        .await
+        .unwrap();
+    assert_eq!(total_balance(&f).await, 60);
+    assert_eq!(ledger_kind_count(&f, "credit").await, 3);
+    // Different set under the same key: conflict.
+    assert_eq!(
+        f.store
+            .batch_credit(
+                &scope(),
+                &[(f.alice, 10), (f.bob, 21), (carol, 30)],
+                100,
+                MAX_SUPPLY,
+                caps(),
+                &k
+            )
+            .await,
+        Err(EconomyError::IdempotencyConflict)
+    );
+    assert_eq!(
+        f.store
+            .batch_credit(&scope(), &[(f.alice, 10)], 100, MAX_SUPPLY, caps(), &k)
+            .await,
+        Err(EconomyError::IdempotencyConflict),
+        "a subset of an applied batch is not a replay"
+    );
+    assert_eq!(total_balance(&f).await, 60);
+
+    // One non-member sinks the whole batch: nothing applied, no rows.
+    let before = ledger_count(&f).await;
+    assert_eq!(
+        f.store
+            .batch_credit(
+                &scope(),
+                &[(f.alice, 5), (Uuid::new_v4(), 5)],
+                100,
+                MAX_SUPPLY,
+                caps(),
+                &key()
+            )
+            .await,
+        Err(EconomyError::NotAMember)
+    );
+    assert_eq!(total_balance(&f).await, 60);
+    assert_eq!(ledger_count(&f).await, before);
+}
+
+#[tokio::test]
+async fn batch_credit_caps_and_supply_apply_to_the_total() {
+    let f = fixture().await;
+    let entries = [(f.alice, 40), (f.bob, 40)];
+    // per-scope cap 70 < total 80, though each user is within their own cap.
+    assert_eq!(
+        f.store
+            .batch_credit(&scope(), &entries, 100, MAX_SUPPLY, caps_of(50, 70), &key())
+            .await,
+        Err(EconomyError::ScopeQuotaExceeded { cap: 70 })
+    );
+    // per-user cap binds an individual entry.
+    assert_eq!(
+        f.store
+            .batch_credit(
+                &scope(),
+                &entries,
+                100,
+                MAX_SUPPLY,
+                caps_of(30, 1000),
+                &key()
+            )
+            .await,
+        Err(EconomyError::UserQuotaExceeded { cap: 30 })
+    );
+    // supply binds the total.
+    assert_eq!(
+        f.store
+            .batch_credit(&scope(), &entries, 100, 79, caps(), &key())
+            .await,
+        Err(EconomyError::SupplyCapReached { cap: 79 })
+    );
+    // per-call cap per entry; duplicates and empty/oversized are invalid.
+    assert_eq!(
+        f.store
+            .batch_credit(&scope(), &entries, 39, MAX_SUPPLY, caps(), &key())
+            .await,
+        Err(EconomyError::OverCap { cap: 39 })
+    );
+    assert!(matches!(
+        f.store
+            .batch_credit(
+                &scope(),
+                &[(f.alice, 1), (f.alice, 1)],
+                100,
+                MAX_SUPPLY,
+                caps(),
+                &key()
+            )
+            .await,
+        Err(EconomyError::Invalid(_))
+    ));
+    assert!(matches!(
+        f.store
+            .batch_credit(&scope(), &[], 100, MAX_SUPPLY, caps(), &key())
+            .await,
+        Err(EconomyError::Invalid(_))
+    ));
+    assert_eq!(ledger_count(&f).await, 0);
+    assert_eq!(total_balance(&f).await, 0);
+}
+
+// -- debit / conditional_debit --
+
+#[tokio::test]
+async fn debit_spends_with_a_ledger_row_and_replays_once() {
+    let f = fixture().await;
+    fund(&f, f.alice, 100).await;
+    let k = key_of("debit:replay:0");
+    assert_eq!(
+        f.store.debit(&scope(), f.alice, 30, 100, caps(), &k).await,
+        Ok(70)
+    );
+    assert_eq!(
+        f.store.debit(&scope(), f.alice, 30, 100, caps(), &k).await,
+        Ok(70)
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 70);
+    assert_eq!(ledger_kind_count(&f, "debit").await, 1);
+    assert_eq!(
+        f.store.debit(&scope(), f.alice, 31, 100, caps(), &k).await,
+        Err(EconomyError::IdempotencyConflict)
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 70);
+}
+
+#[tokio::test]
+async fn debit_over_balance_is_a_typed_error_with_no_row_change() {
+    let f = fixture().await;
+    fund(&f, f.alice, 10).await;
+    assert_eq!(
+        f.store
+            .debit(&scope(), f.alice, 11, 100, caps(), &key())
+            .await,
+        Err(EconomyError::InsufficientFunds { balance: 10 })
+    );
+    // Unfunded member: balance 0 -> insufficient, and no row is conjured.
+    assert_eq!(
+        f.store.debit(&scope(), f.bob, 1, 100, caps(), &key()).await,
+        Err(EconomyError::InsufficientFunds { balance: 0 })
+    );
+    assert_eq!(
+        f.store
+            .debit(&scope(), Uuid::new_v4(), 1, 100, caps(), &key())
+            .await,
+        Err(EconomyError::NotAMember)
+    );
+    assert_eq!(
+        f.store
+            .debit(&scope(), f.alice, 101, 100, caps(), &key())
+            .await,
+        Err(EconomyError::OverCap { cap: 100 })
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 10);
+    assert_eq!(ledger_count(&f).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_debits_never_overdraw() {
+    let f = fixture().await;
+    fund(&f, f.alice, 100).await;
+    let store = Arc::new(PostgresEconomyStore::new(f.eco_conn.clone()));
+    let mut tasks = Vec::new();
+    for _ in 0..50 {
+        let store = Arc::clone(&store);
+        let user = f.alice;
+        tasks.push(tokio::spawn(async move {
+            store.debit(&scope(), user, 10, 100, caps(), &key()).await
+        }));
+    }
+    let mut ok = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            Ok(_) => ok += 1,
+            Err(EconomyError::InsufficientFunds { .. }) => {}
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+    }
+    assert_eq!(ok, 10);
+    assert_eq!(balance_of(&f, f.alice).await, 0);
+    assert_eq!(
+        scalar_i64(&f.su, "SELECT MIN(balance) FROM economy_balances").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn debit_is_bound_by_the_durable_24h_spend_caps() {
+    let f = fixture().await;
+    fund(&f, f.alice, 1_000).await;
+    let c = caps_of(50, 1_000);
+    f.store
+        .debit(&scope(), f.alice, 50, 100, c, &key())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store.debit(&scope(), f.alice, 1, 100, c, &key()).await,
+        Err(EconomyError::UserQuotaExceeded { cap: 50 })
+    );
+}
+
+#[tokio::test]
+async fn conditional_debit_rejects_below_min_and_never_partially_applies() {
+    let f = fixture().await;
+    fund(&f, f.alice, 100).await;
+    // 100 - 60 = 40 < 50 -> rejected, untouched.
+    assert_eq!(
+        f.store
+            .conditional_debit(&scope(), f.alice, 60, 50, 100, caps(), &key())
+            .await,
+        Err(EconomyError::InsufficientFunds { balance: 100 })
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 100);
+    assert_eq!(ledger_count(&f).await, 0);
+    // Exactly to the floor is allowed.
+    let k = key_of("cdebit:floor:0");
+    assert_eq!(
+        f.store
+            .conditional_debit(&scope(), f.alice, 50, 50, 100, caps(), &k)
+            .await,
+        Ok(50)
+    );
+    assert_eq!(
+        f.store
+            .conditional_debit(&scope(), f.alice, 50, 50, 100, caps(), &k)
+            .await,
+        Ok(50)
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 50);
+    assert_eq!(ledger_kind_count(&f, "debit").await, 1);
+    // Next debit would breach the floor.
+    assert!(f
+        .store
+        .conditional_debit(&scope(), f.alice, 1, 50, 100, caps(), &key())
+        .await
+        .is_err());
+    assert!(matches!(
+        f.store
+            .conditional_debit(&scope(), f.alice, 1, -1, 100, caps(), &key())
+            .await,
+        Err(EconomyError::Invalid(_))
+    ));
+}
+
+// -- admin_adjust --
+
+#[tokio::test]
+async fn admin_adjust_is_refused_without_the_stage_admin_guarantee() {
+    let f = fixture().await;
+    fund(&f, f.alice, 10).await;
+    for adjust in [AdminAdjust::Delta(5), AdminAdjust::Set(500)] {
+        assert_eq!(
+            f.store
+                .admin_adjust(&scope(), f.alice, adjust, MAX_SUPPLY, false, &key())
+                .await,
+            Err(EconomyError::NotAuthorized)
+        );
+    }
+    assert_eq!(balance_of(&f, f.alice).await, 10);
+    assert_eq!(ledger_count(&f).await, 0);
+}
+
+#[tokio::test]
+async fn admin_adjust_delta_and_set_are_ledgered_and_idempotent() {
+    let f = fixture().await;
+    fund(&f, f.alice, 100).await;
+    let kd = key_of("admin:delta:0");
+    assert_eq!(
+        f.store
+            .admin_adjust(
+                &scope(),
+                f.alice,
+                AdminAdjust::Delta(25),
+                MAX_SUPPLY,
+                true,
+                &kd
+            )
+            .await,
+        Ok(125)
+    );
+    assert_eq!(
+        f.store
+            .admin_adjust(
+                &scope(),
+                f.alice,
+                AdminAdjust::Delta(25),
+                MAX_SUPPLY,
+                true,
+                &kd
+            )
+            .await,
+        Ok(125),
+        "replay"
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 125);
+    // A Set under the delta's key is not a replay.
+    assert_eq!(
+        f.store
+            .admin_adjust(
+                &scope(),
+                f.alice,
+                AdminAdjust::Set(125),
+                MAX_SUPPLY,
+                true,
+                &kd
+            )
+            .await,
+        Err(EconomyError::IdempotencyConflict)
+    );
+    let ks = key_of("admin:set:0");
+    assert_eq!(
+        f.store
+            .admin_adjust(
+                &scope(),
+                f.alice,
+                AdminAdjust::Set(40),
+                MAX_SUPPLY,
+                true,
+                &ks
+            )
+            .await,
+        Ok(40)
+    );
+    assert_eq!(
+        f.store
+            .admin_adjust(
+                &scope(),
+                f.alice,
+                AdminAdjust::Set(40),
+                MAX_SUPPLY,
+                true,
+                &ks
+            )
+            .await,
+        Ok(40)
+    );
+    assert_eq!(
+        f.store
+            .admin_adjust(
+                &scope(),
+                f.alice,
+                AdminAdjust::Delta(-85),
+                MAX_SUPPLY,
+                true,
+                &ks
+            )
+            .await,
+        Err(EconomyError::IdempotencyConflict),
+        "same delta as the set produced, but a different form"
+    );
+    assert_eq!(ledger_kind_count(&f, "admin_adjust").await, 2);
+    // Negative delta cannot overdraw (CHECK backstop + guard).
+    assert_eq!(
+        f.store
+            .admin_adjust(
+                &scope(),
+                f.alice,
+                AdminAdjust::Delta(-41),
+                MAX_SUPPLY,
+                true,
+                &key()
+            )
+            .await,
+        Err(EconomyError::InsufficientFunds { balance: 40 })
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 40);
+    // Set to zero is legal; negative set / zero delta are invalid.
+    assert_eq!(
+        f.store
+            .admin_adjust(
+                &scope(),
+                f.alice,
+                AdminAdjust::Set(0),
+                MAX_SUPPLY,
+                true,
+                &key()
+            )
+            .await,
+        Ok(0)
+    );
+    assert!(matches!(
+        f.store
+            .admin_adjust(
+                &scope(),
+                f.alice,
+                AdminAdjust::Set(-1),
+                MAX_SUPPLY,
+                true,
+                &key()
+            )
+            .await,
+        Err(EconomyError::Invalid(_))
+    ));
+    assert!(matches!(
+        f.store
+            .admin_adjust(
+                &scope(),
+                f.alice,
+                AdminAdjust::Delta(0),
+                MAX_SUPPLY,
+                true,
+                &key()
+            )
+            .await,
+        Err(EconomyError::Invalid(_))
+    ));
+    assert_eq!(
+        f.store
+            .admin_adjust(
+                &scope(),
+                Uuid::new_v4(),
+                AdminAdjust::Delta(1),
+                MAX_SUPPLY,
+                true,
+                &key()
+            )
+            .await,
+        Err(EconomyError::NotAMember)
+    );
+}
+
+#[tokio::test]
+async fn admin_adjust_over_mint_is_capped_by_the_supply_ceiling_but_not_daily_caps() {
+    let f = fixture().await;
+    fund(&f, f.bob, 60).await;
+    // Increase of 41 would take supply 60 -> 101 > 100.
+    assert_eq!(
+        f.store
+            .admin_adjust(&scope(), f.alice, AdminAdjust::Delta(41), 100, true, &key())
+            .await,
+        Err(EconomyError::SupplyCapReached { cap: 100 })
+    );
+    assert_eq!(
+        f.store
+            .admin_adjust(&scope(), f.alice, AdminAdjust::Set(41), 100, true, &key())
+            .await,
+        Err(EconomyError::SupplyCapReached { cap: 100 })
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 0);
+    assert_eq!(ledger_count(&f).await, 0);
+    // Exactly to the ceiling is fine, and there is no daily-mint window on it:
+    // many adjusts are not throttled (each is an audited admin action).
+    assert_eq!(
+        f.store
+            .admin_adjust(&scope(), f.alice, AdminAdjust::Set(40), 100, true, &key())
+            .await,
+        Ok(40)
+    );
+    // Lowering a balance at the ceiling is always allowed.
+    assert_eq!(
+        f.store
+            .admin_adjust(&scope(), f.alice, AdminAdjust::Set(10), 100, true, &key())
+            .await,
+        Ok(10)
+    );
+}
+
+// -- pay_pot --
+
+#[tokio::test]
+async fn pay_pot_splits_atomically_leaves_the_remainder_and_replays_once() {
+    let f = fixture().await;
+    let carol = add_member(&f, COMMUNITY).await;
+    fund(&f, pot(), 100).await;
+    let k = key_of("pot:split:0");
+    // 3 winners, explicit amounts (host does NO rounding): 33+33+30, 4 stays.
+    let winners = [(f.alice, 33), (f.bob, 33), (carol, 30)];
+    f.store
+        .pay_pot(&scope(), pot(), &winners, &k)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            balance_of(&f, f.alice).await,
+            balance_of(&f, f.bob).await,
+            balance_of(&f, carol).await
+        ),
+        (33, 33, 30)
+    );
+    assert_eq!(
+        scalar_i64(
+            &f.su,
+            &format!(
+                "SELECT balance FROM economy_balances WHERE user_uuid = '{}'",
+                pot()
+            )
+        )
+        .await,
+        4,
+        "remainder stays in the pot"
+    );
+    assert_eq!(total_balance(&f).await, 100, "currency conserved");
+    assert_eq!(ledger_kind_count(&f, "pot_payout").await, 4);
+    // Replay (any order): nothing moves.
+    f.store
+        .pay_pot(
+            &scope(),
+            pot(),
+            &[(carol, 30), (f.alice, 33), (f.bob, 33)],
+            &k,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ledger_kind_count(&f, "pot_payout").await, 4);
+    assert_eq!(balance_of(&f, f.alice).await, 33);
+    // Different split under the same key: conflict, never applied.
+    assert_eq!(
+        f.store
+            .pay_pot(
+                &scope(),
+                pot(),
+                &[(f.alice, 34), (f.bob, 33), (carol, 30)],
+                &k
+            )
+            .await,
+        Err(EconomyError::IdempotencyConflict)
+    );
+    assert_eq!(
+        f.store.pay_pot(&scope(), pot(), &[(f.alice, 33)], &k).await,
+        Err(EconomyError::IdempotencyConflict)
+    );
+    assert_eq!(total_balance(&f).await, 100);
+}
+
+#[tokio::test]
+async fn pay_pot_over_the_pot_balance_or_to_a_non_member_pays_nobody() {
+    let f = fixture().await;
+    fund(&f, pot(), 50).await;
+    // SUM(51) > pot(50): InsufficientFunds, nobody paid, pot intact.
+    assert_eq!(
+        f.store
+            .pay_pot(&scope(), pot(), &[(f.alice, 26), (f.bob, 25)], &key())
+            .await,
+        Err(EconomyError::InsufficientFunds { balance: 50 })
+    );
+    // One non-member winner sinks the whole payout.
+    assert_eq!(
+        f.store
+            .pay_pot(
+                &scope(),
+                pot(),
+                &[(f.alice, 10), (Uuid::new_v4(), 10)],
+                &key()
+            )
+            .await,
+        Err(EconomyError::NotAMember)
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 0);
+    assert_eq!(balance_of(&f, f.bob).await, 0);
+    assert_eq!(total_balance(&f).await, 50);
+    assert_eq!(ledger_count(&f).await, 0);
+    // A refused call records no key: a corrected retry under it applies.
+    let k = key_of("pot:retry:0");
+    assert!(f
+        .store
+        .pay_pot(&scope(), pot(), &[(f.alice, 60)], &k)
+        .await
+        .is_err());
+    f.store
+        .pay_pot(&scope(), pot(), &[(f.alice, 50)], &k)
+        .await
+        .unwrap();
+    assert_eq!(balance_of(&f, f.alice).await, 50);
+}
+
+#[tokio::test]
+async fn pay_pot_can_only_drain_the_communitys_own_pot() {
+    let f = fixture().await;
+    fund(&f, f.alice, 100).await;
+    // Naming a member (or another community's pot) as the source is refused.
+    assert!(matches!(
+        f.store
+            .pay_pot(&scope(), f.alice, &[(f.bob, 10)], &key())
+            .await,
+        Err(EconomyError::Invalid(_))
+    ));
+    let other = scope_of(OTHER_TENANT, OTHER_COMMUNITY, APP_ID);
+    assert!(matches!(
+        f.store
+            .pay_pot(&scope(), pot_account(&other), &[(f.bob, 10)], &key())
+            .await,
+        Err(EconomyError::Invalid(_))
+    ));
+    assert!(matches!(
+        f.store
+            .pay_pot(&scope(), pot(), &[(pot(), 1)], &key())
+            .await,
+        Err(EconomyError::Invalid(_))
+    ));
+    assert_eq!(balance_of(&f, f.alice).await, 100);
+    assert_eq!(ledger_count(&f).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_pot_payouts_never_overdraw_the_pot() {
+    let f = fixture().await;
+    fund(&f, pot(), 100).await;
+    let store = Arc::new(PostgresEconomyStore::new(f.eco_conn.clone()));
+    let mut tasks = Vec::new();
+    for _ in 0..20 {
+        let store = Arc::clone(&store);
+        let (a, b) = (f.alice, f.bob);
+        tasks.push(tokio::spawn(async move {
+            store
+                .pay_pot(&scope(), pot_account(&scope()), &[(a, 5), (b, 5)], &key())
+                .await
+        }));
+    }
+    let mut ok = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            Ok(()) => ok += 1,
+            Err(EconomyError::InsufficientFunds { .. }) => {}
+            Err(e) => panic!("unexpected {e:?}"),
+        }
+    }
+    assert_eq!(ok, 10);
+    assert_eq!(total_balance(&f).await, 100);
+    assert_eq!(
+        scalar_i64(
+            &f.su,
+            &format!(
+                "SELECT balance FROM economy_balances WHERE user_uuid = '{}'",
+                pot()
+            )
+        )
+        .await,
+        0
+    );
+}
+
+// -- exchange --
+
+#[tokio::test]
+async fn exchange_credits_the_floored_rate_in_one_call_and_replays_once() {
+    let f = fixture().await;
+    let k = key_of("exch:replay:0");
+    // 1000 waddlebucks : 500 points -> 7 points = floor(7*1000/500) = 14.
+    assert_eq!(
+        f.store
+            .exchange(
+                &scope(),
+                f.alice,
+                7,
+                1000,
+                500,
+                1_000,
+                MAX_SUPPLY,
+                caps(),
+                &k
+            )
+            .await,
+        Ok(14)
+    );
+    assert_eq!(
+        f.store
+            .exchange(
+                &scope(),
+                f.alice,
+                7,
+                1000,
+                500,
+                1_000,
+                MAX_SUPPLY,
+                caps(),
+                &k
+            )
+            .await,
+        Ok(14)
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 14);
+    assert_eq!(ledger_kind_count(&f, "exchange").await, 1);
+    // Ledger carries the claimed external points (stake) and credit (payout).
+    assert_eq!(
+        scalar_i64(
+            &f.su,
+            "SELECT stake FROM economy_ledger WHERE kind = 'exchange'"
+        )
+        .await,
+        7
+    );
+    assert_eq!(
+        scalar_i64(
+            &f.su,
+            "SELECT payout FROM economy_ledger WHERE kind = 'exchange'"
+        )
+        .await,
+        14
+    );
+    // Same key with different points / user: conflict.
+    assert_eq!(
+        f.store
+            .exchange(
+                &scope(),
+                f.alice,
+                8,
+                1000,
+                500,
+                1_000,
+                MAX_SUPPLY,
+                caps(),
+                &k
+            )
+            .await,
+        Err(EconomyError::IdempotencyConflict)
+    );
+    assert_eq!(
+        f.store
+            .exchange(&scope(), f.bob, 7, 1000, 500, 1_000, MAX_SUPPLY, caps(), &k)
+            .await,
+        Err(EconomyError::IdempotencyConflict)
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 14);
+    // Floors: 3 points at 1:2 -> 1.
+    assert_eq!(
+        f.store
+            .exchange(
+                &scope(),
+                f.alice,
+                3,
+                1,
+                2,
+                1_000,
+                MAX_SUPPLY,
+                caps(),
+                &key()
+            )
+            .await,
+        Ok(15)
+    );
+}
+
+#[tokio::test]
+async fn exchange_refuses_absurd_rates_zero_credit_and_mints_nothing() {
+    let f = fixture().await;
+    let go = |pts, n, d| {
+        let (store, a) = (&f.store, f.alice);
+        async move {
+            store
+                .exchange(
+                    &scope(),
+                    a,
+                    pts,
+                    n,
+                    d,
+                    1_000_000,
+                    MAX_SUPPLY,
+                    caps(),
+                    &key(),
+                )
+                .await
+        }
+    };
+    assert!(
+        matches!(go(1, 1001, 1).await, Err(EconomyError::Invalid(_))),
+        "rate bound"
+    );
+    assert!(matches!(go(1, 0, 1).await, Err(EconomyError::Invalid(_))));
+    assert!(matches!(go(1, 1, 0).await, Err(EconomyError::Invalid(_))));
+    assert!(
+        matches!(go(1, 1, 2).await, Err(EconomyError::Invalid(_))),
+        "credits nothing"
+    );
+    assert!(matches!(go(0, 1, 1).await, Err(EconomyError::Invalid(_))));
+    assert!(matches!(
+        go(i64::MAX, 1000, 1).await,
+        Err(EconomyError::Invalid(_))
+    ));
+    assert_eq!(ledger_count(&f).await, 0);
+    assert_eq!(total_balance(&f).await, 0);
+}
+
+#[tokio::test]
+async fn exchange_is_bound_by_per_call_mint_caps_and_supply() {
+    let f = fixture().await;
+    // per-call: credited 20 > max_amount 19.
+    assert_eq!(
+        f.store
+            .exchange(&scope(), f.alice, 10, 2, 1, 19, MAX_SUPPLY, caps(), &key())
+            .await,
+        Err(EconomyError::OverCap { cap: 19 })
+    );
+    // daily mint window on the CREDITED amount.
+    let c = caps_of(30, 1_000);
+    f.store
+        .exchange(&scope(), f.alice, 10, 2, 1, 100, MAX_SUPPLY, c, &key())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .exchange(&scope(), f.alice, 6, 2, 1, 100, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::UserQuotaExceeded { cap: 30 })
+    );
+    // supply: balance 20 + 10 > 25.
+    assert_eq!(
+        f.store
+            .exchange(&scope(), f.bob, 5, 2, 1, 100, 25, caps(), &key())
+            .await,
+        Err(EconomyError::SupplyCapReached { cap: 25 })
+    );
+    assert_eq!(
+        f.store
+            .exchange(
+                &scope(),
+                Uuid::new_v4(),
+                5,
+                2,
+                1,
+                100,
+                MAX_SUPPLY,
+                caps(),
+                &key()
+            )
+            .await,
+        Err(EconomyError::NotAMember)
+    );
+    assert_eq!(total_balance(&f).await, 20);
+    assert_eq!(ledger_kind_count(&f, "exchange").await, 1);
+}
+
+#[tokio::test]
+async fn the_runtime_role_can_run_every_compound_op_but_still_cannot_delete_or_update_the_ledger() {
+    let f = fixture().await;
+    // Every op above already ran as `waddles_economy_runtime`; the ledger
+    // stays append-only for it.
+    f.store
+        .credit(&scope(), f.alice, 5, 100, MAX_SUPPLY, caps(), &key())
+        .await
+        .unwrap();
+    assert!(f
+        .eco_conn
+        .execute_unprepared("DELETE FROM economy_ledger")
+        .await
+        .is_err());
+    assert!(f
+        .eco_conn
+        .execute_unprepared("UPDATE economy_ledger SET delta = 1")
+        .await
+        .is_err());
+    assert!(f
+        .eco_conn
+        .execute_unprepared("INSERT INTO economy_ledger (tenant_id, community_id, app_id, user_uuid, kind, delta, balance_after) VALUES (1, 10, 'x', gen_random_uuid(), 'mint', 1, 1)")
+        .await
+        .is_err(), "unknown ledger kinds stay refused");
 }
