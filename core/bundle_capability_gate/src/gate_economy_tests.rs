@@ -697,3 +697,99 @@ fn a_transfer_is_not_metered_on_a_payout() {
         .authorize(&scope(), PermissionId::EconomyTransfer, transfer(a, b, 10))
         .is_ok());
 }
+
+// ---- P4 Task 1: compound-op families (credit / debit / admin_adjust / pot.pay)
+
+#[test]
+fn compound_op_families_are_dangerous_economy_scoped_and_round_trip() {
+    for (family, id) in [
+        (PermissionFamily::EconomyCredit, "economy.credit"),
+        (PermissionFamily::EconomyDebit, "economy.debit"),
+        (PermissionFamily::EconomyAdminAdjust, "economy.admin_adjust"),
+        (PermissionFamily::EconomyPotPay, "economy.pot.pay"),
+    ] {
+        assert!(PermissionFamily::ALL.contains(&family), "{id}");
+        assert!(family.is_economy_scoped(), "{id}");
+        assert_eq!(family.catalog_entry().risk, Risk::Dangerous, "{id}");
+        let parsed = PermissionId::parse(id).expect(id);
+        assert_eq!(parsed.family(), family);
+        assert_eq!(
+            parsed.family().catalog_entry().capability_kind,
+            crate::permission::CapabilityKind::Economy
+        );
+    }
+}
+
+#[test]
+fn credit_and_debit_bounds_are_clamped_while_admin_and_pot_have_none() {
+    let none = serde_json::json!({});
+    for f in [
+        PermissionFamily::EconomyCredit,
+        PermissionFamily::EconomyDebit,
+    ] {
+        assert_eq!(f.economy_amount_bound(&none), Some(1_000));
+        assert_eq!(
+            f.economy_amount_bound(&serde_json::json!({"max_amount": 40})),
+            Some(40)
+        );
+        assert_eq!(
+            f.economy_amount_bound(&serde_json::json!({"max_amount": 9_999_999})),
+            Some(1_000)
+        );
+    }
+    for f in [
+        PermissionFamily::EconomyAdminAdjust,
+        PermissionFamily::EconomyPotPay,
+    ] {
+        assert_eq!(f.economy_amount_bound(&none), None, "{f:?}");
+    }
+}
+
+#[test]
+fn credit_is_metered_per_call_and_needs_its_own_grant() {
+    let user = Uuid::new_v4();
+    let g = gate(
+        &[("economy.credit", serde_json::json!({"max_amount": 50}))],
+        &[user],
+    );
+    assert!(g
+        .authorize(&scope(), PermissionId::EconomyCredit, wager(user, 50))
+        .is_ok());
+    assert_eq!(
+        g.authorize(&scope(), PermissionId::EconomyCredit, wager(user, 51))
+            .unwrap_err(),
+        Denied::AmountOutOfBounds
+    );
+    // Holding economy.credit grants nothing else (no spend, no admin, no pot).
+    for p in [
+        PermissionId::EconomyDebit,
+        PermissionId::EconomyAdminAdjust,
+        PermissionId::EconomyPotPay,
+        PermissionId::EconomyTransfer,
+    ] {
+        assert!(g.authorize(&scope(), p, read(Some(user))).is_err());
+    }
+}
+
+#[test]
+fn admin_adjust_requires_its_own_grant_and_is_rate_limited_not_amount_metered() {
+    let user = Uuid::new_v4();
+    let denied_gate = gate(&[("economy.credit", serde_json::json!({}))], &[user]);
+    assert_eq!(
+        denied_gate
+            .authorize(&scope(), PermissionId::EconomyAdminAdjust, read(Some(user)))
+            .unwrap_err(),
+        Denied::NotGranted
+    );
+    let g = gate(&[("economy.admin_adjust", serde_json::json!({}))], &[user]);
+    for _ in 0..10 {
+        assert!(g
+            .authorize(&scope(), PermissionId::EconomyAdminAdjust, read(Some(user)))
+            .is_ok());
+    }
+    assert_eq!(
+        g.authorize(&scope(), PermissionId::EconomyAdminAdjust, read(Some(user)))
+            .unwrap_err(),
+        Denied::RateLimited
+    );
+}
