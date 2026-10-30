@@ -638,7 +638,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.giveaway
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/giveaway
     manifest_path: giveaway.manifest.yaml
