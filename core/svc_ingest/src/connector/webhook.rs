@@ -127,10 +127,21 @@ pub enum RegistryError {
 /// Failed-verification budget per source per rate window, and the cap on
 /// distinct tracked sources (overflow shares one bucket; bounded memory).
 pub const MAX_FAILURES_PER_SOURCE: u32 = 20;
+/// Pre-auth budget = max(verified max x this, [`MIN_PRE_AUTH_BUDGET`]).
+pub const PRE_AUTH_MULTIPLIER: u32 = 4;
+/// Floor of the pre-auth budget per rate window.
+pub const MIN_PRE_AUTH_BUDGET: u32 = 60;
 const MAX_TRACKED_SOURCES: usize = 4096;
 
 struct RouteEntry {
     route: WebhookRoute,
+    /// Unique per registration; namespaces the dedup key so an aborted
+    /// delivery against a superseded registration stays redeliverable.
+    generation: u64,
+    /// Coarse UNAUTHENTICATED budget charged on EVERY request before any
+    /// secret fetch (caps resolver amplification); `pre_max` per window.
+    pre: Mutex<(Instant, u32)>,
+    pre_max: u32,
     /// Limiter charged only by VERIFIED deliveries (`route.rate_limit`).
     window: Mutex<(Instant, u32)>,
     /// Per-source failed-verification counters: unauthenticated callers can
@@ -173,6 +184,22 @@ impl RouteEntry {
             *e = (now, 0);
         }
         e.1 = e.1.saturating_add(1);
+    }
+
+    /// Charges the coarse pre-auth budget; false => reject before any
+    /// secret fetch. Fails closed on a poisoned lock.
+    fn admit_pre(&self, now: Instant) -> bool {
+        let Ok(mut w) = self.pre.lock() else {
+            return false;
+        };
+        if now.saturating_duration_since(w.0) >= self.route.rate_limit.per {
+            *w = (now, 0);
+        }
+        if w.1 >= self.pre_max {
+            return false;
+        }
+        w.1 += 1;
+        true
     }
 
     fn admit(&self, now: Instant) -> bool {
@@ -299,6 +326,7 @@ pub struct WebhookIngress {
     secrets: Arc<dyn WebhookSecretSource>,
     dedup: Arc<dyn WebhookDedup>,
     requests: Option<prometheus::IntCounterVec>,
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl WebhookIngress {
@@ -327,6 +355,7 @@ impl WebhookIngress {
             secrets,
             dedup,
             requests,
+            generation: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -348,7 +377,17 @@ impl WebhookIngress {
         if route.secret_ref.community_id != authorized_community {
             return Err(RegistryError::CommunityMismatch);
         }
+        let pre_max = route
+            .rate_limit
+            .max
+            .saturating_mul(PRE_AUTH_MULTIPLIER)
+            .max(MIN_PRE_AUTH_BUDGET);
         let entry = Arc::new(RouteEntry {
+            generation: self
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            pre: Mutex::new((Instant::now(), 0)),
+            pre_max,
             window: Mutex::new((Instant::now(), 0)),
             failures: Mutex::new(HashMap::new()),
             route,
@@ -361,6 +400,11 @@ impl WebhookIngress {
             if existing.route.secret_ref.community_id != authorized_community {
                 return Err(RegistryError::CommunityMismatch);
             }
+        }
+        // Replacing a registration detaches the previous transport binding
+        // (lock order is always routes -> bound).
+        if let Ok(mut b) = self.bound.write() {
+            b.remove(&entry.route.route_key);
         }
         g.insert(entry.route.route_key.clone(), entry);
         Ok(())
@@ -475,6 +519,12 @@ impl WebhookIngress {
         if source.is_some_and(|s| entry.source_blocked(s, now)) {
             return WebhookOutcome::RateLimited;
         }
+        // Coarse pre-auth cap on EVERY request, before any secret fetch, so
+        // an unauthenticated flood cannot amplify into resolver calls. Applies
+        // regardless of whether the source is known (fail-closed).
+        if !entry.admit_pre(now) {
+            return WebhookOutcome::RateLimited;
+        }
         let fail = |o: WebhookOutcome| {
             if let Some(s) = source {
                 entry.charge_failure(s, now);
@@ -510,35 +560,61 @@ impl WebhookIngress {
         if !entry.admit(now) {
             return WebhookOutcome::RateLimited;
         }
-        // Reserve queue capacity and re-check the owner binding BEFORE
-        // marking dedup: a delivery we cannot dispatch must stay
-        // redeliverable, never be recorded as seen.
+        // Everything below acts on the CURRENT registration, never on the
+        // snapshot taken before the secret-resolve await. Sync locks are only
+        // ever held across non-await code (lock order: routes -> bound).
+        //
+        // Step 1 (sync): confirm the registration is unchanged, re-check the
+        // owner binding and reserve queue capacity BEFORE marking dedup, so a
+        // delivery we cannot dispatch stays redeliverable.
         let permit = {
-            let tx = {
-                let Ok(g) = self.bound.read() else {
-                    return WebhookOutcome::Unavailable;
-                };
-                match g.get(route_key) {
-                    // Owner re-check at dispatch: a route re-registered to a
-                    // different owner is never driven into the old binding.
-                    Some(b) if b.owner == route.owner_bundle => b.tx.clone(),
-                    _ => return WebhookOutcome::Unavailable,
-                }
+            let Ok(routes) = self.routes.read() else {
+                return WebhookOutcome::Unavailable;
             };
-            match tx.try_reserve_owned() {
-                Ok(p) => p,
-                Err(_) => return WebhookOutcome::Unavailable,
+            if !routes
+                .get(route_key)
+                .is_some_and(|c| Arc::ptr_eq(c, &entry))
+            {
+                return WebhookOutcome::Unavailable;
+            }
+            let Ok(bound) = self.bound.read() else {
+                return WebhookOutcome::Unavailable;
+            };
+            match bound.get(route_key) {
+                Some(b) if b.owner == route.owner_bundle => {
+                    match b.tx.clone().try_reserve_owned() {
+                        Ok(p) => p,
+                        Err(_) => return WebhookOutcome::Unavailable,
+                    }
+                }
+                _ => return WebhookOutcome::Unavailable,
             }
         };
-        // Dedup (keyed on the digest of the verified SIGNED message) only
-        // AFTER the signature verifies, so an unauthenticated caller cannot
-        // poison the dedup namespace. Dropping `permit` on Duplicate/Err
-        // releases the reserved slot.
-        let key = format!("wh:{}:{}", route.route_key, prepared.dedup_id);
+        // Step 2 (await, no locks held): dedup keyed on the digest of the
+        // verified SIGNED message, scoped by registration generation, only
+        // AFTER the signature verifies (no unauthenticated poisoning).
+        let key = format!(
+            "wh:{}:{}:{}",
+            route.route_key, entry.generation, prepared.dedup_id
+        );
         match self.dedup.first_seen(&key).await {
             Ok(true) => {}
             Ok(false) => return WebhookOutcome::Duplicate,
             Err(()) => return WebhookOutcome::Unavailable,
+        }
+        // Step 3 (sync, atomic w.r.t. `register`, which needs the write lock):
+        // re-validate the registration and send in one critical section. If it
+        // was superseded during the dedup await, abort -- the mark lives in
+        // the OLD generation's namespace, so redelivery to the new
+        // registration is accepted.
+        let Ok(routes) = self.routes.read() else {
+            return WebhookOutcome::Unavailable;
+        };
+        if !routes
+            .get(route_key)
+            .is_some_and(|c| Arc::ptr_eq(c, &entry))
+        {
+            return WebhookOutcome::Unavailable;
         }
         permit.send(body.to_vec());
         WebhookOutcome::Accepted
@@ -932,14 +1008,14 @@ mod tests {
             signature_header: HeaderName::from_static("x-sig"),
             timestamp_header: HeaderName::from_static("x-ts"),
             id_header: None,
-            template: SignedTemplate::parse("{ts}{body}").unwrap(),
+            template: SignedTemplate::parse("{ts}.{body}").unwrap(),
             encoding: Encoding::Hex,
             timestamp_format: TimestampFormat::UnixSeconds,
         });
         ing.register(route(KEY, "acme", scheme), 7).unwrap();
         let mut t = ing.bind_transport(KEY, "acme").unwrap();
         let body = b"payload";
-        let msg = [NOW.to_string().as_bytes(), body].concat();
+        let msg = [format!("{NOW}.").as_bytes(), body].concat();
         let mut h = HeaderMap::new();
         h.insert("x-ts", NOW.to_string().parse().unwrap());
         h.insert("x-sig", hex_encode(kp.sign(&msg).as_ref()).parse().unwrap());
@@ -1164,5 +1240,79 @@ mod tests {
         );
         assert!(ing.unregister(KEY, 7).is_ok());
         assert_eq!(ing.unregister(KEY, 7).err(), Some(RegistryError::Unknown));
+    }
+
+    /// Secret source that parks inside `resolve` until released, so a test can
+    /// mutate the registry while a request is in flight.
+    struct GateSecrets {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    impl WebhookSecretSource for GateSecrets {
+        fn resolve(&self, _r: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
+            Box::pin(async move {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(SecretString::new(SECRET.into()))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn reregister_mid_request_never_dispatches_to_the_superseded_owner() {
+        let gate = Arc::new(GateSecrets {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let ing = Arc::new(WebhookIngress::new(
+            gate.clone(),
+            Arc::new(MemDedup::default()),
+            None,
+        ));
+        ing.register(route(KEY, "old", generic_hmac()), 7).unwrap();
+        let mut old_t = ing.bind_transport(KEY, "old").unwrap();
+        let h = signed_headers(b"x");
+        let task = {
+            let ing = ing.clone();
+            let h = h.clone();
+            tokio::spawn(async move { ing.handle(KEY, &h, b"x", NOW).await })
+        };
+        gate.entered.notified().await;
+        // In flight (parked at the secret resolve): supersede the route.
+        ing.register(route(KEY, "new", generic_hmac()), 7).unwrap();
+        let mut new_t = ing.bind_transport(KEY, "new").unwrap();
+        gate.release.notify_one();
+        assert_eq!(task.await.unwrap(), WebhookOutcome::Unavailable);
+        assert!(old_t.rx.try_recv().is_err(), "superseded owner got a frame");
+        assert!(new_t.rx.try_recv().is_err());
+        // The aborted attempt did not burn dedup for the new registration:
+        // the provider's redelivery is accepted, to the CURRENT owner.
+        let redelivery = {
+            let ing = ing.clone();
+            tokio::spawn(async move { ing.handle(KEY, &h, b"x", NOW).await })
+        };
+        gate.entered.notified().await;
+        gate.release.notify_one();
+        assert_eq!(redelivery.await.unwrap(), WebhookOutcome::Accepted);
+        assert!(new_t.rx.try_recv().is_ok());
+        assert!(old_t.rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_flood_is_capped_before_any_secret_fetch() {
+        let (ing, s) = ingress(Some(SECRET));
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
+        let _t = ing.bind_transport(KEY, "acme").unwrap();
+        // route max=100 => pre-auth budget = 400. Source unknown (None).
+        let forged = signed_headers(b"orig");
+        let mut limited = 0;
+        for _ in 0..1000 {
+            if ing.handle(KEY, &forged, b"forged", NOW).await == WebhookOutcome::RateLimited {
+                limited += 1;
+            }
+        }
+        let resolves = *s.calls.lock().unwrap();
+        assert_eq!(resolves, 400);
+        assert_eq!(limited, 600);
     }
 }

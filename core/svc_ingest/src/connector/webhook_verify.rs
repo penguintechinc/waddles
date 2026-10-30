@@ -134,20 +134,23 @@ impl SignedTemplate {
         Ok(Self(parts))
     }
 
-    /// Rejects adjacent variable-length placeholders with no literal
-    /// separator: byte boundaries could shift (`id|body`) and still yield the
-    /// same signed string. A pair involving `{ts}` is allowed -- the
-    /// timestamp must parse as a fixed-format value inside the replay window,
-    /// so it cannot absorb arbitrary bytes (this keeps the Twitch
-    /// `{id}{ts}{body}` preset valid).
+    /// Rejects ANY adjacent placeholders with no literal separator: byte
+    /// boundaries could shift (`id|body`, `ts|body` incl. whitespace) and
+    /// still yield the same signed string. The only exemption is the fixed
+    /// Twitch EventSub preset (RFC 3339, canonical, strictly parsed), checked
+    /// in [`Scheme::validate`] -- never a configurable template.
     fn reject_ambiguous(&self) -> Result<(), String> {
         for w in self.0.windows(2) {
-            let ph = |p: &Part| !matches!(p, Part::Lit(_));
-            if ph(&w[0]) && ph(&w[1]) && w[0] != Part::Ts && w[1] != Part::Ts {
+            if !matches!(w[0], Part::Lit(_)) && !matches!(w[1], Part::Lit(_)) {
                 return Err("adjacent placeholders need a literal separator".into());
             }
         }
         Ok(())
+    }
+
+    /// The Twitch EventSub template (`{id}{ts}{body}`).
+    fn twitch() -> Self {
+        Self(vec![Part::Id, Part::Ts, Part::Body])
     }
 
     fn needs_id(&self) -> bool {
@@ -283,7 +286,7 @@ impl Scheme {
             timestamp_header: HeaderName::from_static("twitch-eventsub-message-timestamp"),
             id_header: Some(HeaderName::from_static("twitch-eventsub-message-id")),
             // Static, known-valid template.
-            template: SignedTemplate(vec![Part::Id, Part::Ts, Part::Body]),
+            template: SignedTemplate::twitch(),
             signature_prefix: "sha256=".into(),
             encoding: Encoding::Hex,
             timestamp_format: TimestampFormat::Rfc3339,
@@ -299,6 +302,14 @@ impl Scheme {
         };
         if template.needs_id() && id_header.is_none() {
             return Err("template uses {id} but no id_header configured".into());
+        }
+        // The single exemption: exactly the Twitch preset shape with the
+        // canonical RFC 3339 timestamp format.
+        let twitch_shape = matches!(self, Self::HmacSha256(s)
+            if s.template == SignedTemplate::twitch()
+                && s.timestamp_format == TimestampFormat::Rfc3339);
+        if twitch_shape {
+            return Ok(());
         }
         template.reject_ambiguous()
     }
@@ -505,7 +516,7 @@ mod tests {
             signature_header: HeaderName::from_static("x-sig"),
             timestamp_header: HeaderName::from_static("x-ts"),
             id_header: None,
-            template: SignedTemplate::parse("{ts}{body}").unwrap(),
+            template: SignedTemplate::parse("{ts}.{body}").unwrap(),
             encoding: Encoding::Hex,
             timestamp_format: TimestampFormat::UnixSeconds,
         })
@@ -546,7 +557,7 @@ mod tests {
             }
             "ed25519" => {
                 let kp = Ed25519KeyPair::from_seed_unchecked(&[7u8; 32]).unwrap();
-                let msg = [ts.to_string().as_bytes(), body].concat();
+                let msg = [format!("{ts}.").as_bytes(), body].concat();
                 let h = hdrs(&[
                     ("x-ts", ts.to_string()),
                     ("x-sig", hex_encode(kp.sign(&msg).as_ref())),
@@ -789,7 +800,10 @@ mod tests {
         assert!(mk("{id}{body}{ts}").validate().is_err());
         assert!(mk("{ts}{body}{id}").validate().is_err());
         assert!(mk("{id}.{body}.{ts}").validate().is_ok());
-        assert!(mk("{id}{ts}{body}").validate().is_ok());
+        // {ts} adjacency is NOT exempt for configurable templates.
+        assert!(mk("{id}{ts}{body}").validate().is_err());
+        assert!(mk("{ts}{body}").validate().is_err());
+        assert!(mk("{ts}.{body}").validate().is_ok());
         assert!(Scheme::twitch_eventsub().validate().is_ok());
     }
 }
