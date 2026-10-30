@@ -160,6 +160,10 @@ bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
 # (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
 # SS5, `src/capabilities.rs`).
 bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
+# Shared, stage-agnostic `tool.invoke` policy (bundle-MCP-tools P3b): request
+# validation, self/cycle/depth guard, P1 matrix, P2 gate, target resolution --
+# one authorization path for both stages' `handle_tool`.
+bundle-tool-call = { path = "../bundle_tool_call", version = "=0.1.0" }
 # Target-user id parsing for the `reputation` capability (`handle_reputation`):
 # a bundle names its target as a UUID string; same pin as the gate crate.
 uuid = { version = "=1.26.1" }

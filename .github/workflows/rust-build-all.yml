@@ -39,6 +39,7 @@ jobs:
           - bundle_host_db
           - bundle_host_http
           - bundle_host_kv
+          - bundle_tool_call
           - circuit_breaker
           - connector_e2e
           - discord_mentions

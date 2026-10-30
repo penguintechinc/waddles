@@ -80,6 +80,9 @@ use crate::identity::{
 use crate::license::FeatureGate;
 use crate::stage_metrics::{self, StageMetrics};
 
+mod tool;
+pub use tool::ToolContext;
+
 /// The durable rolling-24h absolute-delta caps the store enforces for
 /// `reputation.community.write` -- the catalog's own `per_user_daily_abs_max`
 /// (per community, user) and `per_scope_daily_abs_max` (per app across the
@@ -398,7 +401,7 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// See [`Self::with_kv`]'s doc; `None` until it is called (a bundle
     /// sees `not_implemented` rather than this loop failing to start if
     /// the Valkey connection for `kv` was never configured).
-    kv: Option<KvHost<K>>,
+    kv: Option<Arc<KvHost<K>>>,
     /// The shared, per-process [`EgressGuard`] backing the `http`
     /// capability -- see [`Self::handle_http`].
     egress: Arc<EgressGuard>,
@@ -449,6 +452,9 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// set in production; tests swap it via `with_stage_metrics` so they can
     /// read back exactly what this call emitted.
     stage_metrics: Arc<StageMetrics>,
+    /// `None` until [`Self::with_tool`] -- every `tool.*` call denies
+    /// `not_implemented` in that state (never a silent no-op).
+    tool: Option<ToolContext>,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -494,6 +500,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             invocation_identity: None,
             verified_scope: None,
             stage_metrics: stage_metrics::stage_metrics(),
+            tool: None,
         }
     }
 
@@ -553,7 +560,7 @@ impl<K: KvBackend> StageCapabilities<K> {
         backend: K,
         capabilities: std::sync::Arc<bundle_host_kv::CapabilitySnapshot>,
     ) -> Self {
-        self.kv = Some(KvHost::new(backend, capabilities));
+        self.kv = Some(Arc::new(KvHost::new(backend, capabilities)));
         self
     }
 
@@ -1990,7 +1997,7 @@ fn kv_err_to_host(err: KvError) -> HostResultError {
     denied(err.wire_code(), err.wire_message())
 }
 
-impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
+impl<K: KvBackend + 'static> CapabilityHandler for StageCapabilities<K> {
     fn handle<'a>(
         &'a self,
         call: HostCallBody,
@@ -2008,7 +2015,7 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
     }
 }
 
-impl<K: KvBackend> StageCapabilities<K> {
+impl<K: KvBackend + 'static> StageCapabilities<K> {
     /// Routes one `host-call` to its capability arm. Split out of
     /// [`CapabilityHandler::handle`] so that wrapper can time the whole call
     /// (early `?` returns included) and label its outcome without every arm
@@ -2064,6 +2071,10 @@ impl<K: KvBackend> StageCapabilities<K> {
             // `identity.*` ops likewise: own gate permission
             // (`identity.resolve`), own handler, never the
             // `storage.tables` path.
+            // `tool.*` ops (bundle-MCP-tools P3b): bundle-to-bundle tool
+            // invocation -- own gate permission (`tool.call:<target>:<tool>`),
+            // own handler, never the `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("tool.") => self.handle_tool(&call).await,
             CapabilityKind::Db if call.op.starts_with("identity.") => {
                 self.handle_identity(&call).await
             }
@@ -2241,7 +2252,7 @@ mod tests {
     /// `host_not_declared` (this stage's deny-by-default posture, see
     /// [`HttpEgressCatalog`]'s doc). Tests exercising a granted call build
     /// their own guard via [`caps_with_egress_rule`] instead.
-    fn test_egress() -> Arc<EgressGuard> {
+    pub(super) fn test_egress() -> Arc<EgressGuard> {
         Arc::new(EgressGuard::new(
             Arc::new(ReqwestTransport::new()),
             test_egress_limits(),

@@ -21,14 +21,34 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::query::ActiveBundleRow;
+use crate::tools::ToolManifestInfo;
 
-/// Map type held behind the shared lock -- `app_id -> (digest, version_id)`.
-type ActiveMap = HashMap<String, (String, i64)>;
+/// One snapshot entry: the active digest, `app_versions.id`, and the tool
+/// facts of that version's approved manifest.
+#[derive(Clone, Debug)]
+struct ActiveEntry {
+    digest: String,
+    version_id: i64,
+    tools: ToolManifestInfo,
+}
+
+/// Map type held behind the shared lock -- `app_id -> entry`.
+type ActiveMap = HashMap<String, ActiveEntry>;
+
+/// What the stage's `tool.invoke` gate needs about a resolved tool target:
+/// the platform-installed digest + version to pin the nested invoke to, and
+/// its tool facts for the invocation matrix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolTargetEntry {
+    pub digest: String,
+    pub version_id: i64,
+    pub tools: ToolManifestInfo,
+}
 
 /// Cheap, `Clone`-able handle over a shared `app_id -> (digest,
 /// version_id)` map -- see the module doc.
 #[derive(Clone, Default)]
-pub struct ActiveVersionSnapshot(Arc<RwLock<HashMap<String, (String, i64)>>>);
+pub struct ActiveVersionSnapshot(Arc<RwLock<ActiveMap>>);
 
 impl ActiveVersionSnapshot {
     pub fn new() -> Self {
@@ -45,7 +65,16 @@ impl ActiveVersionSnapshot {
     pub fn update(&self, rows: &[ActiveBundleRow]) {
         let map = rows
             .iter()
-            .map(|row| (row.app_id.clone(), (row.digest.clone(), row.version_id)))
+            .map(|row| {
+                (
+                    row.app_id.clone(),
+                    ActiveEntry {
+                        digest: row.digest.clone(),
+                        version_id: row.version_id,
+                        tools: row.tools.clone(),
+                    },
+                )
+            })
             .collect();
         // A poisoned lock (a panic elsewhere while holding the write
         // guard) recovers with the poisoned map rather than propagating --
@@ -95,9 +124,8 @@ impl ActiveVersionSnapshot {
     /// version for the OLD one it is actually about to run.
     pub fn resolve_for_digest(&self, app_id: &str, digest: &str) -> Option<i64> {
         let map = self.read_lock();
-        map.get(app_id).and_then(|(active_digest, version_id)| {
-            (active_digest == digest).then_some(*version_id)
-        })
+        map.get(app_id)
+            .and_then(|e| (e.digest == digest).then_some(e.version_id))
     }
 
     /// Resolves `app_id`'s current `app_versions.id` regardless of digest --
@@ -106,9 +134,7 @@ impl ActiveVersionSnapshot {
     /// a digest at all; `crate::bundle_loader`/`crate::source_supervisor`'s
     /// own `bundle_loader` half owns load/unload independently).
     pub fn resolve_for_app(&self, app_id: &str) -> Option<i64> {
-        self.read_lock()
-            .get(app_id)
-            .map(|(_, version_id)| *version_id)
+        self.read_lock().get(app_id).map(|e| e.version_id)
     }
 
     /// Resolves `app_id`'s CURRENT `(digest, app_versions.id)` pair,
@@ -121,7 +147,21 @@ impl ActiveVersionSnapshot {
     /// means the app is no longer active in this scope at all
     /// (deactivated/revoked) -- the only case a caller should fail closed.
     pub fn current_digest_and_version(&self, app_id: &str) -> Option<(String, i64)> {
-        self.read_lock().get(app_id).cloned()
+        self.read_lock()
+            .get(app_id)
+            .map(|e| (e.digest.clone(), e.version_id))
+    }
+
+    /// Resolves `app_id`'s CURRENT platform-installed `(digest, version_id,
+    /// tool facts)` for a `tool.invoke` target lookup -- `None` when the app
+    /// is not active in this scope (unknown / deactivated / stale: the
+    /// caller must fail closed as `target-unavailable`).
+    pub fn tool_entry(&self, app_id: &str) -> Option<ToolTargetEntry> {
+        self.read_lock().get(app_id).map(|e| ToolTargetEntry {
+            digest: e.digest.clone(),
+            version_id: e.version_id,
+            tools: e.tools.clone(),
+        })
     }
 }
 
@@ -141,7 +181,29 @@ mod tests {
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
             declared_capabilities: Vec::new(),
+            tools: Default::default(),
         }
+    }
+
+    #[test]
+    fn tool_entry_resolves_the_live_digest_version_and_tool_facts() {
+        let snap = ActiveVersionSnapshot::new();
+        let mut r = row("waddles.core.a.svc", "sha256:aa", 5);
+        r.tools = crate::tools::ToolManifestInfo {
+            is_tool_service: true,
+            exported: vec![crate::tools::ExportedToolInfo {
+                name: "t".to_string(),
+                write: false,
+            }],
+            requested: Vec::new(),
+        };
+        snap.update(&[r]);
+        let e = snap.tool_entry("waddles.core.a.svc").unwrap();
+        assert_eq!((e.digest.as_str(), e.version_id), ("sha256:aa", 5));
+        assert!(e.tools.exported_tool("t").is_some());
+        assert!(snap.tool_entry("waddles.core.missing.svc").is_none());
+        snap.update(&[]);
+        assert!(snap.tool_entry("waddles.core.a.svc").is_none());
     }
 
     #[test]

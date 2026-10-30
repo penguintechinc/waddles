@@ -12,6 +12,7 @@ updates:
   - /core/bundle_host_economy
   - /core/bundle_host_http
   - /core/bundle_host_kv
+  - /core/bundle_tool_call
   - /core/bundle_host_reputation
   - /core/circuit_breaker
   - /core/connection_resolver

@@ -1304,6 +1304,7 @@ fn try_start_process_loop(
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                tools: Default::default(),
             }]);
         }
         let kv_conn = connect_kv(&spine_cfg).await;

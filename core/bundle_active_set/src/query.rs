@@ -62,6 +62,11 @@ pub struct ActiveBundleRow {
     /// validate further than "is this valid JSON shaped like the summary
     /// schema".
     pub declared_capabilities: Vec<String>,
+    /// The tool-relevant facts of this version's approved manifest
+    /// (`crate::tools`) -- feeds the stage's `tool.invoke` matrix check
+    /// (`ActiveVersionSnapshot::tool_entry`). `Default` (not a tool service,
+    /// exports/requests nothing) when the summary is missing or malformed.
+    pub tools: crate::tools::ToolManifestInfo,
 }
 
 /// Extracts `summary_json.capabilities` (a JSON array of strings) as a
@@ -514,6 +519,9 @@ pub(crate) fn assemble_active_set(
         let declared_capabilities = approval
             .map(|appr| declared_capabilities_from_summary(&appr.summary_json))
             .unwrap_or_default();
+        let tools = approval
+            .map(|appr| crate::tools::ToolManifestInfo::from_summary(&appr.summary_json))
+            .unwrap_or_default();
         // Structural guard (regression: multi_tenant path sent bare-hex
         // digest to Invoke, UnknownBundle despite loaded bundle (alpha
         // 2026-10-03)): this is the ONE sanctioned production construction
@@ -544,6 +552,7 @@ pub(crate) fn assemble_active_set(
             artifact_signature_key_id: version_row.artifact_signature_key_id.clone(),
             artifact_signed_approval_id: version_row.artifact_signed_approval_id,
             declared_capabilities,
+            tools,
         });
     }
 
@@ -1567,6 +1576,53 @@ mod tests {
             result.rows[0].declared_capabilities,
             vec!["context", "kv", "flags", "log", "clock"]
         );
+        Ok(())
+    }
+
+    /// P3b: the approval's `exportedTools`/`requestedTools` + the `mcp.tools`
+    /// capability surface on `ActiveBundleRow::tools` (feeds the `tool.invoke`
+    /// matrix); an approval without them yields the empty default.
+    #[tokio::test]
+    async fn read_active_set_surfaces_tool_facts_from_summary_json() -> Result<(), ActiveSetError> {
+        let digest = format!("sha256:{}", "f".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.core.economy.svc".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.core.economy.svc".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest),
+                scan_status: "scanned".to_string(),
+                component_key: Some("bundles/x/1/c.wasm".to_string()),
+                sidecar_key: Some("bundles/x/1/s.json".to_string()),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.core.economy.svc".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: serde_json::json!({
+                    "capabilities": ["kv", "mcp.tools"],
+                    "exportedTools": [{"name": "adjust", "access": "write", "risk": "dangerous"}],
+                    "requestedTools": [{"target": "waddles.core.other.svc", "tool": "ping", "access": "read"}],
+                }),
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        let tools = &result.rows[0].tools;
+        assert!(tools.is_tool_service);
+        assert_eq!(tools.exported_tool("adjust").map(|t| t.write), Some(true));
+        assert!(tools.requests("waddles.core.other.svc", "ping"));
         Ok(())
     }
 
