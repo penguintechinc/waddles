@@ -75,7 +75,7 @@ mod tests {
     use super::*;
     use crate::config::{CliConfig, Config};
     use crate::connector::webhook::{
-        BoxFut, RateLimit, SecretError, WebhookDedup, WebhookIngress, WebhookRoute,
+        BoxFut, DedupToken, RateLimit, SecretError, WebhookDedup, WebhookIngress, WebhookRoute,
         WebhookSecretSource,
     };
     use crate::connector::webhook_verify::{
@@ -98,8 +98,11 @@ mod tests {
     }
     struct Dd;
     impl WebhookDedup for Dd {
-        fn first_seen<'a>(&'a self, _k: &'a str) -> BoxFut<'a, Result<bool, ()>> {
-            Box::pin(async { Ok(true) })
+        fn first_seen<'a>(&'a self, _k: &'a str) -> BoxFut<'a, Result<Option<DedupToken>, ()>> {
+            Box::pin(async { Ok(Some(DedupToken("t".into()))) })
+        }
+        fn release<'a>(&'a self, _k: &'a str, _t: &'a DedupToken) -> BoxFut<'a, Result<(), ()>> {
+            Box::pin(async { Ok(()) })
         }
     }
 

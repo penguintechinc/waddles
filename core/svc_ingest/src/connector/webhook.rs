@@ -38,7 +38,7 @@ use tokio::sync::mpsc;
 use super::transport::{Transport, TransportError};
 use super::types::{ConnectionCtx, Handshake};
 use super::webhook_verify::{hex_encode, Scheme};
-use crate::ingest::twitch_eventsub::{RedisReplayGuard, ReplayGuard, DEDUP_TTL};
+use crate::ingest::twitch_eventsub::DEDUP_TTL;
 
 /// Absolute per-route ceiling on `body_limit`.
 pub const HARD_MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -135,9 +135,6 @@ const MAX_TRACKED_SOURCES: usize = 4096;
 
 struct RouteEntry {
     route: WebhookRoute,
-    /// Unique per registration; namespaces the dedup key so an aborted
-    /// delivery against a superseded registration stays redeliverable.
-    generation: u64,
     /// Coarse UNAUTHENTICATED budget charged on EVERY request before any
     /// secret fetch (caps resolver amplification); `pre_max` per window.
     pre: Mutex<(Instant, u32)>,
@@ -261,19 +258,76 @@ impl<R: ConnectionResolve + 'static> WebhookSecretSource for ConnectionResolverS
     }
 }
 
-/// Object-safe dedup: first-seen check for a namespaced key.
+/// Proof that THIS request set a dedup key; only the holder can release it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupToken(pub String);
+
+/// Object-safe dedup over a store SHARED by every replica. Keys are stable
+/// across replicas/restarts (`wh:{route_key}:{digest-of-signed-message}`);
+/// there is deliberately no process-local component.
 pub trait WebhookDedup: Send + Sync {
-    /// `Ok(true)` first time, `Ok(false)` duplicate, `Err` backend failure
-    /// (the caller fails closed).
-    fn first_seen<'a>(&'a self, key: &'a str) -> BoxFut<'a, Result<bool, ()>>;
+    /// `Ok(Some(token))` first time (key now set, owned by `token`),
+    /// `Ok(None)` duplicate, `Err` backend failure (caller fails closed).
+    fn first_seen<'a>(&'a self, key: &'a str) -> BoxFut<'a, Result<Option<DedupToken>, ()>>;
+    /// Compensating delete after an aborted dispatch so the provider's
+    /// redelivery is accepted. Deletes ONLY if the key still holds `token`
+    /// (never another in-flight delivery's mark).
+    fn release<'a>(&'a self, key: &'a str, token: &'a DedupToken) -> BoxFut<'a, Result<(), ()>>;
 }
 
-/// Production dedup: the existing Valkey `SET NX PX` [`ReplayGuard`]
-/// (a concrete impl -- the trait's own async fn is not provably `Send`
-/// through a generic bound, but this concrete future is).
-impl WebhookDedup for RedisReplayGuard {
-    fn first_seen<'a>(&'a self, key: &'a str) -> BoxFut<'a, Result<bool, ()>> {
-        Box::pin(async move { self.check_and_mark(key).await.map_err(|_| ()) })
+/// Production dedup: Valkey `SET key <token> NX PX ttl`, released with a
+/// compare-and-delete script. (A dedicated type rather than
+/// `RedisReplayGuard`, which cannot release a key.)
+pub struct RedisWebhookDedup {
+    conn: redis::aio::MultiplexedConnection,
+    ttl_ms: usize,
+}
+
+const DEDUP_PREFIX: &str = "waddles:webhook:dedup:";
+
+impl RedisWebhookDedup {
+    /// Builds the dedup over a connected Valkey connection.
+    #[must_use]
+    pub fn new(conn: redis::aio::MultiplexedConnection, ttl: Duration) -> Self {
+        Self {
+            conn,
+            ttl_ms: usize::try_from(ttl.as_millis()).unwrap_or(usize::MAX),
+        }
+    }
+}
+
+impl WebhookDedup for RedisWebhookDedup {
+    fn first_seen<'a>(&'a self, key: &'a str) -> BoxFut<'a, Result<Option<DedupToken>, ()>> {
+        Box::pin(async move {
+            let token = uuid::Uuid::new_v4().to_string();
+            let mut conn = self.conn.clone();
+            let set: Option<String> = redis::cmd("SET")
+                .arg(format!("{DEDUP_PREFIX}{key}"))
+                .arg(&token)
+                .arg("NX")
+                .arg("PX")
+                .arg(self.ttl_ms)
+                .query_async(&mut conn)
+                .await
+                .map_err(|_| ())?;
+            Ok(set.map(|_| DedupToken(token)))
+        })
+    }
+
+    fn release<'a>(&'a self, key: &'a str, token: &'a DedupToken) -> BoxFut<'a, Result<(), ()>> {
+        Box::pin(async move {
+            let mut conn = self.conn.clone();
+            let _: i64 = redis::Script::new(
+                "if redis.call('get', KEYS[1]) == ARGV[1] then \
+                 return redis.call('del', KEYS[1]) else return 0 end",
+            )
+            .key(format!("{DEDUP_PREFIX}{key}"))
+            .arg(&token.0)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|_| ())?;
+            Ok(())
+        })
     }
 }
 
@@ -326,7 +380,6 @@ pub struct WebhookIngress {
     secrets: Arc<dyn WebhookSecretSource>,
     dedup: Arc<dyn WebhookDedup>,
     requests: Option<prometheus::IntCounterVec>,
-    generation: std::sync::atomic::AtomicU64,
 }
 
 impl WebhookIngress {
@@ -355,7 +408,6 @@ impl WebhookIngress {
             secrets,
             dedup,
             requests,
-            generation: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -383,9 +435,6 @@ impl WebhookIngress {
             .saturating_mul(PRE_AUTH_MULTIPLIER)
             .max(MIN_PRE_AUTH_BUDGET);
         let entry = Arc::new(RouteEntry {
-            generation: self
-                .generation
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             pre: Mutex::new((Instant::now(), 0)),
             pre_max,
             window: Mutex::new((Instant::now(), 0)),
@@ -519,12 +568,6 @@ impl WebhookIngress {
         if source.is_some_and(|s| entry.source_blocked(s, now)) {
             return WebhookOutcome::RateLimited;
         }
-        // Coarse pre-auth cap on EVERY request, before any secret fetch, so
-        // an unauthenticated flood cannot amplify into resolver calls. Applies
-        // regardless of whether the source is known (fail-closed).
-        if !entry.admit_pre(now) {
-            return WebhookOutcome::RateLimited;
-        }
         let fail = |o: WebhookOutcome| {
             if let Some(s) = source {
                 entry.charge_failure(s, now);
@@ -542,6 +585,16 @@ impl WebhookIngress {
                 Ok(p) => p,
                 Err(_) => return fail(WebhookOutcome::Rejected),
             };
+        // Coarse pre-auth cap, charged before any secret fetch so a flood
+        // cannot amplify into resolver calls (fail-closed, regardless of
+        // whether the source is known). Only requests that pass the cheap
+        // structural checks above (size, headers, timestamp window, signature
+        // decodes) are charged, so a malformed/stale/oversize flood cannot
+        // consume it. A well-formed-but-forged flood still can; complete
+        // per-source protection is the ConnectInfo follow-up.
+        if !entry.admit_pre(now) {
+            return WebhookOutcome::RateLimited;
+        }
         // Secret by ROUTE KEY's secret_ref, per call, scoped to this block so
         // it zeroizes on drop and never crosses an await after the check.
         let verified = {
@@ -591,33 +644,48 @@ impl WebhookIngress {
             }
         };
         // Step 2 (await, no locks held): dedup keyed on the digest of the
-        // verified SIGNED message, scoped by registration generation, only
-        // AFTER the signature verifies (no unauthenticated poisoning).
-        let key = format!(
-            "wh:{}:{}:{}",
-            route.route_key, entry.generation, prepared.dedup_id
-        );
-        match self.dedup.first_seen(&key).await {
-            Ok(true) => {}
-            Ok(false) => return WebhookOutcome::Duplicate,
+        // verified SIGNED message -- stable across replicas -- only AFTER the
+        // signature verifies (no unauthenticated poisoning).
+        let key = format!("wh:{}:{}", route.route_key, prepared.dedup_id);
+        let token = match self.dedup.first_seen(&key).await {
+            Ok(Some(t)) => t,
+            Ok(None) => return WebhookOutcome::Duplicate,
             Err(()) => return WebhookOutcome::Unavailable,
-        }
-        // Step 3 (sync, atomic w.r.t. `register`, which needs the write lock):
-        // re-validate the registration and send in one critical section. If it
-        // was superseded during the dedup await, abort -- the mark lives in
-        // the OLD generation's namespace, so redelivery to the new
-        // registration is accepted.
-        let Ok(routes) = self.routes.read() else {
-            return WebhookOutcome::Unavailable;
         };
-        if !routes
-            .get(route_key)
-            .is_some_and(|c| Arc::ptr_eq(c, &entry))
-        {
-            return WebhookOutcome::Unavailable;
+        // Step 3 (sync, atomic w.r.t. `register`, which needs the write lock):
+        // re-validate the registration and send in one critical section.
+        let sent = {
+            let Ok(routes) = self.routes.read() else {
+                drop(permit);
+                return self.abort_dispatch(&key, &token).await;
+            };
+            if routes
+                .get(route_key)
+                .is_some_and(|c| Arc::ptr_eq(c, &entry))
+            {
+                permit.send(body.to_vec());
+                true
+            } else {
+                false
+            }
+        };
+        if sent {
+            WebhookOutcome::Accepted
+        } else {
+            // Superseded during the dedup await: nothing dispatched. Release
+            // exactly the key THIS request set so redelivery is accepted.
+            self.abort_dispatch(&key, &token).await
         }
-        permit.send(body.to_vec());
-        WebhookOutcome::Accepted
+    }
+
+    /// Compensates an aborted dispatch (token-guarded delete). If the release
+    /// itself fails the delivery stays held back until the dedup TTL; that is
+    /// logged and still reported as 503 (never as accepted).
+    async fn abort_dispatch(&self, key: &str, token: &DedupToken) -> WebhookOutcome {
+        if self.dedup.release(key, token).await.is_err() {
+            tracing::warn!("webhook dedup release failed; redelivery delayed until dedup TTL");
+        }
+        WebhookOutcome::Unavailable
     }
 
     /// Per-route hard body cap used by the HTTP layer's coarse limit.
@@ -708,19 +776,39 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
+    /// In-memory stand-in for the SHARED dedup store; clone `store` into two
+    /// `MemDedup`s to model two replicas on one backing store.
+    #[derive(Default, Clone)]
     struct MemDedup {
-        seen: Mutex<std::collections::HashSet<String>>,
+        store: Arc<Mutex<std::collections::HashMap<String, String>>>,
         broken: bool,
     }
     impl WebhookDedup for MemDedup {
-        fn first_seen<'a>(&'a self, key: &'a str) -> BoxFut<'a, Result<bool, ()>> {
+        fn first_seen<'a>(&'a self, key: &'a str) -> BoxFut<'a, Result<Option<DedupToken>, ()>> {
             let r = if self.broken {
                 Err(())
             } else {
-                Ok(self.seen.lock().unwrap().insert(key.to_string()))
+                let mut g = self.store.lock().unwrap();
+                if g.contains_key(key) {
+                    Ok(None)
+                } else {
+                    let t = uuid::Uuid::new_v4().to_string();
+                    g.insert(key.to_string(), t.clone());
+                    Ok(Some(DedupToken(t)))
+                }
             };
             Box::pin(async move { r })
+        }
+        fn release<'a>(
+            &'a self,
+            key: &'a str,
+            token: &'a DedupToken,
+        ) -> BoxFut<'a, Result<(), ()>> {
+            let mut g = self.store.lock().unwrap();
+            if g.get(key) == Some(&token.0) {
+                g.remove(key);
+            }
+            Box::pin(async { Ok(()) })
         }
     }
 
@@ -1264,11 +1352,9 @@ mod tests {
             entered: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
         });
-        let ing = Arc::new(WebhookIngress::new(
-            gate.clone(),
-            Arc::new(MemDedup::default()),
-            None,
-        ));
+        let dedup = MemDedup::default();
+        let store = dedup.store.clone();
+        let ing = Arc::new(WebhookIngress::new(gate.clone(), Arc::new(dedup), None));
         ing.register(route(KEY, "old", generic_hmac()), 7).unwrap();
         let mut old_t = ing.bind_transport(KEY, "old").unwrap();
         let h = signed_headers(b"x");
@@ -1285,6 +1371,8 @@ mod tests {
         assert_eq!(task.await.unwrap(), WebhookOutcome::Unavailable);
         assert!(old_t.rx.try_recv().is_err(), "superseded owner got a frame");
         assert!(new_t.rx.try_recv().is_err());
+        // The abort released exactly the key it set (stable key, no leak).
+        assert!(store.lock().unwrap().is_empty());
         // The aborted attempt did not burn dedup for the new registration:
         // the provider's redelivery is accepted, to the CURRENT owner.
         let redelivery = {
@@ -1314,5 +1402,71 @@ mod tests {
         let resolves = *s.calls.lock().unwrap();
         assert_eq!(resolves, 400);
         assert_eq!(limited, 600);
+    }
+
+    #[tokio::test]
+    async fn dedup_is_shared_across_replicas_and_release_is_token_guarded() {
+        // Two replicas, one backing store.
+        let store = MemDedup::default();
+        let mk = |d: MemDedup| {
+            let (ing, _) = {
+                let s = Arc::new(FakeSecrets {
+                    secret: Some(SECRET.into()),
+                    calls: Mutex::new(0),
+                    fail: None,
+                });
+                (WebhookIngress::new(s, Arc::new(d), None), ())
+            };
+            ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
+            let t = ing.bind_transport(KEY, "acme").unwrap();
+            (ing, t)
+        };
+        let (a, mut ta) = mk(store.clone());
+        let (b, mut tb) = mk(store.clone());
+        let h = signed_headers(b"evt");
+        assert_eq!(
+            a.handle(KEY, &h, b"evt", NOW).await,
+            WebhookOutcome::Accepted
+        );
+        // Same event on the OTHER replica is a duplicate: same key.
+        assert_eq!(
+            b.handle(KEY, &h, b"evt", NOW).await,
+            WebhookOutcome::Duplicate
+        );
+        assert!(ta.rx.try_recv().is_ok());
+        assert!(tb.rx.try_recv().is_err());
+        // A stale token must not delete another delivery's live mark.
+        let key = store.store.lock().unwrap().keys().next().cloned().unwrap();
+        let _ = store
+            .release(&key, &DedupToken("not-the-owner".into()))
+            .await;
+        assert_eq!(
+            b.handle(KEY, &h, b"evt", NOW).await,
+            WebhookOutcome::Duplicate
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_flood_does_not_consume_the_pre_auth_budget() {
+        let (ing, s) = ingress(Some(SECRET));
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
+        let mut t = ing.bind_transport(KEY, "acme").unwrap();
+        // Missing headers / stale timestamp: never charged, never resolved.
+        for i in 0..2000 {
+            let out = if i % 2 == 0 {
+                ing.handle(KEY, &HeaderMap::new(), b"x", NOW).await
+            } else {
+                ing.handle(KEY, &signed_headers(b"x"), b"x", NOW + 100_000)
+                    .await
+            };
+            assert_eq!(out, WebhookOutcome::Rejected);
+        }
+        assert_eq!(*s.calls.lock().unwrap(), 0);
+        let good = signed_headers(b"real");
+        assert_eq!(
+            ing.handle(KEY, &good, b"real", NOW).await,
+            WebhookOutcome::Accepted
+        );
+        assert!(t.rx.try_recv().is_ok());
     }
 }

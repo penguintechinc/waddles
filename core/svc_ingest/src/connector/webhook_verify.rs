@@ -77,10 +77,9 @@ impl TimestampFormat {
             Self::Rfc3339 => chrono::DateTime::parse_from_rfc3339(raw)
                 .map(|d| d.timestamp())
                 .map_err(|_| VerifyError::BadTimestamp),
-            Self::UnixSeconds => raw
-                .trim()
-                .parse::<i64>()
-                .map_err(|_| VerifyError::BadTimestamp),
+            // Strict: no trimming -- the header bytes that are signed are
+            // exactly the bytes that were parsed.
+            Self::UnixSeconds => raw.parse::<i64>().map_err(|_| VerifyError::BadTimestamp),
         }
     }
 }
@@ -136,9 +135,9 @@ impl SignedTemplate {
 
     /// Rejects ANY adjacent placeholders with no literal separator: byte
     /// boundaries could shift (`id|body`, `ts|body` incl. whitespace) and
-    /// still yield the same signed string. The only exemption is the fixed
-    /// Twitch EventSub preset (RFC 3339, canonical, strictly parsed), checked
-    /// in [`Scheme::validate`] -- never a configurable template.
+    /// still yield the same signed string. The only exemption is the
+    /// [`Scheme::TwitchEventSub`] marker variant -- never a configurable
+    /// template, whatever its shape.
     fn reject_ambiguous(&self) -> Result<(), String> {
         for w in self.0.windows(2) {
             if !matches!(w[0], Part::Lit(_)) && !matches!(w[1], Part::Lit(_)) {
@@ -226,7 +225,25 @@ pub enum Scheme {
     Ed25519(Ed25519Spec),
     /// Stripe-style.
     Stripe(StripeSpec),
+    /// The fixed Twitch EventSub preset: a distinct, constructor-only
+    /// marker (not a shape). It is the ONLY scheme exempt from the
+    /// adjacent-placeholder rule; a configurable `HmacSha256` never is.
+    TwitchEventSub,
 }
+
+/// The preset's concrete spec (`sha256=hex(HMAC(secret, id + ts + body))`,
+/// RFC 3339 timestamp), built once.
+static TWITCH_SCHEME: std::sync::LazyLock<Scheme> = std::sync::LazyLock::new(|| {
+    Scheme::HmacSha256(HmacSpec {
+        signature_header: HeaderName::from_static("twitch-eventsub-message-signature"),
+        timestamp_header: HeaderName::from_static("twitch-eventsub-message-timestamp"),
+        id_header: Some(HeaderName::from_static("twitch-eventsub-message-id")),
+        template: SignedTemplate::twitch(),
+        signature_prefix: "sha256=".into(),
+        encoding: Encoding::Hex,
+        timestamp_format: TimestampFormat::Rfc3339,
+    })
+});
 
 /// Result of phase 1: everything needed for the crypto check, no secret.
 #[derive(Debug)]
@@ -277,20 +294,10 @@ fn signed_message_id(message: &[u8]) -> String {
 pub const MAX_STRIPE_V1: usize = 4;
 
 impl Scheme {
-    /// The Twitch EventSub scheme expressed as a generic HMAC route:
-    /// `sha256=hex(HMAC(secret, id + ts + body))`, RFC 3339 timestamp.
+    /// The Twitch EventSub preset (see [`Scheme::TwitchEventSub`]).
     #[must_use]
     pub fn twitch_eventsub() -> Self {
-        Self::HmacSha256(HmacSpec {
-            signature_header: HeaderName::from_static("twitch-eventsub-message-signature"),
-            timestamp_header: HeaderName::from_static("twitch-eventsub-message-timestamp"),
-            id_header: Some(HeaderName::from_static("twitch-eventsub-message-id")),
-            // Static, known-valid template.
-            template: SignedTemplate::twitch(),
-            signature_prefix: "sha256=".into(),
-            encoding: Encoding::Hex,
-            timestamp_format: TimestampFormat::Rfc3339,
-        })
+        Self::TwitchEventSub
     }
 
     /// Structural validation at registration time (fail loud, not per-request).
@@ -299,17 +306,11 @@ impl Scheme {
             Self::HmacSha256(s) => (&s.template, &s.id_header),
             Self::Ed25519(s) => (&s.template, &s.id_header),
             Self::Stripe(_) => return Ok(()),
+            // Fixed, known-good preset; the only adjacency exemption.
+            Self::TwitchEventSub => return Ok(()),
         };
         if template.needs_id() && id_header.is_none() {
             return Err("template uses {id} but no id_header configured".into());
-        }
-        // The single exemption: exactly the Twitch preset shape with the
-        // canonical RFC 3339 timestamp format.
-        let twitch_shape = matches!(self, Self::HmacSha256(s)
-            if s.template == SignedTemplate::twitch()
-                && s.timestamp_format == TimestampFormat::Rfc3339);
-        if twitch_shape {
-            return Ok(());
         }
         template.reject_ambiguous()
     }
@@ -323,6 +324,7 @@ impl Scheme {
         now_unix: i64,
     ) -> Result<Prepared, VerifyError> {
         match self {
+            Self::TwitchEventSub => TWITCH_SCHEME.prepare(headers, body, window_secs, now_unix),
             Self::HmacSha256(s) => {
                 let ts_raw = header_str(headers, &s.timestamp_header)?;
                 check_window(s.timestamp_format.to_unix(ts_raw)?, now_unix, window_secs)?;
@@ -803,7 +805,30 @@ mod tests {
         // {ts} adjacency is NOT exempt for configurable templates.
         assert!(mk("{id}{ts}{body}").validate().is_err());
         assert!(mk("{ts}{body}").validate().is_err());
+        // Even the exact Twitch shape + RFC 3339, if configurable, is rejected.
+        let mut tw = match mk("{id}{ts}{body}") {
+            Scheme::HmacSha256(s) => s,
+            _ => unreachable!(),
+        };
+        tw.timestamp_format = TimestampFormat::Rfc3339;
+        tw.id_header = Some(HeaderName::from_static("twitch-eventsub-message-id"));
+        assert!(Scheme::HmacSha256(tw).validate().is_err());
         assert!(mk("{ts}.{body}").validate().is_ok());
         assert!(Scheme::twitch_eventsub().validate().is_ok());
+    }
+
+    #[test]
+    fn whitespace_padded_unix_timestamp_is_rejected() {
+        let (s, _sec, _h) = signed("hmac", b"x", NOW);
+        for pad in [format!(" {NOW}"), format!("{NOW} "), format!("{NOW}\t")] {
+            let msg = format!("v0:{pad}:x");
+            let h = hdrs(&[
+                ("x-ts", pad.clone()),
+                ("x-sig", format!("v0={}", hmac_hex(SECRET, msg.as_bytes()))),
+            ]);
+            // HeaderValue trims nothing itself; either parse or header rule
+            // must reject.
+            assert!(s.prepare(&h, b"x", WINDOW, NOW).is_err(), "{pad:?}");
+        }
     }
 }
