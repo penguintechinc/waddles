@@ -35,6 +35,7 @@
 //! lives in `core/connector_e2e`.
 
 pub mod driver;
+pub(crate) mod egress_guard;
 pub mod invoker;
 pub mod metrics;
 pub mod poll;

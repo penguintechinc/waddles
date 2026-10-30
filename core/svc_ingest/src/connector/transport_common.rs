@@ -68,47 +68,80 @@ fn splice_safe(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| !c.is_control() && c != '"' && c != '\\')
 }
 
-/// Substitutes every `(slot, handle)` pair into `bytes` as the last step
-/// before send. `slot` is the literal placeholder bytes the connector put in
-/// the handshake; each must occur at least once. The result is zeroized on
-/// drop; resolved secrets drop (and zeroize) inside this call.
+/// Max `(slot, handle)` pairs per handshake.
+pub(crate) const MAX_SECRET_REFS: usize = 8;
+
+/// One uniform failure for every slot/handle problem (unknown handle, absent
+/// slot, bad slot shape): the guest-controlled inputs get no oracle.
+fn uniform() -> TransportError {
+    TransportError::Handshake("handshake secret substitution failed".into())
+}
+
+/// Substitutes every `(slot, handle)` pair into `bytes` in ONE pass over the
+/// IMMUTABLE original (already-substituted text is never re-scanned). `slot`
+/// is the literal placeholder the connector put in the handshake; each must
+/// occur at least once, none may be empty, duplicated, or a substring of
+/// another slot. Output is a pre-sized zeroizing buffer (no realloc copies);
+/// resolved secrets zeroize on drop inside this call.
 pub(crate) async fn substitute_slots<S: WebhookSecretSource>(
     secrets: &S,
     handles: &HashMap<String, ConnectionRef>,
     bytes: &[u8],
     refs: &[(String, String)],
 ) -> Result<Zeroizing<Vec<u8>>, TransportError> {
-    let mut out = Zeroizing::new(bytes.to_vec());
-    for (slot, handle) in refs {
-        if slot.is_empty() {
-            return Err(TransportError::Handshake("empty secret slot".into()));
+    if refs.len() > MAX_SECRET_REFS {
+        return Err(uniform());
+    }
+    for (i, (slot, handle)) in refs.iter().enumerate() {
+        let bad_shape = slot.is_empty()
+            || refs.iter().enumerate().any(|(j, (o, _))| {
+                j != i && (o == slot || o.contains(slot.as_str()) || slot.contains(o.as_str()))
+            });
+        if bad_shape || !handles.contains_key(handle) || count_matches(bytes, slot.as_bytes()) == 0
+        {
+            return Err(uniform());
         }
+    }
+    let mut resolved: Vec<(&[u8], SecretString)> = Vec::with_capacity(refs.len());
+    let mut extra = 0usize;
+    for (slot, handle) in refs {
         let secret = resolve_handle(secrets, handles, handle).await?;
         if !splice_safe(secret.expose()) {
             return Err(TransportError::Fatal("secret not splice-safe".into()));
         }
-        let next = replace_all(&out, slot.as_bytes(), secret.expose().as_bytes())
-            .ok_or_else(|| TransportError::Handshake("secret slot not present".into()))?;
-        out = Zeroizing::new(next);
+        extra = extra.saturating_add(
+            count_matches(bytes, slot.as_bytes()).saturating_mul(secret.expose().len()),
+        );
+        resolved.push((slot.as_bytes(), secret));
+    }
+    let mut out = Zeroizing::new(Vec::with_capacity(bytes.len().saturating_add(extra)));
+    let mut i = 0;
+    'scan: while i < bytes.len() {
+        for (slot, secret) in &resolved {
+            if bytes[i..].starts_with(slot) {
+                out.extend_from_slice(secret.expose().as_bytes());
+                i += slot.len();
+                continue 'scan;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
     }
     Ok(out)
 }
 
-/// Replaces every occurrence of `needle`; `None` when there was none.
-fn replace_all(hay: &[u8], needle: &[u8], with: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(hay.len());
-    let (mut i, mut hit) = (0, false);
+/// Non-overlapping occurrences of `needle` in `hay`.
+fn count_matches(hay: &[u8], needle: &[u8]) -> usize {
+    let (mut i, mut n) = (0, 0);
     while i < hay.len() {
         if hay[i..].starts_with(needle) {
-            out.extend_from_slice(with);
+            n += 1;
             i += needle.len();
-            hit = true;
         } else {
-            out.push(hay[i]);
             i += 1;
         }
     }
-    hit.then_some(out)
+    n
 }
 
 #[cfg(test)]
@@ -133,9 +166,9 @@ mod tests {
     }
 
     #[test]
-    fn replace_all_behaviour() {
-        assert_eq!(replace_all(b"a{T}b{T}", b"{T}", b"xy").unwrap(), b"axybxy");
-        assert!(replace_all(b"abc", b"{T}", b"x").is_none());
+    fn count_matches_behaviour() {
+        assert_eq!(count_matches(b"a{T}b{T}", b"{T}"), 2);
+        assert_eq!(count_matches(b"abc", b"{T}"), 0);
     }
 
     #[test]
@@ -144,5 +177,81 @@ mod tests {
         for bad in ["", "a\"b", "a\\b", "a\nb"] {
             assert!(!splice_safe(bad));
         }
+    }
+
+    use crate::connector::webhook::{BoxFut, SecretError};
+
+    /// Per-ref secret map (handle id -> value), counts resolves.
+    struct MapSecrets(HashMap<i64, &'static str>);
+    impl WebhookSecretSource for MapSecrets {
+        fn resolve(&self, r: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
+            let v = self.0.get(&r.connection_id).copied();
+            Box::pin(async move {
+                v.map(|s| SecretString::new(s.into()))
+                    .ok_or(SecretError::Missing)
+            })
+        }
+    }
+
+    fn handles() -> HashMap<String, ConnectionRef> {
+        ["a", "b"]
+            .iter()
+            .zip([1i64, 2])
+            .map(|(h, id)| {
+                (
+                    h.to_string(),
+                    ConnectionRef {
+                        community_id: 1,
+                        connection_id: id,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn refs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn single_pass_never_rescans_substituted_text() {
+        // Secret A contains slot B's text: must stay literal, not be re-expanded.
+        let s = MapSecrets(HashMap::from([(1, "x{{B}}y"), (2, "SECOND")]));
+        let out = substitute_slots(
+            &s,
+            &handles(),
+            b"{{A}}|{{B}}|{{A}}",
+            &refs(&[("{{A}}", "a"), ("{{B}}", "b")]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(&out[..], b"x{{B}}y|SECOND|x{{B}}y");
+    }
+
+    #[tokio::test]
+    async fn bad_slot_shapes_and_uniform_errors() {
+        let s = MapSecrets(HashMap::from([(1, "s1"), (2, "s2")]));
+        let h = handles();
+        let cases: Vec<Vec<(&str, &str)>> = vec![
+            vec![("", "a")],
+            vec![("{{A}}", "a"), ("{{A}}", "b")],
+            vec![("{{A}}", "a"), ("{{A}}x", "b")],
+            vec![("{{A}}", "nope")],
+            vec![("{{ABSENT}}", "a")],
+        ];
+        let mut msgs = Vec::new();
+        for c in cases {
+            let e = substitute_slots(&s, &h, b"{{A}} {{A}}x", &refs(&c))
+                .await
+                .unwrap_err();
+            msgs.push(e);
+        }
+        assert!(msgs.windows(2).all(|w| w[0] == w[1]), "uniform error");
+        let many: Vec<(String, String)> = (0..=MAX_SECRET_REFS)
+            .map(|i| (format!("{{{{S{i}}}}}"), "a".into()))
+            .collect();
+        assert!(substitute_slots(&s, &h, b"x", &many).await.is_err());
     }
 }

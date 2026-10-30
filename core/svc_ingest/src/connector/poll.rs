@@ -3,21 +3,42 @@
 //! [`PollConfig`] (the overlay's config). One poll = one frame (the response
 //! body). The cursor only advances when the driver reports the frame
 //! `Published` via [`Transport::on_frame_outcome`]; a dropped frame holds the
-//! cursor so the same window is re-fetched. The auth secret is resolved per
-//! request, never cached, and only ever placed in a sensitive header.
+//! cursor so the same window is re-fetched, up to
+//! [`PollConfig::max_drop_attempts`] times, after which the window is
+//! POISON-skipped (loud error log, cursor advanced past it) so one bad frame
+//! cannot wedge the poller.
+//!
+//! No-advance rule (also covers stateless polls): when a response carries no
+//! (valid, <= [`MAX_CURSOR_BYTES`]) next cursor, the window is yielded once;
+//! a later response with the identical body at the unchanged cursor is
+//! treated as "nothing new" and skipped, so the same window is never
+//! re-published every interval.
+//!
+//! SSRF: each request resolves + validates the host ([`resolve_pinned`]) and
+//! pins the connection to that address on a fresh client (no DNS rebind,
+//! redirects off). The auth secret is resolved per request, never cached, and
+//! only ever placed in a sensitive header. Residual (library-forced):
+//! `HeaderValue::from_str` copies the value into a non-zeroizing buffer
+//! owned by `http`/hyper; our own copies are zeroized.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use connection_resolver::ConnectionRef;
 use reqwest::header::{HeaderName, HeaderValue};
+use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
+use super::egress_guard::resolve_pinned;
 use super::transport::{FrameOutcome, Transport, TransportError};
 use super::transport_common::{opaque_id, resolve_handle, validate_endpoint};
 use super::types::{ConnectionCtx, Handshake};
 use super::webhook::WebhookSecretSource;
+
+/// Longest cursor accepted from a response (longer is treated as absent).
+pub const MAX_CURSOR_BYTES: usize = 512;
 
 /// Header carrying a per-call resolved secret.
 #[derive(Debug, Clone)]
@@ -49,13 +70,19 @@ pub struct PollConfig {
     pub cursor_pointer: Option<String>,
     /// Cursor to resume from (restored by the host after a restart).
     pub initial_cursor: Option<String>,
-    /// Minimum gap between polls.
+    /// Minimum gap between polls (1 ms ..= 24 h).
     pub interval: Duration,
     /// Per-request timeout.
     pub request_timeout: Duration,
     /// Max response body accepted.
     pub max_body_bytes: usize,
-    /// Permit `http://` to a loopback host (tests only).
+    /// Consecutive `Dropped` outcomes for one window before it is
+    /// poison-skipped (1 ..= 100).
+    pub max_drop_attempts: u32,
+    /// Exact IPs the host explicitly grants despite the SSRF denylist.
+    pub egress_allow: Vec<IpAddr>,
+    /// Permit `http://` to a loopback host (tests only; the address must
+    /// still be in `egress_allow`).
     pub allow_loopback_insecure: bool,
 }
 
@@ -63,17 +90,22 @@ pub struct PollConfig {
 pub struct PollTransport<S: WebhookSecretSource> {
     cfg: PollConfig,
     url: reqwest::Url,
-    client: reqwest::Client,
     source_id: String,
     connection_id: String,
     secrets: S,
     committed: Option<String>,
+    /// Next cursor of the frame most recently yielded.
     pending: Option<String>,
+    /// Digest of the frame most recently yielded.
+    pending_digest: Option<[u8; 32]>,
+    /// Digest of the last Published frame that did not advance the cursor.
+    last_static_digest: Option<[u8; 32]>,
+    drop_streak: u32,
     last_poll: Option<Instant>,
 }
 
 impl<S: WebhookSecretSource> PollTransport<S> {
-    /// Validates the config and builds the HTTP client.
+    /// Validates the config.
     pub fn new(cfg: PollConfig, secrets: S) -> Result<Self, TransportError> {
         let url = validate_endpoint(&cfg.url, &["https"], "http", cfg.allow_loopback_insecure)
             .map_err(TransportError::Connect)?;
@@ -82,6 +114,17 @@ impl<S: WebhookSecretSource> PollTransport<S> {
                 "cursor_param and cursor_pointer must be set together".into(),
             ));
         }
+        if cfg.interval < Duration::from_millis(1)
+            || cfg.interval > Duration::from_secs(86_400)
+            || cfg.max_drop_attempts == 0
+            || cfg.max_drop_attempts > 100
+            || cfg
+                .initial_cursor
+                .as_ref()
+                .is_some_and(|c| c.len() > MAX_CURSOR_BYTES)
+        {
+            return Err(TransportError::Connect("invalid poll limits".into()));
+        }
         if let Some(a) = &cfg.auth {
             HeaderName::from_bytes(a.header.as_bytes())
                 .map_err(|_| TransportError::Connect("invalid auth header name".into()))?;
@@ -89,20 +132,17 @@ impl<S: WebhookSecretSource> PollTransport<S> {
                 return Err(TransportError::Connect("auth handle not configured".into()));
             }
         }
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(cfg.request_timeout)
-            .build()
-            .map_err(|e| TransportError::Connect(e.to_string()))?;
         Ok(Self {
             source_id: opaque_id("poll", &cfg.source_key),
             connection_id: uuid::Uuid::new_v4().to_string(),
             committed: cfg.initial_cursor.clone(),
             cfg,
             url,
-            client,
             secrets,
             pending: None,
+            pending_digest: None,
+            last_static_digest: None,
+            drop_streak: 0,
             last_poll: None,
         })
     }
@@ -113,27 +153,40 @@ impl<S: WebhookSecretSource> PollTransport<S> {
         self.committed.as_deref()
     }
 
+    /// Builds a one-shot client pinned to the validated address.
+    async fn pinned_client(&self) -> Result<reqwest::Client, TransportError> {
+        let addr = resolve_pinned(&self.url, &self.cfg.egress_allow)
+            .await
+            .map_err(TransportError::Connect)?;
+        let mut b = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(self.cfg.request_timeout);
+        if let Some(host) = self.url.host_str() {
+            b = b.resolve(host, addr);
+        }
+        b.build()
+            .map_err(|e| TransportError::Connect(e.to_string()))
+    }
+
     /// One request; `Ok(None)` = nothing new.
     async fn fetch(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+        let client = self.pinned_client().await?;
         let mut url = self.url.clone();
         if let (Some(p), Some(c)) = (&self.cfg.cursor_param, &self.committed) {
             url.query_pairs_mut().append_pair(p, c);
         }
-        let mut req = self.client.get(url);
+        let mut req = client.get(url);
         if let Some(a) = &self.cfg.auth {
             let secret = resolve_handle(&self.secrets, &self.cfg.handles, &a.handle).await?;
             let joined = Zeroizing::new(format!("{}{}", a.prefix, secret.expose()));
             let mut v = HeaderValue::from_str(&joined)
                 .map_err(|_| TransportError::Fatal("secret not usable as header".into()))?;
             v.set_sensitive(true);
-            req = req.header(
-                HeaderName::from_bytes(a.header.as_bytes())
-                    .map_err(|_| TransportError::Fatal("invalid auth header name".into()))?,
-                v,
-            );
+            let name = HeaderName::from_bytes(a.header.as_bytes())
+                .map_err(|_| TransportError::Fatal("invalid auth header name".into()))?;
+            req = req.header(name, v);
         }
-        // reqwest errors can embed the URL; the URL holds no secret (auth is
-        // header-only) but the cursor is opaque host state, so report kind only.
+        // reqwest errors can embed the URL; report the kind only.
         let mut resp = req.send().await.map_err(|e| {
             TransportError::Read(
                 if e.is_timeout() {
@@ -176,22 +229,41 @@ impl<S: WebhookSecretSource> PollTransport<S> {
         if body.is_empty() {
             return Ok(None);
         }
-        self.pending = self.extract_cursor(&body)?;
+        let digest: [u8; 32] = Sha256::digest(&body).into();
+        let next = self.extract_cursor(&body)?;
+        // Cursor configured but it cannot advance: yield this window once,
+        // never again while it stays identical.
+        let advances = next
+            .as_ref()
+            .is_some_and(|n| Some(n) != self.committed.as_ref());
+        if !advances && self.last_static_digest == Some(digest) {
+            return Ok(None);
+        }
+        self.pending = if advances { next } else { None };
+        self.pending_digest = Some(digest);
         Ok(Some(body))
     }
 
-    /// Reads the next cursor from the body per the configured pointer.
+    /// Reads the next cursor from the body per the configured pointer; an
+    /// over-long value is rejected as absent (loud warn, no content logged).
     fn extract_cursor(&self, body: &[u8]) -> Result<Option<String>, TransportError> {
         let Some(ptr) = &self.cfg.cursor_pointer else {
             return Ok(None);
         };
         let v: serde_json::Value = serde_json::from_slice(body)
             .map_err(|_| TransportError::Read("response is not JSON".into()))?;
-        Ok(match v.pointer(ptr) {
+        let c = match v.pointer(ptr) {
             Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
             Some(serde_json::Value::Number(n)) => Some(n.to_string()),
             _ => None,
-        })
+        };
+        Ok(c.filter(|c| {
+            let ok = c.len() <= MAX_CURSOR_BYTES;
+            if !ok {
+                tracing::warn!(source_id = %self.source_id, "poll cursor over length cap; ignored");
+            }
+            ok
+        }))
     }
 }
 
@@ -224,9 +296,15 @@ impl<S: WebhookSecretSource + 'static> Transport for PollTransport<S> {
     async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
         loop {
             if let Some(t) = self.last_poll {
-                tokio::time::sleep_until(t + self.cfg.interval).await;
+                // interval is validated <= 24h, so overflow is unreachable;
+                // checked_add keeps it total regardless.
+                match t.checked_add(self.cfg.interval) {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => tokio::time::sleep(self.cfg.interval).await,
+                }
             }
             self.pending = None;
+            self.pending_digest = None;
             let res = self.fetch().await;
             self.last_poll = Some(Instant::now());
             if let Some(body) = res? {
@@ -237,13 +315,41 @@ impl<S: WebhookSecretSource + 'static> Transport for PollTransport<S> {
 
     async fn close(&mut self, _reason: &str) {
         self.pending = None;
+        self.pending_digest = None;
     }
 
     async fn on_frame_outcome(&mut self, outcome: FrameOutcome) {
         let pending = self.pending.take();
-        if outcome == FrameOutcome::Published {
-            if let Some(c) = pending {
-                self.committed = Some(c);
+        let digest = self.pending_digest.take();
+        match outcome {
+            FrameOutcome::Published => {
+                self.drop_streak = 0;
+                self.last_static_digest = if pending.is_some() { None } else { digest };
+                if let Some(c) = pending {
+                    self.committed = Some(c);
+                }
+            }
+            FrameOutcome::Dropped(reason) => {
+                self.drop_streak += 1;
+                if self.drop_streak >= self.cfg.max_drop_attempts {
+                    // Poison frame: stop re-fetching it. Advance past it when
+                    // the response named a next cursor; otherwise remember its
+                    // digest so the identical window is skipped.
+                    tracing::error!(
+                        source_id = %self.source_id,
+                        attempts = self.drop_streak,
+                        reason = ?reason,
+                        "poll frame dropped repeatedly; skipping poison window"
+                    );
+                    self.drop_streak = 0;
+                    match pending {
+                        Some(c) => {
+                            self.committed = Some(c);
+                            self.last_static_digest = None;
+                        }
+                        None => self.last_static_digest = digest,
+                    }
+                }
             }
         }
     }
@@ -282,6 +388,7 @@ mod tests {
     struct Srv {
         seen: Arc<Mutex<Vec<Seen>>>,
         status: Arc<Mutex<u16>>,
+        mode: Arc<Mutex<u8>>,
     }
 
     async fn handler(
@@ -294,6 +401,16 @@ mod tests {
             .get("authorization")
             .map(|v| v.to_str().unwrap().to_string());
         s.seen.lock().unwrap().push((cur.clone(), auth));
+        match *s.mode.lock().unwrap() {
+            1 => {
+                return (
+                    StatusCode::OK,
+                    format!(r#"{{"items":[1],"next":"{}"}}"#, "x".repeat(600)),
+                )
+            }
+            2 => return (StatusCode::OK, r#"{"items":[1]}"#.into()),
+            _ => {}
+        }
         let code = *s.status.lock().unwrap();
         if code != 200 {
             return (StatusCode::from_u16(code).unwrap(), String::new());
@@ -337,6 +454,8 @@ mod tests {
             interval: Duration::from_millis(5),
             request_timeout: Duration::from_secs(2),
             max_body_bytes: 1024,
+            max_drop_attempts: 3,
+            egress_allow: vec!["127.0.0.1".parse().unwrap()],
             allow_loopback_insecure: true,
         }
     }
@@ -449,6 +568,71 @@ mod tests {
         assert!(PollTransport::new(c, s()).is_err());
         let mut c = cfg(addr);
         c.auth.as_mut().unwrap().handle = "nope".into();
+        assert!(PollTransport::new(c, s()).is_err());
+    }
+
+    #[tokio::test]
+    async fn poison_frame_is_skipped_after_n_drops() {
+        let (addr, srv) = start().await;
+        let (mut t, _) = mk(addr);
+        for _ in 0..3 {
+            t.next_frame().await.unwrap().unwrap();
+            t.on_frame_outcome(FrameOutcome::Dropped(
+                crate::connector::FrameDropReason::GuestError,
+            ))
+            .await;
+        }
+        assert_eq!(t.cursor(), Some("c1"), "advanced past the poison window");
+        t.next_frame().await.unwrap().unwrap();
+        let seen = srv.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 4);
+        assert!(seen[..3].iter().all(|s| s.0.is_none()));
+        assert_eq!(seen[3].0.as_deref(), Some("c1"));
+    }
+
+    #[tokio::test]
+    async fn missing_or_oversize_cursor_never_republishes_same_window() {
+        for mode in [2u8, 1u8] {
+            let (addr, srv) = start().await;
+            *srv.mode.lock().unwrap() = mode;
+            let (mut t, _) = mk(addr);
+            t.next_frame().await.unwrap().unwrap();
+            t.on_frame_outcome(FrameOutcome::Published).await;
+            assert_eq!(t.cursor(), None, "mode {mode}: cursor must not advance");
+            let again = tokio::time::timeout(Duration::from_millis(120), t.next_frame()).await;
+            assert!(again.is_err(), "mode {mode}: identical window re-published");
+            assert!(srv.seen.lock().unwrap().len() >= 2, "kept polling");
+        }
+    }
+
+    #[tokio::test]
+    async fn ssrf_targets_refused_and_limits_validated() {
+        let (addr, _s) = start().await;
+        for u in [
+            "https://169.254.169.254/x",
+            "https://10.1.1.1/x",
+            "https://localhost/x",
+        ] {
+            let mut c = cfg(addr);
+            c.url = u.into();
+            c.allow_loopback_insecure = false;
+            c.egress_allow = vec![];
+            let mut t =
+                PollTransport::new(c, CountingSecrets(Arc::new(AtomicUsize::new(0)))).unwrap();
+            assert!(
+                matches!(t.next_frame().await, Err(TransportError::Connect(_))),
+                "{u}"
+            );
+        }
+        let s = || CountingSecrets(Arc::new(AtomicUsize::new(0)));
+        let mut c = cfg(addr);
+        c.interval = Duration::ZERO;
+        assert!(PollTransport::new(c, s()).is_err());
+        let mut c = cfg(addr);
+        c.interval = Duration::MAX;
+        assert!(PollTransport::new(c, s()).is_err());
+        let mut c = cfg(addr);
+        c.max_drop_attempts = 0;
         assert!(PollTransport::new(c, s()).is_err());
     }
 }
