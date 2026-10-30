@@ -115,6 +115,49 @@ fn link_stage_v2_imports(linker: &mut Linker<ExecState>) -> Result<(), ExecutorE
     Ok(())
 }
 
+/// `world stage-tools`'s generated bindings (P3b): `stage-v2`'s imports plus
+/// the `tool` host import, exporting only `tool-provider`. A NEW world -- the
+/// frozen `stage`/`stage-next`/`stage-v2` worlds are untouched. Every shared
+/// interface is remapped (`with`) onto the existing bindings so one `Host`
+/// impl per interface on [`ExecState`] serves every world; only `tool` and
+/// `tool-provider` are generated here.
+pub mod stage_tools_world {
+    wasmtime::component::bindgen!({
+        path: "../../wit/waddle-bundle",
+        world: "stage-tools",
+        imports: { default: async },
+        exports: { default: async },
+        additional_derives: [serde::Serialize, serde::Deserialize],
+        with: {
+            "waddle:bundle/types@1.0.0": super::waddle::bundle::types,
+            "waddle:bundle/context-v2@1.0.0": super::stage_v2_world::waddle::bundle::context_v2,
+            "waddle:bundle/http@1.0.0": super::waddle::bundle::http,
+            "waddle:bundle/kv@1.0.0": super::waddle::bundle::kv,
+            "waddle:bundle/db@1.0.0": super::waddle::bundle::db,
+            "waddle:bundle/relay@1.0.0": super::waddle::bundle::relay,
+            "waddle:bundle/flags@1.0.0": super::waddle::bundle::flags,
+            "waddle:bundle/log@1.0.0": super::waddle::bundle::log,
+            "waddle:bundle/clock@1.0.0": super::waddle::bundle::clock,
+            "waddle:bundle/overlay@1.0.0": super::stage_next_world::waddle::bundle::overlay,
+            "waddle:bundle/reputation@1.0.0": super::stage_next_world::waddle::bundle::reputation,
+            "waddle:bundle/economy@1.0.0": super::stage_next_world::waddle::bundle::economy,
+            "waddle:bundle/identity@1.0.0": super::stage_next_world::waddle::bundle::identity,
+            "waddle:bundle/ai@1.0.0": super::stage_next_world::waddle::bundle::ai,
+        },
+    });
+}
+
+/// Links the `stage-tools`-only host import (`tool`). Every other
+/// `stage-tools` import is already linked by `Stage::add_to_linker`,
+/// [`link_stage_next_imports`] and [`link_stage_v2_imports`]; a component of
+/// any other world never declares `tool`, so registering it is inert for it.
+/// Linking is reachability, never authority -- the stage gates every call.
+fn link_stage_tools_imports(linker: &mut Linker<ExecState>) -> Result<(), ExecutorError> {
+    use stage_tools_world::waddle::bundle::tool;
+    tool::add_to_linker::<_, HasExecState>(linker, |s| s)?;
+    Ok(())
+}
+
 /// Marker for the `stage-next`-only interfaces' `add_to_linker` (see
 /// [`stage_next_world`]).
 struct HasStageNextState;
@@ -324,6 +367,12 @@ pub fn build_linker_for(
             Stage::add_to_linker::<_, HasExecState>(&mut linker, |s| s)?;
             link_stage_next_imports(&mut linker)?;
             link_stage_v2_imports(&mut linker)?;
+        }
+        WitWorld::StageTools => {
+            Stage::add_to_linker::<_, HasExecState>(&mut linker, |s| s)?;
+            link_stage_next_imports(&mut linker)?;
+            link_stage_v2_imports(&mut linker)?;
+            link_stage_tools_imports(&mut linker)?;
         }
         WitWorld::Connector => {
             use connector_world::waddle::bundle::{clock, flags, http, log};

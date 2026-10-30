@@ -1,0 +1,17 @@
+(module
+  (import "waddle:bundle/tool@1.0.0" "invoke" (func $invoke (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (memory (export "memory") 1)
+  (global $bump (mut i32) (i32.const 1024))
+  (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32)
+    (local $p i32)
+    (local.set $p (global.get $bump))
+    (global.set $bump (i32.add (global.get $bump) (local.get 3)))
+    (local.get $p))
+  ;; call(name: string, args: list<u8>) -> result<list<u8>, tool-error>
+  ;; returns ptr to [disc u8 @0][list ptr @4][list len @8]: ok(empty list)
+  (func (export "waddle:bundle/tool-provider@1.0.0#call") (param i32 i32 i32 i32) (result i32)
+    (i32.store8 (i32.const 512) (i32.const 0))
+    (i32.store (i32.const 516) (i32.const 0))
+    (i32.store (i32.const 520) (i32.const 0))
+    (i32.const 512))
+)

@@ -58,6 +58,7 @@ use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::config::CliConfig;
+use crate::engine::stage_tools_world::{StageTools, StageToolsPre};
 use crate::engine::stage_v2_world::{StageV2, StageV2Pre};
 use crate::engine::{ticks_for_deadline, Stage, StagePre};
 use crate::error::ExecutorError;
@@ -115,6 +116,12 @@ type Scope = (i32, i32, String);
 /// other path.
 const ACTION_STAGE_V2_EXPORT: &str = "waddle:bundle/action-stage-v2@1.0.0";
 
+/// Fully-qualified export a `world stage-tools` component carries (and no
+/// `process-stage`/`action-stage*`); its presence selects the tools family.
+/// Detected by this one export name, same discipline as
+/// [`ACTION_STAGE_V2_EXPORT`].
+const TOOL_PROVIDER_EXPORT: &str = "waddle:bundle/tool-provider@1.0.0";
+
 /// A pre-linked component of either WIT-world family the executor serves:
 /// the frozen v1 `stage`/`stage-next` family (string scope) or `stage-v2`
 /// (authoritative numeric scope). Both share one registry, one linker and one
@@ -123,6 +130,8 @@ const ACTION_STAGE_V2_EXPORT: &str = "waddle:bundle/action-stage-v2@1.0.0";
 enum GuestPre {
     V1(StagePre<ExecState>),
     V2(StageV2Pre<ExecState>),
+    /// `world stage-tools` (P3b): exports only `tool-provider`.
+    Tools(StageToolsPre<ExecState>),
 }
 
 impl GuestPre {
@@ -132,6 +141,11 @@ impl GuestPre {
         instance_pre: wasmtime::component::InstancePre<ExecState>,
     ) -> wasmtime::Result<Self> {
         if component
+            .get_export_index(None, TOOL_PROVIDER_EXPORT)
+            .is_some()
+        {
+            Ok(Self::Tools(StageToolsPre::new(instance_pre)?))
+        } else if component
             .get_export_index(None, ACTION_STAGE_V2_EXPORT)
             .is_some()
         {
@@ -146,6 +160,10 @@ impl GuestPre {
 enum GuestInstance {
     V1(Stage),
     V2(StageV2),
+    /// Held so the instance lives for the call; its `tool-provider.call`
+    /// dispatch arm lands with `ExportKind::ToolCall` (P3b Task 2).
+    #[allow(dead_code)]
+    Tools(StageTools),
 }
 
 struct LoadedBundle {
@@ -1271,6 +1289,10 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
     let instantiated = match &pre {
         GuestPre::V1(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V1),
         GuestPre::V2(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V2),
+        GuestPre::Tools(p) => p
+            .instantiate_async(&mut store)
+            .await
+            .map(GuestInstance::Tools),
     };
     let stage = match instantiated {
         Ok(stage) => stage,
@@ -1308,6 +1330,12 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
                         .call_transform(&mut store, &event)
                         .await
                 }
+                GuestInstance::Tools(_) => {
+                    return Err(error_body(
+                        ErrorCode::ExportMissing,
+                        "a stage-tools component exports tool-provider only; it has no transform export",
+                    ));
+                }
             };
             metrics.record_guest(&body.app_id, "transform", guest_started.elapsed());
             match outcome {
@@ -1336,6 +1364,12 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
                     st.waddle_bundle_action_stage_v2()
                         .call_dispatch(&mut store, &envelope.envelope, &envelope.config)
                         .await
+                }
+                GuestInstance::Tools(_) => {
+                    return Err(error_body(
+                        ErrorCode::ExportMissing,
+                        "a stage-tools component exports tool-provider only; it has no dispatch export",
+                    ));
                 }
             };
             metrics.record_guest(&body.app_id, "dispatch", guest_started.elapsed());
