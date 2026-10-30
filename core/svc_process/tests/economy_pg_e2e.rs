@@ -49,6 +49,7 @@ const TENANT: i32 = 1;
 const COMMUNITY: i32 = 10;
 const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_economy_store.sql");
 const IDEMPOTENCY_DDL: &str = include_str!("../../../scripts/db/bundle_economy_idempotency.sql");
+const LEDGER_KINDS_DDL: &str = include_str!("../../../scripts/db/bundle_economy_ledger_kinds.sql");
 /// The spine events the two actors' invocations handle (UUID v4s).
 const ALICE_EVENT: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
 const BOB_EVENT: &str = "6f1f5a2e-9d0b-4c53-8a7e-1b2c3d4e5f60";
@@ -267,6 +268,7 @@ async fn world() -> World {
     .await;
     exec(&su, SHIPPED_DDL).await;
     exec(&su, IDEMPOTENCY_DDL).await;
+    exec(&su, LEDGER_KINDS_DDL).await;
     let (alice, bob, stranger) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
     exec(
         &su,

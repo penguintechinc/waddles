@@ -26,6 +26,34 @@ use crate::{
     EconomyCaps, EconomyError, EconomyScope, IdempotencyKey, MAX_IDEMPOTENCY_KEY_LEN,
 };
 
+/// The window name of the ONE shared 24h mint budget (`credit`, `batch_credit`
+/// and `exchange` all draw on it, so a caller cannot mint the daily maximum
+/// through one and again through another) and its ledger kinds. `admin_adjust`
+/// deliberately has NO daily window: it is a privileged, audited action bounded
+/// only by the supply ceiling.
+const MINT_WINDOW: &str = "mint";
+const MINT_KINDS: &str = "'credit','exchange'";
+/// The spend budget: plain and conditional debits share one window.
+const DEBIT_KINDS: &str = "'debit','cond_debit'";
+
+/// Active-membership predicate for a multi-row guarded `UPDATE economy_balances
+/// b ...` (the row's own `b.user_uuid`; binds `$1` tenant, `$2` community).
+const ROW_MEMBER_PREDICATE: &str = "EXISTS (SELECT 1 FROM community_members cm \
+     JOIN communities c ON c.id = cm.community_id \
+     WHERE cm.community_id = $2 AND c.tenant_id = $1 AND cm.user_uuid = b.user_uuid \
+       AND cm.is_active IS TRUE AND cm.removed_at IS NULL AND cm.left_at IS NULL)";
+
+/// Extra ledger columns a write may record besides kind/delta (all nullable):
+/// `stake`/`payout` (exchange: points claimed / currency credited; admin set:
+/// target in `payout`), the exchange `rate`, and a conditional debit's floor.
+#[derive(Default, Clone, Copy)]
+struct LedgerExtra {
+    stake: Option<i64>,
+    payout: Option<i64>,
+    rate: Option<(i64, i64)>,
+    min_balance: Option<i64>,
+}
+
 /// Longest suffix a multi-row op appends to its key (`:m` + up to 3 digits).
 const MEMBER_KEY_SUFFIX_LEN: usize = 5;
 
@@ -60,12 +88,31 @@ impl PriorMovement {
         self.kind == "debit" && self.user == user && self.delta.checked_neg() == Some(amount)
     }
 
-    fn replays_exchange(&self, user: Uuid, from_amount: i64, credited: i64) -> bool {
+    /// Binds the rate too: two rates that happen to credit the same amount are
+    /// different claims.
+    fn replays_exchange(
+        &self,
+        user: Uuid,
+        from_amount: i64,
+        rate_num: i64,
+        rate_den: i64,
+        credited: i64,
+    ) -> bool {
         self.kind == "exchange"
             && self.user == user
             && self.delta == credited
             && self.stake == Some(from_amount)
             && self.payout == Some(credited)
+            && self.rate_num == Some(rate_num)
+            && self.rate_den == Some(rate_den)
+    }
+
+    /// A conditional debit has its own ledger kind and binds its floor.
+    fn replays_cond_debit(&self, user: Uuid, amount: i64, min_balance: i64) -> bool {
+        self.kind == "cond_debit"
+            && self.user == user
+            && self.delta.checked_neg() == Some(amount)
+            && self.min_balance == Some(min_balance)
     }
 
     /// A `Set` row records its absolute target in `payout`; a `Delta` row
@@ -154,7 +201,7 @@ impl PostgresEconomyStore {
 
     /// Takes the community-wide supply lock (always AFTER the per-kind scope
     /// lock) and refuses if `SUM(balance) + add` would pass `max_supply`.
-    async fn check_supply<C: ConnectionTrait>(
+    pub(super) async fn check_supply<C: ConnectionTrait>(
         conn: &C,
         scope: &EconomyScope,
         add: i64,
@@ -254,8 +301,7 @@ impl PostgresEconomyStore {
         user: Uuid,
         delta: i64,
         kind: &'static str,
-        stake: Option<i64>,
-        payout: Option<i64>,
+        extra: LedgerExtra,
         min_after: i64,
         key: &IdempotencyKey,
     ) -> Result<Option<i64>, EconomyError> {
@@ -272,9 +318,10 @@ impl PostgresEconomyStore {
              ), led AS ( \
                  INSERT INTO economy_ledger \
                      (tenant_id, community_id, app_id, user_uuid, kind, delta, stake, payout, \
-                      balance_after, idempotency_key) \
+                      rate_num, rate_den, min_balance, balance_after, idempotency_key) \
                  SELECT $1::INT, $2::INT, $5::TEXT, $3::UUID, $6::TEXT, $4::BIGINT, \
-                        $7::BIGINT, $8::BIGINT, upd.balance, $9::TEXT FROM upd \
+                        $7::BIGINT, $8::BIGINT, $11::BIGINT, $12::BIGINT, $13::BIGINT, \
+                        upd.balance, $9::TEXT FROM upd \
              ) \
              SELECT balance FROM upd"
         );
@@ -282,10 +329,13 @@ impl PostgresEconomyStore {
         values.push(Value::BigInt(Some(delta)));
         values.push(Value::String(Some(scope.app_id.clone())));
         values.push(Value::String(Some(kind.to_string())));
-        values.push(Value::BigInt(stake));
-        values.push(Value::BigInt(payout));
+        values.push(Value::BigInt(extra.stake));
+        values.push(Value::BigInt(extra.payout));
         values.push(Value::String(Some(key.as_str().to_string())));
         values.push(Value::BigInt(Some(min_after)));
+        values.push(Value::BigInt(extra.rate.map(|r| r.0)));
+        values.push(Value::BigInt(extra.rate.map(|r| r.1)));
+        values.push(Value::BigInt(extra.min_balance));
         let Some(row) = conn
             .query_one_raw(stmt(&sql, values))
             .await
@@ -333,8 +383,7 @@ impl PostgresEconomyStore {
         scope: &EconomyScope,
         user: Uuid,
         credited: i64,
-        stake: Option<i64>,
-        payout: Option<i64>,
+        extra: LedgerExtra,
         max_supply: i64,
         caps: EconomyCaps,
         key: &IdempotencyKey,
@@ -342,17 +391,17 @@ impl PostgresEconomyStore {
     ) -> Result<i64, EconomyError> {
         validate_caps(caps)?;
         let txn = self.begin_txn().await?;
-        lock_scope(&txn, scope, op).await?;
+        lock_scope(&txn, scope, MINT_WINDOW).await?;
         if let Some(balance) = Self::replay_single(&txn, scope, op, key, replays).await? {
             return Ok(balance);
         }
-        enforce_user_cap(&txn, scope, user, op, "delta", credited, caps).await?;
-        enforce_scope_cap(&txn, scope, op, "delta", credited, caps).await?;
+        enforce_user_cap(&txn, scope, user, MINT_KINDS, "delta", credited, caps).await?;
+        enforce_scope_cap(&txn, scope, MINT_KINDS, "delta", credited, caps).await?;
         Self::require_member(&txn, scope, user).await?;
         Self::check_supply(&txn, scope, credited, max_supply).await?;
         Self::ensure_rows(&txn, scope, &[user]).await?;
         let Some(balance) =
-            Self::apply_delta(&txn, scope, user, credited, op, stake, payout, 0, key).await?
+            Self::apply_delta(&txn, scope, user, credited, op, extra, 0, key).await?
         else {
             return Err(Self::diagnose_refusal(&txn, scope, user).await?);
         };
@@ -378,8 +427,7 @@ impl PostgresEconomyStore {
             scope,
             user,
             amount,
-            None,
-            None,
+            LedgerExtra::default(),
             max_supply,
             caps,
             key,
@@ -409,12 +457,16 @@ impl PostgresEconomyStore {
             scope,
             user,
             credited,
-            Some(from_amount),
-            Some(credited),
+            LedgerExtra {
+                stake: Some(from_amount),
+                payout: Some(credited),
+                rate: Some((rate_num, rate_den)),
+                min_balance: None,
+            },
             max_supply,
             caps,
             key,
-            |p| p.replays_exchange(user, from_amount, credited),
+            |p| p.replays_exchange(user, from_amount, rate_num, rate_den, credited),
         )
         .await
     }
@@ -432,7 +484,7 @@ impl PostgresEconomyStore {
         validate_caps(caps)?;
         let (sorted, total) = validate_entries(entries, Some(max_amount))?;
         let txn = self.begin_txn().await?;
-        lock_scope(&txn, scope, "credit").await?;
+        lock_scope(&txn, scope, MINT_WINDOW).await?;
 
         // Replay: every derived row present and identical, the one past the end
         // absent. A partial or different set is a conflict, never applied.
@@ -463,9 +515,9 @@ impl PostgresEconomyStore {
         }
 
         for (user, amount) in &sorted {
-            enforce_user_cap(&txn, scope, *user, "credit", "delta", *amount, caps).await?;
+            enforce_user_cap(&txn, scope, *user, MINT_KINDS, "delta", *amount, caps).await?;
         }
-        enforce_scope_cap(&txn, scope, "credit", "delta", total, caps).await?;
+        enforce_scope_cap(&txn, scope, MINT_KINDS, "delta", total, caps).await?;
         let users: Vec<Uuid> = sorted.iter().map(|(u, _)| *u).collect();
         for user in &users {
             Self::require_member(&txn, scope, *user).await?;
@@ -482,6 +534,7 @@ impl PostgresEconomyStore {
                     SET balance = b.balance + w.amt, updated_at = NOW() \
                    FROM w \
                   WHERE b.tenant_id = $1 AND b.community_id = $2 AND b.user_uuid = w.u \
+                    AND {ROW_MEMBER_PREDICATE} \
               RETURNING b.user_uuid AS u, b.balance AS bal, w.amt AS amt, w.ord AS ord \
              ), led AS ( \
                  INSERT INTO economy_ledger \
@@ -508,7 +561,10 @@ impl PostgresEconomyStore {
             .try_get("", "n")
             .map_err(backend_err)?;
         if usize::try_from(n).ok() != Some(sorted.len()) {
-            return Err(backend_err("batch credit applied an unexpected row count"));
+            // The guarded UPDATE skipped a user who is no longer an active member
+            // (left between the preflight and the write). Returning without
+            // `commit` rolls the WHOLE batch back: nobody is credited.
+            return Err(EconomyError::NotAMember);
         }
         txn.commit().await.map_err(backend_err)?;
         metrics::record_applied_amount("batch_credit", total);
@@ -541,13 +597,23 @@ impl PostgresEconomyStore {
             .ok_or_else(|| EconomyError::Invalid("amount out of range".to_string()))?;
         let txn = self.begin_txn().await?;
         lock_scope(&txn, scope, "debit").await?;
-        if let Some(balance) =
-            Self::replay_single(&txn, scope, op, key, |p| p.replays_debit(user, amount)).await?
+        // Plain and conditional debits have distinct ledger kinds (and so
+        // distinct idempotency identities); a conditional debit also binds its
+        // floor. Both draw on one spend window.
+        let ledger_kind: &'static str = if op == "debit" { "debit" } else { "cond_debit" };
+        if let Some(balance) = Self::replay_single(&txn, scope, op, key, |p| {
+            if ledger_kind == "debit" {
+                p.replays_debit(user, amount)
+            } else {
+                p.replays_cond_debit(user, amount, min_balance)
+            }
+        })
+        .await?
         {
             return Ok(balance);
         }
-        enforce_user_cap(&txn, scope, user, "debit", "-delta", amount, caps).await?;
-        enforce_scope_cap(&txn, scope, "debit", "-delta", amount, caps).await?;
+        enforce_user_cap(&txn, scope, user, DEBIT_KINDS, "-delta", amount, caps).await?;
+        enforce_scope_cap(&txn, scope, DEBIT_KINDS, "-delta", amount, caps).await?;
         // `balance + (-amount) >= min_balance` (>= 0 always): rejects, never
         // partially applies; CHECK (balance >= 0) is the backstop.
         let Some(balance) = Self::apply_delta(
@@ -555,9 +621,11 @@ impl PostgresEconomyStore {
             scope,
             user,
             neg,
-            "debit",
-            None,
-            None,
+            ledger_kind,
+            LedgerExtra {
+                min_balance: (ledger_kind == "cond_debit").then_some(min_balance),
+                ..LedgerExtra::default()
+            },
             min_balance,
             key,
         )
@@ -616,6 +684,9 @@ impl PostgresEconomyStore {
         is_admin_authorized: bool,
         key: &IdempotencyKey,
     ) -> Result<i64, EconomyError> {
+        // NO daily window here BY DESIGN: `admin_adjust` is a privileged, audited
+        // action (ledger kind `admin_adjust`), bounded only by the community
+        // supply ceiling below -- it is not part of the shared 24h mint budget.
         // Fail closed BEFORE any I/O: the stage's guarantee is the only gate.
         if !is_admin_authorized {
             return Err(EconomyError::NotAuthorized);
@@ -672,8 +743,10 @@ impl PostgresEconomyStore {
             user,
             delta,
             "admin_adjust",
-            None,
-            payout,
+            LedgerExtra {
+                payout,
+                ..LedgerExtra::default()
+            },
             0,
             key,
         )
@@ -774,6 +847,7 @@ impl PostgresEconomyStore {
                     SET balance = b.balance + w.amt, updated_at = NOW() \
                    FROM w \
                   WHERE b.tenant_id = $1 AND b.community_id = $2 AND b.user_uuid = w.u \
+                    AND {ROW_MEMBER_PREDICATE} \
                     AND EXISTS (SELECT 1 FROM debit) \
               RETURNING b.user_uuid AS u, b.balance AS bal, w.amt AS amt, w.ord AS ord \
              ), led_pot AS ( \
@@ -826,7 +900,9 @@ impl PostgresEconomyStore {
             return Err(EconomyError::InsufficientFunds { balance: held });
         }
         if usize::try_from(n).ok() != Some(sorted.len()) {
-            return Err(backend_err("pay_pot credited an unexpected winner count"));
+            // A winner who left between the preflight and the guarded write was
+            // not credited: roll the whole payout (incl. the pot debit) back.
+            return Err(EconomyError::NotAMember);
         }
         txn.commit().await.map_err(backend_err)?;
         metrics::record_applied_amount("pay_pot", total);

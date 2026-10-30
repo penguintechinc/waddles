@@ -42,9 +42,10 @@
 //! outcome, so the host bounds how much a single call can mint.
 //!
 //! Both rolling-24h daily aggregates ([`EconomyCaps`]: per user, per
-//! (tenant, community, app)) are ALSO enforced durably here, derived from the
+//! (tenant, community) -- ONE budget shared by every app bundle of the
+//! community, never per app) are ALSO enforced durably here, derived from the
 //! append-only ledger inside the write transaction under a transaction-scoped
-//! advisory lock keyed on `(tenant, community, app, wager|transfer)`: the
+//! advisory lock keyed on `(tenant, community, window)`: the
 //! gate's in-memory copy resets on restart and multiplies across replicas, the
 //! ledger does not. The lock is always the FIRST lock a transaction takes (one
 //! per transaction), so the lock order is uniform and cannot cycle with the
@@ -122,12 +123,14 @@ pub const MAX_PAYOUT_MULTIPLE: i64 = 100;
 /// `i64`s so they can never be transposed at a call site.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct EconomyCaps {
-    /// Max rolling-24h sum for one acting user within one app and community:
+    /// Max rolling-24h sum for one acting user within one community (across
+    /// ALL of its apps -- the budget is per community, never per app):
     /// of stakes AND (separately) of payouts credited for a wager, of amounts
     /// sent for a transfer.
     pub per_user_daily_max: i64,
-    /// Max rolling-24h sum by one app across the whole (tenant, community),
-    /// measured the same way as [`Self::per_user_daily_max`].
+    /// Max rolling-24h sum across the whole (tenant, community) -- every app
+    /// bundle of the community shares it -- measured the same way as
+    /// [`Self::per_user_daily_max`].
     pub per_scope_daily_max: i64,
 }
 
@@ -235,12 +238,12 @@ pub enum EconomyError {
     /// The stake/amount (or a payout) exceeds the enforced cap `cap`.
     #[error("amount exceeds the enforced cap ({cap})")]
     OverCap { cap: i64 },
-    /// The acting user's rolling-24h total for this app/community would pass
+    /// The acting user's rolling-24h total for this community would pass
     /// `cap`. Surfaces under the same stable `quota_exceeded` code the gate's
     /// in-memory per-user check uses.
     #[error("rolling-24h per-user economy cap ({cap}) would be exceeded")]
     UserQuotaExceeded { cap: i64 },
-    /// This app's rolling-24h total across the whole (tenant, community) would
+    /// The community's rolling-24h total (all apps) would
     /// pass `cap`. Same `quota_exceeded` code as the gate's per-scope check.
     #[error("rolling-24h per-scope economy cap ({cap}) would be exceeded")]
     ScopeQuotaExceeded { cap: i64 },
@@ -342,7 +345,9 @@ pub trait EconomyStore: Send + Sync {
     /// `caps` the durable daily aggregates. Requires `1 <= stake <= max_bet`,
     /// `0 <= payout <= stake * `[`MAX_PAYOUT_MULTIPLE`], `balance >= stake`,
     /// the stake to fit both rolling-24h STAKE caps and the payout to fit both
-    /// rolling-24h PAYOUT (mint) caps. `key` makes the call idempotent: a
+    /// rolling-24h PAYOUT (mint) caps, and `payout - stake` (what the wager
+    /// CREATES) to fit the community money-supply ceiling `max_supply`
+    /// ([`EconomyError::SupplyCapReached`]). `key` makes the call idempotent: a
     /// replay with identical parameters returns the original balance and moves
     /// nothing; the same key with different parameters is
     /// [`EconomyError::IdempotencyConflict`].
@@ -354,6 +359,7 @@ pub trait EconomyStore: Send + Sync {
         stake: i64,
         payout: i64,
         max_bet: i64,
+        max_supply: i64,
         caps: EconomyCaps,
         key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<i64, EconomyError>>;
@@ -384,7 +390,8 @@ pub trait EconomyStore: Send + Sync {
 
     /// MINT: atomically adds `amount` to `user` (an active member) and returns
     /// the NEW balance. Bounded by the host-computed per-call `max_amount`, the
-    /// rolling-24h mint `caps` (ledger kind `credit`) and the community
+    /// rolling-24h mint `caps` (ONE window shared with `batch_credit` and
+    /// `exchange`: ledger kinds `credit` + `exchange`) and the community
     /// money-supply ceiling `max_supply` (`SUM(balance) + amount <=
     /// max_supply`, checked inside the supply-locked transaction). Idempotent
     /// by `key` exactly as for [`Self::wager`].
@@ -419,7 +426,7 @@ pub trait EconomyStore: Send + Sync {
     /// SPEND/BURN: atomically subtracts `amount` from `user` (guarded
     /// `balance >= amount`; [`EconomyError::InsufficientFunds`] otherwise, no
     /// row changes) and returns the NEW balance. Bounded by `max_amount` and
-    /// the rolling-24h spend `caps` (ledger kind `debit`).
+    /// the rolling-24h spend `caps` (ledger kinds `debit` + `cond_debit`, one window).
     fn debit<'a>(
         &'a self,
         scope: &'a EconomyScope,
@@ -480,7 +487,7 @@ pub trait EconomyStore: Send + Sync {
     /// and credits `floor(from_amount * rate_num / rate_den)` to `user`.
     /// The rate is bounded host-side ([`MAX_EXCHANGE_RATE_PART`],
     /// [`MAX_EXCHANGE_MULTIPLE`]); the credited amount is bounded by
-    /// `max_amount`, the rolling-24h mint `caps` (kind `exchange`) and
+    /// `max_amount`, the rolling-24h mint `caps` (the SAME window as `credit`/`batch_credit`) and
     /// `max_supply`. Returns the NEW balance.
     #[allow(clippy::too_many_arguments)]
     fn exchange<'a>(

@@ -1,7 +1,8 @@
 """Economy ledger kinds for the compound host-cap ops (P4 Task 1).
 
 Extends the `economy_ledger.kind` CHECK to allow `credit`, `debit`,
-`admin_adjust`, `pot_payout` and `exchange` (the new `bundle_host_economy`
+`cond_debit`, `admin_adjust`, `pot_payout` and `exchange`, and adds the
+nullable replay-binding columns `rate_num`/`rate_den`/`min_balance` (the new `bundle_host_economy`
 ops). Idempotent; reaches existing databases. The DDL lives in
 `scripts/db/bundle_economy_ledger_kinds.sql` so the shipped schema and the
 Rust-tested schema cannot drift. No new privilege.
@@ -37,7 +38,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Restore the original three-kind CHECK (fails if new-kind rows exist)."""
-    op.execute("ALTER TABLE economy_ledger DROP CONSTRAINT IF EXISTS economy_ledger_kind_check")
+    op.execute(
+        "ALTER TABLE economy_ledger DROP CONSTRAINT IF EXISTS economy_ledger_kind_check"
+    )
+    op.execute("ALTER TABLE economy_ledger DROP COLUMN IF EXISTS min_balance")
+    op.execute("ALTER TABLE economy_ledger DROP COLUMN IF EXISTS rate_den")
+    op.execute("ALTER TABLE economy_ledger DROP COLUMN IF EXISTS rate_num")
     op.execute(
         "ALTER TABLE economy_ledger ADD CONSTRAINT economy_ledger_kind_check "
         "CHECK (kind IN ('wager', 'transfer_out', 'transfer_in'))"

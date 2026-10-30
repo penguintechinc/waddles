@@ -104,3 +104,11 @@ exact shipped DDL. The #751 regressions:
 | Mint cap on payout | `the_per_user_mint_cap_is_enforced_on_the_payout_not_the_stake`, `a_large_losing_stake_spends_the_stake_budget_not_the_mint_budget`, `the_per_scope_mint_cap_binds_across_users_on_the_payout`, `the_mint_cap_is_durable_across_a_fresh_store`, `a_payout_window_rolls_off_after_24_hours` |
 | Replay / double-spend | `a_replayed_wager_credits_once_and_returns_the_original_balance`, `a_replayed_transfer_moves_money_once`, `a_key_reused_with_different_parameters_is_a_conflict_and_moves_nothing`, `a_refused_call_records_no_key_so_a_later_retry_applies_once`, `a_replay_is_not_refused_by_the_budget_its_own_first_run_used_up`, `keys_are_scoped_per_app`, `concurrent_retries_of_one_wager_credit_exactly_once`, `a_wager_and_a_transfer_racing_on_one_key_apply_at_most_one`, `the_database_refuses_a_second_ledger_row_for_one_key` |
 | Actor binding (stage side) | `core/svc_process/src/capabilities_economy_tests.rs`, `core/svc_process/tests/economy_pg_e2e.rs`, `core/svc_process/tests/identity_pg_e2e.rs` |
+
+## Windows and ceilings (P4 Task 1 + external money review)
+
+* Daily caps are per **community** `(tenant, community)`, shared by every app bundle of the community (not per app); the advisory lock serializing them is community-wide per window.
+* `credit`, `batch_credit` and `exchange` share ONE 24h mint window (ledger kinds `credit` + `exchange`); `debit` and `conditional_debit` (`cond_debit`) share one spend window.
+* `admin_adjust` has **no** daily window by design (privileged, audited); it is bounded by the supply ceiling.
+* The community supply ceiling (`max_supply`) applies to every mint: `credit`, `batch_credit`, `exchange`, `admin_adjust` and a `wager` whose payout exceeds its stake.
+* Idempotency keys stay per `(tenant, community, app)`.

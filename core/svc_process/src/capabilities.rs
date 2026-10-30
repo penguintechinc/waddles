@@ -1390,7 +1390,16 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
                 wiring
                     .store
-                    .wager(&scope, user, stake, payout, cap, economy_caps(family), key)
+                    .wager(
+                        &scope,
+                        user,
+                        stake,
+                        payout,
+                        cap,
+                        economy_max_supply(),
+                        economy_caps(family),
+                        key,
+                    )
                     .await
                     .map(|balance| serde_json::json!({ "balance": balance }))
             }

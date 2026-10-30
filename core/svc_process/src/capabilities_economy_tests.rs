@@ -105,6 +105,7 @@ impl EconomyStore for RecordingStore {
         stake: i64,
         payout: i64,
         max_bet: i64,
+        max_supply: i64,
         caps: EconomyCaps,
         key: &'a IdempotencyKey,
     ) -> bundle_host_economy::BoxFuture<'a, Result<i64, EconomyError>> {
@@ -118,6 +119,7 @@ impl EconomyStore for RecordingStore {
                     stake,
                     payout,
                     max_bet,
+                    max_supply,
                     caps.per_user_daily_max,
                     caps.per_scope_daily_max,
                 ],
@@ -632,7 +634,7 @@ async fn wager_reaches_the_store_with_host_derived_scope_and_the_declared_cap() 
     assert_eq!(users, &vec![f.alice]);
     // stake, payout, the per-call cap = the GRANT's declared 50 (not the
     // guest's), then the catalog's durable per-user / per-scope daily caps.
-    assert_eq!(nums, &vec![10, 25, 50, 10_000, 250_000]);
+    assert_eq!(nums, &vec![10, 25, 50, 1_000_000, 10_000, 250_000]);
 }
 
 #[tokio::test]

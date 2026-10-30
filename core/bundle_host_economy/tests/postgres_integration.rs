@@ -242,21 +242,21 @@ async fn wager_win_and_loss_apply_net_delta_with_one_ledger_row_each() {
     // win: stake 10, payout 25 -> +15
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 10, 25, 50, caps(), &key())
+            .wager(&scope(), f.alice, 10, 25, 50, MAX_SUPPLY, caps(), &key())
             .await,
         Ok(115)
     );
     // loss: stake 40, payout 0 -> -40
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 40, 0, 50, caps(), &key())
+            .wager(&scope(), f.alice, 40, 0, 50, MAX_SUPPLY, caps(), &key())
             .await,
         Ok(75)
     );
     // push: stake 5 payout 5 -> unchanged
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 5, 5, 50, caps(), &key())
+            .wager(&scope(), f.alice, 5, 5, 50, MAX_SUPPLY, caps(), &key())
             .await,
         Ok(75)
     );
@@ -297,7 +297,7 @@ async fn wager_cannot_stake_more_than_the_balance_even_with_a_big_payout() {
     // balance 10 < stake 11: refused even though payout would more than cover it.
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 11, 1_000, 50, caps(), &key())
+            .wager(&scope(), f.alice, 11, 1_000, 50, MAX_SUPPLY, caps(), &key())
             .await,
         Err(EconomyError::InsufficientFunds { balance: 10 })
     );
@@ -306,7 +306,7 @@ async fn wager_cannot_stake_more_than_the_balance_even_with_a_big_payout() {
     // An unfunded member (no row) reads as insufficient with balance 0.
     assert_eq!(
         f.store
-            .wager(&scope(), f.bob, 1, 0, 50, caps(), &key())
+            .wager(&scope(), f.bob, 1, 0, 50, MAX_SUPPLY, caps(), &key())
             .await,
         Err(EconomyError::InsufficientFunds { balance: 0 })
     );
@@ -318,20 +318,29 @@ async fn max_bet_and_payout_multiple_are_enforced_server_side_before_any_write()
     fund(&f, f.alice, 1_000_000).await;
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 51, 0, 50, caps(), &key())
+            .wager(&scope(), f.alice, 51, 0, 50, MAX_SUPPLY, caps(), &key())
             .await,
         Err(EconomyError::OverCap { cap: 50 })
     );
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 10, 1_001, 50, caps(), &key())
+            .wager(&scope(), f.alice, 10, 1_001, 50, MAX_SUPPLY, caps(), &key())
             .await,
         Err(EconomyError::OverCap { cap: 1_000 })
     );
     for (stake, payout) in [(0, 0), (-1, 0), (5, -1)] {
         assert!(matches!(
             f.store
-                .wager(&scope(), f.alice, stake, payout, 50, caps(), &key())
+                .wager(
+                    &scope(),
+                    f.alice,
+                    stake,
+                    payout,
+                    50,
+                    MAX_SUPPLY,
+                    caps(),
+                    &key()
+                )
                 .await,
             Err(EconomyError::Invalid(_))
         ));
@@ -352,7 +361,9 @@ async fn concurrent_wagers_never_overdraw_the_balance() {
         let store = Arc::clone(&store);
         let user = f.alice;
         tasks.push(tokio::spawn(async move {
-            store.wager(&scope(), user, 10, 0, 50, caps(), &key()).await
+            store
+                .wager(&scope(), user, 10, 0, 50, MAX_SUPPLY, caps(), &key())
+                .await
         }));
     }
     let (mut ok, mut insufficient) = (0, 0);
@@ -387,7 +398,7 @@ async fn concurrent_mixed_wagers_keep_the_ledger_and_balance_in_lockstep() {
         tasks.push(tokio::spawn(async move {
             let payout = if i % 2 == 0 { 30 } else { 0 };
             store
-                .wager(&scope(), user, 10, payout, 50, caps(), &key())
+                .wager(&scope(), user, 10, payout, 50, MAX_SUPPLY, caps(), &key())
                 .await
         }));
     }
@@ -578,7 +589,7 @@ async fn non_members_are_rejected_for_every_flavor_of_non_membership() {
     for who in [stranger, left, removed, inactive, other_community] {
         assert_eq!(
             f.store
-                .wager(&scope(), who, 1, 0, 100, caps(), &key())
+                .wager(&scope(), who, 1, 0, 100, MAX_SUPPLY, caps(), &key())
                 .await,
             Err(EconomyError::NotAMember),
             "wager {who}"
@@ -616,7 +627,16 @@ async fn non_members_are_rejected_for_every_flavor_of_non_membership() {
     };
     assert_eq!(
         f.store
-            .wager(&wrong_tenant, f.alice, 1, 0, 100, caps(), &key())
+            .wager(
+                &wrong_tenant,
+                f.alice,
+                1,
+                0,
+                100,
+                MAX_SUPPLY,
+                caps(),
+                &key()
+            )
             .await,
         Err(EconomyError::NotAMember)
     );
@@ -628,7 +648,16 @@ async fn non_members_are_rejected_for_every_flavor_of_non_membership() {
     };
     assert_eq!(
         f.store
-            .wager(&cross, other_community, 1, 0, 100, caps(), &key())
+            .wager(
+                &cross,
+                other_community,
+                1,
+                0,
+                100,
+                MAX_SUPPLY,
+                caps(),
+                &key()
+            )
             .await,
         Err(EconomyError::NotAMember)
     );
@@ -652,7 +681,7 @@ async fn a_member_with_a_null_user_uuid_is_unreachable_fail_closed() {
     );
     assert_eq!(
         f.store
-            .wager(&scope(), Uuid::nil(), 1, 0, 10, caps(), &key())
+            .wager(&scope(), Uuid::nil(), 1, 0, 10, MAX_SUPPLY, caps(), &key())
             .await,
         Err(EconomyError::NotAMember)
     );
@@ -738,7 +767,7 @@ async fn a_failing_statement_rolls_everything_back() {
     fund(&f, f.bob, i64::MAX - 1).await;
     let err = f
         .store
-        .wager(&scope(), f.bob, 10, 1_000, 50, caps(), &key())
+        .wager(&scope(), f.bob, 10, 1_000, 50, MAX_SUPPLY, caps(), &key())
         .await
         .unwrap_err();
     assert!(matches!(err, EconomyError::Backend(_)), "{err:?}");
@@ -751,7 +780,7 @@ async fn role_is_least_privilege_dml_only_append_only_ledger_no_foreign_tables()
     let f = fixture().await;
     fund(&f, f.alice, 100).await;
     f.store
-        .wager(&scope(), f.alice, 1, 0, 50, caps(), &key())
+        .wager(&scope(), f.alice, 1, 0, 50, MAX_SUPPLY, caps(), &key())
         .await
         .unwrap();
     for (sql, why) in [
@@ -874,13 +903,15 @@ async fn the_per_user_daily_stake_cap_is_enforced_from_the_ledger_and_rolls_off(
     let c = caps_of(30, 250_000);
     for _ in 0..3 {
         f.store
-            .wager(&scope(), f.alice, 10, 0, 50, c, &key())
+            .wager(&scope(), f.alice, 10, 0, 50, MAX_SUPPLY, c, &key())
             .await
             .unwrap();
     }
     // 30 staked: one more unit is over the per-user cap.
     assert_eq!(
-        f.store.wager(&scope(), f.alice, 1, 0, 50, c, &key()).await,
+        f.store
+            .wager(&scope(), f.alice, 1, 0, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::UserQuotaExceeded { cap: 30 })
     );
     // A refused call wrote no ledger row and so consumed nothing.
@@ -888,7 +919,9 @@ async fn the_per_user_daily_stake_cap_is_enforced_from_the_ledger_and_rolls_off(
     // Insufficient-funds refusals do not count either: bob (unfunded) fails
     // on funds, never on the shared scope budget.
     assert_eq!(
-        f.store.wager(&scope(), f.bob, 5, 0, 50, c, &key()).await,
+        f.store
+            .wager(&scope(), f.bob, 5, 0, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::InsufficientFunds { balance: 0 })
     );
     // Age every ledger row out of the window: the cap resets.
@@ -899,11 +932,13 @@ async fn the_per_user_daily_stake_cap_is_enforced_from_the_ledger_and_rolls_off(
     .await;
     assert!(f
         .store
-        .wager(&scope(), f.alice, 30, 0, 50, c, &key())
+        .wager(&scope(), f.alice, 30, 0, 50, MAX_SUPPLY, c, &key())
         .await
         .is_ok());
     assert_eq!(
-        f.store.wager(&scope(), f.alice, 1, 0, 50, c, &key()).await,
+        f.store
+            .wager(&scope(), f.alice, 1, 0, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::UserQuotaExceeded { cap: 30 })
     );
 }
@@ -915,35 +950,41 @@ async fn the_per_scope_cap_binds_across_users_and_is_per_app_and_per_community()
     fund(&f, f.bob, 1_000).await;
     let c = caps_of(10_000, 25);
     f.store
-        .wager(&scope(), f.alice, 10, 0, 50, c, &key())
+        .wager(&scope(), f.alice, 10, 0, 50, MAX_SUPPLY, c, &key())
         .await
         .unwrap();
     f.store
-        .wager(&scope(), f.bob, 10, 0, 50, c, &key())
+        .wager(&scope(), f.bob, 10, 0, 50, MAX_SUPPLY, c, &key())
         .await
         .unwrap();
     // 20 staked by this app in this community across two users; 6 more passes 25.
     assert_eq!(
-        f.store.wager(&scope(), f.alice, 6, 0, 50, c, &key()).await,
+        f.store
+            .wager(&scope(), f.alice, 6, 0, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::ScopeQuotaExceeded { cap: 25 })
     );
     assert!(f
         .store
-        .wager(&scope(), f.alice, 5, 0, 50, c, &key())
+        .wager(&scope(), f.alice, 5, 0, 50, MAX_SUPPLY, c, &key())
         .await
         .is_ok());
     assert_eq!(
-        f.store.wager(&scope(), f.bob, 1, 0, 50, c, &key()).await,
+        f.store
+            .wager(&scope(), f.bob, 1, 0, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::ScopeQuotaExceeded { cap: 25 })
     );
-    // A different APP has its own budget in the same community...
+    // A different APP of the SAME community shares the budget (per-community
+    // caps, user decision 2026-10-30: never Nx for N apps)...
     let other_app = scope_of(TENANT, COMMUNITY, "waddles.core.other-economy-app");
-    assert!(f
-        .store
-        .wager(&other_app, f.alice, 20, 0, 50, c, &key())
-        .await
-        .is_ok());
-    // ...and so does a different COMMUNITY.
+    assert_eq!(
+        f.store
+            .wager(&other_app, f.alice, 20, 0, 50, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::ScopeQuotaExceeded { cap: 25 })
+    );
+    // ...but a different COMMUNITY has its own.
     let outsider = Uuid::new_v4();
     exec(
         &f.su,
@@ -957,7 +998,7 @@ async fn the_per_scope_cap_binds_across_users_and_is_per_app_and_per_community()
     let other_community = scope_of(OTHER_TENANT, OTHER_COMMUNITY, APP_ID);
     assert!(f
         .store
-        .wager(&other_community, outsider, 25, 0, 50, c, &key())
+        .wager(&other_community, outsider, 25, 0, 50, MAX_SUPPLY, c, &key())
         .await
         .is_ok());
     // The window rolls off.
@@ -968,7 +1009,7 @@ async fn the_per_scope_cap_binds_across_users_and_is_per_app_and_per_community()
     .await;
     assert!(f
         .store
-        .wager(&scope(), f.bob, 25, 0, 50, c, &key())
+        .wager(&scope(), f.bob, 25, 0, 50, MAX_SUPPLY, c, &key())
         .await
         .is_ok());
 }
@@ -979,7 +1020,7 @@ async fn the_durable_caps_survive_a_restart_and_a_second_replica() {
     fund(&f, f.alice, 1_000).await;
     let c = caps_of(20, 250_000);
     f.store
-        .wager(&scope(), f.alice, 20, 0, 50, c, &key())
+        .wager(&scope(), f.alice, 20, 0, 50, MAX_SUPPLY, c, &key())
         .await
         .unwrap();
     // A brand-new pool + store stands in for a restarted process or a second
@@ -998,7 +1039,9 @@ async fn the_durable_caps_survive_a_restart_and_a_second_replica() {
         .unwrap(),
     );
     assert_eq!(
-        fresh.wager(&scope(), f.alice, 1, 0, 50, c, &key()).await,
+        fresh
+            .wager(&scope(), f.alice, 1, 0, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::UserQuotaExceeded { cap: 20 })
     );
 }
@@ -1029,7 +1072,9 @@ async fn concurrent_cross_user_and_cross_replica_wagers_never_overshoot_the_scop
         let store = Arc::clone(&stores[i % 2]);
         let user = if i % 3 == 0 { f.alice } else { f.bob };
         tasks.push(tokio::spawn(async move {
-            store.wager(&scope(), user, 5, 0, 50, c, &key()).await
+            store
+                .wager(&scope(), user, 5, 0, 50, MAX_SUPPLY, c, &key())
+                .await
         }));
     }
     let (mut ok, mut capped) = (0, 0);
@@ -1066,6 +1111,7 @@ async fn transfer_caps_are_durable_per_sender_and_per_scope_and_separate_from_wa
             50,
             0,
             50,
+            MAX_SUPPLY,
             caps_of(10_000, 10_000),
             &key(),
         )
@@ -1125,7 +1171,16 @@ async fn negative_caps_are_invalid_and_zero_caps_refuse_everything() {
     fund(&f, f.alice, 100).await;
     assert!(matches!(
         f.store
-            .wager(&scope(), f.alice, 1, 0, 50, caps_of(-1, 10), &key())
+            .wager(
+                &scope(),
+                f.alice,
+                1,
+                0,
+                50,
+                MAX_SUPPLY,
+                caps_of(-1, 10),
+                &key()
+            )
             .await,
         Err(EconomyError::Invalid(_))
     ));
@@ -1138,7 +1193,16 @@ async fn negative_caps_are_invalid_and_zero_caps_refuse_everything() {
     // Zero is the stage's fail-closed fallback for an unrecognized catalog.
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 1, 0, 50, caps_of(0, 0), &key())
+            .wager(
+                &scope(),
+                f.alice,
+                1,
+                0,
+                50,
+                MAX_SUPPLY,
+                caps_of(0, 0),
+                &key()
+            )
             .await,
         Err(EconomyError::UserQuotaExceeded { cap: 0 })
     );
@@ -1171,7 +1235,7 @@ async fn a_null_is_active_member_is_a_non_member_everywhere_fail_closed() {
     );
     assert_eq!(
         f.store
-            .wager(&scope(), ghost, 1, 0, 50, caps(), &key())
+            .wager(&scope(), ghost, 1, 0, 50, MAX_SUPPLY, caps(), &key())
             .await,
         Err(EconomyError::NotAMember)
     );
@@ -1283,20 +1347,20 @@ async fn a_replayed_wager_credits_once_and_returns_the_original_balance() {
     // win: stake 10, payout 25 -> 115
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 10, 25, 50, caps(), &k)
+            .wager(&scope(), f.alice, 10, 25, 50, MAX_SUPPLY, caps(), &k)
             .await,
         Ok(115)
     );
     // The retry (same key, same parameters) is a replay, not a second credit.
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 10, 25, 50, caps(), &k)
+            .wager(&scope(), f.alice, 10, 25, 50, MAX_SUPPLY, caps(), &k)
             .await,
         Ok(115)
     );
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 10, 25, 50, caps(), &k)
+            .wager(&scope(), f.alice, 10, 25, 50, MAX_SUPPLY, caps(), &k)
             .await,
         Ok(115)
     );
@@ -1308,13 +1372,13 @@ async fn a_replayed_wager_credits_once_and_returns_the_original_balance() {
     // STILL answers with the balance it originally produced, not the current.
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 40, 0, 50, caps(), &key())
+            .wager(&scope(), f.alice, 40, 0, 50, MAX_SUPPLY, caps(), &key())
             .await,
         Ok(75)
     );
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 10, 25, 50, caps(), &k)
+            .wager(&scope(), f.alice, 10, 25, 50, MAX_SUPPLY, caps(), &k)
             .await,
         Ok(115)
     );
@@ -1352,7 +1416,7 @@ async fn a_key_reused_with_different_parameters_is_a_conflict_and_moves_nothing(
     let w = key_of("evt-3:wager:0");
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 10, 25, 50, caps(), &w)
+            .wager(&scope(), f.alice, 10, 25, 50, MAX_SUPPLY, caps(), &w)
             .await,
         Ok(115)
     );
@@ -1363,7 +1427,7 @@ async fn a_key_reused_with_different_parameters_is_a_conflict_and_moves_nothing(
     ] {
         assert_eq!(
             f.store
-                .wager(&scope(), user, stake, payout, 50, caps(), &w)
+                .wager(&scope(), user, stake, payout, 50, MAX_SUPPLY, caps(), &w)
                 .await,
             Err(EconomyError::IdempotencyConflict),
             "{user} {stake} {payout}"
@@ -1394,7 +1458,9 @@ async fn a_key_reused_with_different_parameters_is_a_conflict_and_moves_nothing(
         Err(EconomyError::IdempotencyConflict)
     );
     assert_eq!(
-        f.store.wager(&scope(), f.alice, 1, 0, 50, caps(), &t).await,
+        f.store
+            .wager(&scope(), f.alice, 1, 0, 50, MAX_SUPPLY, caps(), &t)
+            .await,
         Err(EconomyError::IdempotencyConflict)
     );
     // Only the two original movements exist (wager 1 row, transfer 2 rows).
@@ -1411,7 +1477,7 @@ async fn a_refused_call_records_no_key_so_a_later_retry_applies_once() {
     let k = key_of("evt-4:wager:0");
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 10, 25, 50, caps(), &k)
+            .wager(&scope(), f.alice, 10, 25, 50, MAX_SUPPLY, caps(), &k)
             .await,
         Err(EconomyError::InsufficientFunds { balance: 0 })
     );
@@ -1419,13 +1485,13 @@ async fn a_refused_call_records_no_key_so_a_later_retry_applies_once() {
     fund(&f, f.alice, 100).await;
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 10, 25, 50, caps(), &k)
+            .wager(&scope(), f.alice, 10, 25, 50, MAX_SUPPLY, caps(), &k)
             .await,
         Ok(115)
     );
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 10, 25, 50, caps(), &k)
+            .wager(&scope(), f.alice, 10, 25, 50, MAX_SUPPLY, caps(), &k)
             .await,
         Ok(115)
     );
@@ -1441,17 +1507,19 @@ async fn a_replay_is_not_refused_by_the_budget_its_own_first_run_used_up() {
     let c = caps_of(20, 250_000);
     let k = key_of("evt-5:wager:0");
     f.store
-        .wager(&scope(), f.alice, 20, 0, 50, c, &k)
+        .wager(&scope(), f.alice, 20, 0, 50, MAX_SUPPLY, c, &k)
         .await
         .unwrap();
     // The budget is spent: a NEW call is over cap, the replay is not.
     assert_eq!(
-        f.store.wager(&scope(), f.alice, 1, 0, 50, c, &key()).await,
+        f.store
+            .wager(&scope(), f.alice, 1, 0, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::UserQuotaExceeded { cap: 20 })
     );
     assert!(f
         .store
-        .wager(&scope(), f.alice, 20, 0, 50, c, &k)
+        .wager(&scope(), f.alice, 20, 0, 50, MAX_SUPPLY, c, &k)
         .await
         .is_ok());
     assert_eq!(ledger_count(&f).await, 1);
@@ -1467,13 +1535,13 @@ async fn keys_are_scoped_per_app() {
     let other_app = scope_of(TENANT, COMMUNITY, "waddles.core.other-game");
     assert_eq!(
         f.store
-            .wager(&scope(), f.alice, 10, 0, 50, caps(), &k)
+            .wager(&scope(), f.alice, 10, 0, 50, MAX_SUPPLY, caps(), &k)
             .await,
         Ok(90)
     );
     assert_eq!(
         f.store
-            .wager(&other_app, f.alice, 10, 0, 50, caps(), &k)
+            .wager(&other_app, f.alice, 10, 0, 50, MAX_SUPPLY, caps(), &k)
             .await,
         Ok(80),
         "another app's call under the same key text is its own operation"
@@ -1492,7 +1560,9 @@ async fn concurrent_retries_of_one_wager_credit_exactly_once() {
     for _ in 0..30 {
         let (store, k, user) = (Arc::clone(&store), Arc::clone(&k), f.alice);
         tasks.push(tokio::spawn(async move {
-            store.wager(&scope(), user, 10, 25, 50, caps(), &k).await
+            store
+                .wager(&scope(), user, 10, 25, 50, MAX_SUPPLY, caps(), &k)
+                .await
         }));
     }
     for t in tasks {
@@ -1514,7 +1584,7 @@ async fn a_wager_and_a_transfer_racing_on_one_key_apply_at_most_one() {
         let (s1, k1, a) = (Arc::clone(&store), Arc::clone(&k), f.alice);
         let (s2, k2, b, a2) = (Arc::clone(&store), Arc::clone(&k), f.bob, f.alice);
         let w = tokio::spawn(async move {
-            s1.wager(&scope(), a, 10, 0, 50, caps(), &k1)
+            s1.wager(&scope(), a, 10, 0, 50, MAX_SUPPLY, caps(), &k1)
                 .await
                 .map(|_| ())
         });
@@ -1588,29 +1658,33 @@ async fn the_per_user_mint_cap_is_enforced_on_the_payout_not_the_stake() {
     // stake 1 -> payout 60, twice would be stake 2 << 100 under the old
     // stake-metered cap, but payout 120 > 100.
     f.store
-        .wager(&scope(), f.alice, 1, 60, 50, c, &key())
+        .wager(&scope(), f.alice, 1, 60, 50, MAX_SUPPLY, c, &key())
         .await
         .unwrap();
     assert_eq!(
-        f.store.wager(&scope(), f.alice, 1, 60, 50, c, &key()).await,
+        f.store
+            .wager(&scope(), f.alice, 1, 60, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::UserQuotaExceeded { cap: 100 }),
         "60 + 60 minted would pass the 100 mint cap"
     );
     // Exactly the remaining budget fits.
     assert!(f
         .store
-        .wager(&scope(), f.alice, 1, 40, 50, c, &key())
+        .wager(&scope(), f.alice, 1, 40, 50, MAX_SUPPLY, c, &key())
         .await
         .is_ok());
     // The mint budget is spent: even a payout of 1 is refused ...
     assert_eq!(
-        f.store.wager(&scope(), f.alice, 1, 1, 50, c, &key()).await,
+        f.store
+            .wager(&scope(), f.alice, 1, 1, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::UserQuotaExceeded { cap: 100 })
     );
     // ... but a LOSING wager mints nothing and is not a mint.
     assert!(f
         .store
-        .wager(&scope(), f.alice, 5, 0, 50, c, &key())
+        .wager(&scope(), f.alice, 5, 0, 50, MAX_SUPPLY, c, &key())
         .await
         .is_ok());
     // Refused calls wrote no ledger row and consumed no budget: two applied
@@ -1634,19 +1708,21 @@ async fn a_large_losing_stake_spends_the_stake_budget_not_the_mint_budget() {
     // Stake budget 60, mint budget 60 (the same ceilings, separate windows).
     let c = caps_of(60, 1_000_000);
     f.store
-        .wager(&scope(), f.alice, 50, 0, 50, c, &key())
+        .wager(&scope(), f.alice, 50, 0, 50, MAX_SUPPLY, c, &key())
         .await
         .unwrap();
     // 50 staked: a stake of 11 is over the STAKE window ...
     assert_eq!(
-        f.store.wager(&scope(), f.alice, 11, 0, 50, c, &key()).await,
+        f.store
+            .wager(&scope(), f.alice, 11, 0, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::UserQuotaExceeded { cap: 60 })
     );
     // ... while the MINT window is untouched by that loss: a stake-10 wager
     // that pays 60 (the whole mint budget) still fits both windows.
     assert!(f
         .store
-        .wager(&scope(), f.alice, 10, 60, 50, c, &key())
+        .wager(&scope(), f.alice, 10, 60, 50, MAX_SUPPLY, c, &key())
         .await
         .is_ok());
 }
@@ -1659,26 +1735,29 @@ async fn the_per_scope_mint_cap_binds_across_users_on_the_payout() {
     // 30 of community-wide mint budget; each user alone has plenty.
     let c = caps_of(10_000, 30);
     f.store
-        .wager(&scope(), f.alice, 1, 20, 50, c, &key())
+        .wager(&scope(), f.alice, 1, 20, 50, MAX_SUPPLY, c, &key())
         .await
         .unwrap();
     assert_eq!(
-        f.store.wager(&scope(), f.bob, 1, 11, 50, c, &key()).await,
+        f.store
+            .wager(&scope(), f.bob, 1, 11, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::ScopeQuotaExceeded { cap: 30 }),
         "20 + 11 minted by this app in this community passes the 30 cap"
     );
     assert!(f
         .store
-        .wager(&scope(), f.bob, 1, 10, 50, c, &key())
+        .wager(&scope(), f.bob, 1, 10, 50, MAX_SUPPLY, c, &key())
         .await
         .is_ok());
-    // Another app in the same community has its own mint budget.
+    // Another app in the same community shares the mint budget (per-community).
     let other_app = scope_of(TENANT, COMMUNITY, "waddles.core.other-game");
-    assert!(f
-        .store
-        .wager(&other_app, f.bob, 1, 30, 50, c, &key())
-        .await
-        .is_ok());
+    assert_eq!(
+        f.store
+            .wager(&other_app, f.bob, 1, 30, 50, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::ScopeQuotaExceeded { cap: 30 })
+    );
 }
 
 /// Mint is a ledger fact: it survives a restart and a second replica (the
@@ -1689,7 +1768,7 @@ async fn the_mint_cap_is_durable_across_a_fresh_store() {
     fund(&f, f.alice, 1_000).await;
     let c = caps_of(25, 250_000);
     f.store
-        .wager(&scope(), f.alice, 1, 25, 50, c, &key())
+        .wager(&scope(), f.alice, 1, 25, 50, MAX_SUPPLY, c, &key())
         .await
         .unwrap();
     let fresh = PostgresEconomyStore::new(
@@ -1706,7 +1785,9 @@ async fn the_mint_cap_is_durable_across_a_fresh_store() {
         .unwrap(),
     );
     assert_eq!(
-        fresh.wager(&scope(), f.alice, 1, 1, 50, c, &key()).await,
+        fresh
+            .wager(&scope(), f.alice, 1, 1, 50, MAX_SUPPLY, c, &key())
+            .await,
         Err(EconomyError::UserQuotaExceeded { cap: 25 })
     );
 }
@@ -1717,12 +1798,12 @@ async fn a_payout_window_rolls_off_after_24_hours() {
     fund(&f, f.alice, 1_000).await;
     let c = caps_of(40, 250_000);
     f.store
-        .wager(&scope(), f.alice, 1, 40, 50, c, &key())
+        .wager(&scope(), f.alice, 1, 40, 50, MAX_SUPPLY, c, &key())
         .await
         .unwrap();
     assert!(f
         .store
-        .wager(&scope(), f.alice, 1, 1, 50, c, &key())
+        .wager(&scope(), f.alice, 1, 1, 50, MAX_SUPPLY, c, &key())
         .await
         .is_err());
     exec(
@@ -1732,7 +1813,7 @@ async fn a_payout_window_rolls_off_after_24_hours() {
     .await;
     assert!(f
         .store
-        .wager(&scope(), f.alice, 1, 40, 50, c, &key())
+        .wager(&scope(), f.alice, 1, 40, 50, MAX_SUPPLY, c, &key())
         .await
         .is_ok());
 }
@@ -1862,13 +1943,14 @@ async fn credit_is_bound_by_the_durable_24h_mint_caps() {
             .await,
         Err(EconomyError::ScopeQuotaExceeded { cap: 80 })
     );
-    // A different app has its own scope window.
+    // A different app of the same community shares the window (per-community).
     let other_app = scope_of(TENANT, COMMUNITY, "waddles.core.other");
-    assert!(f
-        .store
-        .credit(&other_app, f.alice, 50, 100, MAX_SUPPLY, c, &key())
-        .await
-        .is_ok());
+    assert_eq!(
+        f.store
+            .credit(&other_app, f.alice, 1, 100, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::UserQuotaExceeded { cap: 50 })
+    );
     // The window rolls off.
     exec(
         &f.su,
@@ -2221,7 +2303,7 @@ async fn conditional_debit_rejects_below_min_and_never_partially_applies() {
         Ok(50)
     );
     assert_eq!(balance_of(&f, f.alice).await, 50);
-    assert_eq!(ledger_kind_count(&f, "debit").await, 1);
+    assert_eq!(ledger_kind_count(&f, "cond_debit").await, 1);
     // Next debit would breach the floor.
     assert!(f
         .store
@@ -2837,4 +2919,353 @@ async fn the_runtime_role_can_run_every_compound_op_but_still_cannot_delete_or_u
         .execute_unprepared("INSERT INTO economy_ledger (tenant_id, community_id, app_id, user_uuid, kind, delta, balance_after) VALUES (1, 10, 'x', gen_random_uuid(), 'mint', 1, 1)")
         .await
         .is_err(), "unknown ledger kinds stay refused");
+}
+
+// ---- External money review (2026-10-30) regressions -------------------------
+
+/// Review HIGH #2: credit, batch_credit and exchange share ONE 24h mint window.
+#[tokio::test]
+async fn credit_batch_credit_and_exchange_share_one_mint_window() {
+    let f = fixture().await;
+    let c = caps_of(50, 1_000);
+    // credit fills alice's per-user daily window -> an exchange (a different
+    // mint op) is refused, as is a batch entry for her.
+    f.store
+        .credit(&scope(), f.alice, 50, 100, MAX_SUPPLY, c, &key())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .exchange(&scope(), f.alice, 1, 1, 1, 100, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::UserQuotaExceeded { cap: 50 })
+    );
+    assert_eq!(
+        f.store
+            .batch_credit(&scope(), &[(f.alice, 1)], 100, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::UserQuotaExceeded { cap: 50 })
+    );
+    // and the other way round: exchange spends the credit budget.
+    f.store
+        .exchange(&scope(), f.bob, 30, 1, 1, 100, MAX_SUPPLY, c, &key())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .credit(&scope(), f.bob, 21, 100, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::UserQuotaExceeded { cap: 50 })
+    );
+    assert!(f
+        .store
+        .credit(&scope(), f.bob, 20, 100, MAX_SUPPLY, c, &key())
+        .await
+        .is_ok());
+    // the per-scope window is shared across the three as well.
+    let c2 = caps_of(1_000, 100);
+    assert_eq!(
+        f.store
+            .exchange(&scope(), f.alice, 1, 1, 1, 100, MAX_SUPPLY, c2, &key())
+            .await,
+        Err(EconomyError::ScopeQuotaExceeded { cap: 100 }),
+        "100 already minted (50 credit + 30 exchange + 20 credit)"
+    );
+}
+
+/// Review (user decision): the daily caps are per COMMUNITY, not per app.
+#[tokio::test]
+async fn two_apps_in_one_community_share_one_daily_cap() {
+    let f = fixture().await;
+    let (a, b) = (
+        scope_of(TENANT, COMMUNITY, "waddles.core.app-a"),
+        scope_of(TENANT, COMMUNITY, "waddles.core.app-b"),
+    );
+    // mint window (per user)
+    let c = caps_of(50, 10_000);
+    f.store
+        .credit(&a, f.alice, 50, 100, MAX_SUPPLY, c, &key())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .credit(&b, f.alice, 1, 100, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::UserQuotaExceeded { cap: 50 }),
+        "app B draws on the same per-user window as app A"
+    );
+    // per-scope (community) window
+    let c = caps_of(10_000, 80);
+    assert!(f
+        .store
+        .credit(&b, f.bob, 30, 100, MAX_SUPPLY, c, &key())
+        .await
+        .is_ok());
+    assert_eq!(
+        f.store
+            .credit(&a, f.bob, 1, 100, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::ScopeQuotaExceeded { cap: 80 })
+    );
+    // wager + transfer windows are community-wide too.
+    fund(&f, f.alice, 1_000).await;
+    let c = caps_of(40, 10_000);
+    f.store
+        .wager(&a, f.alice, 40, 0, 50, MAX_SUPPLY, c, &key())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .wager(&b, f.alice, 1, 0, 50, MAX_SUPPLY, c, &key())
+            .await,
+        Err(EconomyError::UserQuotaExceeded { cap: 40 })
+    );
+    f.store
+        .transfer(&a, f.alice, f.bob, 40, 50, c, &key())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store.transfer(&b, f.alice, f.bob, 1, 50, c, &key()).await,
+        Err(EconomyError::UserQuotaExceeded { cap: 40 })
+    );
+    // A different COMMUNITY (other tenant) has its own budget.
+    exec(
+        &f.su,
+        &format!(
+            "INSERT INTO community_members (community_id, user_uuid) VALUES (20, '{}')",
+            f.alice
+        ),
+    )
+    .await;
+    let other = scope_of(OTHER_TENANT, OTHER_COMMUNITY, "waddles.core.app-a");
+    assert!(f
+        .store
+        .credit(
+            &other,
+            f.alice,
+            40,
+            100,
+            MAX_SUPPLY,
+            caps_of(40, 10_000),
+            &key()
+        )
+        .await
+        .is_ok());
+}
+
+/// Review HIGH #3: the supply ceiling holds for the WAGER mint path too.
+#[tokio::test]
+async fn a_wager_payout_that_would_exceed_max_supply_is_refused() {
+    let f = fixture().await;
+    fund(&f, f.alice, 90).await; // supply 90, ceiling 100
+                                 // stake 1, payout 20: creates 19 -> 109 > 100.
+    assert_eq!(
+        f.store
+            .wager(&scope(), f.alice, 1, 20, 50, 100, caps(), &key())
+            .await,
+        Err(EconomyError::SupplyCapReached { cap: 100 })
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 90);
+    assert_eq!(ledger_count(&f).await, 0);
+    // creates 9 -> 99: fine. A payout <= stake creates nothing: always allowed.
+    assert_eq!(
+        f.store
+            .wager(&scope(), f.alice, 1, 10, 50, 100, caps(), &key())
+            .await,
+        Ok(99)
+    );
+    assert!(f
+        .store
+        .wager(&scope(), f.alice, 5, 0, 50, 100, caps(), &key())
+        .await
+        .is_ok());
+    assert!(f
+        .store
+        .wager(&scope(), f.alice, 5, 5, 50, 1, caps(), &key())
+        .await
+        .is_ok());
+    // A refused wager recorded no key: the same key later applies once there is room.
+    let k = key_of("wager:supply:retry");
+    assert!(f
+        .store
+        .wager(&scope(), f.alice, 1, 50, 50, 100, caps(), &k)
+        .await
+        .is_err());
+    // (Room made: supply 99 -> payout 1 creates nothing.)
+    assert!(f
+        .store
+        .wager(&scope(), f.alice, 1, 1, 50, 100, caps(), &k)
+        .await
+        .is_ok());
+}
+
+/// Installs a trigger that makes `victim` LEAVE the community the moment a
+/// balance row is first created for them -- i.e. AFTER the store's membership
+/// preflight and BEFORE its guarded write (the review's race, made
+/// deterministic).
+async fn leave_after_preflight(f: &Fixture, victim: Uuid) {
+    exec(
+        &f.su,
+        &format!(
+            "CREATE FUNCTION leave_on_insert() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$ \
+             BEGIN \
+               IF NEW.user_uuid = '{victim}' THEN \
+                 UPDATE community_members SET left_at = NOW() WHERE user_uuid = NEW.user_uuid; \
+               END IF; \
+               RETURN NEW; \
+             END $$; \
+             CREATE TRIGGER leave_after_preflight AFTER INSERT ON economy_balances \
+               FOR EACH ROW EXECUTE FUNCTION leave_on_insert();"
+        ),
+    )
+    .await;
+}
+
+/// Review HIGH #4: the guarded write re-checks membership for every row.
+#[tokio::test]
+async fn batch_credit_does_not_credit_a_member_who_left_after_preflight() {
+    let f = fixture().await;
+    let carol = add_member(&f, COMMUNITY).await;
+    leave_after_preflight(&f, carol).await;
+    assert_eq!(
+        f.store
+            .batch_credit(
+                &scope(),
+                &[(f.alice, 10), (carol, 10)],
+                100,
+                MAX_SUPPLY,
+                caps(),
+                &key()
+            )
+            .await,
+        Err(EconomyError::NotAMember)
+    );
+    // All-or-nothing: alice was not credited either, and nothing was ledgered.
+    assert_eq!(
+        scalar_i64(
+            &f.su,
+            "SELECT COALESCE(SUM(balance),0)::BIGINT FROM economy_balances WHERE balance > 0"
+        )
+        .await,
+        0
+    );
+    assert_eq!(ledger_count(&f).await, 0);
+}
+
+#[tokio::test]
+async fn pay_pot_does_not_pay_a_winner_who_left_after_preflight() {
+    let f = fixture().await;
+    let carol = add_member(&f, COMMUNITY).await;
+    fund(&f, pot(), 100).await;
+    leave_after_preflight(&f, carol).await;
+    assert_eq!(
+        f.store
+            .pay_pot(&scope(), pot(), &[(f.alice, 10), (carol, 10)], &key())
+            .await,
+        Err(EconomyError::NotAMember)
+    );
+    assert_eq!(
+        scalar_i64(
+            &f.su,
+            &format!(
+                "SELECT balance FROM economy_balances WHERE user_uuid = '{}'",
+                pot()
+            )
+        )
+        .await,
+        100,
+        "the pot debit rolled back with the refused payout"
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 0);
+    assert_eq!(ledger_count(&f).await, 0);
+}
+
+/// Review MED #5: an exchange's replay identity binds the rate, not just the
+/// credited amount.
+#[tokio::test]
+async fn an_exchange_replay_with_a_changed_rate_is_a_conflict() {
+    let f = fixture().await;
+    let k = key_of("exch:rate:0");
+    // 2 points @ 1/2 -> 1; 2 points @ 2/3 -> floor(4/3) = 1 (same credit!).
+    assert_eq!(
+        f.store
+            .exchange(&scope(), f.alice, 2, 1, 2, 100, MAX_SUPPLY, caps(), &k)
+            .await,
+        Ok(1)
+    );
+    assert_eq!(
+        f.store
+            .exchange(&scope(), f.alice, 2, 1, 2, 100, MAX_SUPPLY, caps(), &k)
+            .await,
+        Ok(1)
+    );
+    assert_eq!(
+        f.store
+            .exchange(&scope(), f.alice, 2, 2, 3, 100, MAX_SUPPLY, caps(), &k)
+            .await,
+        Err(EconomyError::IdempotencyConflict)
+    );
+    assert_eq!(balance_of(&f, f.alice).await, 1);
+    assert_eq!(ledger_kind_count(&f, "exchange").await, 1);
+}
+
+/// Review MED #6: conditional_debit has its own ledger kind and binds its floor.
+#[tokio::test]
+async fn conditional_debit_is_its_own_kind_and_binds_min_balance() {
+    let f = fixture().await;
+    fund(&f, f.alice, 100).await;
+    let k = key_of("cdebit:bind:0");
+    assert_eq!(
+        f.store
+            .conditional_debit(&scope(), f.alice, 10, 20, 100, caps(), &k)
+            .await,
+        Ok(90)
+    );
+    assert_eq!(
+        f.store
+            .conditional_debit(&scope(), f.alice, 10, 20, 100, caps(), &k)
+            .await,
+        Ok(90)
+    );
+    assert_eq!(
+        f.store
+            .conditional_debit(&scope(), f.alice, 10, 30, 100, caps(), &k)
+            .await,
+        Err(EconomyError::IdempotencyConflict),
+        "same key, different floor"
+    );
+    assert_eq!(
+        f.store.debit(&scope(), f.alice, 10, 100, caps(), &k).await,
+        Err(EconomyError::IdempotencyConflict),
+        "a plain debit never replays a conditional one"
+    );
+    let kd = key_of("debit:bind:0");
+    f.store
+        .debit(&scope(), f.alice, 10, 100, caps(), &kd)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store
+            .conditional_debit(&scope(), f.alice, 10, 0, 100, caps(), &kd)
+            .await,
+        Err(EconomyError::IdempotencyConflict),
+        "nor the other way round"
+    );
+    assert_eq!(ledger_kind_count(&f, "cond_debit").await, 1);
+    assert_eq!(ledger_kind_count(&f, "debit").await, 1);
+    assert_eq!(balance_of(&f, f.alice).await, 80);
+    // Conditional and plain debits share one spend window.
+    let c = caps_of(25, 10_000);
+    let g = fixture().await;
+    fund(&g, g.alice, 1_000).await;
+    g.store
+        .debit(&scope(), g.alice, 20, 100, c, &key())
+        .await
+        .unwrap();
+    assert_eq!(
+        g.store
+            .conditional_debit(&scope(), g.alice, 6, 0, 100, c, &key())
+            .await,
+        Err(EconomyError::UserQuotaExceeded { cap: 25 })
+    );
 }

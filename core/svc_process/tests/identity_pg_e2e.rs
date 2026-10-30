@@ -55,6 +55,8 @@ const IDENTITY_DDL: &str = include_str!("../../../scripts/db/bundle_identity_res
 const ECONOMY_DDL: &str = include_str!("../../../scripts/db/bundle_economy_store.sql");
 const ECONOMY_IDEMPOTENCY_DDL: &str =
     include_str!("../../../scripts/db/bundle_economy_idempotency.sql");
+const ECONOMY_LEDGER_KINDS_DDL: &str =
+    include_str!("../../../scripts/db/bundle_economy_ledger_kinds.sql");
 
 /// Tenant 1 has communities 10 (the one under test) and 11 (a sibling);
 /// tenant 2 has community 20 -- and reuses the SAME platform account id as
@@ -175,6 +177,7 @@ async fn world() -> World {
     .await;
     exec(&su, ECONOMY_DDL).await;
     exec(&su, ECONOMY_IDEMPOTENCY_DDL).await;
+    exec(&su, ECONOMY_LEDGER_KINDS_DDL).await;
     // The shipped identity DDL (also grants the view to waddles_bundle_reader).
     exec(&su, IDENTITY_DDL).await;
 

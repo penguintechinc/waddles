@@ -27,7 +27,7 @@ _MIGRATION_PATH = (
     Path(__file__).resolve().parents[1] / "versions" / "0069_economy_ledger_kinds.py"
 )
 _USER = "11111111-2222-4333-8444-555555555555"
-_NEW_KINDS = ["credit", "debit", "admin_adjust", "pot_payout", "exchange"]
+_NEW_KINDS = ["credit", "debit", "cond_debit", "admin_adjust", "pot_payout", "exchange"]
 
 
 def _load_migration():  # type: ignore[no-untyped-def]
@@ -98,8 +98,12 @@ def _insert(cur: Any, tid: int, cid: int, kind: str) -> None:
 
 @requires_docker
 class TestLedgerKinds:
-    @pytest.mark.parametrize("kind", ["wager", "transfer_out", "transfer_in", *_NEW_KINDS])
-    def test_every_known_kind_is_accepted(self, pg_db: PgTestDatabase, kind: str) -> None:
+    @pytest.mark.parametrize(
+        "kind", ["wager", "transfer_out", "transfer_in", *_NEW_KINDS]
+    )
+    def test_every_known_kind_is_accepted(
+        self, pg_db: PgTestDatabase, kind: str
+    ) -> None:
         with _cursor(pg_db) as cur:
             tid, cid = _scope(cur)
             _insert(cur, tid, cid, kind)
@@ -118,3 +122,18 @@ class TestLedgerKinds:
             cur.execute(sql)
             tid, cid = _scope(cur)
             _insert(cur, tid, cid, "admin_adjust")
+
+    def test_replay_binding_columns_exist_and_are_nullable_bigints(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        with _cursor(pg_db) as cur:
+            cur.execute(
+                "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+                "WHERE table_name = 'economy_ledger' "
+                "AND column_name IN ('rate_num', 'rate_den', 'min_balance') ORDER BY 1"
+            )
+            assert cur.fetchall() == [
+                ("min_balance", "bigint", "YES"),
+                ("rate_den", "bigint", "YES"),
+                ("rate_num", "bigint", "YES"),
+            ]
