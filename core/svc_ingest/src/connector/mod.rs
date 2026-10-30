@@ -42,6 +42,8 @@ pub mod registry;
 pub mod sink;
 pub mod transport;
 pub mod types;
+pub mod webhook;
+pub mod webhook_verify;
 pub mod wire_invoker;
 
 pub use driver::{ConnectionEnd, ConnectionReport, ConnectorDriver, DriverError, RunEnd};
