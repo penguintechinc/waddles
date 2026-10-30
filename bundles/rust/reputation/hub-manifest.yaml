@@ -1,0 +1,44 @@
+# hub-api install-pipeline manifest (bundle_manifest_v2, schema_version 2) for the reputation
+# SERVICE bundle. `kind: service` is accepted only via the trusted core-bundle seeder
+# (seed_core_bundles.py passes trusted_source=True). Always-on platform plumbing: it is
+# resolved to its platform-installed version, never per-community activated by an admin.
+# Mirrors bundle.yaml's kind/tool blocks (the seeder's agreement check enforces that).
+schema_version: 2
+app_id: waddles.core.service.reputation
+name: Reputation Service Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: service
+# A service has no chat/event surface; the manifest schema requires a non-empty `stages`, so
+# the single `action` stage points at the tool-provider export the host nested-invokes. It
+# declares no `consumes` (an action stage must not), so no event is ever routed to it.
+stages:
+  action:
+    entry: "waddle:bundle/tool-provider#call"
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: reputation.read
+    justification: "serves get_score/get_many/leaderboard tool calls from the community reputation store"
+  - id: reputation.community.write
+    justification: "applies the bundle's win/loss/loyalty delta policy through the capped reputation host capability"
+    params:
+      delta_min: -5
+      delta_max: 5
+      reason_codes: ["game.win", "game.loss", "loyalty.bonus", "admin.adjust"]
+  - id: reputation.community.admin
+    justification: "serves the admin-only absolute score override tool; callers are admin-checked by the tool before the host call"
+  - id: storage.kv
+    justification: "persists the per-community delta-policy and tier configuration"
+routes_to: []

@@ -1,0 +1,29 @@
+[package]
+name = "waddle-bundle-reputation-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Reputation SERVICE bundle (bundle-MCP-tools P5): an always-on `kind: service` bundle on the `stage-tools` world that exports `tool-provider` and holds the `reputation` host capability, so app bundles reach community reputation only through gated tool calls. Skeleton + registration (Task 2); the tools land in Task 3."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+# Sibling-crate path dependency (same repo, moves together) -- the real
+# `tool` registry/dispatch lives in the SDK; see
+# core/bundle_executor/tests/fixtures/tool-provider-fixture-src for the
+# adapter pattern this bundle follows.
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-reputation-service"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage-tools"
+
+[package.metadata.component.dependencies]

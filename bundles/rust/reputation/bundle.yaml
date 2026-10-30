@@ -1,0 +1,36 @@
+schema_version: 2
+app_id: waddles.core.service.reputation
+name: Reputation Service Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/reputation
+language: rust
+artifact: component
+execution_model: wasi-component
+is_default: false
+kind: service
+stages:
+  action:
+    entry: "waddle:bundle/tool-provider#call"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions: []
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

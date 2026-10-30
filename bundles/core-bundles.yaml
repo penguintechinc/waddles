@@ -1441,3 +1441,19 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # bundle-MCP-tools P5: reputation SERVICE bundle (Rust, always-on `kind: service`). Built by
+  # bundles/Dockerfile.core-bundles's rust-bundle-builder stage (cargo-component, NOT the Python
+  # loop); `wit_world: stage-tools` is documentation here -- the Rust build takes its world from
+  # the crate's own Cargo.toml `[package.metadata.component.target] world`. The seeder installs
+  # it with trusted_source=True (the only path allowed to declare `kind: service`).
+  - app_id: waddles.core.service.reputation
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/reputation
+    manifest_path: reputation.manifest.yaml
+    artifact_path: reputation.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
