@@ -1819,7 +1819,7 @@ mod tests {
                     tenant: "acme".to_string(),
                     community: Some("main".to_string()),
                     app_id: "waddles.bot.commands.default".to_string(),
-                    origin_channel_id: None,
+                    origin_channel_id: Some("somechannel".to_string()),
                     tenant_id: 7,
                     community_id: 0,
                     app_version: 1,
