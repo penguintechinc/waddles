@@ -37,6 +37,7 @@ Usage (pytest)::
 from __future__ import annotations
 
 import dataclasses
+import json
 import sys
 import types
 from collections.abc import Awaitable, Callable, Iterator
@@ -222,6 +223,78 @@ def install_fake_reputation_host(
     rep_mod = types.SimpleNamespace(get=host.get, adjust=host.adjust)
     fake_wit_world = types.ModuleType("wit_world")
     fake_wit_world.imports = types.SimpleNamespace(reputation=rep_mod)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+    return host
+
+
+_TOOL_CASES = {
+    "not_granted": ("ToolError_NotGranted", False),
+    "forbidden": ("ToolError_Forbidden", False),
+    "timeout": ("ToolError_Timeout", False),
+    "depth_exceeded": ("ToolError_DepthExceeded", False),
+    "pool_exhausted": ("ToolError_PoolExhausted", False),
+    "target_unavailable": ("ToolError_TargetUnavailable", False),
+    "invalid_args": ("ToolError_InvalidArgs", True),
+}
+
+
+@dataclass(frozen=True)
+class FakeToolCall:
+    """One recorded `tool.invoke` host call."""
+
+    target: str
+    tool: str
+    args: bytes
+    idempotency_key: str | None
+
+
+@dataclass
+class FakeToolHost:
+    """Stand-in for `wit_world.imports.tool`: records calls, replays scripted responses.
+
+    Like the real executor import, a scripted success is returned as JSON bytes and a
+    scripted error raises an `Err`-shaped exception carrying the `ToolError_*` variant.
+    An unscripted call raises `target_unavailable`, as an unknown target would.
+    """
+
+    calls: list[FakeToolCall] = field(default_factory=list)
+    _script: dict[tuple[str, str], bytes] = field(default_factory=dict)
+    _errors: dict[tuple[str, str], str] = field(default_factory=dict)
+
+    def script(self, target: str, tool: str, value: Any) -> None:
+        """Script `target`/`tool` to succeed with JSON-serializable `value`."""
+        self._script[(target, tool)] = json.dumps(value).encode()
+
+    def script_raw(self, target: str, tool: str, raw: bytes) -> None:
+        """Script `target`/`tool` to succeed with raw (possibly non-JSON) bytes."""
+        self._script[(target, tool)] = raw
+
+    def script_error(self, target: str, tool: str, code: str) -> None:
+        """Script `target`/`tool` to fail with the snake_case `code`."""
+        if code not in _TOOL_CASES:
+            raise ValueError(f"unknown tool error code {code!r}")
+        self._errors[(target, tool)] = code
+
+    def invoke(self, target: str, tool: str, args: bytes, idempotency_key: str | None) -> bytes:
+        """Record the call, then return the scripted bytes or raise the scripted error."""
+        self.calls.append(FakeToolCall(target, tool, bytes(args), idempotency_key))
+        code = self._errors.get((target, tool), None)
+        if code is None and (target, tool) not in self._script:
+            code = "target_unavailable"
+        if code is not None:
+            name, has_payload = _TOOL_CASES[code]
+            case = _variant(name, has_payload)
+            raise _FakeWitError(case("fake") if has_payload else case())
+        return self._script[(target, tool)]
+
+
+def install_fake_tool_host(monkeypatch: Any) -> FakeToolHost:
+    """Install a fresh `FakeToolHost` as `wit_world.imports.tool` and return it."""
+    host = FakeToolHost()
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
+        tool=types.SimpleNamespace(invoke=host.invoke)
+    )
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
     return host
 
