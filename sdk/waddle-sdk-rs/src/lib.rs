@@ -56,9 +56,11 @@ pub mod kv;
 pub mod log;
 pub mod relay;
 pub mod stage;
+pub mod tool;
 pub mod types;
 
 pub use context::BundleContext;
 pub use error::{DbError, HttpError, KvError, RelayError, SdkError};
 pub use stage::{ActionStage, ProcessStage};
+pub use tool::{ToolContext, ToolError, ToolRegistry, ToolTransport};
 pub use types::{PlatformEvent, StageEnvelope, TransportError, TransportResult, UnsupportedStage};

@@ -58,6 +58,7 @@ use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::config::CliConfig;
+use crate::engine::stage_tools_world::{StageTools, StageToolsPre};
 use crate::engine::stage_v2_world::{StageV2, StageV2Pre};
 use crate::engine::{ticks_for_deadline, Stage, StagePre};
 use crate::error::ExecutorError;
@@ -115,6 +116,12 @@ type Scope = (i32, i32, String);
 /// other path.
 const ACTION_STAGE_V2_EXPORT: &str = "waddle:bundle/action-stage-v2@1.0.0";
 
+/// Fully-qualified export a `world stage-tools` component carries (and no
+/// `process-stage`/`action-stage*`); its presence selects the tools family.
+/// Detected by this one export name, same discipline as
+/// [`ACTION_STAGE_V2_EXPORT`].
+const TOOL_PROVIDER_EXPORT: &str = "waddle:bundle/tool-provider@1.0.0";
+
 /// A pre-linked component of either WIT-world family the executor serves:
 /// the frozen v1 `stage`/`stage-next` family (string scope) or `stage-v2`
 /// (authoritative numeric scope). Both share one registry, one linker and one
@@ -123,6 +130,8 @@ const ACTION_STAGE_V2_EXPORT: &str = "waddle:bundle/action-stage-v2@1.0.0";
 enum GuestPre {
     V1(StagePre<ExecState>),
     V2(StageV2Pre<ExecState>),
+    /// `world stage-tools` (P3b): exports only `tool-provider`.
+    Tools(StageToolsPre<ExecState>),
 }
 
 impl GuestPre {
@@ -132,6 +141,11 @@ impl GuestPre {
         instance_pre: wasmtime::component::InstancePre<ExecState>,
     ) -> wasmtime::Result<Self> {
         if component
+            .get_export_index(None, TOOL_PROVIDER_EXPORT)
+            .is_some()
+        {
+            Ok(Self::Tools(StageToolsPre::new(instance_pre)?))
+        } else if component
             .get_export_index(None, ACTION_STAGE_V2_EXPORT)
             .is_some()
         {
@@ -146,6 +160,8 @@ impl GuestPre {
 enum GuestInstance {
     V1(Stage),
     V2(StageV2),
+    /// Serves `ExportKind::ToolCall` via its `tool-provider.call` export.
+    Tools(StageTools),
 }
 
 struct LoadedBundle {
@@ -1103,7 +1119,11 @@ impl<S: ComponentSource> Executor<S> {
         // moves into the job, so the budget is fixed before the call starts.
         let fuel_budget = match body.export {
             ExportKind::Transform => self.fuel_limit_transform,
-            ExportKind::Dispatch => self.fuel_limit_dispatch,
+            // A tool call runs arbitrary provider code like a dispatch (it may
+            // do host-call round-trips), so it reuses the dispatch budget
+            // rather than adding a fourth knob; Task 7 telemetry can justify
+            // a dedicated limit later.
+            ExportKind::Dispatch | ExportKind::ToolCall => self.fuel_limit_dispatch,
             // Routed to `self.connectors` above; the connector fuel budget is
             // `ConnectorLimits::fuel`. Reaching here would be a routing bug,
             // so refuse rather than guess a budget.
@@ -1271,6 +1291,10 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
     let instantiated = match &pre {
         GuestPre::V1(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V1),
         GuestPre::V2(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V2),
+        GuestPre::Tools(p) => p
+            .instantiate_async(&mut store)
+            .await
+            .map(GuestInstance::Tools),
     };
     let stage = match instantiated {
         Ok(stage) => stage,
@@ -1308,6 +1332,12 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
                         .call_transform(&mut store, &event)
                         .await
                 }
+                GuestInstance::Tools(_) => {
+                    return Err(error_body(
+                        ErrorCode::ExportMissing,
+                        "a stage-tools component exports tool-provider only; it has no transform export",
+                    ));
+                }
             };
             metrics.record_guest(&body.app_id, "transform", guest_started.elapsed());
             match outcome {
@@ -1337,12 +1367,53 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
                         .call_dispatch(&mut store, &envelope.envelope, &envelope.config)
                         .await
                 }
+                GuestInstance::Tools(_) => {
+                    return Err(error_body(
+                        ErrorCode::ExportMissing,
+                        "a stage-tools component exports tool-provider only; it has no dispatch export",
+                    ));
+                }
             };
             metrics.record_guest(&body.app_id, "dispatch", guest_started.elapsed());
             match outcome {
                 Ok(Ok(reply)) => serde_json::to_value(reply),
                 Ok(Err(transport_error)) => serde_json::to_value(transport_error)
                     .map(|v| serde_json::json!({"transport_error": v})),
+                Err(trap) => {
+                    let memory_cap_hit = store.data().memory_cap_hit();
+                    return Err(trap_to_error_body(trap, memory_cap_hit));
+                }
+            }
+        }
+        ExportKind::ToolCall => {
+            let call: ToolCallPayload = serde_json::from_value(std::mem::take(&mut body.payload))
+                .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
+            let GuestInstance::Tools(st) = &stage else {
+                return Err(error_body(
+                    ErrorCode::ExportMissing,
+                    "tool-call needs a stage-tools component exporting tool-provider",
+                ));
+            };
+            // `args` crosses the WIT boundary as canonical JSON bytes.
+            let args = serde_json::to_vec(&call.args)
+                .map_err(|e| error_body(ErrorCode::MalformedFrame, e.to_string()))?;
+            let outcome = st
+                .waddle_bundle_tool_provider()
+                .call_call(&mut store, &call.tool, &args)
+                .await;
+            metrics.record_guest(&body.app_id, "tool_call", guest_started.elapsed());
+            match outcome {
+                Ok(Ok(bytes)) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    Ok(v) => Ok(serde_json::json!({ "ok": v })),
+                    Err(e) => {
+                        return Err(error_body(
+                            ErrorCode::MalformedFrame,
+                            format!("tool result is not canonical JSON: {e}"),
+                        ));
+                    }
+                },
+                Ok(Err(tool_error)) => serde_json::to_value(tool_error)
+                    .map(|v| serde_json::json!({ "tool_error": v })),
                 Err(trap) => {
                     let memory_cap_hit = store.data().memory_cap_hit();
                     return Err(trap_to_error_body(trap, memory_cap_hit));
@@ -1439,6 +1510,15 @@ impl<S: ComponentSource> RequestHandler for Arc<Executor<S>> {
 struct EnvelopeAndConfig {
     envelope: crate::engine::waddle::bundle::types::StageEnvelope,
     config: String,
+}
+
+/// `ExportKind::ToolCall` payload: the provider tool name and its JSON args
+/// (re-encoded to canonical JSON bytes for `tool-provider.call`). Call-chain /
+/// idempotency fields join in the stage-side tasks.
+#[derive(serde::Deserialize)]
+struct ToolCallPayload {
+    tool: String,
+    args: serde_json::Value,
 }
 
 /// `EnvelopeAndConfig`'s `stage-v2` twin: the same `{envelope, config}` frame

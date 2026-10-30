@@ -732,7 +732,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1569,8 +1569,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-bundle-host"
-version = "0.3.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=0b97183fa7ae7c91464bd6539821ad0a091d5764#0b97183fa7ae7c91464bd6539821ad0a091d5764"
+version = "0.4.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=658a777740b02b93ce271a5a5a63b36b44ce8837#658a777740b02b93ce271a5a5a63b36b44ce8837"
 dependencies = [
  "regex",
  "serde",
@@ -1925,7 +1925,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2011,7 +2011,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
@@ -2921,7 +2921,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

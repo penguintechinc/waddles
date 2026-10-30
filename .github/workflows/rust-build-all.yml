@@ -39,6 +39,7 @@ jobs:
           - bundle_host_db
           - bundle_host_http
           - bundle_host_kv
+          - bundle_tool_call
           - circuit_breaker
           - connector_e2e
           - discord_mentions
@@ -54,6 +55,7 @@ jobs:
           - svc_presentation
           - svc_process
           - svc_streaming
+          - tool_invoke_e2e
     defaults:
       run:
         working-directory: core/${{ matrix.crate }}

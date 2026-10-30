@@ -1,4 +1,4 @@
-"""`!giveaway` / `!enter` -> a timed, FREE open-entry giveaway with one random winner.
+"""`!giveaway` (incl. `!giveaway enter`) -> a timed, FREE open-entry giveaway with one random winner.
 
 Distinct from `raffle`: a raffle is mod-opened/closed by hand with no deadline, and its
 `draw` leaves the entrant list in place; a giveaway is **timed** (`!giveaway start 5m`), entry
@@ -12,7 +12,7 @@ Commands
   ``1h``), at least 1s and at most 24h. A bad duration gets an explicit reply. Only ONE giveaway
   per community at a time: a second ``start`` is rejected (also while an ended giveaway is still
   waiting for ``draw``/``cancel``).
-- ``!enter`` (alias ``!giveaway enter``) -- anyone, ONCE per giveaway (deduped by
+- ``!giveaway enter`` -- anyone, ONCE per giveaway (bare ``!enter`` is raffle's); deduped by
   ``sha256(platform + author)``). Replies if none is active, the caller already entered, or
   the giveaway's time is up.
 - ``!giveaway draw`` -- MOD-ONLY. Picks one random entrant, announces it, closes the giveaway.
@@ -32,18 +32,17 @@ One `kv` key per community, ``giveaway.active`` = JSON ``{"ends_at": <epoch ms>,
 tenant, community, app_id), so the key is a plain literal using ``.`` -- never ``:`` (the host's
 reserved separator, gh-631). The key is deleted when the giveaway is drawn or cancelled. Entries
 are capped at `MAX_ENTRIES` so the stored JSON stays under the host's `too_large` limit.
-`kv` has no compare-and-swap, so two `!enter`s processed concurrently could lose one entry
+`kv` has no compare-and-swap, so two `!giveaway enter`s processed concurrently could lose one entry
 (read-modify-write on one key); a lost free entry is the accepted trade-off against adding a
 lock capability, and the viewer simply re-enters (the dedupe makes that safe).
 
 Randomness
 ----------
-Same primitive as `slots`/`duel`/`raffle` -- Python's `random` -- but through a private
-``random.Random`` instance seeded from the host clock plus the entries (`_pick_winner`). A
-componentize-py snapshot freezes the *module-level* `random` state at build time, so relying on
-it would replay the same sequence in every fresh instance; seeding from `clock.now_millis()` and
-the stored entrants makes each draw depend on when it happens and who entered. This is a
-community giveaway, not a security decision -- the seed is not secret (ruff S311 is waived).
+Same primitive as `raffle`/`winner`/`slots`: a module-level ``random.SystemRandom()`` (`_RNG`,
+the OS CSPRNG -- `wasi:random` in the component), so the draw is unpredictable and cannot be
+reconstructed from observable inputs (clock, entrant list). SystemRandom holds no seeded state,
+so the componentize-py build snapshot has nothing to freeze. A value-distributing draw must be
+fair, hence never a seeded Mersenne Twister.
 The winner is announced as the entrant's pseudonym tag (`hash[:8]`) because only hashes are
 stored (same PII trade-off as `raffle`: a viewer can recognise their own tag, resolving it to a
 display name needs the PII-tokenization pipeline).
@@ -76,10 +75,13 @@ from waddle_sdk import clock, kv, log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 #: The single `kv` key this bundle owns (community-scoped by the host; `.`, never `:`).
+#: OS-entropy RNG (`os.urandom`, i.e. `wasi:random` in the component). Never the module-level
+#: `random.*` functions or a seeded `random.Random`: predictable / frozen into the build snapshot.
+_RNG = random.SystemRandom()
+
 ACTIVE_KEY = "giveaway.active"
 
 _GIVEAWAY_HEAD = "!giveaway"
-_ENTER_HEAD = "!enter"
 
 _SECOND_MS = 1000
 _MINUTE_MS = 60 * _SECOND_MS
@@ -96,7 +98,7 @@ _UNIT_MS = {"s": _SECOND_MS, "m": _MINUTE_MS, "h": _HOUR_MS}
 _DURATION_RE = re.compile(r"(\d{1,6})([smh])", re.IGNORECASE)
 
 _USAGE = (
-    "Usage: !enter | !giveaway status | !giveaway start <5m|30s|1h> | "
+    "Usage: !giveaway enter | !giveaway status | !giveaway start <5m|30s|1h> | "
     "!giveaway draw | !giveaway cancel (start/draw/cancel are mod only)"
 )
 _PERMISSION_DENIED_MSG = "only moderators/broadcasters can do that"
@@ -173,14 +175,12 @@ def _pseudonym(platform: str, author: str) -> str:
     return hashlib.sha256(f"{platform}\x1f{author}".encode()).hexdigest()
 
 
-def _pick_winner(entries: list[str], now_ms: int) -> str:
-    """Pick one entrant with a `random.Random` seeded from the clock plus the entries.
+def _pick_winner(entries: list[str]) -> str:
+    """Pick one entrant uniformly with the OS CSPRNG (`_RNG`).
 
-    See the module docstring's Randomness section. Isolated so tests can pin the seed inputs.
+    See the module docstring's Randomness section. Isolated so tests can patch the draw.
     """
-    digest = hashlib.sha256(f"{now_ms}|{'|'.join(entries)}".encode()).digest()
-    rng = random.Random(int.from_bytes(digest, "big"))
-    return rng.choice(entries)
+    return _RNG.choice(entries)
 
 
 async def _kv_get(key: str) -> bytes | None:
@@ -258,11 +258,11 @@ async def _handle_start(duration_token: str) -> str:
         )
     await _save(Giveaway(ends_at=now_ms + duration_ms))
     log.info("giveaway.started", duration_ms=duration_ms)
-    return f"A giveaway is open for {humanize_duration(duration_ms)}! Type !enter to join."
+    return f"A giveaway is open for {humanize_duration(duration_ms)}! Type !giveaway enter to join."
 
 
 async def _handle_enter(platform: str, author: str | None) -> str:
-    """`!enter` -- add the caller to the active giveaway, once."""
+    """`!giveaway enter` -- add the caller to the active giveaway, once."""
     if not author:
         return "couldn't identify you, so you can't be entered"
     giveaway = await _load()
@@ -287,8 +287,10 @@ async def _handle_draw() -> str:
     if giveaway is None:
         return f"{_NO_ACTIVE_MSG} -- nothing to draw"
     if not giveaway.entries:
-        return "no entries yet -- nobody has used !enter (use !giveaway cancel to close it)"
-    winner = _pick_winner(giveaway.entries, clock.now_millis())
+        return (
+            "no entries yet -- nobody has used !giveaway enter (use !giveaway cancel to close it)"
+        )
+    winner = _pick_winner(giveaway.entries)
     await _kv_delete(ACTIVE_KEY)
     log.info("giveaway.drawn", entries=len(giveaway.entries))
     return (
@@ -321,8 +323,6 @@ async def _handle_cancel() -> str:
 
 def _resolve(head: str, rest: str) -> tuple[str, str]:
     """Map the head and trailing text onto `(command, argument)`; `usage` on a bad shape."""
-    if head == _ENTER_HEAD:
-        return ("usage", "") if rest else ("enter", "")
     verb, _, arg = rest.partition(" ")
     verb = verb.lower()
     arg = arg.strip()
@@ -349,7 +349,7 @@ async def _execute(command: str, arg: str, event: PlatformEvent) -> str:
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize the commands and build the reply.
 
-    Returns `None` for a non-chat payload or any message that is not `!giveaway`/`!enter`.
+    Returns `None` for a non-chat payload or any message that is not `!giveaway`.
     Activation is enforced by the runtime before this stage runs. Mod-only commands from a non-moderator are
     answered with a denial before any `kv` access. A bad duration replies with the parse error;
     a `kv` failure logs at ERROR and replies with an explicit failure notice.
@@ -359,7 +359,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     head, _, rest = text.strip().partition(" ")
     head = head.lower()
-    if head not in (_GIVEAWAY_HEAD, _ENTER_HEAD):
+    if head != _GIVEAWAY_HEAD:
         return None
 
     command, arg = _resolve(head, rest.strip())

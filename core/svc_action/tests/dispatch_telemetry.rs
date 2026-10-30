@@ -154,6 +154,9 @@ fn scope() -> InvokeScope {
         tenant_id: 7,
         community_id: 3,
         app_version: 1,
+        tool_chain: Vec::new(),
+        deadline_at: None,
+        trace: None,
     }
 }
 

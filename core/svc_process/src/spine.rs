@@ -500,6 +500,80 @@ pub async fn invoke_transform(
     }
 }
 
+/// Runs ONE nested `tool.invoke` leg: sends an `ExportKind::ToolCall` invoke for
+/// the already-authorized `plan` (target app, platform-installed digest, tool,
+/// args, call chain, idempotency key) over `conn`, scoped to `capabilities` (the
+/// TARGET's own capability set, never the caller's), and maps the reply onto the
+/// `{ok}`/`{tool_error}` envelope or a typed [`ToolRefusal`].
+///
+/// The host enforces `deadline` itself with a timeout around the invoke -- the
+/// executor's epoch trap is a backstop, never the mechanism (a slow target must
+/// come back `timeout` even if the guest is not yet trapped). Nested sync
+/// `conn.invoke` is safe: the connection is multiplexed by invoke id and host
+/// calls run on their own spawned task (Task 0 ruling), and the caller's
+/// self/cycle/depth guard already ran in `bundle_tool_call::plan_tool_call`
+/// before this is reached, so no executor slot is requested twice by one chain.
+pub async fn invoke_tool_call(
+    conn: &Connection,
+    plan: &bundle_tool_call::ToolPlan,
+    deadline: Duration,
+    trace: Option<TraceContext>,
+    capabilities: Arc<dyn CapabilityHandler>,
+) -> Result<serde_json::Value, bundle_tool_call::ToolRefusal> {
+    use bundle_tool_call::ToolRefusal;
+    debug_assert!(
+        bundle_active_set::canonical_digest(&plan.target_digest).as_deref()
+            == Ok(plan.target_digest.as_str()),
+        "tool target digest {:?} must already be canonical",
+        plan.target_digest
+    );
+    let deadline_ms = u64::try_from(deadline.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    let payload = bundle_tool_call::nested_payload(plan)?;
+    let started = std::time::Instant::now();
+    let invoke = conn.invoke(
+        InvokeBody {
+            app_id: plan.target_app_id.clone(),
+            digest: plan.target_digest.clone(),
+            export: ExportKind::ToolCall,
+            payload,
+            deadline_ms,
+            trace,
+        },
+        capabilities,
+    );
+    let reply = match tokio::time::timeout(deadline, invoke).await {
+        Ok(reply) => reply,
+        Err(_elapsed) => {
+            tracing::warn!(
+                target = %plan.target_app_id,
+                tool = %plan.tool,
+                deadline_ms,
+                "nested tool call exceeded its host deadline"
+            );
+            stage_metrics::stage_metrics().record_executor_call(
+                &plan.target_app_id,
+                "tool_call",
+                "host_timeout",
+                started.elapsed(),
+            );
+            return Err(ToolRefusal::Timeout);
+        }
+    };
+    record_executor_call(&plan.target_app_id, "tool_call", &reply, started.elapsed());
+    match reply {
+        Ok(frame) => bundle_tool_call::interpret_reply(frame.message),
+        Err(HostApiError::WriterBackpressure { .. }) => Err(ToolRefusal::PoolExhausted),
+        Err(e) => {
+            tracing::warn!(target = %plan.target_app_id, error = %e, "nested tool call transport failure");
+            Err(ToolRefusal::TargetUnavailable(
+                "the executor connection failed".to_string(),
+            ))
+        }
+    }
+}
+
 /// Abstraction over [`penguin_spine::GroupReader::read`]'s exact signature.
 /// Exists solely so [`drain_loop`] can be driven by a fake reader in tests.
 trait StreamReader {
@@ -1235,6 +1309,10 @@ async fn handle_delivered_inner<S: SpineOps>(
                 .map(|()| StageResult::DeadLettered);
         }
     };
+    let trace = d.env.trace.as_ref().map(|t| TraceContext {
+        traceparent: t.traceparent.clone(),
+        tracestate: t.tracestate.clone(),
+    });
     let capabilities: Arc<dyn CapabilityHandler> = {
         let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
             d.env.tenant.clone(),
@@ -1247,6 +1325,15 @@ async fn handle_delivered_inner<S: SpineOps>(
             Arc::clone(&deps.gate),
         );
         let caps = caps.with_verified_scope(verified_scope);
+        // `tool.invoke`: a top-level invocation's chain is just this app, and
+        // every nested call is bounded by this invoke's own executor budget.
+        let caps = caps.with_tool(crate::capabilities::ToolContext {
+            connections: Arc::clone(&deps.connections),
+            snapshot: deps.app_version_snapshot.clone(),
+            chain: vec![deps.app_id.clone()],
+            deadline: Some(std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms)),
+            trace: trace.clone(),
+        });
         let caps = match &deps.kv_conn {
             Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
             None => caps,
@@ -1294,10 +1381,6 @@ async fn handle_delivered_inner<S: SpineOps>(
         };
         Arc::new(caps)
     };
-    let trace = d.env.trace.as_ref().map(|t| TraceContext {
-        traceparent: t.traceparent.clone(),
-        tracestate: t.tracestate.clone(),
-    });
 
     let outcome = invoke_transform(
         &connection,
@@ -2297,6 +2380,7 @@ mod tests {
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
             declared_capabilities: Vec::new(),
+            tools: Default::default(),
         }]);
         let deps = ProcessDeps {
             app_id: "waddles.bot.commands.default".to_string(),
@@ -3005,6 +3089,7 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                tools: Default::default(),
             }]);
 
         handle_delivered(&d, &deps).await.unwrap();
@@ -3061,6 +3146,7 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                tools: Default::default(),
             }]);
 
         handle_delivered(&d1, &deps).await.unwrap();
@@ -3165,6 +3251,7 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                tools: Default::default(),
             }]);
 
         handle_delivered(&d, &deps).await.unwrap();
@@ -3224,6 +3311,7 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                tools: Default::default(),
             }]);
 
         let mut d2 = d1.clone();

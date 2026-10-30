@@ -1,0 +1,27 @@
+[package]
+name = "bundle-tool-call"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Shared, stage-agnostic policy for the bundle-to-bundle `tool.invoke` host call (bundle-MCP-tools P3b): zero-trust request validation, the self/cycle/depth guard, the P1 invocation matrix (app->app forbidden), the P2 `tool.call` gate, target resolution against the live active-version snapshot, and the nested-invoke payload/reply contract. A path dependency within this repo, consumed by svc_process and svc_action so the two stages' `handle_tool` share one authorization path instead of two copies."
+
+[lib]
+name = "bundle_tool_call"
+path = "src/lib.rs"
+
+# Exact-version pins only -- rules/critical-rules.md Dependency Pinning. Every
+# version mirrors core/svc_process's and core/svc_action's own pin of the same
+# crate, so this path dependency introduces no second pin.
+[dependencies]
+serde_json = "=1.0.151"
+tracing = "=0.1.44"
+sha2 = "=0.10.9"
+bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
+bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
+# Reply interpretation (`Message`/`ErrorCode`) -- same pinned rev as the stages.
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "658a777740b02b93ce271a5a5a63b36b44ce8837", package = "penguin-bundle-host", version = "=0.4.0" }
+
+[dev-dependencies]
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }

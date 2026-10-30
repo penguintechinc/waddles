@@ -296,6 +296,7 @@ pub async fn run_tick(
     // SS5.1) must see a superseded digest stop resolving the instant the
     // active set moves, not just after this tick's load/unload completes.
     snapshot.update(&active);
+    snapshot.update_scope(tenant_id, community_id, &active);
 
     let plan = diff::plan(loaded, &active);
     if plan.is_empty() {
@@ -407,6 +408,7 @@ mod tests {
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
             declared_capabilities: Vec::new(),
+            tools: Default::default(),
         }
     }
 

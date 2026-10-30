@@ -81,6 +81,9 @@ from waddle_sdk.db import AsyncDB
 from waddle_sdk.flask_core.bundle_runtime import bundle_context, set_bundle_dal
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.http import HttpClient, RetryableTransportError
+from waddle_sdk.tool import CODES as _TOOL_CODES
+from waddle_sdk.tool import ToolError
+from waddle_sdk.tool import dispatch as _tool_dispatch
 
 try:
     import _bundle_preimports  # noqa: F401 - auto-generated into the bundle's own source dir
@@ -134,6 +137,7 @@ for _wit_capability in (
     "economy",  # stage-next only (issue #714); same guard
     "identity",  # stage-next only (actor/mention -> community user_uuid); same guard
     "ai",  # stage-next only (ai.generate, host-mediated model call); same guard
+    "tool",  # stage-tools only (bundle-to-bundle tool invoke); same guard
 ):
     try:
         importlib.import_module(f"wit_world.imports.{_wit_capability}")
@@ -397,3 +401,70 @@ class StreamingLifecycle:
     def on_recording_ready(self, recording: Any) -> Any:
         """Implement ``streaming-lifecycle.on-recording-ready`` (unsupported by default)."""
         return _unsupported_lifecycle("on-recording-ready")
+
+
+#: snake_case ``ToolError`` code -> generated ``wit_world.imports.tool`` variant class name.
+_TOOL_VARIANTS: dict[str, str] = {
+    "not_granted": "ToolError_NotGranted",
+    "forbidden": "ToolError_Forbidden",
+    "timeout": "ToolError_Timeout",
+    "depth_exceeded": "ToolError_DepthExceeded",
+    "pool_exhausted": "ToolError_PoolExhausted",
+    "target_unavailable": "ToolError_TargetUnavailable",
+    "invalid_args": "ToolError_InvalidArgs",
+}
+if set(_TOOL_VARIANTS) != _TOOL_CODES:  # import-time drift guard (fail loud)
+    raise RuntimeError("tool error code <-> WIT variant drift")
+
+
+def _tool_wit_error(err: ToolError) -> Any:
+    """Map a :class:`ToolError` onto the generated WIT ``Err(tool-error)`` (typed, never lost)."""
+    import wit_world
+    from componentize_py_types import Err
+
+    variant = getattr(wit_world.imports.tool, _TOOL_VARIANTS[err.code])
+    # Only ``invalid-args`` carries a payload; every other case is a bare variant.
+    detail = variant(err.message) if err.code == "invalid_args" else variant()
+    return Err(detail)
+
+
+def _tool_call_impl(name: str, args: bytes) -> bytes:
+    """Implement the exported ``tool-provider.call`` WIT function.
+
+    Runs the ``@tool``-registered handler under ``bundle_context()`` (the host's
+    own numeric scope, fail-closed) and returns the raw result JSON bytes; a
+    :class:`ToolError` becomes the WIT ``Err(tool-error)`` arm. The host import
+    -- not this export -- renders the ``{ok}``/``{tool_error}`` envelope, so no
+    envelope is built here (see ``waddle_sdk.tool`` wire contract).
+    """
+    ctx, tenant_id, community_id = _wit_context()
+
+    async def _run() -> bytes:
+        with bundle_context(
+            tenant=ctx.tenant,
+            community=ctx.community,
+            app_id=ctx.app_id,
+            tenant_id=tenant_id,
+            community_id=community_id,
+        ):
+            return await _tool_dispatch(name, args)
+
+    try:
+        return _run_coro(_run())  # type: ignore[no-any-return]
+    except ToolError as err:
+        raise _tool_wit_error(err) from err
+
+
+class ToolProvider:
+    """componentize-py's app-class name for the ``tool-provider`` export (``world stage-tools``).
+
+    Resolved by ``getattr(app_module, "ToolProvider")``; unused (and harmless)
+    when the component is built against any other world.
+    """
+
+    def call(self, name: str, args: bytes) -> bytes:
+        """Implement the exported ``tool-provider.call`` WIT function.
+
+        See :func:`_tool_call_impl`.
+        """
+        return _tool_call_impl(name, args)

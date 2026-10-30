@@ -56,7 +56,7 @@ tempfile = "=3.23.0"
 # 2026-09-22, verified to resolve from a fresh CARGO_HOME with
 # `--locked`) -- match it verbatim in any other Rust crate here that
 # needs a penguin-libs package before one publishes to a registry.
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "17cd3956808e425e9710245dedde69aca7969d9a", package = "penguin-bundle-host", version = "=0.2.1" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "658a777740b02b93ce271a5a5a63b36b44ce8837", package = "penguin-bundle-host", version = "=0.4.0" }
 
 [dev-dependencies]
 mockito = "=1.7.0"

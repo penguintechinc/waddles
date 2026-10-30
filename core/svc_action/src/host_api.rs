@@ -219,6 +219,31 @@ pub struct Connection {
     metrics: std::sync::OnceLock<crate::telemetry::HostApiMetrics>,
 }
 
+/// Drop guard for one in-flight [`Connection::invoke`]: removes its per-invoke
+/// scope and cancels its pending correlation slot whether the call completed,
+/// failed, or was cancelled mid-await.
+struct InflightInvoke<'a> {
+    conn: &'a Connection,
+    id: u64,
+}
+
+impl Drop for InflightInvoke<'_> {
+    fn drop(&mut self) {
+        let mut scopes = match self.conn.scopes.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    id = self.id,
+                    "scopes lock poisoned while releasing an in-flight invoke; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        scopes.remove(&self.id);
+        self.conn.pending.cancel(self.id);
+    }
+}
+
 impl Connection {
     /// A connection with the default [`HostApiLimits`] (test-only; production
     /// always builds via [`Connection::with_limits`]).
@@ -284,20 +309,12 @@ impl Connection {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id, scope);
-        let send_result = self.send(Frame::new(id, Message::Invoke(body))).await;
-        if let Err(err) = send_result {
-            self.scopes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&id);
-            return Err(err);
-        }
-        let result = rx.await.map_err(|_| HostApiError::ConnectionUnavailable);
-        self.scopes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id);
-        result
+        // Cancellation-safe cleanup: a caller that drops this future (a host
+        // timeout around a nested `tool.invoke`) must not leak the scope or the
+        // pending correlation slot -- the guard runs on EVERY exit path.
+        let _inflight = InflightInvoke { conn: self, id };
+        self.send(Frame::new(id, Message::Invoke(body))).await?;
+        rx.await.map_err(|_| HostApiError::ConnectionUnavailable)
     }
 
     /// Looks up the [`InvokeScope`] registered for `call_id` by
@@ -1578,6 +1595,9 @@ mod tests {
                     tenant_id: 7,
                     community_id: 0,
                     app_version: 1,
+                    tool_chain: Vec::new(),
+                    deadline_at: None,
+                    trace: None,
                 },
             )
             .await
@@ -1803,6 +1823,9 @@ mod tests {
                     tenant_id: 7,
                     community_id: 0,
                     app_version: 1,
+                    tool_chain: Vec::new(),
+                    deadline_at: None,
+                    trace: None,
                 },
             )
             .await
@@ -2111,6 +2134,9 @@ mod tests {
                     tenant_id: 7,
                     community_id: 0,
                     app_version: 1,
+                    tool_chain: Vec::new(),
+                    deadline_at: None,
+                    trace: None,
                 },
             ),
             connection.invoke(
@@ -2130,6 +2156,9 @@ mod tests {
                     tenant_id: 7,
                     community_id: 0,
                     app_version: 1,
+                    tool_chain: Vec::new(),
+                    deadline_at: None,
+                    trace: None,
                 },
             ),
         );
@@ -2153,6 +2182,44 @@ mod tests {
         let registry = ConnectionRegistry::new();
         registry.set_active(Arc::clone(&conn));
         assert!(registry.active().is_some());
+    }
+
+    /// regression (P3b): a cancelled `invoke` (a host timeout wrapped around a
+    /// nested `tool.invoke`) must not leak its scope or its pending slot.
+    #[tokio::test]
+    async fn a_cancelled_invoke_leaks_neither_scope_nor_pending_slot() {
+        let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let conn = Connection::new(tx);
+        let scope = crate::capabilities::InvokeScope {
+            tenant: "acme".to_string(),
+            community: None,
+            app_id: "waddles.test.app.x".to_string(),
+            origin_channel_id: None,
+            tenant_id: 7,
+            community_id: 0,
+            app_version: 1,
+            tool_chain: Vec::new(),
+            deadline_at: None,
+            trace: None,
+        };
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            conn.invoke(
+                InvokeBody {
+                    app_id: "waddles.test.app.x".to_string(),
+                    digest: "sha256:00".to_string(),
+                    export: penguin_bundle_host::wire::ExportKind::ToolCall,
+                    payload: serde_json::json!({}),
+                    deadline_ms: 2000,
+                    trace: None,
+                },
+                scope,
+            ),
+        )
+        .await;
+        assert!(timed_out.is_err(), "nothing answers, so the timeout fires");
+        assert!(conn.scopes.lock().unwrap().is_empty());
+        assert_eq!(conn.pending.pending_count(), 0);
     }
 
     #[tokio::test]

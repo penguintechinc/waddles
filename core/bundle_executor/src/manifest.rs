@@ -29,6 +29,9 @@ pub enum WitWorld {
     /// (`context-v2`/`action-stage-v2`); a v1/`stage-next` bundle never
     /// declares it and keeps running untouched.
     StageV2,
+    /// `world stage-tools` (P3b): `stage-v2`'s imports plus the `tool` host
+    /// import (bundle-to-bundle tool invoke); exports `tool-provider`.
+    StageTools,
     Connector,
 }
 

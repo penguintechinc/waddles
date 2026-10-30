@@ -1,6 +1,6 @@
 # giveaway (Python)
 
-Timed, FREE open-entry giveaway with one random draw: `!giveaway start 5m`, viewers `!enter`,
+Timed, FREE open-entry giveaway with one random draw: `!giveaway start 5m`, viewers `!giveaway enter`,
 a mod runs `!giveaway draw`. First-party (`provider: builtin`,
 `app_id: waddles.core.example.giveaway`), kv-only, WASI component.
 
@@ -19,18 +19,17 @@ a mod runs `!giveaway draw`. First-party (`provider: builtin`,
 | Entry | free, open to everyone, ends at the deadline | free, open while the mod has it open |
 | Draw | exactly ONE winner, then the giveaway **closes** | picks one, entrant list stays in place |
 | Concurrent | one per community (second `start` rejected) | one flat list per community |
-| Commands | `!giveaway start/draw/status/cancel`, `!enter` | `!raffle open/close/draw/list`, `!raffle`, `!enter` |
+| Commands | `!giveaway start/draw/status/cancel/enter` | `!raffle open/close/draw/list`, `!raffle`, `!enter` |
 
-**Shared command:** both bundles list `!enter` as a trigger. If both bundles are activated in the
-same community, `!enter` is answered by both. Use `!giveaway enter` (identical behavior) in such
-a community, or activate only one of the bundles.
+**Namespaced entry:** giveaway is entered with `!giveaway enter`; bare `!enter` belongs to raffle
+only (renamed to resolve a command-trigger collision), so both bundles can be active together.
 
 ## Commands
 
 | Command | Who | Behavior |
 |---|---|---|
 | `!giveaway start <5m\|30s\|1h>` | mod/broadcaster | Opens a giveaway. Bad/zero/over-24h duration -> explicit reply; one already active (or ended and undrawn) -> rejected. |
-| `!enter` / `!giveaway enter` | anyone | Enter once. Replies if none active, already entered, ended, or full (5000 max). |
+| `!giveaway enter` | anyone | Enter once. Replies if none active, already entered, ended, or full (5000 max). |
 | `!giveaway draw` | mod/broadcaster | One random winner announced, giveaway closed. No entries -> "no entries" reply, giveaway stays open. May run before or after the deadline. |
 | `!giveaway status` | anyone | Entry count + time remaining (or "ended, waiting for a draw"). |
 | `!giveaway cancel` | mod/broadcaster | Closes without drawing. Also clears a corrupt stored state. |
@@ -75,7 +74,7 @@ pipeline (same trade-off as `raffle`).
   (op + exception type) and replies "something went wrong"; the stored state is never overwritten
   on corruption. `!giveaway cancel` recovers it.
 - **PII-free logs.** Only op names, counts and exception types; never message text or the actor.
-- **No atomic update.** `kv` has no compare-and-swap, so two truly concurrent `!enter`s can lose
+- **No atomic update.** `kv` has no compare-and-swap, so two truly concurrent `!giveaway enter`s can lose
   one entry (the viewer re-enters; dedupe makes it safe).
 - Eager host imports (`kv`, `log`, `relay`, `clock`) at module top, required
   for componentize-py wizening (`docs/reference/bundle-host-imports.md`).

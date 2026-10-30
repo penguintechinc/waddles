@@ -30,6 +30,10 @@ use penguin_bundle_host::wire::{CapabilityKind, ErrorCode};
 /// The `stage` label value every metric from this crate carries.
 pub const STAGE: &str = "action";
 
+/// `target`/`tool` label value for a `tool.invoke` refused before the
+/// target was resolved (the guest-supplied names must never mint series).
+pub const TOOL_UNRESOLVED: &str = "unresolved";
+
 /// Instrumentation scope name (`otel_scope_name` on the Prometheus surface).
 pub const SCOPE: &str = "svc_action";
 
@@ -55,10 +59,12 @@ pub const COUNT_BUCKETS: [f64; 12] = [
 /// against the emitted data in tests and mirrored in
 /// `docs/observability/data-plane-metrics.md`, so a rename is a conscious,
 /// documented act.
-pub const METRIC_NAMES: [&str; 16] = [
+pub const METRIC_NAMES: [&str; 18] = [
     "waddles_stage_latency_seconds",
     "waddles_executor_call_seconds",
     "waddles_host_call_latency_seconds",
+    "waddles_tool_call_total",
+    "waddles_tool_call_latency_seconds",
     "waddles_bundle_load_seconds",
     "waddles_action_dispatch_attempts",
     "waddles_spine_batch_size",
@@ -92,7 +98,7 @@ pub fn instrument_name(documented: &str) -> &str {
 /// Host-call op names that may appear as the `op` label. Anything else is
 /// folded to `"other"` -- the op string comes straight off the guest's
 /// `host-call` frame and must never mint a new series.
-pub const KNOWN_OPS: [&str; 25] = [
+pub const KNOWN_OPS: [&str; 26] = [
     "get",
     "set",
     "delete",
@@ -117,6 +123,7 @@ pub const KNOWN_OPS: [&str; 25] = [
     "resolve_mention",
     "list",
     "count",
+    "invoke",
     "other",
 ];
 
@@ -124,8 +131,10 @@ pub const KNOWN_OPS: [&str; 25] = [
 /// the egress guard, a quota) refused it, as opposed to an operational
 /// failure. Folded into `result="denied"`; everything else non-ok is
 /// `result="error"`.
-const DENIED_CODES: [&str; 15] = [
+const DENIED_CODES: [&str; 17] = [
     "not_granted",
+    "forbidden",
+    "depth_exceeded",
     "quota_exceeded",
     "rate_limited",
     "resource_scope_mismatch",
@@ -199,6 +208,7 @@ pub fn host_call_labels(kind: CapabilityKind, op: &str) -> (&'static str, &'stat
             Some(("reputation", rest)) => ("reputation", rest),
             Some(("economy", rest)) => ("economy", rest),
             Some(("identity", rest)) => ("identity", rest),
+            Some(("tool", rest)) => ("tool", rest),
             _ => ("db", op),
         },
     };
@@ -253,6 +263,8 @@ pub struct StageMetrics {
     stage_latency: Histogram<f64>,
     executor_call: Histogram<f64>,
     host_call_latency: Histogram<f64>,
+    tool_call: Counter<u64>,
+    tool_call_latency: Histogram<f64>,
     bundle_load: Histogram<f64>,
     dispatch_attempts: Histogram<u64>,
     batch_size: Histogram<u64>,
@@ -306,6 +318,16 @@ impl StageMetrics {
             host_call_latency: latency(
                 "waddles_host_call_latency_seconds",
                 "One bundle host-capability call serviced by the stage, by capability/op/result",
+            ),
+            tool_call: counter(
+                "waddles_tool_call_total",
+                "Bundle-to-bundle tool.invoke completions, by target/tool and outcome \
+                 (ok or the refusal code)",
+            ),
+            tool_call_latency: latency(
+                "waddles_tool_call_latency_seconds",
+                "One bundle-to-bundle tool.invoke as the stage saw it (authorize + nested \
+                 invoke), by target/tool and outcome",
             ),
             bundle_load: latency(
                 "waddles_bundle_load_seconds",
@@ -419,6 +441,29 @@ impl StageMetrics {
                 KeyValue::new("result", result),
             ],
         );
+    }
+
+    /// Records one `tool.invoke` completion (`waddles_tool_call_total` +
+    /// `waddles_tool_call_latency_seconds`). `target`/`tool` MUST be the
+    /// host-resolved identities (or [`TOOL_UNRESOLVED`] when the call was
+    /// refused before resolution) -- never guest-supplied strings -- and
+    /// `outcome` is `ok` or a `bundle_tool_call::ToolRefusal::code`.
+    pub fn record_tool_call(
+        &self,
+        target: &str,
+        tool: &str,
+        outcome: &'static str,
+        elapsed: Duration,
+    ) {
+        let labels = [
+            KeyValue::new("stage", STAGE),
+            KeyValue::new("target", target.to_string()),
+            KeyValue::new("tool", tool.to_string()),
+            KeyValue::new("outcome", outcome),
+        ];
+        self.tool_call.add(1, &labels);
+        self.tool_call_latency
+            .record(elapsed.as_secs_f64(), &labels);
     }
 
     /// Records one bundle-load phase (`waddles_bundle_load_seconds`); `phase`
@@ -1037,6 +1082,7 @@ mod tests {
         m.record_stage("a", "success", Duration::from_millis(1));
         m.record_executor_call("a", "transform", "ok", Duration::from_millis(1));
         m.record_host_call("kv", "get", "ok", Duration::from_millis(1));
+        m.record_tool_call("a", "t", "ok", Duration::from_millis(1));
         m.record_bundle_load("a", "load", "ok", Duration::from_millis(1));
         m.record_attempts("a", "success", 1);
         m.record_batch(1);
@@ -1061,7 +1107,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 16);
+        assert_eq!(METRIC_NAMES.len(), 18);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",

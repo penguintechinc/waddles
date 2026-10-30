@@ -12,6 +12,7 @@ updates:
   - /core/bundle_host_economy
   - /core/bundle_host_http
   - /core/bundle_host_kv
+  - /core/bundle_tool_call
   - /core/bundle_host_reputation
   - /core/circuit_breaker
   - /core/connection_resolver
@@ -29,6 +30,7 @@ updates:
   - /core/svc_presentation
   - /core/svc_process
   - /core/svc_streaming
+  - /core/tool_invoke_e2e
   - /core/twitch_helix
   - /core/waddles_ops_cli
   - /sdk/waddle-sdk-rs

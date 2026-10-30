@@ -267,6 +267,31 @@ pub struct Connection {
     fallback_capabilities: Arc<dyn CapabilityHandler>,
 }
 
+/// Drop guard for one in-flight [`Connection::invoke`]: removes its per-invoke
+/// capability scope and cancels its pending correlation slot whether the call
+/// completed, failed, or was cancelled mid-await.
+struct InflightInvoke<'a> {
+    conn: &'a Connection,
+    id: u64,
+}
+
+impl Drop for InflightInvoke<'_> {
+    fn drop(&mut self) {
+        let mut scopes = match self.conn.invoke_scopes.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    id = self.id,
+                    "invoke_scopes lock poisoned while releasing an in-flight invoke; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        scopes.remove(&self.id);
+        self.conn.pending.cancel(self.id);
+    }
+}
+
 impl Connection {
     /// A connection with the default [`HostApiLimits`] (test-only;
     /// production always builds via [`Connection::with_limits`]).
@@ -338,20 +363,18 @@ impl Connection {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id, capabilities);
+        // Cancellation-safe cleanup: a caller that drops this future (a host
+        // timeout around a nested `tool.invoke`) must not leak the scope or the
+        // pending correlation slot -- the guard runs on EVERY exit path.
+        let _inflight = InflightInvoke { conn: self, id };
 
-        let result = match self.pending.register(id) {
+        match self.pending.register(id) {
             Ok(rx) => match self.send(Frame::new(id, Message::Invoke(body))).await {
                 Ok(()) => rx.await.map_err(|_| HostApiError::ConnectionUnavailable),
                 Err(e) => Err(e),
             },
             Err(e) => Err(HostApiError::from(e)),
-        };
-
-        self.invoke_scopes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id);
-        result
+        }
     }
 
     /// Resolves the capability handler that should answer a `host-call`
@@ -499,13 +522,12 @@ pub(crate) fn test_connection() -> Arc<Connection> {
 /// succeeds (the read loop continues in the background task the caller
 /// spawns) -- see [`accept_and_handshake`], the usual entry point.
 ///
-/// `pub(crate)` (not `pub`): `accept_and_handshake` is the only production
+/// `pub` as a harness seam: `accept_and_handshake` is the only production
 /// caller (it adds the TLS layer this function doesn't need to know
-/// about); `crate::execute`'s own tests call this directly over a plain
-/// in-memory duplex to build a real, handshaken [`Connection`] without a
-/// TLS handshake or a live executor process.
-#[cfg(test)]
-pub(crate) async fn run_connection<S>(
+/// about); unit tests and the real-path `core/tool_invoke_e2e` harness call
+/// this directly over a plain in-memory duplex to build a real, handshaken
+/// [`Connection`] without a TLS handshake or an executor process.
+pub async fn run_connection<S>(
     io: S,
     hello_ok: HelloOkBody,
     expected_sandbox_gvisor: bool,
@@ -1633,6 +1655,33 @@ mod tests {
         // The scope must never be left registered when `invoke` bails out
         // before ever sending a frame.
         assert!(conn.invoke_scopes.lock().unwrap().is_empty());
+    }
+
+    /// regression (P3b): a cancelled `invoke` (a host timeout wrapped around a
+    /// nested `tool.invoke`) must not leak its capability scope or its pending
+    /// correlation slot.
+    #[tokio::test]
+    async fn a_cancelled_invoke_leaks_neither_scope_nor_pending_slot() {
+        let (tx, _rx) = mpsc::channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+        let conn = Connection::new(tx, Arc::new(DenyAllCapabilities));
+        let timed_out = tokio::time::timeout(
+            Duration::from_millis(50),
+            conn.invoke(
+                InvokeBody {
+                    app_id: "waddles.test.app.x".to_string(),
+                    digest: "sha256:00".to_string(),
+                    export: penguin_bundle_host::wire::ExportKind::ToolCall,
+                    payload: serde_json::json!({}),
+                    deadline_ms: 2000,
+                    trace: None,
+                },
+                Arc::new(DenyAllCapabilities),
+            ),
+        )
+        .await;
+        assert!(timed_out.is_err(), "nothing answers, so the timeout fires");
+        assert!(conn.invoke_scopes.lock().unwrap().is_empty());
+        assert_eq!(conn.pending.pending_count(), 0);
     }
 
     #[tokio::test]
