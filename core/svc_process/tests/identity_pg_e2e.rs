@@ -52,6 +52,7 @@ const ECO_PW: &str = "waddles_economy_runtime_test_pw";
 const READER_PW: &str = "waddles_bundle_reader_test_pw";
 const APP_ID: &str = "waddles.core.test-identity";
 const IDENTITY_DDL: &str = include_str!("../../../scripts/db/bundle_identity_resolve.sql");
+const ROLE_DDL: &str = include_str!("../../../scripts/db/bundle_identity_role.sql");
 const ECONOMY_DDL: &str = include_str!("../../../scripts/db/bundle_economy_store.sql");
 const ECONOMY_IDEMPOTENCY_DDL: &str =
     include_str!("../../../scripts/db/bundle_economy_idempotency.sql");
@@ -177,6 +178,8 @@ async fn world() -> World {
     exec(&su, ECONOMY_IDEMPOTENCY_DDL).await;
     // The shipped identity DDL (also grants the view to waddles_bundle_reader).
     exec(&su, IDENTITY_DDL).await;
+    // 0069: the view also projects the member's community role.
+    exec(&su, ROLE_DDL).await;
 
     let (alice, bob, cross_tenant_alice) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
     let members = [
@@ -208,6 +211,21 @@ async fn world() -> World {
         )
         .await;
     }
+    // Community roles (the legacy SQL-owned `community_members.role`).
+    exec(
+        &su,
+        &format!(
+            "UPDATE community_members SET role = 'community-admin' \
+               WHERE community_id = {COMMUNITY} AND platform_user_id = '1001';
+             UPDATE community_members SET role = 'moderator' \
+               WHERE community_id = {COMMUNITY} AND platform_user_id = '2002';
+             UPDATE community_members SET role = 'member' \
+               WHERE community_id = {OTHER_TENANT_COMMUNITY} AND platform_user_id = '1001';
+             UPDATE community_members SET role = 'vip' \
+               WHERE community_id = {COMMUNITY} AND platform_user_id = '4004'"
+        ),
+    )
+    .await;
     // Privileged hub-side funding (the runtime role cannot mint).
     exec(
         &su,
@@ -627,6 +645,118 @@ async fn resolution_is_tenant_and_community_scoped_by_the_query() {
             .await
             .code,
         "not_a_member"
+    );
+}
+
+/// `role_for` reads the role through the real view as the least-privilege
+/// reader: scoped by tenant AND community, active members only, and a missing
+/// role is `NotLinked` -- never defaulted to `member`.
+#[tokio::test]
+async fn role_for_reads_the_real_view_scoped_and_fails_closed() {
+    use svc_process::identity::{IdentityScope, MemberDirectory};
+    let w = world().await;
+    let dir = PgMemberDirectory::new(w.reader.clone());
+    let scope = |tenant_id, community_id| IdentityScope {
+        tenant_id,
+        community_id,
+    };
+
+    assert_eq!(
+        dir.role_for(scope(TENANT, COMMUNITY), "twitch", "1001")
+            .await,
+        Ok("community-admin".to_string())
+    );
+    assert_eq!(
+        dir.role_for(scope(TENANT, COMMUNITY), "twitch", "2002")
+            .await,
+        Ok("moderator".to_string())
+    );
+    // Same platform id, other tenant/community: that member's OWN role.
+    assert_eq!(
+        dir.role_for(
+            scope(OTHER_TENANT, OTHER_TENANT_COMMUNITY),
+            "twitch",
+            "1001"
+        )
+        .await,
+        Ok("member".to_string())
+    );
+    // Active member with no role value: explicit refusal, not a default.
+    assert_eq!(
+        dir.role_for(scope(TENANT, COMMUNITY), "twitch", "3003")
+            .await,
+        Err(IdentityError::NotLinked)
+    );
+    // Left member (even with a role), unknown account, sibling community, and
+    // the right community under the WRONG tenant all fail closed.
+    for (t, c, id) in [
+        (TENANT, COMMUNITY, "4004"),
+        (TENANT, COMMUNITY, "9999"),
+        (TENANT, SIBLING_COMMUNITY, "1001"),
+        (OTHER_TENANT, COMMUNITY, "1001"),
+    ] {
+        assert_eq!(
+            dir.role_for(scope(t, c), "twitch", id).await,
+            Err(IdentityError::NotAMember),
+            "{t}/{c}/{id}"
+        );
+    }
+}
+
+/// Legacy owner authority is read from active community membership only.
+/// Reusing its platform account in another scope cannot convey owner scopes.
+#[tokio::test]
+async fn legacy_owner_scope_is_bound_to_active_community_membership() {
+    use svc_process::identity::{resolve_actor_scopes, IdentityScope};
+    let w = world().await;
+    exec(
+        &w.su,
+        &format!(
+            "UPDATE community_members SET role = 'owner' \
+             WHERE community_id = {COMMUNITY} AND platform_user_id = '1001'"
+        ),
+    )
+    .await;
+    let wiring = IdentityWiring {
+        directory: Arc::new(PgMemberDirectory::new(w.reader.clone())),
+        handles: None,
+        flag: Arc::new(StaticGate(true)),
+    };
+    let scope = |tenant_id, community_id| IdentityScope {
+        tenant_id,
+        community_id,
+    };
+    let invocation = || InvocationIdentity::from_event(&event("1001", "!points set"), vec![]);
+    let owner = resolve_actor_scopes(&wiring, &invocation(), scope(TENANT, COMMUNITY))
+        .await
+        .unwrap();
+    assert!(owner.has_scope("community:owner"));
+    assert!(!owner.has_scope("superadmin"));
+    let other = resolve_actor_scopes(
+        &wiring,
+        &invocation(),
+        scope(OTHER_TENANT, OTHER_TENANT_COMMUNITY),
+    )
+    .await
+    .unwrap();
+    assert!(other.has_scope("community:member"));
+    assert!(!other.has_scope("community:admin"));
+    for wrong_scope in [
+        scope(TENANT, SIBLING_COMMUNITY),
+        scope(OTHER_TENANT, COMMUNITY),
+    ] {
+        assert_eq!(
+            resolve_actor_scopes(&wiring, &invocation(), wrong_scope).await,
+            Err(IdentityError::NotAMember)
+        );
+    }
+    exec(
+        &w.su,
+        &format!("UPDATE community_members SET is_active = false WHERE community_id = {COMMUNITY} AND platform_user_id = '1001'"),
+    ).await;
+    assert_eq!(
+        resolve_actor_scopes(&wiring, &invocation(), scope(TENANT, COMMUNITY)).await,
+        Err(IdentityError::NotAMember)
     );
 }
 

@@ -121,6 +121,49 @@ def test_idempotency_key_is_extracted_and_stripped_from_args() -> None:
     assert json.loads(_run(tool.dispatch("echo2", raw))) == {"args": {"x": 1}, "key": "abc"}
 
 
+def test_verified_actor_and_scopes_reach_a_handler_that_declares_them() -> None:
+    @tool.tool("who")
+    def who(
+        args: dict[str, Any],
+        *,
+        idempotency_key: str | None,
+        actor: str | None,
+        actor_scopes: tuple[str, ...],
+    ) -> Any:
+        return {"args": args, "actor": actor, "scopes": list(actor_scopes)}
+
+    raw = json.dumps({"x": 1, "__ctx": {"actor": "u-1", "scopes": ["community:admin"]}}).encode()
+    assert json.loads(_run(tool.dispatch("who", raw))) == {
+        "args": {"x": 1},
+        "actor": "u-1",
+        "scopes": ["community:admin"],
+    }
+    # No __ctx => no actor, no scopes (never defaulted to anything privileged).
+    assert json.loads(_run(tool.dispatch("who", b'{"x":1}')))["actor"] is None
+
+
+def test_legacy_handlers_without_actor_params_still_work_and_ctx_is_stripped() -> None:
+    @tool.tool("legacy")
+    def legacy(args: dict[str, Any], *, idempotency_key: str | None) -> Any:
+        return {"args": args}
+
+    raw = json.dumps({"x": 1, "__ctx": {"actor": "u", "scopes": ["community:admin"]}}).encode()
+    assert json.loads(_run(tool.dispatch("legacy", raw))) == {"args": {"x": 1}}
+
+
+def test_scopes_without_an_actor_are_dropped_and_malformed_ctx_is_invalid_args() -> None:
+    @tool.tool("who2")
+    def who2(args: dict[str, Any], **kw: Any) -> Any:
+        return {"actor": kw["actor"], "scopes": list(kw["actor_scopes"])}
+
+    raw = json.dumps({"__ctx": {"actor": None, "scopes": ["community:admin"]}}).encode()
+    assert json.loads(_run(tool.dispatch("who2", raw))) == {"actor": None, "scopes": []}
+    for bad in ({"__ctx": 5}, {"__ctx": {"actor": 5}}, {"__ctx": {"actor": "u", "scopes": [1]}}):
+        with pytest.raises(tool.ToolError) as ei:
+            _run(tool.dispatch("who2", json.dumps(bad).encode()))
+        assert ei.value.code == "invalid_args"
+
+
 def test_unknown_tool_raises_typed_error() -> None:
     with pytest.raises(tool.ToolError) as ei:
         _run(tool.dispatch("nope", b"{}"))

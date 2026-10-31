@@ -57,6 +57,7 @@ fn service(exports: &[(&str, bool)], requests: &[(&str, &str, bool)]) -> ToolMan
             .map(|(n, w)| ExportedToolInfo {
                 name: (*n).to_string(),
                 write: *w,
+                required_scope: None,
             })
             .collect(),
         requested: requests
@@ -864,4 +865,215 @@ async fn every_tool_call_completion_emits_a_count_and_a_latency_point_with_pii_f
             "guest-supplied value leaked into a label: {p:?}"
         );
     }
+}
+
+// ---- verified actor / required_scope (P3c) ----
+
+use crate::identity::{
+    BoxFuture, IdentityError, IdentityScope, IdentityWiring, InvocationIdentity, MemberDirectory,
+};
+use crate::license::test_support::FixedGate;
+
+const ACTOR_UUID: &str = "11111111-1111-4111-8111-111111111111";
+
+/// A directory whose single member `1001` has `role` (None = no role column value).
+struct RoleDirectory {
+    role: Option<&'static str>,
+    role_lookups: Mutex<u32>,
+}
+
+impl MemberDirectory for RoleDirectory {
+    fn member_by_platform_id<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        _platform: &'a str,
+        platform_user_id: &'a str,
+    ) -> BoxFuture<'a, Result<uuid::Uuid, IdentityError>> {
+        Box::pin(async move {
+            if platform_user_id == "1001" {
+                Ok(uuid::Uuid::parse_str(ACTOR_UUID).unwrap())
+            } else {
+                Err(IdentityError::NotAMember)
+            }
+        })
+    }
+
+    fn role_for<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        _platform: &'a str,
+        _platform_user_id: &'a str,
+    ) -> BoxFuture<'a, Result<String, IdentityError>> {
+        Box::pin(async move {
+            *self.role_lookups.lock().unwrap() += 1;
+            self.role
+                .map(str::to_string)
+                .ok_or(IdentityError::NotLinked)
+        })
+    }
+
+    fn confirm_member<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        user: uuid::Uuid,
+    ) -> BoxFuture<'a, Result<uuid::Uuid, IdentityError>> {
+        Box::pin(async move { Ok(user) })
+    }
+}
+
+fn admin_rows() -> Vec<ActiveBundleRow> {
+    let mut svc = service(&[("get_balance", false), ("adjust", true)], &[]);
+    svc.exported.push(ExportedToolInfo {
+        name: "admin_op".to_string(),
+        write: true,
+        required_scope: Some("community:admin".to_string()),
+    });
+    vec![
+        row(
+            APP,
+            APP_VERSION,
+            app(&[(SVC, "get_balance", false), (SVC, "admin_op", true)]),
+        ),
+        row(SVC, 22, svc),
+    ]
+}
+
+fn admin_caps(
+    exec: &FakeExecutor,
+    actor_account: Option<&str>,
+    role: Option<&'static str>,
+) -> (StageCapabilities, Arc<RoleDirectory>) {
+    let dir = Arc::new(RoleDirectory {
+        role,
+        role_lookups: Mutex::new(0),
+    });
+    let c = caps_with(
+        admin_rows(),
+        gate(&[
+            (APP, APP_VERSION, SVC, "get_balance"),
+            (APP, APP_VERSION, SVC, "admin_op"),
+        ]),
+        Arc::clone(&exec.registry),
+        vec![APP.to_string()],
+        Some(Instant::now() + Duration::from_secs(10)),
+    )
+    .with_identity(
+        IdentityWiring {
+            directory: Arc::clone(&dir) as Arc<dyn MemberDirectory>,
+            handles: None,
+            flag: Arc::new(FixedGate(true)),
+        },
+        Arc::new(InvocationIdentity::new(
+            "twitch",
+            actor_account.map(str::to_string),
+            vec![],
+        )),
+    );
+    (c, dir)
+}
+
+/// Guest args that try to name their own actor/scope in every way they can.
+fn spoofing_call(tool: &str, key: Option<&str>) -> HostCallBody {
+    HostCallBody {
+        app_id: APP.to_string(),
+        capability: CapabilityKind::Db,
+        op: "tool.invoke".to_string(),
+        args: serde_json::json!({
+            "target": SVC, "tool": tool, "idempotency_key": key,
+            "args": {
+                "user": "u1",
+                "actor": "99999999-9999-4999-8999-999999999999",
+                "scopes": ["community:owner"],
+                "__ctx": {"actor": "99999999-9999-4999-8999-999999999999",
+                          "scopes": ["community:owner"]},
+            },
+        }),
+        call_id: 1,
+    }
+}
+
+#[tokio::test]
+async fn admin_tool_is_served_for_an_admin_and_ctx_is_host_populated_not_guest_supplied() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    let (c, _dir) = admin_caps(&exec, Some("1001"), Some("community-admin"));
+    run(&c, spoofing_call("admin_op", Some("k-1")))
+        .await
+        .unwrap();
+    let inv = recorded(&exec);
+    assert_eq!(inv.len(), 1);
+    let ctx = &inv[0].payload["args"]["__ctx"];
+    assert_eq!(
+        ctx["actor"], ACTOR_UUID,
+        "host-resolved actor, not the guest's"
+    );
+    let scopes: Vec<&str> = ctx["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(scopes.contains(&"community:admin"));
+    assert!(
+        !scopes.contains(&"community:owner"),
+        "guest-supplied scope ignored"
+    );
+}
+
+#[tokio::test]
+async fn admin_tool_is_refused_host_side_for_under_scoped_unresolved_and_no_actor() {
+    // (account on the event, role) -- every case must be refused `forbidden`
+    // and the target must NEVER be invoked.
+    let cases: [(Option<&str>, Option<&'static str>); 5] = [
+        (Some("1001"), Some("moderator")),
+        (Some("1001"), Some("member")),
+        (Some("1001"), Some("unknown-role")),
+        (Some("1001"), None),            // member has no role value
+        (None, Some("community-owner")), // event carries no actor (scheduled/system)
+    ];
+    for (account, role) in cases {
+        let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+        let (c, _dir) = admin_caps(&exec, account, role);
+        let err = run(&c, spoofing_call("admin_op", Some("k-1")))
+            .await
+            .unwrap_err();
+        assert_eq!(err, "forbidden", "{account:?}/{role:?}");
+        assert!(
+            recorded(&exec).is_empty(),
+            "{account:?}/{role:?}: target ran"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admin_tool_is_refused_without_identity_wiring() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    let c = caps_with(
+        admin_rows(),
+        gate(&[(APP, APP_VERSION, SVC, "admin_op")]),
+        Arc::clone(&exec.registry),
+        vec![APP.to_string()],
+        Some(Instant::now() + Duration::from_secs(10)),
+    );
+    let err = run(&c, spoofing_call("admin_op", Some("k-1")))
+        .await
+        .unwrap_err();
+    assert_eq!(err, "forbidden");
+    assert!(recorded(&exec).is_empty());
+}
+
+#[tokio::test]
+async fn non_scoped_tools_skip_role_resolution_and_strip_a_guest_ctx() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    // Even a role-less member can call an unrestricted tool.
+    let (c, dir) = admin_caps(&exec, Some("1001"), None);
+    run(&c, spoofing_call("get_balance", None)).await.unwrap();
+    assert_eq!(
+        *dir.role_lookups.lock().unwrap(),
+        0,
+        "no lookup for ordinary tools"
+    );
+    let inv = recorded(&exec);
+    // No verified actor was resolved, so there is no `__ctx` -- and the guest's
+    // spoofed one never reaches the target.
+    assert!(inv[0].payload["args"].get("__ctx").is_none());
 }

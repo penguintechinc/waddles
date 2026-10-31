@@ -48,6 +48,8 @@ _EXPECTED_COLUMNS = [
 ]
 #: The view as 0048 left it (and as this migration's downgrade must restore it).
 _COLUMNS_AT_0048 = _EXPECTED_COLUMNS[:7]
+#: 0069_identity_view_role appends `role`; `head` therefore carries it.
+_COLUMNS_AT_HEAD = [*_EXPECTED_COLUMNS, "role"]
 _PII_COLUMNS = {
     "display_name",
     "username",
@@ -216,7 +218,7 @@ class TestViewShape:
                 "WHERE table_name = %s ORDER BY ordinal_position",
                 (_VIEW,),
             )
-            assert [r[0] for r in cur.fetchall()] == _EXPECTED_COLUMNS
+            assert [r[0] for r in cur.fetchall()] == _COLUMNS_AT_HEAD
 
     def test_no_pii_column_is_projected(self, pg_db: PgTestDatabase) -> None:
         with _cursor(pg_db) as cur:
@@ -230,7 +232,11 @@ class TestViewShape:
     def test_ddl_is_idempotent_a_second_application_succeeds(
         self, pg_db: PgTestDatabase
     ) -> None:
-        sql = _load_migration()._SQL_PATH.read_text(encoding="utf-8")
+        # At head the view's owner is 0069's SQL (a superset: it appends `role`);
+        # 0052's own file cannot be re-applied over it (a view cannot drop columns).
+        sql = (
+            _MIGRATION_PATH.parents[2] / "scripts" / "db" / "bundle_identity_role.sql"
+        ).read_text(encoding="utf-8")
         with _cursor(pg_db) as cur:
             cur.execute(sql)
             cur.execute(sql)
@@ -318,7 +324,7 @@ class TestDowngradeRoundTrip:
                     )
                     return [r[0] for r in cur.fetchall()]
 
-            assert view_columns() == _EXPECTED_COLUMNS
+            assert view_columns() == _COLUMNS_AT_HEAD
             alembic("downgrade", "0051_bundle_economy_store")
             # 0048's status/reason columns (#757) must survive this downgrade.
             assert view_columns() == _COLUMNS_AT_0048

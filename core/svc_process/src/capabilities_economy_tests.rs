@@ -190,6 +190,19 @@ impl ActorDirectory {
 }
 
 impl MemberDirectory for ActorDirectory {
+    fn role_for<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        _platform: &'a str,
+        _platform_user_id: &'a str,
+    ) -> IdentityFuture<'a, Result<String, IdentityError>> {
+        Box::pin(async {
+            Err(IdentityError::Unavailable(
+                "role lookup is not exercised by this fake".to_string(),
+            ))
+        })
+    }
+
     fn member_by_platform_id<'a>(
         &'a self,
         _scope: IdentityScope,

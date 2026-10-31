@@ -28,7 +28,7 @@ use bundle_host_kv::KvBackend;
 use bundle_tool_call::ToolRefusal;
 use penguin_bundle_host::wire::{HostCallBody, HostResultError, TraceContext};
 
-use super::{denied, CapabilityHandler, StageCapabilities};
+use super::{denied, identity, CapabilityHandler, IdentityScope, StageCapabilities};
 use crate::host_api::ConnectionRegistry;
 use crate::stage_metrics;
 
@@ -143,6 +143,36 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         outcome.map_err(|r| denied(r.code(), r.message()))
     }
 
+    /// The host-VERIFIED actor of this invocation (see
+    /// [`identity::resolve_actor_scopes`]), or the fail-closed
+    /// [`bundle_tool_call::ActorContext::none`] when the invocation is not
+    /// user-originated or the actor/role cannot be resolved (no identity
+    /// wiring, unlinked, inactive, no role, directory down). Never guest input.
+    async fn resolve_verified_actor(&self) -> bundle_tool_call::ActorContext {
+        let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
+            tracing::info!(
+                app_id = %self.app_id, community_id = self.community_id,
+                "tool.invoke: no identity wiring; scope-restricted tools are refused"
+            );
+            return bundle_tool_call::ActorContext::none();
+        };
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        match identity::resolve_actor_scopes(wiring, invocation, scope).await {
+            Ok(actor) => actor,
+            Err(e) => {
+                tracing::info!(
+                    app_id = %self.app_id, community_id = self.community_id,
+                    outcome = e.wire_code(),
+                    "tool.invoke: actor/role unresolved; scope-restricted tools are refused"
+                );
+                bundle_tool_call::ActorContext::none()
+            }
+        }
+    }
+
     async fn run_tool_invoke(
         &self,
         call: &HostCallBody,
@@ -163,13 +193,31 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         // 1-5: validate, guard, matrix, gate, resolve. No executor slot is
         // touched until this returns.
         let req = bundle_tool_call::parse_request(&call.args)?;
+        let gate_scope = self.gate_scope();
+        // Resolve the VERIFIED actor + scopes host-side, and only when the
+        // target tool is scope-restricted (one directory read, no cost for
+        // ordinary tools). `plan_tool_call` re-checks authoritatively, so a miss
+        // here can only fail closed (no actor => no scopes => refused).
+        let actor = if bundle_tool_call::required_scope_of(
+            &ctx.snapshot,
+            &gate_scope,
+            &req.target,
+            &req.tool,
+        )
+        .is_some()
+        {
+            self.resolve_verified_actor().await
+        } else {
+            bundle_tool_call::ActorContext::none()
+        };
         let plan = bundle_tool_call::plan_tool_call(
             &self.app_id,
             &ctx.chain,
             req,
             &ctx.snapshot,
             &self.gate,
-            &self.gate_scope(),
+            &gate_scope,
+            &actor,
         )?;
         *resolved = Some((plan.target_app_id.clone(), plan.tool.clone()));
         tracing::debug!(
