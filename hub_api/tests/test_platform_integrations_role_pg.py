@@ -105,7 +105,15 @@ def role_dal(pg_db: PgTestDatabase) -> Iterator[AsyncDAL]:
 
 
 def _community(db: PgTestDatabase, name: str = "pi-role") -> int:
-    return int(_owner(db, "INSERT INTO communities (name) VALUES (%s) RETURNING id", (name,))[0][0])
+    """A community that belongs to its own tenant (so `Scope.SYSTEM` resolves a real tenant)."""
+    tid = _owner(db, "INSERT INTO tenants (slug) VALUES (%s) RETURNING id", (f"t-{name}",))[0][0]
+    return int(
+        _owner(
+            db,
+            "INSERT INTO communities (name, tenant_id) VALUES (%s, %s) RETURNING id",
+            (name, tid),
+        )[0][0]
+    )
 
 
 def _seed_bot(db: PgTestDatabase) -> None:
@@ -232,7 +240,7 @@ async def test_community_connection_lifecycle_through_the_definer_functions(
 ) -> None:
     """Upsert -> status -> decrypt -> CAS refresh -> disconnect, all as the denied role."""
     cid = _community(pg_db)
-    statuses = await svc.list_connections(role_dal, cid)
+    statuses = await svc.list_connections(role_dal, cid, tenant_id=svc.SYSTEM)
     assert [s.connected for s in statuses] == [False] * len(svc.SUPPORTED_PROVIDERS)
 
     status = await svc.upsert_connection(
@@ -245,6 +253,7 @@ async def test_community_connection_lifecycle_through_the_definer_functions(
         scopes=["a", "b"],
         account_label="My Channel",
         actor_user_id=None,
+        tenant_id=svc.SYSTEM,
     )
     assert status.connected and status.account_label == "My Channel" and status.scopes == ["a", "b"]
     stored = _owner(
@@ -256,22 +265,29 @@ async def test_community_connection_lifecycle_through_the_definer_functions(
     aad = connection_aad(community_id=cid, provider="youtube")
     assert open_secret(stored[0][0], aad=aad, seal_version=1) == "acc-1"
 
-    tokens = await svc.get_decrypted_tokens(role_dal, cid, "youtube")
+    tokens = await svc.get_decrypted_tokens(role_dal, cid, "youtube", tenant_id=svc.SYSTEM)
     assert tokens is not None and tokens.access_token == "acc-1" and tokens.refresh_token == "ref-1"
-    assert (await svc.get_connection(role_dal, cid, "youtube")) is not None
-    assert (await svc.get_connection(role_dal, cid, "twitch")) is None
-    assert await svc.get_decrypted_tokens(role_dal, cid, "twitch") is None
+    assert (await svc.get_connection(role_dal, cid, "youtube", tenant_id=svc.SYSTEM)) is not None
+    assert (await svc.get_connection(role_dal, cid, "twitch", tenant_id=svc.SYSTEM)) is None
+    assert await svc.get_decrypted_tokens(role_dal, cid, "twitch", tenant_id=svc.SYSTEM) is None
 
     await svc.store_refreshed_access_token(
-        role_dal, cid, "youtube", access_token="acc-2", expires_at=datetime.now(UTC)
+        role_dal,
+        cid,
+        "youtube",
+        access_token="acc-2",
+        expires_at=datetime.now(UTC),
+        tenant_id=svc.SYSTEM,
     )
-    refreshed = await svc.get_decrypted_tokens(role_dal, cid, "youtube")
+    refreshed = await svc.get_decrypted_tokens(role_dal, cid, "youtube", tenant_id=svc.SYSTEM)
     assert refreshed is not None and refreshed.access_token == "acc-2"
     assert refreshed.refresh_token == "ref-1"  # untouched refresh token survives
 
-    assert await svc.delete_connection(role_dal, cid, "youtube", None) is True
-    assert await svc.delete_connection(role_dal, cid, "youtube", None) is False
-    assert await svc.get_decrypted_tokens(role_dal, cid, "youtube") is None
+    assert await svc.delete_connection(role_dal, cid, "youtube", None, tenant_id=svc.SYSTEM) is True
+    assert (
+        await svc.delete_connection(role_dal, cid, "youtube", None, tenant_id=svc.SYSTEM) is False
+    )
+    assert await svc.get_decrypted_tokens(role_dal, cid, "youtube", tenant_id=svc.SYSTEM) is None
     cleared = _owner(
         pg_db, "SELECT access_token, refresh_token, is_active FROM platform_integrations"
     )
@@ -296,10 +312,10 @@ async def test_legacy_row_is_lazily_resealed_via_compare_and_set(
         "VALUES ('twitch','community_oauth',%s,%s,TRUE,0)",
         (cid, encrypt_token("legacy-acc")),
     )
-    tokens = await svc.get_decrypted_tokens(role_dal, cid, "twitch")
+    tokens = await svc.get_decrypted_tokens(role_dal, cid, "twitch", tenant_id=svc.SYSTEM)
     assert tokens is not None and tokens.access_token == "legacy-acc"
     assert _owner(pg_db, "SELECT seal_version FROM platform_integrations") == [(1,)]
-    again = await svc.get_decrypted_tokens(role_dal, cid, "twitch")
+    again = await svc.get_decrypted_tokens(role_dal, cid, "twitch", tenant_id=svc.SYSTEM)
     assert again is not None and again.access_token == "legacy-acc"
 
 
@@ -309,8 +325,8 @@ async def test_bot_lane_is_unreachable_through_the_community_functions(
     """Even a bot row for the same platform is invisible/untouchable via the community lane."""
     _seed_bot(pg_db)
     cid = _community(pg_db, "pi-bot")
-    assert await svc.get_decrypted_tokens(role_dal, cid, "twitch") is None
-    assert await svc.delete_connection(role_dal, cid, "twitch", None) is False
+    assert await svc.get_decrypted_tokens(role_dal, cid, "twitch", tenant_id=svc.SYSTEM) is None
+    assert await svc.delete_connection(role_dal, cid, "twitch", None, tenant_id=svc.SYSTEM) is False
     await svc.upsert_connection(
         role_dal,
         cid,
@@ -321,6 +337,7 @@ async def test_bot_lane_is_unreachable_through_the_community_functions(
         scopes=[],
         account_label=None,
         actor_user_id=None,
+        tenant_id=svc.SYSTEM,
     )
     bot = _owner(
         pg_db,
@@ -385,3 +402,21 @@ async def test_a_foreign_tenant_is_rejected_by_the_database_and_audited(
         for r in _owner(pg_db, "SELECT detail FROM credential_access_log WHERE success = FALSE")
     ]
     assert details.count("forbidden_tenant") == 3
+
+
+async def test_system_scope_for_an_unknown_community_is_refused_and_audited(
+    role_dal: AsyncDAL, pg_db: PgTestDatabase
+) -> None:
+    """SYSTEM resolves the tenant from the community row; no row -> a tenant matching nothing."""
+    from services.errors import ApiError
+
+    assert await svc.get_decrypted_tokens(role_dal, 987654, "youtube", tenant_id=svc.SYSTEM) is None
+    with pytest.raises(ApiError):
+        await svc.delete_connection(role_dal, 987654, "youtube", None, tenant_id=svc.SYSTEM)
+    rows = _owner(pg_db, "SELECT action, success, detail FROM credential_access_log ORDER BY id")
+    assert rows == [
+        ("community_secret_read", False, "forbidden_tenant"),
+        ("community_disconnect", False, "forbidden_tenant"),
+    ]
+    with pytest.raises(TypeError):  # None is never a tenant scope
+        await svc.list_connections(role_dal, 1, tenant_id=None)  # type: ignore[arg-type]

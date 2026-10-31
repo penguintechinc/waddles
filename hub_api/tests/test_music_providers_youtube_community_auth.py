@@ -114,7 +114,10 @@ def _mock_get_decrypted_tokens(
     *,
     calls: list[int] | None = None,
 ) -> None:
-    async def _fake(_db: Any, community_id: int, provider: str) -> DecryptedTokens | None:
+    async def _fake(
+        _db: Any, community_id: int, provider: str, *, tenant_id: Any
+    ) -> DecryptedTokens | None:
+        assert tenant_id is youtube_mod.SYSTEM  # no request tenant: explicit SYSTEM, never None
         assert community_id == _COMMUNITY_ID
         assert provider == "youtube"
         if calls is not None:
@@ -212,8 +215,15 @@ class TestCommunityTokenExpiredRefreshes:
         stored: dict[str, Any] = {}
 
         async def fake_store(
-            _db: Any, community_id: int, provider: str, *, access_token: str, expires_at: Any
+            _db: Any,
+            community_id: int,
+            provider: str,
+            *,
+            access_token: str,
+            expires_at: Any,
+            tenant_id: Any,
         ) -> None:
+            assert tenant_id is youtube_mod.SYSTEM
             stored["community_id"] = community_id
             stored["provider"] = provider
             stored["access_token"] = access_token

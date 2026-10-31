@@ -38,7 +38,7 @@
 #   allow_tables   legacy-profile only: tables from `legacy_deny_tables` this role is
 #                  nevertheless granted full DML on (the legacy hub implements login, so it
 #                  alone keeps the authentication / session tables).
-#   functions      {function_name} the role may EXECUTE although EXECUTE was revoked from
+#   functions      {name | name(argtypes)} the role may EXECUTE although EXECUTE was revoked from
 #                  PUBLIC (e.g. resolve_identity_uuid, hub-api's identity resolution).
 #   tables         explicit {table: [PRIVILEGES]} grants (strict roles). Sequences owned
 #                  by a table that is granted INSERT are granted USAGE/SELECT.
@@ -131,8 +131,8 @@ roles:
     # per-community OAuth ciphertext lane (never bot/user_oauth rows). Granted by exact SIGNATURE
     # (no overload inherits it) and re-granted on reconcile.
     functions:
-      - resolve_identity_uuid
-      - erase_ephemeral_pseudonym_handles
+      - resolve_identity_uuid(integer, text, text, text, text, boolean)
+      - erase_ephemeral_pseudonym_handles(text, text, integer, boolean)
       - pi_list_metadata(text, text)
       - pi_community_status(integer, text, integer)
       - pi_community_secret_get(integer, text, integer)

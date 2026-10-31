@@ -59,7 +59,11 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-from services.community_connections import get_decrypted_tokens, store_refreshed_access_token
+from services.community_connections import (
+    SYSTEM,
+    get_decrypted_tokens,
+    store_refreshed_access_token,
+)
 from services.music_providers.errors import ProviderUnavailable, TrackNotFound
 from services.music_providers.track import Track
 from services.oauth_providers import OAuthExchangeError, refresh_access_token
@@ -306,7 +310,9 @@ async def _fetch_community_auth(db: Any, community_id: int) -> _CommunityAuth | 
     failure is logged at WARNING with community id + provider only, never token
     material.
     """
-    tokens = await get_decrypted_tokens(db, community_id, "youtube")
+    # `community_id` is already authorized by the (tenant-scoped) music route that built this
+    # provider; there is no request tenant here, so SYSTEM resolves it from the community row.
+    tokens = await get_decrypted_tokens(db, community_id, "youtube", tenant_id=SYSTEM)
     if tokens is None:
         return None
 
@@ -337,7 +343,12 @@ async def _fetch_community_auth(db: Any, community_id: int) -> _CommunityAuth | 
         now + timedelta(seconds=refreshed.expires_in) if refreshed.expires_in is not None else None
     )
     await store_refreshed_access_token(
-        db, community_id, "youtube", access_token=refreshed.access_token, expires_at=new_expires_at
+        db,
+        community_id,
+        "youtube",
+        access_token=refreshed.access_token,
+        expires_at=new_expires_at,
+        tenant_id=SYSTEM,
     )
     return _CommunityAuth(access_token=refreshed.access_token)
 

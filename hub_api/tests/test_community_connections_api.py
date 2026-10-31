@@ -366,6 +366,7 @@ class TestOAuthCallback:
             user_id=1,
             redirect_uri=f"{CALLBACK_BASE}/api/v1/connections/callback/youtube",
             code_verifier=None,
+            tenant_id=1,
         )
         monkeypatch.setattr(
             connections_module.state_svc, "consume_state", AsyncMock(return_value=payload)
@@ -438,6 +439,7 @@ class TestOAuthCallback:
             user_id=1,
             redirect_uri="http://x/cb",
             code_verifier=None,
+            tenant_id=1,
         )
         monkeypatch.setattr(
             connections_module.state_svc, "consume_state", AsyncMock(return_value=payload)
@@ -460,6 +462,7 @@ class TestOAuthCallback:
             user_id=1,
             redirect_uri="http://x/cb",
             code_verifier=None,
+            tenant_id=1,
         )
         monkeypatch.setattr(
             connections_module.state_svc, "consume_state", AsyncMock(return_value=payload)
@@ -476,6 +479,7 @@ class TestOAuthCallback:
             user_id=1,
             redirect_uri="http://x/cb",
             code_verifier=None,
+            tenant_id=1,
         )
         monkeypatch.setattr(
             connections_module.state_svc, "consume_state", AsyncMock(return_value=payload)
@@ -498,6 +502,7 @@ class TestOAuthCallback:
             user_id=1,
             redirect_uri="http://x/cb",
             code_verifier=None,
+            tenant_id=1,
         )
         monkeypatch.setattr(
             connections_module.state_svc, "consume_state", AsyncMock(return_value=payload)

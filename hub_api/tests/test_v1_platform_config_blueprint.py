@@ -158,6 +158,39 @@ class TestUpdatePlatformConfig:
         assert response.status_code == 404
 
 
+class TestCrossTenantMetadataIsSuperadminOnly:
+    """# regression: gh-969 -- `pi_list_metadata` is cross-tenant BY DESIGN (all tenants' rows).
+
+    The only caller is `GET /superadmin/platform-config`, gated by `users:admin`: present ONLY in
+    `SCOPE_BUNDLES["global"]["admin"]` (granted iff `hub_users.is_super_admin`) and NEVER in the
+    tenant bundle -- so no tenant admin/owner/maintainer can reach it.
+    """
+
+    async def test_no_tenant_scope_bundle_can_list_platform_config(self, client: Any) -> None:
+        from flask_core.auth import SCOPE_BUNDLES
+
+        examined = 0
+        for level in ("admin", "maintainer", "viewer"):
+            scope = " ".join(SCOPE_BUNDLES["tenant"][level])
+            token = make_user_token(user_id=1, scope=scope, tenant=TENANT_SLUG)
+            r = await client.get(
+                "/api/v1/superadmin/platform-config",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert r.status_code == 403, (level, r.status_code)
+            examined += 1
+        assert examined == 3
+        assert "users:admin" not in {s for v in SCOPE_BUNDLES["tenant"].values() for s in v}
+        assert "users:admin" in SCOPE_BUNDLES["global"]["admin"]
+
+    async def test_only_users_admin_scope_passes(self, client: Any) -> None:
+        token = make_user_token(user_id=1, scope="users:admin", tenant=TENANT_SLUG)
+        r = await client.get(
+            "/api/v1/superadmin/platform-config", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert r.status_code == 200
+
+
 class TestListFilters:
     """# regression: gh-969 -- filters on the metadata read (type/platform/invalid/empty)."""
 
@@ -188,9 +221,12 @@ class TestTestPlatformConnectionDelegatesToCredentialManager:
     never touches the bot token, and fails LOUD (503) when the credential manager is down.
     """
 
-    URL_PREFIX = "http://credential-manager:8095/api/v1/credentials/"
+    URL_PREFIX = "https://credential-manager.waddlebot.svc:8095/api/v1/credentials/"
 
     def _patch_cm(self, monkeypatch: Any, handler: Any) -> list[httpx.Request]:
+        monkeypatch.setenv(
+            "CREDENTIAL_MANAGER_URL", "https://credential-manager.waddlebot.svc:8095"
+        )
         seen: list[httpx.Request] = []
         real_async_client = httpx.AsyncClient
 

@@ -137,6 +137,19 @@ spec:
           value: {{ .Values.pipeline.hubApi.spiffePeerTrust | default false | quote }}
         - name: SPIFFE_PEER_ID_HEADER
           value: {{ .Values.pipeline.hubApi.spiffePeerIdHeader | default "X-Spiffe-Peer-Id" | quote }}
+        {{- with .Values.pipeline.hubApi.credentialManager.url }}
+        {{- if not (hasPrefix "https://" .) }}
+        {{- fail "pipeline.hubApi.credentialManager.url must use HTTPS (the caller bearer must never travel over HTTP)" }}
+        {{- end }}
+        - name: CREDENTIAL_MANAGER_URL
+          value: {{ . | quote }}
+        - name: CREDENTIAL_MANAGER_TIMEOUT_S
+          value: {{ $.Values.pipeline.hubApi.credentialManager.timeoutSeconds | quote }}
+        {{- end }}
+        {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
+        - name: CREDENTIAL_MANAGER_CA_FILE
+          value: /etc/waddlebot/credential-manager/ca.crt
+        {{- end }}
         - name: MODULE_NAME
           value: "hub-api"
         - name: PIPELINE_STAGE
@@ -295,6 +308,11 @@ spec:
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
         {{- include "waddlebot.hubApiGrpcTlsVolumeMount" . | nindent 8 }}
+        {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
+        - name: credential-manager-ca
+          mountPath: /etc/waddlebot/credential-manager
+          readOnly: true
+        {{- end }}
       volumes:
       - name: logs
         emptyDir: {}
@@ -304,6 +322,14 @@ spec:
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
       {{- include "waddlebot.hubApiGrpcTlsVolume" . | nindent 6 }}
+      {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
+      - name: credential-manager-ca
+        secret:
+          secretName: {{ .Values.pipeline.hubApi.credentialManager.caSecretName | quote }}
+          items:
+          - key: ca.crt
+            path: ca.crt
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

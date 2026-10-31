@@ -59,6 +59,10 @@ from services.provider_connections.vault import (
 
 logger = logging.getLogger(__name__)
 
+#: Explicit marker for community-bound callers with no request tenant (machine JWT, CronJob):
+#: the tenant is resolved from the community row and passed to SQL -- there is NO default.
+SYSTEM = store.Scope.SYSTEM
+
 
 #: Providers this feature supports -- `list_connections()` always returns
 #: exactly one entry per provider, in this order.
@@ -187,16 +191,17 @@ def _rejected(exc: store.StoreRejectedError) -> ApiError:
 
 
 async def list_connections(
-    db: Any, community_id: int, *, tenant_id: int | None = None
+    db: Any, community_id: int, *, tenant_id: store.TenantScope
 ) -> list[ConnectionStatus]:
     """Return one `ConnectionStatus` per `SUPPORTED_PROVIDERS`, `connected=False` when unset.
 
-    `community_id` MUST come from the validated request scope; `tenant_id` (the validated
-    tenant) additionally makes the DB reject a foreign community (defence in depth).
+    `community_id` MUST come from the validated request scope; `tenant_id` (the validated tenant,
+    REQUIRED -- or the explicit `Scope.SYSTEM` for community-bound machine/CronJob callers) makes
+    the DB reject a foreign community (defence in depth).
     """
     _validate_community(community_id)
     rows = await _run(
-        db, lambda dal: store.community_status(dal, community_id, tenant_id=tenant_id)
+        db, lambda dal: store.community_status(dal, community_id, None, tenant_id=tenant_id)
     )
     by_provider = {row.platform: row for row in rows}
     logger.debug("community_connections.list community_id=%s", community_id)
@@ -207,7 +212,7 @@ async def list_connections(
 
 
 async def get_connection(
-    db: Any, community_id: int, provider: str, *, tenant_id: int | None = None
+    db: Any, community_id: int, provider: str, *, tenant_id: store.TenantScope
 ) -> ConnectionStatus | None:
     """Return `provider`'s connection status, or `None` if there's no active connection."""
     _validate(community_id, provider)
@@ -240,7 +245,7 @@ async def upsert_connection(
     scopes: list[str],
     account_label: str | None,
     actor_user_id: int | None,
-    tenant_id: int | None = None,
+    tenant_id: store.TenantScope,
 ) -> ConnectionStatus:
     """Insert or update the single active `(community_id, provider)` row; sets `is_active=True`.
 
@@ -287,7 +292,7 @@ async def delete_connection(
     provider: str,
     actor_user_id: int | None,
     *,
-    tenant_id: int | None = None,
+    tenant_id: store.TenantScope,
 ) -> bool:
     """Deactivate + null out tokens for the active `(community_id, provider)` row.
 
@@ -345,7 +350,12 @@ def _refresh_for_stamp(
 
 
 def _reseal_legacy(
-    dal: Any, row: store.SecretRow, *, community_id: int, provider: str, tenant_id: int | None
+    dal: Any,
+    row: store.SecretRow,
+    *,
+    community_id: int,
+    provider: str,
+    tenant_id: store.TenantScope,
 ) -> bool:
     """If `row` is still legacy (v0), re-seal both tokens as AAD-bound (v1) via compare-and-set."""
     if not row.is_encrypted or int(row.seal_version or SEAL_LEGACY) != SEAL_LEGACY:
@@ -375,7 +385,7 @@ def _reseal_legacy(
 
 
 async def _reseal_legacy_row(
-    db: Any, row: store.SecretRow, *, community_id: int, provider: str, tenant_id: int | None
+    db: Any, row: store.SecretRow, *, community_id: int, provider: str, tenant_id: store.TenantScope
 ) -> None:
     """Lazy M4 upgrade on read: best effort -- a failure never breaks the read that triggered it.
 
@@ -406,7 +416,7 @@ async def _reseal_legacy_row(
 
 
 async def get_decrypted_tokens(
-    db: Any, community_id: int, provider: str, *, tenant_id: int | None = None
+    db: Any, community_id: int, provider: str, *, tenant_id: store.TenantScope
 ) -> DecryptedTokens | None:
     """Return decrypted OAuth material for provider-API callers; `None` if not connected.
 
@@ -471,7 +481,7 @@ def _store_refreshed(
     provider: str,
     access_token: str,
     expires_at: datetime | None,
-    tenant_id: int | None,
+    tenant_id: store.TenantScope,
 ) -> bool:
     """Seal `access_token` over the current row via compare-and-set; `False` = no active row."""
     aad = connection_aad(community_id=community_id, provider=provider)
@@ -508,7 +518,7 @@ async def store_refreshed_access_token(
     *,
     access_token: str,
     expires_at: datetime | None,
-    tenant_id: int | None = None,
+    tenant_id: store.TenantScope,
 ) -> None:
     """Overwrite the active connection's encrypted `access_token`/`expires_at` after a refresh.
 

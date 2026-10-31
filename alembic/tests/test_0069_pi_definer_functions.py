@@ -410,12 +410,12 @@ def test_metadata_never_returns_secrets_config_is_an_allowlist(
     pg_db: PgTestDatabase,
 ) -> None:
     """Canaries in every secret column AND under arbitrary config keys / URL values never escape."""
-    community = _community(pg_db)
+    ta, community, _, _ = _world(pg_db)
     with _cur(pg_db, HUB) as cur:
         cur.execute("SELECT * FROM pi_list_metadata()")
         listed = cur.fetchall()
         listed_cols = [d.name for d in cur.description]
-        cur.execute("SELECT * FROM pi_community_status(%s)", (community,))
+        cur.execute("SELECT * FROM pi_community_status(%s, NULL, %s)", (community, ta))
         status = cur.fetchall()
         status_cols = [d.name for d in cur.description]
         cur.execute("SELECT * FROM pi_list_metadata('bot', 'twitch')")
@@ -461,11 +461,11 @@ def test_metadata_never_returns_secrets_config_is_an_allowlist(
 def test_secret_get_is_one_row_community_oauth_only_and_audited(
     pg_db: PgTestDatabase,
 ) -> None:
-    community = _community(pg_db)
+    ta, community, _, _ = _world(pg_db)
     mark = _audit_mark(pg_db)
     with _cur(pg_db, HUB) as cur:
         cur.execute(
-            "SELECT * FROM pi_community_secret_get(%s, 'youtube')", (community,)
+            "SELECT * FROM pi_community_secret_get(%s, 'youtube', %s)", (community, ta)
         )
         row = cur.fetchone()
         cols = [d.name for d in cur.description]
@@ -480,11 +480,13 @@ def test_secret_get_is_one_row_community_oauth_only_and_audited(
         ]  # no client_id / client_secret (gh-969 least privilege)
         assert row[1] == CANARY_ACCESS and row[2] == CANARY_REFRESH
         # the bot row for the same platform family is NOT reachable through this lane
-        cur.execute("SELECT * FROM pi_community_secret_get(%s, 'twitch')", (community,))
+        cur.execute(
+            "SELECT * FROM pi_community_secret_get(%s, 'twitch', %s)", (community, ta)
+        )
         assert cur.fetchall() == []
         # refusals are RETURNED (empty), never raised -- so their audit row commits
         for bad in ((0, "youtube"), (community, "nope<script>"), (-1, "twitch")):
-            cur.execute("SELECT * FROM pi_community_secret_get(%s, %s)", bad)
+            cur.execute("SELECT * FROM pi_community_secret_get(%s, %s, %s)", (*bad, ta))
             assert cur.fetchall() == []
     rows = _audit_rows(pg_db, mark)
     assert [(r[0], r[1], r[2]) for r in rows] == [
@@ -534,8 +536,9 @@ def test_foreign_community_is_rejected_in_the_database_and_audited(
         assert len(cur.fetchall()) == 1
         cur.execute("SELECT * FROM pi_community_status(%s,NULL,%s)", (ca, ta))
         assert len(cur.fetchall()) == 2
+        # a NULL tenant NEVER passes (fail closed) -- omitting it cannot reach any community
         cur.execute("SELECT * FROM pi_community_secret_get(%s,'youtube',NULL)", (ca,))
-        assert len(cur.fetchall()) == 1
+        assert cur.fetchall() == []
         # tenant A cannot read A's community by claiming tenant B either
         cur.execute("SELECT * FROM pi_community_secret_get(%s,'youtube',%s)", (ca, tb))
         assert cur.fetchall() == []
@@ -545,7 +548,8 @@ def test_foreign_community_is_rejected_in_the_database_and_audited(
         "community_upsert",
         "community_disconnect",
         "community_set_sealed",
-        "community_secret_read",
+        "community_secret_read",  # NULL tenant
+        "community_secret_read",  # claimed the wrong tenant
     ]
     assert all(r[1] is False and r[3] == HUB for r in denied)
     with _cur(pg_db) as cur:  # nothing was written to community B
@@ -553,6 +557,104 @@ def test_foreign_community_is_rejected_in_the_database_and_audited(
             "SELECT count(*) FROM platform_integrations WHERE community_id = %s", (cb,)
         )
         assert cur.fetchone()[0] == 0
+
+
+@requires_docker
+def test_null_or_omitted_tenant_is_refused_by_every_group_b_function(
+    pg_db: PgTestDatabase,
+) -> None:
+    """# regression: gh-969 -- NULL tenant must NEVER pass; the argument cannot be omitted."""
+    _, ca, _, _ = _world(pg_db)
+    mark = _audit_mark(pg_db)
+    with _cur(pg_db, HUB) as cur:
+        cur.execute("SELECT * FROM pi_community_secret_get(%s,'youtube',NULL)", (ca,))
+        assert cur.fetchall() == []
+        cur.execute(
+            "SELECT outcome FROM pi_community_upsert(%s,'youtube','x','y',NULL,'{}','l',"
+            "1::smallint,NULL)",
+            (ca,),
+        )
+        assert cur.fetchone()[0] == "forbidden_tenant"
+        cur.execute("SELECT pi_community_disconnect(%s,'youtube',NULL)", (ca,))
+        assert cur.fetchone()[0] == "forbidden_tenant"
+        cur.execute(
+            "SELECT pi_community_set_sealed(%s,'youtube',%s,'b',NULL,NULL,1::smallint,TRUE,NULL)",
+            (ca, CANARY_ACCESS),
+        )
+        assert cur.fetchone()[0] == "forbidden_tenant"
+        cur.execute("SELECT * FROM pi_community_status(%s,NULL,NULL)", (ca,))
+        assert cur.fetchall() == []
+        # omitting the argument entirely is impossible: there is no defaulted overload
+        for stmt in (
+            "SELECT * FROM pi_community_secret_get(%s,'youtube')",
+            "SELECT * FROM pi_community_disconnect(%s,'youtube')",
+            "SELECT * FROM pi_community_status(%s)",
+        ):
+            with pytest.raises(psycopg2.errors.UndefinedFunction):
+                cur.execute(stmt, (ca,))
+    rows = _audit_rows(pg_db, mark)
+    assert [(r[0], r[1], r[2]) for r in rows] == [
+        ("community_secret_read", False, "forbidden_tenant"),
+        ("community_upsert", False, "forbidden_tenant"),
+        ("community_disconnect", False, "forbidden_tenant"),
+        ("community_set_sealed", False, "forbidden_tenant"),
+    ]
+    with _cur(pg_db) as cur:  # the seeded row is untouched
+        cur.execute(
+            "SELECT access_token, is_active FROM platform_integrations "
+            "WHERE community_id = %s AND platform = 'youtube'",
+            (ca,),
+        )
+        assert cur.fetchall() == [(CANARY_ACCESS, True)]
+        cur.execute("SELECT public.pi_tenant_ok(%s, NULL)", (ca,))
+        assert cur.fetchone()[0] is False
+    with pytest.raises(psycopg2.errors.InsufficientPrivilege), _cur(pg_db, HUB) as cur:
+        cur.execute(
+            "SELECT public.pi_tenant_ok(%s, NULL)", (ca,)
+        )  # helper not callable by hub-api
+
+
+@requires_docker
+def test_definer_role_memberships_are_revoked_on_migrate(pg_db: PgTestDatabase) -> None:
+    """# regression: gh-969 -- a pre-existing definer role's members could SET ROLE into BYPASSRLS."""
+    env = {PASSWORDS_ENV: json.dumps(pg_db.service_role_passwords)}
+    alembic_cli("downgrade", "0068_app_catalog_kind", dsn=pg_db.dsn, env_overrides=env)
+    with _cur(pg_db) as cur:
+        # the role pre-exists (e.g. left behind / recreated by hand) WITH members and a parent
+        cur.execute(f"CREATE ROLE {OWNER} NOLOGIN BYPASSRLS")
+        cur.execute(f"GRANT {OWNER} TO {HUB} WITH ADMIN OPTION")
+        cur.execute(
+            f"GRANT {OWNER} TO waddles_svc_action WITH ADMIN OPTION GRANTED BY {HUB}"
+        )
+        cur.execute("CREATE ROLE pi_parent NOLOGIN")
+        cur.execute(f"GRANT pi_parent TO {OWNER} WITH ADMIN OPTION")
+        cur.execute(f"GRANT pi_parent TO waddles_svc_core GRANTED BY {OWNER}")
+        cur.execute(
+            "SELECT count(*) FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.roleid "
+            "WHERE g.rolname = %s",
+            (OWNER,),
+        )
+        assert cur.fetchone()[0] == 2  # the precondition really holds
+    alembic_cli("upgrade", "head", dsn=pg_db.dsn, env_overrides=env)
+    with _cur(pg_db) as cur:
+        cur.execute(
+            "SELECT g.rolname, m.rolname FROM pg_auth_members am "
+            "JOIN pg_roles g ON g.oid = am.roleid JOIN pg_roles m ON m.oid = am.member "
+            "JOIN pg_roles gr ON gr.oid = am.grantor "
+            "WHERE g.rolname = %s OR m.rolname = %s OR gr.rolname = %s",
+            (OWNER, OWNER, OWNER),
+        )
+        assert (
+            cur.fetchall() == []
+        )  # no role is a member of it; it is a member of nothing
+        cur.execute("SELECT count(*) FROM pg_roles")
+        assert cur.fetchone()[0] > 10  # denominator: the catalog was really examined
+        cur.execute("DROP ROLE pi_parent")
+    for role in (HUB, "waddles_svc_action"):
+        with _cur(pg_db, role) as cur, pytest.raises(psycopg2.Error):
+            cur.execute(f"SET ROLE {OWNER}")
+    with _cur(pg_db, HUB) as cur, pytest.raises(psycopg2.errors.InsufficientPrivilege):
+        cur.execute("SELECT 1 FROM platform_integrations")
 
 
 @requires_docker
@@ -694,7 +796,7 @@ def test_reconcile_grants_by_exact_signature_not_bare_name(
         cur.execute(
             "REVOKE EXECUTE ON FUNCTION public.pi_list_metadata(bigint) FROM PUBLIC"
         )
-    subprocess.run(
+    done = subprocess.run(
         [sys.executable, "scripts/db/service_roles.py", "reconcile", "--strict"],
         cwd=REPO_ROOT,
         env={
@@ -702,9 +804,11 @@ def test_reconcile_grants_by_exact_signature_not_bare_name(
             PASSWORDS_ENV: json.dumps(pg_db.service_role_passwords),
             "PATH": "/usr/bin:/bin",
         },
-        check=True,
+        check=False,
         capture_output=True,
+        text=True,
     )
+    assert done.returncode == 0, done.stderr[-1500:]
     with _cur(pg_db) as cur:
         cur.execute(
             "SELECT has_function_privilege(%s, %s::regprocedure, 'EXECUTE')",

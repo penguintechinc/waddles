@@ -319,6 +319,9 @@ async def oauth_callback(provider: str) -> tuple[Response, int] | Response:
     account_label = await providers_svc.fetch_account_label(provider, token.access_token)
 
     async_dal, _dal_ = _dal()
+    if payload.tenant_id is None:
+        # No tenant was bound when the flow started (e.g. a pre-upgrade `state`): never guess one.
+        return _callback_html(provider=provider, ok=False, error="save_failed")
     try:
         await connections_svc.upsert_connection(
             async_dal,
@@ -413,7 +416,11 @@ async def internal_get_token(community_id: int, provider: str) -> tuple[dict[str
         return _err(not_found("Community not found"))
 
     try:
-        tokens = await connections_svc.get_decrypted_tokens(async_dal, community_id, provider)
+        # community-bound machine identity (route-bound `community` claim): no request tenant,
+        # so the tenant is resolved from the community row and passed to SQL explicitly.
+        tokens = await connections_svc.get_decrypted_tokens(
+            async_dal, community_id, provider, tenant_id=connections_svc.SYSTEM
+        )
     except connections_svc.UnsupportedProvider:
         return _err(bad_request(f"Unsupported provider: {provider}"))
 
@@ -449,6 +456,7 @@ async def internal_get_token(community_id: int, provider: str) -> tuple[dict[str
         provider,
         access_token=refreshed.access_token,
         expires_at=new_expires_at,
+        tenant_id=connections_svc.SYSTEM,
     )
     return _token_envelope(
         refreshed.access_token,

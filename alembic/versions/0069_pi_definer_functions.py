@@ -18,10 +18,11 @@ bot tokens and per-community OAuth tokens, FORCE RLS, `deny_tables` in
 **Authorization (defence in depth).** The DB cannot know the end user, so hub-api derives
 `community_id` from the VALIDATED request scope (tenant middleware + `community_in_tenant`, or a
 server-side signed OAuth `state`, or a community-bound machine JWT) -- an invariant tested in
-hub-api. In addition every Group B function (and `pi_community_status`) takes the validated
-`p_tenant_id` and, when supplied, REJECTS a community that does not belong to that tenant
-(`communities.tenant_id`), so a bug that lets a foreign `community_id` through is also caught
-here. Internal system-plane callers pass NULL (trusted, community-bound machine identity).
+hub-api. In addition every Group B function (and `pi_community_status`) REQUIRES the validated
+`p_tenant_id` (no default) and REJECTS a community that does not belong to that tenant
+(`communities.tenant_id`); a NULL tenant never passes (`pi_tenant_ok` fails closed), so omitting
+the argument cannot reach another community. Internal community-bound callers (machine JWT,
+CronJob) resolve the tenant from the community row in hub-api and pass it explicitly.
 There is deliberately NO caller-supplied "actor" parameter: end-user attribution cannot be
 verified by the DB, so it is never persisted into ownership columns.
 
@@ -90,12 +91,30 @@ _ROLE_SQL = (
     "-- 0069\n"  # nosec B608 -- only module constants are substituted
     """
 DO $role$
+DECLARE
+    m record;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '__OWNER__') THEN
         CREATE ROLE __OWNER__ NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;
     ELSE
         ALTER ROLE __OWNER__ NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;
     END IF;
+    -- A pre-existing role may carry memberships: any MEMBER could `SET ROLE` into this
+    -- BYPASSRLS owner and read platform_integrations directly (defeating H-3), and anything it is
+    -- itself a member of would widen it. Revoke every membership in BOTH directions.
+    LOOP
+        -- Re-read after each CASCADE: dependent grants may already have disappeared, and
+        -- their former grantor may no longer have ADMIN OPTION. Never revoke a stale row.
+        SELECT g.rolname AS grp, r.rolname AS member, gr.rolname AS grantor INTO m
+          FROM pg_auth_members am
+          JOIN pg_roles g ON g.oid = am.roleid
+          JOIN pg_roles r ON r.oid = am.member
+          JOIN pg_roles gr ON gr.oid = am.grantor
+         WHERE g.rolname = '__OWNER__' OR r.rolname = '__OWNER__'
+         LIMIT 1;
+        EXIT WHEN NOT FOUND;
+        EXECUTE format('REVOKE %I FROM %I GRANTED BY %I CASCADE', m.grp, m.member, m.grantor);
+    END LOOP;
 END $role$;
 GRANT USAGE ON SCHEMA public TO __OWNER__;
 GRANT SELECT, INSERT, UPDATE ON public.platform_integrations TO __OWNER__;
@@ -133,6 +152,13 @@ BEGIN
                     AND NOT rolcreatedb AND NOT rolreplication) THEN
         RAISE EXCEPTION '0069: __OWNER__ must be NOLOGIN NOSUPERUSER BYPASSRLS (least privilege) '
             '-- without BYPASSRLS the FORCE-RLS table would silently show the definer zero rows';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_auth_members am
+                JOIN pg_roles g ON g.oid = am.roleid
+                JOIN pg_roles r ON r.oid = am.member
+               WHERE g.rolname = '__OWNER__' OR r.rolname = '__OWNER__') THEN
+        RAISE EXCEPTION '0069: __OWNER__ must have NO role memberships (any member could SET ROLE '
+            'into the BYPASSRLS definer owner and read platform_integrations directly)';
     END IF;
     FOREACH t IN ARRAY ARRAY['platform_integrations', 'credential_access_log', 'communities'] LOOP
         IF to_regclass('public.' || t) IS NULL THEN
@@ -178,9 +204,10 @@ END $fn$;
 CREATE OR REPLACE FUNCTION public.pi_tenant_ok(p_community_id integer, p_tenant_id integer)
 RETURNS boolean LANGUAGE plpgsql STABLE SET search_path = pg_catalog, pg_temp AS $fn$
 BEGIN
-    -- NULL tenant = trusted system-plane caller (community-bound machine identity).
-    IF p_tenant_id IS NULL THEN
-        RETURN TRUE;
+    -- FAIL CLOSED: a NULL tenant (or community) NEVER passes. There is no "system plane" bypass
+    -- in SQL; callers without a request tenant resolve it from the community row themselves.
+    IF p_tenant_id IS NULL OR p_community_id IS NULL THEN
+        RETURN FALSE;
     END IF;
     RETURN EXISTS (SELECT 1 FROM public.communities c
                     WHERE c.id = p_community_id AND c.tenant_id = p_tenant_id);
@@ -234,7 +261,7 @@ BEGIN
 END $fn$;
 
 CREATE OR REPLACE FUNCTION public.pi_community_status(
-    p_community_id integer, p_platform text DEFAULT NULL, p_tenant_id integer DEFAULT NULL
+    p_community_id integer, p_platform text, p_tenant_id integer
 ) RETURNS TABLE (
     id integer, platform text, community_id integer, access_token_set boolean,
     expires_at timestamptz, scopes text[], config_data jsonb, is_active boolean,
@@ -264,7 +291,7 @@ END $fn$;
 
 _GROUP_B_SQL = """
 CREATE OR REPLACE FUNCTION public.pi_community_secret_get(
-    p_community_id integer, p_platform text, p_tenant_id integer DEFAULT NULL
+    p_community_id integer, p_platform text, p_tenant_id integer
 ) RETURNS TABLE (
     id integer, access_token text, refresh_token text, expires_at timestamptz,
     scopes text[], is_encrypted boolean, seal_version smallint
@@ -306,7 +333,7 @@ END $fn$;
 CREATE OR REPLACE FUNCTION public.pi_community_upsert(
     p_community_id integer, p_platform text, p_access text, p_refresh text,
     p_expires_at timestamptz, p_scopes text[], p_account_label text,
-    p_seal_version smallint, p_tenant_id integer DEFAULT NULL
+    p_seal_version smallint, p_tenant_id integer
 ) RETURNS TABLE (
     outcome text, id integer, scopes text[], expires_at timestamptz, updated_at timestamptz,
     config_data jsonb
@@ -374,7 +401,7 @@ BEGIN
 END $fn$;
 
 CREATE OR REPLACE FUNCTION public.pi_community_disconnect(
-    p_community_id integer, p_platform text, p_tenant_id integer DEFAULT NULL
+    p_community_id integer, p_platform text, p_tenant_id integer
 ) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
 DECLARE
     v_id integer;
@@ -410,7 +437,7 @@ END $fn$;
 CREATE OR REPLACE FUNCTION public.pi_community_set_sealed(
     p_community_id integer, p_platform text, p_expected_access text, p_access text,
     p_refresh text, p_expires_at timestamptz, p_seal_version smallint,
-    p_touch_updated_at boolean, p_tenant_id integer DEFAULT NULL
+    p_touch_updated_at boolean, p_tenant_id integer
 ) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
 DECLARE
     v_id integer;
@@ -530,6 +557,10 @@ END $grant$;
 
 def upgrade() -> None:
     """Create/assert the definer role, (re)create the functions, rebuild ACLs by signature."""
+    for (
+        sig
+    ) in CALLABLE_SIGNATURES:  # CREATE OR REPLACE cannot remove parameter defaults
+        op.execute(f"DROP FUNCTION IF EXISTS public.{sig}")
     op.execute(_ROLE_SQL_PRE)
     op.execute(_ROLE_SQL)
     op.execute(_ASSERT_SQL)

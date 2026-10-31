@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import Enum
 from typing import Any
 
 COMMUNITY_OAUTH = "community_oauth"
@@ -85,6 +86,25 @@ class StoreRejectedError(RuntimeError):
         self.outcome = outcome
 
 
+class Scope(Enum):
+    """Explicit marker for callers with no request tenant (community-bound machine/CronJob).
+
+    NEVER a default: every Group B/status call must pass either the VALIDATED tenant id or this
+    marker. `SYSTEM` makes hub-api resolve the tenant from the community row and pass THAT id to
+    SQL -- the database itself fails closed on a NULL tenant.
+    """
+
+    SYSTEM = "system"
+
+
+#: A validated tenant id, or the explicit `Scope.SYSTEM` marker. Never `None`.
+TenantScope = int | Scope
+
+#: Sent to SQL when the community cannot be resolved: matches no tenant, so the DB refuses (and
+#: audits) the call as `forbidden_tenant`.
+_NO_TENANT = -1
+
+
 class UnsupportedEngineError(RuntimeError):
     """The DAL's adapter is neither Postgres (definer functions) nor SQLite (dev table path)."""
 
@@ -120,6 +140,29 @@ def _call(dal: Any, sql: str, args: list[Any]) -> list[dict[str, Any]]:
     except Exception:
         dal.rollback()
         raise
+
+
+def _check_scope(tenant: object) -> None:
+    """Reject `None`/bool/anything but a tenant id or `Scope.SYSTEM` -- on EVERY engine."""
+    if isinstance(tenant, bool) or not isinstance(tenant, int | Scope):
+        raise TypeError("tenant must be a validated tenant id or Scope.SYSTEM, never None")
+
+
+def _tenant(dal: Any, community_id: int, tenant: TenantScope) -> int:
+    """The concrete tenant id passed to SQL -- never None.
+
+    A validated int is passed through. `Scope.SYSTEM` is resolved from the community row (an
+    unknown community resolves to a tenant that matches nothing, so SQL refuses + audits it).
+    """
+    _check_scope(tenant)
+    if isinstance(tenant, int):
+        return tenant
+    if not _is_pg(dal):
+        return _NO_TENANT  # SQLite (dev) has no tenant check; the value is unused there
+    rows = dal.executesql(
+        "SELECT tenant_id FROM communities WHERE id = %s", placeholders=[community_id]
+    )
+    return int(rows[0][0]) if rows and rows[0][0] is not None else _NO_TENANT
 
 
 def _status(row: dict[str, Any]) -> StatusRow:
@@ -184,17 +227,18 @@ def list_metadata(
 
 
 def community_status(
-    dal: Any, community_id: int, platform: str | None = None, *, tenant_id: int | None = None
+    dal: Any, community_id: int, platform: str | None, *, tenant_id: TenantScope
 ) -> list[StatusRow]:
     """Active community_oauth rows' non-secret state for one community.
 
-    `tenant_id` (the VALIDATED request tenant) makes the DB reject a foreign community too.
+    `tenant_id` (the VALIDATED request tenant, REQUIRED) makes the DB reject a foreign community.
     """
+    _check_scope(tenant_id)
     if _is_pg(dal):
         rows = _call(
             dal,
             "SELECT * FROM pi_community_status(%s, %s, %s)",
-            [community_id, platform, tenant_id],
+            [community_id, platform, _tenant(dal, community_id, tenant_id)],
         )
         return [_status(r) for r in rows]
     t = _bind(dal)
@@ -223,17 +267,18 @@ def community_status(
 
 
 def get_secret(
-    dal: Any, community_id: int, platform: str, *, tenant_id: int | None = None
+    dal: Any, community_id: int, platform: str, *, tenant_id: TenantScope
 ) -> SecretRow | None:
     """Ciphertext of the one active `(community_id, platform)` community_oauth row (audited).
 
     Every refusal (bad args, foreign tenant, no row) is an audited `None`.
     """
+    _check_scope(tenant_id)
     if _is_pg(dal):
         rows = _call(
             dal,
             "SELECT * FROM pi_community_secret_get(%s, %s, %s)",
-            [community_id, platform, tenant_id],
+            [community_id, platform, _tenant(dal, community_id, tenant_id)],
         )
         if not rows:
             return None
@@ -272,13 +317,14 @@ def upsert(
     scopes: list[str],
     account_label: str | None,
     seal_version: int,
-    tenant_id: int | None = None,
+    tenant_id: TenantScope,
 ) -> StatusRow:
     """Insert-or-update the community's sealed OAuth row; refuses a seal downgrade.
 
     No actor is persisted: the DB cannot verify an end-user identity, so ownership columns are
     never written from caller-supplied attribution.
     """
+    _check_scope(tenant_id)
     if _is_pg(dal):
         rows = _call(
             dal,
@@ -292,7 +338,7 @@ def upsert(
                 scopes,
                 account_label,
                 seal_version,
-                tenant_id,
+                _tenant(dal, community_id, tenant_id),
             ],
         )
         if rows[0]["outcome"] != "ok":
@@ -360,13 +406,14 @@ def upsert(
     )
 
 
-def disconnect(dal: Any, *, community_id: int, platform: str, tenant_id: int | None = None) -> bool:
+def disconnect(dal: Any, *, community_id: int, platform: str, tenant_id: TenantScope) -> bool:
     """Deactivate the active row and null every secret; `False` when nothing was active."""
+    _check_scope(tenant_id)
     if _is_pg(dal):
         rows = _call(
             dal,
             "SELECT pi_community_disconnect(%s, %s, %s) AS outcome",
-            [community_id, platform, tenant_id],
+            [community_id, platform, _tenant(dal, community_id, tenant_id)],
         )
         outcome = str(rows[0]["outcome"])
         if outcome not in ("ok", "not_found"):
@@ -406,12 +453,13 @@ def set_sealed(
     expires_at: datetime | None,
     seal_version: int,
     touch_updated_at: bool,
-    tenant_id: int | None = None,
+    tenant_id: TenantScope,
 ) -> bool:
     """Compare-and-set re-seal/refresh: `False` if the stored ciphertext changed meanwhile.
 
     `refresh_token` / `expires_at` of `None` leave the stored value unchanged.
     """
+    _check_scope(tenant_id)
     if _is_pg(dal):
         rows = _call(
             dal,
@@ -426,7 +474,7 @@ def set_sealed(
                 expires_at,
                 seal_version,
                 touch_updated_at,
-                tenant_id,
+                _tenant(dal, community_id, tenant_id),
             ],
         )
         outcome = str(rows[0]["outcome"])

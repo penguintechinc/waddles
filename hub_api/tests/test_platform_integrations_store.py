@@ -81,7 +81,7 @@ def test_sqlite_metadata_and_status_never_return_non_allowlisted_config(dal: Any
         "youtube": {},
     }
     assert all(m.access_token_set for m in meta)
-    status = store.community_status(dal, 5)
+    status = store.community_status(dal, 5, None, tenant_id=store.Scope.SYSTEM)
     assert [s.config_data for s in status] == [{}]
     assert CANARY not in str(meta) + str(status)
 
@@ -95,3 +95,18 @@ def test_unsupported_engine_raises() -> None:
 
     with pytest.raises(store.UnsupportedEngineError):
         store.list_metadata(_Dal())
+
+
+def test_none_is_never_a_tenant_scope_on_any_engine(dal: Any) -> None:
+    """# regression: gh-969 -- omitting/None-ing the tenant fails loudly, even on SQLite."""
+    calls = (
+        lambda: store.community_status(dal, 1, None, tenant_id=None),  # type: ignore[arg-type]
+        lambda: store.get_secret(dal, 1, "youtube", tenant_id=None),  # type: ignore[arg-type]
+        lambda: store.disconnect(dal, community_id=1, platform="youtube", tenant_id=None),  # type: ignore[arg-type]
+        lambda: store.community_status(dal, 1, None, tenant_id=True),
+    )
+    for call in calls:
+        with pytest.raises(TypeError):
+            call()
+    with pytest.raises(TypeError):
+        store.get_secret(dal, 1, "youtube")  # type: ignore[call-arg]  # omitted entirely
