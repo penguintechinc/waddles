@@ -408,6 +408,20 @@ jobs:
               CONSTRAINT platform_integrations_unique_bot
                   UNIQUE (platform, integration_type, community_id, user_id)
           );
+          -- 0069_pi_definer_functions audits every community-secret read into this legacy table
+          -- (config/postgres/migrations/000_create_base_schema.sql): same columns as the real DDL.
+          -- Mirrored in pr-validation.yml's bootstrap -- keep both in sync.
+          CREATE TABLE credential_access_log (
+              id BIGSERIAL PRIMARY KEY,
+              db_user VARCHAR(255) NOT NULL DEFAULT current_user,
+              integration_id INTEGER,
+              platform VARCHAR(50),
+              community_id INTEGER,
+              action VARCHAR(50) NOT NULL,
+              success BOOLEAN NOT NULL DEFAULT TRUE,
+              detail TEXT,
+              accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          );
           SQL
 
       # Runs whenever any alembic-related file changed (`any`), including a

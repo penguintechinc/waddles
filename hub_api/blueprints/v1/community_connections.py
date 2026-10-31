@@ -208,7 +208,12 @@ async def list_connections(community_id: int) -> tuple[dict[str, Any], int]:
         return _err(not_found("Community not found"))
 
     async_dal, _dal_ = _dal()
-    statuses = await connections_svc.list_connections(async_dal, community_id)
+    try:
+        statuses = await connections_svc.list_connections(
+            async_dal, community_id, tenant_id=ctx.tenant_id
+        )
+    except ApiError as exc:
+        return _err(exc)
     return _envelope(
         {
             "connections": [status.to_dict() for status in statuses],
@@ -259,6 +264,7 @@ async def authorize_connection(community_id: int, provider: str) -> tuple[dict[s
         user_id=user_id,
         redirect_uri=redirect_uri,
         code_verifier=code_verifier,
+        tenant_id=ctx.tenant_id,
     )
 
     try:
@@ -313,6 +319,9 @@ async def oauth_callback(provider: str) -> tuple[Response, int] | Response:
     account_label = await providers_svc.fetch_account_label(provider, token.access_token)
 
     async_dal, _dal_ = _dal()
+    if payload.tenant_id is None:
+        # No tenant was bound when the flow started (e.g. a pre-upgrade `state`): never guess one.
+        return _callback_html(provider=provider, ok=False, error="save_failed")
     try:
         await connections_svc.upsert_connection(
             async_dal,
@@ -324,6 +333,7 @@ async def oauth_callback(provider: str) -> tuple[Response, int] | Response:
             scopes=token.scopes,
             account_label=account_label,
             actor_user_id=payload.user_id,
+            tenant_id=payload.tenant_id,
         )
     except (connections_svc.UnsupportedProvider, ApiError):
         return _callback_html(provider=provider, ok=False, error="save_failed")
@@ -350,10 +360,12 @@ async def delete_connection(community_id: int, provider: str) -> tuple[Any, int]
     user_id = get_current_user_id(request)
     try:
         deleted = await connections_svc.delete_connection(
-            async_dal, community_id, provider, user_id
+            async_dal, community_id, provider, user_id, tenant_id=ctx.tenant_id
         )
     except connections_svc.UnsupportedProvider:
         return _err(bad_request(f"Unsupported provider: {provider}"))
+    except ApiError as exc:
+        return _err(exc)
 
     if not deleted:
         return _err(not_found("No active connection for this provider"))
@@ -404,7 +416,11 @@ async def internal_get_token(community_id: int, provider: str) -> tuple[dict[str
         return _err(not_found("Community not found"))
 
     try:
-        tokens = await connections_svc.get_decrypted_tokens(async_dal, community_id, provider)
+        # community-bound machine identity (route-bound `community` claim): no request tenant,
+        # so the tenant is resolved from the community row and passed to SQL explicitly.
+        tokens = await connections_svc.get_decrypted_tokens(
+            async_dal, community_id, provider, tenant_id=connections_svc.SYSTEM
+        )
     except connections_svc.UnsupportedProvider:
         return _err(bad_request(f"Unsupported provider: {provider}"))
 
@@ -440,6 +456,7 @@ async def internal_get_token(community_id: int, provider: str) -> tuple[dict[str
         provider,
         access_token=refreshed.access_token,
         expires_at=new_expires_at,
+        tenant_id=connections_svc.SYSTEM,
     )
     return _token_envelope(
         refreshed.access_token,

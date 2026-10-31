@@ -16,11 +16,10 @@ Every function is tenant-scoped by `community_id` alone -- the caller
 port's other service modules assume (see `community_loyalty.py`'s own
 module docstring).
 
-Every `platform_integrations` select names its columns explicitly
-(`_fields()`) rather than a bare `.select()`/`ALL` -- this repo has hit
-pydal-vs-Postgres column drift before (a drifted/renamed column should
-fail loudly at the call site, not silently resolve to whatever ALL
-currently returns).
+This module never touches `platform_integrations` directly: `waddles_hub_api` is denied the table
+(H-3) and every read/write goes through `services.platform_integrations_store` -- on Postgres the
+narrow SECURITY DEFINER functions of migration 0069 (gh-969), community_oauth lane and ciphertext
+only; the module holds no path to operator bot credentials.
 
 Access/refresh tokens are AES-256-GCM encrypted at rest via
 `provider_connections.vault.seal_secret()`/`open_secret()` (AES-256-GCM, AAD-bound to
@@ -41,11 +40,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
-from services.errors import bad_request, not_found
+from services import platform_integrations_store as store
+from services.errors import ApiError, bad_request, conflict, not_found
 from services.platform_integrations_crypto import PlatformCredentialCryptoError, connection_aad
 from services.provider_connections.telemetry import log_failure
 from services.provider_connections.vault import (
@@ -55,40 +56,17 @@ from services.provider_connections.vault import (
     reseal_if_legacy,
     seal_secret,
 )
-from services.schema import bind_platform_tables
 
 logger = logging.getLogger(__name__)
+
+#: Explicit marker for community-bound callers with no request tenant (machine JWT, CronJob):
+#: the tenant is resolved from the community row and passed to SQL -- there is NO default.
+SYSTEM = store.Scope.SYSTEM
+
 
 #: Providers this feature supports -- `list_connections()` always returns
 #: exactly one entry per provider, in this order.
 SUPPORTED_PROVIDERS: tuple[str, ...] = ("youtube", "spotify", "twitch", "discord", "kick", "slack")
-
-#: This feature's fixed `platform_integrations.integration_type` value.
-_INTEGRATION_TYPE = "community_oauth"
-
-#: OAuth token *type* label written to `platform_integrations.token_type` --
-#: not a secret (ruff S106 false-positives on the literal "Bearer" here).
-_DEFAULT_TOKEN_TYPE = "Bearer"  # noqa: S105
-
-#: Explicit `platform_integrations` column list for every select -- see
-#: module docstring on why this is never a bare `.select()`.
-_SELECT_COLUMNS: tuple[str, ...] = (
-    "id",
-    "platform",
-    "access_token",
-    "refresh_token",
-    "client_id",
-    "client_secret",
-    "token_type",
-    "expires_at",
-    "scopes",
-    "config_data",
-    "is_active",
-    "is_encrypted",
-    "seal_version",
-    "created_at",
-    "updated_at",
-)
 
 
 class UnsupportedProvider(ValueError):  # noqa: N818 - contract-pinned name, see module docstring
@@ -144,32 +122,6 @@ def _validate(community_id: int, provider: str) -> None:
     _validate_community(community_id)
 
 
-def _ensure_tables(dal: Any) -> None:
-    """Idempotently bind `platform_integrations` (+ its M3 group) -- cheap membership check."""
-    bind_platform_tables(dal)
-
-
-def _for_update(dal: Any) -> bool:
-    """`SELECT ... FOR UPDATE` on every adapter except sqlite (rejects the syntax outright)."""
-    return bool(dal._adapter.dbengine != "sqlite")
-
-
-def _fields(dal: Any) -> list[Any]:
-    """Explicit `Field` objects for `_SELECT_COLUMNS`, in order."""
-    table = dal.platform_integrations
-    return [getattr(table, name) for name in _SELECT_COLUMNS]
-
-
-def _active_query(dal: Any, community_id: int, provider: str) -> Any:
-    t = dal.platform_integrations
-    return (
-        (t.community_id == community_id)
-        & (t.platform == provider)
-        & (t.integration_type == _INTEGRATION_TYPE)
-        & (t.is_active == True)  # noqa: E712 - pydal idiom
-    )
-
-
 # ---------------------------------------------------------------------------
 # DTO conversion
 # ---------------------------------------------------------------------------
@@ -179,7 +131,7 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if isinstance(value, datetime) else None
 
 
-def _account_label(row: Any) -> str | None:
+def _account_label(row: store.StatusRow) -> str | None:
     config_data = row.config_data
     if isinstance(config_data, dict):
         label = config_data.get("account_label")
@@ -187,7 +139,7 @@ def _account_label(row: Any) -> str | None:
     return None
 
 
-def _status_from_row(provider: str, row: Any) -> ConnectionStatus:
+def _status_from_row(provider: str, row: store.StatusRow) -> ConnectionStatus:
     return ConnectionStatus(
         provider=provider,
         connected=True,
@@ -210,28 +162,47 @@ def _disconnected_status(provider: str) -> ConnectionStatus:
 
 
 # ---------------------------------------------------------------------------
+# Store access
+# ---------------------------------------------------------------------------
+
+#: Bounded retries for compare-and-set re-seals that lose a race with another writer.
+_CAS_ATTEMPTS = 3
+
+
+async def _run[T](db: Any, fn: Callable[[Any], T]) -> T:
+    """Run a synchronous store call on the DAL's executor thread (never on the event loop)."""
+    loop = asyncio.get_running_loop()
+    dal = db.dal
+    return await loop.run_in_executor(db.executor, lambda: fn(dal))
+
+
+def _rejected(exc: store.StoreRejectedError) -> ApiError:
+    """Map a definer-function refusal to an `ApiError` that reveals nothing about other tenants."""
+    if exc.outcome == "forbidden_tenant":
+        return not_found("Community not found")
+    if exc.outcome == "seal_downgrade":
+        return conflict("connection is sealed with a newer scheme; refusing a downgrade")
+    return bad_request("invalid connection request")
+
+
+# ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
 
 
-async def _select_one(db: Any, dal: Any, community_id: int, provider: str) -> Any | None:
-    query = _active_query(dal, community_id, provider)
-    rows = await db.select_async(dal(query), *_fields(dal))
-    return rows.first() if rows else None
+async def list_connections(
+    db: Any, community_id: int, *, tenant_id: store.TenantScope
+) -> list[ConnectionStatus]:
+    """Return one `ConnectionStatus` per `SUPPORTED_PROVIDERS`, `connected=False` when unset.
 
-
-async def list_connections(db: Any, community_id: int) -> list[ConnectionStatus]:
-    """Return one `ConnectionStatus` per `SUPPORTED_PROVIDERS`, `connected=False` when unset."""
+    `community_id` MUST come from the validated request scope; `tenant_id` (the validated tenant,
+    REQUIRED -- or the explicit `Scope.SYSTEM` for community-bound machine/CronJob callers) makes
+    the DB reject a foreign community (defence in depth).
+    """
     _validate_community(community_id)
-    dal = db.dal
-    _ensure_tables(dal)
-    t = dal.platform_integrations
-    query = (
-        (t.community_id == community_id)
-        & (t.integration_type == _INTEGRATION_TYPE)
-        & (t.is_active == True)  # noqa: E712 - pydal idiom
+    rows = await _run(
+        db, lambda dal: store.community_status(dal, community_id, None, tenant_id=tenant_id)
     )
-    rows = await db.select_async(dal(query), *_fields(dal))
     by_provider = {row.platform: row for row in rows}
     logger.debug("community_connections.list community_id=%s", community_id)
     return [
@@ -240,12 +211,15 @@ async def list_connections(db: Any, community_id: int) -> list[ConnectionStatus]
     ]
 
 
-async def get_connection(db: Any, community_id: int, provider: str) -> ConnectionStatus | None:
+async def get_connection(
+    db: Any, community_id: int, provider: str, *, tenant_id: store.TenantScope
+) -> ConnectionStatus | None:
     """Return `provider`'s connection status, or `None` if there's no active connection."""
     _validate(community_id, provider)
-    dal = db.dal
-    _ensure_tables(dal)
-    row = await _select_one(db, dal, community_id, provider)
+    rows = await _run(
+        db, lambda dal: store.community_status(dal, community_id, provider, tenant_id=tenant_id)
+    )
+    row = rows[0] if rows else None
     logger.debug(
         "community_connections.get community_id=%s provider=%s found=%s",
         community_id,
@@ -260,83 +234,6 @@ async def get_connection(db: Any, community_id: int, provider: str) -> Connectio
 # ---------------------------------------------------------------------------
 
 
-def _sync_upsert(
-    dal: Any,
-    *,
-    community_id: int,
-    provider: str,
-    access_token: str,
-    refresh_token: str | None,
-    expires_at: datetime | None,
-    scopes: list[str],
-    account_label: str | None,
-    actor_user_id: int | None,
-    now: datetime,
-) -> Any:
-    """Single executor job: lock the row (if any), encrypt tokens, insert-or-update, commit."""
-    for_update = _for_update(dal)
-    t = dal.platform_integrations
-    try:
-        query = (
-            (t.community_id == community_id)
-            & (t.platform == provider)
-            & (t.integration_type == _INTEGRATION_TYPE)
-        )
-        existing = dal(query).select(*_fields(dal), for_update=for_update).first()
-
-        aad = connection_aad(community_id=community_id, provider=provider)
-        encrypted_access = seal_secret(access_token, aad=aad)
-        encrypted_refresh = seal_secret(refresh_token, aad=aad) if refresh_token else None
-        config_data = {"account_label": account_label}
-
-        if existing is None:
-            row_id = int(
-                t.insert(
-                    platform=provider,
-                    integration_type=_INTEGRATION_TYPE,
-                    community_id=community_id,
-                    user_id=None,
-                    access_token=encrypted_access,
-                    refresh_token=encrypted_refresh,
-                    client_id=None,
-                    client_secret=None,
-                    token_type=_DEFAULT_TOKEN_TYPE,
-                    expires_at=expires_at,
-                    scopes=scopes,
-                    config_data=config_data,
-                    is_active=True,
-                    is_encrypted=True,
-                    seal_version=SEAL_AAD,
-                    created_at=now,
-                    updated_at=now,
-                    created_by_user_id=actor_user_id,
-                    updated_by_user_id=actor_user_id,
-                )
-            )
-        else:
-            row_id = int(existing.id)
-            dal(t.id == row_id).update(
-                access_token=encrypted_access,
-                refresh_token=encrypted_refresh,
-                token_type=_DEFAULT_TOKEN_TYPE,
-                expires_at=expires_at,
-                scopes=scopes,
-                config_data=config_data,
-                is_active=True,
-                is_encrypted=True,
-                seal_version=SEAL_AAD,
-                updated_at=now,
-                updated_by_user_id=actor_user_id,
-            )
-
-        refreshed = dal(t.id == row_id).select(*_fields(dal)).first()
-        dal.commit()
-        return refreshed
-    except Exception:
-        dal.rollback()
-        raise
-
-
 async def upsert_connection(
     db: Any,
     community_id: int,
@@ -348,31 +245,38 @@ async def upsert_connection(
     scopes: list[str],
     account_label: str | None,
     actor_user_id: int | None,
+    tenant_id: store.TenantScope,
 ) -> ConnectionStatus:
-    """Insert or update the single active `(community_id, provider)` row; sets `is_active=True`."""
+    """Insert or update the single active `(community_id, provider)` row; sets `is_active=True`.
+
+    `actor_user_id` is accepted for contract compatibility but is NOT persisted -- the DB cannot
+    verify an end-user identity, so ownership columns are never written from it (gh-969).
+    """
     _validate(community_id, provider)
     if not access_token or not access_token.strip():
         raise bad_request("access_token is required")
 
-    dal = db.dal
-    _ensure_tables(dal)
-    loop = asyncio.get_event_loop()
-    now = datetime.now(UTC)
-    row = await loop.run_in_executor(
-        db.executor,
-        lambda: _sync_upsert(
-            dal,
-            community_id=community_id,
-            provider=provider,
-            access_token=access_token,
-            refresh_token=refresh_token,
-            expires_at=expires_at,
-            scopes=list(scopes),
-            account_label=account_label,
-            actor_user_id=actor_user_id,
-            now=now,
-        ),
-    )
+    aad = connection_aad(community_id=community_id, provider=provider)
+    encrypted_access = seal_secret(access_token, aad=aad)
+    encrypted_refresh = seal_secret(refresh_token, aad=aad) if refresh_token else None
+    try:
+        row = await _run(
+            db,
+            lambda dal: store.upsert(
+                dal,
+                community_id=community_id,
+                platform=provider,
+                access_token=encrypted_access,
+                refresh_token=encrypted_refresh,
+                expires_at=expires_at,
+                scopes=list(scopes),
+                account_label=account_label,
+                seal_version=SEAL_AAD,
+                tenant_id=tenant_id,
+            ),
+        )
+    except store.StoreRejectedError as exc:
+        raise _rejected(exc) from exc
     logger.debug("community_connections.upsert community_id=%s provider=%s", community_id, provider)
     return _status_from_row(provider, row)
 
@@ -382,54 +286,29 @@ async def upsert_connection(
 # ---------------------------------------------------------------------------
 
 
-def _sync_delete(
-    dal: Any, *, community_id: int, provider: str, actor_user_id: int | None, now: datetime
-) -> bool:
-    for_update = _for_update(dal)
-    t = dal.platform_integrations
-    try:
-        query = _active_query(dal, community_id, provider)
-        row = dal(query).select(*_fields(dal), for_update=for_update).first()
-        if row is None:
-            dal.commit()
-            return False
-
-        dal(t.id == row.id).update(
-            is_active=False,
-            access_token=None,
-            refresh_token=None,
-            client_id=None,
-            client_secret=None,
-            scopes=[],
-            config_data=None,
-            updated_at=now,
-            updated_by_user_id=actor_user_id,
-        )
-        dal.commit()
-        return True
-    except Exception:
-        dal.rollback()
-        raise
-
-
 async def delete_connection(
-    db: Any, community_id: int, provider: str, actor_user_id: int | None
+    db: Any,
+    community_id: int,
+    provider: str,
+    actor_user_id: int | None,
+    *,
+    tenant_id: store.TenantScope,
 ) -> bool:
     """Deactivate + null out tokens for the active `(community_id, provider)` row.
 
-    Returns `False` (no-op) if there was nothing active to delete.
+    Returns `False` (no-op) if there was nothing active to delete. `actor_user_id` is accepted
+    for contract compatibility but not persisted (see `upsert_connection`).
     """
     _validate(community_id, provider)
-    dal = db.dal
-    _ensure_tables(dal)
-    loop = asyncio.get_event_loop()
-    now = datetime.now(UTC)
-    deleted = await loop.run_in_executor(
-        db.executor,
-        lambda: _sync_delete(
-            dal, community_id=community_id, provider=provider, actor_user_id=actor_user_id, now=now
-        ),
-    )
+    try:
+        deleted = await _run(
+            db,
+            lambda dal: store.disconnect(
+                dal, community_id=community_id, platform=provider, tenant_id=tenant_id
+            ),
+        )
+    except store.StoreRejectedError as exc:
+        raise _rejected(exc) from exc
     logger.debug(
         "community_connections.delete community_id=%s provider=%s deleted=%s",
         community_id,
@@ -449,7 +328,9 @@ def _log_suspected_downgrade(community_id: int, provider: str) -> None:
     )
 
 
-def _refresh_for_stamp(row: Any, aad: bytes, *, community_id: int, provider: str) -> str | None:
+def _refresh_for_stamp(
+    row: store.SecretRow, aad: bytes, *, community_id: int, provider: str
+) -> str | None:
     """The refresh-token value to write when the row is stamped AAD-bound, `None` = leave as is.
 
     Every stamped row must hold a refresh token that really is AAD-sealed: plaintext (an
@@ -468,53 +349,55 @@ def _refresh_for_stamp(row: Any, aad: bytes, *, community_id: int, provider: str
     return resealed
 
 
-def _sync_reseal_legacy(dal: Any, *, community_id: int, provider: str) -> bool:
-    """Lock the active row and, if still legacy (v0), re-seal both tokens as AAD-bound (v1)."""
-    for_update = _for_update(dal)
-    t = dal.platform_integrations
-    try:
-        row = (
-            dal(_active_query(dal, community_id, provider))
-            .select(*_fields(dal), for_update=for_update)
-            .first()
-        )
-        if (
-            row is None
-            or not row.is_encrypted
-            or int(row.seal_version or SEAL_LEGACY) != SEAL_LEGACY
-        ):
-            dal.commit()
-            return False
-        aad = connection_aad(community_id=community_id, provider=provider)
-        access = reseal_if_legacy(row.access_token, aad=aad)
-        refresh = reseal_if_legacy(row.refresh_token, aad=aad) if row.refresh_token else None
-        if access is None or (row.refresh_token and refresh is None):
-            # Opens under the AAD although the column says legacy: a suspected downgrade. Never
-            # re-bless it silently -- leave the row for an operator.
-            _log_suspected_downgrade(community_id, provider)
-            dal.commit()
-            return False
-        dal(t.id == row.id).update(
-            access_token=access, refresh_token=refresh, seal_version=SEAL_AAD
-        )
-        dal.commit()
-        return True
-    except Exception:
-        dal.rollback()
-        raise
+def _reseal_legacy(
+    dal: Any,
+    row: store.SecretRow,
+    *,
+    community_id: int,
+    provider: str,
+    tenant_id: store.TenantScope,
+) -> bool:
+    """If `row` is still legacy (v0), re-seal both tokens as AAD-bound (v1) via compare-and-set."""
+    if not row.is_encrypted or int(row.seal_version or SEAL_LEGACY) != SEAL_LEGACY:
+        return False
+    if not row.access_token:
+        return False
+    aad = connection_aad(community_id=community_id, provider=provider)
+    access = reseal_if_legacy(row.access_token, aad=aad)
+    refresh = reseal_if_legacy(row.refresh_token, aad=aad) if row.refresh_token else None
+    if access is None or (row.refresh_token and refresh is None):
+        # Opens under the AAD although the column says legacy: a suspected downgrade. Never
+        # re-bless it silently -- leave the row for an operator.
+        _log_suspected_downgrade(community_id, provider)
+        return False
+    return store.set_sealed(
+        dal,
+        community_id=community_id,
+        platform=provider,
+        expected_access=row.access_token,
+        access_token=access,
+        refresh_token=refresh,
+        expires_at=None,
+        seal_version=SEAL_AAD,
+        touch_updated_at=False,
+        tenant_id=tenant_id,
+    )
 
 
-async def _reseal_legacy_row(db: Any, dal: Any, *, community_id: int, provider: str) -> None:
+async def _reseal_legacy_row(
+    db: Any, row: store.SecretRow, *, community_id: int, provider: str, tenant_id: store.TenantScope
+) -> None:
     """Lazy M4 upgrade on read: best effort -- a failure never breaks the read that triggered it.
 
     The row was just opened successfully, so a failure here is operational (lock/connection), not
     tamper; it is logged by type only and `scripts/reseal_connections.py` reports any leftovers.
     """
-    loop = asyncio.get_event_loop()
     try:
-        await loop.run_in_executor(
-            db.executor,
-            lambda: _sync_reseal_legacy(dal, community_id=community_id, provider=provider),
+        await _run(
+            db,
+            lambda dal: _reseal_legacy(
+                dal, row, community_id=community_id, provider=provider, tenant_id=tenant_id
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - see docstring: reseal is an opportunistic upgrade
         log_failure(
@@ -532,7 +415,9 @@ async def _reseal_legacy_row(db: Any, dal: Any, *, community_id: int, provider: 
 # ---------------------------------------------------------------------------
 
 
-async def get_decrypted_tokens(db: Any, community_id: int, provider: str) -> DecryptedTokens | None:
+async def get_decrypted_tokens(
+    db: Any, community_id: int, provider: str, *, tenant_id: store.TenantScope
+) -> DecryptedTokens | None:
     """Return decrypted OAuth material for provider-API callers; `None` if not connected.
 
     A decrypt failure on a row that claims to be encrypted (tamper/corrupt
@@ -543,9 +428,9 @@ async def get_decrypted_tokens(db: Any, community_id: int, provider: str) -> Dec
     ciphertext as if it were a usable token.
     """
     _validate(community_id, provider)
-    dal = db.dal
-    _ensure_tables(dal)
-    row = await _select_one(db, dal, community_id, provider)
+    row = await _run(
+        db, lambda dal: store.get_secret(dal, community_id, provider, tenant_id=tenant_id)
+    )
     if row is None or not row.access_token:
         return None
 
@@ -572,7 +457,9 @@ async def get_decrypted_tokens(db: Any, community_id: int, provider: str) -> Dec
         raise
 
     if row.is_encrypted and seal_version == SEAL_LEGACY:
-        await _reseal_legacy_row(db, dal, community_id=community_id, provider=provider)
+        await _reseal_legacy_row(
+            db, row, community_id=community_id, provider=provider, tenant_id=tenant_id
+        )
 
     return DecryptedTokens(
         access_token=access_token,
@@ -587,48 +474,51 @@ async def get_decrypted_tokens(db: Any, community_id: int, provider: str) -> Dec
 # ---------------------------------------------------------------------------
 
 
-def _sync_store_refreshed(
+def _store_refreshed(
     dal: Any,
     *,
     community_id: int,
     provider: str,
     access_token: str,
     expires_at: datetime | None,
-    now: datetime,
+    tenant_id: store.TenantScope,
 ) -> bool:
-    for_update = _for_update(dal)
-    t = dal.platform_integrations
-    try:
-        query = _active_query(dal, community_id, provider)
-        row = dal(query).select(*_fields(dal), for_update=for_update).first()
-        if row is None:
-            dal.commit()
+    """Seal `access_token` over the current row via compare-and-set; `False` = no active row."""
+    aad = connection_aad(community_id=community_id, provider=provider)
+    for _ in range(_CAS_ATTEMPTS):
+        row = store.get_secret(dal, community_id, provider, tenant_id=tenant_id)
+        if row is None or not row.access_token:
             return False
-
-        aad = connection_aad(community_id=community_id, provider=provider)
-        refresh_values: dict[str, Any] = {}
         # The row is about to be stamped AAD-bound/encrypted, so its untouched refresh token must
-        # really be AAD-sealed in the same statement or it would mislabel (or fail) on next read.
+        # really be AAD-sealed in the same write or it would mislabel (or fail) on next read.
         refresh = _refresh_for_stamp(row, aad, community_id=community_id, provider=provider)
-        if refresh is not None:
-            refresh_values["refresh_token"] = refresh
-        dal(t.id == row.id).update(
+        if store.set_sealed(
+            dal,
+            community_id=community_id,
+            platform=provider,
+            expected_access=row.access_token,
             access_token=seal_secret(access_token, aad=aad),
+            refresh_token=refresh,
             expires_at=expires_at,
-            is_encrypted=True,
             seal_version=SEAL_AAD,
-            updated_at=now,
-            **refresh_values,
-        )
-        dal.commit()
-        return True
-    except Exception:
-        dal.rollback()
-        raise
+            touch_updated_at=True,
+            tenant_id=tenant_id,
+        ):
+            return True
+    raise RuntimeError(
+        f"community_connections.refresh_cas_exhausted community_id={community_id} "
+        f"provider={provider}"
+    )
 
 
 async def store_refreshed_access_token(
-    db: Any, community_id: int, provider: str, *, access_token: str, expires_at: datetime | None
+    db: Any,
+    community_id: int,
+    provider: str,
+    *,
+    access_token: str,
+    expires_at: datetime | None,
+    tenant_id: store.TenantScope,
 ) -> None:
     """Overwrite the active connection's encrypted `access_token`/`expires_at` after a refresh.
 
@@ -640,21 +530,20 @@ async def store_refreshed_access_token(
     if not access_token or not access_token.strip():
         raise bad_request("access_token is required")
 
-    dal = db.dal
-    _ensure_tables(dal)
-    loop = asyncio.get_event_loop()
-    now = datetime.now(UTC)
-    found = await loop.run_in_executor(
-        db.executor,
-        lambda: _sync_store_refreshed(
-            dal,
-            community_id=community_id,
-            provider=provider,
-            access_token=access_token,
-            expires_at=expires_at,
-            now=now,
-        ),
-    )
+    try:
+        found = await _run(
+            db,
+            lambda dal: _store_refreshed(
+                dal,
+                community_id=community_id,
+                provider=provider,
+                access_token=access_token,
+                expires_at=expires_at,
+                tenant_id=tenant_id,
+            ),
+        )
+    except store.StoreRejectedError as exc:
+        raise _rejected(exc) from exc
     if not found:
         raise not_found(f"no active {provider} connection for community {community_id}")
     logger.debug(

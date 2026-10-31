@@ -161,14 +161,17 @@ def _credential_dto(row: svc.CredentialRow) -> CredentialDTO:
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_response(ListPlatformConfigsResponse)
-async def get_platform_configs() -> ListPlatformConfigsResponse:
+async def get_platform_configs() -> ListPlatformConfigsResponse | tuple[dict[str, object], int]:
     """Get platform configs."""
     async_dal, dal = _dal()
     integration_type = request.args.get("integrationType")
     platform = request.args.get("platform")
-    rows = await svc.get_platform_configs(
-        async_dal, dal, integration_type=integration_type, platform=platform
-    )
+    try:
+        rows = await svc.get_platform_configs(
+            async_dal, dal, integration_type=integration_type, platform=platform
+        )
+    except ApiError as exc:
+        return _err(exc)
     dtos = [_credential_dto(r) for r in rows]
     return ListPlatformConfigsResponse(success=True, data=dtos, count=len(dtos))
 
@@ -204,9 +207,10 @@ async def test_platform_connection(
     platform: str,
 ) -> TestConnectionResponse | tuple[dict[str, object], int]:
     """Test platform connection."""
-    async_dal, dal = _dal()
+    auth_header = request.headers.get("Authorization", "")
+    bearer = auth_header[7:] if auth_header.lower().startswith("bearer ") else None
     try:
-        valid, error = await svc.test_platform_connection(async_dal, dal, platform=platform)
+        valid, error = await svc.test_platform_connection(platform, bearer_token=bearer)
     except ApiError as exc:
         return _err(exc)
     return TestConnectionResponse(

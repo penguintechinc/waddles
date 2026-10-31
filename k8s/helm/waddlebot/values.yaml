@@ -1186,6 +1186,12 @@ pipeline:
         memory: "1Gi"
 
   hubApi:
+    # Operator-secret tests require a separately deployed HTTPS credential manager.
+    # Empty URL keeps those tests explicitly unavailable (503); never infer an HTTP origin.
+    credentialManager:
+      url: ""
+      timeoutSeconds: 15
+      caSecretName: ""  # optional operator-managed Secret containing ca.crt
     enabled: true
     port: 8204
     grpcPort: 50204

@@ -68,6 +68,9 @@ class StatePayload:
     user_id: int
     redirect_uri: str
     code_verifier: str | None
+    #: The tenant validated when the flow STARTED (authorize route); the public callback has no
+    #: JWT, so this server-side value is what the DB-side tenant check receives.
+    tenant_id: int | None = None
 
 
 def _redis_client() -> Any:
@@ -115,6 +118,7 @@ async def create_state(
     user_id: int,
     redirect_uri: str,
     code_verifier: str | None,
+    tenant_id: int | None = None,
 ) -> str:
     """Mint a fresh single-use `state` token and store its context in Redis.
 
@@ -128,6 +132,7 @@ async def create_state(
         "user_id": user_id,
         "redirect_uri": redirect_uri,
         "code_verifier": code_verifier,
+        "tenant_id": tenant_id,
     }
     client = _redis_client()
     await client.set(f"{_STATE_KEY_PREFIX}{token}", json.dumps(payload), ex=_ttl_seconds())
@@ -160,6 +165,7 @@ async def consume_state(state: str) -> StatePayload | None:
             user_id=int(data["user_id"]),
             redirect_uri=str(data["redirect_uri"]),
             code_verifier=data.get("code_verifier"),
+            tenant_id=int(data["tenant_id"]) if data.get("tenant_id") is not None else None,
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         logger.warning("oauth_connection_state.malformed_payload")

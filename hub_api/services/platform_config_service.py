@@ -21,25 +21,23 @@ duplicated.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
-
+from services import credential_manager_client
+from services import platform_integrations_store as store
 from services.auth_service import get_hub_settings_map
-from services.errors import not_found
-from services.platform_integrations_crypto import decrypt_if_needed
+from services.errors import bad_request, not_found
 
-_TWITCH_VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
-_DISCORD_ME_URL = "https://discord.com/api/users/@me"
-_SLACK_AUTH_TEST_URL = "https://slack.com/api/auth.test"
-_YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels?part=id&mine=true"
+#: `platform_integrations.integration_type` values (030_platform_integrations.sql scope CHECK).
+_INTEGRATION_TYPES = frozenset({"bot", "user_oauth", "community_oauth"})
 
 
 @dataclass(slots=True, frozen=True)
 class CredentialRow:
-    """Shaped view of a `platform_integrations` row -- masked before this leaves the service."""
+    """Shaped view of a `platform_integrations` row -- metadata only, no token/secret value."""
 
     id: int
     platform: str
@@ -62,24 +60,24 @@ class CredentialRow:
     updated_by_user_id: int | None = None
 
 
-def _mask(row: Any) -> CredentialRow:
-    """Mirror `formatCredential()` -- token/secret fields collapse to a presence flag."""
+def _from_meta(row: store.MetaRow) -> CredentialRow:
+    """Map a `MetaRow` (presence flags only -- never a token/secret value) to the DTO."""
     return CredentialRow(
         id=row.id,
         platform=row.platform,
         integration_type=row.integration_type,
         community_id=row.community_id,
         user_id=row.user_id,
-        access_token_set=bool(row.access_token),
-        refresh_token_set=bool(row.refresh_token),
+        access_token_set=row.access_token_set,
+        refresh_token_set=row.refresh_token_set,
         client_id=row.client_id,
-        client_secret_set=bool(row.client_secret),
+        client_secret_set=row.client_secret_set,
         token_type=row.token_type,
         expires_at=row.expires_at,
-        scopes=list(row.scopes) if row.scopes else [],
+        scopes=list(row.scopes),
         config_data=row.config_data,
-        is_active=bool(row.is_active),
-        is_encrypted=bool(row.is_encrypted),
+        is_active=row.is_active,
+        is_encrypted=row.is_encrypted,
         created_at=row.created_at,
         updated_at=row.updated_at,
         created_by_user_id=row.created_by_user_id,
@@ -90,20 +88,19 @@ def _mask(row: Any) -> CredentialRow:
 async def get_platform_configs(
     async_dal: Any, dal: Any, *, integration_type: str | None, platform: str | None
 ) -> list[CredentialRow]:
-    """List active platform integrations, optionally filtered by type/platform."""
-    query = dal.platform_integrations.is_active == True  # noqa: E712
-    if integration_type:
-        query &= dal.platform_integrations.integration_type == integration_type
-    if platform:
-        query &= dal.platform_integrations.platform == platform
+    """List active platform integrations (metadata only), optionally filtered by type/platform.
 
-    rows = await async_dal.select_async(
-        dal(query),
-        orderby=dal.platform_integrations.platform
-        | dal.platform_integrations.integration_type
-        | ~dal.platform_integrations.created_at,
+    `waddles_hub_api` is denied the table (H-3); this reads via `pi_list_metadata()`, whose return
+    type has no token/secret column (gh-969).
+    """
+    if integration_type is not None and integration_type not in _INTEGRATION_TYPES:
+        raise bad_request(f"unsupported integrationType '{integration_type}'")
+    loop = asyncio.get_running_loop()
+    rows = await loop.run_in_executor(
+        async_dal.executor,
+        lambda: store.list_metadata(dal, integration_type=integration_type, platform=platform),
     )
-    return [_mask(r) for r in rows]
+    return [_from_meta(r) for r in rows]
 
 
 async def update_platform_config(async_dal: Any, dal: Any, *, platform: str) -> None:
@@ -132,57 +129,15 @@ async def update_platform_config(async_dal: Any, dal: Any, *, platform: str) -> 
     raise not_found("Credential not found")
 
 
-_TESTERS: dict[str, tuple[str, str]] = {
-    "twitch": (_TWITCH_VALIDATE_URL, "OAuth"),
-    "discord": (_DISCORD_ME_URL, "Bearer"),
-    "youtube": (_YOUTUBE_CHANNELS_URL, "Bearer"),
-}
-
-
-async def _test_token(platform: str, access_token: str) -> tuple[bool, str | None]:
-    """Validate a bot access token against its platform's own API. Fails closed on any error."""
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            if platform == "slack":
-                resp = await client.post(
-                    _SLACK_AUTH_TEST_URL, headers={"Authorization": f"Bearer {access_token}"}
-                )
-                body = resp.json()
-                return bool(body.get("ok")), None if body.get("ok") else "invalid token"
-            if platform in _TESTERS:
-                url, scheme = _TESTERS[platform]
-                resp = await client.get(url, headers={"Authorization": f"{scheme} {access_token}"})
-                return resp.is_success, None if resp.is_success else f"HTTP {resp.status_code}"
-            # Unknown platform -- Node's own testPlatformCredential() default case.
-            return True, None
-    except httpx.HTTPError as exc:
-        return False, str(exc)
-
-
 async def test_platform_connection(
-    async_dal: Any, dal: Any, *, platform: str
+    platform: str, *, bearer_token: str | None
 ) -> tuple[bool, str | None]:
-    """Test a platform's bot credential against the real provider API."""
-    rows = await async_dal.select_async(
-        dal(
-            (dal.platform_integrations.platform == platform)
-            & (dal.platform_integrations.integration_type == "bot")
-            & (dal.platform_integrations.is_active == True)  # noqa: E712
-        ),
-        limitby=(0, 1),
-    )
-    if not rows:
-        raise not_found(f"No credentials found for platform: {platform}")
-    row = rows.first()
-    if not row.access_token:
-        return True, None
-    # SECURITY (HIGH): `credential_manager_module`'s refresh service
-    # encrypts this column at rest (`is_encrypted = TRUE`) -- decrypt
-    # before sending to the platform's own validation API, or a
-    # since-refreshed row sends ciphertext and reports a false
-    # "invalid token". See `platform_integrations_crypto`'s own docstring.
-    access_token = decrypt_if_needed(row.access_token, is_encrypted=bool(row.is_encrypted))
-    return await _test_token(platform, access_token)
+    """Validate a platform's operator bot credential -- delegated to the credential manager.
+
+    hub-api cannot read operator bot tokens (H-3, gh-969), so the decrypted token never reaches
+    this process. An unreachable credential manager is an explicit 503, never a silent pass.
+    """
+    return await credential_manager_client.test_bot_connection(platform, bearer_token=bearer_token)
 
 
 async def get_hub_settings(async_dal: Any, dal: Any) -> dict[str, str]:
