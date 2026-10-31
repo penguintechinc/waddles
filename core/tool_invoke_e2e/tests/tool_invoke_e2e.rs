@@ -33,6 +33,10 @@ use serde_json::{json, Value};
 use svc_process::capabilities::{
     CapabilityHandler, HttpEgressCatalog, StageCapabilities, ToolContext,
 };
+use svc_process::identity::{
+    BoxFuture, IdentityError, IdentityScope, IdentityWiring, InvocationIdentity, MemberDirectory,
+};
+use svc_process::license::StaticGate;
 use svc_process::stage_metrics::StageMetrics;
 use tool_invoke_e2e::{digest_of, Rig};
 
@@ -72,6 +76,7 @@ fn tools(
             .map(|(n, w)| ExportedToolInfo {
                 name: (*n).to_string(),
                 write: *w,
+                required_scope: None,
             })
             .collect(),
         requested: requests
@@ -330,7 +335,56 @@ impl Telemetry {
     }
 }
 
+/// The verified-actor fixture: member `1001` exists with this role.
+struct Roster {
+    role: Option<&'static str>,
+}
+
+const ACTOR_UUID: &str = "11111111-1111-4111-8111-111111111111";
+
+impl MemberDirectory for Roster {
+    fn member_by_platform_id<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        _platform: &'a str,
+        id: &'a str,
+    ) -> BoxFuture<'a, Result<uuid::Uuid, IdentityError>> {
+        Box::pin(async move {
+            if id == "1001" {
+                uuid::Uuid::parse_str(ACTOR_UUID).map_err(|e| IdentityError::Backend(e.to_string()))
+            } else {
+                Err(IdentityError::NotAMember)
+            }
+        })
+    }
+
+    fn role_for<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        _platform: &'a str,
+        _id: &'a str,
+    ) -> BoxFuture<'a, Result<String, IdentityError>> {
+        Box::pin(async move {
+            self.role
+                .map(str::to_string)
+                .ok_or(IdentityError::NotLinked)
+        })
+    }
+
+    fn confirm_member<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        user: uuid::Uuid,
+    ) -> BoxFuture<'a, Result<uuid::Uuid, IdentityError>> {
+        Box::pin(async move { Ok(user) })
+    }
+}
+
+/// Who the stage believes triggered the invocation (host-derived, never args).
+type Identity = (Arc<dyn MemberDirectory>, Option<String>);
+
 struct World {
+    identity: Option<Identity>,
     rig: Rig,
     snapshot: ActiveVersionSnapshot,
     gate: Arc<CapabilityGate>,
@@ -361,6 +415,7 @@ impl World {
         let telemetry = Telemetry::new();
         let metrics = Arc::new(StageMetrics::new(&telemetry.provider.meter("tool-e2e")));
         Self {
+            identity: None,
             rig,
             snapshot,
             gate: gate(grants),
@@ -403,6 +458,17 @@ impl World {
             trace: None,
         })
         .with_stage_metrics(Arc::clone(&self.metrics));
+        let c = match &self.identity {
+            Some((directory, account)) => c.with_identity(
+                IdentityWiring {
+                    directory: Arc::clone(directory),
+                    handles: None,
+                    flag: Arc::new(StaticGate(true)),
+                },
+                Arc::new(InvocationIdentity::new("twitch", account.clone(), vec![])),
+            ),
+            None => c,
+        };
         Arc::new(c)
     }
 
@@ -737,4 +803,93 @@ async fn i_cross_tenant_same_app_id_fails_closed() {
         w.go(8, call(SVC1, "echo", json!({}), None)).await,
         json!({"tool_error": "NotGranted"})
     );
+}
+
+/// The default world plus `SVC1.whoami`, an admin-scoped tool the caller is
+/// granted -- the grant authorizes the CALL; the scope authorizes the ACTOR.
+async fn admin_world(account: Option<&str>, role: Option<&'static str>) -> World {
+    let mut rows = default_rows();
+    for r in &mut rows {
+        if r.app_id == SVC1 {
+            r.tools.exported.push(ExportedToolInfo {
+                name: "whoami".to_string(),
+                write: false,
+                required_scope: Some("community:admin".to_string()),
+            });
+        }
+        if r.app_id == CALLER {
+            r.tools.requested.push(RequestedToolInfo {
+                target: SVC1.to_string(),
+                tool: "whoami".to_string(),
+                write: false,
+            });
+        }
+    }
+    let mut grants = default_grants(TENANT);
+    grants.push((TENANT, CALLER, V_CALLER, SVC1, "whoami"));
+    let entries = rows.into_iter().map(|r| (TENANT, COMMUNITY, r)).collect();
+    let mut w = World::new(entries, &grants).await;
+    w.identity = Some((
+        Arc::new(Roster { role }) as Arc<dyn MemberDirectory>,
+        account.map(str::to_string),
+    ));
+    w
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn j_admin_tool_sees_the_host_verified_actor_and_ignores_guest_supplied_ones() {
+    let w = admin_world(Some("1001"), Some("community-admin")).await;
+    // The caller bundle tries every way to name its own actor / scopes.
+    let out = w
+        .go(
+            TENANT,
+            call(
+                SVC1,
+                "whoami",
+                json!({
+                    "actor": "99999999-9999-4999-8999-999999999999",
+                    "scopes": ["community:owner"],
+                    "__ctx": {"actor": "99999999-9999-4999-8999-999999999999",
+                              "scopes": ["community:owner"]},
+                }),
+                None,
+            ),
+        )
+        .await;
+    let ok = &out["ok"];
+    assert_eq!(ok["actor"], ACTOR_UUID, "{out}");
+    let scopes: Vec<&str> = ok["scopes"]
+        .as_array()
+        .expect("scopes array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(scopes.contains(&"community:admin"), "{scopes:?}");
+    assert!(!scopes.contains(&"community:owner"), "{scopes:?}");
+    // The SDK stripped the reserved field; only the guest's own plain data is left.
+    assert!(ok["args"].get("__ctx").is_none(), "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn k_admin_tool_is_refused_host_side_when_the_actor_is_under_scoped_or_absent() {
+    for (account, role) in [
+        (Some("1001"), Some("moderator")),
+        (Some("1001"), Some("member")),
+        (Some("1001"), None),
+        (None, Some("community-owner")),
+    ] {
+        let w = admin_world(account, role).await;
+        let out = w
+            .go(
+                TENANT,
+                call(SVC1, "whoami", json!({"actor": "spoof"}), None),
+            )
+            .await;
+        // The provider never ran: the host's typed refusal comes straight back.
+        assert_eq!(
+            out,
+            json!({"tool_error": "Forbidden"}),
+            "{account:?}/{role:?}"
+        );
+    }
 }

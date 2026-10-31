@@ -205,6 +205,18 @@ pub trait MemberDirectory: Send + Sync {
         platform_user_id: &'a str,
     ) -> BoxFuture<'a, Result<Uuid, IdentityError>>;
 
+    /// The community ROLE (opaque closed enum, e.g. `moderator`) of the ACTIVE
+    /// member of `scope` with this platform account -- the input of the host-side
+    /// role -> scope map that gates scope-restricted bundle tools. No/inactive
+    /// row -> [`IdentityError::NotAMember`]; a NULL/empty role ->
+    /// [`IdentityError::NotLinked`] (no role is never defaulted to `member`).
+    fn role_for<'a>(
+        &'a self,
+        scope: IdentityScope,
+        platform: &'a str,
+        platform_user_id: &'a str,
+    ) -> BoxFuture<'a, Result<String, IdentityError>>;
+
     /// Confirms `user` is an ACTIVE member of `scope` and returns it back;
     /// otherwise [`IdentityError::NotAMember`].
     fn confirm_member<'a>(
@@ -266,6 +278,9 @@ pub struct InvocationIdentity {
     /// Next ordinal per economy mutation kind (`wager` | `transfer`); see
     /// [`Self::reserve_mutation`]. Never held across an `.await`.
     mutation_seq: Mutex<HashMap<&'static str, u32>>,
+    /// The actor's community role, cached after the first successful
+    /// [`MemberDirectory::role_for`] (successes only). Never held across an `.await`.
+    actor_role: Mutex<Option<String>>,
 }
 
 impl fmt::Debug for InvocationIdentity {
@@ -328,6 +343,7 @@ impl InvocationIdentity {
             resolved: Mutex::new(HashMap::new()),
             event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
+            actor_role: Mutex::new(None),
         }
     }
 
@@ -381,6 +397,7 @@ impl InvocationIdentity {
             resolved: Mutex::new(HashMap::new()),
             event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
+            actor_role: Mutex::new(None),
         }
     }
 
@@ -435,6 +452,16 @@ impl InvocationIdentity {
 
     fn cached(&self, key: &str) -> Option<Uuid> {
         self.resolved.lock().ok()?.get(key).copied()
+    }
+
+    fn cached_role(&self) -> Option<String> {
+        self.actor_role.lock().ok()?.clone()
+    }
+
+    fn remember_role(&self, role: String) {
+        if let Ok(mut slot) = self.actor_role.lock() {
+            *slot = Some(role);
+        }
     }
 
     fn remember(&self, key: String, user: Uuid) {
@@ -539,6 +566,46 @@ pub async fn resolve_actor(
     .await;
     finish("actor", "directory", scope, &result, started);
     result
+}
+
+/// Resolves the TRIGGERING actor of `inv` into the host-VERIFIED
+/// [`bundle_tool_call::ActorContext`]: the community `user_uuid` plus the
+/// scopes of the member's community role (fixed host-side map). The sole
+/// authority for scope-restricted `tool.invoke` -- derived from the MAC-verified
+/// envelope's platform account and the membership directory, never guest input.
+///
+/// Fail closed: an event with no actor, an unlinked/inactive member, a missing
+/// role or any directory failure all return `Err` (the caller treats `Err` as
+/// [`bundle_tool_call::ActorContext::none`], i.e. no scopes). The role is cached
+/// per invocation (successes only), so a nested chain costs one lookup.
+pub async fn resolve_actor_scopes(
+    wiring: &IdentityWiring,
+    inv: &InvocationIdentity,
+    scope: IdentityScope,
+) -> Result<bundle_tool_call::ActorContext, IdentityError> {
+    let user = resolve_actor(wiring, inv, scope).await?;
+    let role = match inv.cached_role() {
+        Some(role) => role,
+        None => {
+            let Some(platform_user_id) = inv.actor_platform_user_id.as_deref() else {
+                return Err(IdentityError::NotLinked);
+            };
+            let role = tokio::time::timeout(
+                DIRECTORY_QUERY_TIMEOUT,
+                wiring
+                    .directory
+                    .role_for(scope, &inv.platform, platform_user_id),
+            )
+            .await
+            .map_err(|_| IdentityError::Unavailable("role lookup timed out".to_string()))??;
+            inv.remember_role(role.clone());
+            role
+        }
+    };
+    Ok(bundle_tool_call::ActorContext::for_role(
+        user.to_string(),
+        &role,
+    ))
 }
 
 /// Resolves a mention `token` the bundle presented to its community
@@ -659,6 +726,12 @@ const ACTOR_SQL: &str = "SELECT user_uuid::text AS user_uuid, is_active_member A
      WHERE tenant_id = $1 AND community_id = $2 AND platform = $3 AND platform_user_id = $4 \
      LIMIT 2";
 
+/// Active member's community role by platform account id (alembic 0069).
+const ROLE_SQL: &str = "SELECT role, is_active_member AS is_active \
+     FROM community_member_identities \
+     WHERE tenant_id = $1 AND community_id = $2 AND platform = $3 AND platform_user_id = $4 \
+     LIMIT 2";
+
 /// Active-membership confirmation by `user_uuid` (the partial unique index
 /// `(community_id, user_uuid)` guarantees at most one row).
 const CONFIRM_SQL: &str = "SELECT is_active_member AS is_active \
@@ -738,6 +811,45 @@ impl MemberDirectory for PgMemberDirectory {
                 None => Err(IdentityError::NotLinked),
                 Some(text) => Uuid::parse_str(&text)
                     .map_err(|_| IdentityError::Backend("malformed user_uuid column".to_string())),
+            }
+        })
+    }
+
+    fn role_for<'a>(
+        &'a self,
+        scope: IdentityScope,
+        platform: &'a str,
+        platform_user_id: &'a str,
+    ) -> BoxFuture<'a, Result<String, IdentityError>> {
+        Box::pin(async move {
+            let rows = self
+                .query(
+                    ROLE_SQL,
+                    vec![
+                        Value::Int(Some(scope.tenant_id)),
+                        Value::Int(Some(scope.community_id)),
+                        Value::String(Some(platform.to_string())),
+                        Value::String(Some(platform_user_id.to_string())),
+                    ],
+                )
+                .await?;
+            let row = match rows.as_slice() {
+                [] => return Err(IdentityError::NotAMember),
+                [row] => row,
+                _ => {
+                    return Err(IdentityError::Backend(
+                        "more than one membership row for one platform account".to_string(),
+                    ))
+                }
+            };
+            let active: bool = row.try_get("", "is_active").map_err(backend)?;
+            if !active {
+                return Err(IdentityError::NotAMember);
+            }
+            let role: Option<String> = row.try_get("", "role").map_err(backend)?;
+            match role.map(|r| r.trim().to_string()) {
+                Some(r) if !r.is_empty() => Ok(r),
+                _ => Err(IdentityError::NotLinked),
             }
         })
     }
@@ -855,6 +967,8 @@ mod tests {
     struct FakeDirectory {
         by_platform: HashMap<(String, String), Result<Uuid, IdentityErrorKind>>,
         members: Vec<Uuid>,
+        roles: HashMap<(String, String), String>,
+        role_lookups: AtomicUsize,
         lookups: AtomicUsize,
         scopes_seen: Mutex<Vec<IdentityScope>>,
     }
@@ -893,6 +1007,21 @@ mod tests {
                     Some(Err(k)) => Err((*k).into()),
                     None => Err(IdentityError::NotAMember),
                 }
+            })
+        }
+
+        fn role_for<'a>(
+            &'a self,
+            _scope: IdentityScope,
+            platform: &'a str,
+            platform_user_id: &'a str,
+        ) -> BoxFuture<'a, Result<String, IdentityError>> {
+            Box::pin(async move {
+                self.role_lookups.fetch_add(1, Ordering::SeqCst);
+                self.roles
+                    .get(&(platform.to_string(), platform_user_id.to_string()))
+                    .cloned()
+                    .ok_or(IdentityError::NotLinked)
             })
         }
 
@@ -1362,5 +1491,49 @@ mod tests {
             hub_error_to_identity(&E::CircuitOpen),
             IdentityError::Unavailable(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn actor_scopes_come_from_the_resolved_role_and_are_cached() {
+        let alice = Uuid::new_v4();
+        let mut dir = FakeDirectory::default();
+        dir.by_platform
+            .insert(("twitch".into(), "1001".into()), Ok(alice));
+        dir.roles
+            .insert(("twitch".into(), "1001".into()), "moderator".into());
+        let (w, dir) = wiring(dir, None);
+        let inv = actor_inv(Some("1001"), vec![]);
+
+        let ctx = resolve_actor_scopes(&w, &inv, SCOPE).await.unwrap();
+        assert_eq!(ctx.actor.as_deref(), Some(alice.to_string().as_str()));
+        assert!(ctx.has_scope("community:moderate"));
+        assert!(!ctx.has_scope("community:admin"));
+        resolve_actor_scopes(&w, &inv, SCOPE).await.unwrap();
+        assert_eq!(dir.role_lookups.load(Ordering::SeqCst), 1, "role cached");
+    }
+
+    #[tokio::test]
+    async fn actor_scopes_fail_closed_without_actor_role_or_known_role() {
+        let alice = Uuid::new_v4();
+        let mut dir = FakeDirectory::default();
+        dir.by_platform
+            .insert(("twitch".into(), "1001".into()), Ok(alice));
+        dir.by_platform
+            .insert(("twitch".into(), "2002".into()), Ok(Uuid::new_v4()));
+        dir.roles
+            .insert(("twitch".into(), "2002".into()), "overlord".into());
+        let (w, _dir) = wiring(dir, None);
+
+        // No actor on the event.
+        let none = actor_inv(None, vec![]);
+        assert!(resolve_actor_scopes(&w, &none, SCOPE).await.is_err());
+        // Linked actor, no role row/column value.
+        let norole = actor_inv(Some("1001"), vec![]);
+        assert!(resolve_actor_scopes(&w, &norole, SCOPE).await.is_err());
+        // Unknown role string resolves but grants NO scope.
+        let odd = actor_inv(Some("2002"), vec![]);
+        let ctx = resolve_actor_scopes(&w, &odd, SCOPE).await.unwrap();
+        assert!(ctx.scopes.is_empty());
+        assert!(!ctx.has_scope("community:member"));
     }
 }

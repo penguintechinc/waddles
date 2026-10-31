@@ -83,6 +83,11 @@ fn init() {
                 .ok_or_else(|| ToolError::InvalidArgs("idempotency key required".to_string()))?;
             Ok(json!({"guarded": true, "idempotency_key": key, "args": args}))
         });
+        // Echoes the HOST-VERIFIED actor/scopes the SDK handed it (the args it
+        // sees must NOT contain the reserved `__ctx`).
+        register_tool("whoami", |ctx: &ToolContext, args: Value| {
+            Ok(json!({"actor": ctx.actor, "scopes": ctx.actor_scopes, "args": args}))
+        });
         register_tool("relay", |_ctx: &ToolContext, args: Value| {
             let target = str_arg(&args, "target")?;
             let tool_name = str_arg(&args, "tool")?;

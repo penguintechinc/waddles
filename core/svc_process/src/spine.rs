@@ -3719,6 +3719,20 @@ mod tests {
     }
 
     impl crate::identity::MemberDirectory for SpineDirectory {
+        fn role_for<'a>(
+            &'a self,
+            _scope: crate::identity::IdentityScope,
+            _platform: &'a str,
+            _platform_user_id: &'a str,
+        ) -> crate::identity::BoxFuture<'a, Result<String, crate::identity::IdentityError>>
+        {
+            Box::pin(async {
+                Err(crate::identity::IdentityError::Unavailable(
+                    "role lookup is not exercised by this fake".to_string(),
+                ))
+            })
+        }
+
         fn member_by_platform_id<'a>(
             &'a self,
             _scope: crate::identity::IdentityScope,
