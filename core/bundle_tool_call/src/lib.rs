@@ -93,17 +93,22 @@ impl ActorContext {
 /// are siblings below it. Any unknown / empty role maps to NO scopes
 /// (fail closed). Mirrors `TOOL_REQUIRED_SCOPES` in
 /// `hub_api/services/bundle_manifest_v2.py`.
+/// Accept only roles read from active community membership under the host's
+/// tenant/community scope; tenant, resource, or caller-supplied roles are not
+/// inputs to this mapping. `owner` is the legacy community-creation spelling.
 ///
 /// | role | scopes |
 /// |---|---|
-/// | `community-owner` | member, vip, moderate, admin, owner |
+/// | `community-owner`, `owner` | member, vip, moderate, admin, owner |
 /// | `community-admin` | member, vip, moderate, admin |
 /// | `moderator` | member, moderate |
 /// | `vip` | member, vip |
 /// | `member` | member |
 pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
     match role {
-        "community-owner" => &[
+        // SuperadminService::create_community persists the initial member as
+        // `owner`; both spellings represent the same community-scoped role.
+        "community-owner" | "owner" => &[
             "community:member",
             "community:vip",
             "community:moderate",

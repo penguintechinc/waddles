@@ -641,6 +641,7 @@ fn plan_as(actor: &ActorContext, tool: &str) -> Result<ToolPlan, ToolRefusal> {
 fn role_scope_map_is_cumulative_and_fails_closed() {
     assert_eq!(scopes_for_role("member"), ["community:member"]);
     assert!(scopes_for_role("community-owner").contains(&"community:admin"));
+    assert_eq!(scopes_for_role("owner"), scopes_for_role("community-owner"));
     assert!(scopes_for_role("community-admin").contains(&"community:moderate"));
     assert!(!scopes_for_role("moderator").contains(&"community:admin"));
     assert!(!scopes_for_role("vip").contains(&"community:moderate"));
@@ -651,7 +652,7 @@ fn role_scope_map_is_cumulative_and_fails_closed() {
 
 #[test]
 fn scope_gate_admits_admin_and_owner_refuses_the_rest_host_side() {
-    for role in ["community-admin", "community-owner"] {
+    for role in ["community-admin", "community-owner", "owner"] {
         let a = ActorContext::for_role("00000000-0000-4000-8000-000000000001", role);
         assert!(plan_as(&a, "admin_op").is_ok(), "{role}");
     }

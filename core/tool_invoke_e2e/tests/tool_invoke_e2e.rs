@@ -870,6 +870,18 @@ async fn j_admin_tool_sees_the_host_verified_actor_and_ignores_guest_supplied_on
     assert!(ok["args"].get("__ctx").is_none(), "{out}");
 }
 
+/// Community creation uses `owner`; its verified actor must reach the real
+/// provider with the same administrative scopes as `community-owner`.
+#[tokio::test(flavor = "multi_thread")]
+async fn community_creation_owner_can_invoke_admin_tool() {
+    let w = admin_world(Some("1001"), Some("owner")).await;
+    let out = w.go(TENANT, call(SVC1, "whoami", json!({}), None)).await;
+    assert_eq!(out["ok"]["actor"], ACTOR_UUID, "{out}");
+    let scopes = out["ok"]["scopes"].as_array().expect("scopes array");
+    assert!(scopes.contains(&json!("community:admin")), "{out}");
+    assert!(scopes.contains(&json!("community:owner")), "{out}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn k_admin_tool_is_refused_host_side_when_the_actor_is_under_scoped_or_absent() {
     for (account, role) in [

@@ -703,6 +703,63 @@ async fn role_for_reads_the_real_view_scoped_and_fails_closed() {
     }
 }
 
+/// Legacy owner authority is read from active community membership only.
+/// Reusing its platform account in another scope cannot convey owner scopes.
+#[tokio::test]
+async fn legacy_owner_scope_is_bound_to_active_community_membership() {
+    use svc_process::identity::{resolve_actor_scopes, IdentityScope};
+    let w = world().await;
+    exec(
+        &w.su,
+        &format!(
+            "UPDATE community_members SET role = 'owner' \
+             WHERE community_id = {COMMUNITY} AND platform_user_id = '1001'"
+        ),
+    )
+    .await;
+    let wiring = IdentityWiring {
+        directory: Arc::new(PgMemberDirectory::new(w.reader.clone())),
+        handles: None,
+        flag: Arc::new(StaticGate(true)),
+    };
+    let scope = |tenant_id, community_id| IdentityScope {
+        tenant_id,
+        community_id,
+    };
+    let invocation = || InvocationIdentity::from_event(&event("1001", "!points set"), vec![]);
+    let owner = resolve_actor_scopes(&wiring, &invocation(), scope(TENANT, COMMUNITY))
+        .await
+        .unwrap();
+    assert!(owner.has_scope("community:owner"));
+    assert!(!owner.has_scope("superadmin"));
+    let other = resolve_actor_scopes(
+        &wiring,
+        &invocation(),
+        scope(OTHER_TENANT, OTHER_TENANT_COMMUNITY),
+    )
+    .await
+    .unwrap();
+    assert!(other.has_scope("community:member"));
+    assert!(!other.has_scope("community:admin"));
+    for wrong_scope in [
+        scope(TENANT, SIBLING_COMMUNITY),
+        scope(OTHER_TENANT, COMMUNITY),
+    ] {
+        assert_eq!(
+            resolve_actor_scopes(&wiring, &invocation(), wrong_scope).await,
+            Err(IdentityError::NotAMember)
+        );
+    }
+    exec(
+        &w.su,
+        &format!("UPDATE community_members SET is_active = false WHERE community_id = {COMMUNITY} AND platform_user_id = '1001'"),
+    ).await;
+    assert_eq!(
+        resolve_actor_scopes(&wiring, &invocation(), scope(TENANT, COMMUNITY)).await,
+        Err(IdentityError::NotAMember)
+    );
+}
+
 /// A free-text `@handle` goes through hub-api's resolver, then is CONFIRMED an
 /// active member of this community in the real database.
 #[tokio::test]
