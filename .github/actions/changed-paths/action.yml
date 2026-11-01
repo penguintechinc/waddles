@@ -1,0 +1,70 @@
+name: Changed paths
+description: >-
+  Classify the files changed by this PR / merge-group / push into CI areas
+  (rust, python, node, go, helm, docker, docs_only, any_code). Fails OPEN: if
+  the diff cannot be computed, every area is reported as changed. Requires the
+  repo to be checked out with fetch-depth >= 2 and scripts/ci sparse-checked-out.
+
+outputs:
+  rust:
+    description: Rust crates / WIT / proto / SQL embedded by Rust changed
+    value: ${{ steps.paths.outputs.rust }}
+  python:
+    description: Python source, requirements/lockfiles, alembic or bundles/python changed
+    value: ${{ steps.paths.outputs.python }}
+  node:
+    description: JS/TS source, package manifests, website/frontends or JS test suites changed
+    value: ${{ steps.paths.outputs.node }}
+  go:
+    description: Go source or modules changed
+    value: ${{ steps.paths.outputs.go }}
+  helm:
+    description: Helm / k8s / compose changed
+    value: ${{ steps.paths.outputs.helm }}
+  docker:
+    description: Dockerfiles or container build inputs changed
+    value: ${{ steps.paths.outputs.docker }}
+  docs_only:
+    description: Only documentation changed
+    value: ${{ steps.paths.outputs.docs_only }}
+  any_code:
+    description: Anything other than documentation changed
+    value: ${{ steps.paths.outputs.any_code }}
+
+runs:
+  using: composite
+  steps:
+    - id: paths
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        PUSH_AFTER: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        script="${GITHUB_WORKSPACE}/scripts/ci/changed-paths.sh"
+
+        case "${EVENT_NAME}" in
+          pull_request)
+            # actions/checkout checks out refs/pull/N/merge: HEAD^1 is the base
+            # tip the PR is being merged into, so HEAD^1..HEAD is exactly the
+            # PR's own change set.
+            exec "${script}" --base "HEAD^1" --head "HEAD"
+            ;;
+          merge_group)
+            # The queue head commit sits on base_sha plus every queued PR, so
+            # base..head is the union of what this group will merge.
+            git fetch --no-tags --depth=1 origin "${MG_BASE_SHA}" || true
+            exec "${script}" --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}"
+            ;;
+          push)
+            git fetch --no-tags --depth=1 origin "${PUSH_BEFORE}" || true
+            exec "${script}" --base "${PUSH_BEFORE}" --head "${PUSH_AFTER}"
+            ;;
+          *)
+            # workflow_dispatch / schedule / release: run everything.
+            exec "${script}" --all
+            ;;
+        esac
