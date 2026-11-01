@@ -228,15 +228,12 @@ connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
 # build context is `core/` (see Dockerfile.rust).
 discord-mentions = { path = "../discord_mentions", version = "=0.1.0" }
 
+# Sink/Stream ext for the generic WebSocket transport (`connector::ws`);
+# same exact version already resolved via tokio-tungstenite.
+futures-util = "=0.3.34"
+
 [dev-dependencies]
 http-body-util = "=0.1.3"
-# Already resolved transitively (tokio-tungstenite's own dependency) at
-# this exact version -- promoted to a direct dev-dependency only so
-# `ingest::discord_identify_budget`'s real-`OP_RESUME` test can drive a
-# `tokio_tungstenite::WebSocketStream`'s `Sink`/`Stream` impls
-# (`.send()`/`.next()`) directly, mirroring `penguin-connector-discord`'s
-# own `resume_handshake_sends_resume_and_receives_resumed` test harness.
-futures-util = "=0.3.34"
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
 # `#[tokio::test(start_paused = true)]`/`tokio::time::{pause,advance}` so
 # `ingest::discord`'s reconnect-backoff regression test can drive many
