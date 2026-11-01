@@ -9,6 +9,11 @@ on:
     types: [checks_requested]
     branches: ['release/**']
   workflow_dispatch:
+  # Path-scoped jobs skip when their language did not change, so a new advisory
+  # against an untouched dependency would otherwise go unnoticed until the next
+  # PR that touches it. A scheduled run has no diff base -> every area runs.
+  schedule:
+    - cron: '17 6 * * *'
 
 permissions:
   contents: read
@@ -21,6 +26,34 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Cheap (~5s, no build deps) change classifier. Heavy jobs below depend on it
+  # and skip themselves when nothing applicable changed. Jobs that are NOT
+  # path-scoped deliberately do NOT depend on it, so they still start at t=0
+  # in parallel. Fails open: see scripts/ci/changed-paths.sh.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      rust: ${{ steps.paths.outputs.rust }}
+      python: ${{ steps.paths.outputs.python }}
+      node: ${{ steps.paths.outputs.node }}
+      go: ${{ steps.paths.outputs.go }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+
   # Fast checks (~2-3 min): Trivy fs + Dependency Review.
   # Python (pip-audit, bandit) and Node audits run as their own jobs below.
   # This is the check that matters for day-to-day development velocity.
@@ -59,6 +92,8 @@ jobs:
 
   node-audit:
     name: Node audit (${{ matrix.name }})
+    needs: changes
+    if: needs.changes.outputs.node == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -109,6 +144,8 @@ jobs:
 
   python-audit:
     name: Python security checks
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -205,6 +242,9 @@ jobs:
   # continue-on-error prevents them from blocking the pipeline.
   codeql:
     name: CodeQL Analysis
+    needs: changes
+    # CodeQL here analyzes go, javascript and python only.
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || needs.changes.outputs.go == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
