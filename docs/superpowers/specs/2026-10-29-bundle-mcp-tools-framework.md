@@ -131,6 +131,48 @@ P5  SDK: client (await tool.invoke) + service-side tool-export/dispatch helpers;
 - SDK client + service-export helpers; a reference service bundle + app caller as the real-path e2e.
 - Tests: zero-trust (malicious app proposing bad amounts/targets rejected), matrix enforcement (app→app denied), timeout path, re-approval-on-update, version/SHA-2 pin mismatch rejection, nesting-depth limit.
 
+## 10. Migration program (owner 2026-10-30) — economy/reputation → WASM, connectors stay dataplane
+
+Economy (`core/bundle_host_economy`) and reputation (`core/bundle_host_reputation`) exist today as **host crates called from the dataplane**, not WASM bundles — a divergence from the intended model. Decision: **migrate the LOGIC into Rust WASM service bundles before the major-version lock** ("do it right before we can't take it back"), for independent updates, separation from the dataplane, and a uniform tool-call interface.
+
+**Boundary principle (settles what moves):** the **core Rust dataplane host owns the heavy/sensitive primitives** — networking, routing, transport, the DB connection, and atomic DB operations. **WASM bundles own logic and reach primitives through typed host capabilities.** A bundle never holds a raw DB connection or raw SQL (sandbox + no money-SQL-in-WASM); it never holds a socket.
+
+**DB access is NOT withheld.** A service bundle reaches the DB two ways, no gap:
+- **Specialized caps `economy`/`reputation`** (privileged, already exist, Rust host) — atomic money/score primitives. Money-safety (single-statement CTE, `pg_advisory_xact_lock`, 24h-cap, `CHECK(balance>=0)`, idempotency) stays **host-side**. Granted only to the owning service bundle = the service-vs-app privilege boundary.
+- **Generic `db` cap** (structured single-table DML) — the bundle's own ancillary/config/state tables.
+
+**What migrates vs stays:**
+| Component | Moves to WASM bundle | Stays in core Rust dataplane host |
+|---|---|---|
+| **Economy** | verbs (`!give`/`!points[ set/view/leaders]`), exchange-rate (1000:500), per-community alias, rep-filter-at-draw, exported tools | atomic balance/ledger primitives via `economy` cap |
+| **Reputation** | score policy, admin-override logic, exported tools | atomic score primitives via `reputation` cap |
+| **Connectors (Twitch/YouTube/Discord)** | the **platform OVERLAY** (subscription semantics, payload parsing, normalization, which verify-scheme to invoke, exported `get_chatters`/`send_chat` tools) → a service-bundle overlay | **GENERIC transport primitives only** — generic webhook ingress, generic WS subscription, generic poller, generic outbound HTTP, generic signature-verify (scheme parameterized), secret storage. No platform knowledge in the dataplane |
+
+⇒ **Two WASM logic-bundle migrations (economy, reputation)** + **connectors split into a generic dataplane transport layer + per-platform service-bundle overlays** — not three monolithic bundle migrations.
+
+### 10a. Generic transports + platform overlays (owner 2026-10-30)
+
+**The dataplane must not know what "Twitch" is.** It exposes **platform-agnostic transport primitives**; service bundles supply the **platform overlay** on top. Adding a platform (Slack, Mastodon, a donation provider) = a new bundle overlay, **not new dataplane code**.
+
+Three tiers:
+- **Core Rust dataplane (generic):** transport mechanism + sensitive primitives — sockets, routing, TLS, connection pooling, a **generic registered-webhook HTTP ingress**, a **generic WS subscription**, a **generic poller**, a **generic outbound HTTP call**, and a **generic signature-verify where the scheme (HMAC-SHA256 / Ed25519 / …) and secret ref are parameters**. Secrets live host-side; the bundle drives verification without ever holding the secret (token hygiene preserved).
+- **Service-bundle overlay (WASM logic):** the platform spec — e.g. Twitch EventSub decides which subscriptions to register, asks the host to HMAC-SHA256-verify the inbound body against the configured secret, and parses `channel.follow` into a normalized event; Discord supplies Ed25519 + interaction shape; YouTube supplies PubSubHubbub lease + Atom parse. Exposes normalized tools (`get_chatters`, `send_chat`) to app bundles.
+- **App bundle:** consumes the normalized event / calls the tools (computes *what*, e.g. loot amount → `economy.adjust_balance`).
+
+**Webhook ingress (refined):** the generic host webhook receiver routes an inbound POST to the owning connector overlay bundle by its manifest `ingress` declaration (path/route is generic; the bundle declares which route it owns + the verify scheme/secret-ref the host should apply before delivery). The overlay never sees unverified traffic and never holds the secret.
+
+**Design requirement (feasibility, not a blocker):** every must-be-atomic operation is a **single compound host-capability call** (`transfer(from,to,amt)`, `conditional_debit(user,amt,min)`) so the bundle never does multi-call read-modify-write on a balance (TOCTOU). The bundle orchestrates; each atomic unit = one WIT call.
+
+**Kind-aware network policy:** `service` bundles are more network-active than `app` bundles → a **more permissive but still allowlisted** egress/db/capability profile (never open egress), tied to the manifest `{egress,ingress}` block + data-plane egress-deny-default. **Ingress/webhooks:** some service bundles RECEIVE inbound (Twitch EventSub, Discord interactions, donation callbacks) — host/gateway receives the HTTP webhook and routes it to the owning service bundle (manifest `ingress` declaration + host→bundle delivery path + a handled export). App bundles have no ingress.
+
+**Re-scoped delivery:** P1 (manifest) and P2 (grant catalog) are DONE in release (@3cd9f872). The remaining program:
+- **P3a penguin-libs** — `ExportKind::ToolCall` (0.4.0, source-breaking) + host-invoke-a-tool-export runtime → release + rev-bump (4 files in waddles).
+- **P3b waddles** — WIT `tool-provider` export + bindgen + `tool.invoke` dispatch arm + gate/access/depth-2/cycle/timeout + cross-stage envelope + SDK (client + service-export helpers).
+- **P4 economy migration** — logic → WASM bundle calling the `economy` cap (compound atomic ops added as needed).
+- **P5 reputation migration** — same shape via `reputation` cap.
+- **P6a generic transport layer** — generalize dataplane transports into platform-agnostic primitives (generic webhook ingress + generic WS/poll/outbound-HTTP + parameterized signature-verify + secret-ref delivery).
+- **P6b platform overlays** — move Twitch/YouTube/Discord specifics into per-platform service-bundle overlays driving the P6a generics; expose normalized tools.
+
 ---
 
-*Interim capture during brainstorm. On approval → implementation plan (superpowers:writing-plans). The economy's treasury host op (1a) is independent and can proceed in parallel; the economy service bundle consumes this framework.*
+*Brainstorm capture + 2026-10-30 migration resolution. Next: implementation plan (superpowers:writing-plans) for P3a→P3b→P4→P5→P6. The economy's treasury host op (1a) is independent and can proceed in parallel.*
