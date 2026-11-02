@@ -394,7 +394,8 @@ class TestBatchAndMain:
             assert await kw["get_broadcaster_user_token"](1) == "tok"
             return svc.ReconcileSummary(pairings_examined=3, pairings_synced=2, pairings_failed=1)
 
-        async def _fake_tokens(db: Any, community_id: int, platform: str) -> Any:
+        async def _fake_tokens(db: Any, community_id: int, platform: str, *, tenant_id: Any) -> Any:
+            assert tenant_id is cc.SYSTEM
             # `get_decrypted_tokens` reads `db.dal` + `db.select_async`: it must get the
             # flask_core AsyncDAL (whose `.dal` is the raw pydal DAL), never an AsyncDB.
             assert db.dal is fake_dal
