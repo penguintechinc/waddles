@@ -387,6 +387,25 @@ Future versions (v2, v3) will maintain backward compatibility with v1.
 
 ---
 
+## Test a Platform Bot Credential
+
+**Endpoint**: `POST /api/v1/credentials/<platform>/test` (scope `credentials:admin`)
+
+Validates the active operator BOT token for `platform` against the provider's own API. hub-api's DB
+role cannot read operator bot tokens (H-3, gh-969), so its superadmin "test connection" endpoint
+delegates here. The token is decrypted in memory for one provider call; the response carries the
+verdict only.
+
+| Status | Meaning |
+|---|---|
+| 200 | `{"success": true, "data": {"platform": "twitch", "valid": true, "error": null}}` |
+| 400 | unsupported platform |
+| 403 | missing token / scope |
+| 404 | no active bot credential for the platform |
+| 503 | service not initialized |
+
+---
+
 ## Security Considerations
 
 1. **No Credentials Exposed**: API never returns access tokens or secrets

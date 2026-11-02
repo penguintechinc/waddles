@@ -64,7 +64,7 @@ def _row(dal: Any, community_id: int, provider: str) -> Any:
 
 class TestListConnections:
     async def test_no_rows_returns_all_disconnected(self, connections_db: Any) -> None:
-        result = await svc.list_connections(connections_db, COMMUNITY_ID)
+        result = await svc.list_connections(connections_db, COMMUNITY_ID, tenant_id=svc.SYSTEM)
         assert [c.provider for c in result] == list(svc.SUPPORTED_PROVIDERS)
         assert all(c.connected is False for c in result)
         assert all(c.scopes == [] for c in result)
@@ -72,7 +72,7 @@ class TestListConnections:
 
     async def test_invalid_community_id_raises(self, connections_db: Any) -> None:
         with pytest.raises(ApiError):
-            await svc.list_connections(connections_db, 0)
+            await svc.list_connections(connections_db, 0, tenant_id=svc.SYSTEM)
 
     async def test_connected_provider_reflected_others_stay_disconnected(
         self, connections_db: Any
@@ -87,8 +87,9 @@ class TestListConnections:
             scopes=["chat:read"],
             account_label="mychannel",
             actor_user_id=7,
+            tenant_id=svc.SYSTEM,
         )
-        result = await svc.list_connections(connections_db, COMMUNITY_ID)
+        result = await svc.list_connections(connections_db, COMMUNITY_ID, tenant_id=svc.SYSTEM)
         by_provider = {c.provider: c for c in result}
         assert by_provider["twitch"].connected is True
         assert by_provider["twitch"].scopes == ["chat:read"]
@@ -98,15 +99,18 @@ class TestListConnections:
 
 class TestGetConnection:
     async def test_returns_none_when_absent(self, connections_db: Any) -> None:
-        assert await svc.get_connection(connections_db, COMMUNITY_ID, "discord") is None
+        assert (
+            await svc.get_connection(connections_db, COMMUNITY_ID, "discord", tenant_id=svc.SYSTEM)
+            is None
+        )
 
     async def test_unsupported_provider_raises(self, connections_db: Any) -> None:
         with pytest.raises(svc.UnsupportedProvider):
-            await svc.get_connection(connections_db, COMMUNITY_ID, "myspace")
+            await svc.get_connection(connections_db, COMMUNITY_ID, "myspace", tenant_id=svc.SYSTEM)
 
     async def test_invalid_community_id_raises(self, connections_db: Any) -> None:
         with pytest.raises(ApiError):
-            await svc.get_connection(connections_db, -1, "discord")
+            await svc.get_connection(connections_db, -1, "discord", tenant_id=svc.SYSTEM)
 
     async def test_returns_status_after_upsert(self, connections_db: Any) -> None:
         await svc.upsert_connection(
@@ -119,8 +123,11 @@ class TestGetConnection:
             scopes=[],
             account_label=None,
             actor_user_id=None,
+            tenant_id=svc.SYSTEM,
         )
-        status = await svc.get_connection(connections_db, COMMUNITY_ID, "youtube")
+        status = await svc.get_connection(
+            connections_db, COMMUNITY_ID, "youtube", tenant_id=svc.SYSTEM
+        )
         assert status is not None
         assert status.connected is True
         assert status.account_label is None
@@ -140,6 +147,7 @@ class TestUpsertConnection:
             scopes=["chat:write"],
             account_label="workspace-a",
             actor_user_id=1,
+            tenant_id=svc.SYSTEM,
         )
         await svc.upsert_connection(
             connections_db,
@@ -151,17 +159,22 @@ class TestUpsertConnection:
             scopes=["chat:write", "channels:read"],
             account_label="workspace-b",
             actor_user_id=2,
+            tenant_id=svc.SYSTEM,
         )
         t = dal.platform_integrations
         rows = dal((t.community_id == COMMUNITY_ID) & (t.platform == "slack")).select()
         assert len(rows) == 1
 
-        status = await svc.get_connection(connections_db, COMMUNITY_ID, "slack")
+        status = await svc.get_connection(
+            connections_db, COMMUNITY_ID, "slack", tenant_id=svc.SYSTEM
+        )
         assert status is not None
         assert status.scopes == ["chat:write", "channels:read"]
         assert status.account_label == "workspace-b"
 
-        tokens = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "slack")
+        tokens = await svc.get_decrypted_tokens(
+            connections_db, COMMUNITY_ID, "slack", tenant_id=svc.SYSTEM
+        )
         assert tokens is not None
         assert tokens.access_token == "tok2"
         assert tokens.refresh_token == "ref2"
@@ -178,6 +191,7 @@ class TestUpsertConnection:
             scopes=[],
             account_label=None,
             actor_user_id=None,
+            tenant_id=svc.SYSTEM,
         )
         row = _row(dal, COMMUNITY_ID, "kick")
         assert row.access_token != "super-secret-token"
@@ -195,6 +209,7 @@ class TestUpsertConnection:
                 scopes=[],
                 account_label=None,
                 actor_user_id=None,
+                tenant_id=svc.SYSTEM,
             )
 
     async def test_unsupported_provider_raises(self, connections_db: Any) -> None:
@@ -209,6 +224,7 @@ class TestUpsertConnection:
                 scopes=[],
                 account_label=None,
                 actor_user_id=None,
+                tenant_id=svc.SYSTEM,
             )
 
     async def test_invalid_community_id_raises(self, connections_db: Any) -> None:
@@ -223,6 +239,7 @@ class TestUpsertConnection:
                 scopes=[],
                 account_label=None,
                 actor_user_id=None,
+                tenant_id=svc.SYSTEM,
             )
 
 
@@ -241,10 +258,16 @@ class TestDeleteConnection:
             scopes=["bot"],
             account_label=None,
             actor_user_id=None,
+            tenant_id=svc.SYSTEM,
         )
-        deleted = await svc.delete_connection(connections_db, COMMUNITY_ID, "discord", 9)
+        deleted = await svc.delete_connection(
+            connections_db, COMMUNITY_ID, "discord", 9, tenant_id=svc.SYSTEM
+        )
         assert deleted is True
-        assert await svc.get_connection(connections_db, COMMUNITY_ID, "discord") is None
+        assert (
+            await svc.get_connection(connections_db, COMMUNITY_ID, "discord", tenant_id=svc.SYSTEM)
+            is None
+        )
 
         row = _row(dal, COMMUNITY_ID, "discord")
         assert row.access_token is None
@@ -252,12 +275,16 @@ class TestDeleteConnection:
         assert row.is_active is False
 
     async def test_delete_nonexistent_returns_false(self, connections_db: Any) -> None:
-        deleted = await svc.delete_connection(connections_db, COMMUNITY_ID, "spotify", None)
+        deleted = await svc.delete_connection(
+            connections_db, COMMUNITY_ID, "spotify", None, tenant_id=svc.SYSTEM
+        )
         assert deleted is False
 
     async def test_unsupported_provider_raises(self, connections_db: Any) -> None:
         with pytest.raises(svc.UnsupportedProvider):
-            await svc.delete_connection(connections_db, COMMUNITY_ID, "myspace", None)
+            await svc.delete_connection(
+                connections_db, COMMUNITY_ID, "myspace", None, tenant_id=svc.SYSTEM
+            )
 
 
 class TestGetDecryptedTokens:
@@ -272,15 +299,23 @@ class TestGetDecryptedTokens:
             scopes=["youtube.readonly"],
             account_label=None,
             actor_user_id=None,
+            tenant_id=svc.SYSTEM,
         )
-        tokens = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "youtube")
+        tokens = await svc.get_decrypted_tokens(
+            connections_db, COMMUNITY_ID, "youtube", tenant_id=svc.SYSTEM
+        )
         assert tokens is not None
         assert tokens.access_token == "real-access"
         assert tokens.refresh_token == "real-refresh"
         assert tokens.scopes == ["youtube.readonly"]
 
     async def test_none_when_not_connected(self, connections_db: Any) -> None:
-        assert await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "twitch") is None
+        assert (
+            await svc.get_decrypted_tokens(
+                connections_db, COMMUNITY_ID, "twitch", tenant_id=svc.SYSTEM
+            )
+            is None
+        )
 
     async def test_no_refresh_token_returns_none_for_it(self, connections_db: Any) -> None:
         await svc.upsert_connection(
@@ -293,8 +328,11 @@ class TestGetDecryptedTokens:
             scopes=[],
             account_label=None,
             actor_user_id=None,
+            tenant_id=svc.SYSTEM,
         )
-        tokens = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "spotify")
+        tokens = await svc.get_decrypted_tokens(
+            connections_db, COMMUNITY_ID, "spotify", tenant_id=svc.SYSTEM
+        )
         assert tokens is not None
         assert tokens.refresh_token is None
 
@@ -310,13 +348,16 @@ class TestGetDecryptedTokens:
             scopes=[],
             account_label=None,
             actor_user_id=None,
+            tenant_id=svc.SYSTEM,
         )
         row = _row(dal, COMMUNITY_ID, "spotify")
         tampered = row.access_token[:-4] + ("AAAA" if row.access_token[-4:] != "AAAA" else "BBBB")
         dal(dal.platform_integrations.id == row.id).update(access_token=tampered)
         dal.commit()
         with pytest.raises(PlatformCredentialCryptoError):
-            await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "spotify")
+            await svc.get_decrypted_tokens(
+                connections_db, COMMUNITY_ID, "spotify", tenant_id=svc.SYSTEM
+            )
 
 
 class TestStoreRefreshedAccessToken:
@@ -331,12 +372,20 @@ class TestStoreRefreshedAccessToken:
             scopes=[],
             account_label=None,
             actor_user_id=None,
+            tenant_id=svc.SYSTEM,
         )
         new_expiry = datetime.now(UTC) + timedelta(hours=1)
         await svc.store_refreshed_access_token(
-            connections_db, COMMUNITY_ID, "twitch", access_token="new", expires_at=new_expiry
+            connections_db,
+            COMMUNITY_ID,
+            "twitch",
+            access_token="new",
+            expires_at=new_expiry,
+            tenant_id=svc.SYSTEM,
         )
-        tokens = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "twitch")
+        tokens = await svc.get_decrypted_tokens(
+            connections_db, COMMUNITY_ID, "twitch", tenant_id=svc.SYSTEM
+        )
         assert tokens is not None
         assert tokens.access_token == "new"
         assert tokens.refresh_token == "ref"
@@ -345,19 +394,34 @@ class TestStoreRefreshedAccessToken:
     async def test_raises_not_found_when_no_active_connection(self, connections_db: Any) -> None:
         with pytest.raises(ApiError):
             await svc.store_refreshed_access_token(
-                connections_db, COMMUNITY_ID, "kick", access_token="new", expires_at=None
+                connections_db,
+                COMMUNITY_ID,
+                "kick",
+                access_token="new",
+                expires_at=None,
+                tenant_id=svc.SYSTEM,
             )
 
     async def test_unsupported_provider_raises(self, connections_db: Any) -> None:
         with pytest.raises(svc.UnsupportedProvider):
             await svc.store_refreshed_access_token(
-                connections_db, COMMUNITY_ID, "myspace", access_token="new", expires_at=None
+                connections_db,
+                COMMUNITY_ID,
+                "myspace",
+                access_token="new",
+                expires_at=None,
+                tenant_id=svc.SYSTEM,
             )
 
     async def test_blank_access_token_rejected(self, connections_db: Any) -> None:
         with pytest.raises(ApiError):
             await svc.store_refreshed_access_token(
-                connections_db, COMMUNITY_ID, "twitch", access_token="  ", expires_at=None
+                connections_db,
+                COMMUNITY_ID,
+                "twitch",
+                access_token="  ",
+                expires_at=None,
+                tenant_id=svc.SYSTEM,
             )
 
 
@@ -376,12 +440,15 @@ class TestAccountLabelFallback:
             scopes=[],
             account_label="will-be-cleared",
             actor_user_id=None,
+            tenant_id=svc.SYSTEM,
         )
         row = _row(dal, COMMUNITY_ID, "discord")
         dal(dal.platform_integrations.id == row.id).update(config_data=None)
         dal.commit()
 
-        status = await svc.get_connection(connections_db, COMMUNITY_ID, "discord")
+        status = await svc.get_connection(
+            connections_db, COMMUNITY_ID, "discord", tenant_id=svc.SYSTEM
+        )
         assert status is not None
         assert status.account_label is None
 
@@ -421,6 +488,7 @@ class TestRowBoundSealing:
             scopes=["s"],
             account_label=None,
             actor_user_id=None,
+            tenant_id=svc.SYSTEM,
         )
 
     async def test_new_writes_are_version_1(self, connections_db: Any) -> None:
@@ -444,7 +512,9 @@ class TestRowBoundSealing:
         dal.commit()
         for community in (1, 2):
             with pytest.raises(PlatformCredentialCryptoError):
-                await svc.get_decrypted_tokens(connections_db, community, "twitch")
+                await svc.get_decrypted_tokens(
+                    connections_db, community, "twitch", tenant_id=svc.SYSTEM
+                )
 
     async def test_legacy_v0_row_still_opens_then_reseals_on_read(
         self, connections_db: Any
@@ -459,14 +529,18 @@ class TestRowBoundSealing:
         )
         dal.commit()
 
-        tokens = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "twitch")
+        tokens = await svc.get_decrypted_tokens(
+            connections_db, COMMUNITY_ID, "twitch", tenant_id=svc.SYSTEM
+        )
         assert tokens is not None
         assert (tokens.access_token, tokens.refresh_token) == ("acc-legacy", "ref-legacy")
         row = _row(dal, COMMUNITY_ID, "twitch")
         assert row.seal_version == 1
         aad = connection_aad(community_id=COMMUNITY_ID, provider="twitch")
         assert open_secret(row.access_token, aad=aad, seal_version=1) == "acc-legacy"
-        again = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "twitch")
+        again = await svc.get_decrypted_tokens(
+            connections_db, COMMUNITY_ID, "twitch", tenant_id=svc.SYSTEM
+        )
         assert again is not None and again.refresh_token == "ref-legacy"
 
     async def test_refresh_of_a_legacy_row_keeps_the_refresh_token_readable(
@@ -482,9 +556,16 @@ class TestRowBoundSealing:
         )
         dal.commit()
         await svc.store_refreshed_access_token(
-            connections_db, COMMUNITY_ID, "twitch", access_token="acc-new", expires_at=None
+            connections_db,
+            COMMUNITY_ID,
+            "twitch",
+            access_token="acc-new",
+            expires_at=None,
+            tenant_id=svc.SYSTEM,
         )
-        tokens = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "twitch")
+        tokens = await svc.get_decrypted_tokens(
+            connections_db, COMMUNITY_ID, "twitch", tenant_id=svc.SYSTEM
+        )
         assert tokens is not None
         assert (tokens.access_token, tokens.refresh_token) == ("acc-new", "ref-legacy")
         assert _row(dal, COMMUNITY_ID, "twitch").seal_version == 1
@@ -503,7 +584,9 @@ class TestRowBoundSealing:
         def boom(*_a: Any, **_k: Any) -> bool:
             raise RuntimeError("lock timeout")
 
-        monkeypatch.setattr(svc, "_sync_reseal_legacy", boom)
-        tokens = await svc.get_decrypted_tokens(connections_db, COMMUNITY_ID, "twitch")
+        monkeypatch.setattr(svc, "_reseal_legacy", boom)
+        tokens = await svc.get_decrypted_tokens(
+            connections_db, COMMUNITY_ID, "twitch", tenant_id=svc.SYSTEM
+        )
         assert tokens is not None and tokens.access_token == "acc-legacy"
         assert _row(dal, COMMUNITY_ID, "twitch").seal_version == 0  # left for the reseal job

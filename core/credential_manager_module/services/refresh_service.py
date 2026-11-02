@@ -23,6 +23,7 @@ import redis.asyncio as aioredis
 import httpx
 from flask_core.safe_logging import log_exc_safe
 
+from .connection_tester import validate_token
 from .oauth_handlers import OAuthRefreshError, get_handler
 from .token_crypto import decrypt_if_needed, encrypt_value
 
@@ -186,6 +187,28 @@ class RefreshService:
 
         self._total_refreshed += refreshed
         return refreshed
+
+    async def test_bot_connection(self, platform: str) -> tuple[bool, str | None] | None:
+        """Validate the active operator BOT token for `platform` against its provider.
+
+        Returns `None` when there is no active bot credential (caller maps to 404). The token
+        is decrypted in memory only and never returned or logged (gh-969).
+        """
+        if not self._pool or not self._http:
+            raise RuntimeError("refresh service not started")
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT access_token, is_encrypted FROM platform_integrations "
+                "WHERE platform = $1 AND integration_type = 'bot' AND is_active = TRUE "
+                "ORDER BY id LIMIT 1",
+                platform,
+            )
+        if row is None:
+            return None
+        if not row["access_token"]:
+            return True, None
+        token = decrypt_if_needed(row["access_token"], is_encrypted=bool(row["is_encrypted"]))
+        return await validate_token(self._http, platform, token)
 
     @staticmethod
     def _decrypt_integration(integration: dict) -> dict:

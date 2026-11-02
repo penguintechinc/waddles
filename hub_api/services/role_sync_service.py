@@ -1250,12 +1250,14 @@ async def main() -> int:
     `AsyncDB`: that has no `.dal`, and reading one raises `TableNotFoundError: Table 'dal'
     not found` (see `services/sync_worker_dal.py`).
     """
-    from services.community_connections import get_decrypted_tokens
+    from services.community_connections import SYSTEM, get_decrypted_tokens
 
     with open_worker_dal(os.environ["DATABASE_URL"]) as async_dal:
 
         async def _get_broadcaster_user_token(community_id: int) -> str | None:
-            tokens = await get_decrypted_tokens(async_dal, community_id, "twitch")
+            # CronJob iterating communities: no request tenant -> explicit SYSTEM scope (tenant is
+            # resolved from the community row and passed to SQL; SQL itself never accepts NULL).
+            tokens = await get_decrypted_tokens(async_dal, community_id, "twitch", tenant_id=SYSTEM)
             return tokens.access_token if tokens else None
 
         summary = await run_role_sync_reconcile_batch(

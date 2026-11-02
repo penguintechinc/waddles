@@ -147,5 +147,28 @@ async def force_refresh() -> tuple:
     }), 200
 
 
+_TESTABLE_PLATFORMS = frozenset({"twitch", "discord", "youtube", "slack", "kick", "spotify"})
+
+
+@app.route("/api/v1/credentials/<platform>/test", methods=["POST"])
+@require_scope("credentials:admin")  # type: ignore[untyped-decorator]
+async def credential_connection_check(platform: str) -> tuple:
+    """Validate the operator BOT credential for `platform` against its provider (gh-969).
+
+    hub-api's DB role cannot read `platform_integrations` (H-3), so its superadmin
+    "test connection" endpoint delegates here; this is the only place the decrypted bot token
+    is used for it. Returns the validation outcome only -- never the token.
+    """
+    if platform not in _TESTABLE_PLATFORMS:
+        return jsonify({"success": False, "error": "unsupported platform"}), 400
+    if not refresh_service:
+        return jsonify({"error": "Service not initialized"}), 503
+    result = await refresh_service.test_bot_connection(platform)
+    if result is None:
+        return jsonify({"success": False, "error": f"No credentials found for platform: {platform}"}), 404
+    valid, error = result
+    return jsonify({"success": True, "data": {"platform": platform, "valid": valid, "error": error}}), 200
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=Config.MODULE_PORT)
