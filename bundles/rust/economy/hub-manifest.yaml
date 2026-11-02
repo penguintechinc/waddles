@@ -1,0 +1,199 @@
+schema_version: 2
+app_id: waddles.core.service.economy
+name: Economy Service Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: service
+stages:
+  action:
+    entry: waddle:bundle/tool-provider#call
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: economy.read
+  justification: Read community balances and leaderboard
+- id: economy.credit
+  justification: Mint and exchange through capped atomic host calls
+  params:
+    max_amount: 1000
+- id: economy.debit
+  justification: Spend only the verified actor balance
+  params:
+    max_amount: 1000
+- id: economy.transfer
+  justification: Transfer only from the verified actor
+  params:
+    max_amount: 1000
+- id: economy.admin_adjust
+  justification: Admin-scoped tool sets balances with supply enforcement
+- id: economy.pot.pay
+  justification: Atomically distribute community pot funds
+- id: storage.kv
+  justification: Read community currency alias and exchange policy
+routes_to: []
+exported_tools:
+- name: get_balance
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      user: &id001
+        type: string
+        format: uuid
+    required:
+    - user
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: points_view
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      user: *id001
+    required:
+    - user
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: adjust_balance
+  access: write
+  risk: dangerous
+  input_schema: &id003
+    type: object
+    properties:
+      user: *id001
+      delta:
+        type: integer
+        minimum: -9223372036854775807
+        maximum: 9223372036854775807
+    required:
+    - user
+    - delta
+    additionalProperties: false
+  output_schema: &id004
+    type: object
+- name: transfer
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      from: *id001
+      to: *id001
+      amount: &id002
+        type: integer
+        minimum: 1
+        maximum: 9223372036854775807
+    required:
+    - from
+    - to
+    - amount
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: give
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      from: *id001
+      to: *id001
+      amount: *id002
+    required:
+    - from
+    - to
+    - amount
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: points_set
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      user: *id001
+      balance:
+        type: integer
+        minimum: 0
+        maximum: 9223372036854775807
+    required:
+    - user
+    - balance
+    additionalProperties: false
+  output_schema:
+    type: object
+  required_scope: community:admin
+- name: pay_pot
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      winners:
+        type: array
+        minItems: 1
+        maxItems: 100
+        items:
+          type: object
+          properties:
+            user: *id001
+            amount: *id002
+          required:
+          - user
+          - amount
+          additionalProperties: false
+    required:
+    - winners
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: exchange
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      user: *id001
+      from_amount: *id002
+    required:
+    - user
+    - from_amount
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: points_leaders
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: points_adjust
+  access: write
+  risk: dangerous
+  input_schema: *id003
+  output_schema: *id004
+  required_scope: community:admin
