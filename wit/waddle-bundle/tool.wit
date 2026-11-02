@@ -58,3 +58,10 @@ world stage-tools {
 
   export tool-provider;
 }
+
+/// Chat bundles that call services retain the frozen stage-next exports.
+/// Tool imports are additive in a new world; existing worlds stay unchanged.
+world stage-next-tools {
+  include stage-next;
+  import tool;
+}

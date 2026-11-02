@@ -1077,3 +1077,146 @@ async fn non_scoped_tools_skip_role_resolution_and_strip_a_guest_ctx() {
     // spoofed one never reaches the target.
     assert!(inv[0].payload["args"].get("__ctx").is_none());
 }
+
+/// Builds a host-authored nested plan for mutation namespace regression tests.
+fn mutation_plan() -> bundle_tool_call::ToolPlan {
+    bundle_tool_call::ToolPlan {
+        target_app_id: SVC.to_string(),
+        tool: "adjust_balance".to_string(),
+        args: serde_json::json!({}),
+        idempotency_key: Some("same-retry".to_string()),
+        target_digest: DIGEST.to_string(),
+        target_version: 22,
+        write: true,
+        next_chain: vec![APP.to_string(), SVC.to_string()],
+        caller_app_id: APP.to_string(),
+        actor: bundle_tool_call::ActorContext::none(),
+        tenant_id: TENANT_ID,
+        community_id: COMMUNITY_ID,
+    }
+}
+
+/// Tool retries use the caller's stable scoped key, independent of source event or parent ordinal.
+#[test]
+fn tool_mutation_retries_reuse_keys_without_consuming_parent_ordinals() {
+    let mut parent = caps_with(
+        world_rows(),
+        default_gate(),
+        Arc::new(ConnectionRegistry::new()),
+        vec![APP.to_string()],
+        None,
+    );
+    parent.invocation_identity = Some(Arc::new(
+        crate::identity::InvocationIdentity::new(
+            "twitch",
+            Some("actor-platform-id".into()),
+            vec![],
+        )
+        .with_event_id("event-one"),
+    ));
+    let plan = mutation_plan();
+    let ctx = parent.tool.as_ref().unwrap().clone();
+    let first = parent.for_tool_target(&plan, ctx.clone());
+    let first_key = first
+        .invocation_identity
+        .as_ref()
+        .unwrap()
+        .reserve_mutation("credit")
+        .map(|(k, n)| (k.to_string(), n))
+        .unwrap();
+    let retry = parent.for_tool_target(&plan, ctx.clone());
+    let retry_key = retry
+        .invocation_identity
+        .as_ref()
+        .unwrap()
+        .reserve_mutation("credit")
+        .map(|(k, n)| (k.to_string(), n))
+        .unwrap();
+    assert_eq!(first_key, retry_key);
+    assert_eq!(
+        parent
+            .invocation_identity
+            .as_ref()
+            .unwrap()
+            .reserve_mutation("credit"),
+        Some(("event-one", 0))
+    );
+    parent.invocation_identity = Some(Arc::new(
+        crate::identity::InvocationIdentity::new(
+            "twitch",
+            Some("actor-platform-id".into()),
+            vec![],
+        )
+        .with_event_id("event-two"),
+    ));
+    let redelivery = parent.for_tool_target(&plan, ctx);
+    let later_key = redelivery
+        .invocation_identity
+        .as_ref()
+        .unwrap()
+        .reserve_mutation("credit")
+        .map(|(k, n)| (k.to_string(), n))
+        .unwrap();
+    assert_eq!(first_key, later_key);
+    assert!(bundle_host_economy::IdempotencyKey::for_event(
+        &first_key.0,
+        "conditional_debit",
+        u32::MAX
+    )
+    .is_ok());
+}
+
+/// Different principals, target tools and targets cannot collide even with identical guest retry text.
+#[test]
+fn tool_mutation_keys_are_domain_separated_and_read_calls_cannot_mutate() {
+    let mut parent = caps_with(
+        world_rows(),
+        default_gate(),
+        Arc::new(ConnectionRegistry::new()),
+        vec![APP.to_string()],
+        None,
+    );
+    parent.invocation_identity = Some(Arc::new(
+        crate::identity::InvocationIdentity::new("twitch", None, vec![]).with_event_id("original"),
+    ));
+    let plan = mutation_plan();
+    let ctx = parent.tool.as_ref().unwrap().clone();
+    let key = |parent: &StageCapabilities, plan: &bundle_tool_call::ToolPlan| {
+        parent
+            .for_tool_target(plan, ctx.clone())
+            .invocation_identity
+            .as_ref()
+            .unwrap()
+            .reserve_mutation("credit")
+            .map(|(k, n)| (k.to_string(), n))
+    };
+    let original = key(&parent, &plan).unwrap();
+    for mut different in [plan.clone(), plan.clone(), plan.clone(), plan.clone()]
+        .into_iter()
+        .enumerate()
+    {
+        match different.0 {
+            0 => different.1.caller_app_id = "another-caller".into(),
+            1 => different.1.target_app_id = SVC2.into(),
+            2 => different.1.tool = "exchange".into(),
+            _ => different.1.idempotency_key = Some("another-key".into()),
+        }
+        assert_ne!(original, key(&parent, &different.1).unwrap());
+    }
+    parent.tenant_id += 1;
+    assert_ne!(original, key(&parent, &plan).unwrap());
+    parent.tenant_id -= 1;
+    parent.community_id += 1;
+    assert_ne!(original, key(&parent, &plan).unwrap());
+    let mut read = plan;
+    read.write = false;
+    assert_eq!(key(&parent, &read), None);
+    assert_eq!(
+        parent
+            .invocation_identity
+            .as_ref()
+            .unwrap()
+            .reserve_mutation("credit"),
+        Some(("original", 0))
+    );
+}

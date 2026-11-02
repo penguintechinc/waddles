@@ -103,7 +103,7 @@ impl ActorContext {
 /// | `member` | member |
 pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
     match role {
-        "community-owner" => &[
+        "community-owner" | "owner" => &[
             "community:member",
             "community:vip",
             "community:moderate",
