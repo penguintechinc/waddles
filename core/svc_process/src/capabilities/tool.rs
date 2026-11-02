@@ -194,31 +194,27 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         // touched until this returns.
         let req = bundle_tool_call::parse_request(&call.args)?;
         let gate_scope = self.gate_scope();
-        // Resolve the VERIFIED actor + scopes host-side, and only when the
-        // target tool is scope-restricted (one directory read, no cost for
-        // ordinary tools). `plan_tool_call` re-checks authoritatively, so a miss
-        // here can only fail closed (no actor => no scopes => refused).
-        let actor = if bundle_tool_call::required_scope_of(
-            &ctx.snapshot,
-            &gate_scope,
-            &req.target,
-            &req.tool,
-        )
-        .is_some()
-        {
-            self.resolve_verified_actor().await
-        } else {
-            bundle_tool_call::ActorContext::none()
-        };
-        let plan = bundle_tool_call::plan_tool_call(
+        // Steps 1-5 (self/cycle/depth, the caller's requested_tools, the P2
+        // gate, target resolution + app->app ban, write-key) are actor-
+        // independent and run entirely in memory. The host-verified actor is
+        // resolved from the directory (a DB read) ONLY after this authorization
+        // passes AND the target tool is scope-restricted -- so an ungranted,
+        // cyclic, or depth-exceeded caller never triggers a directory lookup,
+        // and the lookup cannot be used as a timing oracle for ungranted tools.
+        let authorized = bundle_tool_call::authorize_tool_call(
             &self.app_id,
             &ctx.chain,
             req,
             &ctx.snapshot,
             &self.gate,
             &gate_scope,
-            &actor,
         )?;
+        let actor = if authorized.required_scope().is_some() {
+            self.resolve_verified_actor().await
+        } else {
+            bundle_tool_call::ActorContext::none()
+        };
+        let plan = authorized.into_plan(&actor)?;
         *resolved = Some((plan.target_app_id.clone(), plan.tool.clone()));
         tracing::debug!(
             app_id = %self.app_id, target = %plan.target_app_id, tool = %plan.tool,

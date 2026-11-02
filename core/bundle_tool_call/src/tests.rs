@@ -183,9 +183,9 @@ fn a_app_to_service_with_grant_and_matrix_is_authorized_and_pinned() {
         nested_payload(&w).unwrap(),
         serde_json::json!({
             "tool": "adjust",
-            "args": {"x": 1, "__idempotency_key": scoped_idempotency_key(7, 3, APP, "k-1")},
+            "args": {"x": 1, "__idempotency_key": scoped_idempotency_key(7, 3, APP, None, "k-1")},
             "call_chain": [APP, SVC],
-            "idempotency_key": scoped_idempotency_key(7, 3, APP, "k-1"),
+            "idempotency_key": scoped_idempotency_key(7, 3, APP, None, "k-1"),
         })
     );
 }
@@ -503,7 +503,7 @@ fn idempotency_key_is_merged_into_forwarded_args() {
     assert_eq!(p["args"]["x"], 1);
     assert_eq!(
         p["args"][IDEMPOTENCY_ARG],
-        scoped_idempotency_key(7, 3, APP, "k-1")
+        scoped_idempotency_key(7, 3, APP, None, "k-1")
     );
     assert_eq!(IDEMPOTENCY_ARG, "__idempotency_key");
 }
@@ -685,6 +685,72 @@ fn scope_gate_refuses_no_actor_and_scopes_without_actor() {
 #[test]
 fn non_scoped_tools_are_unaffected_by_the_actor() {
     assert!(plan_as(&ActorContext::none(), "adjust").is_ok());
+}
+
+#[test]
+fn scoped_idempotency_key_binds_the_verified_actor() {
+    // Two users driving the SAME caller bundle with the SAME raw key must not
+    // collide (regression: the forwarded key omitted the actor, so user B could
+    // replay user A's mutation). Different actor => different token; `None` anon
+    // is distinct from any named actor.
+    let a = scoped_idempotency_key(7, 3, APP, Some("user-a"), "claim-daily");
+    let b = scoped_idempotency_key(7, 3, APP, Some("user-b"), "claim-daily");
+    let anon = scoped_idempotency_key(7, 3, APP, None, "claim-daily");
+    assert_ne!(a, b);
+    assert_ne!(a, anon);
+    assert_ne!(b, anon);
+    // Deterministic for retry dedupe: same principal + raw key => same token.
+    assert_eq!(
+        a,
+        scoped_idempotency_key(7, 3, APP, Some("user-a"), "claim-daily")
+    );
+}
+
+#[test]
+fn authorize_runs_cheap_gates_before_the_actor_and_into_plan_enforces_scope() {
+    let (snap, gate) = admin_world();
+    let gs = gate_scope(APP);
+    let granted = || {
+        authorize_tool_call(
+            APP,
+            &[APP.to_string()],
+            req(SVC, "admin_op", Some("k-1")),
+            &snap,
+            &gate,
+            &gs,
+        )
+    };
+    // A scope-restricted tool authorizes (steps 1-5) WITHOUT an actor and reports
+    // its required scope -- the DB-backed actor is resolved only after this.
+    assert_eq!(granted().unwrap().required_scope(), Some("community:admin"));
+    // into_plan still fails closed without the scope...
+    assert_eq!(
+        granted()
+            .unwrap()
+            .into_plan(&ActorContext::none())
+            .unwrap_err()
+            .code(),
+        "forbidden"
+    );
+    // ...and succeeds for an admin actor.
+    let admin = ActorContext::for_role("00000000-0000-4000-8000-000000000001", "community-admin");
+    assert!(granted().unwrap().into_plan(&admin).is_ok());
+    // A forbidden call (here a self-call) is refused by authorize ITSELF -- no
+    // actor is ever constructed, proving the cheap gates run before any actor
+    // resolution would (the ordering fix).
+    assert_eq!(
+        authorize_tool_call(
+            APP,
+            &[APP.to_string()],
+            req(APP, "admin_op", Some("k-1")),
+            &snap,
+            &gate,
+            &gs,
+        )
+        .unwrap_err()
+        .code(),
+        "forbidden"
+    );
 }
 
 #[test]
