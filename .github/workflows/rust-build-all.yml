@@ -24,8 +24,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cheap (~5s, no build deps) change classifier. Heavy jobs below depend on it
+  # and skip themselves when nothing applicable changed. Jobs that are NOT
+  # path-scoped deliberately do NOT depend on it, so they still start at t=0
+  # in parallel. Fails open: see scripts/ci/changed-paths.sh.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      rust: ${{ steps.paths.outputs.rust }}
+      python: ${{ steps.paths.outputs.python }}
+      node: ${{ steps.paths.outputs.node }}
+      go: ${{ steps.paths.outputs.go }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+
   build:
     name: "build ${{ matrix.crate }}"
+    needs: changes
+    # Skipped (reports "skipped", which ci-gate treats as non-failing) when no
+    # Rust-affecting file changed, e.g. docs-only or Python-only PRs. Real
+    # `if:` on the job, so no runner is allocated for the 24-crate matrix.
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
