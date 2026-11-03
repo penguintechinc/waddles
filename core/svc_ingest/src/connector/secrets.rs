@@ -116,16 +116,19 @@ impl<R: ConnectionResolve> TransportSecrets<R> {
 
 /// True when `dest` is approved for the resolved connection: in the provider
 /// allowlist, and (static rows) also the host of the stored `endpoint.url`.
+/// A static row WITHOUT a valid matching endpoint is refused; only OAuth rows
+/// may omit it (the provider allowlist is their floor).
 fn destination_approved(
     resolved_provider: &str,
     endpoint_url: Option<&str>,
+    is_static: bool,
     dest: &Destination,
 ) -> bool {
     if !approved_hosts(resolved_provider).contains(&dest.host.as_str()) {
         return false;
     }
     match endpoint_url {
-        None => true,
+        None => !is_static,
         Some(u) => reqwest::Url::parse(u)
             .ok()
             .and_then(|u| Destination::from_url(&u))
@@ -165,7 +168,16 @@ impl<R: ConnectionResolve + 'static> TransportSecretSource for TransportSecrets<
                     return Err(SecretError::Missing);
                 }
             }
-            if !destination_approved(&resolved.provider, resolved.endpoint.url.as_deref(), &dest) {
+            let is_static = matches!(
+                resolved.secret,
+                ConnectionSecret::Bearer { .. } | ConnectionSecret::ApiKeyHeader { .. }
+            );
+            if !destination_approved(
+                &resolved.provider,
+                resolved.endpoint.url.as_deref(),
+                is_static,
+                &dest,
+            ) {
                 return Err(SecretError::Missing);
             }
             let (secret, header) = match resolved.secret {
@@ -473,7 +485,7 @@ mod tests {
             let (resolver, _sa) = resolver(&server).await;
             Mock::given(method("POST"))
                 .and(path("/api/v1/internal/communities/7/provider-connections/12/resolve"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "testprov", "kind": 2, "secret": secret, "expiresAt": null})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "testprov", "kind": 2, "secret": secret, "endpoint": {"url": "https://127.0.0.1/x"}, "expiresAt": null})))
                 .expect(1).mount(&server).await;
             let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
             let result = source.resolve(CONNECTION, dest()).await;
@@ -643,6 +655,7 @@ mod tests {
         let (resolver, _sa) = resolver(&server).await;
         mount_resolve(&server, serde_json::json!({
             "communityId": 7, "connectionId": 12, "provider": "testprov", "kind": 2, "expiresAt": null,
+            "endpoint": {"url": "https://127.0.0.1/x"},
             "secret": {"scheme": 3, "fields": {"header": "X-Stored", "value": "api-val"}}
         })).await;
         Mock::given(method("GET"))
@@ -679,5 +692,54 @@ mod tests {
         .unwrap();
         poll.connect().await.unwrap();
         poll.next_frame().await.unwrap().unwrap();
+    }
+
+    /// Static rows must carry an endpoint matching the destination; a missing
+    /// endpoint refuses (secret not released) while OAuth may omit it.
+    #[tokio::test]
+    async fn static_rows_require_endpoint_but_oauth_does_not() {
+        let _env = env_read().await;
+        let twitch = dest_of("https://api.twitch.tv/");
+        for (secret, endpoint, ok) in [
+            (
+                serde_json::json!({"scheme": 1, "fields": {"token": "b"}}),
+                None,
+                false,
+            ),
+            (
+                serde_json::json!({"scheme": 3, "fields": {"header": "X-K", "value": "v"}}),
+                None,
+                false,
+            ),
+            (
+                serde_json::json!({"scheme": 1, "fields": {"token": "b"}}),
+                Some("https://api.twitch.tv/x"),
+                true,
+            ),
+            (
+                serde_json::json!({"scheme": 1, "fields": {"token": "b"}}),
+                Some("not a url"),
+                false,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let (resolver, _sa) = resolver(&server).await;
+            let mut body = serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "twitch", "kind": 2, "secret": secret, "expiresAt": null});
+            if let Some(u) = endpoint {
+                body["endpoint"] = serde_json::json!({"url": u});
+            }
+            mount_resolve(&server, body).await;
+            let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
+            assert_eq!(
+                source.resolve(CONNECTION, twitch.clone()).await.is_ok(),
+                ok,
+                "{endpoint:?}"
+            );
+        }
+        let server = MockServer::start().await;
+        let (resolver, _sa) = resolver(&server).await;
+        mount_resolve(&server, serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "twitch", "kind": 1, "accessToken": "t", "expiresAt": null})).await;
+        let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
+        assert!(source.resolve(CONNECTION, twitch).await.is_ok());
     }
 }
