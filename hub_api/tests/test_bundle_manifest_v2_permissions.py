@@ -438,6 +438,7 @@ def test_core_kv_manifests_parse_to_structured_storage_kv_declaration() -> None:
             known_custom_platforms=frozenset(),
             allow_wildcard_consumes=True,
             allow_prebuilt=True,
+            trusted_source=True,  # core bundles ship via the trusted seeder path
         )
         ids = [d.id for d in manifest.permission_declarations]  # type: ignore[attr-defined]
         assert ids, f"{path}: zero structured permission declarations"
