@@ -11,11 +11,64 @@ use connection_resolver::{
 use super::transport::TransportError;
 use super::webhook::{BoxFut, SecretError};
 
+/// Where a credential is about to be sent: the host of the transport's target
+/// URL. The credential is only released if this host is approved for the
+/// RESOLVED connection (never decided by overlay or guest input).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination {
+    host: String,
+}
+
+impl Destination {
+    /// Builds from a validated target URL; `None` when it has no host.
+    pub fn from_url(url: &reqwest::Url) -> Option<Self> {
+        url.host_str().map(|h| Self {
+            host: h.trim_end_matches('.').to_ascii_lowercase(),
+        })
+    }
+}
+
+/// A resolved credential plus, for API-key rows, the STORED header name.
+pub struct ResolvedAuth {
+    /// The secret value (zeroizing, redacted `Debug`).
+    pub secret: SecretString,
+    /// Stored header name for `ApiKeyHeader` rows; overrides any overlay header.
+    pub header: Option<String>,
+}
+
+/// Host-owned allowlist: exact upstream hosts approved per RESOLVED provider.
+/// Exact match only (no suffixes): shared-suffix hosts such as
+/// `*.googleapis.com` include user-controlled buckets. Unknown provider = none.
+/// NOTE: hosts listed are the supported platforms' published API/gateway hosts;
+/// only `www.googleapis.com` is exercised by an in-tree adapter today.
+pub fn approved_hosts(provider: &str) -> &'static [&'static str] {
+    match provider.to_ascii_lowercase().as_str() {
+        "twitch" => &[
+            "api.twitch.tv",
+            "id.twitch.tv",
+            "irc-ws.chat.twitch.tv",
+            "eventsub.wss.twitch.tv",
+        ],
+        "discord" => &["discord.com", "gateway.discord.gg"],
+        "youtube" => &["www.googleapis.com", "youtube.googleapis.com"],
+        "slack" => &["slack.com", "www.slack.com"],
+        // Test-only provider whose upstream is the loopback mock server.
+        #[cfg(test)]
+        "testprov" => &["127.0.0.1"],
+        _ => &[],
+    }
+}
+
 /// Authentication credentials for outbound transports, distinct from inbound
 /// verification keys so an OAuth source cannot be wired into webhook ingress.
 pub trait TransportSecretSource: Send + Sync {
-    /// Resolve the host-approved connection immediately before sending.
-    fn resolve(&self, requested: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>>;
+    /// Resolve the host-approved connection immediately before sending; refuse
+    /// (`Missing`) unless `dest` is approved for the resolved connection.
+    fn resolve(
+        &self,
+        requested: ConnectionRef,
+        dest: Destination,
+    ) -> BoxFut<'_, Result<ResolvedAuth, SecretError>>;
 }
 
 /// A fresh, community-bound connection resolve for every transport use.
@@ -34,6 +87,7 @@ pub trait TransportSecretSource: Send + Sync {
 pub struct TransportSecrets<R: ConnectionResolve> {
     resolver: Arc<R>,
     community_id: i64,
+    expected_provider: Option<String>,
 }
 
 impl<R: ConnectionResolve> TransportSecrets<R> {
@@ -48,14 +102,45 @@ impl<R: ConnectionResolve> TransportSecrets<R> {
         Ok(Self {
             resolver,
             community_id,
+            expected_provider: None,
         })
+    }
+
+    /// Additionally requires the resolved provider to equal this host-verified
+    /// value (never the overlay's platform field).
+    pub fn with_expected_provider(mut self, provider: impl Into<String>) -> Self {
+        self.expected_provider = Some(provider.into().to_ascii_lowercase());
+        self
+    }
+}
+
+/// True when `dest` is approved for the resolved connection: in the provider
+/// allowlist, and (static rows) also the host of the stored `endpoint.url`.
+fn destination_approved(
+    resolved_provider: &str,
+    endpoint_url: Option<&str>,
+    dest: &Destination,
+) -> bool {
+    if !approved_hosts(resolved_provider).contains(&dest.host.as_str()) {
+        return false;
+    }
+    match endpoint_url {
+        None => true,
+        Some(u) => reqwest::Url::parse(u)
+            .ok()
+            .and_then(|u| Destination::from_url(&u))
+            .is_some_and(|d| d == *dest),
     }
 }
 
 impl<R: ConnectionResolve + 'static> TransportSecretSource for TransportSecrets<R> {
     /// Select one supported authentication secret after checking the resolved
     /// connection identity; multi-field authentication must use its own adapter.
-    fn resolve(&self, requested: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
+    fn resolve(
+        &self,
+        requested: ConnectionRef,
+        dest: Destination,
+    ) -> BoxFut<'_, Result<ResolvedAuth, SecretError>> {
         Box::pin(async move {
             if requested.community_id != self.community_id || requested.connection_id <= 0 {
                 return Err(SecretError::Missing);
@@ -75,16 +160,24 @@ impl<R: ConnectionResolve + 'static> TransportSecretSource for TransportSecrets<
             {
                 return Err(SecretError::Missing);
             }
-            let secret = match resolved.secret {
-                ConnectionSecret::OAuthAccessToken { access_token } => access_token,
-                ConnectionSecret::Bearer { token } => token,
-                ConnectionSecret::ApiKeyHeader { value, .. } => value,
+            if let Some(expected) = &self.expected_provider {
+                if !resolved.provider.eq_ignore_ascii_case(expected) {
+                    return Err(SecretError::Missing);
+                }
+            }
+            if !destination_approved(&resolved.provider, resolved.endpoint.url.as_deref(), &dest) {
+                return Err(SecretError::Missing);
+            }
+            let (secret, header) = match resolved.secret {
+                ConnectionSecret::OAuthAccessToken { access_token } => (access_token, None),
+                ConnectionSecret::Bearer { token } => (token, None),
+                ConnectionSecret::ApiKeyHeader { header, value } => (value, Some(header)),
                 _ => return Err(SecretError::Missing),
             };
             if secret.expose().is_empty() {
                 return Err(SecretError::Missing);
             }
-            Ok(secret)
+            Ok(ResolvedAuth { secret, header })
         })
     }
 }
@@ -111,6 +204,26 @@ mod tests {
         community_id: 7,
         connection_id: 12,
     };
+
+    /// Destination host the loopback mock "upstream" presents (approved for `testprov`).
+    fn dest() -> Destination {
+        Destination::from_url(&reqwest::Url::parse("https://127.0.0.1/x").unwrap()).unwrap()
+    }
+
+    fn dest_of(url: &str) -> Destination {
+        Destination::from_url(&reqwest::Url::parse(url).unwrap()).unwrap()
+    }
+
+    /// Mounts one resolve answer with an arbitrary body.
+    async fn mount_resolve(server: &MockServer, body: serde_json::Value) {
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v1/internal/communities/7/provider-connections/12/resolve",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
 
     /// Resolver clients read ambient `HTTP(S)_PROXY` at build time; poll's proxy
     /// test mutates it process-wide, so every resolver test holds the read side.
@@ -169,7 +282,7 @@ mod tests {
             ))
             .and(header("Authorization", "Bearer synthetic-machine-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "communityId": 7, "connectionId": 12, "provider": "test-platform",
+                "communityId": 7, "connectionId": 12, "provider": "testprov",
                 "kind": 1, "accessToken": token, "expiresAt": null,
             })))
             .up_to_n_times(1)
@@ -187,7 +300,7 @@ mod tests {
         let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
         let mut poll = PollTransport::new(
             PollConfig {
-                platform: "test-platform".into(),
+                platform: "overlay-claims-anything".into(),
                 url: format!("{}/poll", server.uri()),
                 source_key: "opaque-source".into(),
                 handles: HashMap::from([("auth".into(), CONNECTION)]),
@@ -257,6 +370,7 @@ mod tests {
             &HashMap::from([("auth".into(), CONNECTION)]),
             template,
             &[("{{AUTH}}".into(), "auth".into())],
+            &dest(),
         )
         .await
         .unwrap();
@@ -292,7 +406,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                source.resolve(requested).await.err(),
+                source.resolve(requested, dest()).await.err(),
                 Some(SecretError::Missing)
             );
         }
@@ -309,12 +423,12 @@ mod tests {
             (404, serde_json::json!({}), SecretError::Missing),
             (
                 200,
-                serde_json::json!({"communityId": 8, "connectionId": 12, "provider": "test", "kind": 1, "accessToken": "foreign", "expiresAt": null}),
+                serde_json::json!({"communityId": 8, "connectionId": 12, "provider": "testprov", "kind": 1, "accessToken": "foreign", "expiresAt": null}),
                 SecretError::Missing,
             ),
             (
                 200,
-                serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "test", "kind": 2, "secret": {"scheme": 2, "fields": {"username": "user", "password": "pass"}}, "expiresAt": null}),
+                serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "testprov", "kind": 2, "secret": {"scheme": 2, "fields": {"username": "user", "password": "pass"}}, "expiresAt": null}),
                 SecretError::Missing,
             ),
         ] {
@@ -329,7 +443,10 @@ mod tests {
                 .mount(&server)
                 .await;
             let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
-            assert_eq!(source.resolve(CONNECTION).await.err(), Some(expected));
+            assert_eq!(
+                source.resolve(CONNECTION, dest()).await.err(),
+                Some(expected)
+            );
         }
     }
 
@@ -356,14 +473,211 @@ mod tests {
             let (resolver, _sa) = resolver(&server).await;
             Mock::given(method("POST"))
                 .and(path("/api/v1/internal/communities/7/provider-connections/12/resolve"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "test", "kind": 2, "secret": secret, "expiresAt": null})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "testprov", "kind": 2, "secret": secret, "expiresAt": null})))
                 .expect(1).mount(&server).await;
             let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
-            let result = source.resolve(CONNECTION).await;
+            let result = source.resolve(CONNECTION, dest()).await;
             match expected {
-                Some(value) => assert_eq!(result.unwrap().expose(), value),
+                Some(value) => assert_eq!(result.unwrap().secret.expose(), value),
                 None => assert_eq!(result.err(), Some(SecretError::Missing)),
             }
         }
+    }
+
+    /// Off-allowlist hosts never receive any credential type; the allowlist
+    /// follows the RESOLVED provider, and an unknown provider has no hosts.
+    #[tokio::test]
+    async fn destination_outside_resolved_provider_allowlist_is_refused() {
+        let _env = env_read().await;
+        for (provider, body_extra, host) in [
+            (
+                "testprov",
+                serde_json::json!({"kind": 1, "accessToken": "oauth-secret"}),
+                "https://attacker.example/x",
+            ),
+            (
+                "twitch",
+                serde_json::json!({"kind": 1, "accessToken": "oauth-secret"}),
+                "https://attacker.example/x",
+            ),
+            (
+                "twitch",
+                serde_json::json!({"kind": 1, "accessToken": "oauth-secret"}),
+                "https://127.0.0.1/x",
+            ),
+            (
+                "unknown-provider",
+                serde_json::json!({"kind": 1, "accessToken": "oauth-secret"}),
+                "https://api.twitch.tv/x",
+            ),
+            (
+                "twitch",
+                serde_json::json!({"kind": 2, "secret": {"scheme": 1, "fields": {"token": "bearer-secret"}}}),
+                "https://evil.twitch.tv.attacker.example/x",
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let (resolver, _sa) = resolver(&server).await;
+            let mut body = serde_json::json!({"communityId": 7, "connectionId": 12, "provider": provider, "expiresAt": null});
+            body.as_object_mut()
+                .unwrap()
+                .extend(body_extra.as_object().unwrap().clone());
+            mount_resolve(&server, body).await;
+            let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
+            assert_eq!(
+                source.resolve(CONNECTION, dest_of(host)).await.err(),
+                Some(SecretError::Missing),
+                "{provider} -> {host}"
+            );
+        }
+        // Approved host for the resolved provider is accepted.
+        let server = MockServer::start().await;
+        let (resolver, _sa) = resolver(&server).await;
+        mount_resolve(&server, serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "twitch", "kind": 1, "accessToken": "ok", "expiresAt": null})).await;
+        let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
+        let ok = source
+            .resolve(CONNECTION, dest_of("https://irc-ws.chat.twitch.tv/"))
+            .await
+            .unwrap();
+        assert_eq!(ok.secret.expose(), "ok");
+    }
+
+    /// The overlay cannot point a registered handle at an off-allowlist
+    /// endpoint to harvest the credential: zero requests reach that host.
+    #[tokio::test]
+    async fn poll_to_unapproved_host_sends_nothing_and_cannot_echo() {
+        let _env = env_read().await;
+        let hub = MockServer::start().await;
+        let (resolver, _sa) = resolver(&hub).await;
+        // Provider approves only 127.0.0.1 hosts for "twitch"? No: "twitch" hosts
+        // are real names, so the loopback "attacker" is off-allowlist.
+        mount_resolve(&hub, serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "twitch", "kind": 1, "accessToken": "leak-me", "expiresAt": null})).await;
+        let attacker = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&attacker)
+            .await;
+        let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
+        let mut poll = PollTransport::new(
+            PollConfig {
+                platform: "twitch".into(),
+                url: format!("{}/poll", attacker.uri()),
+                source_key: "opaque-source".into(),
+                handles: HashMap::from([("auth".into(), CONNECTION)]),
+                auth: Some(PollAuth {
+                    header: "Authorization".into(),
+                    prefix: "Bearer ".into(),
+                    handle: "auth".into(),
+                }),
+                cursor_param: None,
+                cursor_pointer: None,
+                initial_cursor: None,
+                interval: Duration::from_millis(1),
+                request_timeout: Duration::from_secs(2),
+                max_body_bytes: 1024,
+                max_drop_attempts: 3,
+                egress_allow: vec![attacker.address().ip()],
+                allow_loopback_insecure: true,
+            },
+            source,
+        )
+        .unwrap();
+        poll.connect().await.unwrap();
+        assert!(poll.next_frame().await.is_err());
+        assert!(attacker.received_requests().await.unwrap().is_empty());
+    }
+
+    /// Provider binding: a host-supplied expected provider must equal the
+    /// RESOLVED provider, whatever the overlay platform string claims.
+    #[tokio::test]
+    async fn expected_provider_mismatch_is_rejected() {
+        let _env = env_read().await;
+        for (expected, ok) in [("twitch", true), ("discord", false)] {
+            let server = MockServer::start().await;
+            let (resolver, _sa) = resolver(&server).await;
+            mount_resolve(&server, serde_json::json!({"communityId": 7, "connectionId": 12, "provider": "twitch", "kind": 1, "accessToken": "t", "expiresAt": null})).await;
+            let source = TransportSecrets::new(Arc::new(resolver), 7)
+                .unwrap()
+                .with_expected_provider(expected);
+            let r = source
+                .resolve(CONNECTION, dest_of("https://api.twitch.tv/"))
+                .await;
+            assert_eq!(r.is_ok(), ok, "{expected}");
+        }
+    }
+
+    /// API-key rows return the STORED header name, and a static row's
+    /// `endpoint.url` host must also match the destination.
+    #[tokio::test]
+    async fn api_key_uses_stored_header_and_static_endpoint_is_enforced() {
+        let _env = env_read().await;
+        let server = MockServer::start().await;
+        let (resolver, _sa) = resolver(&server).await;
+        mount_resolve(&server, serde_json::json!({
+            "communityId": 7, "connectionId": 12, "provider": "twitch", "kind": 2, "expiresAt": null,
+            "endpoint": {"url": "https://api.twitch.tv/helix"},
+            "secret": {"scheme": 3, "fields": {"header": "X-Stored", "value": "k"}}
+        })).await;
+        let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
+        let got = source
+            .resolve(CONNECTION, dest_of("https://api.twitch.tv/"))
+            .await
+            .unwrap();
+        assert_eq!(got.header.as_deref(), Some("X-Stored"));
+        // In the provider allowlist but not the row's own endpoint host.
+        assert_eq!(
+            source
+                .resolve(CONNECTION, dest_of("https://id.twitch.tv/"))
+                .await
+                .err(),
+            Some(SecretError::Missing)
+        );
+    }
+
+    /// End to end: an API-key row is sent under the stored header name with a
+    /// raw value, ignoring the overlay's header/prefix.
+    #[tokio::test]
+    async fn poll_sends_api_key_under_stored_header() {
+        let _env = env_read().await;
+        let server = MockServer::start().await;
+        let (resolver, _sa) = resolver(&server).await;
+        mount_resolve(&server, serde_json::json!({
+            "communityId": 7, "connectionId": 12, "provider": "testprov", "kind": 2, "expiresAt": null,
+            "secret": {"scheme": 3, "fields": {"header": "X-Stored", "value": "api-val"}}
+        })).await;
+        Mock::given(method("GET"))
+            .and(path("/poll"))
+            .and(header("X-Stored", "api-val"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
+        let mut poll = PollTransport::new(
+            PollConfig {
+                platform: "overlay-claims-anything".into(),
+                url: format!("{}/poll", server.uri()),
+                source_key: "opaque-source".into(),
+                handles: HashMap::from([("auth".into(), CONNECTION)]),
+                auth: Some(PollAuth {
+                    header: "Authorization".into(),
+                    prefix: "Bearer ".into(),
+                    handle: "auth".into(),
+                }),
+                cursor_param: None,
+                cursor_pointer: None,
+                initial_cursor: None,
+                interval: Duration::from_millis(1),
+                request_timeout: Duration::from_secs(2),
+                max_body_bytes: 1024,
+                max_drop_attempts: 3,
+                egress_allow: vec![server.address().ip()],
+                allow_loopback_insecure: true,
+            },
+            source,
+        )
+        .unwrap();
+        poll.connect().await.unwrap();
+        poll.next_frame().await.unwrap().unwrap();
     }
 }

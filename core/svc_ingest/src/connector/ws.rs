@@ -30,7 +30,7 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use super::egress_guard::resolve_pinned;
-use super::secrets::TransportSecretSource;
+use super::secrets::{Destination, TransportSecretSource};
 use super::transport::{Transport, TransportError};
 use super::transport_common::{opaque_id, substitute_slots, validate_endpoint};
 use super::types::{ConnectionCtx, Handshake};
@@ -146,11 +146,14 @@ impl<S: TransportSecretSource> WsTransport<S> {
         if handshake.bytes.is_empty() && handshake.secret_refs.is_empty() {
             return Ok(());
         }
+        let dest = Destination::from_url(&self.url)
+            .ok_or_else(|| TransportError::Handshake("not connected".into()))?;
         let payload = substitute_slots(
             &self.secrets,
             &self.cfg.handles,
             &handshake.bytes,
             &handshake.secret_refs,
+            &dest,
         )
         .await?;
         let stream = self
@@ -290,9 +293,18 @@ mod tests {
     #[derive(Clone)]
     struct CountingSecrets(Arc<AtomicUsize>);
     impl TransportSecretSource for CountingSecrets {
-        fn resolve(&self, _r: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
+        fn resolve(
+            &self,
+            _r: ConnectionRef,
+            _d: Destination,
+        ) -> BoxFut<'_, Result<crate::connector::secrets::ResolvedAuth, SecretError>> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok(SecretString::new("tok123".into())) })
+            Box::pin(async {
+                Ok(crate::connector::secrets::ResolvedAuth {
+                    secret: SecretString::new("tok123".into()),
+                    header: None,
+                })
+            })
         }
     }
 

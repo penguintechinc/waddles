@@ -9,7 +9,7 @@ use connection_resolver::{ConnectionRef, SecretString};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::secrets::TransportSecretSource;
+use super::secrets::{Destination, ResolvedAuth, TransportSecretSource};
 use super::transport::TransportError;
 use super::webhook::SecretError;
 use super::webhook_verify::hex_encode;
@@ -57,12 +57,13 @@ pub(crate) async fn resolve_handle<S: TransportSecretSource>(
     secrets: &S,
     handles: &HashMap<String, ConnectionRef>,
     handle: &str,
-) -> Result<SecretString, TransportError> {
+    dest: &Destination,
+) -> Result<ResolvedAuth, TransportError> {
     let r = handles
         .get(handle)
         .copied()
         .ok_or_else(|| TransportError::Handshake("unknown secret handle".into()))?;
-    secrets.resolve(r).await.map_err(|e| match e {
+    secrets.resolve(r, dest.clone()).await.map_err(|e| match e {
         SecretError::Missing => TransportError::Fatal("secret unavailable for handle".into()),
         SecretError::Unavailable => TransportError::Handshake("secret backend unavailable".into()),
     })
@@ -94,6 +95,7 @@ pub(crate) async fn substitute_slots<S: TransportSecretSource>(
     handles: &HashMap<String, ConnectionRef>,
     bytes: &[u8],
     refs: &[(String, String)],
+    dest: &Destination,
 ) -> Result<Zeroizing<Vec<u8>>, TransportError> {
     if refs.len() > MAX_SECRET_REFS {
         return Err(uniform());
@@ -111,7 +113,7 @@ pub(crate) async fn substitute_slots<S: TransportSecretSource>(
     let mut resolved: Vec<(&[u8], SecretString)> = Vec::with_capacity(refs.len());
     let mut extra = 0usize;
     for (slot, handle) in refs {
-        let secret = resolve_handle(secrets, handles, handle).await?;
+        let secret = resolve_handle(secrets, handles, handle, dest).await?.secret;
         if !splice_safe(secret.expose()) {
             return Err(TransportError::Fatal("secret not splice-safe".into()));
         }
@@ -190,13 +192,24 @@ mod tests {
     /// Per-ref secret map (handle id -> value), counts resolves.
     struct MapSecrets(HashMap<i64, &'static str>);
     impl TransportSecretSource for MapSecrets {
-        fn resolve(&self, r: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
+        fn resolve(
+            &self,
+            r: ConnectionRef,
+            _d: Destination,
+        ) -> BoxFut<'_, Result<ResolvedAuth, SecretError>> {
             let v = self.0.get(&r.connection_id).copied();
             Box::pin(async move {
-                v.map(|s| SecretString::new(s.into()))
-                    .ok_or(SecretError::Missing)
+                v.map(|s| ResolvedAuth {
+                    secret: SecretString::new(s.into()),
+                    header: None,
+                })
+                .ok_or(SecretError::Missing)
             })
         }
+    }
+
+    fn dest() -> Destination {
+        Destination::from_url(&reqwest::Url::parse("https://api.twitch.tv/x").unwrap()).unwrap()
     }
 
     fn handles() -> HashMap<String, ConnectionRef> {
@@ -230,6 +243,7 @@ mod tests {
             &handles(),
             b"{{A}}|{{B}}|{{A}}",
             &refs(&[("{{A}}", "a"), ("{{B}}", "b")]),
+            &dest(),
         )
         .await
         .unwrap();
@@ -249,7 +263,7 @@ mod tests {
         ];
         let mut msgs = Vec::new();
         for c in cases {
-            let e = substitute_slots(&s, &h, b"{{A}} {{A}}x", &refs(&c))
+            let e = substitute_slots(&s, &h, b"{{A}} {{A}}x", &refs(&c), &dest())
                 .await
                 .unwrap_err();
             msgs.push(e);
@@ -258,6 +272,8 @@ mod tests {
         let many: Vec<(String, String)> = (0..=MAX_SECRET_REFS)
             .map(|i| (format!("{{{{S{i}}}}}"), "a".into()))
             .collect();
-        assert!(substitute_slots(&s, &h, b"x", &many).await.is_err());
+        assert!(substitute_slots(&s, &h, b"x", &many, &dest())
+            .await
+            .is_err());
     }
 }
