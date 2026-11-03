@@ -93,16 +93,21 @@ impl ActorContext {
 /// are siblings below it. Any unknown / empty role maps to NO scopes
 /// (fail closed). Mirrors `TOOL_REQUIRED_SCOPES` in
 /// `hub_api/services/bundle_manifest_v2.py`.
+/// Accept only roles read from active community membership under the host's
+/// tenant/community scope; tenant, resource, or caller-supplied roles are not
+/// inputs to this mapping. `owner` is the legacy community-creation spelling.
 ///
 /// | role | scopes |
 /// |---|---|
-/// | `community-owner` | member, vip, moderate, admin, owner |
+/// | `community-owner`, `owner` | member, vip, moderate, admin, owner |
 /// | `community-admin` | member, vip, moderate, admin |
 /// | `moderator` | member, moderate |
 /// | `vip` | member, vip |
 /// | `member` | member |
 pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
     match role {
+        // SuperadminService::create_community persists the initial member as
+        // `owner`; both spellings represent the same community-scoped role.
         "community-owner" | "owner" => &[
             "community:member",
             "community:vip",
@@ -322,15 +327,14 @@ pub struct ToolPlan {
 /// 5. a write tool requires the caller's idempotency key (`invalid_args`);
 /// 6. a tool declaring `required_scope` requires the HOST-VERIFIED `actor` to
 ///    hold it (`forbidden`; no actor / unresolved / under-scoped all refuse).
-pub fn plan_tool_call(
+pub fn authorize_tool_call(
     caller_app_id: &str,
     chain: &[String],
     req: ToolRequest,
     snapshot: &ActiveVersionSnapshot,
     gate: &CapabilityGate,
     gate_scope: &InvokeScope,
-    actor: &ActorContext,
-) -> Result<ToolPlan, ToolRefusal> {
+) -> Result<AuthorizedCall, ToolRefusal> {
     // 1. Guards, before anything else.
     if req.target == caller_app_id {
         return Err(ToolRefusal::Forbidden(
@@ -411,32 +415,88 @@ pub fn plan_tool_call(
         ));
     }
 
-    // 6. Host-side scope enforcement against the VERIFIED actor -- before any
-    // dispatch, with no reliance on guest code. Fail closed.
-    if let Some(required) = &exported.required_scope {
-        if !actor.has_scope(required) {
-            return Err(ToolRefusal::Forbidden(
-                "the verified actor lacks the scope this tool requires".to_string(),
-            ));
-        }
-    }
+    // 6. The scope REQUIREMENT is captured here; it is ENFORCED later, in
+    // `AuthorizedCall::into_plan`, against the host-verified actor. Steps 1-5
+    // are actor-independent, so a caller resolves the (directory-backed) actor
+    // only after this cheap, in-memory authorization passes -- an ungranted,
+    // cyclic, or depth-exceeded call never triggers a lookup, and the lookup is
+    // not a timing oracle for tools the caller was never granted.
+    let required_scope = exported.required_scope.clone();
 
     let mut next_chain = chain.to_vec();
     next_chain.push(req.target.clone());
-    Ok(ToolPlan {
-        target_app_id: req.target,
-        tool: req.tool,
-        args: req.args,
-        idempotency_key: req.idempotency_key,
-        target_digest: target_entry.digest,
-        target_version: target_entry.version_id,
-        write: exported.write,
-        next_chain,
-        caller_app_id: caller_app_id.to_string(),
-        actor: actor.clone(),
-        tenant_id,
-        community_id,
+    Ok(AuthorizedCall {
+        required_scope,
+        plan: ToolPlan {
+            target_app_id: req.target,
+            tool: req.tool,
+            args: req.args,
+            idempotency_key: req.idempotency_key,
+            target_digest: target_entry.digest,
+            target_version: target_entry.version_id,
+            write: exported.write,
+            next_chain,
+            caller_app_id: caller_app_id.to_string(),
+            actor: ActorContext::none(),
+            tenant_id,
+            community_id,
+        },
     })
+}
+
+/// A tool call that passed every actor-INDEPENDENT authorization step
+/// (self/cycle/depth, the caller's `requested_tools`, the P2 gate, target
+/// resolution + the app->app ban, and the write-key requirement). The
+/// host-verified actor is applied last, in [`AuthorizedCall::into_plan`], so an
+/// expensive directory lookup runs only once these cheap in-memory gates pass.
+#[derive(Debug)]
+pub struct AuthorizedCall {
+    plan: ToolPlan,
+    required_scope: Option<String>,
+}
+
+impl AuthorizedCall {
+    /// The scope this tool requires, if any. A write may separately resolve
+    /// identity to bind its retry key even when no role scope is required.
+    pub fn required_scope(&self) -> Option<&str> {
+        self.required_scope.as_deref()
+    }
+
+    /// Whether the authorized target tool mutates state, as declared by its manifest.
+    /// Identity-only resolution for writes occurs after the cheap authorization gates.
+    pub fn is_write(&self) -> bool {
+        self.plan.write
+    }
+
+    /// Enforces `required_scope` against the host-verified `actor` (fail closed:
+    /// no actor / unresolved / under-scoped all refuse) and finalizes the plan.
+    pub fn into_plan(mut self, actor: &ActorContext) -> Result<ToolPlan, ToolRefusal> {
+        if let Some(required) = &self.required_scope {
+            if !actor.has_scope(required) {
+                return Err(ToolRefusal::Forbidden(
+                    "the verified actor lacks the scope this tool requires".to_string(),
+                ));
+            }
+        }
+        self.plan.actor = actor.clone();
+        Ok(self.plan)
+    }
+}
+
+/// Backward-compatible one-shot: authorize (steps 1-5) then enforce scope and
+/// finalize (step 6) against `actor`. Prefer `authorize_tool_call` + `into_plan`
+/// when the actor is expensive to resolve (so it is resolved only on a call that
+/// already passed the cheap gates and actually declares a `required_scope`).
+pub fn plan_tool_call(
+    caller_app_id: &str,
+    chain: &[String],
+    req: ToolRequest,
+    snapshot: &ActiveVersionSnapshot,
+    gate: &CapabilityGate,
+    gate_scope: &InvokeScope,
+    actor: &ActorContext,
+) -> Result<ToolPlan, ToolRefusal> {
+    authorize_tool_call(caller_app_id, chain, req, snapshot, gate, gate_scope)?.into_plan(actor)
 }
 
 /// Reserved top-level args field carrying the caller's idempotency key to the
@@ -444,13 +504,17 @@ pub fn plan_tool_call(
 pub const IDEMPOTENCY_ARG: &str = "__idempotency_key";
 
 /// Principal-scoped, deterministic idempotency token:
-/// `hex(sha256(tenant 0x1f community 0x1f caller_app_id 0x1f raw_key))`.
-/// Same principal + raw key => same token (retry dedupes); any differing
-/// principal component => a different token. Fixed 64-char hex output.
+/// `hex(sha256(tenant 0x1f community 0x1f caller_app_id 0x1f actor 0x1f raw_key))`.
+/// Same principal (tenant + community + caller bundle + verified actor) + raw key
+/// => same token (retry dedupes); any differing principal component => a different
+/// token. Binding `actor` keeps two users driving the SAME caller bundle from
+/// colliding on a shared raw key (e.g. a fixed "claim-daily" key). `None` actor
+/// (non-user-originated call) binds the empty string. Fixed 64-char hex output.
 pub fn scoped_idempotency_key(
     tenant_id: i32,
     community_id: i32,
     caller_app_id: &str,
+    actor: Option<&str>,
     raw_key: &str,
 ) -> String {
     use sha2::{Digest, Sha256};
@@ -460,6 +524,8 @@ pub fn scoped_idempotency_key(
     h.update(community_id.to_string().as_bytes());
     h.update([0x1f]);
     h.update(caller_app_id.as_bytes());
+    h.update([0x1f]);
+    h.update(actor.unwrap_or("").as_bytes());
     h.update([0x1f]);
     h.update(raw_key.as_bytes());
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
@@ -501,7 +567,13 @@ pub fn nested_payload(plan: &ToolPlan) -> Result<serde_json::Value, ToolRefusal>
         ));
     }
     let forwarded_key = plan.idempotency_key.as_deref().map(|raw| {
-        scoped_idempotency_key(plan.tenant_id, plan.community_id, &plan.caller_app_id, raw)
+        scoped_idempotency_key(
+            plan.tenant_id,
+            plan.community_id,
+            &plan.caller_app_id,
+            plan.actor.actor.as_deref(),
+            raw,
+        )
     });
     if let Some(key) = &forwarded_key {
         let obj = args

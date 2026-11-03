@@ -82,6 +82,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
                     self.tenant_id,
                     self.community_id,
                     &plan.caller_app_id,
+                    plan.actor.actor.as_deref(),
                     raw,
                 );
                 let mut hash = Sha256::new();
@@ -117,6 +118,28 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             verified_scope: self.verified_scope,
             stage_metrics: Arc::clone(&self.stage_metrics),
             tool: Some(ctx),
+        }
+    }
+
+    /// Resolve identity without fetching a role for an already-authorized write.
+    /// The verified UUID binds retry keys across users without granting any scope.
+    async fn resolve_write_actor(&self) -> bundle_tool_call::ActorContext {
+        let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
+            return bundle_tool_call::ActorContext::none();
+        };
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        match identity::resolve_actor(wiring, invocation, scope).await {
+            Ok(user) => bundle_tool_call::ActorContext {
+                actor: Some(user.to_string()),
+                scopes: Vec::new(),
+            },
+            Err(error) => {
+                tracing::debug!(code = error.wire_code(), "tool write actor unresolved");
+                bundle_tool_call::ActorContext::none()
+            }
         }
     }
 
@@ -215,31 +238,29 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         // touched until this returns.
         let req = bundle_tool_call::parse_request(&call.args)?;
         let gate_scope = self.gate_scope();
-        // Resolve the VERIFIED actor + scopes host-side, and only when the
-        // target tool is scope-restricted (one directory read, no cost for
-        // ordinary tools). `plan_tool_call` re-checks authoritatively, so a miss
-        // here can only fail closed (no actor => no scopes => refused).
-        let actor = if bundle_tool_call::required_scope_of(
-            &ctx.snapshot,
-            &gate_scope,
-            &req.target,
-            &req.tool,
-        )
-        .is_some()
-        {
-            self.resolve_verified_actor().await
-        } else {
-            bundle_tool_call::ActorContext::none()
-        };
-        let plan = bundle_tool_call::plan_tool_call(
+        // Steps 1-5 (self/cycle/depth, the caller's requested_tools, the P2
+        // gate, target resolution + app->app ban, write-key) are actor-
+        // independent and run entirely in memory. The host-verified actor is
+        // resolved from the directory (a DB read) ONLY after this authorization
+        // passes AND the target tool is scope-restricted -- so an ungranted,
+        // cyclic, or depth-exceeded caller never triggers a directory lookup,
+        // and the lookup cannot be used as a timing oracle for ungranted tools.
+        let authorized = bundle_tool_call::authorize_tool_call(
             &self.app_id,
             &ctx.chain,
             req,
             &ctx.snapshot,
             &self.gate,
             &gate_scope,
-            &actor,
         )?;
+        let actor = if authorized.required_scope().is_some() {
+            self.resolve_verified_actor().await
+        } else if authorized.is_write() {
+            self.resolve_write_actor().await
+        } else {
+            bundle_tool_call::ActorContext::none()
+        };
+        let plan = authorized.into_plan(&actor)?;
         *resolved = Some((plan.target_app_id.clone(), plan.tool.clone()));
         tracing::debug!(
             app_id = %self.app_id, target = %plan.target_app_id, tool = %plan.tool,

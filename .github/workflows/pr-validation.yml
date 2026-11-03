@@ -17,6 +17,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cheap (~5s, no build deps) change classifier. Heavy jobs below depend on it
+  # and skip themselves when nothing applicable changed. Jobs that are NOT
+  # path-scoped deliberately do NOT depend on it, so they still start at t=0
+  # in parallel. Fails open: see scripts/ci/changed-paths.sh.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      rust: ${{ steps.paths.outputs.rust }}
+      python: ${{ steps.paths.outputs.python }}
+      node: ${{ steps.paths.outputs.node }}
+      go: ${{ steps.paths.outputs.go }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+
   # Proves the lint/security gate plumbing (scripts/lib/checks.sh, scripts/lint.sh)
   # can FAIL: seeds a crashing scanner, a non-numeric counter and a new finding
   # and asserts each turns the gate red (critical-rules.md Verification
@@ -40,6 +68,12 @@ jobs:
         env:
           PYTHON_BIN: python
         run: bash scripts/ci/tests/test_checks_gate_integrity.sh
+
+      # Proves the path classifier behind the `changes` job skips only what it
+      # should and fails OPEN otherwise. Lives here (no `needs`) so it runs at
+      # t=0 in parallel and is never itself path-skipped.
+      - name: Changed-paths classifier tests
+        run: bash scripts/ci/tests/test_changed_paths.sh
 
   no-stubs-gate:
     name: No stubs / no silent fallbacks (check-no-stubs)
@@ -96,6 +130,8 @@ jobs:
 
   python-unit:
     name: Python unit tests
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     # A REAL Valkey for libs/flask_core/tests/test_token_revocation_valkey.py (JWT revocation
     # store: Lua put_max, MGET, TTL expiry, cross-replica visibility). Same image + digest the
@@ -175,12 +211,14 @@ jobs:
 
   alembic-migration-chain:
     name: Alembic migration chain (real Postgres)
+    needs: changes
     runs-on: ubuntu-latest
     # Scoped to pull_request only: the base-revision diff below needs a real
     # PR base commit to compare against (merge_group/workflow_dispatch have
     # no equivalent single "pre-PR tree" to diff, and this gate's whole job
     # is proving one PR's new migration(s) apply/rollback/reapply cleanly).
-    if: github.event_name == 'pull_request'
+    # Also skipped when no Python/alembic file changed (see changes job).
+    if: github.event_name == 'pull_request' && needs.changes.outputs.python == 'true'
     # Narrower than the workflow-level default (contents: read + packages:
     # read) -- this job only checks out the repo and talks to its own
     # Postgres service container, no package-registry access needed.
@@ -408,6 +446,20 @@ jobs:
               CONSTRAINT platform_integrations_unique_bot
                   UNIQUE (platform, integration_type, community_id, user_id)
           );
+          -- 0069_pi_definer_functions audits every community-secret read into this legacy table
+          -- (config/postgres/migrations/000_create_base_schema.sql): same columns as the real DDL.
+          -- Mirrored in pr-validation.yml's bootstrap -- keep both in sync.
+          CREATE TABLE credential_access_log (
+              id BIGSERIAL PRIMARY KEY,
+              db_user VARCHAR(255) NOT NULL DEFAULT current_user,
+              integration_id INTEGER,
+              platform VARCHAR(50),
+              community_id INTEGER,
+              action VARCHAR(50) NOT NULL,
+              success BOOLEAN NOT NULL DEFAULT TRUE,
+              detail TEXT,
+              accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          );
           SQL
 
       # Runs whenever any alembic-related file changed (`any`), including a
@@ -627,6 +679,8 @@ jobs:
 
   web-builds:
     name: Build ${{ matrix.name }}
+    needs: changes
+    if: needs.changes.outputs.node == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

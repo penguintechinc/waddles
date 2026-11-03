@@ -7,7 +7,8 @@
 -- (0043/0045/0048/0052) keep their exact names/types/order and `role` goes last.
 --
 -- PII posture (unchanged): `role` is one of the closed vocabulary
--- community-owner | community-admin | moderator | vip | member -- an opaque
+-- community-owner | owner (legacy community creation) | community-admin |
+-- moderator | vip | member -- an opaque
 -- enum, never a handle, display name or free text. No PII column is projected.
 --
 -- Prerequisites: everything bundle_identity_resolve.sql needs. `community_members.role`

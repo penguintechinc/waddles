@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0069_identity_view_role: `role` appended to the identity view.
+"""Real-Postgres tests for 0070_identity_view_role: `role` appended to the identity view.
 
 The stage derives a tool caller's scopes from this column, so the test pins that the
 column is appended last, carries the member's opaque role, is NULL (never defaulted)
@@ -19,7 +19,7 @@ requires_docker = pytest.mark.skipif(
     not DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
 )
 
-_PATH = Path(__file__).resolve().parents[1] / "versions" / "0069_identity_view_role.py"
+_PATH = Path(__file__).resolve().parents[1] / "versions" / "0070_identity_view_role.py"
 _VIEW = "community_member_identities"
 _READER = "waddles_bundle_reader"
 

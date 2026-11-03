@@ -6,8 +6,8 @@ admin-scoped bundle tools are enforced HOST-SIDE. `role` is an opaque closed enu
 (community-owner/-admin, moderator, vip, member) -- no PII. Reuses the existing
 read-only `waddles_bundle_reader` grant (re-asserted by the SQL file).
 
-Revision ID: 0069_identity_view_role
-Revises: 0068_app_catalog_kind
+Revision ID: 0070_identity_view_role
+Revises: 0069_pi_definer_functions
 Create Date: 2026-10-30
 """
 
@@ -17,8 +17,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0069_identity_view_role"
-down_revision = "0068_app_catalog_kind"
+revision = "0070_identity_view_role"
+down_revision = "0069_pi_definer_functions"
 branch_labels = None
 depends_on = None
 

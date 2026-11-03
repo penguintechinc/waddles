@@ -48,7 +48,7 @@ _EXPECTED_COLUMNS = [
 ]
 #: The view as 0048 left it (and as this migration's downgrade must restore it).
 _COLUMNS_AT_0048 = _EXPECTED_COLUMNS[:7]
-#: 0069_identity_view_role appends `role`; `head` therefore carries it.
+#: 0070_identity_view_role appends `role`; `head` therefore carries it.
 _COLUMNS_AT_HEAD = [*_EXPECTED_COLUMNS, "role"]
 _PII_COLUMNS = {
     "display_name",

@@ -1203,6 +1203,12 @@ fn tool_mutation_keys_are_domain_separated_and_read_calls_cannot_mutate() {
         }
         assert_ne!(original, key(&parent, &different.1).unwrap());
     }
+    let mut another_actor = plan.clone();
+    another_actor.actor = bundle_tool_call::ActorContext {
+        actor: Some(ACTOR_UUID.into()),
+        scopes: vec![],
+    };
+    assert_ne!(original, key(&parent, &another_actor).unwrap());
     parent.tenant_id += 1;
     assert_ne!(original, key(&parent, &plan).unwrap());
     parent.tenant_id -= 1;
@@ -1218,5 +1224,34 @@ fn tool_mutation_keys_are_domain_separated_and_read_calls_cannot_mutate() {
             .unwrap()
             .reserve_mutation("credit"),
         Some(("original", 0))
+    );
+}
+
+/// A write binds the verified member UUID without asking the role directory for privileges.
+#[tokio::test]
+async fn unrestricted_write_binds_actor_without_role_lookup() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    let (mut c, dir) = admin_caps(&exec, Some("1001"), None);
+    let old = c.tool.as_ref().unwrap().clone();
+    c = caps_with(
+        world_rows(),
+        default_gate(),
+        old.connections,
+        vec![APP.into()],
+        None,
+    )
+    .with_identity(
+        c.identity.clone().unwrap(),
+        c.invocation_identity.clone().unwrap(),
+    );
+    run(&c, spoofing_call("adjust", Some("actor-bound-retry")))
+        .await
+        .unwrap();
+    assert_eq!(*dir.role_lookups.lock().unwrap(), 0);
+    let invokes = recorded(&exec);
+    assert_eq!(invokes[0].payload["args"]["__ctx"]["actor"], ACTOR_UUID);
+    assert_eq!(
+        invokes[0].payload["args"]["__ctx"]["scopes"],
+        serde_json::json!([])
     );
 }

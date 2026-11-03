@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0070_economy_ledger_kinds (P4 Task 1).
+"""Real-Postgres tests for 0071_economy_ledger_kinds (P4 Task 1).
 
 Runs the actual Alembic chain to `head` and asserts the ledger `kind` CHECK now
 admits the compound-op kinds (and still refuses anything else), that the DDL is
@@ -24,7 +24,7 @@ requires_docker = pytest.mark.skipif(
 )
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parents[1] / "versions" / "0070_economy_ledger_kinds.py"
+    Path(__file__).resolve().parents[1] / "versions" / "0071_economy_ledger_kinds.py"
 )
 _USER = "11111111-2222-4333-8444-555555555555"
 _NEW_KINDS = ["credit", "debit", "cond_debit", "admin_adjust", "pot_payout", "exchange"]
@@ -41,8 +41,8 @@ def _load_migration():  # type: ignore[no-untyped-def]
 class TestMigrationMetadata:
     def test_chains_off_identity_role(self) -> None:
         migration = _load_migration()
-        assert migration.revision == "0070_economy_ledger_kinds"
-        assert migration.down_revision == "0069_identity_view_role"
+        assert migration.revision == "0071_economy_ledger_kinds"
+        assert migration.down_revision == "0070_identity_view_role"
 
     def test_revision_id_fits_varchar32(self) -> None:
         assert len(_load_migration().revision) <= 32

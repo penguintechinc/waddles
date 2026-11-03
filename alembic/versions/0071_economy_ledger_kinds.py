@@ -7,8 +7,8 @@ ops). Idempotent; reaches existing databases. The DDL lives in
 `scripts/db/bundle_economy_ledger_kinds.sql` so the shipped schema and the
 Rust-tested schema cannot drift. No new privilege.
 
-Revision ID: 0070_economy_ledger_kinds
-Revises: 0069_identity_view_role
+Revision ID: 0071_economy_ledger_kinds
+Revises: 0070_identity_view_role
 Create Date: 2026-10-30
 """
 
@@ -18,8 +18,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0070_economy_ledger_kinds"
-down_revision = "0069_identity_view_role"
+revision = "0071_economy_ledger_kinds"
+down_revision = "0070_identity_view_role"
 branch_labels = None
 depends_on = None
 

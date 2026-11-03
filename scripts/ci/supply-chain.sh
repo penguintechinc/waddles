@@ -14,6 +14,8 @@
 # GitHub Actions OIDC (override only via SUPPLY_CHAIN_IDENTITY_REGEXP for forks/tests).
 # COSIGN_KEY / COSIGN_PUB_KEY select key-based mode; the release pipeline never sets them,
 # scripts/ci/test-supply-chain.sh does, against a throwaway local registry.
+# Key-based local tests neither publish nor require transparency-log entries;
+# keyless release signing and verification continue to require them.
 #
 # Every subcommand reports how many items it examined and exits non-zero on zero.
 set -euo pipefail
@@ -35,7 +37,7 @@ require_digest() {
 # Prints the verification identity arguments for cosign (key-based or keyless).
 identity_args() {
   if [ -n "${COSIGN_PUB_KEY:-}" ]; then
-    printf '%s\n' --key "$COSIGN_PUB_KEY"
+    printf '%s\n' --key "$COSIGN_PUB_KEY" --insecure-ignore-tlog=true
   else
     printf '%s\n' --certificate-identity-regexp "$IDENTITY_RE" --certificate-oidc-issuer "$OIDC_ISSUER"
   fi
@@ -55,7 +57,7 @@ cmd_sign() {
   local ref="${1:?ref}"
   require_digest "$ref"
   if [ -n "${COSIGN_KEY:-}" ]; then
-    cosign sign --yes --key "$COSIGN_KEY" "$ref"
+    cosign sign --yes --use-signing-config=false --tlog-upload=false --key "$COSIGN_KEY" "$ref"
   else
     cosign sign --yes "$ref"
   fi
@@ -76,7 +78,7 @@ cmd_attest() {
   local ref="${1:?ref}" sbom="${2:?sbom path}"
   require_digest "$ref"
   if [ -n "${COSIGN_KEY:-}" ]; then
-    cosign attest --yes --key "$COSIGN_KEY" --type spdxjson --predicate "$sbom" "$ref"
+    cosign attest --yes --use-signing-config=false --tlog-upload=false --key "$COSIGN_KEY" --type spdxjson --predicate "$sbom" "$ref"
   else
     cosign attest --yes --type spdxjson --predicate "$sbom" "$ref"
   fi

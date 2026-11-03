@@ -45,8 +45,8 @@ fn policy(store: &dyn ConfigStore) -> Result<Policy, ToolError> {
     {
         None => Policy {
             alias: "waddlebucks".into(),
-            rate_num: 500,
-            rate_den: 1000,
+            rate_num: 1000,
+            rate_den: 500,
         },
         Some(bytes) => serde_json::from_slice::<Policy>(&bytes)
             .map_err(|_| invalid("invalid currency policy"))?,
@@ -384,7 +384,7 @@ mod tests {
         assert!(c[0].starts_with("credit:"));
         assert!(c[1].starts_with("debit:"));
         assert_eq!(c[4], "pot:2");
-        assert_eq!(c[5], format!("exchange:{ALICE}:1000:500:1000"));
+        assert_eq!(c[5], format!("exchange:{ALICE}:1000:1000:500"));
     }
     #[test]
     fn admin_uses_only_host_verified_context() {

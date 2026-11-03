@@ -3,6 +3,7 @@
 Atomic money and scope gates are exercised by the Rust host integration suite;
 these tests pin the chat adapter and ensure it has no legacy storage accesses.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -23,7 +24,9 @@ MENTION = "{user:opaque-token}"
 
 class Host:
     """WIT seam records real SDK encoding and refuses any legacy storage access."""
+
     def __init__(self) -> None:
+        """Initialize the isolated record of SDK calls and transport replies."""
         self.calls: list[tuple[str, str, dict[str, Any], str | None]] = []
         self.replies: list[dict[str, Any]] = []
         self.error: Exception | None = None
@@ -34,7 +37,9 @@ class Host:
             raise self.error
         decoded = json.loads(args)
         self.calls.append((target, name, decoded, key))
-        return json.dumps({"balance": 12, "amount": decoded.get("amount", 0), "alias": "stars", "entries": []}).encode()
+        return json.dumps(
+            {"balance": 12, "amount": decoded.get("amount", 0), "alias": "stars", "entries": []}
+        ).encode()
 
     def resolve_actor(self) -> str:
         """Resolve the current host actor, independent of guest-visible actor text."""
@@ -42,7 +47,7 @@ class Host:
 
     def resolve_mention(self, token: str) -> str:
         """Resolve only the exact mention in the current event."""
-        assert token == "opaque-token"
+        assert token == "opaque-token"  # noqa: S105 -- public mention identifier, not a secret
         return BOB
 
     def push(self, provider: str, payload: str) -> None:
@@ -55,7 +60,8 @@ def host(monkeypatch: pytest.MonkeyPatch) -> Host:
     """Install real SDK imports with a narrow WIT seam and no DB/KV capability."""
     value = Host()
     imports = types.SimpleNamespace(
-        identity=value, tool=types.SimpleNamespace(invoke=value.invoke),
+        identity=value,
+        tool=types.SimpleNamespace(invoke=value.invoke),
         relay=types.SimpleNamespace(push=value.push),
         log=types.SimpleNamespace(Level={"WARN": "warn"}, write=lambda *_: None),
     )
@@ -65,9 +71,17 @@ def host(monkeypatch: pytest.MonkeyPatch) -> Host:
 
 def event(text: str, message_id: str = "msg-1") -> PlatformEvent:
     """Build the delivered event with replay identity and an origin channel."""
-    return PlatformEvent("twitch", "chat.message", "untrusted-display", {
-        "text": text, "channel_id": "123", "message_id": message_id,
-    }, "2026-10-30T00:00:00Z")
+    return PlatformEvent(
+        "twitch",
+        "chat.message",
+        "untrusted-display",
+        {
+            "text": text,
+            "channel_id": "123",
+            "message_id": message_id,
+        },
+        "2026-10-30T00:00:00Z",
+    )
 
 
 def run(text: str) -> PlatformEvent:
@@ -77,18 +91,23 @@ def run(text: str) -> PlatformEvent:
     return result
 
 
-@pytest.mark.parametrize(("text", "tool_name", "args"), [
-    ("!points", "points_view", {"user": ALICE}),
-    ("!points view", "points_view", {"user": ALICE}),
-    (f"!points {MENTION}", "points_view", {"user": BOB}),
-    ("!points leaders", "points_leaders", {"limit": 10}),
-    ("!points top", "points_leaders", {"limit": 10}),
-    (f"!points set 0 {MENTION}", "points_set", {"user": BOB, "balance": 0}),
-    (f"!points add 4 {MENTION}", "points_adjust", {"user": BOB, "delta": 4}),
-    (f"!points sub 4 {MENTION}", "points_adjust", {"user": BOB, "delta": -4}),
-    (f"!give 4 {MENTION}", "give", {"from": ALICE, "to": BOB, "amount": 4}),
-])
-def test_commands_delegate_exactly_once(host: Host, text: str, tool_name: str, args: dict[str, Any]) -> None:
+@pytest.mark.parametrize(
+    ("text", "tool_name", "args"),
+    [
+        ("!points", "points_view", {"user": ALICE}),
+        ("!points view", "points_view", {"user": ALICE}),
+        (f"!points {MENTION}", "points_view", {"user": BOB}),
+        ("!points leaders", "points_leaders", {"limit": 10}),
+        ("!points top", "points_leaders", {"limit": 10}),
+        (f"!points set 0 {MENTION}", "points_set", {"user": BOB, "balance": 0}),
+        (f"!points add 4 {MENTION}", "points_adjust", {"user": BOB, "delta": 4}),
+        (f"!points sub 4 {MENTION}", "points_adjust", {"user": BOB, "delta": -4}),
+        (f"!give 4 {MENTION}", "give", {"from": ALICE, "to": BOB, "amount": 4}),
+    ],
+)
+def test_commands_delegate_exactly_once(
+    host: Host, text: str, tool_name: str, args: dict[str, Any]
+) -> None:
     """All commands use the service and resolved UUIDs, without private storage."""
     result = run(text)
     assert len(host.calls) == 1
@@ -108,11 +127,19 @@ def test_replay_keys_stable_across_identical_messages(host: Host) -> None:
     assert host.calls[0][3] != host.calls[2][3]
 
 
-@pytest.mark.parametrize("text", [
-    "!points add -1 @alice", "!points set +4 @alice", "!points add 1_000 @alice",
-    f"!give 0 {MENTION}", f"!points add 9999999999999999999999 {MENTION}",
-    "!points leaders extra", "!points view @rawname", "!give 3 @rawname",
-])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "!points add -1 @alice",
+        "!points set +4 @alice",
+        "!points add 1_000 @alice",
+        f"!give 0 {MENTION}",
+        f"!points add 9999999999999999999999 {MENTION}",
+        "!points leaders extra",
+        "!points view @rawname",
+        "!give 3 @rawname",
+    ],
+)
 def test_bad_commands_cannot_reach_money(host: Host, text: str) -> None:
     """Invalid syntax and unverified targets reply with usage without a tool call."""
     assert run(text).payload["reply"] == app._USAGE
@@ -134,3 +161,23 @@ def test_action_only_relays_and_never_calls_tools(host: Host) -> None:
     assert result.detail == "points_reply"
     assert host.calls == before
     assert host.replies == [{"channel": "123", "text": "Balance: 12 stars."}]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f'!give -a 4 -u "{MENTION}"',
+        f'!give --amount 4 --user "{MENTION}"',
+    ],
+)
+def test_schema_flags_reach_the_same_service_tool(host: Host, text: str) -> None:
+    """Short/long Unix flags and quoted mentions use the shared parser."""
+    run(text)
+    assert host.calls[0][1:3] == ("give", {"from": ALICE, "to": BOB, "amount": 4})
+
+
+def test_generated_help_never_resolves_identity_or_calls_service(host: Host) -> None:
+    """Command help is generated from declarations and stays read-only."""
+    result = run("!give --help")
+    assert "--amount" in result.payload["reply"]
+    assert host.calls == []

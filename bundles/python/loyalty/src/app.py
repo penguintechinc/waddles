@@ -4,19 +4,50 @@ All identity resolution and tool calls run in process-stage, where the host wire
 identity and atomic economy capabilities. Action-stage only relays the completed
 reply. Admin tools are gated by host-verified community scopes, never chat badges.
 """
+
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
 
 from waddle_sdk import event_dedupe, identity, log, relay, tool
+from waddle_sdk.command import CliArgument, CliCommandSpec, ParsedCliCommand, parse_cli_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 SERVICE = "waddles.core.service.economy"
-_USAGE = (
-    "Usage: !points [view [@user]|leaders|set <amount> @user|add <amount> @user|"
-    "sub <amount> @user] | !give <amount> @user"
+_TARGET_ARGS = (
+    CliArgument("user_value", required=False, help="host-issued user mention"),
+    CliArgument("user", ("-u", "--user"), required=False, help="host-issued user mention"),
 )
+_AMOUNT_ARGS = (
+    CliArgument("amount_value", required=False, kind="integer", help="currency amount"),
+    CliArgument(
+        "amount", ("-a", "--amount"), required=False, kind="integer", help="currency amount"
+    ),
+)
+POINTS_SPEC = CliCommandSpec(
+    "points",
+    subcommands=(
+        CliCommandSpec("view", _TARGET_ARGS, description="Show a community balance"),
+        CliCommandSpec("leaders", description="Show the community leaderboard"),
+        CliCommandSpec("top", description="Show the community leaderboard"),
+        *(
+            CliCommandSpec(
+                name, _AMOUNT_ARGS + _TARGET_ARGS, description="Admin balance adjustment"
+            )
+            for name in ("set", "add", "sub")
+        ),
+    ),
+    default_subcommand="view",
+)
+GIVE_SPEC = CliCommandSpec(
+    "give", _AMOUNT_ARGS + _TARGET_ARGS, description="Transfer your currency to a member"
+)
+_GENERATED_HELP = parse_cli_command("!points --help", POINTS_SPEC).help
+if _GENERATED_HELP is None:
+    raise RuntimeError("shared command parser did not generate help")
+_USAGE: str = _GENERATED_HELP
 _MAX_AMOUNT = 2**63 - 1
 
 
@@ -33,14 +64,22 @@ class DispatchResult:
         self.http_status = None
 
 
-def _amount(text: str, *, zero: bool = False) -> int:
-    """Accept bounded ASCII amounts, rejecting alternate integer syntax."""
-    if not text or not text.isascii() or not text.isdigit() or len(text) > 19:
+def _amount(value: str | int | None, *, zero: bool = False) -> int:
+    """Require an integer in the host's signed money range."""
+    if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError("invalid amount")
-    amount = int(text)
-    if not (0 if zero else 1) <= amount <= _MAX_AMOUNT:
+    if not (0 if zero else 1) <= value <= _MAX_AMOUNT:
         raise ValueError("invalid amount")
-    return amount
+    return value
+
+
+def _value(parsed: ParsedCliCommand, name: str) -> str | int | None:
+    """Combine a flag with its legacy positional alias, refusing ambiguous input."""
+    positional = parsed.values.get(name + "_value")
+    flagged = parsed.values.get(name)
+    if positional is not None and flagged is not None:
+        raise ValueError("argument supplied twice")
+    return flagged if flagged is not None else positional
 
 
 async def _target(text: str) -> str:
@@ -57,46 +96,50 @@ def _key(event: PlatformEvent) -> str:
     return hashlib.sha256(f"loyalty:{event.platform}:{message_id}".encode()).hexdigest()
 
 
-async def _execute(event: PlatformEvent, parts: list[str]) -> str:
-    """Resolve the command to one approved service tool and render its result."""
-    head, tail = parts[0].lower(), parts[1:]
-    if head == "!give":
-        if len(tail) != 2:
-            raise ValueError("usage")
-        amount = _amount(tail[0])
-        target = await _target(tail[1])
+async def _execute(event: PlatformEvent, parsed: ParsedCliCommand) -> str:
+    """Resolve schema-parsed CLI values to one approved service tool."""
+    verb = parsed.subcommand or parsed.command
+    target_value = _value(parsed, "user")
+    if target_value is not None and not isinstance(target_value, str):
+        raise ValueError("invalid target")
+    if parsed.command == "give":
+        amount = _amount(_value(parsed, "amount"))
+        if target_value is None:
+            raise ValueError("target required")
+        target = await _target(target_value)
         actor = await identity.resolve_actor()
         result = await tool.invoke(
-            SERVICE, "give", {"from": actor, "to": target, "amount": amount},
+            SERVICE,
+            "give",
+            {"from": actor, "to": target, "amount": amount},
             idempotency_key=_key(event),
         )
         return f"Transferred {result['amount']} {result['alias']}."
-    if tail and tail[0].lower() in {"leaders", "top"}:
-        if len(tail) != 1:
-            raise ValueError("usage")
+    if verb in {"leaders", "top"}:
         result = await tool.invoke(SERVICE, "points_leaders", {"limit": 10})
         entries = result["entries"]
-        return "Leaderboard (" + result["alias"] + "): " + (
+        return f"Leaderboard ({result['alias']}): " + (
             ", ".join(f"{i}. {row['user']}={row['balance']}" for i, row in enumerate(entries, 1))
-            if entries else "no balances yet"
+            if entries
+            else "no balances yet"
         )
-    verb = tail[0].lower() if tail else "view"
     if verb in {"set", "add", "sub"}:
-        if len(tail) != 3:
-            raise ValueError("usage")
-        amount = _amount(tail[1], zero=verb == "set")
-        target = await _target(tail[2])
+        amount = _amount(_value(parsed, "amount"), zero=verb == "set")
+        if target_value is None:
+            raise ValueError("target required")
+        target = await _target(target_value)
         name = "points_set" if verb == "set" else "points_adjust"
-        args = {"user": target, "balance": amount} if verb == "set" else {
-            "user": target, "delta": -amount if verb == "sub" else amount,
-        }
+        args = (
+            {"user": target, "balance": amount}
+            if verb == "set"
+            else {
+                "user": target,
+                "delta": -amount if verb == "sub" else amount,
+            }
+        )
         result = await tool.invoke(SERVICE, name, args, idempotency_key=_key(event))
     else:
-        # Preserve bare !points @mention and !points view @mention.
-        target_parts = tail[1:] if verb == "view" and tail else tail
-        if len(target_parts) > 1:
-            raise ValueError("usage")
-        target = await _target(target_parts[0]) if target_parts else await identity.resolve_actor()
+        target = await _target(target_value) if target_value else await identity.resolve_actor()
         result = await tool.invoke(SERVICE, "points_view", {"user": target})
     return f"Balance: {result['balance']} {result['alias']}."
 
@@ -106,13 +149,14 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     text = event.payload.get("text")
     if not isinstance(text, str):
         return None
-    parts = text.strip().split()
-    if not parts or parts[0].lower() not in {"!points", "!give"}:
+    command = re.match(r"^\s*!(points|give)(?=\s|$)", text, re.IGNORECASE)
+    if command is None:
         return None
     if not event.payload.get("channel_id"):
         raise ValueError("points requires an origin channel")
     try:
-        reply = await _execute(event, parts)
+        parsed = parse_cli_command(text, GIVE_SPEC if command[1].lower() == "give" else POINTS_SPEC)
+        reply = parsed.help if parsed.help is not None else await _execute(event, parsed)
     except ValueError:
         reply = _USAGE
     except tool.ToolError as exc:
@@ -121,14 +165,19 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
             raise
         reply = "Points request refused (" + exc.code + ")."
     return PlatformEvent(
-        platform=event.platform, event_type=event.event_type, actor=event.actor,
+        platform=event.platform,
+        event_type=event.event_type,
+        actor=event.actor,
         occurred_at=event.occurred_at,
         payload={"channel_id": event.payload["channel_id"], "reply": reply},
     )
 
 
 async def dispatch(
-    envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any,
+    envelope: StageEnvelope,
+    config: dict[str, Any],
+    *,
+    http_client: Any,
 ) -> DispatchResult:
     """Relay the computed result without reading or changing any balance."""
     channel = envelope.event.payload.get("channel_id")
