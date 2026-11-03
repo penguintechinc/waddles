@@ -3,6 +3,27 @@
 Owns inbound platform connections and HTTP intake; normalizes events and appends them once to the
 Valkey stream spine. No database.
 
+## Generic transport credentials
+
+`WsTransport` and `PollTransport` use `TransportSecrets::new(resolver, community_id)`
+with a real `connection_resolver::ConnectionResolver`. The host binds the community
+and the handle-to-connection map; a guest can name a registered handle but cannot
+select a different community. Each handshake or poll resolves its credential anew,
+so rotation is visible on the next use. OAuth access tokens, bearer credentials and
+API-key values are supported; empty values and multi-field credentials fail closed.
+
+Webhook verification uses `ConnectionResolverSecrets` instead. Its
+`WebhookSecretSource` trait is separate from `TransportSecretSource`, and it rejects
+OAuth access tokens as signing keys. Resolved secrets stay in host-owned zeroizing
+buffers. HTTP and WebSocket libraries may retain their own non-zeroizing send-buffer
+copies, as documented in the transport modules.
+
+These transport primitives do not activate generic runtime intake. Production
+activation also requires the authenticated executor link and a trusted registry of
+connector bindings; the generic webhook route continues to return 503 until those
+dependencies are wired. The legacy EventSub environment-secret implementation is
+still present and must be retired when that runtime path is ready.
+
 ## Per-community Twitch sessions (`INGEST_DYNAMIC_CONNECTIONS`)
 
 With the flag ON, svc-ingest runs one Twitch IRC session **per connected bot/channel binding**

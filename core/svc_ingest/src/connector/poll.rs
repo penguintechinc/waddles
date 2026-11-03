@@ -32,10 +32,10 @@ use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 use super::egress_guard::resolve_pinned;
+use super::secrets::TransportSecretSource;
 use super::transport::{FrameOutcome, Transport, TransportError};
 use super::transport_common::{opaque_id, resolve_handle, validate_endpoint};
 use super::types::{ConnectionCtx, Handshake};
-use super::webhook::WebhookSecretSource;
 
 /// Longest cursor accepted from a response (longer is treated as absent).
 pub const MAX_CURSOR_BYTES: usize = 512;
@@ -87,7 +87,7 @@ pub struct PollConfig {
 }
 
 /// Polling transport over reqwest (rustls, redirects disabled).
-pub struct PollTransport<S: WebhookSecretSource> {
+pub struct PollTransport<S: TransportSecretSource> {
     cfg: PollConfig,
     url: reqwest::Url,
     source_id: String,
@@ -104,7 +104,7 @@ pub struct PollTransport<S: WebhookSecretSource> {
     last_poll: Option<Instant>,
 }
 
-impl<S: WebhookSecretSource> PollTransport<S> {
+impl<S: TransportSecretSource> PollTransport<S> {
     /// Validates the config.
     pub fn new(cfg: PollConfig, secrets: S) -> Result<Self, TransportError> {
         let url = validate_endpoint(&cfg.url, &["https"], "http", cfg.allow_loopback_insecure)
@@ -270,7 +270,7 @@ impl<S: WebhookSecretSource> PollTransport<S> {
     }
 }
 
-impl<S: WebhookSecretSource + 'static> Transport for PollTransport<S> {
+impl<S: TransportSecretSource + 'static> Transport for PollTransport<S> {
     fn platform(&self) -> &str {
         &self.cfg.platform
     }
@@ -377,7 +377,7 @@ mod tests {
 
     #[derive(Clone)]
     struct CountingSecrets(Arc<AtomicUsize>);
-    impl WebhookSecretSource for CountingSecrets {
+    impl TransportSecretSource for CountingSecrets {
         fn resolve(&self, _r: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(SecretString::new("tok123".into())) })
@@ -641,6 +641,7 @@ mod tests {
 
     #[tokio::test]
     async fn ambient_proxy_env_does_not_bypass_pin() {
+        let _env = crate::connector::transport_common::PROXY_ENV.write().await;
         let (addr, srv) = start().await;
         // A dead proxy: if honored the request would fail / not reach srv.
         std::env::set_var("HTTP_PROXY", "http://127.0.0.1:1");

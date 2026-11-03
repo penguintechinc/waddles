@@ -9,9 +9,15 @@ use connection_resolver::{ConnectionRef, SecretString};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use super::secrets::TransportSecretSource;
 use super::transport::TransportError;
-use super::webhook::{SecretError, WebhookSecretSource};
+use super::webhook::SecretError;
 use super::webhook_verify::hex_encode;
+
+/// Test-only: serializes the process-wide proxy-env mutation in poll's pin test
+/// against tests whose HTTP clients read that env (reader = client user).
+#[cfg(test)]
+pub(crate) static PROXY_ENV: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 /// Validates a transport endpoint: `https`/`wss` only (plain `http`/`ws` is
 /// accepted solely for a loopback host and only when `allow_loopback_insecure`
@@ -47,7 +53,7 @@ pub(crate) fn opaque_id(prefix: &str, source_key: &str) -> String {
 
 /// Resolves one handle through the secret source, fresh on every call (the
 /// source MUST NOT cache; this layer never stores the value).
-pub(crate) async fn resolve_handle<S: WebhookSecretSource>(
+pub(crate) async fn resolve_handle<S: TransportSecretSource>(
     secrets: &S,
     handles: &HashMap<String, ConnectionRef>,
     handle: &str,
@@ -83,7 +89,7 @@ fn uniform() -> TransportError {
 /// occur at least once, none may be empty, duplicated, or a substring of
 /// another slot. Output is a pre-sized zeroizing buffer (no realloc copies);
 /// resolved secrets zeroize on drop inside this call.
-pub(crate) async fn substitute_slots<S: WebhookSecretSource>(
+pub(crate) async fn substitute_slots<S: TransportSecretSource>(
     secrets: &S,
     handles: &HashMap<String, ConnectionRef>,
     bytes: &[u8],
@@ -183,7 +189,7 @@ mod tests {
 
     /// Per-ref secret map (handle id -> value), counts resolves.
     struct MapSecrets(HashMap<i64, &'static str>);
-    impl WebhookSecretSource for MapSecrets {
+    impl TransportSecretSource for MapSecrets {
         fn resolve(&self, r: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
             let v = self.0.get(&r.connection_id).copied();
             Box::pin(async move {

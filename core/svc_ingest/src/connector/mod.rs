@@ -41,6 +41,7 @@ pub mod metrics;
 pub mod poll;
 pub(crate) mod ratelimit;
 pub mod registry;
+pub mod secrets;
 pub mod sink;
 pub mod transport;
 pub(crate) mod transport_common;
@@ -57,6 +58,7 @@ pub use poll::{PollAuth, PollConfig, PollTransport};
 pub use registry::{
     ConnectorRegistry, EventLimits, PinnedConnector, RegistryError, MAX_EVENTS_PER_FRAME,
 };
+pub use secrets::{TransportSecretSource, TransportSecrets};
 pub use sink::{
     check_event_limits, is_valid_event_type, to_platform_event, EventSink, SinkError,
     SpineEventSink,
