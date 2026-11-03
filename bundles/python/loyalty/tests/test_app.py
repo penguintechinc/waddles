@@ -10,16 +10,23 @@ import asyncio
 import json
 import sys
 import types
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.testing import StageGuard
 
 import app
 
 ALICE = "11111111-1111-4111-8111-111111111111"
 BOB = "22222222-2222-4222-8222-222222222222"
 MENTION = "{user:opaque-token}"
+
+# Stage-faithful fakes: identity is process-only, relay is action-only (see StageGuard).
+GUARD = StageGuard()
+transform = GUARD.process_stage(app.transform)
+dispatch = GUARD.action_stage(app.dispatch)
 
 
 class Host:
@@ -56,17 +63,22 @@ class Host:
 
 
 @pytest.fixture
-def host(monkeypatch: pytest.MonkeyPatch) -> Host:
+def host(monkeypatch: pytest.MonkeyPatch) -> Iterator[Host]:
     """Install real SDK imports with a narrow WIT seam and no DB/KV capability."""
+    GUARD.reset()
     value = Host()
     imports = types.SimpleNamespace(
-        identity=value,
+        identity=types.SimpleNamespace(
+            resolve_actor=GUARD.process_only("identity.resolve_actor", value.resolve_actor),
+            resolve_mention=GUARD.process_only("identity.resolve_mention", value.resolve_mention),
+        ),
         tool=types.SimpleNamespace(invoke=value.invoke),
-        relay=types.SimpleNamespace(push=value.push),
+        relay=types.SimpleNamespace(push=GUARD.action_only("relay.push", value.push)),
         log=types.SimpleNamespace(Level={"WARN": "warn"}, write=lambda *_: None),
     )
     monkeypatch.setitem(sys.modules, "wit_world", types.SimpleNamespace(imports=imports))
-    return value
+    yield value
+    GUARD.assert_clean()
 
 
 def event(text: str, message_id: str = "msg-1") -> PlatformEvent:
@@ -86,7 +98,7 @@ def event(text: str, message_id: str = "msg-1") -> PlatformEvent:
 
 def run(text: str) -> PlatformEvent:
     """Drive the real process-stage adapter synchronously in unit tests."""
-    result = asyncio.run(app.transform(event(text)))
+    result = asyncio.run(transform(event(text)))
     assert result is not None
     return result
 
@@ -122,7 +134,7 @@ def test_replay_keys_stable_across_identical_messages(host: Host) -> None:
     command = f"!give 4 {MENTION}"
     run(command)
     run(command)
-    asyncio.run(app.transform(event(command, "msg-2")))
+    asyncio.run(transform(event(command, "msg-2")))
     assert host.calls[0][3] == host.calls[1][3]
     assert host.calls[0][3] != host.calls[2][3]
 
@@ -148,7 +160,7 @@ def test_bad_commands_cannot_reach_money(host: Host, text: str) -> None:
 
 def test_unrelated_events_do_not_call_service(host: Host) -> None:
     """No matching command costs no identity, storage or service operation."""
-    assert asyncio.run(app.transform(event("hello"))) is None
+    assert asyncio.run(transform(event("hello"))) is None
     assert host.calls == []
 
 
@@ -157,7 +169,7 @@ def test_action_only_relays_and_never_calls_tools(host: Host) -> None:
     transformed = run("!points")
     before = list(host.calls)
     envelope = StageEnvelope("tenant", "community", "loyalty", "action", transformed, "now")
-    result = asyncio.run(app.dispatch(envelope, {}, http_client=None))
+    result = asyncio.run(dispatch(envelope, {}, http_client=None))
     assert result.detail == "points_reply"
     assert host.calls == before
     assert host.replies == [{"channel": "123", "text": "Balance: 12 stars."}]
