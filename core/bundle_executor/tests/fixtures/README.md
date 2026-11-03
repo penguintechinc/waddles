@@ -253,7 +253,7 @@ Real `world stage-tools` components (bundle-MCP-tools P3b) driven by `core/tool_
 `bindings_glue` only carries the frozen `stage` world; it is dead-stripped from these builds). `wit/` holds verbatim
 copies of `wit/waddle-bundle/stage.wit` + `tool.wit`; refresh both whenever either changes.
 
-- **provider** (`tool-provider-fixture-src/`, a service): `echo` (read), `guarded` (WRITE; echoes the forwarded
+- **provider** (`tool-provider-fixture-src/`, a service): `echo` (read), `whoami` (echoes the host-verified actor + scopes), `guarded` (WRITE; echoes the forwarded
   idempotency key), `relay` (nested `tool.invoke` -- cycle/depth/self-call probes) and `slow` (spins; only the deadline ends it).
 - **caller** (`tool-caller-fixture-src/`, an app): `go` `{target, tool, args, key?}` forwards through the SDK client and returns
   the host's typed outcome. (`stage-tools` is the only world with the `tool` import, so the app also exports
