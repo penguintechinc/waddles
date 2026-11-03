@@ -32,9 +32,9 @@ def _load():  # type: ignore[no-untyped-def]
     return module
 
 
-def test_chains_off_0068_and_revision_id_fits_varchar32() -> None:
+def test_chains_off_0069_and_revision_id_fits_varchar32() -> None:
     m = _load()
-    assert m.down_revision == "0068_app_catalog_kind"
+    assert m.down_revision == "0069_pi_definer_functions"
     assert len(m.revision) <= 32
 
 

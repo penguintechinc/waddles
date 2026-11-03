@@ -632,6 +632,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spec_default_rate_500_points_credits_1000_waddlebucks() {
+        assert_eq!(validate_exchange(500, 1000, 500, 10_000).unwrap(), 1000);
+    }
+
+    #[test]
     fn wager_validation_accepts_the_boundaries() {
         assert!(validate_wager(1, 0, 10).is_ok());
         assert!(validate_wager(10, 1_000, 10).is_ok());

@@ -31,7 +31,7 @@ _NEW_KINDS = ["credit", "debit", "cond_debit", "admin_adjust", "pot_payout", "ex
 
 
 def _load_migration():  # type: ignore[no-untyped-def]
-    spec = importlib.util.spec_from_file_location("migration_0069", _MIGRATION_PATH)
+    spec = importlib.util.spec_from_file_location("migration_0071", _MIGRATION_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -58,7 +58,7 @@ class TestMigrationMetadata:
 def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0069-economy-ledger-kinds") as db:
+    with migrated_postgres("0071-economy-ledger-kinds") as db:
         yield db
 
 

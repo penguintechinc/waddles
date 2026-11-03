@@ -386,6 +386,21 @@ mod tests {
         assert_eq!(c[4], "pot:2");
         assert_eq!(c[5], format!("exchange:{ALICE}:1000:1000:500"));
     }
+    /// Spec 2026-10-29-waddlebucks-economy: default is 1000 waddlebucks per 500 Twitch points.
+    #[test]
+    fn default_exchange_rate_is_1000_wb_per_500_points() {
+        let (r, h) = setup(None);
+        call(
+            &r,
+            "exchange",
+            keyed(json!({"user":ALICE,"from_amount":500})),
+        )
+        .unwrap();
+        let c = h.calls.lock().unwrap();
+        assert_eq!(c[0], format!("exchange:{ALICE}:500:1000:500"));
+        // credited = points * rate_num / rate_den
+        assert_eq!(500u64 * 1000 / 500, 1000);
+    }
     #[test]
     fn admin_uses_only_host_verified_context() {
         let (r, h) = setup(None);
