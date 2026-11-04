@@ -21,6 +21,16 @@ args JSON under the reserved ``__idempotency_key`` field; :func:`dispatch`
 strips it and hands it to the handler as ``idempotency_key=`` so it can be
 passed on to the economy/reputation host capability.
 
+**Verified actor/scopes.** The stage also writes the HOST-VERIFIED actor (the
+community ``user_uuid``) and that actor's host-derived scopes into the reserved
+``__ctx`` args field (it overwrites any caller-supplied value). :func:`dispatch`
+strips it and, for a handler that declares ``actor`` / ``actor_scopes``
+parameters (or ``**kwargs``), passes them as keyword arguments. They are
+``None`` / ``()`` when the call is not user-originated. Read them HERE -- never
+take an actor or scope from the tool's own args, which any caller can forge.
+Scope-restricted tools (manifest ``required_scope``) are refused by the host
+before dispatch; these values are for finer in-tool decisions on verified data.
+
 **Eager import (componentize-py)** -- see ``waddle_sdk.reputation``.
 """
 
@@ -40,6 +50,9 @@ except (ImportError, AttributeError):  # host-side tests / non-stage-tools world
 
 #: Reserved args field the stage uses to forward the caller's idempotency key.
 IDEMPOTENCY_FIELD = "__idempotency_key"
+
+#: Reserved args field carrying the host-verified ``{"actor", "scopes"}``.
+CTX_FIELD = "__ctx"
 
 #: Snake_case codes, one per WIT ``tool-error`` case (CamelCase variant -> code).
 _CODES: dict[str, str] = {
@@ -113,8 +126,47 @@ async def invoke(target: str, tool: str, args: Any, *, idempotency_key: str | No
         raise ToolError("target_unavailable", "target returned non-JSON result") from exc
 
 
+def _parse_ctx(raw: Any) -> tuple[str | None, tuple[str, ...]]:
+    """Decode the host-written ``__ctx`` into ``(actor, scopes)``; malformed -> ``invalid_args``.
+
+    Scopes without an actor are dropped (an unverified scope set is meaningless).
+    """
+    if raw is None:
+        return None, ()
+    if not isinstance(raw, dict):
+        raise ToolError("invalid_args", "malformed host context")
+    actor = raw.get("actor")
+    scopes = raw.get("scopes")
+    if actor is not None and not isinstance(actor, str):
+        raise ToolError("invalid_args", "malformed host context")
+    if scopes is None:
+        scopes = []
+    if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
+        raise ToolError("invalid_args", "malformed host context")
+    if actor is None:
+        return None, ()
+    return actor, tuple(scopes)
+
+
+def _handler_kwargs(
+    handler: ToolHandler, key: str | None, actor: str | None, scopes: tuple[str, ...]
+) -> dict[str, Any]:
+    """Handler kwargs: ``idempotency_key`` always; ``actor``/``actor_scopes`` only if accepted."""
+    kwargs: dict[str, Any] = {"idempotency_key": key}
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    takes_all = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    if takes_all or "actor" in params:
+        kwargs["actor"] = actor
+    if takes_all or "actor_scopes" in params:
+        kwargs["actor_scopes"] = scopes
+    return kwargs
+
+
 def tool(name: str) -> Callable[[ToolHandler], ToolHandler]:
-    """Register ``fn(args: dict, *, idempotency_key: str | None)`` (sync or async) as ``name``."""
+    """Register ``fn(args, *, idempotency_key[, actor, actor_scopes])`` as ``name`` (sync/async)."""
 
     def deco(fn: ToolHandler) -> ToolHandler:
         if name in _REGISTRY:
@@ -144,8 +196,9 @@ async def dispatch(name: str, args: bytes) -> bytes:
     key = parsed.pop(IDEMPOTENCY_FIELD, None)
     if key is not None and not isinstance(key, str):
         raise ToolError("invalid_args", f"{IDEMPOTENCY_FIELD} must be a string")
+    actor, scopes = _parse_ctx(parsed.pop(CTX_FIELD, None))
     try:
-        result = handler(parsed, idempotency_key=key)
+        result = handler(parsed, **_handler_kwargs(handler, key, actor, scopes))
         if inspect.isawaitable(result):
             result = await result
     except ToolError:

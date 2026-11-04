@@ -162,3 +162,30 @@ def test_summary_and_hash_cover_requested_tools() -> None:
     s2, h2 = _h((RequestedTool(target_app_id="waddles.svc.a", tool="t", access="write"),))
     assert s1["requestedTools"] == [{"target": "waddles.svc.a", "tool": "t", "access": "read"}]
     assert len({base_h, h1, h2}) == 3
+
+
+def test_required_scope_is_in_the_summary_only_when_set_and_changes_the_hash() -> None:
+    from dataclasses import replace
+
+    from services.bundle_manifest_v2 import ExportedTool
+
+    schema: dict = {"type": "object", "properties": {}}
+    plain = ExportedTool("t", schema, schema, "write", "dangerous")
+    scoped = ExportedTool("t", schema, schema, "write", "dangerous", "community:admin")
+    base = replace(_MANIFEST, kind="service", exported_tools=(plain,))
+    gated = replace(_MANIFEST, kind="service", exported_tools=(scoped,))
+
+    def build(m: BundleManifestV2) -> dict:
+        return build_permission_summary(
+            m,
+            grant_labels=[],
+            component_capabilities=frozenset(),
+            min_tier="free",
+            flag_key="f",
+            allow_private_hosts=False,
+        )
+
+    s_plain, s_gated = build(base), build(gated)
+    assert "requiredScope" not in s_plain["exportedTools"][0]
+    assert s_gated["exportedTools"][0]["requiredScope"] == "community:admin"
+    assert permission_hash(s_plain) != permission_hash(s_gated)

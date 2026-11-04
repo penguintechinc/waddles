@@ -121,13 +121,35 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         // 1-5: validate, guard, matrix, gate, resolve. No executor slot is
         // touched until this returns.
         let req = bundle_tool_call::parse_request(&call.args)?;
+        let gate_scope = scope.gate_scope();
+        // svc_action has NO identity/directory wiring, so it cannot resolve a
+        // verified actor or role: scope-restricted (`required_scope`) tools are
+        // refused here, fail closed, with a clear reason. (Wiring identity
+        // resolution into svc_action is a follow-up.) `plan_tool_call` below
+        // would refuse them too -- an empty actor holds no scope -- this early
+        // check only gives the caller an actionable message.
+        if bundle_tool_call::required_scope_of(
+            &wiring.snapshot,
+            &gate_scope,
+            &req.target,
+            &req.tool,
+        )
+        .is_some()
+        {
+            return Err(ToolRefusal::Forbidden(
+                "scope-restricted tools cannot be invoked from the action stage: it has no \
+                 verified-actor resolution (use the process stage)"
+                    .to_string(),
+            ));
+        }
         let plan = bundle_tool_call::plan_tool_call(
             &scope.app_id,
             &chain,
             req,
             &wiring.snapshot,
             &self.gate,
-            &scope.gate_scope(),
+            &gate_scope,
+            &bundle_tool_call::ActorContext::none(),
         )?;
         *resolved = Some((plan.target_app_id.clone(), plan.tool.clone()));
         tracing::debug!(

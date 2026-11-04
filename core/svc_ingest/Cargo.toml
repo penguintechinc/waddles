@@ -195,6 +195,10 @@ sha2 = "=0.10.9"
 # security-sensitive check. Already resolves to this exact version
 # transitively (via `hmac`/`digest`, confirmed in `Cargo.lock`).
 subtle = "=2.6.1"
+# Ed25519 verification for the generic webhook `Scheme::Ed25519`
+# (`connector::webhook_verify`). Already in the lockfile via rustls; pinned
+# directly because this module calls it.
+ring = "=0.17.14"
 # Identity-field envelope encryption (`src/identity_crypto.rs`) --
 # AES-256-GCM (`aes-gcm`), per-tenant DEK derivation for the dev/alpha
 # fallback provider (`hkdf`), the JSON envelope's nonce/ciphertext encoding
@@ -224,15 +228,12 @@ connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
 # build context is `core/` (see Dockerfile.rust).
 discord-mentions = { path = "../discord_mentions", version = "=0.1.0" }
 
+# Sink/Stream ext for the generic WebSocket transport (`connector::ws`);
+# same exact version already resolved via tokio-tungstenite.
+futures-util = "=0.3.34"
+
 [dev-dependencies]
 http-body-util = "=0.1.3"
-# Already resolved transitively (tokio-tungstenite's own dependency) at
-# this exact version -- promoted to a direct dev-dependency only so
-# `ingest::discord_identify_budget`'s real-`OP_RESUME` test can drive a
-# `tokio_tungstenite::WebSocketStream`'s `Sink`/`Stream` impls
-# (`.send()`/`.next()`) directly, mirroring `penguin-connector-discord`'s
-# own `resume_handshake_sends_resume_and_receives_resumed` test harness.
-futures-util = "=0.3.34"
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
 # `#[tokio::test(start_paused = true)]`/`tokio::time::{pause,advance}` so
 # `ingest::discord`'s reconnect-backoff regression test can drive many

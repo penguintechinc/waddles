@@ -24,6 +24,9 @@ pub struct ExportedToolInfo {
     pub name: String,
     /// `true` for `access: write`; `false` for `access: read`.
     pub write: bool,
+    /// The host-verified actor scope a caller must hold (from the manifest's
+    /// `required_scope`, summary key `requiredScope`); `None` = unrestricted.
+    pub required_scope: Option<String>,
 }
 
 /// One tool a bundle requests from another bundle.
@@ -98,9 +101,17 @@ impl ToolManifestInfo {
             });
         let exported = if is_tool_service {
             parse_tool_list(summary, "exportedTools", |t| {
+                // A present-but-malformed `requiredScope` drops the whole entry
+                // (fail closed): never silently downgrade to "unrestricted".
+                let required_scope = match t.get("requiredScope") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+                    Some(_) => return None,
+                };
                 Some(ExportedToolInfo {
                     name: t.get("name")?.as_str()?.to_string(),
                     write: access_is_write(t)?,
+                    required_scope,
                 })
             })
         } else {
