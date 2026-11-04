@@ -180,6 +180,26 @@ def pg_db() -> Iterator[PgTestDatabase]:
             dsn=db.dsn,
             env_overrides={PASSWORDS_ENV: json.dumps(passwords)},
         )
+        # Production runs `service_roles.py reconcile --strict` after `alembic upgrade head`
+        # (every migrate Job): tables created by migrations after 0055 (e.g. 0066
+        # one_time_secrets) carry no grants until it runs, so the fixture mirrors the deploy.
+        result = subprocess.run(  # noqa: S603 -- fixed argv, no shell, test-only
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "db" / "service_roles.py"),
+                "reconcile",
+                "--strict",
+            ],
+            env={
+                "DATABASE_URL": db.dsn,
+                PASSWORDS_ENV: json.dumps(passwords),
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
         yield dataclasses.replace(db, service_role_passwords=passwords)
 
 
