@@ -1972,18 +1972,6 @@
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_connections.py",
-      "line": 323,
-      "line_hash": "0c38e38137cc1176"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/community_connections.py",
-      "line": 356,
-      "line_hash": "24feaee35aa48c5e"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
       "path": "hub_api/blueprints/v1/community_loyalty.py",
       "line": 135,
       "line_hash": "aee2e740852d05c0"
@@ -2836,12 +2824,6 @@
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/platform_config.py",
-      "line": 208,
-      "line_hash": "ddfbca0e26348bea"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
       "path": "hub_api/blueprints/v1/profile.py",
       "line": 138,
       "line_hash": "f743f60abec8e9af"
@@ -3669,6 +3651,36 @@
       "line_hash": "2cf501e304c3732d",
       "justification": "`except ApiError as exc: return _err(exc)` is the explicit, structured error mapping used by every hub_api v1 blueprint: the service layer raises ApiError (status + code + message) and the route renders it as the HTTP error response with that status. The error is surfaced to the caller, not swallowed or defaulted; identical shape to the already-baselined sibling handlers in the same blueprint family.",
       "status": "sanctioned-by-design"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_connections.py",
+      "line": 211,
+      "line_hash": "3cf667ec5246b338"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_connections.py",
+      "line": 361,
+      "line_hash": "cdfabe4863a349e1"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_connections.py",
+      "line": 418,
+      "line_hash": "4e42fdd5db02cf53"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/platform_config.py",
+      "line": 169,
+      "line_hash": "82800702b1fad4c4"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/platform_config.py",
+      "line": 212,
+      "line_hash": "b24a3e0da9dd9de2"
     }
   ]
 }
