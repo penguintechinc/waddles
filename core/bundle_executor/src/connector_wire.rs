@@ -142,7 +142,7 @@ impl ConnectorRouter {
         let export = body.export;
         let app_id = body.app_id.clone();
         let started = Instant::now();
-        let outcome = dispatch(&host, export, body.payload).await;
+        let outcome = dispatch(&host, export, body.payload, body.deadline_ms).await;
         match &outcome {
             Ok(_) => debug!(app_id = %app_id, export = export.as_str(), "connector invoke ok"),
             Err(e) => warn!(
@@ -365,6 +365,7 @@ async fn dispatch(
     host: &ConnectorHost,
     export: ExportKind,
     payload: serde_json::Value,
+    deadline_ms: u64,
 ) -> Result<(serde_json::Value, u64), ErrorBody> {
     match export {
         ExportKind::ConnectorOnConnect => {
@@ -399,15 +400,19 @@ async fn dispatch(
             let call: ToolCallArgs = decode(payload)?;
             // `args` crosses the WIT boundary as canonical JSON bytes.
             let args = serde_json::to_vec(&call.args).map_err(malformed)?;
-            settle(host.call_tool(call.tool, args).await, |bytes| {
-                let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-                    error_body(
-                        ErrorCode::MalformedFrame,
-                        format!("tool result is not canonical JSON: {e}"),
-                    )
-                })?;
-                Ok(serde_json::json!({ "ok": v }))
-            })
+            settle(
+                host.call_tool_with_deadline(call.tool, args, Some(deadline_ms))
+                    .await,
+                |bytes| {
+                    let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+                        error_body(
+                            ErrorCode::MalformedFrame,
+                            format!("tool result is not canonical JSON: {e}"),
+                        )
+                    })?;
+                    Ok(serde_json::json!({ "ok": v }))
+                },
+            )
         }
         // Rejected by `invoke` before dispatch; kept total so adding an
         // export is a compile error here, never a silent drop.

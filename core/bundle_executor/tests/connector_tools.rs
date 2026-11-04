@@ -519,3 +519,140 @@ async fn tool_call_wire_failures_are_typed() {
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::UnknownBundle, "{e:?}");
 }
+
+// ---- security review: tool traffic must not defeat the receiver pool / deadline ----
+
+use bundle_executor::connector::{clamp_deadline_ms, tool_pool_size};
+use std::time::Instant;
+
+async fn tools_host_with(rig: &Rig, l: ConnectorLimits) -> ConnectorHost {
+    ConnectorHost::load(
+        &rig.engine,
+        &rig.linkers,
+        &manifest(TOOLS_APP, TOOLS_WASM, WitWorld::ConnectorTools),
+        TOOLS_WASM.to_vec(),
+        l,
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+#[test]
+fn tool_pool_is_a_fixed_separate_share_and_deadline_only_tightens() {
+    assert_eq!(tool_pool_size(1), 1);
+    assert_eq!(tool_pool_size(4), 2);
+    assert_eq!(tool_pool_size(9), 4);
+    assert_eq!(clamp_deadline_ms(None, 2_000), 2_000);
+    assert_eq!(clamp_deadline_ms(Some(500), 2_000), 500);
+    assert_eq!(clamp_deadline_ms(Some(60_000), 2_000), 2_000);
+    assert_eq!(clamp_deadline_ms(Some(0), 2_000), 1);
+}
+
+// regression: security-review resource-cap defeat -- saturating tool-provider
+// calls must never consume a slot on-frame / heartbeat need.
+#[tokio::test]
+async fn saturated_tool_pool_cannot_starve_on_frame_or_heartbeat() {
+    let rig = rig();
+    let l = ConnectorLimits {
+        pool_size: 2,
+        deadline_ms: 1_500,
+        // Huge fuel so the spinning tool is ended by the DEADLINE, holding its
+        // slot long enough to prove saturation.
+        fuel: u64::MAX / 2,
+        ..limits()
+    };
+    let host = tools_host_with(&rig, l).await;
+    assert_eq!(host.available_slots(), 2);
+    assert_eq!(host.available_tool_slots(), tool_pool_size(2));
+
+    // Occupy the entire tool pool with a spinning tool.
+    let slow = {
+        let h = host.clone();
+        tokio::spawn(async move {
+            h.call_tool("slow".into(), json(serde_json::json!({})))
+                .await
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while host.available_tool_slots() > 0 {
+        assert!(Instant::now() < deadline, "slow tool never took its slot");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Further tool calls are typed back-pressure from the TOOL pool...
+    let err = host
+        .call_tool("echo".into(), json(serde_json::json!({})))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ConnectorCallError::PoolExhausted { .. }),
+        "{err:?}"
+    );
+    // ...while the receiver pool is untouched and on-frame/heartbeat still run.
+    assert_eq!(host.available_slots(), 2);
+    host.on_frame(RawFrame {
+        ctx: ctx(),
+        bytes: br#"{"text":"still alive"}"#.to_vec(),
+        received_at: "2026-11-04T00:00:00.000Z".into(),
+    })
+    .await
+    .unwrap();
+    host.on_heartbeat_due(ctx()).await.unwrap();
+
+    // The spinning tool is ended by the host deadline, freeing the tool slot.
+    let done = slow.await.unwrap().unwrap_err();
+    assert!(done.is_sandbox_trip(), "{done:?}");
+    assert_eq!(host.available_tool_slots(), tool_pool_size(2));
+}
+
+// regression: a wire/body deadline ABOVE the connector's limit is clamped to it.
+#[tokio::test]
+async fn a_requested_deadline_above_the_limit_is_clamped_to_the_limit() {
+    let rig = rig();
+    let l = ConnectorLimits {
+        deadline_ms: 400,
+        fuel: u64::MAX / 2,
+        ..limits()
+    };
+    let host = tools_host_with(&rig, l).await;
+    let started = Instant::now();
+    let err = host
+        .call_tool_with_deadline("slow".into(), json(serde_json::json!({})), Some(600_000))
+        .await
+        .unwrap_err();
+    let took = started.elapsed();
+    assert!(
+        matches!(err, ConnectorCallError::DeadlineExceeded(_)),
+        "{err:?}"
+    );
+    assert!(
+        took < Duration::from_secs(5),
+        "a 600s body deadline must be clamped to the 400ms limit, took {took:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_requested_deadline_below_the_limit_tightens_it() {
+    let rig = rig();
+    let l = ConnectorLimits {
+        deadline_ms: 20_000,
+        fuel: u64::MAX / 2,
+        ..limits()
+    };
+    let host = tools_host_with(&rig, l).await;
+    let started = Instant::now();
+    let err = host
+        .call_tool_with_deadline("slow".into(), json(serde_json::json!({})), Some(300))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ConnectorCallError::DeadlineExceeded(_)),
+        "{err:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "a 300ms body deadline must beat the 20s limit, took {:?}",
+        started.elapsed()
+    );
+}

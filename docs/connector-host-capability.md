@@ -122,6 +122,11 @@ through `tool.invoke`, never a platform-specific host path.
 - **Wire.** `ExportKind::ToolCall` for a digest pinned in the connector registry is served by the overlay
   (`{"ok": <json>}` / `{"tool_error": ...}`, the stage-tools result shape); a plain connector answers
   `EXPORT_MISSING`; an unpinned digest still falls through to the stage registry.
+- **Resource isolation (security review).** Tool calls run on a DEDICATED semaphore (`tool_pool_size` = half the
+  receiver pool, min 1), never the receiver pool, so saturating `tool-provider` traffic cannot starve `on-frame` /
+  heartbeat (excess tool calls get typed `PoolExhausted`). The wire `deadline_ms` is clamped to
+  `min(body.deadline_ms, limits.deadline_ms)` (`clamp_deadline_ms`) -- a caller can tighten, never extend. Regression
+  tests: `saturated_tool_pool_cannot_starve_on_frame_or_heartbeat`, `a_requested_deadline_above_the_limit_is_clamped_*`.
 - **`tool` import.** Linked via the shared `HasExecState` host impl; authority stays with the stage (grants, kind
   matrix, depth). With no stage bridge it answers a typed `target-unavailable`.
 - **Gating / flag.** The executor only exposes the mechanism; nothing in production pins a `connector-tools`

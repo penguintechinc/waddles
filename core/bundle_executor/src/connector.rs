@@ -230,14 +230,29 @@ pub struct CallReply<T> {
 /// `FnOnce` signature cannot express without boxing the future.
 macro_rules! run_export {
     ($host:expr, $export:literal, $guest_err:expr, |$conn:ident, $store:ident| $call:expr) => {{
+        run_export!(
+            $host,
+            $export,
+            $guest_err,
+            pool = receiver,
+            deadline = $host.inner.limits.deadline_ms,
+            |$conn, $store| $call
+        )
+    }};
+    ($host:expr, $export:literal, $guest_err:expr, pool = $pool:ident, deadline = $deadline:expr,
+     |$conn:ident, $store:ident| $call:expr) => {{
         let inner = Arc::clone(&$host.inner);
-        let permit = inner.acquire_slot($export).await?;
+        let deadline_ms: u64 = $deadline;
+        let permit = inner
+            .acquire_slot($export, inner.pool_for(stringify!($pool)))
+            .await?;
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
             let _slot = permit;
             handle.block_on(async move {
                 let started = Instant::now();
-                let (mut store, $conn) = inner.fresh_instance($export, started).await?;
+                let (mut store, $conn) =
+                    inner.fresh_instance($export, started, deadline_ms).await?;
                 let $store = &mut store;
                 let outcome = $call.await;
                 inner.finish($export, started, &store, outcome, $guest_err)
@@ -246,6 +261,21 @@ macro_rules! run_export {
         .await
         .map_err(|e| ConnectorCallError::Internal(format!("guest task failed: {e}")))?
     }};
+}
+
+/// Size of the dedicated tool-provider pool: half the receiver pool, at least
+/// one. A fixed share kept separate from the receiver pool, so saturating tool
+/// calls never consumes a slot `on-frame`/heartbeat needs.
+#[must_use]
+pub fn tool_pool_size(receiver_pool_size: usize) -> usize {
+    (receiver_pool_size / 2).max(1)
+}
+
+/// The effective per-call deadline: a caller-supplied (wire) deadline may only
+/// tighten the connector's own limit, never extend it.
+#[must_use]
+pub fn clamp_deadline_ms(requested_ms: Option<u64>, limit_ms: u64) -> u64 {
+    requested_ms.map_or(limit_ms, |r| r.min(limit_ms)).max(1)
 }
 
 /// An always-pinned connector component, pre-linked once, callable many times
@@ -262,6 +292,9 @@ struct Inner {
     digest: String,
     limits: ConnectorLimits,
     slots: Arc<Semaphore>,
+    /// Separate pool for `tool-provider.call` so tool traffic can never starve
+    /// `receiver` calls (`on-frame`, heartbeat) of slots.
+    tool_slots: Arc<Semaphore>,
     bridge: Option<Arc<HostBridge>>,
     metrics: Arc<ExecutorMetrics>,
 }
@@ -341,6 +374,7 @@ impl ConnectorHost {
                 app_id: manifest.app_id.clone(),
                 digest: manifest.digest.clone(),
                 slots: Arc::new(Semaphore::new(limits.pool_size)),
+                tool_slots: Arc::new(Semaphore::new(tool_pool_size(limits.pool_size))),
                 limits,
                 bridge,
                 metrics: executor_metrics(),
@@ -360,6 +394,7 @@ impl ConnectorHost {
                 digest: i.digest.clone(),
                 limits: i.limits,
                 slots: Arc::clone(&i.slots),
+                tool_slots: Arc::clone(&i.tool_slots),
                 bridge: i.bridge.clone(),
                 metrics,
             }),
@@ -376,6 +411,12 @@ impl ConnectorHost {
     #[must_use]
     pub fn digest(&self) -> &str {
         &self.inner.digest
+    }
+
+    /// Free tool-pool slots right now (test/diagnostic introspection).
+    #[must_use]
+    pub fn available_tool_slots(&self) -> usize {
+        self.inner.tool_slots.available_permits()
     }
 
     /// Free slots right now (test/diagnostic introspection).
@@ -437,6 +478,20 @@ impl ConnectorHost {
         name: String,
         args: Vec<u8>,
     ) -> Result<CallReply<Vec<u8>>, ConnectorCallError> {
+        self.call_tool_with_deadline(name, args, None).await
+    }
+
+    /// [`Self::call_tool`] with a caller-supplied deadline (the wire
+    /// `InvokeBody.deadline_ms`), clamped to `min(requested, limits.deadline_ms)`
+    /// -- a caller can tighten but never extend the connector's own bound. Runs
+    /// on the dedicated tool pool ([`tool_pool_size`]), never the receiver pool.
+    pub async fn call_tool_with_deadline(
+        &self,
+        name: String,
+        args: Vec<u8>,
+        requested_deadline_ms: Option<u64>,
+    ) -> Result<CallReply<Vec<u8>>, ConnectorCallError> {
+        let deadline = clamp_deadline_ms(requested_deadline_ms, self.inner.limits.deadline_ms);
         if matches!(self.inner.pre, ConnectorPreKind::Plain(_)) {
             let err = ConnectorCallError::NoToolProvider;
             self.inner.metrics.record_connector_call(
@@ -452,6 +507,8 @@ impl ConnectorHost {
             self,
             "tool-call",
             ConnectorCallError::Tool,
+            pool = tool,
+            deadline = deadline,
             |conn, store| {
                 async {
                     match &conn {
@@ -495,12 +552,9 @@ impl Inner {
     async fn acquire_slot(
         &self,
         export: &'static str,
+        pool: Arc<Semaphore>,
     ) -> Result<OwnedSemaphorePermit, ConnectorCallError> {
-        let acquired = tokio::time::timeout(
-            self.limits.pool_wait,
-            Arc::clone(&self.slots).acquire_owned(),
-        )
-        .await;
+        let acquired = tokio::time::timeout(self.limits.pool_wait, pool.acquire_owned()).await;
         match acquired {
             Ok(Ok(permit)) => Ok(permit),
             Ok(Err(_closed)) => Err(ConnectorCallError::Internal(
@@ -522,16 +576,27 @@ impl Inner {
         }
     }
 
+    /// The semaphore for a pool name: `tool` is the dedicated tool-provider
+    /// pool, anything else the receiver pool.
+    fn pool_for(&self, pool: &str) -> Arc<Semaphore> {
+        if pool == "tool" {
+            Arc::clone(&self.tool_slots)
+        } else {
+            Arc::clone(&self.slots)
+        }
+    }
+
     /// Builds the bounded `Store`, arms fuel (before instantiation, so a heavy
     /// start function is metered too) and instantiates.
     async fn fresh_instance(
         &self,
         export: &'static str,
         started: Instant,
+        deadline_ms: u64,
     ) -> Result<(Store<ExecState>, ConnectorInstance), ConnectorCallError> {
         let exec_state = ExecState::new(self.bridge.clone(), self.app_id.clone(), 0)
             .with_memory_limit_mb(self.limits.memory_limit_mb);
-        let mut store = new_bounded_store(&self.engine, exec_state, self.limits.deadline_ms);
+        let mut store = new_bounded_store(&self.engine, exec_state, deadline_ms);
         if let Err(e) = store.set_fuel(self.limits.fuel) {
             // Fuel accounting off on an engine `build_engine` always enables it
             // for is a host invariant breach -- never blamed on the guest.

@@ -90,6 +90,16 @@ fn init() {
                 Err(ToolError::NotGranted)
             },
         );
+        // Spins forever; only the host fuel/epoch deadline ends it (saturation +
+        // deadline-clamp regression probes).
+        register_tool(
+            "slow",
+            |_ctx: &ToolContext, _args: Value| -> Result<Value, ToolError> {
+                loop {
+                    std::hint::black_box(());
+                }
+            },
+        );
         register_tool("relay", |_ctx: &ToolContext, args: Value| {
             let target = str_arg(&args, "target")?;
             let tool_name = str_arg(&args, "tool")?;
