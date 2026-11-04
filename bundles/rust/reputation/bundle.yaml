@@ -90,17 +90,16 @@ exported_tools:
 - name: override
   access: write
   risk: dangerous
+  required_scope: community:admin
   input_schema:
     type: object
     properties:
-      actor: *id001
       user: *id001
       absolute_score:
         type: integer
       reason:
         type: string
     required:
-    - actor
     - user
     - absolute_score
     additionalProperties: false

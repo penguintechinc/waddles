@@ -215,7 +215,7 @@ async fn fixture() -> Fixture {
     exec(&su, SHIPPED_DDL).await;
     // Shipped DDL is idempotent: a second application must succeed.
     exec(&su, SHIPPED_DDL).await;
-    // Host-ops DDL (alembic 0069) runs after it, also idempotent.
+    // Host-ops DDL (alembic 0071) runs after it, also idempotent.
     exec(&su, HOST_OPS_DDL).await;
     exec(&su, HOST_OPS_DDL).await;
 

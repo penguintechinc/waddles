@@ -38,7 +38,7 @@ permissions:
       delta_max: 5
       reason_codes: ["game.win", "game.loss", "loyalty.bonus", "admin.adjust"]
   - id: reputation.community.admin
-    justification: "serves the admin-only absolute score override tool; callers are admin-checked by the tool before the host call"
+    justification: "serves the admin-only absolute score override tool; the host enforces required_scope community:admin on the verified actor before dispatch"
   - id: storage.kv
     justification: "persists the per-community delta-policy and tier configuration"
 routes_to: []
@@ -105,17 +105,16 @@ exported_tools:
 - name: override
   access: write
   risk: dangerous
+  required_scope: community:admin
   input_schema:
     type: object
     properties:
-      actor: *id001
       user: *id001
       absolute_score:
         type: integer
       reason:
         type: string
     required:
-    - actor
     - user
     - absolute_score
     additionalProperties: false

@@ -11,12 +11,13 @@
 //! (`win`/`loss`/`loyalty`) and the community's delta policy decides the
 //! points. Writes ride the host's event+ordinal-keyed `adjust-many` /
 //! `override-score` (replay-safe) and require the caller's idempotency key.
-//! `override` is admin-only: the caller-attested `actor` must be in the
-//! community's `admins` kv list (fail-closed when absent or unreadable); the
-//! host separately requires the `reputation.community.admin` grant.
+//! `override` is admin-only: the manifest declares `required_scope:
+//! community:admin` (the HOST refuses before dispatch unless the verified
+//! actor holds it) and the tool re-checks `ToolContext::has_scope` as
+//! defense in depth -- the actor is never read from caller args. The host
+//! separately requires the `reputation.community.admin` grant.
 //! No tool ever logs or returns anything but UUIDs, scores and tier names.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -33,8 +34,6 @@ pub const DEFAULT_LEADERBOARD: u32 = 10;
 pub const MAX_POLICY_DELTA: i32 = 5;
 /// Most tiers a community may configure.
 pub const MAX_TIERS: usize = 16;
-/// Most admins a community may list.
-pub const MAX_ADMINS: usize = 100;
 /// Longest tier name.
 pub const MAX_TIER_NAME: usize = 32;
 /// Longest caller-supplied override reason (host ledger column is 100).
@@ -44,8 +43,8 @@ const DEFAULT_OVERRIDE_REASON: &str = "admin.override";
 pub const KEY_POLICY: &str = "policy";
 /// kv key holding the community's tier ladder JSON.
 pub const KEY_TIERS: &str = "tiers";
-/// kv key holding the community's admin-actor UUID list JSON.
-pub const KEY_ADMINS: &str = "admins";
+/// Scope the verified actor must hold to call `override` (host-enforced too).
+pub const OVERRIDE_SCOPE: &str = "community:admin";
 
 /// One member's score row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,25 +266,6 @@ pub fn tier_for(tiers: &[Tier], score: i64) -> &Tier {
         .unwrap_or(&tiers[0])
 }
 
-/// The community's admin-actor UUIDs: absent -> none (override always denied);
-/// present-but-invalid -> LOUD error.
-pub fn load_admins(cfg: &dyn ConfigStore) -> Result<HashSet<String>, ToolError> {
-    let Some(bytes) = cfg
-        .get(KEY_ADMINS)
-        .map_err(|_| ToolError::TargetUnavailable)?
-    else {
-        return Ok(HashSet::new());
-    };
-    let list: Vec<String> =
-        serde_json::from_slice(&bytes).map_err(|_| invalid("invalid admins config"))?;
-    if list.len() > MAX_ADMINS {
-        return Err(invalid("invalid admins config"));
-    }
-    list.iter()
-        .map(|u| parse_uuid(u, "admins[]").map_err(|_| invalid("invalid admins config")))
-        .collect()
-}
-
 // ---- tools --------------------------------------------------------------
 
 fn entry_json(tiers: &[Tier], e: &Entry) -> Value {
@@ -375,8 +355,8 @@ pub fn adjust(
     Ok(out)
 }
 
-/// `override {actor, user, absolute_score, reason?}` (WRITE, ADMIN) -> `{user,
-/// score, tier}`. The caller-attested `actor` MUST be in the community's `admins`
+/// `override {user, absolute_score, reason?}` (WRITE, ADMIN) -> `{user,
+/// score, tier}`. The HOST-verified actor MUST hold `community:admin`
 /// list, else `forbidden` BEFORE any host call.
 pub fn override_tool(
     host: &dyn RepHost,
@@ -384,9 +364,8 @@ pub fn override_tool(
     ctx: &ToolContext,
     args: Value,
 ) -> Result<Value, ToolError> {
-    only_fields(&args, &["actor", "user", "absolute_score", "reason"])?;
+    only_fields(&args, &["user", "absolute_score", "reason"])?;
     require_key(ctx)?;
-    let actor = uuid_field(&args, "actor")?;
     let user = uuid_field(&args, "user")?;
     let absolute = args
         .get("absolute_score")
@@ -397,7 +376,7 @@ pub fn override_tool(
         Some(Value::String(r)) if valid_reason(r) => r.as_str(),
         Some(_) => return Err(invalid("reason must match [a-z0-9._:-], 1..=100")),
     };
-    if !load_admins(cfg)?.contains(&actor) {
+    if !ctx.has_scope(OVERRIDE_SCOPE) {
         return Err(ToolError::Forbidden);
     }
     let tiers = load_tiers(cfg)?;
@@ -866,44 +845,83 @@ mod tests {
         }
     }
 
+    /// Calls `tool` with a host-verified `__ctx` (actor + scopes) attached.
+    fn call_as(
+        h: &Arc<FakeHost>,
+        c: &Arc<FakeCfg>,
+        tool: &str,
+        mut args: Value,
+        ctx: Value,
+    ) -> Result<Value, ToolError> {
+        args[waddle_sdk::tool::IDEMPOTENCY_ARG] = json!("k");
+        args[waddle_sdk::tool::CTX_ARG] = ctx;
+        build_registry(h.clone(), c.clone())
+            .call(tool, &serde_json::to_vec(&args).unwrap())
+            .map(|b| serde_json::from_slice(&b).unwrap())
+    }
+
     #[test]
     fn override_is_admin_only_and_checked_before_any_host_call() {
         let h = FakeHost::with(&[(U1, 5)]);
-        let args = json!({"actor": ADMIN, "user": U1, "absolute_score": 100});
-        // No admins configured: fail closed.
-        let none = FakeCfg::with(&[]);
-        assert_eq!(
-            call(&h, &none, "override", args.clone(), Some("k")).unwrap_err(),
-            ToolError::Forbidden
-        );
-        // Configured, but the actor is not listed.
-        let other = FakeCfg::with(&[("admins", &format!(r#"["{U2}"]"#))]);
-        assert_eq!(
-            call(&h, &other, "override", args.clone(), Some("k")).unwrap_err(),
-            ToolError::Forbidden
-        );
+        let c = FakeCfg::with(&[]);
+        let args = json!({"user": U1, "absolute_score": 100});
+        // No verified actor, a non-admin actor, and an actor-less scope claim: all forbidden.
+        for ctx in [
+            json!(null),
+            json!({"actor": ADMIN, "scopes": ["community:member", "community:moderate"]}),
+            json!({"actor": null, "scopes": ["community:admin"]}),
+        ] {
+            assert_eq!(
+                call_as(&h, &c, "override", args.clone(), ctx).unwrap_err(),
+                ToolError::Forbidden
+            );
+        }
+        // A caller-supplied `actor` arg is rejected outright (never trusted).
+        let mut spoof = args.clone();
+        spoof["actor"] = json!(ADMIN);
+        assert!(matches!(
+            call_as(
+                &h,
+                &c,
+                "override",
+                spoof,
+                json!({"actor": U2, "scopes": ["community:admin"]})
+            ),
+            Err(ToolError::InvalidArgs(_))
+        ));
         assert!(h.log().is_empty(), "the host was never reached");
-        // Listed admin (case-insensitive UUID).
-        let ok = FakeCfg::with(&[("admins", &format!(r#"["{}"]"#, ADMIN.to_uppercase()))]);
-        let out = call(&h, &ok, "override", args, Some("k")).unwrap();
+        // Verified admin.
+        let out = call_as(
+            &h,
+            &c,
+            "override",
+            args,
+            json!({"actor": ADMIN, "scopes": ["community:member", "community:admin"]}),
+        )
+        .unwrap();
         assert_eq!(out, json!({"user": U1, "score": 100, "tier": "trusted"}));
         assert_eq!(h.log(), vec![format!("override:{U1}:100:admin.override")]);
     }
 
     #[test]
-    fn override_validates_its_arguments_and_a_broken_admins_list_fails_loud() {
+    fn override_validates_its_arguments() {
         let h = FakeHost::with(&[(U1, 5)]);
-        let c = FakeCfg::with(&[("admins", &format!(r#"["{ADMIN}"]"#))]);
-        let base = json!({"actor": ADMIN, "user": U1, "absolute_score": 1});
+        let c = FakeCfg::with(&[]);
+        let admin = json!({"actor": ADMIN, "scopes": ["community:admin"]});
+        let base = json!({"user": U1, "absolute_score": 1});
+        let mut nokey = base.clone();
+        nokey[waddle_sdk::tool::CTX_ARG] = admin.clone();
         assert_eq!(
-            call(&h, &c, "override", base.clone(), None).unwrap_err(),
+            build_registry(h.clone(), c.clone())
+                .call("override", &serde_json::to_vec(&nokey).unwrap())
+                .unwrap_err(),
             ToolError::InvalidArgs("idempotency key required".into())
         );
         for patch in [
             json!({"absolute_score": "x"}),
             json!({"absolute_score": 1.5}),
             json!({"reason": "Bad Reason"}),
-            json!({"actor": "nope"}),
+            json!({"user": "nope"}),
             json!({"extra": 1}),
         ] {
             let mut a = base.clone();
@@ -912,7 +930,7 @@ mod tests {
             }
             assert!(
                 matches!(
-                    call(&h, &c, "override", a, Some("k")),
+                    call_as(&h, &c, "override", a, admin.clone()),
                     Err(ToolError::InvalidArgs(_))
                 ),
                 "{patch}"
@@ -920,15 +938,8 @@ mod tests {
         }
         let mut with_reason = base.clone();
         with_reason["reason"] = json!("admin.correction");
-        call(&h, &c, "override", with_reason, Some("k")).unwrap();
+        call_as(&h, &c, "override", with_reason, admin).unwrap();
         assert!(h.log().last().unwrap().ends_with(":admin.correction"));
-        for bad in ["not json", r#"["nope"]"#] {
-            let c = FakeCfg::with(&[("admins", bad)]);
-            assert_eq!(
-                call(&h, &c, "override", base.clone(), Some("k2")).unwrap_err(),
-                ToolError::InvalidArgs("invalid admins config".into())
-            );
-        }
     }
 
     #[test]

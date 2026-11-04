@@ -8,8 +8,8 @@ host-derived idempotency key. The DDL lives in
 `scripts/db/bundle_reputation_host_ops.sql` (shared with the Rust crate's
 integration test so the shipped and tested schema cannot drift).
 
-Revision ID: 0069_reputation_host_ops
-Revises: 0068_app_catalog_kind
+Revision ID: 0071_reputation_host_ops
+Revises: 0070_identity_view_role
 Create Date: 2026-10-30
 """
 
@@ -19,8 +19,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0069_reputation_host_ops"
-down_revision = "0068_app_catalog_kind"
+revision = "0071_reputation_host_ops"
+down_revision = "0070_identity_view_role"
 branch_labels = None
 depends_on = None
 
