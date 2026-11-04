@@ -56,6 +56,7 @@ use wasmtime::component::Component;
 use wasmtime::{Engine, Store};
 
 use crate::config::CliConfig;
+use crate::engine::connector_tools_world::{ConnectorTools, ConnectorToolsPre};
 use crate::engine::connector_world::{Connector, ConnectorPre};
 use crate::engine::LinkerCache;
 use crate::error::ExecutorError;
@@ -69,6 +70,40 @@ use crate::metrics::{executor_metrics, ExecutorMetrics};
 pub use crate::engine::connector_world::waddle::connector::types::{
     ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
 };
+/// The `tool-provider.call` error a `connector-tools` guest returns (P6a T4).
+pub use crate::engine::stage_tools_world::waddle::bundle::tool::ToolError;
+
+/// A pre-linked connector component: the frozen `connector` world, or the
+/// additive `connector-tools` world (P6a T4: `connector` + `tool` import +
+/// `tool-provider` export). Chosen once at load from the manifest's world.
+#[derive(Clone)]
+enum ConnectorPreKind {
+    Plain(ConnectorPre<ExecState>),
+    Tools(ConnectorToolsPre<ExecState>),
+}
+
+/// One instantiated connector component of either world.
+enum ConnectorInstance {
+    Plain(Connector),
+    Tools(ConnectorTools),
+}
+
+/// Awaits one `receiver` export call on whichever world's generated accessor
+/// the instance carries. Each world generates its own `Guest` struct (the
+/// `with` remap shares the data types, not the export accessor), so the call
+/// is spelled out per arm; argument and return types are the shared ones.
+macro_rules! receiver_call {
+    ($inst:expr, $method:ident, $store:expr $(, $arg:expr)*) => {
+        match $inst {
+            ConnectorInstance::Plain(c) => {
+                c.waddle_connector_receiver().$method($store $(, $arg)*).await
+            }
+            ConnectorInstance::Tools(c) => {
+                c.waddle_connector_receiver().$method($store $(, $arg)*).await
+            }
+        }
+    };
+}
 
 /// Per-call resource bounds for one connector (spec S3.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +144,15 @@ pub enum ConnectorCallError {
     /// The guest returned `result::err(frame-error)`.
     #[error("connector returned a frame-error: {0:?}")]
     Guest(FrameError),
+    /// The guest's `tool-provider.call` returned `result::err(tool-error)`
+    /// (P6a T4). A typed tool refusal, not a sandbox fault.
+    #[error("connector tool call returned a tool-error: {0:?}")]
+    Tool(ToolError),
+    /// `tool-provider.call` on a component that was loaded under the plain
+    /// `connector` world and therefore exports no tools. Fail loud, never a
+    /// silent empty result.
+    #[error("connector exports no tool-provider (loaded under the `connector` world)")]
+    NoToolProvider,
     /// The guest's fuel budget was exhausted (spec S3.5 / Gemini cond. 4).
     #[error("connector call exhausted its fuel budget: {0}")]
     FuelExhausted(String),
@@ -143,6 +187,8 @@ impl ConnectorCallError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Guest(_) => "guest_error",
+            Self::Tool(_) => "tool_error",
+            Self::NoToolProvider => "no_tool_provider",
             Self::FuelExhausted(_) => "fuel_exhausted",
             Self::DeadlineExceeded(_) => "deadline",
             Self::MemoryLimit(_) => "memory_limit",
@@ -183,7 +229,7 @@ pub struct CallReply<T> {
 /// borrows the freshly built `Store` and component instance, which a plain
 /// `FnOnce` signature cannot express without boxing the future.
 macro_rules! run_export {
-    ($host:expr, $export:literal, |$conn:ident, $store:ident| $call:expr) => {{
+    ($host:expr, $export:literal, $guest_err:expr, |$conn:ident, $store:ident| $call:expr) => {{
         let inner = Arc::clone(&$host.inner);
         let permit = inner.acquire_slot($export).await?;
         let handle = tokio::runtime::Handle::current();
@@ -194,7 +240,7 @@ macro_rules! run_export {
                 let (mut store, $conn) = inner.fresh_instance($export, started).await?;
                 let $store = &mut store;
                 let outcome = $call.await;
-                inner.finish($export, started, &store, outcome)
+                inner.finish($export, started, &store, outcome, $guest_err)
             })
         })
         .await
@@ -211,7 +257,7 @@ pub struct ConnectorHost {
 
 struct Inner {
     engine: Engine,
-    pre: ConnectorPre<ExecState>,
+    pre: ConnectorPreKind,
     app_id: String,
     digest: String,
     limits: ConnectorLimits,
@@ -237,9 +283,9 @@ impl ConnectorHost {
         limits: ConnectorLimits,
         bridge: Option<Arc<HostBridge>>,
     ) -> Result<Self, ExecutorError> {
-        if manifest.world != WitWorld::Connector {
+        if !manifest.world.is_connector() {
             return Err(ExecutorError::ConnectorLoad(format!(
-                "{} declares world {:?}, not `connector`",
+                "{} declares world {:?}, not `connector`/`connector-tools`",
                 manifest.app_id, manifest.world
             )));
         }
@@ -270,9 +316,22 @@ impl ConnectorHost {
                 "component does not link against the connector world: {e}"
             ))
         })?;
-        let pre = ConnectorPre::new(instance_pre).map_err(|e| {
-            ExecutorError::ConnectorLoad(format!("component lacks the connector exports: {e}"))
-        })?;
+        let pre = match manifest.world {
+            WitWorld::ConnectorTools => ConnectorToolsPre::new(instance_pre)
+                .map(ConnectorPreKind::Tools)
+                .map_err(|e| {
+                    ExecutorError::ConnectorLoad(format!(
+                        "component lacks the connector-tools exports (receiver/sender/tool-provider): {e}"
+                    ))
+                })?,
+            _ => ConnectorPre::new(instance_pre)
+                .map(ConnectorPreKind::Plain)
+                .map_err(|e| {
+                    ExecutorError::ConnectorLoad(format!(
+                        "component lacks the connector exports: {e}"
+                    ))
+                })?,
+        };
 
         debug!(app_id = %manifest.app_id, pool_size = limits.pool_size, "connector pinned");
         Ok(Self {
@@ -332,10 +391,12 @@ impl ConnectorHost {
         &self,
         ctx: ConnectionCtx,
     ) -> Result<CallReply<HandshakePayload>, ConnectorCallError> {
-        run_export!(self, "on-connect", |conn, store| {
-            conn.waddle_connector_receiver()
-                .call_on_connect(store, &ctx)
-        })
+        run_export!(
+            self,
+            "on-connect",
+            ConnectorCallError::Guest,
+            |conn, store| { async { receiver_call!(&conn, call_on_connect, store, &ctx) } }
+        )
     }
 
     /// `receiver.on-frame`: normalize one raw frame into zero or more events.
@@ -343,10 +404,12 @@ impl ConnectorHost {
         &self,
         frame: RawFrame,
     ) -> Result<CallReply<Vec<NormalizedEvent>>, ConnectorCallError> {
-        run_export!(self, "on-frame", |conn, store| {
-            conn.waddle_connector_receiver()
-                .call_on_frame(store, &frame)
-        })
+        run_export!(
+            self,
+            "on-frame",
+            ConnectorCallError::Guest,
+            |conn, store| { async { receiver_call!(&conn, call_on_frame, store, &frame) } }
+        )
     }
 
     /// `receiver.on-heartbeat-due`: an optional bundle-supplied heartbeat body.
@@ -354,10 +417,58 @@ impl ConnectorHost {
         &self,
         ctx: ConnectionCtx,
     ) -> Result<CallReply<Option<Vec<u8>>>, ConnectorCallError> {
-        run_export!(self, "on-heartbeat-due", |conn, store| {
-            conn.waddle_connector_receiver()
-                .call_on_heartbeat_due(store, &ctx)
-        })
+        run_export!(
+            self,
+            "on-heartbeat-due",
+            ConnectorCallError::Guest,
+            |conn, store| { async { receiver_call!(&conn, call_on_heartbeat_due, store, &ctx) } }
+        )
+    }
+
+    /// `tool-provider.call` (P6a T4): run one of the connector overlay's own
+    /// exported tools (`get_chatters`, `send_chat`, ...). `args` and the
+    /// result are canonical JSON bytes. Fails loud with
+    /// [`ConnectorCallError::NoToolProvider`] on a plain-`connector` component
+    /// (no silent empty result); a guest `tool-error` is
+    /// [`ConnectorCallError::Tool`]. Runs under the same pool slot, fuel
+    /// budget and deadline as every other connector export.
+    pub async fn call_tool(
+        &self,
+        name: String,
+        args: Vec<u8>,
+    ) -> Result<CallReply<Vec<u8>>, ConnectorCallError> {
+        if matches!(self.inner.pre, ConnectorPreKind::Plain(_)) {
+            let err = ConnectorCallError::NoToolProvider;
+            self.inner.metrics.record_connector_call(
+                &self.inner.app_id,
+                "tool-call",
+                err.kind(),
+                Duration::ZERO,
+            );
+            warn!(app_id = %self.inner.app_id, "tool call on a connector with no tool-provider");
+            return Err(err);
+        }
+        run_export!(
+            self,
+            "tool-call",
+            ConnectorCallError::Tool,
+            |conn, store| {
+                async {
+                    match &conn {
+                        ConnectorInstance::Tools(c) => {
+                            c.waddle_bundle_tool_provider()
+                                .call_call(store, &name, &args)
+                                .await
+                        }
+                        // Unreachable: guarded above. Surfaces as a trap-shaped
+                        // host error rather than a panic if it ever is not.
+                        ConnectorInstance::Plain(_) => Err(wasmtime::Error::msg(
+                            "tool-call routed to a plain connector instance",
+                        )),
+                    }
+                }
+            }
+        )
     }
 
     /// `receiver.on-disconnect`: tell the connector the connection ended. Has
@@ -367,14 +478,14 @@ impl ConnectorHost {
         ctx: ConnectionCtx,
         reason: String,
     ) -> Result<CallReply<()>, ConnectorCallError> {
-        run_export!(self, "on-disconnect", |conn, store| {
-            async {
-                conn.waddle_connector_receiver()
-                    .call_on_disconnect(store, &ctx, &reason)
-                    .await
-                    .map(Ok)
+        run_export!(
+            self,
+            "on-disconnect",
+            ConnectorCallError::Guest,
+            |conn, store| {
+                async { receiver_call!(&conn, call_on_disconnect, store, &ctx, &reason).map(Ok) }
             }
-        })
+        )
     }
 }
 
@@ -417,7 +528,7 @@ impl Inner {
         &self,
         export: &'static str,
         started: Instant,
-    ) -> Result<(Store<ExecState>, Connector), ConnectorCallError> {
+    ) -> Result<(Store<ExecState>, ConnectorInstance), ConnectorCallError> {
         let exec_state = ExecState::new(self.bridge.clone(), self.app_id.clone(), 0)
             .with_memory_limit_mb(self.limits.memory_limit_mb);
         let mut store = new_bounded_store(&self.engine, exec_state, self.limits.deadline_ms);
@@ -430,7 +541,17 @@ impl Inner {
             self.record(export, &err, started);
             return Err(err);
         }
-        match self.pre.instantiate_async(&mut store).await {
+        let instantiated = match &self.pre {
+            ConnectorPreKind::Plain(pre) => pre
+                .instantiate_async(&mut store)
+                .await
+                .map(ConnectorInstance::Plain),
+            ConnectorPreKind::Tools(pre) => pre
+                .instantiate_async(&mut store)
+                .await
+                .map(ConnectorInstance::Tools),
+        };
+        match instantiated {
             Ok(conn) => Ok((store, conn)),
             Err(e) => {
                 let err = self.classify(e, &store, true);
@@ -442,12 +563,13 @@ impl Inner {
 
     /// Maps the raw wasmtime outcome of an export call to a typed result,
     /// records it, and reads back the fuel spent.
-    fn finish<T>(
+    fn finish<T, E>(
         &self,
         export: &'static str,
         started: Instant,
         store: &Store<ExecState>,
-        outcome: wasmtime::Result<Result<T, FrameError>>,
+        outcome: wasmtime::Result<Result<T, E>>,
+        guest_err: fn(E) -> ConnectorCallError,
     ) -> Result<CallReply<T>, ConnectorCallError> {
         let result = match outcome {
             Ok(Ok(value)) => {
@@ -459,7 +581,7 @@ impl Inner {
                     fuel_used: self.limits.fuel.saturating_sub(r),
                 })
             }
-            Ok(Err(frame_error)) => Err(ConnectorCallError::Guest(frame_error)),
+            Ok(Err(guest_error)) => Err(guest_err(guest_error)),
             Err(trap) => Err(self.classify(trap, store, false)),
         };
         match &result {

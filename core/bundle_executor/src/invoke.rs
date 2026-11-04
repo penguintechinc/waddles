@@ -1089,6 +1089,11 @@ impl<S: ComponentSource> Executor<S> {
         if body.export.is_connector() {
             return self.connectors.invoke(body).await;
         }
+        // A `tool-call` for a pinned `connector-tools` overlay (P6a T4) rides
+        // the connector registry too: connectors are never in `bundles`.
+        if body.export == ExportKind::ToolCall && self.connectors.contains(&body.digest).await {
+            return self.connectors.invoke(body).await;
+        }
         let (pre, slots, memory_limit_mb, allowed_scopes) = {
             let bundles = self.bundles.read().await;
             let loaded = bundles

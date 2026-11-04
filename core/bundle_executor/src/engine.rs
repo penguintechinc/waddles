@@ -197,6 +197,37 @@ pub mod connector_world {
     });
 }
 
+/// `world connector-tools`'s generated bindings (P6a T4): `connector` plus the
+/// P3b `tool` import and `tool-provider` export. A NEW world -- `connector` is
+/// frozen. Every interface it shares with `connector` / `stage-tools` is
+/// remapped (`with`) onto the existing bindings, so one `Host` impl per
+/// interface on [`ExecState`] serves every world and the guest-call accessors
+/// return the very same `receiver`/`sender`/`tool-provider` types.
+pub mod connector_tools_world {
+    wasmtime::component::bindgen!({
+        path: "../../wit/waddle-connector",
+        world: "connector-tools",
+        imports: { default: async },
+        exports: { default: async },
+        additional_derives: [serde::Serialize, serde::Deserialize],
+        with: {
+            "waddle:connector/types@1.0.0": super::connector_world::waddle::connector::types,
+            "waddle:connector/identity@1.0.0": super::connector_world::waddle::connector::identity,
+            "waddle:connector/receiver@1.0.0":
+                super::connector_world::exports::waddle::connector::receiver,
+            "waddle:connector/sender@1.0.0":
+                super::connector_world::exports::waddle::connector::sender,
+            "waddle:bundle/http@1.0.0": super::connector_world::waddle::bundle::http,
+            "waddle:bundle/log@1.0.0": super::connector_world::waddle::bundle::log,
+            "waddle:bundle/clock@1.0.0": super::connector_world::waddle::bundle::clock,
+            "waddle:bundle/flags@1.0.0": super::connector_world::waddle::bundle::flags,
+            "waddle:bundle/tool@1.0.0": super::stage_tools_world::waddle::bundle::tool,
+            "waddle:bundle/tool-provider@1.0.0":
+                super::stage_tools_world::exports::waddle::bundle::tool_provider,
+        },
+    });
+}
+
 /// Zero-sized marker type satisfying `bindgen!`'s `HasData` bound for the
 /// `connector` world's per-interface `add_to_linker` functions (spec
 /// S3.2.1 gate 2: each of `identity`/`http`/`log`/`clock`/`%flags` is
@@ -377,38 +408,44 @@ pub fn build_linker_for(
             link_stage_v2_imports(&mut linker)?;
             link_stage_tools_imports(&mut linker)?;
         }
-        WitWorld::Connector => {
-            use connector_world::waddle::bundle::{clock, flags, http, log};
-            use connector_world::waddle::connector::identity;
-
-            // Reused `waddle:bundle@1.0.0` interfaces -- always available to
-            // a `connector`-world component, same as every `stage` bundle's
-            // http/log/clock/flags (spec S1's world declaration). `net.http`
-            // host-allowlisting is enforced at the http-call-bridge layer,
-            // not at link time, same as the `stage` world today.
-            http::add_to_linker::<_, HasConnectorExecState>(&mut linker, |s| s)?;
-            log::add_to_linker::<_, HasConnectorExecState>(&mut linker, |s| s)?;
-            clock::add_to_linker::<_, HasConnectorExecState>(&mut linker, |s| s)?;
-            flags::add_to_linker::<_, HasConnectorExecState>(&mut linker, |s| s)?;
-
-            // Gate 2 (spec S3.2.1): `identity.lookup` links only for a
-            // core-namespaced component granted `connector.pii.read`. A
-            // component that does not pass this check never gets `identity`
-            // registered on its `Linker` at all -- not merely a call that
-            // returns `denied` -- so any compiled component that actually
-            // imports `identity.lookup` fails to instantiate.
-            if manifest.may_link_identity() {
-                identity::add_to_linker::<_, HasConnectorExecState>(&mut linker, |s| s)?;
-            }
-
-            // `receiver`/`sender` are the world's EXPORTS (the guest
-            // implements them) -- nothing to link; the executor calls them
-            // post-instantiation via the generated `Connector` accessors,
-            // out of this task's scope (host transport wiring, spec S2).
+        WitWorld::Connector => link_connector_imports(&mut linker, manifest)?,
+        WitWorld::ConnectorTools => {
+            link_connector_imports(&mut linker, manifest)?;
+            // The P3b `tool` import. Linking is reachability, never authority:
+            // the stage gates every `tool.invoke` (grants, kind matrix, depth).
+            link_stage_tools_imports(&mut linker)?;
         }
     }
 
     Ok(linker)
+}
+
+/// Registers the imports shared by the `connector` and `connector-tools`
+/// worlds: the reused `waddle:bundle` `http`/`log`/`clock`/`flags`, and
+/// `identity.lookup` only when [`VerifiedManifest::may_link_identity`] passes
+/// (spec S3.2.1 gate 2). `receiver`/`sender`/`tool-provider` are EXPORTS (the
+/// guest implements them) -- nothing to link.
+fn link_connector_imports(
+    linker: &mut Linker<ExecState>,
+    manifest: &VerifiedManifest,
+) -> Result<(), ExecutorError> {
+    use connector_world::waddle::bundle::{clock, flags, http, log};
+    use connector_world::waddle::connector::identity;
+
+    // `net.http` host-allowlisting is enforced at the http-call-bridge layer,
+    // not at link time, same as the `stage` world today.
+    http::add_to_linker::<_, HasConnectorExecState>(linker, |s| s)?;
+    log::add_to_linker::<_, HasConnectorExecState>(linker, |s| s)?;
+    clock::add_to_linker::<_, HasConnectorExecState>(linker, |s| s)?;
+    flags::add_to_linker::<_, HasConnectorExecState>(linker, |s| s)?;
+
+    // Gate 2: a component that does not pass never gets `identity` registered
+    // at all -- not merely a call that returns `denied` -- so any compiled
+    // component that imports `identity.lookup` fails to instantiate.
+    if manifest.may_link_identity() {
+        identity::add_to_linker::<_, HasConnectorExecState>(linker, |s| s)?;
+    }
+    Ok(())
 }
 
 /// Caches a built [`Linker`] per `(digest, permission-set)` (task
@@ -544,6 +581,21 @@ mod tests {
         let _linker = build_linker_for(&engine, &granted)?;
 
         let ungranted = manifest("sha256:cc", WitWorld::Connector, &[]);
+        let _linker = build_linker_for(&engine, &ungranted)?;
+        Ok(())
+    }
+
+    #[test]
+    fn build_linker_for_connector_tools_world_succeeds_with_and_without_identity_grant(
+    ) -> Result<(), ExecutorError> {
+        let engine = build_engine(&test_config())?;
+        let granted = manifest(
+            "sha256:b1",
+            WitWorld::ConnectorTools,
+            &[crate::manifest::PERM_CONNECTOR_PII_READ],
+        );
+        let _linker = build_linker_for(&engine, &granted)?;
+        let ungranted = manifest("sha256:c1", WitWorld::ConnectorTools, &[]);
         let _linker = build_linker_for(&engine, &ungranted)?;
         Ok(())
     }
