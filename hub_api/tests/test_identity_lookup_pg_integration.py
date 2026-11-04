@@ -653,7 +653,8 @@ async def test_reader_role_cannot_read_raw_handles_or_run_the_lookups(
         conn.close()
     # 0048 added the status/reason columns and the bundle-identity migration appended
     # the two non-PII columns the bundle `identity` capability needs (`tenant_id`,
-    # `is_active_member`); still no handle/name/username/email column.
+    # `is_active_member`) and 0070 appended the opaque closed-enum `role` the stage maps to a
+    # fixed host-side scope set; still no handle/name/username/email column.
     assert columns == {
         "community_id",
         "platform",
@@ -664,6 +665,7 @@ async def test_reader_role_cannot_read_raw_handles_or_run_the_lookups(
         "user_uuid_unavailable_reason",
         "tenant_id",
         "is_active_member",
+        "role",
     }
     assert HANDLE_SECRET not in str(rows) and NAME_SECRET not in str(rows)
 

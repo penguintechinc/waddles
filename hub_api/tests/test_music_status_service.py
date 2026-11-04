@@ -258,7 +258,9 @@ class TestYoutubeHealthCommunitySource:
     ) -> None:
         monkeypatch.setenv("YOUTUBE_API_KEY", "env-fallback-key")
 
-        async def fake_get_decrypted_tokens(_db: Any, community_id: int, provider: str) -> Any:
+        async def fake_get_decrypted_tokens(
+            _db: Any, community_id: int, provider: str, *, tenant_id: Any
+        ) -> Any:
             assert community_id == 42
             assert provider == "youtube"
             return DecryptedTokens(
@@ -290,7 +292,9 @@ class TestYoutubeHealthCommunitySource:
     ) -> None:
         monkeypatch.setenv("YOUTUBE_API_KEY", "env-key")
 
-        async def fake_get_decrypted_tokens(_db: Any, _community_id: int, _provider: str) -> Any:
+        async def fake_get_decrypted_tokens(
+            _db: Any, _community_id: int, _provider: str, *, tenant_id: Any
+        ) -> Any:
             return None
 
         monkeypatch.setattr(youtube_mod, "get_decrypted_tokens", fake_get_decrypted_tokens)
@@ -334,7 +338,9 @@ class TestYoutubeHealthCommunitySource:
         """
         monkeypatch.setenv("YOUTUBE_API_KEY", "env-key")
 
-        async def fake_get_decrypted_tokens(_db: Any, community_id: int, _provider: str) -> Any:
+        async def fake_get_decrypted_tokens(
+            _db: Any, community_id: int, _provider: str, *, tenant_id: Any
+        ) -> Any:
             if community_id == 1:
                 return DecryptedTokens(
                     access_token="community-1-token", refresh_token=None, expires_at=None, scopes=[]
