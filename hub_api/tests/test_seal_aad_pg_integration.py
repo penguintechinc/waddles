@@ -129,7 +129,15 @@ def cr_dal(pg_db: PgTestDatabase) -> Iterator[Any]:
 
 
 def _community(db: PgTestDatabase, name: str) -> int:
-    return int(_sql(db, "INSERT INTO communities (name) VALUES (%s) RETURNING id", (name,))[0][0])
+    """A community owned by its own tenant -- the definer functions refuse a tenant-less one."""
+    tenant = _tenant(db, f"t-{name}-{uuid4().hex[:6]}")
+    return int(
+        _sql(
+            db,
+            "INSERT INTO communities (name, tenant_id) VALUES (%s, %s) RETURNING id",
+            (name, tenant),
+        )[0][0]
+    )
 
 
 def _integration_row(db: PgTestDatabase, community_id: int, provider: str) -> tuple[Any, ...]:
@@ -197,7 +205,7 @@ class TestPlatformIntegrationsAad:
     ) -> None:
         community = _community(pg_db, "c-v1")
         _insert_v1_integration(pg_db, community, "twitch", "v1")
-        tokens = await svc.get_decrypted_tokens(adal, community, "twitch")
+        tokens = await svc.get_decrypted_tokens(adal, community, "twitch", tenant_id=svc.SYSTEM)
         assert tokens is not None
         assert (tokens.access_token, tokens.refresh_token) == ("acc-v1", "ref-v1")
         _, access_ct, _, version = _integration_row(pg_db, community, "twitch")
@@ -225,7 +233,7 @@ class TestPlatformIntegrationsAad:
         # Neither row may return the other community's plaintext -- both fail closed.
         for community in (one, two):
             with pytest.raises(PlatformCredentialCryptoError):
-                await svc.get_decrypted_tokens(adal, community, "twitch")
+                await svc.get_decrypted_tokens(adal, community, "twitch", tenant_id=svc.SYSTEM)
 
     async def test_the_same_ciphertext_does_not_open_under_another_provider(
         self, adal: AsyncDAL, pg_db: PgTestDatabase
@@ -239,7 +247,7 @@ class TestPlatformIntegrationsAad:
             (community,),
         )
         with pytest.raises(PlatformCredentialCryptoError):
-            await svc.get_decrypted_tokens(adal, community, "spotify")
+            await svc.get_decrypted_tokens(adal, community, "spotify", tenant_id=svc.SYSTEM)
         assert access_ct  # the row existed and was examined
 
     async def test_legacy_v0_row_still_opens_then_reseals_on_read(
@@ -247,7 +255,7 @@ class TestPlatformIntegrationsAad:
     ) -> None:
         community = _community(pg_db, "c-legacy")
         _insert_legacy_integration(pg_db, community, "twitch", "legacy")
-        tokens = await svc.get_decrypted_tokens(adal, community, "twitch")
+        tokens = await svc.get_decrypted_tokens(adal, community, "twitch", tenant_id=svc.SYSTEM)
         assert tokens is not None
         assert (tokens.access_token, tokens.refresh_token) == ("acc-legacy", "ref-legacy")
         _, access_ct, refresh_ct, version = _integration_row(pg_db, community, "twitch")
@@ -262,9 +270,9 @@ class TestPlatformIntegrationsAad:
         community = _community(pg_db, "c-legacy-refresh")
         _insert_legacy_integration(pg_db, community, "twitch", "lr")
         await svc.store_refreshed_access_token(
-            adal, community, "twitch", access_token="acc-new", expires_at=None
+            adal, community, "twitch", access_token="acc-new", expires_at=None, tenant_id=svc.SYSTEM
         )
-        tokens = await svc.get_decrypted_tokens(adal, community, "twitch")
+        tokens = await svc.get_decrypted_tokens(adal, community, "twitch", tenant_id=svc.SYSTEM)
         assert tokens is not None
         assert (tokens.access_token, tokens.refresh_token) == ("acc-new", "ref-lr")
         assert _integration_row(pg_db, community, "twitch")[3] == 1
@@ -284,7 +292,7 @@ class TestDowngradeResistance:
         )
 
         # (a) the real ciphertext still opens (via the AAD) ...
-        tokens = await svc.get_decrypted_tokens(adal, one, "twitch")
+        tokens = await svc.get_decrypted_tokens(adal, one, "twitch", tenant_id=svc.SYSTEM)
         assert tokens is not None and tokens.access_token == "acc-one"
         # ... and the lazy reseal did NOT silently re-bless the flipped row
         assert _integration_row(pg_db, one, "twitch")[3] == 0
@@ -297,21 +305,23 @@ class TestDowngradeResistance:
             (stolen, one),
         )
         with pytest.raises(PlatformCredentialCryptoError):
-            await svc.get_decrypted_tokens(adal, one, "twitch")
+            await svc.get_decrypted_tokens(adal, one, "twitch", tenant_id=svc.SYSTEM)
 
     async def test_a_substituted_unbound_ciphertext_is_refused_once_the_flag_is_set(
         self, adal: AsyncDAL, pg_db: PgTestDatabase, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         community = _community(pg_db, "c-flag")
         _insert_legacy_integration(pg_db, community, "twitch", "legacy")
-        tokens = await svc.get_decrypted_tokens(adal, community, "twitch")  # window: still opens
+        tokens = await svc.get_decrypted_tokens(
+            adal, community, "twitch", tenant_id=svc.SYSTEM
+        )  # window: still opens
         assert tokens is not None and tokens.access_token == "acc-legacy"
 
         other = _community(pg_db, "c-flag-2")
         _insert_legacy_integration(pg_db, other, "twitch", "legacy2")
         monkeypatch.setenv("CONNECTION_SEAL_REFUSE_LEGACY", "1")
         with pytest.raises(PlatformCredentialCryptoError):  # true legacy v0 row now fails closed
-            await svc.get_decrypted_tokens(adal, other, "twitch")
+            await svc.get_decrypted_tokens(adal, other, "twitch", tenant_id=svc.SYSTEM)
         assert _integration_row(pg_db, other, "twitch")[3] == 0  # and was left untouched
 
     async def test_refresh_stamp_seals_a_plaintext_refresh_token(
@@ -326,9 +336,9 @@ class TestDowngradeResistance:
             (community,),
         )
         await svc.store_refreshed_access_token(
-            adal, community, "twitch", access_token="acc-new", expires_at=None
+            adal, community, "twitch", access_token="acc-new", expires_at=None, tenant_id=svc.SYSTEM
         )
-        tokens = await svc.get_decrypted_tokens(adal, community, "twitch")
+        tokens = await svc.get_decrypted_tokens(adal, community, "twitch", tenant_id=svc.SYSTEM)
         assert tokens is not None
         assert (tokens.access_token, tokens.refresh_token) == ("acc-new", "plain-ref")
         _, _, refresh_ct, version = _integration_row(pg_db, community, "twitch")

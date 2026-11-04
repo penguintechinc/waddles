@@ -22,7 +22,7 @@ from penguin_dal.exceptions import TableNotFoundError
 from pydal import DAL
 
 from services import sync_worker_dal as swd
-from services.community_connections import get_decrypted_tokens
+from services.community_connections import SYSTEM, get_decrypted_tokens
 from services.schema import bind_platform_tables
 
 
@@ -117,14 +117,17 @@ class TestOpenWorkerDal:
         seed_twitch_connection(fixture_dal, community_id, "tok-real")
         url = f"sqlite://{tmp_path / 'bar_citizen_test.db'}"
         with swd.open_worker_dal(url) as async_dal:
-            tokens = await get_decrypted_tokens(async_dal, community_id, "twitch")
+            tokens = await get_decrypted_tokens(async_dal, community_id, "twitch", tenant_id=SYSTEM)
             assert tokens is not None and tokens.access_token == "tok-real"  # noqa: S105
-            assert await get_decrypted_tokens(async_dal, community_id, "discord") is None
+            assert (
+                await get_decrypted_tokens(async_dal, community_id, "discord", tenant_id=SYSTEM)
+                is None
+            )
 
     async def test_token_lookup_rejects_a_penguin_dal_asyncdb(self) -> None:
         """`get_decrypted_tokens` needs the flask_core `AsyncDAL` -- an `AsyncDB` is the old bug."""
         with pytest.raises(TableNotFoundError, match="Table 'dal' not found"):
-            await get_decrypted_tokens(AsyncDBShapedDouble(), 1, "twitch")
+            await get_decrypted_tokens(AsyncDBShapedDouble(), 1, "twitch", tenant_id=SYSTEM)
 
     def test_error_rolls_back_uncommitted_work_instead_of_committing_it(
         self, bar_citizen_db: Any, tmp_path: Any
