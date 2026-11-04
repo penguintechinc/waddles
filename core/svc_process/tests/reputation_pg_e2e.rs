@@ -42,6 +42,8 @@ const APP_ID: &str = "waddles.core.test-reputation";
 const TENANT: i32 = 1;
 const COMMUNITY: i32 = 10;
 const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_store.sql");
+/// P5 host-ops DDL (alembic 0071): ledger kind/idempotency columns + score clamp the store now writes.
+const HOST_OPS_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_host_ops.sql");
 
 struct World {
     _container: ContainerAsync<GenericImage>,
@@ -141,6 +143,7 @@ async fn world_with_members(extra_members: usize) -> World {
     )
     .await;
     exec(&su, SHIPPED_DDL).await;
+    exec(&su, HOST_OPS_DDL).await;
     let mut members = Vec::new();
     for _ in 0..=extra_members {
         let m = Uuid::new_v4();
