@@ -118,12 +118,18 @@ def fake_host(monkeypatch: pytest.MonkeyPatch):
     )
     log_mod = types.SimpleNamespace(
         Level={"ERROR": "ERROR", "WARN": "WARN", "INFO": "INFO", "DEBUG": "DEBUG"},
-        write=lambda lvl, msg, fields_json: log_calls.append((lvl, msg, json.loads(fields_json))),
+        write=lambda lvl, msg, fields_json: log_calls.append(
+            (lvl, msg, json.loads(fields_json))
+        ),
     )
     fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(kv=fake_kv, relay=relay_mod, log=log_mod)  # type: ignore[attr-defined]
+    fake_wit_world.imports = types.SimpleNamespace(
+        kv=fake_kv, relay=relay_mod, log=log_mod
+    )  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-    return types.SimpleNamespace(kv=fake_kv, relay_calls=relay_calls, log_calls=log_calls)
+    return types.SimpleNamespace(
+        kv=fake_kv, relay_calls=relay_calls, log_calls=log_calls
+    )
 
 
 def _event(
@@ -233,7 +239,9 @@ _FORMING_MENTION_RE = re.compile(
 def _assert_no_mention(text: str) -> None:
     view = _without_live(text).replace("\t", "").replace("\n", "").replace("\r", "")
     match = _FORMING_MENTION_RE.search(view)
-    assert match is None, f"mention-forming markup survived: {match.group(0)!r} in {text!r}"
+    assert match is None, (
+        f"mention-forming markup survived: {match.group(0)!r} in {text!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -241,15 +249,23 @@ def _assert_no_mention(text: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("text", ["welcome", "", "cc add x y", "  welcome !cc", "?welcome"])
-def test_text_without_leading_bang_is_ignored_with_zero_kv_ops(text: str, fake_host) -> None:
+@pytest.mark.parametrize(
+    "text", ["welcome", "", "cc add x y", "  welcome !cc", "?welcome"]
+)
+def test_text_without_leading_bang_is_ignored_with_zero_kv_ops(
+    text: str, fake_host
+) -> None:
     assert _run(transform(_event(text))) is None
     assert fake_host.kv.calls == []
 
 
 def test_non_chat_payload_is_ignored(fake_host) -> None:
     event = PlatformEvent(
-        platform="twitch", event_type="channel.follow", actor=None, payload={}, occurred_at=""
+        platform="twitch",
+        event_type="channel.follow",
+        actor=None,
+        payload={},
+        occurred_at="",
     )
     assert _run(transform(event)) is None
     assert fake_host.kv.calls == []
@@ -260,8 +276,12 @@ def test_unknown_bang_token_costs_exactly_one_get(fake_host) -> None:
     assert fake_host.kv.calls == [("get", (f"{CMD_KEY_PREFIX}nothingstoredhere",))]
 
 
-@pytest.mark.parametrize("token", ["!", "!!x", "!foo:bar", "!x" + "y" * 40, "!-lead", "!UP:case"])
-def test_tokens_that_cannot_be_a_command_name_cost_zero_kv_ops(token: str, fake_host) -> None:
+@pytest.mark.parametrize(
+    "token", ["!", "!!x", "!foo:bar", "!x" + "y" * 40, "!-lead", "!UP:case"]
+)
+def test_tokens_that_cannot_be_a_command_name_cost_zero_kv_ops(
+    token: str, fake_host
+) -> None:
     assert _run(transform(_event(token))) is None
     assert fake_host.kv.calls == []
 
@@ -299,8 +319,12 @@ def test_bare_and_help_return_usage_and_variables(text: str, fake_host) -> None:
     assert "$(user)" in reply and "$(random <min> <max>)" in reply
 
 
-@pytest.mark.parametrize("text", ["!cc bogus", "!cc enable x", "!cc sub a b", "!cc reset a"])
-def test_unknown_subcommand_replies_with_usage_never_echoing_input(text: str, fake_host) -> None:
+@pytest.mark.parametrize(
+    "text", ["!cc bogus", "!cc enable x", "!cc sub a b", "!cc reset a"]
+)
+def test_unknown_subcommand_replies_with_usage_never_echoing_input(
+    text: str, fake_host
+) -> None:
     reply = _say(text, is_mod=True)
     assert reply.startswith("Usage: !cc add")
     assert "bogus" not in reply
@@ -314,7 +338,10 @@ def test_add_then_invoke_roundtrip(fake_host) -> None:
 
 
 def test_management_alias_customcommand_and_bang_name_case_folding(fake_host) -> None:
-    assert _admin("!customcommand add !WeLCome Hi") == "Added !welcome. Try it with !welcome"
+    assert (
+        _admin("!customcommand add !WeLCome Hi")
+        == "Added !welcome. Try it with !welcome"
+    )
     assert _say("!WELCOME") == "Hi"
 
 
@@ -327,7 +354,9 @@ def test_edit_spellings_replace_the_response(verb: str, fake_host) -> None:
 
 
 @pytest.mark.parametrize("verb", ["del", "delete", "remove", "DEL"])
-def test_delete_spellings_remove_command_counter_and_index(verb: str, fake_host) -> None:
+def test_delete_spellings_remove_command_counter_and_index(
+    verb: str, fake_host
+) -> None:
     _admin("!cc add welcome $(count)")
     _say("!welcome")
     assert (USES_KEY_PREFIX + "welcome") in fake_host.kv.store
@@ -350,7 +379,9 @@ def test_edit_and_delete_of_a_missing_command_say_so(fake_host) -> None:
 
 
 def test_edit_self_heals_an_index_entry_lost_to_a_partial_failure(fake_host) -> None:
-    fake_host.kv.store[CMD_KEY_PREFIX + "ghost"] = b"boo"  # command present, index entry missing
+    fake_host.kv.store[CMD_KEY_PREFIX + "ghost"] = (
+        b"boo"  # command present, index entry missing
+    )
     assert _admin("!cc edit ghost boo2") == "Updated !ghost."
     assert json.loads(fake_host.kv.store[NAMES_KEY]) == ["ghost"]
     # and delete is idempotent over the same half-state
@@ -427,19 +458,27 @@ def test_add_name_validation(name: str, reason: str | None, fake_host) -> None:
 
 
 def test_reserved_names_cover_every_bundle_command_in_the_repo() -> None:
-    """A custom command named like a real command would reply on top of it -- keep the list fresh."""
+    """A custom command named like a real command would reply on top of it -- keep the list
+    fresh."""
     bundles_root = Path(__file__).resolve().parents[3]
     wanted: set[str] = set()
     for manifest in bundles_root.glob("*/*/bundle.yaml"):
         wanted.add(manifest.parent.name.lower())
-        for match in re.finditer(r"command_prefix:\s*\[([^\]]*)\]", manifest.read_text()):
+        for match in re.finditer(
+            r"command_prefix:\s*\[([^\]]*)\]", manifest.read_text()
+        ):
             wanted.update(
-                p.strip().strip("\"'").lstrip("!").lower() for p in match.group(1).split(",")
+                p.strip().strip("\"'").lstrip("!").lower()
+                for p in match.group(1).split(",")
             )
     wanted.discard("")
-    assert len(wanted) > 50, "scanned too few bundle manifests -- the repo-root path is wrong"
+    assert len(wanted) > 50, (
+        "scanned too few bundle manifests -- the repo-root path is wrong"
+    )
     missing = sorted(wanted - RESERVED_NAMES)
-    assert not missing, f"add these bundle commands to customcommand's RESERVED_NAMES: {missing}"
+    assert not missing, (
+        f"add these bundle commands to customcommand's RESERVED_NAMES: {missing}"
+    )
 
 
 def test_every_reserved_name_is_a_legal_charset_name() -> None:
@@ -491,15 +530,17 @@ def test_add_edit_with_no_response_asks_for_one(fake_host) -> None:
 
 
 def test_five_variables_are_allowed(fake_host) -> None:
-    assert _admin("!cc add many $(user) $(target) $(count) $(random 1 2) $(touser)").startswith(
-        "Added"
-    )
+    assert _admin(
+        "!cc add many $(user) $(target) $(count) $(random 1 2) $(touser)"
+    ).startswith("Added")
 
 
 def test_per_community_command_cap(fake_host) -> None:
     names = [f"c{i}" for i in range(MAX_COMMANDS)]
     fake_host.kv.store[NAMES_KEY] = json.dumps(names).encode()
-    assert f"maximum of {MAX_COMMANDS} custom commands" in _admin("!cc add overflow text")
+    assert f"maximum of {MAX_COMMANDS} custom commands" in _admin(
+        "!cc add overflow text"
+    )
     assert CMD_KEY_PREFIX + "overflow" not in fake_host.kv.store
     # editing/deleting at the cap still works
     fake_host.kv.store[CMD_KEY_PREFIX + "c0"] = b"x"
@@ -530,13 +571,17 @@ def test_user_variable_without_an_actor_falls_back_to_someone(actor, fake_host) 
 
 
 @pytest.mark.parametrize("var", ["$(target)", "$(touser)", "$(TARGET)"])
-def test_target_variable_is_the_first_mention_in_the_invocation(var: str, fake_host) -> None:
+def test_target_variable_is_the_first_mention_in_the_invocation(
+    var: str, fake_host
+) -> None:
     _admin("!cc add cuddle " + var + " gets a hug from $(user)")
     reply = _say(f"!cuddle some words {TARGET} and {{user:second}}")
     assert reply == f"{TARGET} gets a hug from {ACTOR}"
 
 
-def test_target_variable_falls_back_to_first_word_then_to_the_invoker(fake_host) -> None:
+def test_target_variable_falls_back_to_first_word_then_to_the_invoker(
+    fake_host,
+) -> None:
     _admin("!cc add cuddle $(target) is hugged")
     assert _say("!cuddle  bob   alice") == "bob is hugged"
     assert _say("!cuddle") == f"{ACTOR} is hugged"
@@ -624,9 +669,13 @@ def test_running_a_command_costs_two_kv_ops(fake_host) -> None:
         "<!here> go",
     ],
 )
-def test_stored_mass_mention_markup_is_defanged_on_output(stored: str, fake_host) -> None:
+def test_stored_mass_mention_markup_is_defanged_on_output(
+    stored: str, fake_host
+) -> None:
     _admin(f"!cc add shout {stored}")
-    assert fake_host.kv.store[CMD_KEY_PREFIX + "shout"] == stored.encode()  # stored verbatim
+    assert (
+        fake_host.kv.store[CMD_KEY_PREFIX + "shout"] == stored.encode()
+    )  # stored verbatim
     reply = _say("!shout")
     assert ZWSP in reply
     _assert_no_mention(reply)
@@ -657,15 +706,21 @@ def test_a_stored_token_equal_to_the_invokers_own_is_still_escaped(fake_host) ->
 def test_mod_typed_braces_arrive_host_escaped_and_render_as_typed(fake_host) -> None:
     # The host escapes typed braces on the way in: the stored text already holds `\{`/`\}`.
     _admin("!cc add braces use \\{user:x\\} literally")
-    assert _say("!braces") == "use \\{user:x\\} literally"  # detokenizer shows `{user:x}`
+    assert (
+        _say("!braces") == "use \\{user:x\\} literally"
+    )  # detokenizer shows `{user:x}`
 
 
-def test_trailing_backslash_cannot_neutralise_the_adjacent_live_mention(fake_host) -> None:
+def test_trailing_backslash_cannot_neutralise_the_adjacent_live_mention(
+    fake_host,
+) -> None:
     _admin("!cc add bs path\\$(user)")
     reply = _say("!bs", actor=ACTOR)
     assert _live_tokens(reply) == [ACTOR_TOKEN]
     prefix = reply.split("{user:")[0]
-    assert (len(prefix) - len(prefix.rstrip("\\"))) % 2 == 0  # even backslash run: not an escape
+    assert (
+        len(prefix) - len(prefix.rstrip("\\"))
+    ) % 2 == 0  # even backslash run: not an escape
 
 
 def test_plain_actor_handle_cannot_forge_a_mention_or_token(fake_host) -> None:
@@ -678,7 +733,15 @@ def test_plain_actor_handle_cannot_forge_a_mention_or_token(fake_host) -> None:
 
 def test_plain_target_word_cannot_forge_a_mention_or_token(fake_host) -> None:
     _admin("!cc add greet welcome $(target)")
-    for hostile in ("@everyone", "@here", "<@123>", "<#9>", "<!here>", "{user:a b}", "{user:}"):
+    for hostile in (
+        "@everyone",
+        "@here",
+        "<@123>",
+        "<#9>",
+        "<!here>",
+        "{user:a b}",
+        "{user:}",
+    ):
         reply = _say(f"!greet {hostile}")
         assert _live_tokens(reply) == []
         _assert_no_mention(reply)
@@ -691,15 +754,21 @@ def test_host_escaped_typed_token_in_the_arguments_stays_literal(fake_host) -> N
     assert reply == "welcome \\{user:victim\\}"
 
 
-@pytest.mark.parametrize("lead", ["/ban", ".timeout", "!quote", ZWSP + "/ban", NUL + "!x"])
-def test_substituted_value_cannot_make_the_reply_lead_with_a_command(lead: str, fake_host) -> None:
+@pytest.mark.parametrize(
+    "lead", ["/ban", ".timeout", "!quote", ZWSP + "/ban", NUL + "!x"]
+)
+def test_substituted_value_cannot_make_the_reply_lead_with_a_command(
+    lead: str, fake_host
+) -> None:
     _admin("!cc add parrot $(target) is cool")
     reply = _say(f"!parrot {lead}")
     assert reply.startswith(SAFE_LEAD)
     assert reply.endswith(" is cool")
 
 
-def test_leading_command_guard_is_idempotent_and_leaves_safe_text_alone(fake_host) -> None:
+def test_leading_command_guard_is_idempotent_and_leaves_safe_text_alone(
+    fake_host,
+) -> None:
     assert app.guard_leading_command("welcome") == "welcome"
     assert app.guard_leading_command(" /x") == SAFE_LEAD + " /x"
     guarded = app.guard_leading_command("/ban")
@@ -720,7 +789,9 @@ def test_control_characters_in_the_arguments_are_stripped(fake_host) -> None:
     assert reply == "abcd"
 
 
-def test_end_to_end_fuzz_never_leaks_a_forged_mention_or_foreign_token(fake_host) -> None:
+def test_end_to_end_fuzz_never_leaks_a_forged_mention_or_foreign_token(
+    fake_host,
+) -> None:
     rng = random.Random(20261022)  # noqa: S311 - deterministic test fuzz, not security
     atoms = [
         "@everyone",
@@ -759,10 +830,14 @@ def test_end_to_end_fuzz_never_leaks_a_forged_mention_or_foreign_token(fake_host
     ]
     rendered = live_seen = guarded = 0
     for case in range(400):
-        body = "".join(rng.choice(atoms) for _ in range(rng.randint(1, 9))).strip() or "x"
+        body = (
+            "".join(rng.choice(atoms) for _ in range(rng.randint(1, 9))).strip() or "x"
+        )
         name = f"f{case}"
         fake_host.kv.store.pop(NAMES_KEY, None)
-        _seed(fake_host, name, body)  # kv-seeded: bypasses the add-time rules on purpose
+        _seed(
+            fake_host, name, body
+        )  # kv-seeded: bypasses the add-time rules on purpose
         arg_bits = "".join(rng.choice(atoms) for _ in range(rng.randint(0, 5)))
         actor = rng.choice([ACTOR, "rawhandle", "@everyone", "{user:evil}", None])
         result = _run(transform(_event(f"!{name} {arg_bits}".strip(), actor=actor)))
@@ -834,7 +909,10 @@ def test_mutation_lock_is_claimed_and_released(fake_host) -> None:
 
 def test_a_concurrent_mutation_is_told_to_retry_and_changes_nothing(fake_host) -> None:
     fake_host.kv.store[LOCK_KEY] = b"1"  # another moderator holds the claim
-    assert _admin("!cc add welcome hi") == "Another change is in progress - please try again."
+    assert (
+        _admin("!cc add welcome hi")
+        == "Another change is in progress - please try again."
+    )
     assert NAMES_KEY not in fake_host.kv.store
     assert CMD_KEY_PREFIX + "welcome" not in fake_host.kv.store
     # the holder's lock is untouched by the loser (it is not ours to delete)
@@ -902,7 +980,9 @@ def test_corrupt_stored_command_fails_loud_without_counting_a_run(fake_host) -> 
     assert USES_KEY_PREFIX + "bad" not in fake_host.kv.store
 
 
-def test_logs_and_keys_never_carry_names_responses_arguments_or_actors(fake_host) -> None:
+def test_logs_and_keys_never_carry_names_responses_arguments_or_actors(
+    fake_host,
+) -> None:
     secret_name, secret_text, secret_arg, secret_actor = (
         "zzname",
         "topsecretresponse",
@@ -964,7 +1044,11 @@ def _envelope(payload: dict, platform: str = "twitch") -> StageEnvelope:
 @pytest.mark.parametrize("platform", ["twitch", "discord"])
 def test_dispatch_relays_the_finalised_text(platform: str, fake_host) -> None:
     result = _run(
-        dispatch(_envelope({"channel_id": "c1", "text": "greet"}, platform), {}, http_client=None)
+        dispatch(
+            _envelope({"channel_id": "c1", "text": "greet"}, platform),
+            {},
+            http_client=None,
+        )
     )
     assert fake_host.relay_calls == [(platform, {"channel": "c1", "text": "greet"})]
     assert (result.transport, result.detail, result.sub_type, result.http_status) == (
@@ -984,7 +1068,9 @@ def test_dispatch_relays_the_finalised_text(platform: str, fake_host) -> None:
         {"channel_id": "c1", "text": 5},
     ],
 )
-def test_dispatch_rejects_a_payload_missing_channel_or_text(payload: dict, fake_host) -> None:
+def test_dispatch_rejects_a_payload_missing_channel_or_text(
+    payload: dict, fake_host
+) -> None:
     with pytest.raises(ValueError):
         _run(dispatch(_envelope(payload), {}, http_client=None))
     assert fake_host.relay_calls == []
@@ -1000,7 +1086,9 @@ def test_interior_whitespace_in_the_response_is_preserved_and_tabs_separate_word
     assert _admin("!cc edit spaced" + chr(9) + "x") == "Updated !spaced."
 
 
-def test_an_oversized_or_odd_actor_token_is_not_treated_as_host_minted(fake_host) -> None:
+def test_an_oversized_or_odd_actor_token_is_not_treated_as_host_minted(
+    fake_host,
+) -> None:
     _admin("!cc add greet $(user)")
     assert _live_tokens(_say("!greet", actor="{user:" + "a" * 129 + "}")) == []
     assert _live_tokens(_say("!greet", actor="{user:tok:1.a-b_c}")) == ["tok:1.a-b_c"]

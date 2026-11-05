@@ -284,7 +284,8 @@ def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
     assert out is not None
 
 
-# -- stage split: the leaderboard is read in transform (process stage), relay only in dispatch ------
+# -- stage split: the leaderboard is read in transform (process stage), relay only in dispatch
+# ------
 
 
 def test_dispatch_makes_no_economy_call(host: Host) -> None:

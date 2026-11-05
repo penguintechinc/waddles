@@ -1,4 +1,5 @@
-"""`!emojify <text>` -> sprinkles a relevant emoji after matching words (keyword map, fallback sparkle).
+"""`!emojify <text>` -> sprinkles a relevant emoji after matching words (keyword map, fallback
+sparkle).
 
 Pure, deterministic text transform: relay only, no kv/db, no egress, no AI. `transform()` matches
 the command and builds the reply, `dispatch()` is a pure relay (same split as `echo`).

@@ -140,7 +140,8 @@ def test_no_kv_import() -> None:
 
 # hardening: activation-only
 def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
-    """Activation-gated only: an OFF `waddles.command-affirmation` flag must not drop the command."""
+    """Activation-gated only: an OFF `waddles.command-affirmation` flag must not drop the
+    command."""
     host.flag = False
     out = _run(transform(_event("!affirmation")))
     assert out is not None

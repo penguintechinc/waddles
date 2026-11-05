@@ -19,7 +19,9 @@ def _run(coro):
 
 def _event(text, *, channel_id="12345", platform="twitch"):
     return PlatformEvent(
-        platform=platform, event_type="chat.message", actor="viewer-1",
+        platform=platform,
+        event_type="chat.message",
+        actor="viewer-1",
         payload={"text": text, "channel_id": channel_id},
         occurred_at="2026-10-21T00:00:00.000Z",
     )
@@ -54,20 +56,27 @@ def _text(text, **kw):
 
 def _envelope(platform="twitch", text="reply", channel_id="12345"):
     return StageEnvelope(
-        tenant="tenant-1", community=None, app_id="waddles.core.example.numberfact", stage="action",
+        tenant="tenant-1",
+        community=None,
+        app_id="waddles.core.example.numberfact",
+        stage="action",
         event=_event(text, channel_id=channel_id, platform=platform),
         ts="2026-10-21T00:00:00.000Z",
     )
 
 
-@pytest.mark.parametrize("text", ["!numberfacting", "numberfact", "hello", "", "!other"])
+@pytest.mark.parametrize(
+    "text", ["!numberfacting", "numberfact", "hello", "", "!other"]
+)
 def test_non_matching_is_ignored_without_flag_lookup(host, text):
     assert _text(text) is None
     assert host.flag_keys == []
 
 
 def test_non_text_payload_ignored(host):
-    ev = PlatformEvent(platform="twitch", event_type="x", actor=None, payload={}, occurred_at="")
+    ev = PlatformEvent(
+        platform="twitch", event_type="x", actor=None, payload={}, occurred_at=""
+    )
     assert _run(transform(ev)) is None
 
 
@@ -105,10 +114,16 @@ def test_given_number_is_deterministic(host):
     assert _text("!numberfact 1234567") == _text("!numberfact 1234567")
 
 
-@pytest.mark.parametrize("n,needle", [
-    (97, "prime"), (49, "perfect square (7 x 7)"), (15, "composite odd"),
-    (18, "composite even"), (-5, "negative"),
-])
+@pytest.mark.parametrize(
+    "n,needle",
+    [
+        (97, "prime"),
+        (49, "perfect square (7 x 7)"),
+        (15, "composite odd"),
+        (18, "composite even"),
+        (-5, "negative"),
+    ],
+)
 def test_computed_property_facts(host, n, needle):
     assert needle in app.fact_for(n)
     assert _text(f"!numberfact {n}") == app.fact_for(n)
@@ -116,8 +131,11 @@ def test_computed_property_facts(host, n, needle):
 
 def test_bare_is_random_curated_and_seedable(host):
     import random
+
     assert _text("!numberfact") in set(app.FACTS.values())
-    assert app.build_reply(None, rng=random.Random(3)) == app.build_reply(None, rng=random.Random(3))
+    assert app.build_reply(None, rng=random.Random(3)) == app.build_reply(
+        None, rng=random.Random(3)
+    )
 
 
 @pytest.mark.parametrize("arg", ["abc", "1.5", "--3", "+", "\u0661", "list", "add"])
@@ -130,7 +148,15 @@ def test_huge_number_rejected(host):
 
 
 def test_prime_helper_edges():
-    assert [app._is_prime(i) for i in (0, 1, 2, 3, 4, 9, 11)] == [False, False, True, True, False, False, True]
+    assert [app._is_prime(i) for i in (0, 1, 2, 3, 4, 9, 11)] == [
+        False,
+        False,
+        True,
+        True,
+        False,
+        False,
+        True,
+    ]
 
 
 # hardening: activation-only
