@@ -61,9 +61,10 @@ SDK_SRC = REPO_ROOT / "sdk" / "waddle-sdk" / "src"
 WIT_WORLD_DIR = REPO_ROOT / "wit" / "waddle-bundle"
 WIT_WORLD_STAGE = "stage"
 WIT_WORLD_STAGE_NEXT = "stage-next"
+WIT_WORLD_STAGE_NEXT_TOOLS = "stage-next-tools"
 #: The only worlds a catalog row may name (`wit_world`); `stage-v2` is deliberately absent --
 #: no Python bundle is built against the numeric-scope world yet.
-VALID_WIT_WORLDS = frozenset({WIT_WORLD_STAGE, WIT_WORLD_STAGE_NEXT})
+VALID_WIT_WORLDS = frozenset({WIT_WORLD_STAGE, WIT_WORLD_STAGE_NEXT, WIT_WORLD_STAGE_NEXT_TOOLS})
 #: Permission-id prefixes whose host import exists ONLY in `world stage-next`
 #: (`wit/waddle-bundle/stage.wit`: `economy`, `ai`, `identity`, `reputation`, `overlay`,
 #: `streaming-lifecycle`). A manifest declaring any of them needs a stage-next build.
@@ -113,6 +114,8 @@ def _permission_ids(manifest: dict[str, Any]) -> list[str]:
 
 def required_wit_world(permission_ids: list[str]) -> str:
     """Return the minimum WIT world a bundle declaring `permission_ids` must be built against."""
+    if any(pid.startswith("tool.call:") for pid in permission_ids):
+        return WIT_WORLD_STAGE_NEXT_TOOLS
     if any(pid.startswith(STAGE_NEXT_PERMISSION_PREFIXES) for pid in permission_ids):
         return WIT_WORLD_STAGE_NEXT
     return WIT_WORLD_STAGE
@@ -131,7 +134,10 @@ def resolve_wit_world(app_id: str, declared: object, permission_ids: list[str]) 
             f"{app_id}: catalog field wit_world must be one of {sorted(VALID_WIT_WORLDS)}, "
             f"got {world!r}"
         )
-    if required_wit_world(permission_ids) == WIT_WORLD_STAGE_NEXT and world != WIT_WORLD_STAGE_NEXT:
+    needed = required_wit_world(permission_ids)
+    if needed == WIT_WORLD_STAGE_NEXT_TOOLS and world != WIT_WORLD_STAGE_NEXT_TOOLS:
+        raise BuildError(f"{app_id}: tool.call permissions require wit_world={WIT_WORLD_STAGE_NEXT_TOOLS!r}")
+    if needed == WIT_WORLD_STAGE_NEXT and world not in {WIT_WORLD_STAGE_NEXT, WIT_WORLD_STAGE_NEXT_TOOLS}:
         offending = sorted(
             pid for pid in permission_ids if pid.startswith(STAGE_NEXT_PERMISSION_PREFIXES)
         )
