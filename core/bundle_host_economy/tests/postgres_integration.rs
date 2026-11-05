@@ -2176,6 +2176,33 @@ async fn batch_credit_caps_and_supply_apply_to_the_total() {
     assert_eq!(total_balance(&f).await, 0);
 }
 
+/// regression: p981-claim-1 -- the per-call ceiling (`max_amount`) bounds the
+/// WHOLE batch, not just each entry: 100 recipients x 1,000 must not mint
+/// 100,000 in one call under a 1,000 per-call grant.
+#[tokio::test]
+async fn batch_credit_per_call_ceiling_bounds_the_batch_total() {
+    let f = fixture().await;
+    let mut entries = vec![(f.alice, 1_000_i64)];
+    for _ in 0..99 {
+        entries.push((add_member(&f, COMMUNITY).await, 1_000));
+    }
+    assert_eq!(
+        f.store
+            .batch_credit(&scope(), &entries, 1_000, MAX_SUPPLY, caps(), &key())
+            .await,
+        Err(EconomyError::OverCap { cap: 1_000 })
+    );
+    assert_eq!(ledger_count(&f).await, 0);
+    assert_eq!(total_balance(&f).await, 0);
+    // A batch whose total is exactly the ceiling is applied.
+    let ok: Vec<(Uuid, i64)> = entries.iter().map(|(u, _)| (*u, 10)).collect();
+    f.store
+        .batch_credit(&scope(), &ok, 1_000, MAX_SUPPLY, caps(), &key())
+        .await
+        .unwrap();
+    assert_eq!(total_balance(&f).await, 1_000);
+}
+
 // -- debit / conditional_debit --
 
 #[tokio::test]

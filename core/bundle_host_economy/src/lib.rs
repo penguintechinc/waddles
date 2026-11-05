@@ -408,7 +408,8 @@ pub trait EconomyStore: Send + Sync {
     ) -> BoxFuture<'a, Result<i64, EconomyError>>;
 
     /// MINT for many users in ONE transaction (all-or-nothing): every entry
-    /// must be a distinct active member with `1 <= amount <= max_amount`; the
+    /// must be a distinct active member with `1 <= amount`, and the batch TOTAL
+    /// must be `<= max_amount` (the per-call ceiling covers the whole call); the
     /// per-user and the per-scope rolling-24h mint windows and the supply
     /// ceiling are checked against the batch TOTAL. At most
     /// [`MAX_BATCH_ENTRIES`] entries. Idempotent by `key` for the whole batch.

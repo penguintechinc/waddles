@@ -483,6 +483,11 @@ impl PostgresEconomyStore {
         validate_multi_key(key)?;
         validate_caps(caps)?;
         let (sorted, total) = validate_entries(entries, Some(max_amount))?;
+        // `max_amount` is the PER-CALL ceiling: it bounds the whole batch, not
+        // only each entry (else N entries mint N x ceiling in one call).
+        if total > max_amount {
+            return Err(EconomyError::OverCap { cap: max_amount });
+        }
         let txn = self.begin_txn().await?;
         lock_scope(&txn, scope, MINT_WINDOW).await?;
 
