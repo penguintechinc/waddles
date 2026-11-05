@@ -1,0 +1,124 @@
+# hub-api install-pipeline manifest (schema_version 2) for the YouTube platform OVERLAY
+# (bundle-MCP-tools P6b T3). A `kind: service` connector on the `connector-tools` world.
+# Credentials are NEVER in this file or the component: the overlay returns request templates
+# carrying the opaque secret-ref slot `{{YT_OAUTH_TOKEN}}` -> handle `youtube.oauth`, which the
+# host's credential adapter (per-tenant bot credentials spec) resolves at send time.
+# Cutover flag: PostHog `waddles.overlay-youtube` (default OFF; the Python svc_ingest path runs
+# unchanged while OFF).
+schema_version: 2
+app_id: waddles.core.service.youtube
+name: YouTube Platform Overlay (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: service
+stages:
+  action:
+    entry: waddle:bundle/tool-provider#call
+egress:
+  - host: www.googleapis.com
+    methods: ["GET", "POST"]
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: net.http.fqdn:www.googleapis.com
+    justification: YouTube Data API v3 (liveChat/messages list+insert, search, videos); requests are host-transmitted templates
+    params:
+      methods: ["GET", "POST"]
+  - id: chat.send:youtube
+    justification: Post chat messages into the host-pinned live chat via liveChatMessages.insert
+routes_to: []
+exported_tools:
+  - name: discovery_request
+    access: read
+    risk: normal
+    input_schema:
+      type: object
+      properties:
+        step: {type: string, enum: [search, videos]}
+        channel_id: {type: string, minLength: 1}
+        video_id: {type: string, minLength: 1}
+      required: [step]
+      additionalProperties: false
+    output_schema: {type: object}
+  - name: discovery_parse
+    access: read
+    risk: normal
+    input_schema:
+      type: object
+      properties:
+        step: {type: string, enum: [search, videos]}
+        body: {type: object}
+      required: [step, body]
+      additionalProperties: false
+    output_schema: {type: object}
+  - name: poll_request
+    access: read
+    risk: normal
+    input_schema:
+      type: object
+      properties:
+        live_chat_id: {type: string, minLength: 1}
+        max_results: {type: integer, minimum: 1, maximum: 2000}
+      required: [live_chat_id]
+      additionalProperties: false
+    output_schema: {type: object}
+  - name: poll_plan
+    access: read
+    risk: normal
+    input_schema:
+      type: object
+      properties:
+        body: {type: object}
+      required: [body]
+      additionalProperties: false
+    output_schema: {type: object}
+  - name: classify_error
+    access: read
+    risk: normal
+    input_schema:
+      type: object
+      properties:
+        status: {type: integer, minimum: 100, maximum: 599}
+        body: {}
+        consecutive_quota_errors: {type: integer, minimum: 0}
+        max_consecutive_quota_errors: {type: integer, minimum: 1}
+        no_broadcast_backoff_s: {type: number, minimum: 0}
+      required: [status]
+      additionalProperties: false
+    output_schema: {type: object}
+  - name: build_send_chat_request
+    access: read
+    risk: normal
+    input_schema:
+      type: object
+      properties:
+        target_source_id: {type: string, minLength: 1}
+        payload:
+          type: object
+          properties:
+            text: {type: string, minLength: 1, maxLength: 200}
+          required: [text]
+          additionalProperties: false
+      required: [target_source_id, payload]
+      additionalProperties: false
+    output_schema: {type: object}
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/youtube
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: 1.0.0
+  min_version: 1.0.0
+  max_version: null

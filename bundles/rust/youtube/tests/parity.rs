@@ -237,3 +237,20 @@ fn errors_do_not_echo_content() {
     };
     assert!(!m.contains("SECRETXYZ"));
 }
+
+/// Cross-checked against the real Python `normalize()`: empty `author_id` -> actor
+/// `"unknown"` and null payload author; int `is_mod` fails closed while `is_owner: true` grants.
+#[test]
+fn python_cross_checked_edge_cases() {
+    let p = parse_frame(
+        &raw(json!({"text": "x", "is_mod": 1, "is_owner": true, "author_id": ""})),
+        RECEIVED_AT,
+    )
+    .unwrap();
+    let e = &p.events[0];
+    assert_eq!(e.actor.as_deref(), Some("unknown"));
+    let pl = payload(e);
+    assert_eq!(pl["author_id"], Value::Null);
+    assert_eq!(pl["is_mod"], json!(false));
+    assert_eq!(pl["is_owner"], json!(true));
+}
