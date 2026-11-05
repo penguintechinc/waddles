@@ -112,6 +112,7 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
         "connections:resolve",
         "connections:list",
         "dataplane:resolve-scope",
+        "identity:platform-user:resolve",
     ]
     assert entry["tenant"] == "system"
     assert entry["k8s_service_account"] == "svc-ingest"
@@ -236,3 +237,15 @@ def test_dataplane_resolve_scope_is_not_rendered_when_dynamic_connections_is_off
     assert len(identities) >= 3, identities.keys()
     for name, entry in identities.items():
         assert _RESOLVER_SCOPE not in entry["allowed_scopes"], name
+
+
+_PLATFORM_USER_SCOPE = "identity:platform-user:resolve"
+
+
+def test_platform_user_scope_is_granted_to_svc_ingest_alone(docs: list[dict[str, Any]]) -> None:
+    identities = _identities(docs)
+    assert _PLATFORM_USER_SCOPE in identities["svc-ingest"]["allowed_scopes"]
+    assert len(identities) >= 3, identities.keys()  # denominator: the others were examined
+    for name, entry in identities.items():
+        if name != "svc-ingest":
+            assert _PLATFORM_USER_SCOPE not in entry["allowed_scopes"], name

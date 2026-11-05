@@ -59,6 +59,12 @@ class IdentityServiceStub:
             response_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveHandleResponse.FromString,
             _registered_method=True,
         )
+        self.ResolvePlatformUser = channel.unary_unary(
+            "/waddles.hub.internal.v1.IdentityService/ResolvePlatformUser",
+            request_serializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolvePlatformUserRequest.SerializeToString,
+            response_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolvePlatformUserResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class IdentityServiceServicer:
@@ -91,11 +97,41 @@ class IdentityServiceServicer:
         handle ("@bob", "bob") or a Discord mention ("<@123>", "<@!123>") -- to
         the stable UUID of that identity, entirely inside the hub-api PII
         boundary: the raw handle is matched here and never stored, echoed or
-        logged; only the UUID comes back. NOT_FOUND = no such identity in the
-        tenant (or tenant unknown), FAILED_PRECONDITION = the handle matches
-        more than one identity (never guessed), INVALID_ARGUMENT = malformed
-        or non-user reference (role/channel mention, @everyone). Required
-        scope: "identity:handle:resolve".
+        logged; only the UUID comes back. The result is where a secret lands, so
+        matching is conservative: a handle matches only a VERIFIED, platform-unique
+        login (the OAuth-verified platform username of a linked user, or -- on
+        Twitch, where the chat handle is the login -- the handle a pseudonym was
+        minted with), NEVER a mutable display name / server nickname (Discord);
+        and every match, handle or mention, requires CURRENT community membership
+        in the tenant (a left/removed/erased identity is never returned, and a
+        mention never mints a pseudonym for a non-member). NOT_FOUND = no such
+        verified, current-member identity in the tenant (or tenant unknown, or a
+        display-name-only reference on a platform that does not accept them --
+        ask the user for a real mention), FAILED_PRECONDITION = the handle
+        matches more than one identity (never guessed), INVALID_ARGUMENT =
+        malformed or non-user reference (role/channel mention, @everyone, zero-
+        width/format characters). Required scope: "identity:handle:resolve".
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def ResolvePlatformUser(self, request, context):
+        """Resolves tokenized user UUIDs back to the RAW platform user id (e.g. a Discord
+        snowflake) for ONE community -- the single detokenization point the PII boundary
+        allows (security.md PII Tokenization), consumed only by svc-ingest's outbound
+        executor (Discord dm.send / role.add / role.remove) which holds the answer
+        transiently for one operation and never logs or stores it. Required scope:
+        "identity:platform-user:resolve". The tenant is authorized against the verified
+        token's `tenant` claim exactly like the other RPCs (a tenant-bound token is
+        confined to its own tenant; `system` must name one). `community_id` is the
+        NUMERIC communities.id and the `platform` is explicit and mandatory. Every uuid
+        must be a CURRENT member of that community on that platform: if any uuid is
+        unknown, in another community/tenant, a non-member, or has no single platform
+        identity, the whole call is NOT_FOUND with one constant message (no oracle, no
+        partial answer). INVALID_ARGUMENT = malformed input (a non-canonical uuid,
+        community_id <= 0, bad platform, or not 1..25 uuids). A per-caller token
+        bucket tighter than the other RPCs applies.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
@@ -118,6 +154,11 @@ def add_IdentityServiceServicer_to_server(servicer, server):
             servicer.ResolveHandle,
             request_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveHandleRequest.FromString,
             response_serializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveHandleResponse.SerializeToString,
+        ),
+        "ResolvePlatformUser": grpc.unary_unary_rpc_method_handler(
+            servicer.ResolvePlatformUser,
+            request_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolvePlatformUserRequest.FromString,
+            response_serializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolvePlatformUserResponse.SerializeToString,
         ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -216,6 +257,36 @@ class IdentityService:
             "/waddles.hub.internal.v1.IdentityService/ResolveHandle",
             waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveHandleRequest.SerializeToString,
             waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveHandleResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def ResolvePlatformUser(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/waddles.hub.internal.v1.IdentityService/ResolvePlatformUser",
+            waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolvePlatformUserRequest.SerializeToString,
+            waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolvePlatformUserResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -21,11 +21,14 @@ from services.identity_resolution_service import (
     IdentityRequest,
     IdentityResolutionError,
     IdentityValidationError,
+    PlatformUserNotFoundError,
     TenantAccessDeniedError,
     TenantNotFoundError,
+    audit_platform_user_resolution,
     authorize_tenant,
     resolve_display_names,
     resolve_identities,
+    resolve_platform_users,
     resolve_target,
 )
 
@@ -34,6 +37,9 @@ REQUIRED_SCOPES: dict[str, str] = {
     "/waddles.hub.internal.v1.IdentityService/MintEphemeralPseudonyms": "identity:ephemeral:mint",
     "/waddles.hub.internal.v1.IdentityService/ResolveDisplayNames": "identity:displayname:read",
     "/waddles.hub.internal.v1.IdentityService/ResolveHandle": "identity:handle:resolve",
+    "/waddles.hub.internal.v1.IdentityService/ResolvePlatformUser": (
+        "identity:platform-user:resolve"
+    ),
     "/waddles.hub.internal.v1.KeyService/GetStreamDek": "key:stream-dek:read",
 }
 
@@ -49,7 +55,7 @@ async def _abort_for(
     """Map a resolution failure to its gRPC status (messages are PII-free constants)."""
     if isinstance(exc, IdentityValidationError):
         code, detail = grpc.StatusCode.INVALID_ARGUMENT, str(exc)
-    elif isinstance(exc, TenantNotFoundError | HandleNotFoundError):
+    elif isinstance(exc, TenantNotFoundError | HandleNotFoundError | PlatformUserNotFoundError):
         code, detail = grpc.StatusCode.NOT_FOUND, str(exc)
     elif isinstance(exc, AmbiguousHandleError):
         code, detail = grpc.StatusCode.FAILED_PRECONDITION, str(exc)
@@ -171,6 +177,59 @@ class IdentityServicer(identity_pb2_grpc.IdentityServiceServicer):  # type: igno
             await _abort_for(exc, context)
         return identity_pb2.ResolveHandleResponse(
             uuid=str(resolved.uuid), match_kind=_MATCH_KINDS[resolved.kind]
+        )
+
+    async def ResolvePlatformUser(  # noqa: N802 - grpc-generated servicer method name
+        self,
+        request: identity_pb2.ResolvePlatformUserRequest,
+        context: grpc.aio.ServicerContext[Any, Any],
+    ) -> identity_pb2.ResolvePlatformUserResponse:
+        """Detokenize <=25 member UUIDs of ONE community to raw platform user ids.
+
+        The only RPC that returns raw platform ids. The tenant comes from the verified token
+        (`authorize_tenant`), the community is a numeric id that must belong to it, and any miss
+        -- wrong community, non-member, unknown -- is the same constant NOT_FOUND. Every call,
+        success or refusal, writes one PII-free audit record (caller, community id, count,
+        outcome); the ids themselves are never logged and nothing is cached.
+        """
+        claim_tenant, caller = await self._caller(context)
+        dal = await self._require_dal(context)
+        count = len(request.uuids)
+        outcome = "ok"
+        try:
+            tenant = await authorize_tenant(
+                dal, claim_tenant, request.tenant_id, op="resolve_platform_user", caller=caller
+            )
+            result = await resolve_platform_users(
+                dal, tenant, request.community_id, request.platform, list(request.uuids)
+            )
+        except IdentityResolutionError as exc:
+            outcome = {
+                PlatformUserNotFoundError: "not_found",
+                TenantNotFoundError: "not_found",
+                TenantAccessDeniedError: "denied",
+                IdentityValidationError: "invalid",
+            }.get(type(exc), "error")
+            audit_platform_user_resolution(
+                caller=caller,
+                community_id=request.community_id,
+                platform=request.platform,
+                count=count,
+                outcome=outcome,
+            )
+            await _abort_for(exc, context)
+        audit_platform_user_resolution(
+            caller=caller,
+            community_id=request.community_id,
+            platform=request.platform,
+            count=count,
+            outcome=outcome,
+        )
+        return identity_pb2.ResolvePlatformUserResponse(
+            users=[
+                identity_pb2.ResolvedPlatformUser(uuid=r.uuid, platform_user_id=r.platform_user_id)
+                for r in result
+            ]
         )
 
 

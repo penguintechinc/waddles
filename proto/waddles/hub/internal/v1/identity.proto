@@ -47,6 +47,22 @@ service IdentityService {
   // malformed or non-user reference (role/channel mention, @everyone, zero-
   // width/format characters). Required scope: "identity:handle:resolve".
   rpc ResolveHandle(ResolveHandleRequest) returns (ResolveHandleResponse);
+  // Resolves tokenized user UUIDs back to the RAW platform user id (e.g. a Discord
+  // snowflake) for ONE community -- the single detokenization point the PII boundary
+  // allows (security.md PII Tokenization), consumed only by svc-ingest's outbound
+  // executor (Discord dm.send / role.add / role.remove) which holds the answer
+  // transiently for one operation and never logs or stores it. Required scope:
+  // "identity:platform-user:resolve". The tenant is authorized against the verified
+  // token's `tenant` claim exactly like the other RPCs (a tenant-bound token is
+  // confined to its own tenant; `system` must name one). `community_id` is the
+  // NUMERIC communities.id and the `platform` is explicit and mandatory. Every uuid
+  // must be a CURRENT member of that community on that platform: if any uuid is
+  // unknown, in another community/tenant, a non-member, or has no single platform
+  // identity, the whole call is NOT_FOUND with one constant message (no oracle, no
+  // partial answer). INVALID_ARGUMENT = malformed input (a non-canonical uuid,
+  // community_id <= 0, bad platform, or not 1..25 uuids). A per-caller token
+  // bucket tighter than the other RPCs applies.
+  rpc ResolvePlatformUser(ResolvePlatformUserRequest) returns (ResolvePlatformUserResponse);
 }
 
 message MintEphemeralPseudonymRequest {
@@ -119,4 +135,27 @@ message ResolveHandleResponse {
   // stable per-tenant ephemeral pseudonym.
   string uuid = 1;
   MatchKind match_kind = 2;
+}
+
+message ResolvePlatformUserRequest {
+  // Tenant reference (numeric id or slug), authorized against the token claim.
+  string tenant_id = 1;
+  // communities.id (numeric) the uuids must be current members of. > 0.
+  int64 community_id = 2;
+  // Explicit platform, e.g. "discord" (^[a-z0-9_-]{1,50}$). Never inferred.
+  string platform = 3;
+  // 1..25 canonical user UUIDs (hub_users.uuid or ephemeral pseudonyms).
+  repeated string uuids = 4;
+}
+
+message ResolvedPlatformUser {
+  // The uuid exactly as requested (canonical lowercase).
+  string uuid = 1;
+  // RAW platform user id (PII). The caller holds it transiently, never logs/stores it.
+  string platform_user_id = 2;
+}
+
+message ResolvePlatformUserResponse {
+  // One entry per distinct requested uuid, in request order.
+  repeated ResolvedPlatformUser users = 1;
 }

@@ -22,7 +22,7 @@ resource kind). Anything more means the boundary leaked.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final, Protocol, runtime_checkable
@@ -67,6 +67,11 @@ class MetadataField:
     lowercase: bool = False
     #: Leading marker stripped before validation (for example the IRC ``#`` of ``#channel``).
     strip_prefix: str = ""
+    #: ``(field name, raw value) -> canonical string`` for a field whose input is not a plain string
+    #: (for example Discord's managed-roles object). Runs first, may raise
+    #: :class:`InvalidConnectionInput`, and its result then goes through the usual length/pattern
+    #: checks -- the stored value is always a flat string, so the data-plane contract is unchanged.
+    normalizer: Callable[[str, Any], str] | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -233,6 +238,8 @@ def validate_metadata(spec: AdapterSpec, raw: Mapping[str, Any]) -> dict[str, st
             if metadata_field.required:
                 raise InvalidConnectionInput(f"metadata field {name!r} is required")
             continue
+        if metadata_field.normalizer is not None:
+            value = metadata_field.normalizer(name, value)
         if not isinstance(value, str):
             raise InvalidConnectionInput(f"metadata field {name!r} must be a string")
         value = value.strip()

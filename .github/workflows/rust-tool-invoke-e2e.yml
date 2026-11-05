@@ -11,6 +11,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/tool_invoke_e2e/**'
+      - 'core/test_support/**'
       - 'core/svc_process/**'
       - 'core/bundle_tool_call/**'
       - 'core/bundle_active_set/**'
@@ -24,6 +25,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/tool_invoke_e2e/**'
+      - 'core/test_support/**'
       - 'core/svc_process/**'
       - 'core/bundle_tool_call/**'
       - 'core/bundle_active_set/**'

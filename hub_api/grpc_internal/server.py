@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 
 
+#: Full gRPC method name of the detokenizing RPC (its own, tighter rate-limit bucket).
+_PLATFORM_USER_METHOD = "/waddles.hub.internal.v1.IdentityService/ResolvePlatformUser"
+
+
 def _load_server_credentials() -> grpc.ServerCredentials:
     """Loads the internal gRPC server's TLS material from env-mounted paths.
 
@@ -87,6 +91,13 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
         RateLimitInterceptor(
             requests_per_second=float(os.getenv("GRPC_RATE_LIMIT_RPS", "50")),
             burst=float(os.getenv("GRPC_RATE_LIMIT_BURST", "100")),
+            # The one RPC that returns raw platform ids gets its own, tighter bucket.
+            method_limits={
+                _PLATFORM_USER_METHOD: (
+                    float(os.getenv("GRPC_PLATFORM_USER_RPS", "20")),
+                    float(os.getenv("GRPC_PLATFORM_USER_BURST", "40")),
+                )
+            },
         ),
         OTelInterceptor(),
     ]
