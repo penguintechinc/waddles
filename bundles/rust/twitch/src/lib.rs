@@ -27,7 +27,9 @@ mod component {
     use super::bindings::waddle::connector::types::{
         ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
     };
-    use super::common::{FrameErr, OVERLAY_FLAG, OVERLAY_FLAG_DEFAULT, PLATFORM, gate_decision};
+    use super::common::{
+        FrameErr, OVERLAY_FLAG, OVERLAY_FLAG_DEFAULT, PLATFORM, gate_decision, resolve_actors,
+    };
     use super::tools::{HelixHost, IdentityHost, SECRET_REFS, build_registry};
     use super::{eventsub, irc, sender};
     use waddle_sdk::tool::{ToolError, ToolRegistry};
@@ -54,8 +56,22 @@ mod component {
         log::write(log::Level::Debug, "twitch overlay", &f);
     }
 
-    fn to_events(evs: Vec<super::common::NormEvent>) -> Vec<NormalizedEvent> {
-        evs.into_iter()
+    /// Resolves actors through `identity.lookup`; fail closed (drop + count,
+    /// loud frame error when nothing survives). Never logs a key or handle.
+    fn to_events(evs: Vec<super::common::NormEvent>) -> Result<Vec<NormalizedEvent>, FrameError> {
+        let total = evs.len();
+        let ident = WasmIdent;
+        let (resolved, dropped) = resolve_actors(evs, &|key| ident.uuid_for(key).map_err(|_| ()));
+        if dropped > 0 {
+            log_op("actor_lookup_dropped", dropped);
+            if resolved.is_empty() && total > 0 {
+                return Err(FrameError::Backend(
+                    "identity lookup failed; event dropped".to_string(),
+                ));
+            }
+        }
+        Ok(resolved
+            .into_iter()
             .map(|e| NormalizedEvent {
                 platform: PLATFORM.to_string(),
                 payload_json: e.payload_json(),
@@ -63,7 +79,7 @@ mod component {
                 actor: e.actor,
                 occurred_at: e.occurred_at,
             })
-            .collect()
+            .collect())
     }
 
     impl ReceiverGuest for Component {
@@ -88,7 +104,7 @@ mod component {
             };
             let evs = res.map_err(fe)?;
             log_op(if is_json { "eventsub" } else { "irc" }, evs.len());
-            Ok(to_events(evs))
+            to_events(evs)
         }
 
         fn on_heartbeat_due(_ctx: ConnectionCtx) -> Result<Option<Vec<u8>>, FrameError> {

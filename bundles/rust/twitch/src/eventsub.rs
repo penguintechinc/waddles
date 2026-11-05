@@ -69,6 +69,20 @@ pub fn normalize_eventsub(body: &[u8], received_at: &str) -> Result<Vec<NormEven
     Ok(vec![build(event_type, &event, from_sub, received_at)])
 }
 
+/// Identity key for the actor: the platform user id, else the broadcaster id,
+/// else the login when the wire has no id. `None` only for a system event
+/// (no login at all), matching the hardcoded path's `actor: None`.
+fn actor_key(user_id: Option<&str>, broadcaster_id: &str, login: Option<&str>) -> Option<String> {
+    let login = login?;
+    Some(
+        user_id
+            .filter(|s| !s.is_empty())
+            .or((!broadcaster_id.is_empty()).then_some(broadcaster_id))
+            .unwrap_or(login)
+            .to_string(),
+    )
+}
+
 fn build(event_type: &str, event: &Value, from_sub: Option<&str>, received_at: &str) -> NormEvent {
     let s = |k: &str| event.get(k).and_then(Value::as_str).map(str::to_string);
     let broadcaster_id = s("broadcaster_user_id")
@@ -96,7 +110,11 @@ fn build(event_type: &str, event: &Value, from_sub: Option<&str>, received_at: &
     };
     NormEvent {
         event_type: event_type.to_string(),
-        actor: user_login.clone().or_else(|| broadcaster_login.clone()),
+        actor_key: actor_key(
+            user_id.as_deref(),
+            &broadcaster_id,
+            user_login.as_deref().or(broadcaster_login.as_deref()),
+        ),
         payload: object(json!({
             "broadcaster_id": broadcaster_id,
             "broadcaster_login": broadcaster_login,
@@ -151,7 +169,7 @@ mod tests {
         let b = br#"{"subscription":{"type":"stream.offline","condition":{"broadcaster_user_id":"9"}}}"#;
         let e = normalize_eventsub(b, TS).unwrap();
         assert_eq!(e[0].payload["broadcaster_id"], "9");
-        assert_eq!(e[0].actor, None);
+        assert_eq!(e[0].actor_key, None);
         assert_eq!(e[0].occurred_at, TS);
         assert!(e[0].payload_json().contains("\"metadata\":{}"));
     }

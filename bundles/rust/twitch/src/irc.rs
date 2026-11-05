@@ -162,7 +162,7 @@ pub fn normalize_privmsg(msg: &ChatMessage, received_at: &str) -> NormEvent {
     };
     NormEvent {
         event_type: "message".to_string(),
-        actor: Some(msg.sender.clone()),
+        actor_key: Some(user_id.clone().unwrap_or_else(|| msg.sender.clone())),
         payload,
         occurred_at: received_at.to_string(),
     }

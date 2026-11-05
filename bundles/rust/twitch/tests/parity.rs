@@ -57,6 +57,27 @@ mod irc_or_es {
     }
 }
 
+/// The identity key the shared harness expects (`ACTOR_ID_FIELD` in
+/// scripts/ci/gen-connector-parity-expected.py): payload `user_id` (IRC) or
+/// `user_id`/`broadcaster_id` (EventSub), else the golden login when the wire
+/// carries no id; `null` for a system event. The RAW login is never published:
+/// the host resolves this key through `identity.lookup`.
+fn expected_actor_key(v: &Value) -> Value {
+    let g = &v["golden"];
+    if g["actor"].is_null() {
+        return Value::Null;
+    }
+    let fields: &[&str] = if v["path"] == "twitch_irc" {
+        &["user_id"]
+    } else {
+        &["user_id", "broadcaster_id"]
+    };
+    fields
+        .iter()
+        .find_map(|f| g["payload"].get(*f).filter(|x| !x.is_null()).cloned())
+        .unwrap_or_else(|| g["actor"].clone())
+}
+
 fn check(v: &Value, self_nick_known: bool) -> Result<(), String> {
     let id = v["id"].as_str().unwrap();
     let got = run(v, self_nick_known);
@@ -76,7 +97,7 @@ fn check(v: &Value, self_nick_known: bool) -> Result<(), String> {
             let g = &v["golden"];
             if g["platform"] != "twitch"
                 || Value::String(e.event_type.clone()) != g["event_type"]
-                || serde_json::to_value(&e.actor).unwrap() != g["actor"]
+                || serde_json::to_value(&e.actor_key).unwrap() != expected_actor_key(v)
                 || Value::Object(e.payload.clone()) != g["payload"]
                 || e.occurred_at != TS
             {
@@ -111,4 +132,46 @@ fn guest_path_without_self_nick_differs_only_on_self_echo() {
     let fails: Vec<String> = vs.iter().filter_map(|v| check(v, false).err()).collect();
     assert_eq!(fails.len(), 1, "{fails:?}");
     assert!(fails[0].contains("irc_self_message_dropped"));
+}
+
+/// Every published actor is the identity.lookup UUID, never the raw login.
+#[test]
+fn published_actor_is_the_lookup_uuid_never_the_raw_login() {
+    use waddle_bundle_twitch_overlay::common::resolve_actors;
+    let mut with_actor = 0;
+    for v in vectors() {
+        let events: Vec<_> = run(&v, true).into_iter().map(|e| e.0).collect();
+        let (resolved, dropped) = resolve_actors(events, &|k| Ok(format!("uuid-for-{k}")));
+        assert_eq!(dropped, 0);
+        for r in resolved {
+            let Some(actor) = r.actor else { continue };
+            with_actor += 1;
+            let key = expected_actor_key(&v);
+            assert_eq!(actor, format!("uuid-for-{}", key.as_str().unwrap()));
+            assert_ne!(
+                Value::String(actor),
+                v["golden"]["actor"],
+                "raw handle leaked"
+            );
+        }
+    }
+    assert!(with_actor > 0, "zero actors examined is a failure");
+}
+
+/// Lookup failure drops every event (fail closed); nothing reaches the sink.
+#[test]
+fn identity_lookup_failure_drops_everything_with_no_raw_fallback() {
+    use waddle_bundle_twitch_overlay::common::resolve_actors;
+    let mut examined = 0;
+    for v in vectors()
+        .iter()
+        .filter(|v| v["outcome"] == "event" && !v["golden"]["actor"].is_null())
+    {
+        let events: Vec<_> = run(v, true).into_iter().map(|e| e.0).collect();
+        examined += events.len();
+        let (resolved, dropped) = resolve_actors(events, &|_| Err(()));
+        assert!(resolved.is_empty());
+        assert!(dropped >= 1);
+    }
+    assert!(examined > 0);
 }
