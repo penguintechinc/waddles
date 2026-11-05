@@ -257,6 +257,14 @@ spec:
         - name: BUNDLE_CONFIG_FULL_RECONCILE_MINUTES
           # Periodic full active-set reconcile interval, in whole minutes (floor: 1m).
           value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleConfigFullReconcileMinutes | default 15 | quote }}
+        # P6a T6: dedicated outbound pin key (NOT the shared envFrom Secret) -- templates/outbound-pin-secret.yaml.
+        - name: OUTBOUND_PIN_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.outboundPinSecretName" . }}
+              key: OUTBOUND_PIN_KEYS
+        - name: OUTBOUND_PIN_ACTIVE_KID
+          value: {{ .Values.outboundPin.activeKid | default "k1" | quote }}
         - name: ENVELOPE_BINDING_KEYS
           valueFrom:
             secretKeyRef:

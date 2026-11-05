@@ -33,6 +33,18 @@ pub enum WitWorld {
     /// import (bundle-to-bundle tool invoke); exports `tool-provider`.
     StageTools,
     Connector,
+    /// `world connector-tools` (P6a T4): `connector` plus the `tool` import and
+    /// the `tool-provider` export, so a connector overlay can expose and call
+    /// tools. Same core-only trust gate as `Connector`.
+    ConnectorTools,
+}
+
+impl WitWorld {
+    /// True for the core-only connector worlds (`connector`, `connector-tools`).
+    #[must_use]
+    pub fn is_connector(self) -> bool {
+        matches!(self, Self::Connector | Self::ConnectorTools)
+    }
 }
 
 /// Namespace prefix reserved for first-party core bundles (mirrors PR #419
@@ -90,7 +102,7 @@ impl VerifiedManifest {
     /// distinction spec S3.2.1's test requirement draws).
     #[must_use]
     pub fn may_link_identity(&self) -> bool {
-        self.world == WitWorld::Connector
+        self.world.is_connector()
             && self.is_core_namespace()
             && self.has_permission(PERM_CONNECTOR_PII_READ)
     }
@@ -162,6 +174,45 @@ mod tests {
             perms(&["connector.receive:discord"]),
         );
         assert!(!m.may_link_identity());
+    }
+
+    #[test]
+    fn connector_tools_world_shares_the_connector_identity_gate() {
+        let granted = VerifiedManifest::new(
+            "waddles.core.connector.twitch",
+            "sha256:c1",
+            WitWorld::ConnectorTools,
+            perms(&[PERM_CONNECTOR_PII_READ]),
+        );
+        assert!(granted.may_link_identity());
+        let ungranted = VerifiedManifest::new(
+            "waddles.core.connector.twitch",
+            "sha256:c2",
+            WitWorld::ConnectorTools,
+            perms(&[]),
+        );
+        assert!(!ungranted.may_link_identity());
+        let vendor = VerifiedManifest::new(
+            "vendor.acme.connector.twitch",
+            "sha256:c3",
+            WitWorld::ConnectorTools,
+            perms(&[PERM_CONNECTOR_PII_READ]),
+        );
+        assert!(!vendor.may_link_identity());
+    }
+
+    #[test]
+    fn is_connector_covers_exactly_the_connector_worlds() {
+        assert!(WitWorld::Connector.is_connector());
+        assert!(WitWorld::ConnectorTools.is_connector());
+        for w in [
+            WitWorld::Stage,
+            WitWorld::StageNext,
+            WitWorld::StageV2,
+            WitWorld::StageTools,
+        ] {
+            assert!(!w.is_connector(), "{w:?}");
+        }
     }
 
     #[test]

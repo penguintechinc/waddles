@@ -346,6 +346,7 @@ fn caps_scoped(
         chain,
         deadline,
         trace: None,
+        read_only: false,
     })
 }
 
@@ -880,6 +881,8 @@ const ACTOR_UUID: &str = "11111111-1111-4111-8111-111111111111";
 struct RoleDirectory {
     role: Option<&'static str>,
     role_lookups: Mutex<u32>,
+    /// When set, every member lookup fails with a backend error (directory outage).
+    outage: bool,
 }
 
 impl MemberDirectory for RoleDirectory {
@@ -890,6 +893,9 @@ impl MemberDirectory for RoleDirectory {
         platform_user_id: &'a str,
     ) -> BoxFuture<'a, Result<uuid::Uuid, IdentityError>> {
         Box::pin(async move {
+            if self.outage {
+                return Err(IdentityError::Backend("directory down".to_string()));
+            }
             if platform_user_id == "1001" {
                 Ok(uuid::Uuid::parse_str(ACTOR_UUID).unwrap())
             } else {
@@ -946,6 +952,7 @@ fn admin_caps(
     let dir = Arc::new(RoleDirectory {
         role,
         role_lookups: Mutex::new(0),
+        outage: false,
     });
     let c = caps_with(
         admin_rows(),
@@ -1076,4 +1083,333 @@ async fn non_scoped_tools_skip_role_resolution_and_strip_a_guest_ctx() {
     // No verified actor was resolved, so there is no `__ctx` -- and the guest's
     // spoofed one never reaches the target.
     assert!(inv[0].payload["args"].get("__ctx").is_none());
+}
+
+/// Builds a host-authored nested plan for mutation namespace regression tests.
+fn mutation_plan() -> bundle_tool_call::ToolPlan {
+    bundle_tool_call::ToolPlan {
+        target_app_id: SVC.to_string(),
+        tool: "adjust_balance".to_string(),
+        args: serde_json::json!({}),
+        idempotency_key: Some("same-retry".to_string()),
+        target_digest: DIGEST.to_string(),
+        target_version: 22,
+        write: true,
+        next_chain: vec![APP.to_string(), SVC.to_string()],
+        caller_app_id: APP.to_string(),
+        actor: bundle_tool_call::ActorContext::none(),
+        tenant_id: TENANT_ID,
+        community_id: COMMUNITY_ID,
+    }
+}
+
+/// Tool retries use the caller's stable scoped key, independent of source event or parent ordinal.
+#[test]
+fn tool_mutation_retries_reuse_keys_without_consuming_parent_ordinals() {
+    let mut parent = caps_with(
+        world_rows(),
+        default_gate(),
+        Arc::new(ConnectionRegistry::new()),
+        vec![APP.to_string()],
+        None,
+    );
+    parent.invocation_identity = Some(Arc::new(
+        crate::identity::InvocationIdentity::new(
+            "twitch",
+            Some("actor-platform-id".into()),
+            vec![],
+        )
+        .with_event_id("event-one"),
+    ));
+    let plan = mutation_plan();
+    let ctx = parent.tool.as_ref().unwrap().clone();
+    let first = parent.for_tool_target(&plan, ctx.clone());
+    let first_key = first
+        .invocation_identity
+        .as_ref()
+        .unwrap()
+        .reserve_mutation("credit")
+        .map(|(k, n)| (k.to_string(), n))
+        .unwrap();
+    let retry = parent.for_tool_target(&plan, ctx.clone());
+    let retry_key = retry
+        .invocation_identity
+        .as_ref()
+        .unwrap()
+        .reserve_mutation("credit")
+        .map(|(k, n)| (k.to_string(), n))
+        .unwrap();
+    assert_eq!(first_key, retry_key);
+    assert_eq!(
+        parent
+            .invocation_identity
+            .as_ref()
+            .unwrap()
+            .reserve_mutation("credit"),
+        Some(("event-one", 0))
+    );
+    parent.invocation_identity = Some(Arc::new(
+        crate::identity::InvocationIdentity::new(
+            "twitch",
+            Some("actor-platform-id".into()),
+            vec![],
+        )
+        .with_event_id("event-two"),
+    ));
+    let redelivery = parent.for_tool_target(&plan, ctx);
+    let later_key = redelivery
+        .invocation_identity
+        .as_ref()
+        .unwrap()
+        .reserve_mutation("credit")
+        .map(|(k, n)| (k.to_string(), n))
+        .unwrap();
+    assert_eq!(first_key, later_key);
+    assert!(bundle_host_economy::IdempotencyKey::for_event(
+        &first_key.0,
+        "conditional_debit",
+        u32::MAX
+    )
+    .is_ok());
+}
+
+/// Different principals, target tools and targets cannot collide even with identical guest retry text.
+#[test]
+fn tool_mutation_keys_are_domain_separated_and_read_calls_cannot_mutate() {
+    let mut parent = caps_with(
+        world_rows(),
+        default_gate(),
+        Arc::new(ConnectionRegistry::new()),
+        vec![APP.to_string()],
+        None,
+    );
+    parent.invocation_identity = Some(Arc::new(
+        crate::identity::InvocationIdentity::new("twitch", None, vec![]).with_event_id("original"),
+    ));
+    let plan = mutation_plan();
+    let ctx = parent.tool.as_ref().unwrap().clone();
+    let key = |parent: &StageCapabilities, plan: &bundle_tool_call::ToolPlan| {
+        parent
+            .for_tool_target(plan, ctx.clone())
+            .invocation_identity
+            .as_ref()
+            .unwrap()
+            .reserve_mutation("credit")
+            .map(|(k, n)| (k.to_string(), n))
+    };
+    let original = key(&parent, &plan).unwrap();
+    for mut different in [plan.clone(), plan.clone(), plan.clone(), plan.clone()]
+        .into_iter()
+        .enumerate()
+    {
+        match different.0 {
+            0 => different.1.caller_app_id = "another-caller".into(),
+            1 => different.1.target_app_id = SVC2.into(),
+            2 => different.1.tool = "exchange".into(),
+            _ => different.1.idempotency_key = Some("another-key".into()),
+        }
+        assert_ne!(original, key(&parent, &different.1).unwrap());
+    }
+    let mut another_actor = plan.clone();
+    another_actor.actor = bundle_tool_call::ActorContext {
+        actor: Some(ACTOR_UUID.into()),
+        scopes: vec![],
+    };
+    assert_ne!(original, key(&parent, &another_actor).unwrap());
+    parent.tenant_id += 1;
+    assert_ne!(original, key(&parent, &plan).unwrap());
+    parent.tenant_id -= 1;
+    parent.community_id += 1;
+    assert_ne!(original, key(&parent, &plan).unwrap());
+    let mut read = plan;
+    read.write = false;
+    assert_eq!(key(&parent, &read), None);
+    assert_eq!(
+        parent
+            .invocation_identity
+            .as_ref()
+            .unwrap()
+            .reserve_mutation("credit"),
+        Some(("original", 0))
+    );
+}
+
+/// A write binds the verified member UUID without asking the role directory for privileges.
+#[tokio::test]
+async fn unrestricted_write_binds_actor_without_role_lookup() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    let (mut c, dir) = admin_caps(&exec, Some("1001"), None);
+    let old = c.tool.as_ref().unwrap().clone();
+    c = caps_with(
+        world_rows(),
+        default_gate(),
+        old.connections,
+        vec![APP.into()],
+        None,
+    )
+    .with_identity(
+        c.identity.clone().unwrap(),
+        c.invocation_identity.clone().unwrap(),
+    );
+    run(&c, spoofing_call("adjust", Some("actor-bound-retry")))
+        .await
+        .unwrap();
+    assert_eq!(*dir.role_lookups.lock().unwrap(), 0);
+    let invokes = recorded(&exec);
+    assert_eq!(invokes[0].payload["args"]["__ctx"]["actor"], ACTOR_UUID);
+    assert_eq!(
+        invokes[0].payload["args"]["__ctx"]["scopes"],
+        serde_json::json!([])
+    );
+}
+
+/// Rows where SVC (a service) requests SVC2's WRITE tool `mint`.
+fn read_to_write_world() -> (Vec<ActiveBundleRow>, Arc<CapabilityGate>) {
+    let rows = vec![
+        row(
+            APP,
+            APP_VERSION,
+            app(&[(SVC, "get_balance", false), (SVC, "adjust", true)]),
+        ),
+        row(
+            SVC,
+            22,
+            service(
+                &[("get_balance", false), ("adjust", true)],
+                &[(SVC2, "mint", true)],
+            ),
+        ),
+        row(SVC2, 33, service(&[("mint", true)], &[])),
+    ];
+    let gate = gate(&[
+        (APP, APP_VERSION, SVC, "get_balance"),
+        (APP, APP_VERSION, SVC, "adjust"),
+        (SVC, 22, SVC2, "mint"),
+    ]);
+    (rows, gate)
+}
+
+/// SVC's guest invoking `mint` with a retry token, from chain `[APP, SVC]`.
+fn svc_calls_mint() -> HostCallBody {
+    let mut call = tool_call(SVC2, "mint", Some("k1"));
+    call.app_id = SVC.to_string();
+    call
+}
+
+/// regression: p981-claim-2 -- a tool invoked as READ must not reach a WRITE
+/// tool downstream (a read-labelled call mutating funds). The refusal happens
+/// before any executor traffic.
+#[tokio::test]
+async fn a_read_tool_may_not_reach_a_write_tool_downstream() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    let (rows, gate) = read_to_write_world();
+    let mut c = caps_with(
+        rows,
+        gate,
+        Arc::clone(&exec.registry),
+        vec![APP.to_string(), SVC.to_string()],
+        None,
+    );
+    c.tool.as_mut().unwrap().read_only = true;
+    assert_eq!(run(&c, svc_calls_mint()).await.unwrap_err(), "forbidden");
+    assert!(recorded(&exec).is_empty());
+}
+
+/// The same service->service write is allowed when no hop was a read.
+#[tokio::test]
+async fn a_write_tool_may_reach_a_write_tool_downstream() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    let (rows, gate) = read_to_write_world();
+    let c = caps_with(
+        rows,
+        gate,
+        Arc::clone(&exec.registry),
+        vec![APP.to_string(), SVC.to_string()],
+        None,
+    );
+    assert_eq!(
+        run(&c, svc_calls_mint()).await.unwrap(),
+        serde_json::json!({"ok": 1})
+    );
+    assert_eq!(recorded(&exec).len(), 1);
+}
+
+/// Read-only is sticky down the chain: a READ hop makes the derived target
+/// capability set read-only, a WRITE hop from a clean chain does not.
+#[test]
+fn read_only_propagates_to_the_nested_capabilities() {
+    let parent = caps_with(
+        world_rows(),
+        default_gate(),
+        Arc::new(ConnectionRegistry::new()),
+        vec![APP.to_string()],
+        None,
+    );
+    let ctx = parent.tool.as_ref().unwrap().clone();
+    let mut read_plan = mutation_plan();
+    read_plan.write = false;
+    let nested = parent.for_tool_target(&read_plan, ctx.clone());
+    assert!(nested.tool.as_ref().unwrap().read_only);
+    let write_plan = mutation_plan();
+    let nested = parent.for_tool_target(&write_plan, ctx.clone());
+    assert!(!nested.tool.as_ref().unwrap().read_only);
+}
+
+/// `world_rows` caps whose identity wiring is `directory` and whose event names `account`.
+fn world_caps_with_directory(
+    exec: &FakeExecutor,
+    directory: Arc<RoleDirectory>,
+    account: Option<&str>,
+) -> StageCapabilities {
+    caps_with(
+        world_rows(),
+        default_gate(),
+        Arc::clone(&exec.registry),
+        vec![APP.into()],
+        None,
+    )
+    .with_identity(
+        IdentityWiring {
+            directory: directory as Arc<dyn MemberDirectory>,
+            handles: None,
+            flag: Arc::new(FixedGate(true)),
+        },
+        Arc::new(InvocationIdentity::new(
+            "twitch",
+            account.map(str::to_string),
+            vec![],
+        )),
+    )
+}
+
+/// regression: p981-claim-D -- a directory outage while resolving a write's actor fails
+/// CLOSED with a typed refusal (never a silently unattributed write), while a
+/// legitimately actor-less event (scheduled/system) still binds the empty actor.
+#[tokio::test]
+async fn write_actor_directory_outage_fails_closed_but_actorless_events_proceed() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    let down = Arc::new(RoleDirectory {
+        role: None,
+        role_lookups: Mutex::new(0),
+        outage: true,
+    });
+    let c = world_caps_with_directory(&exec, down, Some("1001"));
+    assert_eq!(
+        run(&c, spoofing_call("adjust", Some("k-outage")))
+            .await
+            .unwrap_err(),
+        "target_unavailable"
+    );
+    assert!(recorded(&exec).is_empty(), "the write never ran");
+    // No platform account on the event at all: not an outage, the write proceeds.
+    let up = Arc::new(RoleDirectory {
+        role: None,
+        role_lookups: Mutex::new(0),
+        outage: false,
+    });
+    let c = world_caps_with_directory(&exec, up, None);
+    run(&c, spoofing_call("adjust", Some("k-none")))
+        .await
+        .unwrap();
+    assert_eq!(recorded(&exec).len(), 1);
 }

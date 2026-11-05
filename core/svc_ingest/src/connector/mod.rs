@@ -27,8 +27,9 @@
 //! | [`metrics`] | Prometheus series (PII-free, bounded labels) |
 //!
 //! **B0 ships the skeleton, not a platform.** No real Slack/Kick/Discord
-//! transport lives here, and heartbeat scheduling (a dedicated per-connection
-//! task, spec S3.5) arrives with the first heartbeat-bearing transport. The
+//! transport lives here. Heartbeat scheduling (a dedicated per-connection
+//! loop, spec S3.5) lives in [`driver`], dormant until a transport declares
+//! `Transport::heartbeat_interval` AND the driver is opted in. The
 //! production invoker is [`WireConnectorInvoker`], carrying connector exports
 //! over the executor host-API wire (`penguin-bundle-host` 0.3.0
 //! `ExportKind::Connector*`); its real-path proof against the real executor
@@ -41,6 +42,7 @@ pub mod metrics;
 pub mod poll;
 pub(crate) mod ratelimit;
 pub mod registry;
+pub mod secrets;
 pub mod sink;
 pub mod transport;
 pub(crate) mod transport_common;
@@ -50,13 +52,17 @@ pub mod webhook_verify;
 pub mod wire_invoker;
 pub mod ws;
 
-pub use driver::{ConnectionEnd, ConnectionReport, ConnectorDriver, DriverError, RunEnd};
+pub use driver::{
+    ConnectionEnd, ConnectionReport, ConnectorDriver, DriverError, RunEnd,
+    DEFAULT_HEARTBEAT_SEND_TIMEOUT, MAX_HEARTBEAT_INTERVAL, MIN_HEARTBEAT_INTERVAL,
+};
 pub use invoker::{ConnectorInvokeError, ConnectorInvoker};
 pub use metrics::{register_connector_metrics, ConnectorMetrics};
 pub use poll::{PollAuth, PollConfig, PollTransport};
 pub use registry::{
     ConnectorRegistry, EventLimits, PinnedConnector, RegistryError, MAX_EVENTS_PER_FRAME,
 };
+pub use secrets::{TransportSecretSource, TransportSecrets};
 pub use sink::{
     check_event_limits, is_valid_event_type, to_platform_event, EventSink, SinkError,
     SpineEventSink,

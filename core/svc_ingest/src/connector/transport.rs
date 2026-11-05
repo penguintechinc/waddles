@@ -8,6 +8,8 @@
 //! B0 ships the trait and the registration seam only: no real platform
 //! transport is implemented here (those are later phases).
 
+use std::time::Duration;
+
 use super::types::{ConnectionCtx, Handshake};
 
 /// A transport-level failure. Always a reason string for diagnostics, never
@@ -24,6 +26,10 @@ pub enum TransportError {
     /// Reading the next frame failed (reset, protocol error, timeout).
     #[error("read failed: {0}")]
     Read(String),
+    /// Sending a heartbeat body (or, for a transport that does not support
+    /// heartbeats, being asked to) failed.
+    #[error("send failed: {0}")]
+    Send(String),
     /// A TERMINAL failure that reconnecting cannot fix -- e.g. the upstream
     /// answered 401/403 and the credential is dead. The driver PARKS the
     /// source on this (stops, never backoff-retries) so a revoked token is
@@ -44,6 +50,7 @@ impl TransportError {
             Self::Connect(_) => "connect",
             Self::Handshake(_) => "handshake",
             Self::Read(_) => "read",
+            Self::Send(_) => "send",
             Self::Fatal(_) => "fatal",
         }
     }
@@ -108,6 +115,42 @@ pub trait Transport: Send {
     /// The next raw frame: `Ok(Some(bytes))`, `Ok(None)` on a clean remote
     /// close. Must be cancel-safe (the driver races it against shutdown).
     async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError>;
+
+    /// How often the driver should ask the connector for a heartbeat body
+    /// (`receiver.on-heartbeat-due`, spec S3.5). `None` (the default) means
+    /// this transport has no heartbeat -- a declared capability, not a
+    /// fallback. `Some(Duration::ZERO)` is a configuration fault the driver
+    /// refuses with `DriverError::HeartbeatIntervalOutOfRange`, as does
+    /// anything outside `MIN_HEARTBEAT_INTERVAL..=MAX_HEARTBEAT_INTERVAL`
+    /// (checked only when the driver has heartbeats enabled).
+    fn heartbeat_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Sends a connector-built heartbeat body. Only called when
+    /// [`Self::heartbeat_interval`] is `Some`; the default FAILS LOUD so a
+    /// transport that declares an interval but forgets to implement the send
+    /// is a visible fault, never a silently dropped beat. The driver bounds
+    /// this call with a deadline and cancels it on expiry, so it must be
+    /// cancel-safe.
+    async fn send_heartbeat(&mut self, _bytes: Vec<u8>) -> Result<(), TransportError> {
+        Err(TransportError::Send(
+            "transport declares a heartbeat interval but does not implement send_heartbeat"
+                .to_string(),
+        ))
+    }
+
+    /// Sends the platform-default heartbeat. Called when the connector's
+    /// `on-heartbeat-due` returned `none`, which the WIT contract defines as
+    /// "the host sends its platform-default heartbeat unchanged". The default
+    /// FAILS LOUD (same reasoning as [`Self::send_heartbeat`]); same deadline
+    /// and cancel-safety requirements.
+    async fn send_default_heartbeat(&mut self) -> Result<(), TransportError> {
+        Err(TransportError::Send(
+            "connector asked for the platform-default heartbeat but the transport does not implement send_default_heartbeat"
+                .to_string(),
+        ))
+    }
 
     /// Closes the connection; best effort, called on every teardown path.
     async fn close(&mut self, reason: &str);

@@ -409,6 +409,21 @@ impl InvocationIdentity {
         self
     }
 
+    /// Forks verified actor/mention facts with a fresh mutation sequence for one
+    /// nested tool call. The host supplies a domain-separated retry namespace
+    /// for writes; reads receive `None` and cannot mutate economy/reputation.
+    pub(super) fn for_tool_call(&self, mutation_event_id: Option<String>) -> Self {
+        Self {
+            platform: self.platform.clone(),
+            actor_platform_user_id: self.actor_platform_user_id.clone(),
+            mentions: self.mentions.clone(),
+            resolved: Mutex::new(HashMap::new()),
+            event_id: mutation_event_id,
+            mutation_seq: Mutex::new(HashMap::new()),
+            actor_role: Mutex::new(None),
+        }
+    }
+
     /// Claims the next ordinal for a `kind` (`wager` | `transfer`) economy
     /// mutation and returns it with the event id, i.e. the pair an
     /// idempotency key is derived from. `None` when the invocation has no event

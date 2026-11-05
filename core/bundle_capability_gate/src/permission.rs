@@ -266,6 +266,19 @@ pub enum PermissionFamily {
     EconomyWager,
     /// `economy.transfer` -- member-to-member currency transfer (issue #714).
     EconomyTransfer,
+    /// `economy.credit` -- MINT (`credit` / `batch-credit` / `exchange`): the
+    /// host-cap ops that CREATE currency (P4 Task 1). Mint-capped per call, per
+    /// day and by the community supply ceiling.
+    EconomyCredit,
+    /// `economy.debit` -- SPEND/BURN (`debit` / `conditional-debit`) of the
+    /// invocation's actor's own balance (P4 Task 1).
+    EconomyDebit,
+    /// `economy.admin_adjust` -- privileged absolute-set/delta of any member's
+    /// balance (P4 Task 1). Admin-approved grant only; supply-capped.
+    EconomyAdminAdjust,
+    /// `economy.pot.pay` -- atomic multi-winner payout from the community pot
+    /// (P4 Task 1). Moves existing currency; never mints.
+    EconomyPotPay,
     /// `identity.resolve` -- resolve the invocation's triggering actor (and a
     /// mention target the triggering message carried) to the community
     /// `user_uuid` that `economy.*`/`reputation.*` name their targets by.
@@ -328,6 +341,10 @@ impl PermissionFamily {
         Self::EconomyRead,
         Self::EconomyWager,
         Self::EconomyTransfer,
+        Self::EconomyCredit,
+        Self::EconomyDebit,
+        Self::EconomyAdminAdjust,
+        Self::EconomyPotPay,
         Self::IdentityResolve,
         Self::FlagsRead,
         Self::PlatformScheduled,
@@ -364,6 +381,10 @@ impl PermissionFamily {
             Self::EconomyRead => "economy.read",
             Self::EconomyWager => "economy.wager",
             Self::EconomyTransfer => "economy.transfer",
+            Self::EconomyCredit => "economy.credit",
+            Self::EconomyDebit => "economy.debit",
+            Self::EconomyAdminAdjust => "economy.admin_adjust",
+            Self::EconomyPotPay => "economy.pot.pay",
             Self::IdentityResolve => "identity.resolve",
             Self::FlagsRead => "flags.read",
             Self::PlatformScheduled => "platform.scheduled",
@@ -415,7 +436,13 @@ impl PermissionFamily {
     pub fn is_economy_scoped(&self) -> bool {
         matches!(
             self,
-            Self::EconomyRead | Self::EconomyWager | Self::EconomyTransfer
+            Self::EconomyRead
+                | Self::EconomyWager
+                | Self::EconomyTransfer
+                | Self::EconomyCredit
+                | Self::EconomyDebit
+                | Self::EconomyAdminAdjust
+                | Self::EconomyPotPay
         )
     }
 
@@ -460,7 +487,7 @@ impl PermissionFamily {
     pub fn economy_amount_bound(&self, params: &serde_json::Value) -> Option<i64> {
         let key = match self {
             Self::EconomyWager => "max_bet",
-            Self::EconomyTransfer => "max_amount",
+            Self::EconomyTransfer | Self::EconomyCredit | Self::EconomyDebit => "max_amount",
             _ => return None,
         };
         let Quota::EconomyAmount {
@@ -673,6 +700,48 @@ impl PermissionFamily {
                 },
                 notes: "issue #714; amount metered against the SENDER; declared params.max_amount clamped to the per-call ceiling",
             },
+            Self::EconomyCredit => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Economy,
+                default_quota: Quota::EconomyAmount {
+                    per_call_abs_max: 1_000,
+                    per_user_daily_abs_max: 10_000,
+                    per_scope_daily_abs_max: 250_000,
+                },
+                notes: "P4 Task 1; MINT (credit/batch-credit/exchange); mint-capped per call, per day (durable store window) and by the community supply ceiling; declared params.max_amount clamped to the per-call ceiling",
+            },
+            Self::EconomyDebit => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Economy,
+                default_quota: Quota::EconomyAmount {
+                    per_call_abs_max: 1_000,
+                    per_user_daily_abs_max: 10_000,
+                    per_scope_daily_abs_max: 250_000,
+                },
+                notes: "P4 Task 1; SPEND/BURN of the invocation's actor's own balance (debit/conditional-debit); declared params.max_amount clamped to the per-call ceiling",
+            },
+            Self::EconomyAdminAdjust => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Economy,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(1),
+                },
+                notes: "P4 Task 1; privileged absolute-set/delta of a member's balance; ledger kind admin_adjust; bypasses the daily earn windows but is bounded by the community supply ceiling; needs an explicit reviewer ack",
+            },
+            Self::EconomyPotPay => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Economy,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(1),
+                },
+                notes: "P4 Task 1; atomic multi-winner payout from the reserved community pot account (explicit amounts, remainder stays in the pot); moves existing currency, never mints",
+            },
             Self::ToolCall => CatalogEntry {
                 family: *self,
                 risk: Risk::Dangerous,
@@ -793,6 +862,10 @@ pub enum PermissionId {
     EconomyRead,
     EconomyWager,
     EconomyTransfer,
+    EconomyCredit,
+    EconomyDebit,
+    EconomyAdminAdjust,
+    EconomyPotPay,
     IdentityResolve,
     FlagsRead,
     PlatformScheduled,
@@ -862,6 +935,10 @@ impl PermissionId {
             Self::EconomyRead => PermissionFamily::EconomyRead,
             Self::EconomyWager => PermissionFamily::EconomyWager,
             Self::EconomyTransfer => PermissionFamily::EconomyTransfer,
+            Self::EconomyCredit => PermissionFamily::EconomyCredit,
+            Self::EconomyDebit => PermissionFamily::EconomyDebit,
+            Self::EconomyAdminAdjust => PermissionFamily::EconomyAdminAdjust,
+            Self::EconomyPotPay => PermissionFamily::EconomyPotPay,
             Self::IdentityResolve => PermissionFamily::IdentityResolve,
             Self::FlagsRead => PermissionFamily::FlagsRead,
             Self::PlatformScheduled => PermissionFamily::PlatformScheduled,
@@ -1087,6 +1164,10 @@ impl PermissionId {
             "economy.read" => Ok(Self::EconomyRead),
             "economy.wager" => Ok(Self::EconomyWager),
             "economy.transfer" => Ok(Self::EconomyTransfer),
+            "economy.credit" => Ok(Self::EconomyCredit),
+            "economy.debit" => Ok(Self::EconomyDebit),
+            "economy.admin_adjust" => Ok(Self::EconomyAdminAdjust),
+            "economy.pot.pay" => Ok(Self::EconomyPotPay),
             "identity.resolve" => Ok(Self::IdentityResolve),
             "flags.read" => Ok(Self::FlagsRead),
             "platform.scheduled" => Ok(Self::PlatformScheduled),

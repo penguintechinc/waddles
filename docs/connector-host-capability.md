@@ -104,6 +104,61 @@ executor withholds the wasmtime error chain, `SinkError::Invalid` is a `&'static
 spoofed platform, rejected/failed events, truncation) are sampled -- 5 per 30s per category per connection with a
 `suppressed_before` count -- while every occurrence is still counted. `tracing` span `connector.on_frame` wraps each call.
 
+## Heartbeat scheduling (P6a Task 5, spec S3.5)
+
+`ConnectorDriver` runs a per-connection heartbeat loop concurrently with the frame pump (same task, bounded
+`mpsc(1)` hand-off, so at most ONE `on-heartbeat-due` is in flight). A due heartbeat is written even while a
+frame is still being processed (`on-frame` + publish only borrow the invoker/sink, never the transport). One
+structural limit: the transport is a single `&mut`, so reading the NEXT frame pauses while a heartbeat write is
+in progress; that write has a deadline (default 5s, `with_heartbeat_send_timeout`) after which it is cancelled and
+the connection torn down + reconnected.
+
+| Piece | Behaviour |
+|---|---|
+| `Transport::heartbeat_interval()` | `None` (default) = no heartbeat; outside `MIN_HEARTBEAT_INTERVAL..=MAX_HEARTBEAT_INTERVAL` (100ms..=1h, zero included) = `DriverError::HeartbeatIntervalOutOfRange` (before connect, only when the flag is ON) |
+| `Transport::send_heartbeat(bytes)` | sends the connector body; the default FAILS LOUD (`TransportError::Send`); must be cancel-safe |
+| `Transport::send_default_heartbeat()` | called when the connector returns `none` (WIT: "host sends its platform-default heartbeat unchanged"); the default FAILS LOUD |
+| Schedule | first beat one period after establishment; missed ticks are delayed, never burst |
+| Flag | `ConnectorDriver::with_heartbeat_enabled(bool)`; caller resolves PostHog `ingest.connector-heartbeat` (default OFF). OFF = no effect at all: no validation/refusal, no timer, one DEBUG line per connection |
+| Outcomes (`svc_ingest_connector_heartbeats_total{platform,outcome}`) | `sent`, `default_sent`, `guest_error` (connection stays up), `send_failed` (fatal parks, else reconnect), `send_timeout` (reconnect), trap/`unavailable` kinds (teardown + backoff) |
+| Latency | `svc_ingest_connector_heartbeat_duration_seconds{platform}`; span `connector.on_heartbeat_due` |
+
+Shutdown cancels an in-flight heartbeat promptly, and an in-flight frame too; the frame is reported to the transport
+as `Dropped`, so a stateful cursor transport re-yields it. The heartbeat future is dropped before `on-disconnect`
+runs. Tests: `core/svc_ingest/tests/connector_heartbeat.rs` (paused-clock + real-time).
+
+## Connector tools (`world connector-tools`, P6a Task 4)
+
+A connector overlay can EXPOSE normalized platform tools (`get_chatters`, `send_chat`, ...) and optionally CALL other
+bundles' tools, reusing the P3b tool mechanism (`docs/bundle-tool-invoke.md`) -- so app bundles reach platform data
+through `tool.invoke`, never a platform-specific host path.
+
+- **New world, frozen old one.** `wit/waddle-connector/connector.wit` gains `world connector-tools` = `connector` +
+  `import waddle:bundle/tool@1.0.0` + `export waddle:bundle/tool-provider@1.0.0`. `world connector` is untouched, so
+  every compiled connector keeps linking. `deps/waddle-bundle/tool.wit` carries byte-identical `tool`/`tool-provider`
+  interface bodies (checked by `wit/waddle-connector/connector_wit_test.sh`).
+- **Host.** `WitWorld::ConnectorTools` (manifest) selects `engine::connector_tools_world`; the same core-namespace +
+  `connector.pii.read` gates apply (`WitWorld::is_connector`). `ConnectorHost::call_tool(name, args)` runs
+  `tool-provider.call` under the same pool slot / fuel / deadline / memory bounds as every other export; a guest
+  refusal is `ConnectorCallError::Tool(ToolError)` (typed, not a sandbox trip), a plain-`connector` host answers
+  `NoToolProvider` (fail loud, never an empty result).
+- **Wire.** `ExportKind::ToolCall` for a digest pinned in the connector registry is served by the overlay
+  (`{"ok": <json>}` / `{"tool_error": ...}`, the stage-tools result shape); a plain connector answers
+  `EXPORT_MISSING`; an unpinned digest still falls through to the stage registry.
+- **Resource isolation (security review).** Tool calls run on a DEDICATED semaphore (`tool_pool_size` = half the
+  receiver pool, min 1), never the receiver pool, so saturating `tool-provider` traffic cannot starve `on-frame` /
+  heartbeat (excess tool calls get typed `PoolExhausted`). The wire `deadline_ms` is clamped to
+  `min(body.deadline_ms, limits.deadline_ms)` (`clamp_deadline_ms`) -- a caller can tighten, never extend. Regression
+  tests: `saturated_tool_pool_cannot_starve_on_frame_or_heartbeat`, `a_requested_deadline_above_the_limit_is_clamped_*`.
+- **`tool` import.** Linked via the shared `HasExecState` host impl; authority stays with the stage (grants, kind
+  matrix, depth). With no stage bridge it answers a typed `target-unavailable`.
+- **Gating / flag.** The executor only exposes the mechanism; nothing in production pins a `connector-tools`
+  component yet (the first one is a P6b overlay). The pin/routing site gates on PostHog flag
+  `waddles.connector-tools`, default OFF, when P6b wires it. Telemetry: `waddles_executor_connector_calls_total` /
+  `_call_seconds` with `export="tool-call"`; logs carry `app_id` only (never args or results).
+- **Tests.** `core/bundle_executor/tests/connector_tools.rs` (real compiled fixtures through the production
+  engine/linker/wire path), `src/connector_wire.rs` and `src/manifest.rs` unit tests.
+
 ## Not in B0 (explicit, typed, not silent)
 
 - **A production listener + pinned set.** The wire invoker takes any accepted duplex stream
@@ -111,7 +166,7 @@ spoofed platform, rejected/failed events, truncation) are sampled -- 5 per 30s p
   connectors arrive with the first real platform connector (neither exists in production yet, and svc_ingest
   still constructs no `ConnectorDriver`). Pinned connectors run with no host-call bridge: a connector import
   that needs one (`http`, ...) fails typed, and any `host-call` frame is answered `HOST_CALL_DENIED`.
-- Real platform transports, heartbeat scheduling (a dedicated per-connection task, spec S3.5), secret-handle
+- Real platform transports, secret-handle
   substitution in the outbound path (spec S2.1), `identity.lookup` backing (RO-replica reader, cache, audit,
   invalidation -- spec S3.3/S3.4), sender dispatch in `svc_action`, shadow-mode harness, flipping any
   `rustDataPlane` default, Ed25519 verification ahead of the connector `Linker` (`VerifiedManifest` is its output).

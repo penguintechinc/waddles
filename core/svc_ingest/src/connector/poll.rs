@@ -32,10 +32,10 @@ use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 use super::egress_guard::resolve_pinned;
+use super::secrets::{Destination, TransportSecretSource};
 use super::transport::{FrameOutcome, Transport, TransportError};
 use super::transport_common::{opaque_id, resolve_handle, validate_endpoint};
 use super::types::{ConnectionCtx, Handshake};
-use super::webhook::WebhookSecretSource;
 
 /// Longest cursor accepted from a response (longer is treated as absent).
 pub const MAX_CURSOR_BYTES: usize = 512;
@@ -87,7 +87,7 @@ pub struct PollConfig {
 }
 
 /// Polling transport over reqwest (rustls, redirects disabled).
-pub struct PollTransport<S: WebhookSecretSource> {
+pub struct PollTransport<S: TransportSecretSource> {
     cfg: PollConfig,
     url: reqwest::Url,
     source_id: String,
@@ -104,7 +104,7 @@ pub struct PollTransport<S: WebhookSecretSource> {
     last_poll: Option<Instant>,
 }
 
-impl<S: WebhookSecretSource> PollTransport<S> {
+impl<S: TransportSecretSource> PollTransport<S> {
     /// Validates the config.
     pub fn new(cfg: PollConfig, secrets: S) -> Result<Self, TransportError> {
         let url = validate_endpoint(&cfg.url, &["https"], "http", cfg.allow_loopback_insecure)
@@ -180,12 +180,20 @@ impl<S: WebhookSecretSource> PollTransport<S> {
         }
         let mut req = client.get(url);
         if let Some(a) = &self.cfg.auth {
-            let secret = resolve_handle(&self.secrets, &self.cfg.handles, &a.handle).await?;
-            let joined = Zeroizing::new(format!("{}{}", a.prefix, secret.expose()));
+            let dest = Destination::from_url(&self.url)
+                .ok_or_else(|| TransportError::Fatal("secret unavailable for handle".into()))?;
+            let auth = resolve_handle(&self.secrets, &self.cfg.handles, &a.handle, &dest).await?;
+            // API-key rows use the STORED header name and a raw value; only
+            // bearer/OAuth rows use the overlay's header + prefix.
+            let (hname, prefix) = match &auth.header {
+                Some(stored) => (stored.as_str(), ""),
+                None => (a.header.as_str(), a.prefix.as_str()),
+            };
+            let joined = Zeroizing::new(format!("{prefix}{}", auth.secret.expose()));
             let mut v = HeaderValue::from_str(&joined)
                 .map_err(|_| TransportError::Fatal("secret not usable as header".into()))?;
             v.set_sensitive(true);
-            let name = HeaderName::from_bytes(a.header.as_bytes())
+            let name = HeaderName::from_bytes(hname.as_bytes())
                 .map_err(|_| TransportError::Fatal("invalid auth header name".into()))?;
             req = req.header(name, v);
         }
@@ -270,7 +278,7 @@ impl<S: WebhookSecretSource> PollTransport<S> {
     }
 }
 
-impl<S: WebhookSecretSource + 'static> Transport for PollTransport<S> {
+impl<S: TransportSecretSource + 'static> Transport for PollTransport<S> {
     fn platform(&self) -> &str {
         &self.cfg.platform
     }
@@ -377,10 +385,19 @@ mod tests {
 
     #[derive(Clone)]
     struct CountingSecrets(Arc<AtomicUsize>);
-    impl WebhookSecretSource for CountingSecrets {
-        fn resolve(&self, _r: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
+    impl TransportSecretSource for CountingSecrets {
+        fn resolve(
+            &self,
+            _r: ConnectionRef,
+            _d: Destination,
+        ) -> BoxFut<'_, Result<crate::connector::secrets::ResolvedAuth, SecretError>> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok(SecretString::new("tok123".into())) })
+            Box::pin(async {
+                Ok(crate::connector::secrets::ResolvedAuth {
+                    secret: SecretString::new("tok123".into()),
+                    header: None,
+                })
+            })
         }
     }
 
@@ -641,6 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn ambient_proxy_env_does_not_bypass_pin() {
+        let _env = crate::connector::transport_common::PROXY_ENV.write().await;
         let (addr, srv) = start().await;
         // A dead proxy: if honored the request would fail / not reach srv.
         std::env::set_var("HTTP_PROXY", "http://127.0.0.1:1");
