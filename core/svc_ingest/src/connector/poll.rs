@@ -283,7 +283,16 @@ impl<S: TransportSecretSource> PollTransport<S> {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .map(Duration::from_secs);
-            let body = self.read_body(&mut resp).await.unwrap_or_default();
+            // An unreadable/oversize error body just means "no rule can
+            // match" (falls through to the default fail-loud handling below);
+            // it is counted, never silently swallowed.
+            let body = match self.read_body(&mut resp).await {
+                Ok(b) => b,
+                Err(_) => {
+                    self.count("poll_http", "body_unreadable");
+                    Vec::new()
+                }
+            };
             match self
                 .cfg
                 .lifecycle
