@@ -335,7 +335,7 @@ impl ExecutorLink {
 
     /// Sends one `invoke` and awaits its `result`/`error`, bounded by the
     /// call timeout plus a transport grace.
-    async fn call(
+    pub(crate) async fn call(
         &self,
         app_id: &str,
         digest: &str,

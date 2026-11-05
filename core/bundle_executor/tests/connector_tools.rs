@@ -1011,3 +1011,353 @@ async fn unpinned_tool_call_never_fetches_from_the_component_source() {
         "an invoke must never fetch"
     );
 }
+
+// ---- P6a T6d: `sender.build-request` (`ExportKind::ConnectorBuildRequest`) ----
+//
+// Real compiled `connector_tools_fixture.wasm` (deterministic sender keyed on
+// `action.kind`, see its source) and the real `echo_connector.wasm` (plain
+// `connector` world, sender is `unsupported`), through the production
+// `ConnectorHost` and the real host-API wire.
+
+use bundle_executor::connector::SenderAction;
+
+fn action(kind: &str, target: &str, payload: &str) -> SenderAction {
+    SenderAction {
+        kind: kind.to_string(),
+        target_source_id: target.to_string(),
+        payload_json: payload.to_string(),
+    }
+}
+
+fn wire_action(kind: &str, payload_json: &str) -> serde_json::Value {
+    serde_json::json!({"kind": kind, "target_source_id": "s", "payload_json": payload_json})
+}
+
+#[tokio::test]
+async fn build_request_returns_the_guest_template_with_fuel_metered() {
+    let rig = rig();
+    let host = tools_host(&rig).await;
+    let reply = host
+        .build_request(action("chat.send", "src-9", r#"{"text":"hi"}"#), None)
+        .await
+        .unwrap();
+    let t = reply.value;
+    assert_eq!(t.method, "POST");
+    assert_eq!(t.url, "https://api.example.test/v1/src-9/messages");
+    assert_eq!(t.headers.len(), 1);
+    assert_eq!(t.headers[0].name, "Content-Type");
+    assert_eq!(t.body.as_deref(), Some(br#"{"text":"hi"}"#.as_slice()));
+    assert_eq!(
+        t.secret_refs,
+        vec![("token".to_string(), "handle-1".to_string())]
+    );
+    assert!(reply.fuel_used > 0);
+    assert_eq!(host.available_slots(), 4, "permit returned");
+}
+
+#[tokio::test]
+async fn build_request_guest_frame_errors_are_typed_guest_errors() {
+    let rig = rig();
+    let host = tools_host(&rig).await;
+    let err = host
+        .build_request(action("chat.bad", "s", "{}"), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ConnectorCallError::Guest(FrameError::Malformed(_))),
+        "{err:?}"
+    );
+    let err = host
+        .build_request(action("chat.backend", "s", "{}"), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ConnectorCallError::Guest(FrameError::Backend(_))),
+        "{err:?}"
+    );
+    let err = host
+        .build_request(action("dm.send", "s", "{}"), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ConnectorCallError::Guest(FrameError::Unsupported(_))),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn build_request_works_on_the_plain_connector_world_too() {
+    let rig = rig();
+    let host = try_load(&rig, ECHO_APP, ECHO_WASM, WitWorld::Connector)
+        .await
+        .unwrap();
+    // The echo connector's sender is `unsupported`; reaching the guest proves the
+    // plain-world accessor is wired (not a link or routing failure).
+    let err = host
+        .build_request(action("chat.send", "s", "{}"), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ConnectorCallError::Guest(FrameError::Unsupported(_))),
+        "{err:?}"
+    );
+}
+
+// regression (#984 parity): oversized action is refused BEFORE admission.
+#[tokio::test]
+async fn oversized_build_request_action_is_refused_before_admission() {
+    let rig = rig();
+    let host = tools_host_with(
+        &rig,
+        ConnectorLimits {
+            max_tool_args_bytes: 64,
+            ..limits()
+        },
+    )
+    .await;
+    let err = host
+        .build_request(action("chat.send", "s", &"x".repeat(200)), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ConnectorCallError::PayloadTooLarge { what: "args", .. }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(host.available_slots(), 4);
+    // The cap covers kind + target + payload; a small action passes.
+    host.build_request(action("chat.send", "s", "{}"), None)
+        .await
+        .unwrap();
+}
+
+// regression (#984 parity): an oversized TEMPLATE (`chat.huge` = 950 KB body,
+// default result cap 900 KB) is refused before it is encoded anywhere.
+#[tokio::test]
+async fn oversized_build_request_template_is_refused() {
+    let rig = rig();
+    let host = tools_host(&rig).await;
+    let err = host
+        .build_request(action("chat.huge", "s", "{}"), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ConnectorCallError::PayloadTooLarge { what: "result", .. }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(host.available_slots(), 4);
+}
+
+#[tokio::test]
+async fn a_spinning_build_request_is_contained_by_fuel() {
+    let rig = rig();
+    let host = tools_host(&rig).await;
+    let err = host
+        .build_request(action("chat.spin", "s", "{}"), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ConnectorCallError::FuelExhausted(_)),
+        "{err:?}"
+    );
+    assert!(err.is_sandbox_trip());
+    assert_eq!(host.available_slots(), 4);
+}
+
+#[tokio::test]
+async fn build_request_deadline_is_clamped_and_only_tightens() {
+    let rig = rig();
+    // Fuel effectively unlimited so the DEADLINE, not fuel, ends the spin.
+    let host = tools_host_with(
+        &rig,
+        ConnectorLimits {
+            fuel: 4_000_000_000_000_000,
+            deadline_ms: 2_000,
+            ..limits()
+        },
+    )
+    .await;
+    let started = Instant::now();
+    let err = host
+        .build_request(action("chat.spin", "s", "{}"), Some(150))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ConnectorCallError::DeadlineExceeded(_)),
+        "{err:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(1_500),
+        "a requested 150 ms deadline must tighten the 2 s limit, took {:?}",
+        started.elapsed()
+    );
+    // A caller cannot EXTEND the connector's own bound.
+    let started = Instant::now();
+    let err = host
+        .build_request(action("chat.spin", "s", "{}"), Some(60_000))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ConnectorCallError::DeadlineExceeded(_)),
+        "{err:?}"
+    );
+    assert!(started.elapsed() < Duration::from_millis(6_000));
+}
+
+#[tokio::test]
+async fn build_request_over_the_wire_returns_the_encoded_template() {
+    let mut stage = wire_rig().await;
+    let pin = digest_of(TOOLS_WASM);
+    let ok = stage
+        .invoke(
+            TOOLS_APP,
+            &pin,
+            ExportKind::ConnectorBuildRequest,
+            serde_json::json!({
+                "kind": "chat.send",
+                "target_source_id": "src-7",
+                "payload_json": "{\"text\":\"yo\"}",
+            }),
+        )
+        .await
+        .unwrap();
+    let p = &ok.payload;
+    assert_eq!(p["method"], "POST");
+    assert_eq!(p["url"], "https://api.example.test/v1/src-7/messages");
+    assert_eq!(
+        p["headers"],
+        serde_json::json!([["Content-Type", "application/json"]])
+    );
+    let body = base64::engine::general_purpose::STANDARD
+        .decode(p["body"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(body, br#"{"text":"yo"}"#);
+    assert_eq!(p["secret_refs"], serde_json::json!([["token", "handle-1"]]));
+    assert!(ok.fuel_used > 0);
+
+    // A guest frame-error is a normal `result` payload (same shape as receiver).
+    let fe = stage
+        .invoke(
+            TOOLS_APP,
+            &pin,
+            ExportKind::ConnectorBuildRequest,
+            wire_action("chat.bad", "{}"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fe.payload["frame_error"]["kind"], "malformed");
+}
+
+#[tokio::test]
+async fn build_request_wire_failures_are_typed() {
+    let mut stage = wire_rig().await;
+    let pin = digest_of(TOOLS_WASM);
+
+    // Unknown field -> MALFORMED_FRAME (strict decode).
+    let mut bad = wire_action("chat.send", "{}");
+    bad["x"] = serde_json::json!(1);
+    let e = stage
+        .invoke(TOOLS_APP, &pin, ExportKind::ConnectorBuildRequest, bad)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::MalformedFrame, "{e:?}");
+
+    // Wrong app_id for a pinned digest -> UNKNOWN_BUNDLE.
+    let e = stage
+        .invoke(
+            "waddles.core.someone-else",
+            &pin,
+            ExportKind::ConnectorBuildRequest,
+            wire_action("chat.send", "{}"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::UnknownBundle, "{e:?}");
+
+    // Unpinned digest: digest-pinned connectors only, never the stage registry.
+    let e = stage
+        .invoke(
+            TOOLS_APP,
+            "sha256:deadbeef",
+            ExportKind::ConnectorBuildRequest,
+            wire_action("chat.send", "{}"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::UnknownBundle, "{e:?}");
+
+    // Oversized action -> MALFORMED_FRAME, never silently truncated.
+    let e = stage
+        .invoke(
+            TOOLS_APP,
+            &pin,
+            ExportKind::ConnectorBuildRequest,
+            wire_action("chat.send", &"x".repeat(950_000)),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::MalformedFrame, "{e:?}");
+
+    // Sandbox containment maps to its typed wire code.
+    let e = stage
+        .invoke(
+            TOOLS_APP,
+            &pin,
+            ExportKind::ConnectorBuildRequest,
+            wire_action("chat.spin", "{}"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::ExecutorDeadline, "{e:?}");
+    assert_eq!(e.detail.as_deref(), Some("fuel_exhausted"), "{e:?}");
+}
+
+#[tokio::test]
+async fn build_request_takes_global_admission_like_other_exports() {
+    let mut stage = wire_rig_with(&[
+        "--executor-max-concurrent-calls",
+        "1",
+        "--executor-pool-wait-ms",
+        "200",
+        // Huge fuel so the spinning build is ended by the DEADLINE, not fuel.
+        "--executor-connector-fuel-limit",
+        "4000000000000000",
+    ])
+    .await;
+    let pin = digest_of(TOOLS_WASM);
+    let slow = stage
+        .send_invoke(
+            TOOLS_APP,
+            &pin,
+            ExportKind::ConnectorBuildRequest,
+            wire_action("chat.spin", "{}"),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let quick = stage
+        .send_invoke(
+            TOOLS_APP,
+            &pin,
+            ExportKind::ConnectorBuildRequest,
+            wire_action("chat.send", "{}"),
+        )
+        .await;
+    let mut seen = std::collections::HashMap::new();
+    for _ in 0..2 {
+        let (id, out) = stage.next_reply().await;
+        seen.insert(id, out);
+    }
+    let refused = seen.remove(&quick).expect("quick reply").unwrap_err();
+    assert_eq!(refused.code, ErrorCode::ExecutorDeadline, "{refused:?}");
+    assert_eq!(
+        refused.detail.as_deref(),
+        Some("pool_exhausted"),
+        "{refused:?}"
+    );
+    assert!(seen.remove(&slow).expect("slow reply").is_err());
+}

@@ -243,11 +243,13 @@ pinned connector component (a template built by any other digest is `DigestMisma
 
 ### T6d-1 status (read before enabling)
 
-* **Template source.** `build-request` is called through the `TemplateBuilder` seam. The production wire (`penguin-bundle-host` 0.4.0
-  `ExportKind`) has NO `ConnectorBuildRequest` export, so no production `TemplateBuilder` exists yet and boot (`lib.rs`) still starts
-  the legacy drains. Needed: `penguin-libs` `ExportKind::ConnectorBuildRequest` (breaking minor), `ConnectorHost::build_request` +
-  `connector_wire` dispatch in `core/bundle_executor`, and a `WireTemplateBuilder` here. The drains are already executor-ready:
-  `outbound::run_exec` / `run_discord_exec` (readiness key, acks, stamp gate unchanged).
+* **Template source.** `build-request` is called through the `TemplateBuilder` seam. The production implementation,
+  `WireTemplateBuilder` (`sender_exec/wire_builder.rs`), carries it over the executor wire (`penguin-bundle-host` 0.5.0
+  `ExportKind::ConnectorBuildRequest`; executor side `ConnectorHost::build_request` + `connector_wire`). It is BUILT BUT NOT WIRED INTO
+  BOOT: `lib.rs` still starts the legacy drains. Follow-up (after the executor PR merges): construct
+  `WireTemplateBuilder::new(link, registry)` where `lib.rs` already holds the `ExecutorLink`/`ConnectorRegistry`, build the
+  `SenderExecutor`, and start `outbound::run_exec` / `run_discord_exec` instead of the legacy drains (seam documented in the
+  `wire_builder` module doc). The drains are already executor-ready (readiness key, acks, stamp gate unchanged).
 * **Legacy egress still present** (removed once the above lands): `outbound.rs` `RealIrcOutbound` (IRC), `discord_rest.rs` (Discord REST).
   `connector/poll.rs` is the INBOUND poll path (its own pinned client) and is unchanged.
 * **Slot sources.** Only Twitch has one (`TwitchSlots`); it needs the connection record to expose a usable bot login (it does) and uses a

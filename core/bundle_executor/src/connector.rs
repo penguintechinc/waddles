@@ -65,6 +65,12 @@ use crate::invoke::{new_bounded_store, verify_digest};
 use crate::manifest::{VerifiedManifest, WitWorld};
 use crate::metrics::{executor_metrics, ExecutorMetrics};
 
+/// The `sender.build-request` argument and result records (P6a T6d): the
+/// outbound `action` the host hands a connector, and the `http-request-tpl`
+/// (slots and opaque secret handles only) it returns.
+pub use crate::engine::connector_world::exports::waddle::connector::sender::{
+    Action as SenderAction, Header as TemplateHeader, HttpRequestTpl,
+};
 /// The generated WIT types a connector call takes and returns, re-exported so
 /// callers never reach into `engine::connector_world`'s generated tree.
 pub use crate::engine::connector_world::waddle::connector::types::{
@@ -103,6 +109,50 @@ macro_rules! receiver_call {
             }
         }
     };
+}
+
+/// `sender.build-request` on whichever world's accessor the instance carries.
+/// The `connector-tools` bindgen remaps imported interfaces onto `connector`'s
+/// but still generates its own copy of the EXPORTED `sender` records, so the
+/// tools arm converts the (structurally identical) records at the boundary.
+async fn call_sender(
+    conn: &ConnectorInstance,
+    store: &mut Store<ExecState>,
+    action: &SenderAction,
+) -> wasmtime::Result<Result<HttpRequestTpl, FrameError>> {
+    match conn {
+        ConnectorInstance::Plain(c) => {
+            c.waddle_connector_sender()
+                .call_build_request(store, action)
+                .await
+        }
+        ConnectorInstance::Tools(c) => {
+            use crate::engine::connector_tools_world::exports::waddle::connector::sender as tools;
+            let tools_action = tools::Action {
+                kind: action.kind.clone(),
+                target_source_id: action.target_source_id.clone(),
+                payload_json: action.payload_json.clone(),
+            };
+            let reply = c
+                .waddle_connector_sender()
+                .call_build_request(store, &tools_action)
+                .await?;
+            Ok(reply.map(|t| HttpRequestTpl {
+                method: t.method,
+                url: t.url,
+                headers: t
+                    .headers
+                    .into_iter()
+                    .map(|h| TemplateHeader {
+                        name: h.name,
+                        value: h.value,
+                    })
+                    .collect(),
+                body: t.body,
+                secret_refs: t.secret_refs,
+            }))
+        }
+    }
 }
 
 /// Per-call resource bounds for one connector (spec S3.5).
@@ -604,6 +654,61 @@ impl ConnectorHost {
         Ok(reply)
     }
 
+    /// `sender.build-request` (P6a T6d): the connector shapes the platform
+    /// request for an outbound `action`. The returned template carries SLOTS
+    /// and opaque secret handles only; the host's outbound executor verifies
+    /// and fills it (the guest never sees a credential).
+    ///
+    /// Bounded like the tool-call path (#984): the action's total size is
+    /// checked against `max_tool_args_bytes` BEFORE admission (an oversized
+    /// request never takes a slot), the template's total size against
+    /// `max_tool_result_bytes` BEFORE it is encoded anywhere, and a
+    /// caller-supplied deadline can only tighten `limits.deadline_ms`. Runs on
+    /// the combined pool under the connector's own fuel budget. A guest
+    /// `frame-error` is [`ConnectorCallError::Guest`].
+    pub async fn build_request(
+        &self,
+        action: SenderAction,
+        requested_deadline_ms: Option<u64>,
+    ) -> Result<CallReply<HttpRequestTpl>, ConnectorCallError> {
+        let deadline = clamp_deadline_ms(requested_deadline_ms, self.inner.limits.deadline_ms);
+        let action_len = action
+            .kind
+            .len()
+            .saturating_add(action.target_source_id.len())
+            .saturating_add(action.payload_json.len());
+        if action_len > self.inner.limits.max_tool_args_bytes {
+            let err = ConnectorCallError::PayloadTooLarge {
+                what: "args",
+                len: action_len,
+                max: self.inner.limits.max_tool_args_bytes,
+            };
+            self.inner.record("build-request", &err, Instant::now());
+            return Err(err);
+        }
+        let reply = run_export!(
+            self,
+            "build-request",
+            ConnectorCallError::Guest,
+            pool = receiver,
+            deadline = deadline,
+            |conn, store| call_sender(&conn, store, &action)
+        )?;
+        // The guest result is already lifted into host memory; refuse an
+        // oversized template HERE, before anything encodes it further.
+        let result_len = template_len(&reply.value);
+        if result_len > self.inner.limits.max_tool_result_bytes {
+            let err = ConnectorCallError::PayloadTooLarge {
+                what: "result",
+                len: result_len,
+                max: self.inner.limits.max_tool_result_bytes,
+            };
+            self.inner.record("build-request", &err, Instant::now());
+            return Err(err);
+        }
+        Ok(reply)
+    }
+
     /// `receiver.on-disconnect`: tell the connector the connection ended. Has
     /// no WIT result, so it can only fail by trap/limit.
     pub async fn on_disconnect(
@@ -774,6 +879,27 @@ impl Inner {
             None => ConnectorCallError::Trap(chain),
         }
     }
+}
+
+/// Total byte size of a guest-built template (method + url + every header
+/// name/value + body + every secret-ref slot/handle), saturating.
+fn template_len(t: &HttpRequestTpl) -> usize {
+    let headers: usize = t
+        .headers
+        .iter()
+        .map(|h| h.name.len().saturating_add(h.value.len()))
+        .fold(0, usize::saturating_add);
+    let refs: usize = t
+        .secret_refs
+        .iter()
+        .map(|(a, b)| a.len().saturating_add(b.len()))
+        .fold(0, usize::saturating_add);
+    t.method
+        .len()
+        .saturating_add(t.url.len())
+        .saturating_add(headers)
+        .saturating_add(t.body.as_ref().map_or(0, Vec::len))
+        .saturating_add(refs)
 }
 
 /// A PII-free, bounded description of a wasmtime failure: the typed trap's

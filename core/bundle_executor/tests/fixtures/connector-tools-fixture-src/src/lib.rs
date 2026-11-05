@@ -15,7 +15,7 @@ use std::sync::Once;
 
 use bindings::exports::waddle::bundle::tool_provider::Guest as ToolGuest;
 use bindings::exports::waddle::connector::receiver::Guest as ReceiverGuest;
-use bindings::exports::waddle::connector::sender::{Action, Guest as SenderGuest, HttpRequestTpl};
+use bindings::exports::waddle::connector::sender::{Action, Guest as SenderGuest, Header, HttpRequestTpl};
 use bindings::waddle::bundle::tool::{self, ToolError as WitError};
 use bindings::waddle::connector::types::{
     ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
@@ -151,11 +151,45 @@ impl ReceiverGuest for Component {
     fn on_disconnect(_ctx: ConnectionCtx, _reason: String) {}
 }
 
+/// Deterministic `sender.build-request` (P6a T6d real-path fixture). Behavior
+/// is keyed on `action.kind`, so a test selects each wire outcome by input:
+/// `chat.send` -> a template (target id in the URL, payload as body, one opaque
+/// secret handle); `chat.bad` / `chat.backend` -> `malformed` / `backend`
+/// frame-errors; `chat.huge` -> a ~950 KB body (over the host's result cap);
+/// `chat.spin` -> an unbounded loop (fuel/deadline containment); anything
+/// else -> `unsupported`.
 impl SenderGuest for Component {
-    fn build_request(_action: Action) -> Result<HttpRequestTpl, FrameError> {
-        Err(FrameError::Unsupported(
-            "connector-tools fixture has no sender".to_string(),
-        ))
+    fn build_request(action: Action) -> Result<HttpRequestTpl, FrameError> {
+        match action.kind.as_str() {
+            "chat.send" => Ok(HttpRequestTpl {
+                method: "POST".to_string(),
+                url: format!(
+                    "https://api.example.test/v1/{}/messages",
+                    action.target_source_id
+                ),
+                headers: vec![Header {
+                    name: "Content-Type".to_string(),
+                    value: "application/json".to_string(),
+                }],
+                body: Some(action.payload_json.into_bytes()),
+                secret_refs: vec![("token".to_string(), "handle-1".to_string())],
+            }),
+            "chat.bad" => Err(FrameError::Malformed("bad action".to_string())),
+            "chat.backend" => Err(FrameError::Backend("platform down".to_string())),
+            "chat.huge" => Ok(HttpRequestTpl {
+                method: "POST".to_string(),
+                url: "https://api.example.test/v1/huge".to_string(),
+                headers: Vec::new(),
+                body: Some(vec![b'x'; 950_000]),
+                secret_refs: Vec::new(),
+            }),
+            "chat.spin" => loop {
+                std::hint::black_box(0u64);
+            },
+            _ => Err(FrameError::Unsupported(
+                "connector-tools fixture sender: unsupported kind".to_string(),
+            )),
+        }
     }
 }
 

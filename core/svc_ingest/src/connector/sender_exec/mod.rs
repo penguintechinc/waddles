@@ -33,6 +33,7 @@ pub mod policy;
 pub mod subst;
 pub mod twitch_slots;
 pub mod verify;
+pub mod wire_builder;
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
@@ -45,6 +46,7 @@ use tracing::Instrument;
 pub use policy::{KindPolicy, PlatformPolicy, SlotOrigin};
 pub use subst::{PreparedRequest, SlotValue, SubstError};
 pub use verify::TemplateError;
+pub use wire_builder::WireTemplateBuilder;
 
 use crate::outbound_ops::OutboundAction;
 use crate::outbound_pin::PinError;
@@ -103,10 +105,11 @@ pub enum BuildError {
 
 /// Runs `sender.build-request` on the pinned component for a platform.
 ///
-/// Production binds this to the executor wire once
-/// `penguin-bundle-host` carries a `ConnectorBuildRequest` export (see the
-/// crate README "T6d-1 status"); the executor and every test drive it
-/// through this seam.
+/// Production implementation: [`WireTemplateBuilder`] (`sender.build-request`
+/// over the executor wire, `penguin-bundle-host` 0.5.0
+/// `ExportKind::ConnectorBuildRequest`). It is built but NOT yet wired into
+/// boot -- see the "Boot wiring seam" section of [`wire_builder`]. The
+/// executor and every test drive it through this seam.
 #[allow(async_fn_in_trait)] // service-binary-internal, see outbound.rs::IrcOutbound
 pub trait TemplateBuilder: Send + Sync {
     /// Builds the template for `action` on `platform`.

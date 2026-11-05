@@ -1117,6 +1117,17 @@ impl<S: ComponentSource> Executor<S> {
         // registry, never the scope-refcounted stage registry below: a
         // connector is core-only, pinned for the process lifetime, and
         // neither loadable nor evictable over the wire.
+        //
+        // `sender.build-request` (P6a T6d) takes the same global admission slot
+        // as a tool call: it is stage-initiated guest compute on behalf of an
+        // outbound action, so it must count against the executor's concurrency
+        // bound (the receiver exports are connection-driven and exempt).
+        // Authorization is upstream (the mTLS-pinned stage, which only sends
+        // build-request for a digest-pinned connector it resolved itself).
+        if body.export == ExportKind::ConnectorBuildRequest {
+            let _global = self.acquire_global_slot(&body.app_id).await?;
+            return self.connectors.invoke(body).await;
+        }
         if body.export.is_connector() {
             return self.connectors.invoke(body).await;
         }
@@ -1174,7 +1185,8 @@ impl<S: ComponentSource> Executor<S> {
             ExportKind::ConnectorOnConnect
             | ExportKind::ConnectorOnFrame
             | ExportKind::ConnectorOnHeartbeatDue
-            | ExportKind::ConnectorOnDisconnect => {
+            | ExportKind::ConnectorOnDisconnect
+            | ExportKind::ConnectorBuildRequest => {
                 return Err(error_body(
                     ErrorCode::ExportMissing,
                     "connector export reached the stage invoke path",
@@ -1482,7 +1494,8 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
         ExportKind::ConnectorOnConnect
         | ExportKind::ConnectorOnFrame
         | ExportKind::ConnectorOnHeartbeatDue
-        | ExportKind::ConnectorOnDisconnect => {
+        | ExportKind::ConnectorOnDisconnect
+        | ExportKind::ConnectorBuildRequest => {
             return Err(error_body(
                 ErrorCode::ExportMissing,
                 "connector export reached the stage guest runner",
