@@ -401,6 +401,7 @@ mod tests {
                 max_drop_attempts: 3,
                 egress_allow: vec![server.address().ip()],
                 allow_loopback_insecure: true,
+                lifecycle: Default::default(),
             },
             source,
         )
@@ -662,6 +663,7 @@ mod tests {
                 max_drop_attempts: 3,
                 egress_allow: vec![attacker.address().ip()],
                 allow_loopback_insecure: true,
+                lifecycle: Default::default(),
             },
             source,
         )
@@ -758,6 +760,7 @@ mod tests {
                 max_drop_attempts: 3,
                 egress_allow: vec![server.address().ip()],
                 allow_loopback_insecure: true,
+                lifecycle: Default::default(),
             },
             source,
         )

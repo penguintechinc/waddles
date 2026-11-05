@@ -32,9 +32,10 @@ use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 use super::egress_guard::resolve_pinned;
+use super::lifecycle::{backoff_wait, HttpAction, PollLifecycle};
 use super::secrets::{Destination, TransportSecretSource};
 use super::transport::{FrameOutcome, Transport, TransportError};
-use super::transport_common::{opaque_id, resolve_handle, validate_endpoint};
+use super::transport_common::{opaque_id, resolve_handle, validate_endpoint, FrameRuleMetrics};
 use super::types::{ConnectionCtx, Handshake};
 
 /// Longest cursor accepted from a response (longer is treated as absent).
@@ -84,6 +85,9 @@ pub struct PollConfig {
     /// Permit `http://` to a loopback host (tests only; the address must
     /// still be in `egress_allow`).
     pub allow_loopback_insecure: bool,
+    /// Host-owned poll lifecycle (interval hint, HTTP error classification,
+    /// API-key query slot); `PollLifecycle::default()` = none.
+    pub lifecycle: PollLifecycle,
 }
 
 /// Polling transport over reqwest (rustls, redirects disabled).
@@ -102,6 +106,14 @@ pub struct PollTransport<S: TransportSecretSource> {
     last_static_digest: Option<[u8; 32]>,
     drop_streak: u32,
     last_poll: Option<Instant>,
+    /// Gap before the next poll; the configured interval unless the last
+    /// response carried an in-bounds hint.
+    interval_now: Duration,
+    /// Polling is paused until then (classified quota/rate back-off).
+    backoff_until: Option<Instant>,
+    /// Consecutive classified back-offs (drives the exponential wait).
+    backoff_streak: u32,
+    metrics: Option<FrameRuleMetrics>,
 }
 
 impl<S: TransportSecretSource> PollTransport<S> {
@@ -125,6 +137,9 @@ impl<S: TransportSecretSource> PollTransport<S> {
         {
             return Err(TransportError::Connect("invalid poll limits".into()));
         }
+        cfg.lifecycle
+            .validate(&cfg.handles, cfg.cursor_param.as_deref(), &url)
+            .map_err(|e| TransportError::Connect(e.to_string()))?;
         if let Some(a) = &cfg.auth {
             HeaderName::from_bytes(a.header.as_bytes())
                 .map_err(|_| TransportError::Connect("invalid auth header name".into()))?;
@@ -136,7 +151,6 @@ impl<S: TransportSecretSource> PollTransport<S> {
             source_id: opaque_id("poll", &cfg.source_key),
             connection_id: uuid::Uuid::new_v4().to_string(),
             committed: cfg.initial_cursor.clone(),
-            cfg,
             url,
             secrets,
             pending: None,
@@ -144,7 +158,33 @@ impl<S: TransportSecretSource> PollTransport<S> {
             last_static_digest: None,
             drop_streak: 0,
             last_poll: None,
+            interval_now: cfg.interval,
+            backoff_until: None,
+            backoff_streak: 0,
+            metrics: None,
+            cfg,
         })
+    }
+
+    /// Attaches the lifecycle counters (registered once per registry via
+    /// [`FrameRuleMetrics::register`]).
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: FrameRuleMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    fn count(&self, rule: &str, outcome: &str) {
+        if let Some(m) = &self.metrics {
+            m.add(&self.cfg.platform, rule, outcome, 1);
+        }
+    }
+
+    /// The gap before the next poll: the configured interval unless the last
+    /// response carried an in-bounds hint.
+    #[must_use]
+    pub fn interval(&self) -> Duration {
+        self.interval_now
     }
 
     /// The last cursor the driver confirmed published (for host persistence).
@@ -178,6 +218,23 @@ impl<S: TransportSecretSource> PollTransport<S> {
         if let (Some(p), Some(c)) = (&self.cfg.cursor_param, &self.committed) {
             url.query_pairs_mut().append_pair(p, c);
         }
+        if let Some(q) = &self.cfg.lifecycle.query_secret {
+            let dest = Destination::from_url(&self.url)
+                .ok_or_else(|| TransportError::Fatal("secret unavailable for handle".into()))?;
+            let secret = resolve_handle(&self.secrets, &self.cfg.handles, &q.handle, &dest)
+                .await?
+                .secret;
+            if secret.expose().is_empty() {
+                return Err(TransportError::Fatal(
+                    "secret unavailable for handle".into(),
+                ));
+            }
+            // `append_pair` percent-encodes everything outside the
+            // form-urlencoded unreserved set, so the value can never end the
+            // parameter or inject another. Residual (library-forced): the
+            // `Url` owns a non-zeroizing copy until it drops after the send.
+            url.query_pairs_mut().append_pair(&q.param, secret.expose());
+        }
         let mut req = client.get(url);
         if let Some(a) = &self.cfg.auth {
             let dest = Destination::from_url(&self.url)
@@ -209,6 +266,69 @@ impl<S: TransportSecretSource> PollTransport<S> {
             )
         })?;
         let status = resp.status();
+        let code = status.as_u16();
+        // Host-classified error responses (e.g. quota 403 -> back off, not
+        // fatal). The body is only read when a rule targets this status. The
+        // URL (which may carry the query secret) is never part of any error.
+        if self
+            .cfg
+            .lifecycle
+            .error_rules
+            .iter()
+            .any(|r| r.status == code)
+        {
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map(Duration::from_secs);
+            // An unreadable/oversize error body just means "no rule can
+            // match" (falls through to the default fail-loud handling below);
+            // it is counted, never silently swallowed.
+            let body = match self.read_body(&mut resp).await {
+                Ok(b) => b,
+                Err(_) => {
+                    self.count("poll_http", "body_unreadable");
+                    Vec::new()
+                }
+            };
+            match self
+                .cfg
+                .lifecycle
+                .classify(code, &body)
+                .map(|r| r.action.clone())
+            {
+                Some(HttpAction::Backoff {
+                    base,
+                    max,
+                    honor_retry_after,
+                }) => {
+                    let wait = backoff_wait(
+                        base,
+                        max,
+                        self.backoff_streak,
+                        retry_after.filter(|_| honor_retry_after),
+                    );
+                    self.backoff_streak = self.backoff_streak.saturating_add(1);
+                    self.backoff_until = Instant::now().checked_add(wait);
+                    self.count("poll_http", "backoff");
+                    tracing::warn!(
+                        source_id = %self.source_id,
+                        wait_secs = wait.as_secs(),
+                        "poll upstream classified as quota/rate limited; backing off"
+                    );
+                    return Ok(None);
+                }
+                Some(HttpAction::Park) => {
+                    self.count("poll_http", "park");
+                    return Err(TransportError::Fatal(format!(
+                        "upstream error ({status}) classified fatal"
+                    )));
+                }
+                None => self.count("poll_http", "unclassified"),
+            }
+        }
         if matches!(status.as_u16(), 401 | 403) {
             return Err(TransportError::Fatal(format!(
                 "upstream rejected credentials ({status})"
@@ -226,19 +346,22 @@ impl<S: TransportSecretSource> PollTransport<S> {
         {
             return Err(TransportError::Read("response over size ceiling".into()));
         }
-        let mut body = Vec::new();
-        while let Some(chunk) = resp
-            .chunk()
-            .await
-            .map_err(|_| TransportError::Read("body read failed".into()))?
-        {
-            if body.len() + chunk.len() > self.cfg.max_body_bytes {
-                return Err(TransportError::Read("response over size ceiling".into()));
-            }
-            body.extend_from_slice(&chunk);
-        }
+        let body = self.read_body(&mut resp).await?;
         if body.is_empty() {
             return Ok(None);
+        }
+        self.backoff_streak = 0;
+        if self.cfg.lifecycle.interval_hint.is_some() {
+            match self.cfg.lifecycle.next_interval(&body) {
+                Some((d, clamped)) => {
+                    self.interval_now = d;
+                    self.count("poll_interval", if clamped { "clamped" } else { "applied" });
+                }
+                None => {
+                    self.interval_now = self.cfg.interval;
+                    self.count("poll_interval", "ignored");
+                }
+            }
         }
         let digest: [u8; 32] = Sha256::digest(&body).into();
         let next = self.extract_cursor(&body)?;
@@ -253,6 +376,22 @@ impl<S: TransportSecretSource> PollTransport<S> {
         self.pending = if advances { next } else { None };
         self.pending_digest = Some(digest);
         Ok(Some(body))
+    }
+
+    /// Reads a response body up to the size ceiling.
+    async fn read_body(&self, resp: &mut reqwest::Response) -> Result<Vec<u8>, TransportError> {
+        let mut body = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|_| TransportError::Read("body read failed".into()))?
+        {
+            if body.len() + chunk.len() > self.cfg.max_body_bytes {
+                return Err(TransportError::Read("response over size ceiling".into()));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 
     /// Reads the next cursor from the body per the configured pointer; an
@@ -306,12 +445,18 @@ impl<S: TransportSecretSource + 'static> Transport for PollTransport<S> {
 
     async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
         loop {
+            if let Some(until) = self.backoff_until {
+                // Cancel-safe: the deadline lives on self, so a cancelled
+                // read resumes the same wait.
+                tokio::time::sleep_until(until).await;
+                self.backoff_until = None;
+            }
             if let Some(t) = self.last_poll {
                 // interval is validated <= 24h, so overflow is unreachable;
                 // checked_add keeps it total regardless.
-                match t.checked_add(self.cfg.interval) {
+                match t.checked_add(self.interval_now) {
                     Some(at) => tokio::time::sleep_until(at).await,
-                    None => tokio::time::sleep(self.cfg.interval).await,
+                    None => tokio::time::sleep(self.interval_now).await,
                 }
             }
             self.pending = None;
@@ -477,6 +622,7 @@ mod tests {
             max_drop_attempts: 3,
             egress_allow: vec!["127.0.0.1".parse().unwrap()],
             allow_loopback_insecure: true,
+            lifecycle: PollLifecycle::default(),
         }
     }
 

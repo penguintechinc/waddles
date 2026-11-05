@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use prometheus::IntGauge;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn, Instrument};
 
 use super::invoker::{ConnectorInvokeError, ConnectorInvoker};
@@ -372,11 +372,16 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         // heartbeat is in flight per connection. Dropping either side on
         // return cancels the other (shutdown/teardown safe).
         let (beat_tx, mut beat_rx) = mpsc::channel::<HeartbeatResult>(1);
+        // The interval can change mid-connection (a transport that captures
+        // it from a frame, e.g. a HELLO): the pump re-reads
+        // `Transport::heartbeat_interval` after every frame and publishes a
+        // change here; the loop restarts its schedule on it.
+        let (interval_tx, interval_rx) = watch::channel(heartbeat_every);
         // Scoped so the heartbeat future (and any `on-heartbeat-due` still in
         // flight inside it) is DROPPED here, before `on-disconnect` runs --
         // never left suspended across teardown holding invoker resources.
         let (end, frames_ok) = {
-            let beats = self.heartbeat_loop(&platform, &ctx, heartbeat_every, beat_tx);
+            let beats = self.heartbeat_loop(&platform, &ctx, interval_rx, beat_tx);
             tokio::pin!(beats);
             let pump = self.pump(
                 transport,
@@ -385,11 +390,11 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                 &pinned,
                 &ctx,
                 &mut beat_rx,
-                heartbeat_every.is_some(),
+                &interval_tx,
             );
             tokio::select! {
                 out = pump => out,
-                () = &mut beats, if heartbeat_every.is_some() => {
+                () = &mut beats, if self.heartbeat_enabled => {
                     // Unreachable while the pump (which owns the receiver)
                     // lives; surfaced loudly rather than ignored.
                     warn!(platform = %platform, "heartbeat loop exited unexpectedly");
@@ -413,42 +418,81 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         Ok(report(end, true, frames_ok))
     }
 
-    /// The per-connection heartbeat loop: every `every` (first beat one
-    /// period after establishment, missed ticks delayed not burst) it calls
-    /// `on-heartbeat-due` and hands the result to the pump. With `None` it
-    /// does nothing and resolves immediately (the caller does not poll it).
-    /// Returns only when the pump's receiver is gone.
+    /// The per-connection heartbeat loop: every interval (first beat one
+    /// period after the interval is known, missed ticks delayed not burst) it
+    /// calls `on-heartbeat-due` and hands the result to the pump. The
+    /// interval arrives on a watch channel: `None` = idle until one is set,
+    /// a change restarts the schedule. Returns only when the pump is gone.
     async fn heartbeat_loop(
         &self,
         platform: &str,
         ctx: &ConnectionCtx,
-        every: Option<Duration>,
+        mut interval: watch::Receiver<Option<Duration>>,
         tx: mpsc::Sender<HeartbeatResult>,
     ) {
-        let Some(every) = every else {
-            return;
-        };
-        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            ticker.tick().await;
-            let started = Instant::now();
-            let result = self
-                .invoker
-                .on_heartbeat_due(platform, ctx)
-                .instrument(tracing::info_span!("connector.on_heartbeat_due", platform = %platform))
-                .await;
-            self.metrics
-                .heartbeat_duration_seconds
-                .with_label_values(&[platform])
-                .observe(started.elapsed().as_secs_f64());
-            // Bounded hand-off: waits (and so skips ticks) while the pump has
-            // not yet consumed the previous result. A closed receiver means
-            // the pump returned.
-            if tx.send(result).await.is_err() {
-                return;
+            let Some(every) = *interval.borrow_and_update() else {
+                if interval.changed().await.is_err() {
+                    return;
+                }
+                continue;
+            };
+            let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    changed = interval.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        break;
+                    }
+                    _ = ticker.tick() => {}
+                }
+                let started = Instant::now();
+                let result = self
+                    .invoker
+                    .on_heartbeat_due(platform, ctx)
+                    .instrument(
+                        tracing::info_span!("connector.on_heartbeat_due", platform = %platform),
+                    )
+                    .await;
+                self.metrics
+                    .heartbeat_duration_seconds
+                    .with_label_values(&[platform])
+                    .observe(started.elapsed().as_secs_f64());
+                // Bounded hand-off: waits (and so skips ticks) while the pump
+                // has not yet consumed the previous result. A closed receiver
+                // means the pump returned.
+                if tx.send(result).await.is_err() {
+                    return;
+                }
             }
         }
+    }
+
+    /// Re-reads the transport's heartbeat interval and publishes a change to
+    /// the loop. A value outside the driver bounds is a transport fault (the
+    /// interval was captured from the wire): `Some(end)` ends the connection.
+    fn sync_heartbeat<T: Transport>(
+        &self,
+        transport: &T,
+        platform: &str,
+        tx: &watch::Sender<Option<Duration>>,
+    ) -> Option<ConnectionEnd> {
+        let now = transport.heartbeat_interval();
+        if now == *tx.borrow() {
+            return None;
+        }
+        if let Some(d) = now {
+            if !(MIN_HEARTBEAT_INTERVAL..=MAX_HEARTBEAT_INTERVAL).contains(&d) {
+                warn!(platform = %platform, "transport heartbeat interval out of range, tearing the connection down");
+                return Some(ConnectionEnd::TransportError);
+            }
+        }
+        debug!(platform = %platform, "transport heartbeat interval changed");
+        tx.send_replace(now);
+        None
     }
 
     /// Classifies one heartbeat round's result. Non-send outcomes are counted
@@ -610,8 +654,9 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         pinned: &PinnedConnector,
         ctx: &ConnectionCtx,
         beat_rx: &mut mpsc::Receiver<HeartbeatResult>,
-        heartbeat_on: bool,
+        interval_tx: &watch::Sender<Option<Duration>>,
     ) -> (ConnectionEnd, u64) {
+        let heartbeat_on = self.heartbeat_enabled;
         let mut frames_ok = 0u64;
         let mut logs = PumpLogs::new();
         loop {
@@ -647,6 +692,13 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                     return (end, frames_ok);
                 }
             };
+
+            // The frame may have carried a new heartbeat interval (HELLO).
+            if heartbeat_on {
+                if let Some(end) = self.sync_heartbeat(transport, platform, interval_tx) {
+                    return (end, frames_ok);
+                }
+            }
 
             // Host-side ceiling, before any guest runs (spec S3.5).
             if bytes.len() > pinned.max_frame_bytes {
