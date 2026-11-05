@@ -90,7 +90,7 @@ a guest only as a generic `backend`.
 
 ```bash
 cd core/bundle_host_economy
-cargo test                      # unit tests + tests/postgres_integration.rs (needs Docker: testcontainers)
+cargo test                      # unit tests + tests/postgres_integration.rs (needs Docker CLI)
 cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings
 cargo deny check
 cargo llvm-cov --locked --fail-under-lines 90

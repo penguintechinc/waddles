@@ -23,6 +23,11 @@
 //!   that triggered the bundle. The sender binds the DM target to that
 //!   channel's community (a bundle names the recipient, so without this a
 //!   bundle could DM any user the shared bot reaches).
+//! * `origin_channel` on `chat.send`/`chat.delete` -- the host-pinned
+//!   destination stamped by the producer. The drain refuses (typed
+//!   [`SenderError::Rejected`], see [`crate::outbound_pin`]) any entry whose
+//!   `channel` differs from it or that lacks it, so the destination is never
+//!   bundle-chosen; pre-upgrade un-stamped entries are refused loudly.
 //! * `op_id` / `exp_ms` -- optional confirmation handshake. When `op_id` is
 //!   present the producer is waiting for a result: the drain executes the
 //!   op and posts the outcome under that id (see `crate::outbound`). `exp_ms`
@@ -44,7 +49,8 @@
 use serde::Deserialize;
 
 use crate::discord_rest::{DiscordRestClient, DiscordRestError};
-use crate::outbound::IrcOutbound;
+use crate::outbound::{IrcOutbound, IrcSendError};
+use crate::outbound_creds::CredError;
 
 /// Highest queue-envelope schema version this consumer understands.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -54,9 +60,20 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutboundAction {
     /// `chat.send` -- post `text` to `channel`.
-    ChatSend { channel: String, text: String },
+    ChatSend {
+        channel: String,
+        text: String,
+        /// Host-pinned destination stamped by the producer; `channel` must
+        /// equal it ([`crate::outbound_pin`]) or the send is refused.
+        origin_channel: Option<String>,
+    },
     /// `chat.delete` -- delete message `message_id` in `channel`.
-    ChatDelete { channel: String, message_id: String },
+    ChatDelete {
+        channel: String,
+        message_id: String,
+        /// Host-pinned destination, as for [`Self::ChatSend`].
+        origin_channel: Option<String>,
+    },
     /// `dm.send` -- send `text` as a direct message to platform user
     /// `user_id`, who must belong to the community of `origin_channel` (the
     /// channel of the event that triggered the bundle).
@@ -126,6 +143,8 @@ struct WireEnvelope {
     op_id: Option<String>,
     #[serde(default)]
     exp_ms: Option<u64>,
+    #[serde(default)]
+    community_id: Option<i64>,
 }
 
 /// Longest accepted `op_id` (it becomes part of a Valkey key).
@@ -141,6 +160,10 @@ pub struct OutboundEntry {
     pub op_id: Option<String>,
     /// Epoch-ms deadline after which the producer stopped waiting.
     pub exp_ms: Option<u64>,
+    /// Numeric `communities.id` whose credential this send uses, stamped by
+    /// the producer from the binding-verified scope. `None` when absent or
+    /// not a positive id (never defaulted; a per-community drain refuses it).
+    pub community_id: Option<i64>,
 }
 
 /// `true` for a safe `op_id`: 1..=[`MAX_OP_ID_LEN`] ASCII alphanumerics or
@@ -195,6 +218,7 @@ pub fn parse_outbound_entry(
         }
     }
     let (op_id, exp_ms) = (wire.op_id.clone(), wire.exp_ms);
+    let community_id = wire.community_id.filter(|c| *c > 0);
     if let Some(v) = wire.v {
         if v > SCHEMA_VERSION {
             return Err(OutboundParseError::UnsupportedVersion(v));
@@ -213,10 +237,12 @@ pub fn parse_outbound_entry(
         "chat.send" => OutboundAction::ChatSend {
             channel: require(wire.channel, "chat.send", "channel")?,
             text: require(wire.text, "chat.send", "text")?,
+            origin_channel: wire.origin_channel.filter(|s| !s.is_empty()),
         },
         "chat.delete" => OutboundAction::ChatDelete {
             channel: require(wire.channel, "chat.delete", "channel")?,
             message_id: require(wire.message_id, "chat.delete", "message_id")?,
+            origin_channel: wire.origin_channel.filter(|s| !s.is_empty()),
         },
         "dm.send" => OutboundAction::DmSend {
             user_id: require(wire.user_id, "dm.send", "user_id")?,
@@ -229,6 +255,7 @@ pub fn parse_outbound_entry(
         action,
         op_id,
         exp_ms,
+        community_id,
     })
 }
 
@@ -296,6 +323,24 @@ pub trait PlatformSender: Send + Sync {
     ) -> Result<(), SenderError>;
 }
 
+/// Host-pin gate: returns the canonical pinned destination or a loud,
+/// typed [`SenderError::Rejected`] (never sends to an unpinned target).
+fn enforce_pin(
+    platform: &'static str,
+    op: &'static str,
+    channel: &str,
+    origin_channel: &Option<String>,
+) -> Result<String, SenderError> {
+    crate::outbound_pin::pin_target(platform, channel, origin_channel.as_deref()).map_err(|e| {
+        crate::outbound_pin::record_refusal(platform, op, e);
+        SenderError::Rejected {
+            platform,
+            op,
+            reason: e.reason(),
+        }
+    })
+}
+
 /// Invokes the `PlatformSender` method matching `action`'s op.
 ///
 /// # Errors
@@ -305,11 +350,22 @@ pub async fn dispatch_to<S: PlatformSender>(
     action: &OutboundAction,
 ) -> Result<(), SenderError> {
     match action {
-        OutboundAction::ChatSend { channel, text } => sender.send_chat(channel, text).await,
+        OutboundAction::ChatSend {
+            channel,
+            text,
+            origin_channel,
+        } => {
+            let pinned = enforce_pin(sender.platform(), "chat.send", channel, origin_channel)?;
+            sender.send_chat(&pinned, text).await
+        }
         OutboundAction::ChatDelete {
             channel,
             message_id,
-        } => sender.delete_chat(channel, message_id).await,
+            origin_channel,
+        } => {
+            let pinned = enforce_pin(sender.platform(), "chat.delete", channel, origin_channel)?;
+            sender.delete_chat(&pinned, message_id).await
+        }
         OutboundAction::DmSend {
             user_id,
             text,
@@ -347,13 +403,15 @@ pub async fn route<T: PlatformSender, D: PlatformSender>(
 /// `Unsupported` until the Twitch Helix client lands (follow-up PR).
 pub struct TwitchSender<'a, S: IrcOutbound> {
     irc: &'a S,
+    community_id: Option<i64>,
 }
 
 impl<'a, S: IrcOutbound> TwitchSender<'a, S> {
-    /// Wraps the existing IRC chat sender.
+    /// Wraps the IRC chat sender for one entry's `community_id` (the
+    /// community whose credential the send uses).
     #[must_use]
-    pub fn new(irc: &'a S) -> Self {
-        Self { irc }
+    pub fn new(irc: &'a S, community_id: Option<i64>) -> Self {
+        Self { irc, community_id }
     }
 }
 
@@ -364,12 +422,26 @@ impl<S: IrcOutbound> PlatformSender for TwitchSender<'_, S> {
 
     async fn send_chat(&self, channel: &str, text: &str) -> Result<(), SenderError> {
         self.irc
-            .send(channel, text)
+            .send(self.community_id, channel, text)
             .await
-            .map_err(|e| SenderError::Failed {
-                platform: "twitch",
-                op: "chat.send",
-                message: e.to_string(),
+            .map_err(|e| match e {
+                // Typed, content-free refusal: nothing was sent and there is
+                // no fallback credential.
+                IrcSendError::Credential(c @ CredError::Unavailable) => SenderError::Failed {
+                    platform: "twitch",
+                    op: "chat.send",
+                    message: c.reason().to_string(),
+                },
+                IrcSendError::Credential(c) => SenderError::Rejected {
+                    platform: "twitch",
+                    op: "chat.send",
+                    reason: c.reason(),
+                },
+                IrcSendError::Send(e) => SenderError::Failed {
+                    platform: "twitch",
+                    op: "chat.send",
+                    message: e.to_string(),
+                },
             })
     }
 
@@ -496,7 +568,6 @@ impl PlatformSender for DiscordSender<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use penguin_connector_twitch::TwitchError;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -505,7 +576,12 @@ mod tests {
     }
 
     impl IrcOutbound for RecordingIrc {
-        async fn send(&self, channel: &str, text: &str) -> Result<(), TwitchError> {
+        async fn send(
+            &self,
+            _community_id: Option<i64>,
+            channel: &str,
+            text: &str,
+        ) -> Result<(), IrcSendError> {
             self.calls
                 .lock()
                 .unwrap()
@@ -521,7 +597,8 @@ mod tests {
             a,
             OutboundAction::ChatSend {
                 channel: "#c".into(),
-                text: "hi".into()
+                text: "hi".into(),
+                origin_channel: None,
             }
         );
     }
@@ -543,7 +620,8 @@ mod tests {
             del,
             OutboundAction::ChatDelete {
                 channel: "#c".into(),
-                message_id: "m1".into()
+                message_id: "m1".into(),
+                origin_channel: None,
             }
         );
         let dm = parse_outbound(
@@ -691,10 +769,11 @@ mod tests {
     #[tokio::test]
     async fn chat_send_routes_to_the_twitch_irc_sender() {
         let irc = RecordingIrc::default();
-        let twitch = TwitchSender::new(&irc);
+        let twitch = TwitchSender::new(&irc, Some(7));
         let action = OutboundAction::ChatSend {
             channel: "#c".into(),
             text: "hi".into(),
+            origin_channel: Some("#c".into()),
         };
         route("twitch", &action, &twitch, &DiscordSender::unconfigured())
             .await
@@ -705,13 +784,91 @@ mod tests {
         );
     }
 
+    /// regression: P0 relay-channel pin -- a queued chat.send whose channel
+    /// differs from (or lacks) the host-pinned origin is refused with a typed
+    /// `Rejected`, and nothing reaches the platform sender.
+    #[tokio::test]
+    async fn chat_send_to_unpinned_channel_is_refused_and_never_sent() {
+        let irc = RecordingIrc::default();
+        let twitch = TwitchSender::new(&irc, Some(7));
+        let before =
+            crate::outbound_pin::refusal_count("twitch", "chat.send", "channel_not_pinned");
+        for (channel, origin, reason) in [
+            ("#victim", Some("#mine"), "channel_not_pinned"),
+            ("#a,#victim", Some("#a"), "invalid_channel"),
+            ("#mine", None, "no_origin_pin"),
+        ] {
+            let action = OutboundAction::ChatSend {
+                channel: channel.into(),
+                text: "hi".into(),
+                origin_channel: origin.map(Into::into),
+            };
+            let err = route("twitch", &action, &twitch, &DiscordSender::unconfigured())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, SenderError::Rejected { reason: r, .. } if r == reason),
+                "{channel}: {err}"
+            );
+        }
+        assert!(irc.calls.lock().unwrap().is_empty(), "nothing may be sent");
+        assert!(
+            crate::outbound_pin::refusal_count("twitch", "chat.send", "channel_not_pinned")
+                > before
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_delete_to_unpinned_discord_channel_is_refused() {
+        let irc = RecordingIrc::default();
+        let twitch = TwitchSender::new(&irc, Some(7));
+        let action = OutboundAction::ChatDelete {
+            channel: "2".into(),
+            message_id: "9".into(),
+            origin_channel: Some("1".into()),
+        };
+        let err = route("discord", &action, &twitch, &DiscordSender::unconfigured())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SenderError::Rejected {
+                reason: "channel_not_pinned",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn chat_ops_parse_the_stamped_origin_channel() {
+        let a = parse_outbound(
+            r##"{"v":1,"op":"chat.send","platform":"twitch","channel":"#c","text":"hi","origin_channel":"#c"}"##,
+            "twitch",
+        )
+        .unwrap();
+        assert_eq!(
+            a,
+            OutboundAction::ChatSend {
+                channel: "#c".into(),
+                text: "hi".into(),
+                origin_channel: Some("#c".into()),
+            }
+        );
+    }
+
     #[tokio::test]
     async fn new_ops_route_to_the_adapter_and_return_unsupported() {
         let irc = RecordingIrc::default();
-        let twitch = TwitchSender::new(&irc);
+        let twitch = TwitchSender::new(&irc, Some(7));
         let del = OutboundAction::ChatDelete {
+            channel: "1".into(),
+            message_id: "m".into(),
+            origin_channel: Some("1".into()),
+        };
+        let del_tw = OutboundAction::ChatDelete {
             channel: "#c".into(),
             message_id: "m".into(),
+            origin_channel: Some("#c".into()),
         };
         let dm = OutboundAction::DmSend {
             user_id: "u".into(),
@@ -719,7 +876,7 @@ mod tests {
             origin_channel: "c".into(),
         };
         for (platform, action, op) in [
-            ("twitch", &del, "chat.delete"),
+            ("twitch", &del_tw, "chat.delete"),
             ("twitch", &dm, "dm.send"),
             ("discord", &del, "chat.delete"),
             ("discord", &dm, "dm.send"),
@@ -743,10 +900,11 @@ mod tests {
     #[tokio::test]
     async fn unknown_platform_is_unsupported_not_a_silent_noop() {
         let irc = RecordingIrc::default();
-        let twitch = TwitchSender::new(&irc);
+        let twitch = TwitchSender::new(&irc, Some(7));
         let action = OutboundAction::ChatSend {
             channel: "c".into(),
             text: "t".into(),
+            origin_channel: None,
         };
         let err = route("myspace", &action, &twitch, &DiscordSender::unconfigured())
             .await
@@ -821,16 +979,18 @@ mod tests {
         mount_member_of_guild(&server).await;
         let client = rest(&server);
         let irc = RecordingIrc::default();
-        let twitch = TwitchSender::new(&irc);
+        let twitch = TwitchSender::new(&irc, Some(7));
         let discord = DiscordSender::new(&client);
         for action in [
             OutboundAction::ChatSend {
                 channel: "1".into(),
                 text: "hi".into(),
+                origin_channel: Some("1".into()),
             },
             OutboundAction::ChatDelete {
                 channel: "1".into(),
                 message_id: "2".into(),
+                origin_channel: Some("1".into()),
             },
             OutboundAction::DmSend {
                 user_id: "3".into(),

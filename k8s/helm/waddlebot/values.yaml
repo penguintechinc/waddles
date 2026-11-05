@@ -1002,6 +1002,14 @@ posthog:
 # Base images pinned to digests already used elsewhere in this repo (grepped from existing
 # Dockerfiles, never invented) as placeholders — none of these 7 containers have their own
 # Dockerfile/CI-built image yet. Replace per-container once each does.
+# P6a T6 outbound relay queue integrity stamp (pin_sig). DEDICATED HMAC key, mounted only into
+# svc-action-rust (signer) + svc-ingest-rust (verifier); see templates/outbound-pin-secret.yaml.
+# existingSecret: name of a pre-created Secret (ExternalSecret/SealedSecret) holding key
+# OUTBOUND_PIN_KEYS=`kid:hexkey[,...]`; empty => alpha/local auto-generate, other tiers fail closed.
+outboundPin:
+  existingSecret: ""
+  activeKid: "k1"
+
 pipeline:
   pythonBaseImage: "python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb"
   nodeBaseImage: "node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"
