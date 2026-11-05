@@ -124,8 +124,10 @@ def test_chart_grants_svc_ingest_exactly_connections_resolve_on_the_system_tenan
     chart_identities: dict[str, ServiceIdentity],
 ) -> None:
     identity = chart_identities[_SVC_INGEST]
-    # Minimum: the two data-plane scopes (connections + scope resolver), nothing else.
-    assert identity.allowed_scopes == frozenset({_SCOPE, _LIST_SCOPE, "dataplane:resolve-scope"})
+    # Minimum: the data-plane scopes (connections, scope resolver, platform-user detokenizer).
+    assert identity.allowed_scopes == frozenset(
+        {_SCOPE, _LIST_SCOPE, "dataplane:resolve-scope", "identity:platform-user:resolve"}
+    )
     assert "connections:resolve:static" not in identity.allowed_scopes
     assert identity.tenant == "system"
     # Pinned to the dedicated ServiceAccount, never the chart-wide shared one.
