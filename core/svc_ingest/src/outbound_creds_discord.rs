@@ -283,7 +283,7 @@ mod tests {
                     .iter()
                     .find(|b| b.connection_id == r.connection_id)
                     .map(|b| b.metadata.clone())
-                    .unwrap_or_default()
+                    .expect("resolve is only called for listed connections")
             });
             Ok(ResolvedConnection {
                 connection_id: k,
