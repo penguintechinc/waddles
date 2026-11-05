@@ -1659,3 +1659,52 @@ async fn a_reused_key_with_a_changed_reason_is_an_idempotency_conflict() {
         Err(ReputationError::IdempotencyConflict)
     );
 }
+
+/// regression: #983 review -- the leaderboard filter + sort must be served by an
+/// index, not a sequential scan of `bundle_reputation_scores`. Seeds thousands
+/// of rows across several communities (so the planner makes a real choice),
+/// ANALYZEs, then EXPLAINs the store's exact leaderboard query.
+#[tokio::test]
+async fn leaderboard_query_uses_an_index_not_a_seq_scan_on_the_scores_table() {
+    let f = fixture().await;
+    exec(
+        &f.su,
+        "INSERT INTO communities (id, tenant_id) SELECT g, 1 FROM generate_series(30, 39) g;
+         INSERT INTO community_members (community_id, user_uuid)
+             SELECT c, gen_random_uuid() FROM unnest(ARRAY[10, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]) c,
+             generate_series(1, 1000) n;
+         INSERT INTO bundle_reputation_scores (tenant_id, community_id, user_uuid, balance)
+             SELECT 1, cm.community_id, cm.user_uuid, (random() * 2000 - 1000)::BIGINT
+             FROM community_members cm WHERE cm.user_uuid IS NOT NULL
+             ON CONFLICT DO NOTHING;
+         ANALYZE bundle_reputation_scores; ANALYZE community_members; ANALYZE communities;",
+    )
+    .await;
+    let rows = f
+        .su
+        .query_all_raw(Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            "EXPLAIN SELECT s.user_uuid AS user_uuid, s.balance AS balance \
+             FROM bundle_reputation_scores s \
+             JOIN community_members cm \
+               ON cm.community_id = s.community_id AND cm.user_uuid = s.user_uuid \
+             JOIN communities c ON c.id = cm.community_id AND c.tenant_id = s.tenant_id \
+             WHERE s.tenant_id = 1 AND s.community_id = 10 \
+               AND cm.is_active IS TRUE AND cm.removed_at IS NULL AND cm.left_at IS NULL \
+             ORDER BY s.balance DESC, s.user_uuid ASC \
+             LIMIT 10"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    let plan: Vec<String> = rows
+        .iter()
+        .map(|r| r.try_get_by_index::<String>(0).unwrap())
+        .collect();
+    let plan = plan.join("\n");
+    eprintln!("{plan}");
+    assert!(
+        !plan.contains("Seq Scan on bundle_reputation_scores"),
+        "leaderboard seq-scans the scores table:\n{plan}"
+    );
+}
