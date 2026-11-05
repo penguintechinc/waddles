@@ -482,14 +482,20 @@ admin ──POST …/<conn>/discover (or PATCH metadata.live_chat_id)──▶ b
 - **Per-tenant Google application** ([spec](superpowers/specs/2026-11-02-per-tenant-bot-credentials.md)):
   the **global** tenant uses the platform app from `YOUTUBE_CLIENT_ID` / `YOUTUBE_CLIENT_SECRET`
   (Helm: the `waddlebot-platform-credentials` secret, already `envFrom`'d into hub-api); every other
-  tenant brings its own -- `POST …/youtube/authorize` takes `{"client_id", "client_secret"}` (stored
-  sealed in `tenant_platform_apps` only after the install succeeds) or uses the one a previous install
-  stored. A tenant never falls back to the global app; the global tenant cannot supply its own. Without
-  an app: `422 YOUTUBE_APP_NOT_CONFIGURED`.
+  tenant brings its own, written by a **tenant admin** (`tenant:admin`) with `PUT /api/v1/tenants/youtube/app`
+  `{"client_id", "client_secret"}` (sealed in `tenant_platform_apps`). The community flow can never supply
+  or change it (`403 YOUTUBE_APP_TENANT_ADMIN_ONLY`), an existing app is never replaced by a different
+  `client_id` (`409 YOUTUBE_APP_CONFLICT`; the secret of the same app may rotate), a tenant never falls
+  back to the global app and the global tenant cannot store one. Without an app:
+  `422 YOUTUBE_APP_NOT_CONFIGURED`.
 - **OAuth security**: authorization code + PKCE (`S256`) with `access_type=offline&prompt=consent`;
   single-use CSRF `state` (Redis `GETDEL`, 10 min TTL) carrying tenant/community/admin -- the public
-  callback reads nothing tenant-shaped from the query; the verifier and any supplied client secret ride
-  in the state AES-GCM-sealed with AAD bound to tenant + community; the redirect URI is the
+  callback reads nothing tenant-shaped from the query; the verifier rides in the state AES-GCM-sealed
+  with AAD bound to tenant + community; **the state is bound to the initiating browser** -- authorize sets a
+  `__Host-yt_install` cookie (HttpOnly, Secure, SameSite=Lax, host-only) holding a random nonce whose SHA-256
+  is stored in the state; the callback requires it (constant-time compare) BEFORE consuming, and a missing or
+  foreign cookie gets the same generic `400` as an unknown state without burning it (so the authorize call
+  and the callback must share a host: `connectionsCallbackBaseUrl` = the API origin the webui calls); the redirect URI is the
   server-configured callback (never client input); a response without a refresh token is refused
   (`no_refresh_token`); a replay, forged, expired or tampered state is `400 invalid_or_expired_state`.
   Hosts are an explicit allowlist (`accounts.google.com`, `oauth2.googleapis.com`,

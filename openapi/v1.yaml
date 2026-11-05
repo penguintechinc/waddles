@@ -14901,17 +14901,17 @@ paths:
           application/json:
             schema:
               additionalProperties: false
-              description: 'Body of ``authorize``: the tenant''s OWN Google OAuth
-                application, or nothing.
+              description: 'Body of the community-scoped ``authorize``: nothing may
+                be supplied.
 
 
-                Both fields together (a non-global tenant bringing its own application)
-                or neither (the global
+                ``client_id`` / ``client_secret`` exist only so a caller trying to
+                bring an OAuth application
 
-                tenant''s platform application, or one this tenant stored in an earlier
-                install). The secret is
+                through the COMMUNITY flow gets a typed 403 rather than a silent ignore
+                -- the application is
 
-                write-only: sealed into the single-use state and never echoed.'
+                tenant-level and is configured by a tenant admin (``PUT /tenants/youtube/app``).'
               properties:
                 client_id:
                   anyOf:
@@ -14948,8 +14948,8 @@ paths:
                 type: object
           description: 'Response of ``authorize``: where the admin''s browser goes
             next.'
-      summary: '``POST`` -- mint state + PKCE and return Google''s consent URL for
-        this community.'
+      summary: '``POST`` -- mint state + PKCE, bind it to THIS browser, return Google''s
+        consent URL.'
   /api/v1/communities/{community_id}/provider-connections/{connection_id}:
     delete:
       description: ''
@@ -23061,6 +23061,56 @@ paths:
           description: '`authorize_url` response envelope -- never includes the submitted
             secret.'
       summary: '`POST /api/v1/tenants/discord/install/authorize`.'
+  /api/v1/tenants/youtube/app:
+    put:
+      description: '
+
+        ``tenant:admin`` (tenant before scope, like the Twitch install): a community
+        admin cannot reach
+
+        this. The global tenant uses the platform app and is refused; an existing
+        application with a
+
+        different ``client_id`` is never replaced (409) -- only its secret may be
+        rotated.'
+      operationId: put_put_youtube_app
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: 'Body of the tenant-admin app write: the tenant''s own
+                Google OAuth application.'
+              properties:
+                client_id:
+                  title: Client Id
+                  type: string
+                client_secret:
+                  title: Client Secret
+                  type: string
+              required:
+              - client_id
+              - client_secret
+              title: YoutubeAppRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response of the app write: no field can carry the secret.'
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: YoutubeAppResponse
+                type: object
+          description: 'Response of the app write: no field can carry the secret.'
+      summary: '``PUT`` -- tenant admin stores the tenant''s own Google OAuth application
+        (sealed).'
   /api/v1/user/identities:
     get:
       description: ''

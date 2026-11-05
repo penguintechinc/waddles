@@ -58,7 +58,7 @@ def _base(db: Any, community_id: int | None = None) -> str:
 
 
 async def _authorize(
-    client: Any, db: Any, body: dict[str, Any] | None = OWN_APP, **kwargs: Any
+    client: Any, db: Any, body: dict[str, Any] | None = None, **kwargs: Any
 ) -> Any:
     headers = kwargs.pop("headers", None) or admin_headers(db)
     community_id = kwargs.pop("community_id", None)
@@ -79,7 +79,7 @@ async def _install(
     google: FakeGoogle,
     *,
     channel: Any = YT_CHANNEL,
-    body: dict[str, Any] | None = OWN_APP,
+    body: dict[str, Any] | None = None,
     with_refresh: bool = True,
     scopes: list[str] | None = None,
     community_id: int | None = None,
@@ -157,46 +157,39 @@ class TestAuthorize:
     async def test_the_redirect_uri_cannot_be_chosen_by_the_client(
         self, yt_client: Any, yt_db: Any
     ) -> None:
-        response = await _authorize(yt_client, yt_db, {**OWN_APP, "redirect_uri": "https://evil/x"})
+        response = await _authorize(yt_client, yt_db, {"redirect_uri": "https://evil/x"})
         assert response.status_code == 400
 
-    @pytest.mark.parametrize(
-        "body",
-        [
-            {"client_id": APP_CLIENT_ID},
-            {"client_secret": APP_CLIENT_SECRET},
-            {},
-        ],
-    )
-    async def test_a_tenant_without_its_own_app_gets_a_typed_422(
-        self, yt_client: Any, yt_db: Any, body: dict[str, Any]
+    async def test_a_tenant_without_an_app_gets_a_typed_422(
+        self, yt_client: Any, yt_db: Any
     ) -> None:
-        response = await _authorize(yt_client, yt_db, body)
+        yt_db.dal(yt_db.dal.tenant_platform_apps.id > 0).delete()
+        yt_db.dal.commit()
+        response = await _authorize(yt_client, yt_db)
         assert response.status_code == 422
         assert (await response.get_json())["error"]["code"] == "YOUTUBE_APP_NOT_CONFIGURED"
 
     @pytest.mark.parametrize(
-        "bad",
+        "body",
         [
-            {"client_id": "has space", "client_secret": "x"},
-            {"client_id": "x" * 513, "client_secret": "x"},
-            {"client_id": "x", "client_secret": "new\nline"},
-            {"client_id": "", "client_secret": "x"},
+            OWN_APP,
+            {"client_id": "other.apps.googleusercontent.com"},
+            {"client_secret": "x"},
+            {"client_id": "other.apps.googleusercontent.com", "client_secret": "evil-secret"},
         ],
     )
-    async def test_client_fields_are_validated_server_side(
-        self, yt_client: Any, yt_db: Any, bad: dict[str, Any]
+    async def test_a_community_admin_cannot_supply_or_overwrite_the_tenant_app(
+        self, yt_client: Any, yt_db: Any, fake_redis: FakeRedis, body: dict[str, Any]
     ) -> None:
-        response = await _authorize(yt_client, yt_db, bad)
-        assert response.status_code == 400
-        assert "x" * 513 not in json.dumps(await response.get_json())
-
-    async def test_a_stored_app_is_used_when_nothing_is_supplied(
-        self, yt_client: Any, yt_db: Any, acme_google_app: None
-    ) -> None:
-        response = await _authorize(yt_client, yt_db, {})
-        assert response.status_code == 200
-        assert _params((await response.get_json())["authorizeUrl"])["client_id"] == APP_CLIENT_ID
+        before = yt_db.dal(yt_db.dal.tenant_platform_apps.id > 0).select().first()
+        response = await _authorize(yt_client, yt_db, body)
+        assert response.status_code == 403
+        assert (await response.get_json())["error"]["code"] == "YOUTUBE_APP_TENANT_ADMIN_ONLY"
+        assert fake_redis.store == {}  # no state minted, no cookie
+        assert "Set-Cookie" not in response.headers
+        yt_db.dal.rollback()
+        after = yt_db.dal(yt_db.dal.tenant_platform_apps.id > 0).select().first()
+        assert after.credentials_ciphertext == before.credentials_ciphertext
 
     async def test_the_global_tenant_uses_the_platform_app_and_cannot_bring_its_own(
         self, yt_client: Any, yt_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -215,7 +208,7 @@ class TestAuthorize:
         refused = await _authorize(
             yt_client, yt_db, OWN_APP, headers=headers, community_id=yt_db.global_community_id
         )
-        assert refused.status_code == 422
+        assert refused.status_code == 403
 
     async def test_the_global_tenant_without_a_platform_app_is_refused(
         self, yt_client: Any, yt_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -1107,20 +1100,6 @@ class TestInstallEdges:
         )
         assert await _error(callback) == "exchange_failed"
         assert fake_google.calls == []
-
-    async def test_failing_to_store_the_tenant_app_is_save_failed(
-        self,
-        yt_client: Any,
-        yt_db: Any,
-        fake_google: FakeGoogle,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        def boom(*args: Any, **kwargs: Any) -> None:
-            raise RuntimeError("db down")
-
-        monkeypatch.setattr(install, "store_tenant_credentials", boom)
-        callback, _ = await _install(yt_client, yt_db, fake_google)
-        assert await _error(callback) == "save_failed"
 
     async def test_google_unavailable_after_the_exchange_is_provider_unavailable(
         self,

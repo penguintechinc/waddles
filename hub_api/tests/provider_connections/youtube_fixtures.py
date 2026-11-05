@@ -52,6 +52,13 @@ class FakeRedis:
         self.store[key] = (value, time.monotonic() + ex if ex is not None else None)
         return True
 
+    async def get(self, key: str) -> str | None:
+        """Non-destructive read; an expired entry reads as absent."""
+        entry = self.store.get(key)
+        if entry is None or (entry[1] is not None and entry[1] < time.monotonic()):
+            return None
+        return entry[0]
+
     async def getdel(self, key: str) -> str | None:
         """Atomic get-and-delete; an expired entry reads as absent."""
         entry = self.store.pop(key, None)
@@ -149,6 +156,7 @@ def yt_app(
     yt_service: ProviderConnectionService,
     fake_redis: FakeRedis,
     fake_google: FakeGoogle,
+    acme_google_app: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Quart:
     """``pc_app`` + the YouTube blueprint, the YouTube-capable service and the fake code socket."""

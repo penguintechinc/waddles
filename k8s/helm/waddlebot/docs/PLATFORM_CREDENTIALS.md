@@ -39,8 +39,8 @@ placeholder.
 
 YouTube note: hub-api's `youtube` connection provider reads `YOUTUBE_CLIENT_ID` / `YOUTUBE_CLIENT_SECRET`
 (from this Secret, `optional: true`) as the **global tenant's** Google OAuth application only -- both for the
-connect flow and for token refresh. Every other tenant brings its own application (stored sealed in the
-database, never in this Secret); no tenant falls back to the global one. Register the redirect URI
+connect flow and for token refresh. Every other tenant brings its own application (a tenant admin stores it sealed in the
+database via `PUT /api/v1/tenants/youtube/app`, never in this Secret); no tenant falls back to the global one. Register the redirect URI
 `<connectionsCallbackBaseUrl>/api/v1/provider-connections/youtube/callback` in the Google Cloud console
 (see `docs/PROVIDER_CONNECTIONS.md` "YouTube provider"). Nothing in `values.yaml` changes: no literal, no
 placeholder, the existing `platformCredentials.existingSecret` pattern carries it.

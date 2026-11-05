@@ -28,12 +28,14 @@ from dataclasses import dataclass, field
 from typing import Any, Final
 
 from flask_core.authz import require_scope
+from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from pydantic import ConfigDict
-from quart import Blueprint, Response, current_app, request
+from quart import Blueprint, Response, after_this_request, current_app, request
 from quart_schema import validate_request, validate_response
 
 from blueprints.v1.provider_connections import (
+    FEATURE_PROVIDER_CONNECTIONS,
     SCOPE_CONNECTIONS_ADMIN,
     ProviderConnectionResponse,
     _admin_guard,
@@ -42,24 +44,27 @@ from blueprints.v1.provider_connections import (
     _service,
 )
 from services import youtube_install as install
-from services.errors import ApiError, bad_request, forbidden
+from services.current_user import get_current_user_id
+from services.errors import ApiError, bad_request, forbidden, payment_required
 from services.provider_connections.youtube import PROVIDER_ID
 
 logger = logging.getLogger(__name__)
 
 youtube_connections_bp = Blueprint("v1_youtube_connections", __name__, url_prefix="/api/v1")
 
+#: Tenant-level scope (tenant-owner bundle) -- configuring the tenant's OAuth application.
+SCOPE_TENANT_ADMIN: Final = "tenant:admin"
 _BASE: Final = "/communities/<int:community_id>/provider-connections"
 _TOKEN_FIELD_RE: Final = re.compile(r"[\x21-\x7e]+")
 
 
 @dataclass(slots=True, frozen=True)
 class YoutubeAuthorizeRequest:
-    """Body of ``authorize``: the tenant's OWN Google OAuth application, or nothing.
+    """Body of the community-scoped ``authorize``: nothing may be supplied.
 
-    Both fields together (a non-global tenant bringing its own application) or neither (the global
-    tenant's platform application, or one this tenant stored in an earlier install). The secret is
-    write-only: sealed into the single-use state and never echoed.
+    ``client_id`` / ``client_secret`` exist only so a caller trying to bring an OAuth application
+    through the COMMUNITY flow gets a typed 403 rather than a silent ignore -- the application is
+    tenant-level and is configured by a tenant admin (``PUT /tenants/youtube/app``).
     """
 
     __pydantic_config__ = ConfigDict(extra="forbid")
@@ -76,10 +81,25 @@ class YoutubeAuthorizeResponse:
     authorizeUrl: str  # noqa: N815 - camelCase is the wire shape of every connection DTO
 
 
-def _client_field(value: str | None, name: str) -> str | None:
+@dataclass(slots=True, frozen=True)
+class YoutubeAppRequest:
+    """Body of the tenant-admin app write: the tenant's own Google OAuth application."""
+
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    client_id: str
+    client_secret: str = field(repr=False)
+
+
+@dataclass(slots=True, frozen=True)
+class YoutubeAppResponse:
+    """Response of the app write: no field can carry the secret."""
+
+    success: bool
+
+
+def _client_field(value: str, name: str) -> str:
     """Shape-check a client id/secret (printable ASCII, bounded); the value is never echoed."""
-    if value is None:
-        return None
     if (
         not value
         or len(value) > install.MAX_CLIENT_FIELD_LENGTH
@@ -87,6 +107,52 @@ def _client_field(value: str | None, name: str) -> str | None:
     ):
         raise bad_request(f"{name} is invalid")
     return value
+
+
+@youtube_connections_bp.route("/tenants/youtube/app", methods=["PUT"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[misc]
+@validate_request(YoutubeAppRequest)
+@validate_response(YoutubeAppResponse)
+@_guarded("youtube_app")
+async def put_youtube_app(data: YoutubeAppRequest) -> YoutubeAppResponse:
+    """``PUT`` -- tenant admin stores the tenant's own Google OAuth application (sealed).
+
+    ``tenant:admin`` (tenant before scope, like the Twitch install): a community admin cannot reach
+    this. The global tenant uses the platform app and is refused; an existing application with a
+    different ``client_id`` is never replaced (409) -- only its secret may be rotated.
+    """
+    ctx = get_tenant_context(request)
+    actor = get_current_user_id(request)
+    if ctx is None or actor is None:
+        raise forbidden("Tenant context not resolved")
+    if not await feature_enabled(FEATURE_PROVIDER_CONNECTIONS, tenant=ctx.tenant_slug):
+        raise payment_required("Provider connections are not enabled for this plan")
+    client_id = _client_field(data.client_id, "client_id")
+    client_secret = _client_field(data.client_secret, "client_secret")
+    try:
+        await install.store_tenant_app(
+            current_app.config["dal"],
+            tenant_id=ctx.tenant_id,
+            is_default_tenant=ctx.is_default,
+            user_id=actor,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+    except install.YoutubeInstallError as exc:
+        if exc.code == install.ERR_APP_CONFLICT:
+            raise ApiError(
+                "This tenant already has a YouTube OAuth application with a different client_id.",
+                409,
+                "YOUTUBE_APP_CONFLICT",
+            ) from exc
+        raise ApiError(
+            "The global tenant uses the platform YouTube OAuth application.",
+            422,
+            "YOUTUBE_APP_NOT_CONFIGURED",
+        ) from exc
+    logger.info("youtube_connections.app_stored tenant_id=%d", ctx.tenant_id)
+    return YoutubeAppResponse(success=True)
 
 
 @youtube_connections_bp.route(_BASE + "/youtube/authorize", methods=["POST"])
@@ -98,30 +164,41 @@ def _client_field(value: str | None, name: str) -> str | None:
 async def authorize_youtube(
     community_id: int, data: YoutubeAuthorizeRequest
 ) -> YoutubeAuthorizeResponse:
-    """``POST`` -- mint state + PKCE and return Google's consent URL for this community."""
+    """``POST`` -- mint state + PKCE, bind it to THIS browser, return Google's consent URL."""
     tenant_id, actor = await _admin_guard(community_id)
-    ctx = get_tenant_context(request)
-    if ctx is None or actor is None:
+    if actor is None:
         raise forbidden("Tenant context not resolved")
-    client_id = _client_field(data.client_id, "client_id")
-    client_secret = _client_field(data.client_secret, "client_secret")
+    if data.client_id is not None or data.client_secret is not None:
+        raise ApiError(
+            "A community admin cannot supply an OAuth application; a tenant admin configures it.",
+            403,
+            "YOUTUBE_APP_TENANT_ADMIN_ONLY",
+        )
     try:
-        url = await install.begin_install(
-            current_app.config["dal"],
-            tenant_id=tenant_id,
-            is_default_tenant=ctx.is_default,
-            community_id=community_id,
-            user_id=actor,
-            client_id=client_id,
-            client_secret=client_secret,
+        url, nonce = await install.begin_install(
+            current_app.config["dal"], tenant_id=tenant_id, community_id=community_id, user_id=actor
         )
     except install.YoutubeInstallError as exc:
         raise ApiError(
-            "This tenant has no usable YouTube OAuth application; supply client_id and "
-            "client_secret (the global tenant cannot).",
+            "This tenant has no YouTube OAuth application; a tenant admin must configure one.",
             422,
             "YOUTUBE_APP_NOT_CONFIGURED",
         ) from exc
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Set the ``__Host-`` binding cookie (HttpOnly, Secure, SameSite=Lax, host-only)."""
+        response.set_cookie(
+            install.BINDING_COOKIE,
+            nonce,
+            max_age=install.binding_cookie_max_age(),
+            path="/",
+            secure=True,
+            httponly=True,
+            samesite="Lax",
+        )
+        return response
+
     logger.info("youtube_connections.authorize_started community_id=%d", community_id)
     return YoutubeAuthorizeResponse(success=True, authorizeUrl=url)
 
@@ -196,14 +273,25 @@ async def youtube_callback() -> tuple[Response, int] | Response:
             current_app.config["dal"],
             _service(),
             state=request.args.get("state", ""),
+            binding_nonce=request.cookies.get(install.BINDING_COOKIE),
             code=request.args.get("code"),
             provider_error=request.args.get("error"),
         )
     except install.YoutubeInstallError as exc:
         logger.info("youtube_connections.callback_failed code=%s", exc.code)
         status = 400 if exc.code in (install.ERR_STATE, install.ERR_NO_CODE) else 200
-        return _callback_html(ok=False, error=exc.code), status
-    return _callback_html(ok=True)
+        page = _callback_html(ok=False, error=exc.code)
+        if exc.code != install.ERR_STATE:
+            _clear_binding(page)  # the state was consumed: the cookie has done its job
+        return page, status
+    page = _callback_html(ok=True)
+    _clear_binding(page)
+    return page
+
+
+def _clear_binding(page: Response) -> None:
+    """Expire the binding cookie on ``page``."""
+    page.delete_cookie(install.BINDING_COOKIE, path="/", secure=True, httponly=True, samesite="Lax")
 
 
 BLUEPRINTS = [youtube_connections_bp]

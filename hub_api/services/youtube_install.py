@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -87,6 +88,9 @@ ERR_SCOPES: Final = "insufficient_scopes"
 ERR_NO_CHANNEL: Final = "channel_not_found"
 ERR_UNAVAILABLE: Final = "provider_unavailable"
 ERR_SAVE: Final = "save_failed"
+ERR_APP_CONFLICT: Final = "app_conflict"
+#: ``__Host-`` cookie carrying the initiating browser's nonce (Secure, HttpOnly, Path=/, no Domain).
+BINDING_COOKIE: Final = "__Host-yt_install"
 
 
 class YoutubeInstallError(Exception):
@@ -108,8 +112,6 @@ class InstallState:
     redirect_uri: str
     client_id: str
     code_verifier: str
-    #: The OAuth client secret the admin typed (non-global tenant); ``None`` = resolve it again.
-    supplied_client_secret: str | None
 
 
 def _cfg() -> HubAPIConfig:
@@ -128,6 +130,16 @@ def callback_redirect_uri() -> str:
 def _state_aad(tenant_id: int, community_id: int) -> bytes:
     """Bind the sealed state blob to the tenant + community it was minted for."""
     return f"youtube_install_state|{tenant_id}|{community_id}".encode()
+
+
+def _nonce_hash(nonce: str) -> str:
+    """SHA-256 hex of a browser-binding nonce (all the server ever stores of it)."""
+    return hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+
+
+def binding_cookie_max_age() -> int:
+    """Cookie lifetime == the state TTL, so the two expire together."""
+    return _ttl_seconds()
 
 
 def pkce_challenge(verifier: str) -> str:
@@ -180,37 +192,26 @@ def make_app_credentials(dal: Any) -> AppCredentials:
 
 
 async def begin_install(
-    dal: Any,
-    *,
-    tenant_id: int,
-    is_default_tenant: bool,
-    community_id: int,
-    user_id: int,
-    client_id: str | None,
-    client_secret: str | None,
-) -> str:
-    """Mint state + PKCE and return Google's consent URL for this tenant's OAuth application.
+    dal: Any, *, tenant_id: int, community_id: int, user_id: int
+) -> tuple[str, str]:
+    """Mint state + PKCE and return ``(consent URL, browser-binding nonce)``.
 
-    ``client_id`` / ``client_secret`` are the tenant's own application, supplied together or not at
-    all; the global tenant may not supply them (it uses the platform app). Raises
-    :class:`YoutubeInstallError` ``app_not_configured`` when no application can be found.
+    The OAuth application is ALWAYS the tenant's already-configured one (global tenant: the platform
+    app from env; any other tenant: the row a tenant admin stored with :func:`store_tenant_app`). A
+    community admin can never supply or change it. The nonce must be set as the ``__Host-`` cookie
+    of the initiating browser; only its SHA-256 is kept server-side, and the callback refuses any
+    browser that cannot present it (account-linking CSRF defence). Raises
+    :class:`YoutubeInstallError` ``app_not_configured`` when the tenant has no application.
     """
-    if (client_id is None) != (client_secret is None):
-        raise YoutubeInstallError(ERR_APP)
-    if client_id is not None and is_default_tenant:
-        raise YoutubeInstallError(ERR_APP)
-    if client_id is None:
-        try:
-            client_id, _ = await resolve_app_credentials(dal, tenant_id=tenant_id)
-        except AppCredentialsUnavailable as exc:
-            raise YoutubeInstallError(ERR_APP) from exc
+    try:
+        client_id, _ = await resolve_app_credentials(dal, tenant_id=tenant_id)
+    except AppCredentialsUnavailable as exc:
+        raise YoutubeInstallError(ERR_APP) from exc
     verifier = secrets.token_urlsafe(64)
     redirect_uri = callback_redirect_uri()
-    sealed = seal_secret(
-        json.dumps({"v": verifier, "s": client_secret}),
-        aad=_state_aad(tenant_id, community_id),
-    )
+    sealed = seal_secret(json.dumps({"v": verifier}), aad=_state_aad(tenant_id, community_id))
     token = secrets.token_urlsafe(32)
+    nonce = secrets.token_urlsafe(32)
     payload = {
         "tenant_id": tenant_id,
         "community_id": community_id,
@@ -218,6 +219,7 @@ async def begin_install(
         "redirect_uri": redirect_uri,
         "client_id": client_id,
         "sealed": sealed,
+        "binding": _nonce_hash(nonce),
     }
     await _redis_client().set(f"{_STATE_KEY_PREFIX}{token}", json.dumps(payload), ex=_ttl_seconds())
     params = {
@@ -231,21 +233,64 @@ async def begin_install(
         "code_challenge": pkce_challenge(verifier),
         "code_challenge_method": "S256",
     }
-    return f"{GOOGLE_AUTHORIZE_URL}?{urlencode(params)}"
+    return f"{GOOGLE_AUTHORIZE_URL}?{urlencode(params)}", nonce
 
 
-async def consume_state(state: str) -> InstallState | None:
-    """Atomically fetch-and-delete ``state``; ``None`` if absent/expired/replayed/tampered.
+async def store_tenant_app(
+    dal: Any,
+    *,
+    tenant_id: int,
+    is_default_tenant: bool,
+    user_id: int,
+    client_id: str,
+    client_secret: str,
+) -> None:
+    """Persist a tenant's own Google OAuth application (tenant-admin only; sealed at rest).
 
-    ``GETDEL`` makes it single-use even under concurrent requests. A payload that fails to decode
-    or whose sealed blob does not authenticate under its own tenant + community AAD is treated as
-    absent (fail closed, no partial result).
+    The global tenant cannot (it uses the platform app). An existing application with a DIFFERENT
+    ``client_id`` is never replaced -- every connection already minted under it could no longer
+    refresh -- so only the secret of the same application can be rotated. Raises
+    :class:`YoutubeInstallError` ``app_not_configured`` (global tenant) or ``app_conflict``.
     """
-    if not state or len(state) > 128:
-        return None
+    if is_default_tenant:
+        raise YoutubeInstallError(ERR_APP)
     try:
-        raw = await _redis_client().getdel(f"{_STATE_KEY_PREFIX}{state}")
-    except Exception:  # noqa: BLE001 - a Redis hiccup must fail the flow, not crash it
+        existing_id, _ = await resolve_app_credentials(dal, tenant_id=tenant_id)
+    except AppCredentialsUnavailable:
+        existing_id = None
+    if existing_id is not None and existing_id != client_id:
+        raise YoutubeInstallError(ERR_APP_CONFLICT)
+    store_tenant_credentials(
+        dal,
+        tenant_id=tenant_id,
+        is_global_tenant=False,
+        platform=PROVIDER_ID,
+        payload={"client_id": client_id, "client_secret": client_secret},
+        installed_by_user_id=user_id,
+    )
+
+
+async def consume_state(state: str, nonce: str | None) -> InstallState | None:
+    """Verify the browser binding, THEN atomically fetch-and-delete ``state``.
+
+    ``None`` for absent / expired / replayed / tampered state AND for a missing or wrong ``nonce``
+    -- one indistinguishable answer (no oracle). A refused binding leaves the state untouched, so
+    an attacker holding a leaked link cannot burn the victim's pending install. ``GETDEL`` keeps
+    the consume single-use under concurrency. A payload that fails to decode or whose sealed blob
+    does not authenticate under its own tenant + community AAD is treated as absent.
+    """
+    if not state or len(state) > 128 or not nonce or len(nonce) > 128:
+        return None
+    key = f"{_STATE_KEY_PREFIX}{state}"
+    try:
+        peeked = await _redis_client().get(key)
+        if peeked is None:
+            return None
+        stored = json.loads(peeked).get("binding")
+        if not isinstance(stored, str) or not hmac.compare_digest(stored, _nonce_hash(nonce)):
+            return None
+        raw = await _redis_client().getdel(key)
+    except Exception:  # noqa: BLE001 - a Redis hiccup or bad payload must fail the flow
         logger.exception("youtube_install.state_consume_failed")
         return None
     if raw is None:
@@ -261,7 +306,6 @@ async def consume_state(state: str) -> InstallState | None:
                 seal_version=SEAL_AAD,
             )
         )
-        supplied = inner.get("s")
         return InstallState(
             tenant_id=tenant_id,
             community_id=community_id,
@@ -269,7 +313,6 @@ async def consume_state(state: str) -> InstallState | None:
             redirect_uri=str(data["redirect_uri"]),
             client_id=str(data["client_id"]),
             code_verifier=str(inner["v"]),
-            supplied_client_secret=supplied if isinstance(supplied, str) else None,
         )
     except (KeyError, TypeError, ValueError, PlatformCredentialCryptoError):
         logger.warning("youtube_install.state_malformed")
@@ -332,34 +375,31 @@ async def complete_install(
     service: ProviderConnectionService,
     *,
     state: str,
+    binding_nonce: str | None,
     code: str | None,
     provider_error: str | None,
 ) -> None:
     """Finish the flow for the public callback; raises :class:`YoutubeInstallError` on any failure.
 
-    The ``state`` is consumed FIRST and unconditionally -- even a denied or code-less callback
-    burns it, so one state can never be replayed. The tenant, community and acting admin all come
-    from that state, never from the request.
+    The browser binding is verified and the ``state`` consumed FIRST -- a missing/foreign cookie is
+    refused with the generic state error and leaves the state intact, while a bound browser burns
+    it even on a denied or code-less callback (one state is never replayable). The tenant,
+    community and acting admin all come from that state, never from the request.
     """
-    pending = await consume_state(state)
+    pending = await consume_state(state, binding_nonce)
     if pending is None:
         raise YoutubeInstallError(ERR_STATE)
     if provider_error:
         raise YoutubeInstallError(ERR_DENIED)
     if not code:
         raise YoutubeInstallError(ERR_NO_CODE)
-    if pending.supplied_client_secret is not None:
-        client_secret = pending.supplied_client_secret
-    else:
-        try:
-            resolved_id, client_secret = await resolve_app_credentials(
-                dal, tenant_id=pending.tenant_id
-            )
-        except AppCredentialsUnavailable as exc:
-            raise YoutubeInstallError(ERR_APP) from exc
-        if resolved_id != pending.client_id:
-            # The stored application changed between authorize and callback: refuse, never mix.
-            raise YoutubeInstallError(ERR_APP)
+    try:
+        resolved_id, client_secret = await resolve_app_credentials(dal, tenant_id=pending.tenant_id)
+    except AppCredentialsUnavailable as exc:
+        raise YoutubeInstallError(ERR_APP) from exc
+    if resolved_id != pending.client_id:
+        # The tenant's application changed between authorize and callback: refuse, never mix.
+        raise YoutubeInstallError(ERR_APP)
     access, refresh = await exchange_code(
         client_id=pending.client_id,
         client_secret=client_secret,
@@ -371,19 +411,6 @@ async def complete_install(
         # Hourly access tokens with no refresh token would die within the hour: refuse the install.
         raise YoutubeInstallError(ERR_NO_REFRESH)
     await _store_connection(service, pending, access, refresh)
-    if pending.supplied_client_secret is not None:
-        try:
-            store_tenant_credentials(
-                dal,
-                tenant_id=pending.tenant_id,
-                is_global_tenant=False,
-                platform=PROVIDER_ID,
-                payload={"client_id": pending.client_id, "client_secret": client_secret},
-                installed_by_user_id=pending.user_id,
-            )
-        except Exception as exc:  # noqa: BLE001 - mapped to a fixed code, details never surfaced
-            logger.warning("youtube_install.app_store_failed tenant_id=%d", pending.tenant_id)
-            raise YoutubeInstallError(ERR_SAVE) from exc
 
 
 async def _store_connection(
