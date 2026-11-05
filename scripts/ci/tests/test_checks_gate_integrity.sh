@@ -91,6 +91,7 @@ make_sandbox() {
 fake_flake8() {
   local pin
   pin=$(sed -n 's/^flake8==\([0-9.]*\).*/\1/p' "$REPO_ROOT/requirements-lint.txt")
+  # shellcheck disable=SC2016  # the fake script's own $1 must stay literal, not expand here
   printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "%s (mccabe: fake)"; exit 0; }\n%s\n' "$pin" "$2" > "$1/bin/flake8"
   chmod +x "$1/bin/flake8"
 }

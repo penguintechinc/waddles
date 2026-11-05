@@ -17,7 +17,10 @@ grep -q "^world connector {" "$FILE"
 # `identity` is connector-only -- never present in waddle:bundle/stage.wit.
 grep -q "^interface identity {" "$FILE"
 grep -q "  lookup: func(key: identity-key) -> result<identity-record, error>;" "$FILE"
-! grep -q "interface identity {" "wit/waddle-bundle/stage.wit"
+if grep -q "interface identity {" "wit/waddle-bundle/stage.wit"; then
+  echo "FAIL: identity interface leaked into waddle:bundle/stage.wit" >&2
+  exit 1
+fi
 
 # receiver exports: on-connect, on-frame, on-heartbeat-due, on-disconnect.
 for export_fn in on-connect on-frame on-heartbeat-due on-disconnect; do
@@ -41,7 +44,10 @@ grep -q "  import waddle:bundle/tool@1.0.0;" "$FILE"
 grep -q "  export waddle:bundle/tool-provider@1.0.0;" "$FILE"
 # The `connector` world itself stays frozen: no tool surface in it.
 CONNECTOR_BODY="$(awk '/^world connector \{/{f=1} f{print} f&&/^\}/{exit}' "$FILE")"
-! grep -q "tool" <<<"$CONNECTOR_BODY"
+if grep -q "tool" <<<"$CONNECTOR_BODY"; then
+  echo "FAIL: connector world must not carry a tool surface" >&2
+  exit 1
+fi
 
 # deps/tool.wit carries byte-identical `tool` + `tool-provider` interface bodies.
 TOOL_DEP="wit/waddle-connector/deps/waddle-bundle/tool.wit"
