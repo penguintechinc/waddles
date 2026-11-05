@@ -456,10 +456,16 @@ pub struct AuthorizedCall {
 }
 
 impl AuthorizedCall {
-    /// The scope this tool requires, if any. `None` => no actor resolution is
-    /// needed; `into_plan` then accepts any actor (including `none()`).
+    /// The scope this tool requires, if any. A write may separately resolve
+    /// identity to bind its retry key even when no role scope is required.
     pub fn required_scope(&self) -> Option<&str> {
         self.required_scope.as_deref()
+    }
+
+    /// Whether the authorized target tool mutates state, as declared by its manifest.
+    /// Identity-only resolution for writes occurs after the cheap authorization gates.
+    pub fn is_write(&self) -> bool {
+        self.plan.write
     }
 
     /// Enforces `required_scope` against the host-verified `actor` (fail closed:

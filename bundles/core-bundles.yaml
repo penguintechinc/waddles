@@ -465,8 +465,9 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.loyalty
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
+    wit_world: stage-next-tools
     source_dir: python/loyalty
     manifest_path: loyalty.manifest.yaml
     artifact_path: loyalty.wasm
@@ -1454,6 +1455,19 @@ bundles:
     source_dir: rust/reputation
     manifest_path: reputation.manifest.yaml
     artifact_path: reputation.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
+  # Atomic community currency service, installed by the trusted core seeder.
+  - app_id: waddles.core.service.economy
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/economy
+    manifest_path: economy.manifest.yaml
+    artifact_path: economy.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null

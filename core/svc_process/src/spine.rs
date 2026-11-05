@@ -1333,6 +1333,7 @@ async fn handle_delivered_inner<S: SpineOps>(
             chain: vec![deps.app_id.clone()],
             deadline: Some(std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms)),
             trace: trace.clone(),
+            read_only: false,
         });
         let caps = match &deps.kv_conn {
             Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),

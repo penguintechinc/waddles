@@ -1,6 +1,6 @@
 -- Bundle reputation host-cap ops (bundle-MCP-tools P5 Task 1): admin override,
 -- batch adjust, bounded batch reads, leaderboard. Read by BOTH
--- `alembic/versions/0071_reputation_host_ops.py` (production) and
+-- `alembic/versions/0072_reputation_host_ops.py` (production) and
 -- `core/bundle_host_reputation/tests/postgres_integration.rs` (`include_str!`),
 -- so the tested schema is the shipped schema. Idempotent; runs AFTER
 -- `bundle_reputation_store.sql` (0050).

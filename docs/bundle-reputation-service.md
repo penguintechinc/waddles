@@ -50,4 +50,4 @@ Absent = defaults; present-but-invalid = loud `invalid-args`, never silently def
   (real wasm + executor + `tool.invoke` + gate: admin/non-admin override, 24h cap, community isolation, telemetry).
 * The e2e fixture `core/tool_invoke_e2e/tests/fixtures/reputation_service.wasm` must be rebuilt when the bundle
   changes (see the README beside it).
-* Migration: `alembic/versions/0071_reputation_host_ops.py` (score clamp CHECK + ledger columns).
+* Migration: `alembic/versions/0072_reputation_host_ops.py` (score clamp CHECK + ledger columns).
