@@ -146,6 +146,11 @@ pub struct ResolvedConnection {
     pub secret: ConnectionSecret,
     /// Expiry in epoch seconds, when the credential is time-limited.
     pub expires_at: Option<i64>,
+    /// Non-secret binding metadata AS OF THIS RESOLVE (same public keys as the
+    /// binding list). Lets a caller re-assert facts it read from a list (e.g.
+    /// channel ownership) against the record it is about to use. Empty when
+    /// the server sent none.
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for ResolvedConnection {
@@ -193,6 +198,8 @@ struct ResolveWire {
     #[serde(default)]
     endpoint: Endpoint,
     secret: Option<SecretWire>,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -336,6 +343,7 @@ pub(crate) fn parse_resolved(
         endpoint: wire.endpoint,
         secret,
         expires_at,
+        metadata: wire.metadata,
     })
 }
 
@@ -483,6 +491,23 @@ mod tests {
         community_id: 7,
         connection_id: 12,
     };
+
+    /// regression: p6a-t6b codex-2 -- resolve surfaces the record's own
+    /// metadata so callers can re-assert list-derived facts; absent -> empty.
+    #[test]
+    fn resolve_body_metadata_is_surfaced() {
+        let body = br#"{"communityId":7,"connectionId":12,"provider":"twitch","kind":1,
+            "accessToken":"t","expiresAt":null,"endpoint":{},"metadata":{"channel":"abc"},"secret":null}"#;
+        let rc = parse_resolved(body, REF).unwrap();
+        assert_eq!(rc.metadata.get("channel").map(String::as_str), Some("abc"));
+        let no_meta = br#"{"communityId":7,"connectionId":12,"provider":"twitch","kind":1,
+            "accessToken":"t","expiresAt":null,"endpoint":{},"secret":null}"#;
+        assert!(parse_resolved(no_meta, REF).unwrap().metadata.is_empty());
+        assert!(
+            !format!("{rc:?}").contains("abc"),
+            "Debug must not print metadata"
+        );
+    }
 
     #[test]
     fn unknown_kind_or_scheme_code_is_malformed() {
@@ -686,6 +711,7 @@ mod tests {
                 },
                 secret,
                 expires_at: None,
+                metadata: BTreeMap::new(),
             };
             assert!(!format!("{rc:?}").contains("PLAIN"));
             assert!(format!("{rc:?}").contains("us-east-1"));

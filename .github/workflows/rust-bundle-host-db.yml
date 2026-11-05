@@ -11,12 +11,14 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_host_db/**'
+      - 'core/test_support/**'
       - '.github/workflows/rust-bundle-host-db.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_host_db/**'
+      - 'core/test_support/**'
       - '.github/workflows/rust-bundle-host-db.yml'
   workflow_dispatch:
 
@@ -35,7 +37,7 @@ jobs:
       crate_name: bundle-host-db
       working_directory: core/bundle_host_db
       # `tests/postgres_integration.rs` starts a real Postgres container via
-      # `testcontainers` -- needs Docker, which `ubuntu-latest` ships. The
+      # the `docker` CLI helper (`core/test_support`) -- needs Docker, which `ubuntu-latest` ships. The
       # crate's own `[dev-dependencies]` self-reference turns on its
       # `test-util` feature for that test, so the reusable pipeline's plain
       # `cargo clippy/test/llvm-cov` invocations need no `--features` flag.
