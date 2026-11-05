@@ -3298,9 +3298,11 @@ async fn conditional_debit_is_its_own_kind_and_binds_min_balance() {
 }
 
 /// regression: p981-claim-H -- a flood of concurrent retries of one keyed mint /
-/// admin adjust is serialised by the community advisory lock BEFORE the replay
-/// read, so every retry returns the one original result (never a unique
-/// violation, never a second movement).
+/// admin adjust returns the one original result (never a unique violation, never
+/// a second movement). NOTE: this is an end-to-end outcome test; it does NOT
+/// isolate the per-kind scope lock (removing it left this green; which other
+/// layer absorbs the race was not traced) -- see
+/// `a_keyed_credit_waits_on_the_community_mint_lock_before_its_replay_read`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_retries_of_one_credit_and_admin_adjust_apply_exactly_once() {
     let f = fixture().await;
@@ -3326,4 +3328,38 @@ async fn concurrent_retries_of_one_credit_and_admin_adjust_apply_exactly_once() 
     assert_eq!(balance_of(&f, f.alice).await, 40);
     assert_eq!(balance_of(&f, f.bob).await, 25);
     assert_eq!(ledger_count(&f).await, 2);
+}
+
+/// regression: p981-claim-H -- isolates the lock that makes the replay read safe. While another
+/// transaction holds the community's `mint` advisory lock, a keyed credit must WAIT (it takes
+/// that lock before its replay read), then complete once released. The retry-flood test above
+/// stays green even with the lock removed (the absorbing layer was not traced), so only this
+/// test pins `lock_scope` itself.
+#[tokio::test]
+async fn a_keyed_credit_waits_on_the_community_mint_lock_before_its_replay_read() {
+    use sea_orm::TransactionTrait;
+    let f = fixture().await;
+    let holder = f.su.begin().await.unwrap();
+    holder
+        .execute_unprepared(&format!(
+            "SELECT pg_advisory_xact_lock(hashtextextended(\
+             'waddles.bundle_economy.scope:{TENANT}:{COMMUNITY}:mint', 0))"
+        ))
+        .await
+        .unwrap();
+    let store = Arc::new(PostgresEconomyStore::new(f.eco_conn.clone()));
+    let k = key_of("evt-lock:credit:0");
+    let (s, alice) = (Arc::clone(&store), f.alice);
+    let task = tokio::spawn(async move {
+        s.credit(&scope(), alice, 40, 100, MAX_SUPPLY, caps(), &k)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    assert!(
+        !task.is_finished(),
+        "credit ran without taking the mint lock"
+    );
+    holder.commit().await.unwrap();
+    assert_eq!(task.await.unwrap(), Ok(40));
+    assert_eq!(ledger_count(&f).await, 1);
 }
