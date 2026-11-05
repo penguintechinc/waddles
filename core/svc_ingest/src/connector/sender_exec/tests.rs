@@ -23,10 +23,10 @@ const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const TOKEN: &str = "SECRET-TOKEN-XYZ";
 
 #[derive(Clone)]
-struct FixedBuilder {
+pub(crate) struct FixedBuilder {
     tpl: Arc<Mutex<RequestTpl>>,
     digest: String,
-    calls: Arc<Mutex<Vec<SenderAction>>>,
+    pub(crate) calls: Arc<Mutex<Vec<SenderAction>>>,
     fail: Option<BuildError>,
 }
 
@@ -62,17 +62,17 @@ impl TemplateBuilder for FixedBuilder {
 }
 
 /// What the resolver was asked: community, pinned channel, handles.
-type SeenReq = (Option<i64>, Option<String>, Vec<&'static str>);
+pub(crate) type SeenReq = (Option<i64>, Option<String>, Vec<&'static str>);
 
 #[derive(Clone, Default)]
-struct MapSlots {
-    map: HashMap<String, String>,
-    err: Option<SlotError>,
-    seen: Arc<Mutex<Vec<SeenReq>>>,
+pub(crate) struct MapSlots {
+    pub(crate) map: HashMap<String, String>,
+    pub(crate) err: Option<SlotError>,
+    pub(crate) seen: Arc<Mutex<Vec<SeenReq>>>,
 }
 
 impl MapSlots {
-    fn with(pairs: &[(&str, &str)]) -> Self {
+    pub(crate) fn with(pairs: &[(&str, &str)]) -> Self {
         Self {
             map: pairs
                 .iter()
@@ -81,7 +81,7 @@ impl MapSlots {
             ..Self::default()
         }
     }
-    fn twitch() -> Self {
+    pub(crate) fn twitch() -> Self {
         Self::with(&[
             ("token", TOKEN),
             ("client_id", "cid123"),
@@ -113,7 +113,7 @@ impl SlotSource for MapSlots {
 }
 
 #[derive(Clone, Copy)]
-struct Flag(bool);
+pub(crate) struct Flag(pub(crate) bool);
 
 impl FlagGate for Flag {
     async fn enabled(&self, flag: &str) -> bool {
@@ -192,14 +192,19 @@ fn req<'a>(
     }
 }
 
-struct Rig {
-    server: MockServer,
-    builder: FixedBuilder,
-    slots: MapSlots,
-    exec: SenderExecutor<FixedBuilder, MapSlots, Flag, NoDuties>,
+pub(crate) struct Rig {
+    pub(crate) server: MockServer,
+    pub(crate) builder: FixedBuilder,
+    pub(crate) slots: MapSlots,
+    pub(crate) exec: SenderExecutor<FixedBuilder, MapSlots, Flag, NoDuties>,
 }
 
-async fn rig(policy: PlatformPolicy, tpl: RequestTpl, slots: MapSlots, flag: bool) -> Rig {
+pub(crate) async fn rig(
+    policy: PlatformPolicy,
+    tpl: RequestTpl,
+    slots: MapSlots,
+    flag: bool,
+) -> Rig {
     let server = ok_server().await;
     rig_on(server, policy, tpl, slots, flag)
 }
@@ -222,7 +227,7 @@ fn rig_on(
     }
 }
 
-async fn sent(r: &Rig) -> Vec<wiremock::Request> {
+pub(crate) async fn sent(r: &Rig) -> Vec<wiremock::Request> {
     r.server.received_requests().await.unwrap()
 }
 

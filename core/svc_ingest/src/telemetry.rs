@@ -234,6 +234,8 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .expect("register svc_ingest_outbound_pin_refused_total");
     crate::outbound_creds::register_metrics(registry)
         .expect("register svc_ingest_outbound_credential_resolve_total");
+    crate::connector::sender_exec::register_metrics(registry)
+        .expect("register svc_ingest_sender_exec_total / _seconds");
 
     let eventsub_verifications_total = prometheus::IntCounterVec::new(
         prometheus::Opts::new(

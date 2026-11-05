@@ -811,4 +811,4 @@ fn default_payload(kind: &KindPolicy, action: &OutboundAction) -> Result<String,
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

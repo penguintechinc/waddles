@@ -35,8 +35,8 @@ use tokio::sync::oneshot;
 use crate::ingest::Backoff;
 use crate::outbound_creds::{CredError, TwitchCredentialSource};
 use crate::outbound_ops::{
-    dispatch_to, parse_outbound_entry, route, DiscordSender, OutboundEntry, SenderError,
-    TwitchSender,
+    dispatch_to, parse_outbound_entry, route, ActionExecutor, DiscordSender, NoExecutor,
+    OutboundEntry, SenderError, TwitchSender,
 };
 use crate::outbound_pin::PinKeys;
 
@@ -250,15 +250,39 @@ fn check_stamp(
 /// poll actually succeeds (`Ok(Some(_))` or `Ok(None)` -- either proves
 /// the Valkey round-trip is healthy) -- never a fixed 2s retry that never
 /// escalates against a genuinely down connection.
+#[cfg(test)]
 async fn drain_loop<Q, S>(
+    queue: Q,
+    sender: &S,
+    pin: Option<&PinKeys>,
+    backoff: Backoff,
+    shutdown: oneshot::Receiver<()>,
+) where
+    Q: RelaySource,
+    S: IrcOutbound,
+{
+    drain_loop_with(queue, sender, None::<&NoExecutor>, pin, backoff, shutdown).await;
+}
+
+/// [`drain_loop`] with an optional generic-executor backend (P6a T6d-1).
+///
+/// `exec = Some(_)`: every entry that passes the stamp gate (HMAC + expiry,
+/// FIRST) is executed through [`ActionExecutor`] -- the template-verified,
+/// host-slot-substituted, `GuardedClient`-only path -- and `sender` is never
+/// consulted. `exec = None`: the legacy per-platform sender, unchanged.
+/// Retry/ack semantics are identical either way: a refused or failed entry
+/// is already popped, logged PII-free and dropped, never re-queued.
+async fn drain_loop_with<Q, S, X>(
     mut queue: Q,
     sender: &S,
+    exec: Option<&X>,
     pin: Option<&PinKeys>,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
 ) where
     Q: RelaySource,
     S: IrcOutbound,
+    X: ActionExecutor,
 {
     loop {
         tokio::select! {
@@ -271,8 +295,14 @@ async fn drain_loop<Q, S>(
                             if check_stamp(&raw, "twitch", action.op(), pin).is_err() {
                                 continue;
                             }
-                            let twitch = TwitchSender::new(sender, community_id);
-                            if let Err(err) = route("twitch", &action, &twitch, &DiscordSender::unconfigured()).await {
+                            let result = match exec {
+                                Some(x) => x.execute_action("twitch", community_id, &action).await,
+                                None => {
+                                    let twitch = TwitchSender::new(sender, community_id);
+                                    route("twitch", &action, &twitch, &DiscordSender::unconfigured()).await
+                                }
+                            };
+                            if let Err(err) = result {
                                 match err {
                                     // A new op with no implementation yet is an
                                     // actionable failure, not degraded service.
@@ -321,8 +351,52 @@ pub async fn run<C: TwitchCredentialSource>(
     let conn = connect_with_response_timeout(&client, BLOCKING_CONN_RESPONSE_TIMEOUT).await?;
     let sender = RealIrcOutbound::new(endpoint, creds);
     let backoff = Backoff::new(Duration::from_secs(30));
-    drain_loop(conn, &sender, pin.as_ref(), backoff, shutdown).await;
+    drain_loop_with(
+        conn,
+        &sender,
+        None::<&NoExecutor>,
+        pin.as_ref(),
+        backoff,
+        shutdown,
+    )
+    .await;
     Ok(())
+}
+
+/// The twitch drain backed by the generic executor (P6a T6d-1): no IRC
+/// identity, no per-process credential -- every send resolves its own
+/// community's slots through `exec`. Started instead of [`run`] once a
+/// pinned-component [`crate::connector::sender_exec::TemplateBuilder`] is
+/// available to build `exec` (see the crate README "T6d-1 status").
+///
+/// # Errors
+/// [`redis::RedisError`] if the Valkey connect fails.
+pub async fn run_exec<X: ActionExecutor>(
+    spine_cfg: &penguin_spine::SpineConfig,
+    exec: &X,
+    pin: Option<PinKeys>,
+    shutdown: oneshot::Receiver<()>,
+) -> Result<(), redis::RedisError> {
+    let client = build_redis_client(spine_cfg)?;
+    let conn = connect_with_response_timeout(&client, BLOCKING_CONN_RESPONSE_TIMEOUT).await?;
+    let backoff = Backoff::new(Duration::from_secs(30));
+    drain_loop_with(conn, &NoIrc, Some(exec), pin.as_ref(), backoff, shutdown).await;
+    Ok(())
+}
+
+/// The [`IrcOutbound`] of an executor-backed drain: never consulted (the
+/// executor replaces the legacy sender); if it ever were, it fails loud.
+struct NoIrc;
+
+impl IrcOutbound for NoIrc {
+    async fn send(
+        &self,
+        _community_id: Option<i64>,
+        _channel: &str,
+        _text: &str,
+    ) -> Result<(), IrcSendError> {
+        Err(IrcSendError::Credential(CredError::NoBinding))
+    }
 }
 
 /// The queue key the Discord outbound drain reads -- byte-identical to
@@ -463,9 +537,10 @@ fn now_ms() -> u64 {
 /// waiting and reported failure, so performing the op now would contradict
 /// that report (a late DM after "please resend" would be a duplicate). Logs
 /// carry platform/op/code only -- never content, ids or error bodies.
-async fn handle_discord_entry<C: DrainControl>(
+async fn handle_discord_entry<C: DrainControl, X: ActionExecutor>(
     raw: &str,
     sender: &DiscordSender<'_>,
+    exec: Option<&X>,
     ctl: &C,
     pin: Option<&PinKeys>,
 ) {
@@ -492,7 +567,17 @@ async fn handle_discord_entry<C: DrainControl>(
     if check_stamp(raw, "discord", op, pin).is_err() {
         return;
     }
-    let result = dispatch_to(sender, &entry.action).await;
+    // The stamp gate above ran first; the executor (when configured) then
+    // re-checks the pin, verifies the connector's template and sends through
+    // the guarded client only. A refused/failed op is acked and dropped
+    // exactly as on the legacy path -- never re-queued.
+    let result = match exec {
+        Some(x) => {
+            x.execute_action("discord", entry.community_id, &entry.action)
+                .await
+        }
+        None => dispatch_to(sender, &entry.action).await,
+    };
     match &result {
         Ok(()) => {}
         Err(err @ SenderError::Unsupported { .. }) => {
@@ -518,9 +603,36 @@ async fn handle_discord_entry<C: DrainControl>(
 /// malformed or failed entry is logged (PII-free: platform/op/error only)
 /// and dropped, never panics, never stalls the loop; queue-read errors back
 /// off exponentially.
+#[cfg(test)]
 async fn discord_drain_loop<Q, C>(
+    queue: Q,
+    sender: &DiscordSender<'_>,
+    ctl: &C,
+    pin: Option<&PinKeys>,
+    backoff: Backoff,
+    shutdown: oneshot::Receiver<()>,
+) where
+    Q: RelaySource,
+    C: DrainControl,
+{
+    discord_drain_loop_with(
+        queue,
+        sender,
+        None::<&NoExecutor>,
+        ctl,
+        pin,
+        backoff,
+        shutdown,
+    )
+    .await;
+}
+
+/// [`discord_drain_loop`] with an optional generic-executor backend; see
+/// [`drain_loop_with`].
+async fn discord_drain_loop_with<Q, C, X>(
     mut queue: Q,
     sender: &DiscordSender<'_>,
+    exec: Option<&X>,
     ctl: &C,
     pin: Option<&PinKeys>,
     mut backoff: Backoff,
@@ -528,6 +640,7 @@ async fn discord_drain_loop<Q, C>(
 ) where
     Q: RelaySource,
     C: DrainControl,
+    X: ActionExecutor,
 {
     loop {
         tokio::select! {
@@ -535,7 +648,7 @@ async fn discord_drain_loop<Q, C>(
             popped = queue.brpop_one() => match popped {
                 Ok(Some(raw)) => {
                     backoff.reset();
-                    handle_discord_entry(&raw, sender, ctl, pin).await;
+                    handle_discord_entry(&raw, sender, exec, ctl, pin).await;
                 }
                 Ok(None) => backoff.reset(),
                 Err(err) => {
@@ -578,6 +691,35 @@ pub async fn run_discord(
     pin: Option<PinKeys>,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), redis::RedisError> {
+    let sender = DiscordSender::new(rest);
+    run_discord_inner(spine_cfg, &sender, None::<&NoExecutor>, pin, shutdown).await
+}
+
+/// The Discord drain backed by the generic executor (P6a T6d-1): no bot
+/// token in this process -- the executor resolves the community's own
+/// credential per send. Started instead of [`run_discord`] once a
+/// pinned-component template builder is available (crate README "T6d-1
+/// status"). Readiness is advertised exactly as on the legacy path.
+///
+/// # Errors
+/// [`redis::RedisError`] if a Valkey connect fails.
+pub async fn run_discord_exec<X: ActionExecutor>(
+    spine_cfg: &penguin_spine::SpineConfig,
+    exec: &X,
+    pin: Option<PinKeys>,
+    shutdown: oneshot::Receiver<()>,
+) -> Result<(), redis::RedisError> {
+    let sender = DiscordSender::unconfigured();
+    run_discord_inner(spine_cfg, &sender, Some(exec), pin, shutdown).await
+}
+
+async fn run_discord_inner<X: ActionExecutor>(
+    spine_cfg: &penguin_spine::SpineConfig,
+    sender: &DiscordSender<'_>,
+    exec: Option<&X>,
+    pin: Option<PinKeys>,
+    shutdown: oneshot::Receiver<()>,
+) -> Result<(), redis::RedisError> {
     let client = build_redis_client(spine_cfg)?;
     let list_conn = connect_with_response_timeout(&client, BLOCKING_CONN_RESPONSE_TIMEOUT).await?;
     let ctl = ValkeyDrainControl::new(
@@ -587,16 +729,16 @@ pub async fn run_discord(
         conn: list_conn,
         key: DISCORD_OUTBOUND_QUEUE_KEY,
     };
-    let sender = DiscordSender::new(rest);
     tracing::info!(
         platform = "discord",
         "discord outbound drain running; advertising readiness"
     );
     tokio::select! {
         () = heartbeat_loop(&ctl) => {}
-        () = discord_drain_loop(
+        () = discord_drain_loop_with(
             queue,
-            &sender,
+            sender,
+            exec,
             &ctl,
             pin.as_ref(),
             Backoff::new(Duration::from_secs(30)),
@@ -1770,5 +1912,386 @@ mod tests {
             RealIrcOutbound::new(ep(), StaticCredentialSource::new("n".into(), "t".into()));
         let err = legacy.send(None, "#c", "hi").await.unwrap_err();
         assert!(matches!(err, IrcSendError::Send(_)), "{err}");
+    }
+
+    // ---- P6a T6d-1: executor-backed drains ------------------------------
+
+    use crate::connector::sender_exec::tests as exec_rig;
+    use crate::outbound_ops::OutboundAction;
+
+    /// Records what the drain handed the executor and answers from `script`
+    /// (a function so the non-`Clone` [`SenderError`] can be minted per call).
+    struct ScriptedExec {
+        calls: Mutex<Vec<(&'static str, Option<i64>, &'static str)>>,
+        script: fn(&'static str, &'static str) -> Result<(), SenderError>,
+    }
+
+    impl ScriptedExec {
+        fn new(script: fn(&'static str, &'static str) -> Result<(), SenderError>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                script,
+            }
+        }
+    }
+
+    impl ActionExecutor for ScriptedExec {
+        async fn execute_action(
+            &self,
+            platform: &'static str,
+            community_id: Option<i64>,
+            action: &OutboundAction,
+        ) -> Result<(), SenderError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((platform, community_id, action.op()));
+            (self.script)(platform, action.op())
+        }
+    }
+
+    async fn drive_twitch_exec<X: ActionExecutor>(
+        exec: &X,
+        sender: &RecordingSender,
+        payloads: Vec<Result<Option<String>, String>>,
+    ) {
+        let queue = FakeQueue {
+            payloads,
+            idx: AtomicUsize::new(0),
+        };
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_loop_with(
+                queue,
+                sender,
+                Some(exec),
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+    }
+
+    async fn drive_discord_exec<X: ActionExecutor>(
+        exec: &X,
+        ctl: &FakeCtl,
+        payloads: Vec<Result<Option<String>, String>>,
+    ) {
+        let queue = FakeQueue {
+            payloads,
+            idx: AtomicUsize::new(0),
+        };
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            discord_drain_loop_with(
+                queue,
+                &DiscordSender::unconfigured(),
+                Some(exec),
+                ctl,
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+    }
+
+    const TW_SEND: &str = r##"{"v":1,"op":"chat.send","platform":"twitch","channel":"#c","text":"hi","origin_channel":"#c","community_id":7}"##;
+
+    /// The stamp gate stays the FIRST gate with an executor configured: a
+    /// forged / un-stamped / unknown-op / malformed entry never reaches it,
+    /// the legacy sender is never consulted, and the loop keeps draining.
+    #[tokio::test]
+    async fn executor_backed_twitch_drain_keeps_the_stamp_gate_first_and_never_uses_the_legacy_sender(
+    ) {
+        let exec = ScriptedExec::new(|_, _| Ok(()));
+        let sender = RecordingSender::default();
+        drive_twitch_exec(
+            &exec,
+            &sender,
+            vec![
+                Ok(Some(format!("RAW:{TW_SEND}"))),
+                Ok(Some("not json".to_string())),
+                Ok(Some(
+                    r##"{"v":1,"op":"bogus","platform":"twitch","channel":"#c","text":"hi","origin_channel":"#c"}"##.to_string(),
+                )),
+                Ok(Some(TW_SEND.to_string())),
+            ],
+        )
+        .await;
+        assert_eq!(
+            exec.calls.lock().unwrap().as_slice(),
+            &[("twitch", Some(7), "chat.send")],
+            "only the signed, well-formed entry reaches the executor, with its numeric community"
+        );
+        assert!(sender.calls.lock().unwrap().is_empty());
+        assert!(sender.communities.lock().unwrap().is_empty());
+    }
+
+    /// Refused / failed / unsupported outcomes are consumed (already popped),
+    /// never re-queued, and never stall the entries behind them.
+    #[tokio::test]
+    async fn executor_outcomes_are_dropped_not_retried_and_the_loop_continues() {
+        type Script = fn(&'static str, &'static str) -> Result<(), SenderError>;
+        let scripts: [Script; 3] = [
+            |_, op| {
+                Err(SenderError::Rejected {
+                    platform: "twitch",
+                    op,
+                    reason: "channel_not_owned",
+                })
+            },
+            |_, op| {
+                Err(SenderError::Failed {
+                    platform: "twitch",
+                    op,
+                    message: "upstream_error".into(),
+                })
+            },
+            |p, op| {
+                Err(SenderError::Unsupported {
+                    platform: p.to_string(),
+                    op,
+                })
+            },
+        ];
+        for script in scripts {
+            let exec = ScriptedExec::new(script);
+            drive_twitch_exec(
+                &exec,
+                &RecordingSender::default(),
+                vec![Ok(Some(TW_SEND.to_string())), Ok(Some(TW_SEND.to_string()))],
+            )
+            .await;
+            assert_eq!(
+                exec.calls.lock().unwrap().len(),
+                2,
+                "each entry executed exactly once"
+            );
+        }
+    }
+
+    /// Discord: the producer's ack carries the executor's stable code; an
+    /// unsigned entry is neither executed nor acked.
+    #[tokio::test]
+    async fn executor_backed_discord_drain_acks_stable_codes_and_gates_on_the_stamp() {
+        fn script(_: &'static str, op: &'static str) -> Result<(), SenderError> {
+            match op {
+                "chat.send" => Ok(()),
+                "chat.delete" => Err(SenderError::Rejected {
+                    platform: "discord",
+                    op,
+                    reason: "flag_off",
+                }),
+                _ => Err(SenderError::Unsupported {
+                    platform: "discord".into(),
+                    op,
+                }),
+            }
+        }
+        let exec = ScriptedExec::new(script);
+        let ctl = FakeCtl::default();
+        drive_discord_exec(
+            &exec,
+            &ctl,
+            vec![
+                Ok(Some(r#"RAW:{"v":1,"op":"chat.send","platform":"discord","channel":"1","origin_channel":"1","text":"x","op_id":"forged"}"#.to_string())),
+                Ok(Some(r#"{"v":1,"op":"chat.send","platform":"discord","channel":"1","origin_channel":"1","text":"x","op_id":"a","community_id":3}"#.to_string())),
+                Ok(Some(r#"{"v":1,"op":"chat.delete","platform":"discord","channel":"1","origin_channel":"1","message_id":"2","op_id":"b"}"#.to_string())),
+                Ok(Some(r#"{"v":1,"op":"dm.send","platform":"discord","user_id":"u","text":"x","origin_channel":"1","op_id":"c"}"#.to_string())),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ctl.acks.lock().unwrap().as_slice(),
+            &[
+                ("a".to_string(), r#"{"ok":true}"#.to_string()),
+                (
+                    "b".to_string(),
+                    r#"{"ok":false,"code":"flag_off"}"#.to_string()
+                ),
+                (
+                    "c".to_string(),
+                    r#"{"ok":false,"code":"unsupported"}"#.to_string()
+                ),
+            ]
+        );
+        let calls = exec.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0], ("discord", Some(3), "chat.send"));
+    }
+
+    /// The real executor (verifier + substituter + guarded client) behind the
+    /// real twitch drain against a local fake Helix: the signed entry becomes
+    /// ONE Helix request, authenticated with the host-resolved credential.
+    #[tokio::test]
+    async fn real_executor_behind_the_twitch_drain_sends_one_helix_request() {
+        let rig = exec_rig::rig(
+            crate::connector::sender_exec::PlatformPolicy::twitch(),
+            crate::connector::sender_exec::verify::tests::twitch_send(),
+            exec_rig::MapSlots::twitch(),
+            true,
+        )
+        .await;
+        let sender = RecordingSender::default();
+        drive_twitch_exec(&rig.exec, &sender, vec![Ok(Some(TW_SEND.to_string()))]).await;
+        let got = exec_rig::sent(&rig).await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].url.path(), "/helix/chat/messages");
+        assert!(
+            sender.calls.lock().unwrap().is_empty(),
+            "legacy IRC path unused"
+        );
+        assert_eq!(rig.slots.seen.lock().unwrap()[0].0, Some(7));
+    }
+
+    /// regression: p987 -- with the executor configured, a validly-signed
+    /// entry whose channel differs from the stamped origin still makes NO
+    /// request (the executor pin runs on top of the stamp gate), and the
+    /// refusal is counted.
+    #[tokio::test]
+    async fn real_executor_refuses_a_wrong_channel_even_when_the_signature_is_valid() {
+        let rig = exec_rig::rig(
+            crate::connector::sender_exec::PlatformPolicy::twitch(),
+            crate::connector::sender_exec::verify::tests::twitch_send(),
+            exec_rig::MapSlots::twitch(),
+            true,
+        )
+        .await;
+        let before =
+            crate::outbound_pin::refusal_count("twitch", "chat.send", "channel_not_pinned");
+        drive_twitch_exec(
+            &rig.exec,
+            &RecordingSender::default(),
+            vec![Ok(Some(
+                r##"{"v":1,"op":"chat.send","platform":"twitch","channel":"#victim","text":"hi","origin_channel":"#c","community_id":7}"##.to_string(),
+            ))],
+        )
+        .await;
+        assert!(exec_rig::sent(&rig).await.is_empty());
+        assert_eq!(rig.builder.calls.lock().unwrap().len(), 0);
+        assert!(
+            crate::outbound_pin::refusal_count("twitch", "chat.send", "channel_not_pinned")
+                > before
+        );
+    }
+
+    /// Flag OFF: the executor refuses; the producer is acked with the stable
+    /// code; nothing is built or sent. A DM (host duty not registered) is
+    /// acked `unsupported`, never executed half-way.
+    #[tokio::test]
+    async fn real_executor_flag_off_and_missing_duty_are_acked_loudly() {
+        let rig = exec_rig::rig(
+            crate::connector::sender_exec::PlatformPolicy::discord(),
+            crate::connector::sender_exec::verify::tests::discord_send(),
+            exec_rig::MapSlots::with(&[("discord-bot", "tok")]),
+            false,
+        )
+        .await;
+        let ctl = FakeCtl::default();
+        drive_discord_exec(
+            &rig.exec,
+            &ctl,
+            vec![Ok(Some(
+                r#"{"v":1,"op":"chat.send","platform":"discord","channel":"1","origin_channel":"1","text":"x","op_id":"f"}"#.to_string(),
+            ))],
+        )
+        .await;
+        assert_eq!(
+            ctl.acks.lock().unwrap().as_slice(),
+            &[(
+                "f".to_string(),
+                r#"{"ok":false,"code":"flag_off"}"#.to_string()
+            )]
+        );
+        assert!(exec_rig::sent(&rig).await.is_empty());
+        assert_eq!(rig.builder.calls.lock().unwrap().len(), 0);
+
+        let on = exec_rig::rig(
+            crate::connector::sender_exec::PlatformPolicy::discord(),
+            crate::connector::sender_exec::verify::tests::discord_send(),
+            exec_rig::MapSlots::with(&[("discord-bot", "tok")]),
+            true,
+        )
+        .await;
+        let ctl = FakeCtl::default();
+        drive_discord_exec(
+            &on.exec,
+            &ctl,
+            vec![Ok(Some(
+                r#"{"v":1,"op":"dm.send","platform":"discord","user_id":"9","text":"x","origin_channel":"1","op_id":"d"}"#.to_string(),
+            ))],
+        )
+        .await;
+        assert_eq!(
+            ctl.acks.lock().unwrap().as_slice(),
+            &[(
+                "d".to_string(),
+                r#"{"ok":false,"code":"unsupported"}"#.to_string()
+            )]
+        );
+        assert!(exec_rig::sent(&on).await.is_empty());
+    }
+
+    #[test]
+    fn exec_error_mapping_is_content_free_and_classified() {
+        use crate::connector::sender_exec::{ExecError, SlotError};
+        use crate::outbound_ops::exec_to_sender_error as map;
+        let r = map("twitch", "chat.send", &ExecError::FlagOff);
+        assert!(matches!(
+            r,
+            SenderError::Rejected {
+                reason: "flag_off",
+                ..
+            }
+        ));
+        let r = map(
+            "twitch",
+            "chat.send",
+            &ExecError::Slot(SlotError::Refused("no_connection")),
+        );
+        assert!(matches!(
+            r,
+            SenderError::Rejected {
+                reason: "no_connection",
+                ..
+            }
+        ));
+        let r = map(
+            "twitch",
+            "chat.send",
+            &ExecError::Slot(SlotError::Unavailable("credential_unavailable")),
+        );
+        assert!(
+            matches!(&r, SenderError::Failed { message, .. } if message == "credential_unavailable")
+        );
+        let r = map("twitch", "chat.send", &ExecError::Upstream(500));
+        assert!(matches!(&r, SenderError::Failed { message, .. } if message == "upstream_error"));
+        let r = map("discord", "dm.send", &ExecError::HostDutyMissing);
+        assert!(matches!(r, SenderError::Unsupported { .. }));
+        let r = map("slack", "chat.send", &ExecError::UnsupportedPlatform);
+        assert!(matches!(r, SenderError::Unsupported { .. }));
+        for e in [ExecError::FlagOff, ExecError::Upstream(401)] {
+            let shown = map("twitch", "chat.send", &e).to_string();
+            assert!(!shown.contains("401") && !shown.contains("http"), "{shown}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_executor_fails_loud_and_the_legacy_wrapper_matches_none() {
+        let a = OutboundAction::ChatSend {
+            channel: "#c".into(),
+            text: "t".into(),
+            origin_channel: Some("#c".into()),
+        };
+        let e = NoExecutor
+            .execute_action("twitch", Some(1), &a)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, SenderError::Unsupported { .. }));
+        assert_eq!(e.ack_code(), "unsupported");
     }
 }

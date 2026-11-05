@@ -48,6 +48,9 @@
 
 use serde::Deserialize;
 
+use crate::connector::sender_exec::{
+    DutyHook, ExecError, ExecRequest, FlagGate, SenderExecutor, SlotSource, TemplateBuilder,
+};
 use crate::discord_rest::{DiscordRestClient, DiscordRestError};
 use crate::outbound::{IrcOutbound, IrcSendError};
 use crate::outbound_creds::CredError;
@@ -371,6 +374,117 @@ pub async fn dispatch_to<S: PlatformSender>(
             text,
             origin_channel,
         } => sender.send_dm(user_id, text, origin_channel).await,
+    }
+}
+
+/// Executes one parsed, stamp-verified action through the generic outbound
+/// executor (P6a T6d-1) instead of a per-platform [`PlatformSender`]. The
+/// drain calls it only AFTER its integrity gate (HMAC + expiry) passed; the
+/// implementation re-applies the destination pin before anything else.
+#[allow(async_fn_in_trait)] // pub trait, service binary only -- see outbound.rs::IrcOutbound's doc
+pub trait ActionExecutor: Send + Sync {
+    /// Runs `action` for `platform` on behalf of `community_id`.
+    ///
+    /// # Errors
+    /// [`SenderError`] -- `Unsupported` for a kind/platform/host duty the
+    /// executor does not implement, `Rejected` for a host-policy refusal
+    /// (pin, flag, template, credential), `Failed` for a failed attempt.
+    async fn execute_action(
+        &self,
+        platform: &'static str,
+        community_id: Option<i64>,
+        action: &OutboundAction,
+    ) -> Result<(), SenderError>;
+}
+
+/// The "no executor configured" marker: lets the legacy drain paths be
+/// instantiated with `None::<&NoExecutor>`. Calling it fails loud.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoExecutor;
+
+impl ActionExecutor for NoExecutor {
+    async fn execute_action(
+        &self,
+        platform: &'static str,
+        _community_id: Option<i64>,
+        action: &OutboundAction,
+    ) -> Result<(), SenderError> {
+        Err(SenderError::Unsupported {
+            platform: platform.to_string(),
+            op: action.op(),
+        })
+    }
+}
+
+/// Maps an executor failure onto the drain's three outcomes. The code is
+/// the executor's stable, content-free [`ExecError::code`]; no URL, id,
+/// credential or message text can reach the producer's ack or the log.
+pub(crate) fn exec_to_sender_error(
+    platform: &'static str,
+    op: &'static str,
+    e: &ExecError,
+) -> SenderError {
+    match e {
+        ExecError::UnsupportedPlatform
+        | ExecError::UnsupportedKind
+        | ExecError::HostDutyMissing => SenderError::Unsupported {
+            platform: platform.to_string(),
+            op,
+        },
+        e if e.is_policy_refusal() => SenderError::Rejected {
+            platform,
+            op,
+            reason: e.code(),
+        },
+        e => SenderError::Failed {
+            platform,
+            op,
+            message: e.code().to_string(),
+        },
+    }
+}
+
+impl<B, S, F, D> ActionExecutor for SenderExecutor<B, S, F, D>
+where
+    B: TemplateBuilder,
+    S: SlotSource,
+    F: FlagGate,
+    D: DutyHook,
+{
+    async fn execute_action(
+        &self,
+        platform: &'static str,
+        community_id: Option<i64>,
+        action: &OutboundAction,
+    ) -> Result<(), SenderError> {
+        // The same pin gate `dispatch_to` applies, so a destination the
+        // stamp does not prove is refused (and counted) before the executor
+        // builds anything.
+        match action {
+            OutboundAction::ChatSend {
+                channel,
+                origin_channel,
+                ..
+            } => {
+                enforce_pin(platform, "chat.send", channel, origin_channel)?;
+            }
+            OutboundAction::ChatDelete {
+                channel,
+                origin_channel,
+                ..
+            } => {
+                enforce_pin(platform, "chat.delete", channel, origin_channel)?;
+            }
+            OutboundAction::DmSend { .. } => {}
+        }
+        self.execute(&ExecRequest {
+            platform,
+            action,
+            community_id,
+        })
+        .await
+        .map(|_| ())
+        .map_err(|e| exec_to_sender_error(platform, action.op(), &e))
     }
 }
 
