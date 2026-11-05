@@ -38,6 +38,7 @@ IDENTITY_SCOPES = frozenset(
         "identity:ephemeral:mint",
         "identity:displayname:read",
         "identity:handle:resolve",
+        "identity:platform-user:resolve",
     }
 )
 
@@ -148,4 +149,16 @@ class AuthedIdentityStub:
         """Handle call with a handle-scoped token."""
         return await self._stub.ResolveHandle(
             request, metadata=self._metadata("ResolveHandle"), timeout=_bounded(timeout)
+        )
+
+    async def ResolvePlatformUser(  # noqa: N802 - mirrors the generated stub
+        self,
+        request: identity_pb2.ResolvePlatformUserRequest,
+        timeout: float = 5,  # noqa: ASYNC109
+    ) -> identity_pb2.ResolvePlatformUserResponse:
+        """Detokenize call with a platform-user-scoped token."""
+        return await self._stub.ResolvePlatformUser(
+            request,
+            metadata=self._metadata("ResolvePlatformUser"),
+            timeout=_bounded(timeout),
         )

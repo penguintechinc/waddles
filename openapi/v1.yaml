@@ -14847,7 +14847,11 @@ paths:
                   type: boolean
                 metadata:
                   additionalProperties:
-                    type: string
+                    anyOf:
+                    - type: string
+                    - additionalProperties:
+                        type: string
+                      type: object
                   title: Metadata
                   type: object
                 provider:
@@ -14989,7 +14993,11 @@ paths:
                 metadata:
                   anyOf:
                   - additionalProperties:
-                      type: string
+                      anyOf:
+                      - type: string
+                      - additionalProperties:
+                          type: string
+                        type: object
                     type: object
                   - type: 'null'
                   default: null

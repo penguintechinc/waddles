@@ -57,7 +57,7 @@ import traceback
 import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import Any, Literal
 
@@ -95,6 +95,10 @@ _tenant_authz = _meter.create_counter(
 _erasures = _meter.create_counter(
     "hub_api.identity.pseudonym_erasures", description="GDPR pseudonym erasures by mode"
 )
+_platform_user_counter = _meter.create_counter(
+    "hub_api.identity.platform_user_resolutions",
+    description="UUID -> raw platform user id detokenizations by outcome (no PII labels)",
+)
 _target_refusals = _meter.create_counter(
     "hub_api.identity.target_refusals",
     description="Handle/mention lookups refused for safety, by reason (no PII)",
@@ -121,6 +125,8 @@ _meter.create_observable_gauge(
 )
 
 MAX_BATCH = 100
+#: Most uuids one ResolvePlatformUser call may detokenize (small: each answer is raw PII).
+MAX_PLATFORM_USER_BATCH = 25
 MAX_TARGET_LEN = 255
 MAX_DISPLAY_NAME_LEN = 64
 _PLATFORM_RE = re.compile(r"^[a-z0-9_-]{1,50}$")
@@ -177,6 +183,15 @@ class TargetNotMemberError(HandleNotFoundError):
 
     Maps to the same NOT_FOUND / ``handle not found`` as an unknown handle, so a non-member is
     indistinguishable from a nonexistent user (no membership oracle).
+    """
+
+
+class PlatformUserNotFoundError(IdentityResolutionError):
+    """No requested uuid is a single, current member identity of that community (NOT_FOUND).
+
+    ONE constant message for every miss -- unknown uuid, another community or tenant, an
+    unknown community/tenant, a non-member, a platform mismatch, an ambiguous identity -- so
+    the answer is never an existence or membership oracle.
     """
 
 
@@ -796,6 +811,144 @@ async def resolve_display_names(
         },
     )
     return result
+
+
+#: UUID -> raw platform user id for ONE community, current members only. Two routes to the
+#: same fact, both confined to the (community, tenant) pair: (1) the member row's own platform
+#: account (``cm.user_uuid`` is trigger-derived, never caller-supplied -- alembic 0048); (2) a
+#: hub user who joined through the hub (no platform columns) and whose VERIFIED identity link on
+#: the requested platform supplies the id. A deactivated hub user never resolves. Params:
+#: ``[community, tenant, platform, uuids, platform, uuids, community, tenant]``.
+_PLATFORM_USER_SQL = _with_current_member(
+    """
+SELECT cm.user_uuid::text, cm.platform_user_id
+  FROM community_members cm JOIN communities c ON c.id = cm.community_id
+ WHERE c.id = %s AND c.tenant_id = %s AND {CURRENT_MEMBER}
+   AND cm.platform = %s AND cm.platform_user_id IS NOT NULL
+   AND cm.user_uuid = ANY(%s::uuid[])
+   AND NOT EXISTS (
+        SELECT 1 FROM hub_user_identities hui JOIN hub_users hu ON hu.id = hui.hub_user_id
+         WHERE hui.platform = cm.platform AND hui.platform_user_id = cm.platform_user_id
+           AND hu.is_active IS FALSE)
+UNION
+SELECT hu.uuid::text, hui.platform_user_id
+  FROM hub_users hu JOIN hub_user_identities hui ON hui.hub_user_id = hu.id
+ WHERE hui.platform = %s AND hu.uuid = ANY(%s::uuid[]) AND hu.is_active IS NOT FALSE
+   AND hui.platform_user_id IS NOT NULL
+   AND EXISTS (
+        SELECT 1 FROM community_members cm JOIN communities c ON c.id = cm.community_id
+         WHERE c.id = %s AND c.tenant_id = %s AND cm.user_id = hu.id::text AND {CURRENT_MEMBER})
+"""
+)
+
+_NO_PLATFORM_USER = "platform user not found"
+
+
+@dataclass(slots=True, frozen=True)
+class ResolvedPlatformUser:
+    """One detokenized member: the uuid asked for and its RAW platform id (PII, never logged)."""
+
+    uuid: str
+    platform_user_id: str = field(repr=False)
+
+
+def _canonical_uuid(token: Any) -> str:
+    """Canonical lowercase 8-4-4-4-12 form of ``token``, or raise :class:`IdentityValidationError`.
+
+    Strict: braces, ``urn:uuid:`` and un-hyphenated forms are refused, and so is anything that is
+    not a string -- in particular a raw platform id is never a valid reference here.
+    """
+    if not isinstance(token, str) or len(token) != 36:
+        raise IdentityValidationError("uuids invalid")
+    try:
+        parsed = uuid.UUID(token)
+    except ValueError as exc:
+        raise IdentityValidationError("uuids invalid") from exc
+    if str(parsed) != token.lower():
+        raise IdentityValidationError("uuids invalid")
+    return str(parsed)
+
+
+async def resolve_platform_users(
+    async_dal: Any,
+    tenant_id: str,
+    community_id: int,
+    platform: str,
+    tokens: Sequence[str],
+) -> tuple[ResolvedPlatformUser, ...]:
+    """Detokenize 1..25 user UUIDs to RAW platform user ids, scoped to one community.
+
+    The single point where a raw platform id may leave a UUID: the caller (svc-ingest's outbound
+    executor) must already be authorized for ``tenant_id`` (:func:`authorize_tenant`) and holds
+    the answer transiently. ``community_id`` is the NUMERIC ``communities.id`` and must belong
+    to the tenant; ``platform`` is explicit. Every uuid must be a CURRENT member of that
+    community on that platform with exactly one platform identity -- otherwise the WHOLE call
+    raises :class:`PlatformUserNotFoundError` (one constant message; no oracle, no partial
+    answer). Duplicates collapse, request order is kept. Nothing is cached, stored or logged.
+    """
+    _validate_tenant_ref(tenant_id)
+    if isinstance(community_id, bool) or not isinstance(community_id, int) or community_id <= 0:
+        raise IdentityValidationError("community_id invalid")
+    if not isinstance(platform, str) or not _PLATFORM_RE.match(platform):
+        raise IdentityValidationError("platform invalid")
+    if not tokens or len(tokens) > MAX_PLATFORM_USER_BATCH:
+        raise IdentityValidationError(f"batch must contain 1..{MAX_PLATFORM_USER_BATCH} items")
+    ordered = list(dict.fromkeys(_canonical_uuid(t) for t in tokens))
+
+    async def work() -> tuple[ResolvedPlatformUser, ...]:
+        try:
+            tenant_pk = await _tenant_pk(async_dal, tenant_id)
+        except TenantNotFoundError as exc:
+            raise PlatformUserNotFoundError(_NO_PLATFORM_USER) from exc
+        rows = await async_dal.executesql_async(
+            _PLATFORM_USER_SQL,
+            [
+                community_id,
+                tenant_pk,
+                platform,
+                ordered,
+                platform,
+                ordered,
+                community_id,
+                tenant_pk,
+            ],
+        )
+        found: dict[str, set[str]] = {}
+        for row in rows or []:
+            found.setdefault(str(row[0]), set()).add(str(row[1]))
+        out: list[ResolvedPlatformUser] = []
+        for key in ordered:
+            ids = found.get(key, set())
+            if len(ids) != 1:
+                _platform_user_counter.add(1, {"outcome": "ambiguous" if ids else "not_found"})
+                raise PlatformUserNotFoundError(_NO_PLATFORM_USER)
+            out.append(ResolvedPlatformUser(key, next(iter(ids))))
+        _platform_user_counter.add(len(out), {"outcome": "ok"})
+        return tuple(out)
+
+    return await _observed("resolve_platform_users", len(ordered), work)
+
+
+def audit_platform_user_resolution(
+    *, caller: str, community_id: int, platform: str, count: int, outcome: str
+) -> None:
+    """Emit the audit record of one detokenization: WHO, which community, how many, the outcome.
+
+    Fixed, PII-free fields only -- the raw platform ids, the uuids and the tenant reference as
+    sent are never part of it (``community_id`` is the numeric id, ``caller`` the verified
+    ``sub``). One record per call, success or refusal, so every detokenization is attributable.
+    """
+    logger.info(
+        "platform user detokenization",
+        extra={
+            "action": "identity_resolve_platform_user",
+            "caller": caller[:128],
+            "community_id": community_id,
+            "platform": platform if _PLATFORM_RE.match(platform) else "invalid",
+            "count": count,
+            "outcome": outcome,
+        },
+    )
 
 
 async def authorize_tenant(
