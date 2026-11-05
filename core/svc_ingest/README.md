@@ -132,6 +132,13 @@ intermediate build: `no_pin_sig`; stamped but without `exp_ms`: `pin_exp_invalid
 writer must not settle another producer's `op_id`); the real producer times out. `op_id` is MAC-bound. On alpha, accept the loss of in-flight chat ops. (The metric label is `no_origin_pin`, not
 `missing_origin`.) A refused entry is already popped (`BRPOP`) so it is never retried; there is no poison loop.
 
+## Connector heartbeat (P6a T5)
+
+The connector driver schedules `receiver.on-heartbeat-due` per connection when a transport declares
+`Transport::heartbeat_interval()` and the driver is opted in (`with_heartbeat_enabled`, PostHog
+`ingest.connector-heartbeat`, default OFF). See `docs/connector-host-capability.md` "Heartbeat scheduling".
+Tests: `cargo test --locked --test connector_heartbeat`.
+
 ## Connector egress (SSRF guard)
 
 Poll/WebSocket connector transports resolve and pin their endpoint through `connector::egress_guard`, a thin

@@ -104,6 +104,29 @@ executor withholds the wasmtime error chain, `SinkError::Invalid` is a `&'static
 spoofed platform, rejected/failed events, truncation) are sampled -- 5 per 30s per category per connection with a
 `suppressed_before` count -- while every occurrence is still counted. `tracing` span `connector.on_frame` wraps each call.
 
+## Heartbeat scheduling (P6a Task 5, spec S3.5)
+
+`ConnectorDriver` runs a per-connection heartbeat loop concurrently with the frame pump (same task, bounded
+`mpsc(1)` hand-off, so at most ONE `on-heartbeat-due` is in flight). A due heartbeat is written even while a
+frame is still being processed (`on-frame` + publish only borrow the invoker/sink, never the transport). One
+structural limit: the transport is a single `&mut`, so reading the NEXT frame pauses while a heartbeat write is
+in progress; that write has a deadline (default 5s, `with_heartbeat_send_timeout`) after which it is cancelled and
+the connection torn down + reconnected.
+
+| Piece | Behaviour |
+|---|---|
+| `Transport::heartbeat_interval()` | `None` (default) = no heartbeat; outside `MIN_HEARTBEAT_INTERVAL..=MAX_HEARTBEAT_INTERVAL` (100ms..=1h, zero included) = `DriverError::HeartbeatIntervalOutOfRange` (before connect, only when the flag is ON) |
+| `Transport::send_heartbeat(bytes)` | sends the connector body; the default FAILS LOUD (`TransportError::Send`); must be cancel-safe |
+| `Transport::send_default_heartbeat()` | called when the connector returns `none` (WIT: "host sends its platform-default heartbeat unchanged"); the default FAILS LOUD |
+| Schedule | first beat one period after establishment; missed ticks are delayed, never burst |
+| Flag | `ConnectorDriver::with_heartbeat_enabled(bool)`; caller resolves PostHog `ingest.connector-heartbeat` (default OFF). OFF = no effect at all: no validation/refusal, no timer, one DEBUG line per connection |
+| Outcomes (`svc_ingest_connector_heartbeats_total{platform,outcome}`) | `sent`, `default_sent`, `guest_error` (connection stays up), `send_failed` (fatal parks, else reconnect), `send_timeout` (reconnect), trap/`unavailable` kinds (teardown + backoff) |
+| Latency | `svc_ingest_connector_heartbeat_duration_seconds{platform}`; span `connector.on_heartbeat_due` |
+
+Shutdown cancels an in-flight heartbeat promptly, and an in-flight frame too; the frame is reported to the transport
+as `Dropped`, so a stateful cursor transport re-yields it. The heartbeat future is dropped before `on-disconnect`
+runs. Tests: `core/svc_ingest/tests/connector_heartbeat.rs` (paused-clock + real-time).
+
 ## Connector tools (`world connector-tools`, P6a Task 4)
 
 A connector overlay can EXPOSE normalized platform tools (`get_chatters`, `send_chat`, ...) and optionally CALL other
@@ -143,7 +166,7 @@ through `tool.invoke`, never a platform-specific host path.
   connectors arrive with the first real platform connector (neither exists in production yet, and svc_ingest
   still constructs no `ConnectorDriver`). Pinned connectors run with no host-call bridge: a connector import
   that needs one (`http`, ...) fails typed, and any `host-call` frame is answered `HOST_CALL_DENIED`.
-- Real platform transports, heartbeat scheduling (a dedicated per-connection task, spec S3.5), secret-handle
+- Real platform transports, secret-handle
   substitution in the outbound path (spec S2.1), `identity.lookup` backing (RO-replica reader, cache, audit,
   invalidation -- spec S3.3/S3.4), sender dispatch in `svc_action`, shadow-mode harness, flipping any
   `rustDataPlane` default, Ed25519 verification ahead of the connector `Linker` (`VerifiedManifest` is its output).
