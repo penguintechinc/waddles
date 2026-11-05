@@ -341,12 +341,11 @@ class YoutubeAdapter:
 
     def _expiry(self, expires_in: object) -> datetime | None:
         """``now + expires_in`` seconds (Google sends a number or a numeric string)."""
-        if isinstance(expires_in, bool):
+        if isinstance(expires_in, str):
+            expires_in = int(expires_in) if expires_in.isdecimal() else 0
+        if isinstance(expires_in, bool) or not isinstance(expires_in, int | float):
             return None
-        try:
-            seconds = int(expires_in) if isinstance(expires_in, int | float | str) else 0
-        except ValueError:
-            return None
+        seconds = int(expires_in)
         return self._clock() + timedelta(seconds=seconds) if seconds > 0 else None
 
     async def _send(
@@ -418,11 +417,8 @@ def _live_candidate(item: object, channel_id: object) -> tuple[int, str, str] | 
 
 def _error_reasons(response: httpx.Response) -> set[str]:
     """The ``reason`` codes of a Google API error body (never echoed, only compared)."""
-    try:
-        payload: Any = response.json()
-    except ValueError:
-        return set()
-    error = payload.get("error") if isinstance(payload, dict) else None
+    payload = _json_object(response)  # a non-JSON error body is a malformed answer: unavailable
+    error = payload.get("error")
     errors = error.get("errors") if isinstance(error, dict) else None
     return {
         str(entry["reason"])
@@ -451,11 +447,8 @@ def _raise_for_youtube_error(response: httpx.Response, call: str) -> None:
 
 def _oauth_error(response: httpx.Response) -> str:
     """The OAuth ``error`` code of a token-endpoint failure (a short enum string, else ``""``)."""
-    try:
-        payload: Any = response.json()
-    except ValueError:
-        return ""
-    code = payload.get("error") if isinstance(payload, dict) else None
+    payload = _json_object(response)  # a non-JSON error body is a malformed answer: unavailable
+    code = payload.get("error")
     return code if isinstance(code, str) and len(code) <= 64 else ""
 
 
