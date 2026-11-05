@@ -38,7 +38,7 @@ use crate::outbound_ops::{
     dispatch_to, parse_outbound_entry, route, ActionExecutor, DiscordSender, NoExecutor,
     OutboundEntry, SenderError, TwitchSender,
 };
-use crate::outbound_pin::PinKeys;
+use crate::outbound_pin::{PinKeys, VerifiedStamp};
 
 /// The queue key this module drains -- byte-identical to
 /// `core/svc_action/src/capabilities.rs::outbound_relay_queue_key("twitch")`,
@@ -223,7 +223,7 @@ fn check_stamp(
     platform: &'static str,
     op: &'static str,
     pin: Option<&PinKeys>,
-) -> Result<(), SenderError> {
+) -> Result<VerifiedStamp, SenderError> {
     crate::outbound_pin::verify_stamp(raw, platform, pin).map_err(|e| {
         crate::outbound_pin::record_refusal(platform, op, e);
         SenderError::Rejected {
@@ -232,6 +232,88 @@ fn check_stamp(
             reason: e.reason(),
         }
     })
+}
+
+/// Single-use enforcement for signed outbound entries.
+///
+/// The Valkey ACL lets any app client write the queue and a stamp is valid for
+/// its whole TTL, so a captured entry could be replayed. After the stamp
+/// verifies, the drain atomically claims the stamp in Valkey before executing.
+#[allow(async_fn_in_trait)] // pub trait, service binary only -- see publish.rs::EventAppender's doc
+pub trait ReplayGuard: Send + Sync {
+    /// Atomically records `key` for `ttl_ms`: `Ok(true)` the first time it is
+    /// seen (execute), `Ok(false)` if it was already claimed (replay -- drop).
+    /// `Err` means the check could not be made; callers must NOT execute.
+    async fn claim(&self, key: &str, ttl_ms: u64) -> Result<bool, String>;
+}
+
+/// The production [`ReplayGuard`]: `SET <key> 1 NX PX <ttl>` on the existing
+/// Valkey (a connection that is not the one blocked in `BRPOP`).
+pub struct ValkeyReplayGuard {
+    conn: redis::aio::MultiplexedConnection,
+}
+
+impl ValkeyReplayGuard {
+    /// Wraps a dedicated (non-blocking) connection.
+    #[must_use]
+    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+        Self { conn }
+    }
+}
+
+impl ReplayGuard for ValkeyReplayGuard {
+    async fn claim(&self, key: &str, ttl_ms: u64) -> Result<bool, String> {
+        let mut conn = self.conn.clone();
+        // `SET .. NX` replies `OK` when it set the key and a nil when it
+        // already existed -- the single atomic test-and-set.
+        let reply: Option<String> = redis::cmd("SET")
+            .arg(key)
+            .arg(1)
+            .arg("NX")
+            .arg("PX")
+            .arg(ttl_ms)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(reply.is_some())
+    }
+}
+
+/// Claims `stamp` once. First sight -> `Ok`. A replay is counted
+/// (`pin_replayed`) and refused with [`SenderError::Rejected`]. If Valkey
+/// cannot answer the entry is NOT executed (fail closed): a typed
+/// [`SenderError::Failed`] is returned and counted -- a Valkey outage never
+/// lets an unchecked replay through. Like every other post-pop failure the
+/// entry is dropped, not re-queued (best-effort relay); a waiting Discord
+/// producer sees `failed` and may resend under a fresh `op_id`.
+async fn claim_once<G: ReplayGuard>(
+    guard: &G,
+    platform: &'static str,
+    op: &'static str,
+    stamp: &VerifiedStamp,
+) -> Result<(), SenderError> {
+    let key = crate::outbound_pin::replay_key(platform, stamp);
+    match guard.claim(&key, stamp.ttl_ms).await {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            crate::outbound_pin::record_replay(platform, op);
+            Err(SenderError::Rejected {
+                platform,
+                op,
+                reason: "pin_replayed",
+            })
+        }
+        Err(_) => {
+            // The transport error text is dropped on purpose: it adds nothing
+            // an operator needs and must never carry request material.
+            crate::outbound_pin::record_replay_check_failed(platform, op);
+            Err(SenderError::Failed {
+                platform,
+                op,
+                message: "replay check unavailable".to_string(),
+            })
+        }
+    }
 }
 
 /// Runs the `BRPOP`/parse/send loop until `shutdown` resolves. Split out
@@ -261,7 +343,16 @@ async fn drain_loop<Q, S>(
     Q: RelaySource,
     S: IrcOutbound,
 {
-    drain_loop_with(queue, sender, None::<&NoExecutor>, pin, backoff, shutdown).await;
+    drain_loop_with(
+        queue,
+        sender,
+        None::<&NoExecutor>,
+        &tests::MemoryReplayGuard::default(),
+        pin,
+        backoff,
+        shutdown,
+    )
+    .await;
 }
 
 /// [`drain_loop`] with an optional generic-executor backend (P6a T6d-1).
@@ -272,10 +363,11 @@ async fn drain_loop<Q, S>(
 /// consulted. `exec = None`: the legacy per-platform sender, unchanged.
 /// Retry/ack semantics are identical either way: a refused or failed entry
 /// is already popped, logged PII-free and dropped, never re-queued.
-async fn drain_loop_with<Q, S, X>(
+async fn drain_loop_with<Q, S, X, G>(
     mut queue: Q,
     sender: &S,
     exec: Option<&X>,
+    guard: &G,
     pin: Option<&PinKeys>,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
@@ -283,6 +375,7 @@ async fn drain_loop_with<Q, S, X>(
     Q: RelaySource,
     S: IrcOutbound,
     X: ActionExecutor,
+    G: ReplayGuard,
 {
     loop {
         tokio::select! {
@@ -292,15 +385,20 @@ async fn drain_loop_with<Q, S, X>(
                     backoff.reset();
                     match parse_outbound_entry(&raw, "twitch") {
                         Ok(OutboundEntry { action, community_id, .. }) => {
-                            if check_stamp(&raw, "twitch", action.op(), pin).is_err() {
+                            let Ok(stamp) = check_stamp(&raw, "twitch", action.op(), pin) else {
                                 continue;
-                            }
-                            let result = match exec {
-                                Some(x) => x.execute_action("twitch", community_id, &action).await,
-                                None => {
-                                    let twitch = TwitchSender::new(sender, community_id);
-                                    route("twitch", &action, &twitch, &DiscordSender::unconfigured()).await
-                                }
+                            };
+                            // Single-use: claim the stamp BEFORE any send so a
+                            // replayed (or unverifiable-by-outage) entry never runs.
+                            let result = match claim_once(guard, "twitch", action.op(), &stamp).await {
+                                Err(e) => Err(e),
+                                Ok(()) => match exec {
+                                    Some(x) => x.execute_action("twitch", community_id, &action).await,
+                                    None => {
+                                        let twitch = TwitchSender::new(sender, community_id);
+                                        route("twitch", &action, &twitch, &DiscordSender::unconfigured()).await
+                                    }
+                                },
                             };
                             if let Err(err) = result {
                                 match err {
@@ -349,12 +447,16 @@ pub async fn run<C: TwitchCredentialSource>(
 ) -> Result<(), redis::RedisError> {
     let client = build_redis_client(spine_cfg)?;
     let conn = connect_with_response_timeout(&client, BLOCKING_CONN_RESPONSE_TIMEOUT).await?;
+    let guard = ValkeyReplayGuard::new(
+        connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
+    );
     let sender = RealIrcOutbound::new(endpoint, creds);
     let backoff = Backoff::new(Duration::from_secs(30));
     drain_loop_with(
         conn,
         &sender,
         None::<&NoExecutor>,
+        &guard,
         pin.as_ref(),
         backoff,
         shutdown,
@@ -379,8 +481,20 @@ pub async fn run_exec<X: ActionExecutor>(
 ) -> Result<(), redis::RedisError> {
     let client = build_redis_client(spine_cfg)?;
     let conn = connect_with_response_timeout(&client, BLOCKING_CONN_RESPONSE_TIMEOUT).await?;
+    let guard = ValkeyReplayGuard::new(
+        connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
+    );
     let backoff = Backoff::new(Duration::from_secs(30));
-    drain_loop_with(conn, &NoIrc, Some(exec), pin.as_ref(), backoff, shutdown).await;
+    drain_loop_with(
+        conn,
+        &NoIrc,
+        Some(exec),
+        &guard,
+        pin.as_ref(),
+        backoff,
+        shutdown,
+    )
+    .await;
     Ok(())
 }
 
@@ -537,11 +651,12 @@ fn now_ms() -> u64 {
 /// waiting and reported failure, so performing the op now would contradict
 /// that report (a late DM after "please resend" would be a duplicate). Logs
 /// carry platform/op/code only -- never content, ids or error bodies.
-async fn handle_discord_entry<C: DrainControl, X: ActionExecutor>(
+async fn handle_discord_entry<C: DrainControl, X: ActionExecutor, G: ReplayGuard>(
     raw: &str,
     sender: &DiscordSender<'_>,
     exec: Option<&X>,
     ctl: &C,
+    guard: &G,
     pin: Option<&PinKeys>,
 ) {
     let entry = match parse_outbound_entry(raw, "discord") {
@@ -564,19 +679,29 @@ async fn handle_discord_entry<C: DrainControl, X: ActionExecutor>(
     // (counted + WARN by `check_stamp`, already popped so never retried) and
     // gets NO ack -- acking would let an unauthenticated queue writer settle
     // another producer's `op_id` by reusing it.
-    if check_stamp(raw, "discord", op, pin).is_err() {
+    let Ok(stamp) = check_stamp(raw, "discord", op, pin) else {
+        return;
+    };
+    // Single-use: a replayed stamp is dropped with NO ack (the original
+    // execution already answered the producer; a second ack would overwrite
+    // its result). An unavailable check does not execute and acks `failed`.
+    let claim = claim_once(guard, "discord", op, &stamp).await;
+    if matches!(claim, Err(SenderError::Rejected { .. })) {
         return;
     }
     // The stamp gate above ran first; the executor (when configured) then
     // re-checks the pin, verifies the connector's template and sends through
     // the guarded client only. A refused/failed op is acked and dropped
     // exactly as on the legacy path -- never re-queued.
-    let result = match exec {
-        Some(x) => {
-            x.execute_action("discord", entry.community_id, &entry.action)
-                .await
-        }
-        None => dispatch_to(sender, &entry.action).await,
+    let result = match claim {
+        Err(e) => Err(e),
+        Ok(()) => match exec {
+            Some(x) => {
+                x.execute_action("discord", entry.community_id, &entry.action)
+                    .await
+            }
+            None => dispatch_to(sender, &entry.action).await,
+        },
     };
     match &result {
         Ok(()) => {}
@@ -620,6 +745,7 @@ async fn discord_drain_loop<Q, C>(
         sender,
         None::<&NoExecutor>,
         ctl,
+        &tests::MemoryReplayGuard::default(),
         pin,
         backoff,
         shutdown,
@@ -629,11 +755,13 @@ async fn discord_drain_loop<Q, C>(
 
 /// [`discord_drain_loop`] with an optional generic-executor backend; see
 /// [`drain_loop_with`].
-async fn discord_drain_loop_with<Q, C, X>(
+#[allow(clippy::too_many_arguments)] // queue, sender, executor, ack channel, replay guard, pin keys, backoff, shutdown: each is a distinct injected seam
+async fn discord_drain_loop_with<Q, C, X, G>(
     mut queue: Q,
     sender: &DiscordSender<'_>,
     exec: Option<&X>,
     ctl: &C,
+    guard: &G,
     pin: Option<&PinKeys>,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
@@ -641,6 +769,7 @@ async fn discord_drain_loop_with<Q, C, X>(
     Q: RelaySource,
     C: DrainControl,
     X: ActionExecutor,
+    G: ReplayGuard,
 {
     loop {
         tokio::select! {
@@ -648,7 +777,7 @@ async fn discord_drain_loop_with<Q, C, X>(
             popped = queue.brpop_one() => match popped {
                 Ok(Some(raw)) => {
                     backoff.reset();
-                    handle_discord_entry(&raw, sender, exec, ctl, pin).await;
+                    handle_discord_entry(&raw, sender, exec, ctl, guard, pin).await;
                 }
                 Ok(None) => backoff.reset(),
                 Err(err) => {
@@ -725,6 +854,9 @@ async fn run_discord_inner<X: ActionExecutor>(
     let ctl = ValkeyDrainControl::new(
         connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
     );
+    let guard = ValkeyReplayGuard::new(
+        connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
+    );
     let queue = ListQueue {
         conn: list_conn,
         key: DISCORD_OUTBOUND_QUEUE_KEY,
@@ -740,6 +872,7 @@ async fn run_discord_inner<X: ActionExecutor>(
             sender,
             exec,
             &ctl,
+            &guard,
             pin.as_ref(),
             Backoff::new(Duration::from_secs(30)),
             shutdown,
@@ -781,6 +914,28 @@ mod tests {
     /// Shared test keyring (signing `k1`) -- the drain verifies with it.
     pub(super) const TEST_KEYS: &str = "k1:000102030405060708090a0b0c0d0e0f";
 
+    /// In-memory [`ReplayGuard`] with the same first-sight/replay semantics as
+    /// the `SET NX` one; `down` simulates a Valkey outage. Records every
+    /// (key, ttl) claim for assertions.
+    #[derive(Default)]
+    pub(super) struct MemoryReplayGuard {
+        seen: Mutex<std::collections::HashSet<String>>,
+        claims: Mutex<Vec<(String, u64)>>,
+        down: bool,
+    }
+
+    impl ReplayGuard for MemoryReplayGuard {
+        async fn claim(&self, key: &str, ttl_ms: u64) -> Result<bool, String> {
+            if self.down {
+                return Err("simulated valkey outage".to_string());
+            }
+            self.claims.lock().unwrap().push((key.to_string(), ttl_ms));
+            Ok(self.seen.lock().unwrap().insert(key.to_string()))
+        }
+    }
+
+    static OP_SEQ: AtomicUsize = AtomicUsize::new(0);
+
     fn test_pin_keys() -> PinKeys {
         PinKeys::parse(TEST_KEYS, Some("k1")).unwrap()
     }
@@ -794,6 +949,14 @@ mod tests {
         let Ok(mut v) = serde_json::from_str::<serde_json::Value>(raw) else {
             return raw.to_string();
         };
+        // The producer always stamps a unique op_id; tests that do not care
+        // get one (a test of "no op_id" opts out with `RAW:`).
+        if v.get("op_id").is_none() && v.get("origin_channel").is_some() {
+            v["op_id"] = serde_json::Value::from(format!(
+                "test-op-{}",
+                OP_SEQ.fetch_add(1, Ordering::SeqCst)
+            ));
+        }
         let snapshot = v.clone();
         let get = |k: &str| {
             snapshot
@@ -1390,10 +1553,94 @@ mod tests {
         );
     }
 
-    /// An op with no `op_id` (legacy / fire-and-forget producer) executes and
-    /// posts nothing.
+    /// p6a producer-completeness: an authentic entry with no `op_id` nonce is
+    /// refused with the distinct counted reason `no_op_id` (rollout signal),
+    /// never executed and never acked.
     #[tokio::test]
-    async fn discord_drain_posts_no_ack_without_an_op_id() {
+    async fn discord_drain_refuses_an_authentic_entry_without_an_op_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/channels/1/messages/2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let rest = rest_for(&server);
+        let ctl = FakeCtl::default();
+        let before = crate::outbound_pin::refusal_count("discord", "chat.delete", "no_op_id");
+        let exp_ms = super::now_ms() + 60_000;
+        let sig = test_pin_keys()
+            .sign(&crate::pin_sig::PinFields {
+                platform: "discord",
+                op: "chat.delete",
+                channel: "1",
+                origin_channel: "1",
+                message_id: "2",
+                text: "",
+                user_id: "",
+                op_id: "",
+                exp_ms,
+                community_id: 0,
+                tenant_id: 0,
+            })
+            .unwrap();
+        let raw = format!(
+            r#"RAW:{{"op":"chat.delete","channel":"1","origin_channel":"1","message_id":"2","exp_ms":{exp_ms},"pin_sig":"{sig}"}}"#
+        );
+        drive_discord_drain(Some(&rest), &ctl, vec![Ok(Some(raw))]).await;
+        assert!(ctl.acks.lock().unwrap().is_empty());
+        assert_eq!(
+            crate::outbound_pin::refusal_count("discord", "chat.delete", "no_op_id"),
+            before + 1
+        );
+    }
+
+    /// A pre-stamped-op_id discord entry, signed `exp` ms ahead, reusable
+    /// byte-for-byte (same op_id + exp => same pin_sig) to model a replay.
+    fn fixed_discord_entry(op_id: &str, exp_ms: u64) -> String {
+        stamp_for_test(&format!(
+            r#"{{"v":1,"op":"chat.delete","platform":"discord","channel":"1","origin_channel":"1","message_id":"2","op_id":"{op_id}","exp_ms":{exp_ms}}}"#
+        ))
+    }
+
+    async fn drive_discord_guarded(
+        rest: &crate::discord_rest::DiscordRestClient,
+        ctl: &FakeCtl,
+        guard: &MemoryReplayGuard,
+        payloads: Vec<&str>,
+    ) {
+        let queue = FakeQueue {
+            payloads: payloads
+                .into_iter()
+                .map(|p| Ok(Some(format!("RAW:{p}"))))
+                .collect(),
+            idx: AtomicUsize::new(0),
+        };
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            discord_drain_loop_with(
+                queue,
+                &DiscordSender::new(rest),
+                None::<&NoExecutor>,
+                ctl,
+                guard,
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+    }
+
+    /// p6a replay (security review MEDIUM): a validly signed entry re-pushed
+    /// inside its TTL executes ONCE; the duplicate is counted `pin_replayed`,
+    /// is not executed and posts no second ack (it would overwrite the first
+    /// outcome). The dedupe key is hash-only.
+    #[tokio::test]
+    async fn discord_replayed_signed_entry_executes_once_and_is_counted() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
@@ -1404,17 +1651,225 @@ mod tests {
             .mount(&server)
             .await;
         let rest = rest_for(&server);
+        let (ctl, guard) = (FakeCtl::default(), MemoryReplayGuard::default());
+        let entry = fixed_discord_entry("replay-1", super::now_ms() + 60_000);
+        let before = crate::outbound_pin::replay_count("discord", "chat.delete");
+        drive_discord_guarded(&rest, &ctl, &guard, vec![&entry, &entry, &entry]).await;
+        assert_eq!(ctl.acks.lock().unwrap().len(), 1, "one ack, not three");
+        assert_eq!(
+            crate::outbound_pin::replay_count("discord", "chat.delete"),
+            before + 2
+        );
+        let claims = guard.claims.lock().unwrap();
+        assert_eq!(claims.len(), 3);
+        let (key, ttl) = &claims[0];
+        assert!(key.starts_with("outbound:seen:discord:"));
+        assert!(
+            !key.contains("replay-1"),
+            "key must be a digest, not the op_id"
+        );
+        assert!(*ttl > 0 && *ttl <= 60_000);
+    }
+
+    /// Two distinct signed ops (different op_id) are two executions -- the
+    /// dedupe is per-op, not per-text/destination.
+    #[tokio::test]
+    async fn discord_distinct_op_ids_both_execute() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/channels/1/messages/2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let rest = rest_for(&server);
+        let (ctl, guard) = (FakeCtl::default(), MemoryReplayGuard::default());
+        let exp = super::now_ms() + 60_000;
+        let (a, b) = (
+            fixed_discord_entry("op-a", exp),
+            fixed_discord_entry("op-b", exp),
+        );
+        drive_discord_guarded(&rest, &ctl, &guard, vec![&a, &b]).await;
+        assert_eq!(ctl.acks.lock().unwrap().len(), 2);
+    }
+
+    /// Fail-CLOSED: when the single-use check cannot reach Valkey the entry is
+    /// NOT executed (never an unchecked replay window); the producer gets the
+    /// stable `failed` ack and the outage is counted.
+    #[tokio::test]
+    async fn discord_replay_check_outage_fails_closed_without_executing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/channels/1/messages/2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let rest = rest_for(&server);
         let ctl = FakeCtl::default();
-        drive_discord_drain(
-            Some(&rest),
-            &ctl,
-            vec![Ok(Some(
-                r#"{"op":"chat.delete","channel":"1","origin_channel":"1","message_id":"2"}"#
-                    .to_string(),
-            ))],
-        )
-        .await;
-        assert!(ctl.acks.lock().unwrap().is_empty());
+        let guard = MemoryReplayGuard {
+            down: true,
+            ..MemoryReplayGuard::default()
+        };
+        let entry = fixed_discord_entry("outage-1", super::now_ms() + 60_000);
+        let before = crate::outbound_pin::replay_check_failed_count("discord", "chat.delete");
+        drive_discord_guarded(&rest, &ctl, &guard, vec![&entry]).await;
+        let acks = ctl.acks.lock().unwrap();
+        assert_eq!(acks.len(), 1);
+        assert_eq!(acks[0].0, "outage-1");
+        assert!(acks[0].1.contains(r#""code":"failed""#), "{}", acks[0].1);
+        assert_eq!(
+            crate::outbound_pin::replay_check_failed_count("discord", "chat.delete"),
+            before + 1
+        );
+    }
+
+    /// Twitch twin: replay executes once; an outage executes nothing.
+    #[tokio::test]
+    async fn twitch_replay_executes_once_and_outage_fails_closed() {
+        let exp = super::now_ms() + 60_000;
+        let entry = stamp_for_test(&format!(
+            r##"{{"v":1,"op":"chat.send","platform":"twitch","channel":"#c","text":"hi","origin_channel":"#c","op_id":"tw-1","exp_ms":{exp}}}"##
+        ));
+        let run = |guard: MemoryReplayGuard| {
+            let entry = entry.clone();
+            async move {
+                let queue = FakeQueue {
+                    payloads: vec![
+                        Ok(Some(format!("RAW:{entry}"))),
+                        Ok(Some(format!("RAW:{entry}"))),
+                    ],
+                    idx: AtomicUsize::new(0),
+                };
+                let sender = RecordingSender::default();
+                let (_tx, rx) = oneshot::channel();
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    drain_loop_with(
+                        queue,
+                        &sender,
+                        None::<&NoExecutor>,
+                        &guard,
+                        Some(&test_pin_keys()),
+                        Backoff::new(Duration::from_secs(30)),
+                        rx,
+                    ),
+                )
+                .await;
+                sender
+            }
+        };
+        let before = crate::outbound_pin::replay_count("twitch", "chat.send");
+        let sender = run(MemoryReplayGuard::default()).await;
+        assert_eq!(
+            sender.calls.lock().unwrap().len(),
+            1,
+            "replay must not resend"
+        );
+        assert_eq!(
+            crate::outbound_pin::replay_count("twitch", "chat.send"),
+            before + 1
+        );
+        let down = MemoryReplayGuard {
+            down: true,
+            ..MemoryReplayGuard::default()
+        };
+        let before = crate::outbound_pin::replay_check_failed_count("twitch", "chat.send");
+        let sender = run(down).await;
+        assert!(
+            sender.calls.lock().unwrap().is_empty(),
+            "outage must not execute"
+        );
+        assert_eq!(
+            crate::outbound_pin::replay_check_failed_count("twitch", "chat.send"),
+            before + 2
+        );
+    }
+
+    /// Real-Valkey proof of the atomic `SET NX PX` claim: first claim wins, the
+    /// duplicate loses, the key carries the PX ttl, and expiry frees it.
+    /// `#[ignore]`d for plain `cargo test` (no Valkey); run explicitly with
+    /// `WADDLES_TEST_VALKEY_URL=redis://127.0.0.1:<port>/ cargo test -- --ignored
+    /// real_valkey` (it FAILS, never skips, if the URL is unset).
+    #[tokio::test]
+    #[ignore = "needs a real Valkey: set WADDLES_TEST_VALKEY_URL and run with --ignored"]
+    async fn real_valkey_replay_guard_is_atomic_single_use_with_ttl() {
+        let url = std::env::var("WADDLES_TEST_VALKEY_URL")
+            .expect("WADDLES_TEST_VALKEY_URL must be set for the real-Valkey test");
+        let client = redis::Client::open(url).unwrap();
+        let guard =
+            ValkeyReplayGuard::new(client.get_multiplexed_async_connection().await.unwrap());
+        let key = format!("outbound:seen:test:{}", super::now_ms());
+        assert!(guard.claim(&key, 400).await.unwrap(), "first claim wins");
+        assert!(!guard.claim(&key, 400).await.unwrap(), "duplicate loses");
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let pttl: i64 = redis::cmd("PTTL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!((1..=400).contains(&pttl), "PX ttl applied, got {pttl}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            guard.claim(&key, 400).await.unwrap(),
+            "expired key is claimable"
+        );
+        // 32 concurrent claimers of one key: exactly one winner.
+        let race = format!("{key}:race");
+        let g = std::sync::Arc::new(guard);
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let (g, k) = (g.clone(), race.clone());
+            tasks.push(tokio::spawn(
+                async move { g.claim(&k, 5_000).await.unwrap() },
+            ));
+        }
+        let mut winners = 0;
+        for t in tasks {
+            if t.await.unwrap() {
+                winners += 1;
+            }
+        }
+        assert_eq!(winners, 1);
+        let _: () = redis::cmd("DEL")
+            .arg(&race)
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        // A dead server is an Err (the fail-closed input), never Ok(true).
+        let dead = redis::Client::open("redis://127.0.0.1:1/").unwrap();
+        assert!(dead.get_multiplexed_async_connection().await.is_err());
+    }
+
+    /// `claim_once` maps the guard's three outcomes onto typed results.
+    #[tokio::test]
+    async fn claim_once_maps_outcomes() {
+        let stamp = VerifiedStamp {
+            replay_digest: "ab".repeat(32),
+            ttl_ms: 5_000,
+        };
+        let g = MemoryReplayGuard::default();
+        assert!(claim_once(&g, "discord", "chat.send", &stamp).await.is_ok());
+        let dup = claim_once(&g, "discord", "chat.send", &stamp).await;
+        assert!(matches!(
+            dup,
+            Err(SenderError::Rejected {
+                reason: "pin_replayed",
+                ..
+            })
+        ));
+        let down = MemoryReplayGuard {
+            down: true,
+            ..MemoryReplayGuard::default()
+        };
+        let err = claim_once(&down, "discord", "chat.send", &stamp).await;
+        assert!(matches!(err, Err(SenderError::Failed { .. })));
+        assert_eq!(err.unwrap_err().ack_code(), "failed");
     }
 
     /// An entry already past its `exp_ms` deadline is dropped WITHOUT being
@@ -1978,6 +2433,7 @@ mod tests {
                 queue,
                 sender,
                 Some(exec),
+                &MemoryReplayGuard::default(),
                 Some(&test_pin_keys()),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -2003,6 +2459,7 @@ mod tests {
                 &DiscordSender::unconfigured(),
                 Some(exec),
                 ctl,
+                &MemoryReplayGuard::default(),
                 Some(&test_pin_keys()),
                 Backoff::new(Duration::from_secs(30)),
                 rx,

@@ -67,7 +67,13 @@ mod tests {
     use super::*;
     use crate::capabilities::RELAY_PROVIDERS;
 
-    const ALL_OPS: [RelayOp; 3] = [RelayOp::ChatSend, RelayOp::ChatDelete, RelayOp::DmSend];
+    const ALL_OPS: [RelayOp; 5] = [
+        RelayOp::ChatSend,
+        RelayOp::ChatDelete,
+        RelayOp::DmSend,
+        RelayOp::RoleAdd,
+        RelayOp::RoleRemove,
+    ];
 
     #[test]
     fn routes_supported_relay_ops_to_stateful_reply() {
@@ -76,6 +82,8 @@ mod tests {
             ("discord", RelayOp::ChatSend),
             ("discord", RelayOp::ChatDelete),
             ("discord", RelayOp::DmSend),
+            ("discord", RelayOp::RoleAdd),
+            ("discord", RelayOp::RoleRemove),
         ];
         for (provider, op) in cases {
             assert_eq!(
