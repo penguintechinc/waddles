@@ -31,7 +31,8 @@ pub struct Event {
     pub occurred_at: String,
 }
 
-/// One inbound chat message (mirror of the crate's `ChatMessage`).
+/// One inbound chat message (mirror of the crate's `ChatMessage`, minus the
+/// username: the actor is the tokenized UUID, so the raw handle is never carried).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessage {
     /// Guild id, `None` for a DM.
@@ -42,35 +43,65 @@ pub struct ChatMessage {
     pub message_id: String,
     /// Author user id.
     pub author_id: String,
-    /// Author username.
-    pub author_username: String,
-    /// Message text.
+    /// Message text (empty for an attachment-only message).
     pub content: String,
 }
 
-/// Normalizes a `MESSAGE_CREATE` `d`. `None` = drop (self-authored by id, or
-/// `author`/`author.id`/`channel_id` missing). Other bots are KEPT; an unknown
-/// `self_user_id` never filters. Everything else reads leniently (empty
-/// default), exactly as the crate does.
-#[must_use]
-pub fn normalize_message_create(d: &Value, self_user_id: Option<&str>) -> Option<ChatMessage> {
-    let author = d.get("author")?;
-    let author_id = author.get("id")?.as_str()?.to_string();
-    if self_user_id.is_some_and(|me| me == author_id) {
-        return None;
+/// A REQUIRED snowflake field: missing / non-string / non-numeric is a typed error,
+/// never an empty id (an empty id must not reach an actor or source key).
+fn req_snowflake(v: Option<&Value>, field: &str) -> Result<String> {
+    match v {
+        Some(Value::String(s)) if is_snowflake(s) => Ok(s.clone()),
+        _ => Err(OverlayError::Malformed(format!(
+            "`{field}` missing or not a snowflake"
+        ))),
     }
-    let lenient = |v: Option<&Value>| v.and_then(Value::as_str).unwrap_or_default().to_string();
-    Some(ChatMessage {
-        guild_id: d
-            .get("guild_id")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        channel_id: d.get("channel_id")?.as_str()?.to_string(),
-        message_id: lenient(d.get("id")),
+}
+
+/// An OPTIONAL snowflake (absent / null = not present, e.g. a DM has no guild);
+/// present-but-mistyped is a typed error.
+fn opt_snowflake(v: Option<&Value>, field: &str) -> Result<Option<String>> {
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => req_snowflake(v, field).map(Some),
+    }
+}
+
+/// Message text. Discord omits/nulls `content` when the Message Content intent is
+/// not yet in effect or the message is attachment-only: that is a documented,
+/// explicit empty string (parity corpus `empty_content_attachment_only`); any
+/// other type is a typed error.
+fn message_text(v: Option<&Value>) -> Result<String> {
+    match v {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(_) => Err(OverlayError::Malformed("`content` is not a string".into())),
+    }
+}
+
+/// Normalizes a `MESSAGE_CREATE` `d`. `Ok(None)` = the bot's own message (by id;
+/// other bots are KEPT; an unknown `self_user_id` never filters).
+///
+/// # Errors
+/// [`OverlayError::Malformed`] when `author.id`, `channel_id` or the message `id`
+/// is missing/not a snowflake, `guild_id` is mistyped, or `content` is not a
+/// string. Fails loudly (the host drops and counts the frame) instead of
+/// defaulting a missing id to an empty string.
+pub fn normalize_message_create(
+    d: &Value,
+    self_user_id: Option<&str>,
+) -> Result<Option<ChatMessage>> {
+    let author_id = req_snowflake(d.get("author").and_then(|a| a.get("id")), "author.id")?;
+    if self_user_id.is_some_and(|me| me == author_id) {
+        return Ok(None);
+    }
+    Ok(Some(ChatMessage {
+        guild_id: opt_snowflake(d.get("guild_id"), "guild_id")?,
+        channel_id: req_snowflake(d.get("channel_id"), "channel_id")?,
+        message_id: req_snowflake(d.get("id"), "id")?,
         author_id,
-        author_username: lenient(author.get("username")),
-        content: lenient(d.get("content")),
-    })
+        content: message_text(d.get("content"))?,
+    }))
 }
 
 /// Builds the `message` event (payload keys identical to `normalize_discord`).
@@ -137,32 +168,38 @@ pub fn interaction_event(
     }
     let kind = interaction_kind(t)
         .ok_or_else(|| OverlayError::Unsupported(format!("interaction type {t}")))?;
-    let id = body
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|s| is_snowflake(s))
-        .ok_or_else(|| OverlayError::Malformed("interaction id not a snowflake".into()))?;
+    let id = req_snowflake(body.get("id"), "interaction id")?;
 
     let user = body
         .get("member")
         .and_then(|m| m.get("user"))
         .or_else(|| body.get("user"));
-    let author_id = user.and_then(|u| u.get("id")).and_then(Value::as_str);
-    let guild_id = body.get("guild_id").and_then(Value::as_str);
-    let channel_id = body.get("channel_id").and_then(Value::as_str).or_else(|| {
-        body.get("channel")
-            .and_then(|c| c.get("id"))
-            .and_then(Value::as_str)
-    });
-    let bits: u64 = body
-        .get("member")
-        .and_then(|m| m.get("permissions"))
-        .and_then(Value::as_str)
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let author_id = opt_snowflake(user.and_then(|u| u.get("id")), "user.id")?;
+    let guild_id = opt_snowflake(body.get("guild_id"), "guild_id")?;
+    let channel_id = match body.get("channel_id") {
+        Some(c) => opt_snowflake(Some(c), "channel_id")?,
+        None => opt_snowflake(body.get("channel").and_then(|c| c.get("id")), "channel.id")?,
+    };
+    // No `member` (a DM interaction) = no guild permissions; a present-but-garbled
+    // bitfield is a typed error, never silently 0.
+    let bits: u64 = match body.get("member").and_then(|m| m.get("permissions")) {
+        None | Some(Value::Null) => 0,
+        Some(Value::String(p)) => p
+            .parse()
+            .map_err(|_| OverlayError::Malformed("member.permissions not a bitfield".into()))?,
+        Some(_) => {
+            return Err(OverlayError::Malformed(
+                "member.permissions not a string".into(),
+            ));
+        }
+    };
     let perms = from_bits(bits, false);
     let data = body.get("data");
-    let field = |k: &str| data.and_then(|d| d.get(k)).cloned().unwrap_or(Value::Null);
+    // An absent optional `data.<k>` is JSON null in the payload (documented shape).
+    let field = |k: &str| match data.and_then(|d| d.get(k)) {
+        Some(v) => v.clone(),
+        None => Value::Null,
+    };
 
     let payload = json!({
         "interaction_id": id,
@@ -179,7 +216,7 @@ pub fn interaction_event(
     Ok(Some(Event {
         platform: PLATFORM.to_string(),
         event_type: kind.to_string(),
-        actor: author_id.map(tokenize).transpose()?,
+        actor: author_id.as_deref().map(tokenize).transpose()?,
         payload_json: payload.to_string(),
         occurred_at: occurred_at.to_string(),
     }))
@@ -189,37 +226,99 @@ pub fn interaction_event(
 mod tests {
     use super::*;
 
-    fn msg(v: Value, me: Option<&str>) -> Option<ChatMessage> {
+    fn msg(v: Value, me: Option<&str>) -> Result<Option<ChatMessage>> {
         normalize_message_create(&v, me)
+    }
+
+    fn base() -> Value {
+        json!({"author":{"id":"5","username":"B","bot":true},"channel_id":"2","id":"3","content":"x"})
     }
 
     #[test]
     fn keeps_other_bots_filters_self_and_never_filters_when_unknown() {
-        let base = json!({"author":{"id":"5","username":"B","bot":true},"channel_id":"2"});
-        assert!(msg(base.clone(), Some("9")).is_some());
-        assert!(msg(json!({"author":{"id":"9"},"channel_id":"2"}), Some("9")).is_none());
-        assert!(msg(json!({"author":{"id":"9"},"channel_id":"2"}), None).is_some());
+        assert!(msg(base(), Some("9")).unwrap().is_some());
+        assert_eq!(msg(base(), Some("5")).unwrap(), None);
+        assert!(msg(base(), None).unwrap().is_some());
     }
 
     #[test]
-    fn missing_required_fields_drop_but_optional_ones_default() {
-        assert!(msg(json!({"channel_id":"2"}), None).is_none());
-        assert!(msg(json!({"author":{},"channel_id":"2"}), None).is_none());
-        assert!(msg(json!({"author":{"id":"1"}}), None).is_none());
-        let m = msg(
-            json!({"author":{"id":"1"},"channel_id":"2","content":null}),
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            (
-                m.content.as_str(),
-                m.message_id.as_str(),
-                m.author_username.as_str()
-            ),
-            ("", "", "")
-        );
-        assert_eq!(m.guild_id, None);
+    fn missing_or_mistyped_required_ids_fail_loud_never_default_to_empty() {
+        // regression (no-silent-fallback gate): an empty id must never flow into an
+        // actor / source key (tenant-isolation risk).
+        let mut cases: Vec<Value> = Vec::new();
+        for key in ["id", "channel_id"] {
+            let mut v = base();
+            v.as_object_mut().unwrap().remove(key);
+            cases.push(v);
+            let mut v = base();
+            v[key] = json!("");
+            cases.push(v);
+            let mut v = base();
+            v[key] = json!(5);
+            cases.push(v);
+            let mut v = base();
+            v[key] = json!("12ab");
+            cases.push(v);
+        }
+        for bad_author in [json!({}), json!({"id":""}), json!({"id":7}), json!("x")] {
+            let mut v = base();
+            v["author"] = bad_author;
+            cases.push(v);
+        }
+        let mut v = base();
+        v.as_object_mut().unwrap().remove("author");
+        cases.push(v);
+        let mut v = base();
+        v["guild_id"] = json!(111); // mistyped (present but not a string)
+        cases.push(v);
+        let mut v = base();
+        v["content"] = json!(5);
+        cases.push(v);
+        for (i, v) in cases.into_iter().enumerate() {
+            assert!(
+                matches!(msg(v.clone(), None), Err(OverlayError::Malformed(_))),
+                "case {i}: {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_content_and_guild_are_explicit_documented_cases() {
+        let mut v = base();
+        v["content"] = Value::Null;
+        assert_eq!(msg(v, None).unwrap().unwrap().content, "");
+        let mut v = base();
+        v.as_object_mut().unwrap().remove("content");
+        let m = msg(v, None).unwrap().unwrap();
+        assert_eq!((m.content.as_str(), m.guild_id), ("", None));
+        let mut v = base();
+        v["guild_id"] = Value::Null;
+        assert_eq!(msg(v, None).unwrap().unwrap().guild_id, None);
+    }
+
+    #[test]
+    fn garbled_interaction_fields_fail_loud() {
+        let ok = |m: Value| interaction_event(&m, "t", &tok);
+        let b = || json!({"id":"9","type":2,"guild_id":"1","channel_id":"2","member":{"user":{"id":"4"},"permissions":"8"},"data":{"name":"x"}});
+        assert!(ok(b()).unwrap().is_some());
+        for (k, v) in [
+            ("guild_id", json!(1)),
+            ("channel_id", json!("")),
+            ("id", json!("")),
+        ] {
+            let mut m = b();
+            m[k] = v;
+            assert!(ok(m).is_err(), "{k}");
+        }
+        let mut m = b();
+        m["member"]["permissions"] = json!("not-a-number");
+        assert!(ok(m).is_err());
+        let mut m = b();
+        m["member"]["permissions"] = json!(8);
+        assert!(ok(m).is_err());
+        let mut m = b();
+        m["member"]["user"]["id"] = json!("");
+        assert!(ok(m).is_err());
     }
 
     #[test]
@@ -228,6 +327,7 @@ mod tests {
             json!({"author":{"id":"4","username":"u"},"channel_id":"2","id":"3","content":"hi","guild_id":"1"}),
             None,
         )
+        .unwrap()
         .unwrap();
         let e = message_event(
             &m,

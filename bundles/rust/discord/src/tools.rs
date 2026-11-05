@@ -74,8 +74,11 @@ pub fn call(name: &str, args: &[u8]) -> Result<Vec<u8>, ToolFail> {
             let code = a
                 .get("code")
                 .and_then(Value::as_u64)
-                .and_then(|c| u16::try_from(c).ok())
-                .ok_or_else(|| ToolFail::InvalidArgs("`code` must be a u16".into()))?;
+                .ok_or_else(|| ToolFail::InvalidArgs("`code` must be a u16".into()))
+                .and_then(|c| {
+                    u16::try_from(c)
+                        .map_err(|_| ToolFail::InvalidArgs("`code` must be a u16".into()))
+                })?;
             json!({"class": class_name(classify_close_code(code))})
         }
         _ => return Err(ToolFail::Unknown),

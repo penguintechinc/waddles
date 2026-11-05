@@ -59,8 +59,7 @@ pub fn from_bits(effective: u64, is_owner: bool) -> DiscordPermissions {
 pub struct GuildInfo {
     /// Guild owner's user id.
     pub owner_id: String,
-    /// `(role_id, permission bitfield)`; roles with unparseable bitfields are skipped
-    /// (same as the hardcoded `filter_map`).
+    /// `(role_id, permission bitfield)`; a malformed role fails the whole parse.
     pub roles: Vec<(String, u64)>,
 }
 
@@ -76,18 +75,26 @@ pub fn parse_guild(body: &[u8]) -> Result<GuildInfo> {
         .and_then(Value::as_str)
         .ok_or_else(|| OverlayError::Malformed("guild response missing owner_id".into()))?
         .to_string();
-    let roles = v
+    let mut roles = Vec::new();
+    for r in v
         .get("roles")
         .and_then(Value::as_array)
         .ok_or_else(|| OverlayError::Malformed("guild response missing roles".into()))?
-        .iter()
-        .filter_map(|r| {
-            let id = r.get("id")?.as_str()?.to_string();
-            // Discord stringifies the bitfield; parse it back.
-            let perms: u64 = r.get("permissions")?.as_str()?.parse().ok()?;
-            Some((id, perms))
-        })
-        .collect();
+    {
+        let id = r
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| OverlayError::Malformed("guild role missing id".into()))?;
+        // Discord stringifies the bitfield; a role we cannot parse is a typed error
+        // (the lookup then fails closed) rather than a silently dropped role.
+        let perms: u64 = r
+            .get("permissions")
+            .and_then(Value::as_str)
+            .ok_or_else(|| OverlayError::Malformed("guild role missing permissions".into()))?
+            .parse()
+            .map_err(|_| OverlayError::Malformed("guild role permissions not a bitfield".into()))?;
+        roles.push((id.to_string(), perms));
+    }
     Ok(GuildInfo { owner_id, roles })
 }
 
@@ -149,11 +156,11 @@ mod tests {
     #[test]
     fn parses_guild_and_member() {
         let g = parse_guild(
-            br#"{"owner_id":"900","roles":[{"id":"a","permissions":"8"},{"id":"b","permissions":"x"},{"id":"c"}]}"#,
+            br#"{"owner_id":"900","roles":[{"id":"a","permissions":"8"},{"id":"b","permissions":"0"}]}"#,
         )
         .unwrap();
         assert_eq!(g.owner_id, "900");
-        assert_eq!(g.roles, vec![("a".to_string(), 8)]);
+        assert_eq!(g.roles, vec![("a".to_string(), 8), ("b".to_string(), 0)]);
         assert_eq!(
             parse_member_roles(br#"{"roles":["r1","r2"]}"#, "111").unwrap(),
             s(&["r1", "r2", "111"])
@@ -165,6 +172,16 @@ mod tests {
         assert!(parse_guild(b"x").is_err());
         assert!(parse_guild(br#"{"roles":[]}"#).is_err());
         assert!(parse_guild(br#"{"owner_id":"1"}"#).is_err());
+        // A malformed role fails the parse (no silently dropped role).
+        for roles in [
+            r#"[{"id":"b","permissions":"x"}]"#,
+            r#"[{"id":"c"}]"#,
+            r#"[{"permissions":"8"}]"#,
+            r#"[{"id":"d","permissions":8}]"#,
+        ] {
+            let body = format!(r#"{{"owner_id":"1","roles":{roles}}}"#);
+            assert!(parse_guild(body.as_bytes()).is_err(), "{roles}");
+        }
         assert!(parse_member_roles(b"x", "1").is_err());
         assert!(parse_member_roles(br#"{}"#, "1").is_err());
     }

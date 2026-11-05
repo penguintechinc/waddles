@@ -120,9 +120,12 @@ pub fn classify(frame: &Frame) -> Result<Lifecycle> {
         OP_HEARTBEAT_ACK => Ok(Lifecycle::HeartbeatAck),
         OP_RECONNECT => Ok(Lifecycle::Reconnect),
         // Never collapse Discord's own flag to a fixed value (same rule as the crate).
-        OP_INVALID_SESSION => Ok(Lifecycle::InvalidSession {
-            resumable: frame.d.as_bool().unwrap_or(false),
-        }),
+        OP_INVALID_SESSION => match frame.d {
+            Value::Bool(resumable) => Ok(Lifecycle::InvalidSession { resumable }),
+            _ => Err(OverlayError::Malformed(
+                "INVALID_SESSION `d` is not a bool".into(),
+            )),
+        },
         OP_DISPATCH => match frame.t.as_deref() {
             Some("READY") => Ok(Lifecycle::Ready(SessionState {
                 session_id: str_at(&frame.d, &["session_id"]),
@@ -284,11 +287,17 @@ mod tests {
             classify(&frame(r#"{"op":9,"d":true}"#)).unwrap(),
             Lifecycle::InvalidSession { resumable: true }
         );
-        // Missing/non-bool `d` defaults to NOT resumable (as the crate does).
-        assert_eq!(
-            classify(&frame(r#"{"op":9}"#)).unwrap(),
-            Lifecycle::InvalidSession { resumable: false }
-        );
+        // Missing/non-bool `d` is a typed error, never a defaulted `false`.
+        for raw in [
+            r#"{"op":9}"#,
+            r#"{"op":9,"d":null}"#,
+            r#"{"op":9,"d":"yes"}"#,
+        ] {
+            assert!(
+                matches!(classify(&frame(raw)), Err(OverlayError::Malformed(_))),
+                "{raw}"
+            );
+        }
         assert_eq!(
             classify(&frame(r#"{"op":0,"s":3,"t":"RESUMED","d":{}}"#)).unwrap(),
             Lifecycle::Resumed

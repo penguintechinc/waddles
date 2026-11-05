@@ -227,11 +227,11 @@ fn gateway_frame(
         Some("MESSAGE_CREATE") => {
             let session = SessionState::from_token(ctx.session_token.as_deref())?;
             let Some(msg) =
-                normalize::normalize_message_create(&frame.d, session.self_user_id.as_deref())
+                normalize::normalize_message_create(&frame.d, session.self_user_id.as_deref())?
             else {
                 host.log(
                     Level::Debug,
-                    "MESSAGE_CREATE dropped (self-authored or missing author/channel)",
+                    "MESSAGE_CREATE dropped (self-authored)",
                     r#"{"op":"on_frame"}"#,
                 );
                 return Ok(Vec::new());
