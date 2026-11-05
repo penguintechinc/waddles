@@ -495,6 +495,22 @@ login, single amd64 build, gated Trivy scan on the local image):
 
 ---
 
+## Merging a PR into a Release Branch
+
+`make release-merge PR=<n> [HEAD=<sha-prefix>] [DRY=1]` (wraps `scripts/release-merge.sh`) is the
+verify-then-merge procedure for feature/fix/chore PRs into `release/v*.X`.
+
+- Refuses unless base is `release/*` (never `main`) and the PR is OPEN; `HEAD=` pins the reviewed head (refuses on drift)
+- Requires every non-skipped check on the current head to be SUCCESS/NEUTRAL; the advisory `submit-queue` status is printed but ignored (as in `ci-gate.yml`)
+- `ci-gate` (override: `RELEASE_MERGE_REQUIRED`) must be present and SUCCESS on the head; SKIPPED checks never count, all-skipped = refuse
+- Two check snapshots a few seconds apart must be identical before merging; merge uses `--match-head-commit` so GitHub refuses if the head moved
+- Zero checks examined = refuse; CONFLICTING = refuse (never auto-resolved)
+- Then `gh pr merge --admin --merge` (release branches only), polls to MERGED, confirms the merge commit is in `origin/<base>`, and lists the latest runs on the base
+- `DRY=1` runs all checks without merging; release -> `main` is never done with this tool
+- Self-test: `make test-scripts` (also part of `make test`)
+
+---
+
 ## Version Management
 
 ### .version File
