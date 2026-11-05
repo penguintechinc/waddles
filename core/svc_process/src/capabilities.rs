@@ -1758,14 +1758,11 @@ impl<K: KvBackend> StageCapabilities<K> {
         {
             invocation.release_mutation(kind, ordinal);
         }
-        // The store's batch is all-or-nothing: a DEFINITIVE refusal (anything but
-        // an indeterminate backend failure) applied nothing, so its gate quota is
-        // handed back. A backend failure may have committed -- keep it consumed.
-        if let (Op::AdjustMany { items, .. }, Err(e)) = (&op, &result) {
-            if !matches!(e, ReputationError::Backend(_)) {
-                self.refund_adjust_many(items);
-            }
-        }
+        // Deliberately NO refund here: a call the store refused already took the
+        // per-community serialized transaction, so it stays charged against the
+        // magnitude quota -- that is what cuts a denial loop off at the gate
+        // (in-memory) instead of letting it hammer the DB. Only gate-side
+        // refusals (above) are refunded, since they never reach the store.
         result.map_err(reputation_error_to_host)
     }
 

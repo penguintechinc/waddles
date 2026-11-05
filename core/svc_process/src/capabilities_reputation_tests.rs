@@ -972,28 +972,35 @@ async fn a_refused_batch_refunds_the_quota_its_earlier_items_consumed() {
     assert_eq!(f.store.ext_count(), 1);
 }
 
-/// A batch whose items all pass the gate but which the store definitively
-/// refuses (all-or-nothing, nothing applied) also hands its quota back.
+/// regression: #983 review -- a batch the STORE refuses (it took the per-community
+/// serialized transaction) is NOT refunded: refusals that reach the DB lane stay
+/// charged against the magnitude quota, so a loop of store-refused batches stops
+/// reaching the store once the budget is spent (the gate then refuses
+/// in-memory, before any DB work). Only gate-side refusals are refunded.
 #[tokio::test]
-async fn a_batch_the_store_refuses_outright_refunds_its_quota() {
-    let f = ext_fixture(admin_grants());
+async fn store_refused_batches_stay_charged_so_a_denial_loop_cannot_hammer_the_store() {
+    let f = ext_fixture(admin_grants()); // per-user daily cap 5
     let body = |u: Uuid| {
         serde_json::json!({
             "adjustments": [{"user": u.to_string(), "delta": 5}], "reason": "r",
         })
     };
-    for _ in 0..20 {
-        f.store.answer_unit(Err(ReputationError::NotAMember));
+    f.store.answer_unit(Err(ReputationError::NotAMember));
+    assert_eq!(
+        code_of(&f, "reputation.adjust_many", body(f.member)).await,
+        "not_a_member"
+    );
+    for _ in 0..50 {
         assert_eq!(
             code_of(&f, "reputation.adjust_many", body(f.member)).await,
-            "not_a_member"
+            "quota_exceeded"
         );
     }
-    f.store.answer_unit(Ok(()));
-    f.caps
-        .handle(rep_call("reputation.adjust_many", body(f.member)))
-        .await
-        .expect("budget intact after store refusals");
+    assert_eq!(
+        f.store.ext_count(),
+        1,
+        "only the first call reached the store; the loop was cut off at the gate"
+    );
 }
 
 #[tokio::test]
