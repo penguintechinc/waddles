@@ -99,7 +99,8 @@ fn to_wit(e: ToolError) -> WitError {
     }
 }
 
-/// Emits one PII-free line: tool name and outcome code only (never args).
+/// Emits one PII-free line: a known tool label (see `logic::tool_log_label`) and
+/// outcome code only -- never args, never a caller-supplied unknown name.
 fn log_outcome(tool: &str, outcome: &str) {
     let fields = serde_json::json!({ "tool": tool, "outcome": outcome }).to_string();
     log::write(log::Level::Debug, "reputation tool call", &fields);
@@ -116,7 +117,7 @@ impl Guest for Component {
     fn call(name: String, args: Vec<u8>) -> Result<Vec<u8>, WitError> {
         let result = registry().call(&name, &args);
         log_outcome(
-            &name,
+            logic::tool_log_label(&name),
             match &result {
                 Ok(_) => "ok",
                 Err(ToolError::InvalidArgs(_)) => "invalid_args",

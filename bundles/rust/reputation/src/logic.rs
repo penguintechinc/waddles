@@ -34,6 +34,9 @@ pub const DEFAULT_LEADERBOARD: u32 = 10;
 pub const MAX_POLICY_DELTA: i32 = 5;
 /// Most tiers a community may configure.
 pub const MAX_TIERS: usize = 16;
+/// Largest absolute tier `min_score` a ladder may declare (far above the
+/// host's +-1_000_000 score clamp, far below i64 overflow of `min - score`).
+pub const TIER_SCORE_BOUND: i64 = 1_000_000_000_000;
 /// Longest tier name.
 pub const MAX_TIER_NAME: usize = 32;
 /// Longest caller-supplied override reason (host ledger column is 100).
@@ -187,7 +190,7 @@ pub fn load_policy(cfg: &dyn ConfigStore) -> Result<DeltaPolicy, ToolError> {
         loss: raw.loss.unwrap_or(d.loss),
         loyalty: raw.loyalty.unwrap_or(d.loyalty),
     };
-    let in_bound = |v: i32| v != 0 && v.abs() <= MAX_POLICY_DELTA;
+    let in_bound = |v: i32| v != 0 && v.unsigned_abs() <= MAX_POLICY_DELTA.unsigned_abs();
     if in_bound(p.win)
         && in_bound(p.loss)
         && in_bound(p.loyalty)
@@ -246,7 +249,13 @@ pub fn load_tiers(cfg: &dyn ConfigStore) -> Result<Vec<Tier>, ToolError> {
     };
     let ascending = tiers.windows(2).all(|w| w[0].min_score < w[1].min_score);
     let covers = tiers.first().is_some_and(|t| t.min_score <= -1_000_000);
+    // Bounded thresholds keep every `min_score - score` provably in i64 range
+    // (scores are host-clamped to +-1_000_000).
+    let bounded = tiers
+        .iter()
+        .all(|t| (-TIER_SCORE_BOUND..=TIER_SCORE_BOUND).contains(&t.min_score));
     if tiers.is_empty()
+        || !bounded
         || tiers.len() > MAX_TIERS
         || !ascending
         || !covers
@@ -451,11 +460,33 @@ pub fn rep(
     )
 }
 
+/// The tool names this bundle serves -- the closed set safe to put in a log line.
+pub const TOOL_NAMES: [&str; 6] = [
+    "get_score",
+    "get_many",
+    "adjust",
+    "override",
+    "leaderboard",
+    "rep",
+];
+
+/// The log label for a caller-supplied tool `name`: the name itself when it is
+/// one of [`TOOL_NAMES`], otherwise the constant `unknown_tool`. A caller can
+/// put anything (an email, a handle) in a tool name, and bundle logs must be
+/// PII-free, so an unrecognized name is never logged verbatim.
+pub fn tool_log_label(name: &str) -> &'static str {
+    TOOL_NAMES
+        .iter()
+        .copied()
+        .find(|known| *known == name)
+        .unwrap_or("unknown_tool")
+}
+
 /// Builds the tool table: each tool name routes to its handler over `host`/`cfg`.
 pub fn build_registry(host: Arc<dyn RepHost>, cfg: Arc<dyn ConfigStore>) -> ToolRegistry {
     let mut r = ToolRegistry::new();
     type Tool = fn(&dyn RepHost, &dyn ConfigStore, &ToolContext, Value) -> Result<Value, ToolError>;
-    let tools: [(&str, Tool); 6] = [
+    let tools: [(&str, Tool); TOOL_NAMES.len()] = [
         ("get_score", get_score),
         ("get_many", get_many),
         ("adjust", adjust),
@@ -1006,5 +1037,78 @@ mod tests {
                 want
             );
         }
+    }
+
+    /// regression: #983 review -- an unrecognized (caller-supplied) tool name,
+    /// e.g. an email, is never a log label.
+    #[test]
+    fn unknown_tool_names_are_never_logged_verbatim() {
+        for pii in [
+            "alice@example.com",
+            "@SomeHandle",
+            "get_score ",
+            "GET_SCORE",
+            "",
+        ] {
+            assert_eq!(tool_log_label(pii), "unknown_tool", "{pii:?}");
+        }
+        for known in TOOL_NAMES {
+            assert_eq!(tool_log_label(known), known);
+        }
+    }
+
+    /// regression: #983 review -- `i32::MIN.abs()` wraps with overflow checks off.
+    #[test]
+    fn policy_deltas_at_i32_extremes_are_rejected() {
+        let h = FakeHost::with(&[]);
+        for bad in [
+            format!(r#"{{"loss": {}}}"#, i32::MIN),
+            format!(r#"{{"win": {}}}"#, i32::MAX),
+            format!(r#"{{"loyalty": {}}}"#, i32::MAX),
+            r#"{"loss": -6}"#.to_string(),
+            r#"{"win": 6}"#.to_string(),
+        ] {
+            let c = FakeCfg::with(&[("policy", bad.as_str())]);
+            assert_eq!(
+                call(
+                    &h,
+                    &c,
+                    "adjust",
+                    json!({"user": U1, "event": "loss"}),
+                    Some("k")
+                )
+                .unwrap_err(),
+                ToolError::InvalidArgs("invalid policy config".into()),
+                "{bad}"
+            );
+        }
+        assert!(h.log().is_empty());
+    }
+
+    /// regression: #983 review -- `min_score - score` overflowed for a tier
+    /// threshold near `i64::MAX`.
+    #[test]
+    fn tier_thresholds_outside_the_bound_are_rejected_not_overflowed() {
+        let h = FakeHost::with(&[(U1, -1_000_000)]);
+        for bad in [
+            format!(
+                r#"[{{"name":"low","min_score":-1000000}},{{"name":"x","min_score":{}}}]"#,
+                i64::MAX
+            ),
+            format!(r#"[{{"name":"low","min_score":{}}}]"#, i64::MIN),
+        ] {
+            let c = FakeCfg::with(&[("tiers", bad.as_str())]);
+            assert_eq!(
+                call(&h, &c, "rep", json!({"user": U1}), None).unwrap_err(),
+                ToolError::InvalidArgs("invalid tier config".into()),
+                "{bad}"
+            );
+        }
+        let ok = FakeCfg::with(&[(
+            "tiers",
+            r#"[{"name":"low","min_score":-1000000},{"name":"x","min_score":1000000000}]"#,
+        )]);
+        let out = call(&h, &ok, "rep", json!({"user": U1}), None).unwrap();
+        assert_eq!(out["next_tier"]["needed"], json!(1_001_000_000_i64));
     }
 }
