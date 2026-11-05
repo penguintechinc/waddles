@@ -135,9 +135,8 @@ fn max_results_is_a_bounded_integer() {
             "{bad}"
         );
     }
-    // a string can never become the value (it falls back to the default integer)
-    let u = url(json!({"max_results": "5&liveChatId=evil"})).unwrap();
-    assert!(u.ends_with("maxResults=200") && !u.contains("evil"));
+    // a string can never become the value: a typed error, never a silent default
+    assert!(url(json!({"max_results": "5&liveChatId=evil"})).is_err());
 }
 
 #[test]

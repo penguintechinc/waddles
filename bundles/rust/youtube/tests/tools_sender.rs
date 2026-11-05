@@ -31,9 +31,15 @@ fn poll_plan_honors_token_interval_and_floor() {
             .interval_ms,
         3500
     );
-    // default when absent / wrong type; empty token is no token
-    let p = poll_plan(&json!({"pollingIntervalMillis": "x", "nextPageToken": ""})).unwrap();
+    // default ONLY when absent/null; a present wrong type is a loud error (see fail_loud.rs)
+    let p = poll_plan(&json!({"nextPageToken": ""})).unwrap();
     assert_eq!((p.next_page_token, p.interval_ms), (None, 5000));
+    assert_eq!(
+        poll_plan(&json!({"pollingIntervalMillis": null}))
+            .unwrap()
+            .interval_ms,
+        5000
+    );
 }
 
 #[test]

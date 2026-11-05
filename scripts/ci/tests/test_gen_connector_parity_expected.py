@@ -32,7 +32,7 @@ def _corpus_copy(tmp_path: Path) -> Path:
 def test_committed_expected_files_are_current() -> None:
     r = _run("--check")
     assert r.returncode == 0, r.stderr
-    assert "examined=34" in r.stdout
+    assert "examined=41" in r.stdout
 
 
 def test_pseudonym_matches_rust_known_value() -> None:

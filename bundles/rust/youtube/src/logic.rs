@@ -219,9 +219,10 @@ pub fn parse_frame(bytes: &[u8], received_at: &str) -> Result<Parsed, LogicError
         let mut events = Vec::new();
         let mut skipped = 0;
         for item in items {
-            match item_to_raw(item).map(|r| normalize_raw(&r, received_at)) {
-                Some(Ok(e)) => events.push(e),
-                _ => skipped += 1,
+            match item_to_raw(item) {
+                // No displayable text / liveChatId: drop-and-count (never raised, never logged).
+                None => skipped += 1,
+                Some(raw) => events.push(normalize_raw(&raw, received_at)?),
             }
         }
         return Ok(Parsed { events, skipped });
@@ -261,11 +262,24 @@ pub fn poll_plan(body: &Value) -> Result<PollPlan, LogicError> {
         _ => None,
     };
     let ms = match body.get("pollingIntervalMillis") {
-        Some(Value::Number(n)) => n
-            .as_u64()
-            .or_else(|| n.as_f64().map(|f| if f < 0.0 { 0 } else { f as u64 }))
-            .unwrap_or(DEFAULT_POLL_INTERVAL_MS),
-        _ => DEFAULT_POLL_INTERVAL_MS,
+        // Absent is the protocol default; a present non-number is a loud error.
+        None | Some(Value::Null) => DEFAULT_POLL_INTERVAL_MS,
+        Some(Value::Number(n)) => {
+            if let Some(u) = n.as_u64() {
+                u
+            } else if let Some(f) = n.as_f64() {
+                if f < 0.0 { 0 } else { f as u64 }
+            } else {
+                return Err(LogicError::Malformed(
+                    "pollingIntervalMillis is not a number".into(),
+                ));
+            }
+        }
+        Some(_) => {
+            return Err(LogicError::Malformed(
+                "pollingIntervalMillis is not a number".into(),
+            ));
+        }
     };
     Ok(PollPlan {
         next_page_token: token,
@@ -663,6 +677,40 @@ fn ser<T: Serialize>(v: T) -> Result<Value, LogicError> {
     serde_json::to_value(v).map_err(|e| LogicError::Malformed(e.to_string()))
 }
 
+/// Optional bounded integer argument: absent/null -> `default`; present but not an
+/// integer in `1..=max` (or `0..=max` when `min_zero`) -> typed error, never a default.
+fn opt_u32(args: &Value, key: &str, default: u32, min: u32, max: u32) -> Result<u32, LogicError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| LogicError::Malformed(format!("{key} is not an integer")))?;
+            if (min..=max).contains(&n) {
+                Ok(n)
+            } else {
+                Err(LogicError::Malformed(format!(
+                    "{key} out of range {min}..={max}"
+                )))
+            }
+        }
+    }
+}
+
+/// Optional non-negative number argument with the same absent-vs-invalid rule.
+fn opt_f64(args: &Value, key: &str, default: f64) -> Result<f64, LogicError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => match v.as_f64() {
+            Some(f) if f >= 0.0 && f.is_finite() => Ok(f),
+            _ => Err(LogicError::Malformed(format!(
+                "{key} is not a non-negative number"
+            ))),
+        },
+    }
+}
+
 /// Tool dispatch (`tool-provider.call`): pure JSON in/out; no tool performs I/O.
 pub fn run_tool(name: &str, args: &Value) -> Result<Value, LogicError> {
     let body = || {
@@ -685,16 +733,7 @@ pub fn run_tool(name: &str, args: &Value) -> Result<Value, LogicError> {
             ))),
         },
         "poll_request" => {
-            let max = args
-                .get("max_results")
-                .and_then(Value::as_u64)
-                .unwrap_or(200);
-            if !(1..=u64::from(MAX_POLL_RESULTS)).contains(&max) {
-                return Err(LogicError::Malformed(
-                    "max_results out of range 1..=2000".into(),
-                ));
-            }
-            let max = u32::try_from(max).unwrap_or(200);
+            let max = opt_u32(args, "max_results", 200, 1, MAX_POLL_RESULTS)?;
             Ok(tpl_json(&poll_request(max)))
         }
         "poll_plan" => ser(poll_plan(body()?)?),
@@ -702,31 +741,34 @@ pub fn run_tool(name: &str, args: &Value) -> Result<Value, LogicError> {
             let status = args
                 .get("status")
                 .and_then(Value::as_u64)
-                .and_then(|s| u16::try_from(s).ok())
                 .ok_or_else(|| LogicError::Malformed("missing numeric status".into()))?;
-            let num = |k: &str, d: u32| {
-                args.get(k)
-                    .and_then(Value::as_u64)
-                    .map_or(d, |n| u32::try_from(n).unwrap_or(u32::MAX))
-            };
-            let backoff = args
-                .get("no_broadcast_backoff_s")
-                .and_then(Value::as_f64)
-                .unwrap_or(NO_BROADCAST_BACKOFF_S);
+            let status = u16::try_from(status)
+                .map_err(|_| LogicError::Malformed("status out of range".into()))?;
             let null = Value::Null;
+            // The error body is optional (non-403 statuses ignore it); absent == no body.
+            let err_body = match args.get("body") {
+                Some(b) => b,
+                None => &null,
+            };
             ser(classify_error(
                 status,
-                args.get("body").unwrap_or(&null),
-                num("consecutive_quota_errors", 0),
-                backoff,
-                num("max_consecutive_quota_errors", MAX_CONSECUTIVE_QUOTA_ERRORS),
+                err_body,
+                opt_u32(args, "consecutive_quota_errors", 0, 0, u32::MAX)?,
+                opt_f64(args, "no_broadcast_backoff_s", NO_BROADCAST_BACKOFF_S)?,
+                opt_u32(
+                    args,
+                    "max_consecutive_quota_errors",
+                    MAX_CONSECUTIVE_QUOTA_ERRORS,
+                    1,
+                    u32::MAX,
+                )?,
             ))
         }
         "build_send_chat_request" => {
             let payload = args
                 .get("payload")
-                .map(Value::to_string)
-                .unwrap_or_default();
+                .ok_or_else(|| LogicError::Malformed("missing payload".into()))?
+                .to_string();
             Ok(tpl_json(&build_chat_send(
                 "chat.send",
                 require(args, "target_source_id")?,
