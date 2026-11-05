@@ -118,7 +118,23 @@ pub struct ConnectorLimits {
     pub pool_size: usize,
     /// How long a call waits for a free slot before `pool_exhausted`.
     pub pool_wait: Duration,
+    /// Largest accepted `tool-provider.call` args, canonical-JSON bytes.
+    pub max_tool_args_bytes: usize,
+    /// Largest accepted `tool-provider.call` result, canonical-JSON bytes.
+    pub max_tool_result_bytes: usize,
 }
+
+/// Default cap on tool args / results: just under the host-API
+/// `MAX_FRAME_BYTES` (1 MiB), since a larger value could not ride a wire frame
+/// anyway. Checked BEFORE the result is parsed into a `serde_json::Value`, so a
+/// guest cannot amplify a huge byte blob into a larger host-heap tree.
+pub const MAX_TOOL_PAYLOAD_BYTES: usize = 900_000;
+
+/// Extra wall-clock a call may run past its epoch deadline before the host
+/// abandons it. The epoch trap normally ends a guest at `deadline_ms`; this
+/// grace only matters when the guest is parked on a HOST await (a stage that
+/// never answers a host call), where no epoch trap can fire.
+const HOST_AWAIT_GRACE: Duration = Duration::from_millis(250);
 
 impl ConnectorLimits {
     /// Derives the limits from the executor's validated [`CliConfig`].
@@ -130,6 +146,8 @@ impl ConnectorLimits {
             memory_limit_mb: cfg.executor_memory_limit_mb,
             pool_size: cfg.executor_connector_pool_size as usize,
             pool_wait: Duration::from_millis(cfg.executor_pool_wait_ms),
+            max_tool_args_bytes: MAX_TOOL_PAYLOAD_BYTES,
+            max_tool_result_bytes: MAX_TOOL_PAYLOAD_BYTES,
         }
     }
 }
@@ -153,6 +171,17 @@ pub enum ConnectorCallError {
     /// silent empty result.
     #[error("connector exports no tool-provider (loaded under the `connector` world)")]
     NoToolProvider,
+    /// A tool's args (caller) or result (guest) exceeded the configured byte
+    /// cap. Refused loudly; the oversized value is never parsed or forwarded.
+    #[error("tool {what} is {len} bytes, over the {max}-byte cap")]
+    PayloadTooLarge {
+        /// `"args"` or `"result"`.
+        what: &'static str,
+        /// The offending size.
+        len: usize,
+        /// The cap it exceeded.
+        max: usize,
+    },
     /// The guest's fuel budget was exhausted (spec S3.5 / Gemini cond. 4).
     #[error("connector call exhausted its fuel budget: {0}")]
     FuelExhausted(String),
@@ -189,6 +218,7 @@ impl ConnectorCallError {
             Self::Guest(_) => "guest_error",
             Self::Tool(_) => "tool_error",
             Self::NoToolProvider => "no_tool_provider",
+            Self::PayloadTooLarge { .. } => "payload_too_large",
             Self::FuelExhausted(_) => "fuel_exhausted",
             Self::DeadlineExceeded(_) => "deadline",
             Self::MemoryLimit(_) => "memory_limit",
@@ -223,6 +253,13 @@ pub struct CallReply<T> {
     pub fuel_used: u64,
 }
 
+/// The slots one call holds: always one of the combined `pool_size` pool, plus
+/// (for a tool call) one of the tool share. Released together on drop.
+struct CallPermits {
+    _total: OwnedSemaphorePermit,
+    _tool_share: Option<OwnedSemaphorePermit>,
+}
+
 /// Runs one connector export on a blocking-pool thread under a pool slot, a
 /// fresh bounded `Store` and an armed fuel budget, then classifies and records
 /// the outcome. A macro (not a closure-taking fn) because the guest call
@@ -244,7 +281,7 @@ macro_rules! run_export {
         let inner = Arc::clone(&$host.inner);
         let deadline_ms: u64 = $deadline;
         let permit = inner
-            .acquire_slot($export, inner.pool_for(stringify!($pool)))
+            .acquire_slot($export, stringify!($pool) == "tool")
             .await?;
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
@@ -254,7 +291,20 @@ macro_rules! run_export {
                 let (mut store, $conn) =
                     inner.fresh_instance($export, started, deadline_ms).await?;
                 let $store = &mut store;
-                let outcome = $call.await;
+                // The epoch trap cannot interrupt a guest parked on a HOST await
+                // (an import the stage never answers). Bound the whole call by
+                // the deadline plus a grace so the permit is always returned.
+                let budget = Duration::from_millis(deadline_ms) + HOST_AWAIT_GRACE;
+                let outcome = match tokio::time::timeout(budget, $call).await {
+                    Ok(outcome) => outcome,
+                    Err(_elapsed) => {
+                        let err = ConnectorCallError::DeadlineExceeded(
+                            "host await exceeded the call deadline".to_string(),
+                        );
+                        inner.record($export, &err, started);
+                        return Err(err);
+                    }
+                };
                 inner.finish($export, started, &store, outcome, $guest_err)
             })
         })
@@ -263,9 +313,10 @@ macro_rules! run_export {
     }};
 }
 
-/// Size of the dedicated tool-provider pool: half the receiver pool, at least
-/// one. A fixed share kept separate from the receiver pool, so saturating tool
-/// calls never consumes a slot `on-frame`/heartbeat needs.
+/// Size of the tool-provider SHARE of the combined pool: half of it, at least
+/// one. Tool calls draw from this share AND the combined pool, so total
+/// in-flight instances never exceed `pool_size` and saturating tools can never
+/// consume more than the share -- `on-frame`/heartbeat always keep the rest.
 #[must_use]
 pub fn tool_pool_size(receiver_pool_size: usize) -> usize {
     (receiver_pool_size / 2).max(1)
@@ -291,9 +342,12 @@ struct Inner {
     app_id: String,
     digest: String,
     limits: ConnectorLimits,
+    /// The combined cap on concurrent instances (`pool_size`), shared by every
+    /// export kind.
     slots: Arc<Semaphore>,
-    /// Separate pool for `tool-provider.call` so tool traffic can never starve
-    /// `receiver` calls (`on-frame`, heartbeat) of slots.
+    /// The reserved tool share ([`tool_pool_size`]) of `slots`: a tool call
+    /// holds one of these AND one of `slots`, so tool traffic can never occupy
+    /// more than its share and starve `receiver` calls (`on-frame`, heartbeat).
     tool_slots: Arc<Semaphore>,
     bridge: Option<Arc<HostBridge>>,
     metrics: Arc<ExecutorMetrics>,
@@ -413,13 +467,13 @@ impl ConnectorHost {
         &self.inner.digest
     }
 
-    /// Free tool-pool slots right now (test/diagnostic introspection).
+    /// Free tool-share slots right now (test/diagnostic introspection).
     #[must_use]
     pub fn available_tool_slots(&self) -> usize {
         self.inner.tool_slots.available_permits()
     }
 
-    /// Free slots right now (test/diagnostic introspection).
+    /// Free slots of the combined pool right now (test/diagnostic introspection).
     #[must_use]
     pub fn available_slots(&self) -> usize {
         self.inner.slots.available_permits()
@@ -492,6 +546,16 @@ impl ConnectorHost {
         requested_deadline_ms: Option<u64>,
     ) -> Result<CallReply<Vec<u8>>, ConnectorCallError> {
         let deadline = clamp_deadline_ms(requested_deadline_ms, self.inner.limits.deadline_ms);
+        // Size gate BEFORE admission: an oversized request never takes a slot.
+        if args.len() > self.inner.limits.max_tool_args_bytes {
+            let err = ConnectorCallError::PayloadTooLarge {
+                what: "args",
+                len: args.len(),
+                max: self.inner.limits.max_tool_args_bytes,
+            };
+            self.inner.record("tool-call", &err, Instant::now());
+            return Err(err);
+        }
         if matches!(self.inner.pre, ConnectorPreKind::Plain(_)) {
             let err = ConnectorCallError::NoToolProvider;
             self.inner.metrics.record_connector_call(
@@ -503,7 +567,7 @@ impl ConnectorHost {
             warn!(app_id = %self.inner.app_id, "tool call on a connector with no tool-provider");
             return Err(err);
         }
-        run_export!(
+        let reply = run_export!(
             self,
             "tool-call",
             ConnectorCallError::Tool,
@@ -525,7 +589,19 @@ impl ConnectorHost {
                     }
                 }
             }
-        )
+        )?;
+        // The guest result is already lifted into a host `Vec`; refuse an
+        // oversized one HERE, before anything parses it into a larger tree.
+        if reply.value.len() > self.inner.limits.max_tool_result_bytes {
+            let err = ConnectorCallError::PayloadTooLarge {
+                what: "result",
+                len: reply.value.len(),
+                max: self.inner.limits.max_tool_result_bytes,
+            };
+            self.inner.record("tool-call", &err, Instant::now());
+            return Err(err);
+        }
+        Ok(reply)
     }
 
     /// `receiver.on-disconnect`: tell the connector the connection ended. Has
@@ -548,15 +624,28 @@ impl ConnectorHost {
 
 impl Inner {
     /// Waits up to `pool_wait` for a slot; a full pool is typed back-pressure,
-    /// recorded, never an unbounded queue.
+    /// recorded, never an unbounded queue. A tool call takes its reserved share
+    /// FIRST and then a combined-pool slot (a receiver call never waits on the
+    /// share, so the order cannot deadlock); one timeout bounds both waits.
     async fn acquire_slot(
         &self,
         export: &'static str,
-        pool: Arc<Semaphore>,
-    ) -> Result<OwnedSemaphorePermit, ConnectorCallError> {
-        let acquired = tokio::time::timeout(self.limits.pool_wait, pool.acquire_owned()).await;
-        match acquired {
-            Ok(Ok(permit)) => Ok(permit),
+        tool: bool,
+    ) -> Result<CallPermits, ConnectorCallError> {
+        let acquire = async {
+            let tool_share = if tool {
+                Some(Arc::clone(&self.tool_slots).acquire_owned().await?)
+            } else {
+                None
+            };
+            let total = Arc::clone(&self.slots).acquire_owned().await?;
+            Ok::<_, tokio::sync::AcquireError>(CallPermits {
+                _total: total,
+                _tool_share: tool_share,
+            })
+        };
+        match tokio::time::timeout(self.limits.pool_wait, acquire).await {
+            Ok(Ok(permits)) => Ok(permits),
             Ok(Err(_closed)) => Err(ConnectorCallError::Internal(
                 "connector pool semaphore closed".to_string(),
             )),
@@ -573,16 +662,6 @@ impl Inner {
                 warn!(app_id = %self.app_id, export, "connector pool exhausted");
                 Err(err)
             }
-        }
-    }
-
-    /// The semaphore for a pool name: `tool` is the dedicated tool-provider
-    /// pool, anything else the receiver pool.
-    fn pool_for(&self, pool: &str) -> Arc<Semaphore> {
-        if pool == "tool" {
-            Arc::clone(&self.tool_slots)
-        } else {
-            Arc::clone(&self.slots)
         }
     }
 
@@ -747,6 +826,14 @@ mod tests {
             ConnectorCallError::PoolExhausted { in_flight: 1 }.kind(),
             ConnectorCallError::InstantiateFailed(String::new()).kind(),
             ConnectorCallError::Internal(String::new()).kind(),
+            ConnectorCallError::PayloadTooLarge {
+                what: "args",
+                len: 2,
+                max: 1,
+            }
+            .kind(),
+            ConnectorCallError::NoToolProvider.kind(),
+            ConnectorCallError::Tool(ToolError::TargetUnavailable).kind(),
         ];
         let distinct: std::collections::BTreeSet<_> = kinds.iter().collect();
         assert_eq!(
@@ -853,5 +940,84 @@ mod tests {
             ) >= 1.0,
             "the latency histogram must have a sample"
         );
+    }
+
+    /// regression (PR #984 review claim 2): the epoch deadline cannot interrupt a
+    /// guest parked on a HOST await (a stage that never answers a `tool.invoke`
+    /// host call). The call must still end near its deadline with a typed
+    /// `DeadlineExceeded`, and the tool permit must come back -- never be held
+    /// by a hung blocking task.
+    #[tokio::test]
+    async fn a_tool_call_hung_on_a_host_await_is_bounded_by_its_deadline() {
+        use crate::engine::{build_engine, LinkerCache};
+        use crate::wire::Connection;
+        use clap::Parser;
+        use sha2::{Digest, Sha256};
+
+        const TOOLS: &[u8] = include_bytes!("../tests/fixtures/connector_tools_fixture.wasm");
+        let app_id = "waddles.core.test.connector-hang";
+        let cfg = CliConfig::try_parse_from([
+            "bundle-executor",
+            "--stage-host-api-addr",
+            "svc-process:8301",
+        ])
+        .expect("static test args always parse");
+        let engine = build_engine(&cfg).expect("engine");
+        let _ticker = crate::engine::spawn_epoch_ticker(&engine);
+        let mut h = Sha256::new();
+        h.update(TOOLS);
+        let manifest = VerifiedManifest::new(
+            app_id,
+            format!("sha256:{:x}", h.finalize()),
+            WitWorld::ConnectorTools,
+            std::collections::HashSet::new(),
+        );
+        // A stage that reads the host call and NEVER answers it.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let connection = Connection::new(tx);
+        let silent_stage = tokio::spawn(async move {
+            let _held_open = rx.recv().await;
+            std::future::pending::<()>().await;
+        });
+        let host = ConnectorHost::load(
+            &engine,
+            &LinkerCache::new(engine.clone()),
+            &manifest,
+            TOOLS.to_vec(),
+            ConnectorLimits::from_config(&cfg),
+            Some(HostBridge::new(connection)),
+        )
+        .await
+        .expect("tools overlay loads");
+        let before = host.available_tool_slots();
+
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            host.call_tool_with_deadline(
+                "relay".into(),
+                br#"{"target":"waddles.core.other","tool":"x","args":{}}"#.to_vec(),
+                Some(300),
+            ),
+        )
+        .await
+        .expect("a hung host await must not outlive the deadline by seconds");
+        let err = outcome.expect_err("the hung call must fail, not fabricate a result");
+        assert!(
+            matches!(err, ConnectorCallError::DeadlineExceeded(_)),
+            "{err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "took {:?}",
+            started.elapsed()
+        );
+        // The permit is released once the bounded task unwinds.
+        let give_up = Instant::now() + Duration::from_secs(3);
+        while host.available_tool_slots() != before {
+            assert!(Instant::now() < give_up, "tool permit never came back");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        silent_stage.abort();
     }
 }

@@ -306,6 +306,10 @@ fn call_error_to_body(e: ConnectorCallError) -> ErrorBody {
         | ConnectorCallError::Tool(_)
         | ConnectorCallError::Internal(_) => error_body(ErrorCode::LoadFailed, message),
         ConnectorCallError::NoToolProvider => error_body(ErrorCode::ExportMissing, message),
+        // Oversized tool args/result: a typed refusal, never a silent truncation.
+        ConnectorCallError::PayloadTooLarge { .. } => {
+            error_body(ErrorCode::MalformedFrame, message)
+        }
         ConnectorCallError::FuelExhausted(_) => ErrorBody {
             code: ErrorCode::ExecutorDeadline,
             message,
