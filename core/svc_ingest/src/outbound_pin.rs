@@ -57,6 +57,11 @@ pub enum PinError {
     /// be verified -- every chat op is refused (fail closed, never open).
     #[error("outbound pin verification key is not configured")]
     KeyUnconfigured,
+    /// The (authentic) entry carries no producer `op_id`/nonce, so it has no
+    /// per-op identity for single-use enforcement: refused, distinct from a
+    /// bad signature so a rolling upgrade (svc_action first) is visible.
+    #[error("outbound entry carries no op_id nonce")]
+    MissingOpId,
 }
 
 impl PinError {
@@ -75,6 +80,7 @@ impl PinError {
             Self::Expired => "pin_expired",
             Self::ExpiryInvalid => "pin_exp_invalid",
             Self::KeyUnconfigured => "pin_key_unconfigured",
+            Self::MissingOpId => "no_op_id",
         }
     }
 }
@@ -206,7 +212,11 @@ fn now_epoch_ms() -> u64 {
 /// [`PinError::MissingOrigin`], [`PinError::KeyUnconfigured`],
 /// [`PinError::MissingSignature`], [`PinError::BadSignature`],
 /// [`PinError::ExpiryInvalid`] or [`PinError::Expired`] -- fail closed.
-pub fn verify_stamp(raw: &str, platform: &str, keys: Option<&PinKeys>) -> Result<(), PinError> {
+pub fn verify_stamp(
+    raw: &str,
+    platform: &str,
+    keys: Option<&PinKeys>,
+) -> Result<VerifiedStamp, PinError> {
     verify_stamp_at(raw, platform, keys, now_epoch_ms())
 }
 
@@ -219,7 +229,7 @@ pub fn verify_stamp_at(
     platform: &str,
     keys: Option<&PinKeys>,
     now_ms: u64,
-) -> Result<(), PinError> {
+) -> Result<VerifiedStamp, PinError> {
     let wire: StampWire = serde_json::from_str(raw).map_err(|_| PinError::BadSignature)?;
     let op = wire.op.as_deref().unwrap_or("chat.send");
     let origin = wire
@@ -233,6 +243,14 @@ pub fn verify_stamp_at(
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or(PinError::MissingSignature)?;
+    // One spelling only: the hex decoder is case-insensitive, so a re-cased
+    // tag would still verify while hashing differently in the replay key.
+    // Refuse anything but canonical lowercase hex (the kid is case-sensitive
+    // and compared verbatim, so it is already canonical).
+    let (kid, tag_hex) = sig.split_once(':').ok_or(PinError::BadSignature)?;
+    if tag_hex.bytes().any(|c| c.is_ascii_uppercase()) {
+        return Err(PinError::BadSignature);
+    }
     let exp_ms = wire.exp_ms.ok_or(PinError::ExpiryInvalid)?;
     let fields = PinFields {
         platform,
@@ -259,7 +277,43 @@ pub fn verify_stamp_at(
     if exp_ms > now_ms.saturating_add(MAX_EXP_AHEAD_MS) {
         return Err(PinError::ExpiryInvalid);
     }
-    Ok(())
+    // Per-op identity is mandatory (checked after the signature, so only
+    // authentic entries can probe this rule): without it two sends of the
+    // same text would share one dedupe key.
+    if fields.op_id.is_empty() {
+        return Err(PinError::MissingOpId);
+    }
+    Ok(VerifiedStamp {
+        replay_digest: sha256_hex(format!("{kid}:{tag_hex}").as_bytes()),
+        ttl_ms: exp_ms.saturating_sub(now_ms).max(1),
+    })
+}
+
+/// What a verified stamp yields for single-use enforcement: a one-way digest
+/// of the (MAC-bound, per-op) `pin_sig` and how long the entry stays valid.
+/// Carries no channel/user id or text, so it is safe to key on and log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedStamp {
+    /// Lower-hex SHA-256 of the `pin_sig` string.
+    pub replay_digest: String,
+    /// Milliseconds until `exp_ms` (at least 1).
+    pub ttl_ms: u64,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Valkey key marking a stamp as already executed:
+/// `outbound:seen:<platform>:<sha256(pin_sig)>` -- hash only, never a raw
+/// channel/user id.
+#[must_use]
+pub fn replay_key(platform: &str, stamp: &VerifiedStamp) -> String {
+    format!("outbound:seen:{platform}:{}", stamp.replay_digest)
 }
 
 static PIN_REFUSED: LazyLock<prometheus::IntCounterVec> = LazyLock::new(|| {
@@ -275,12 +329,77 @@ static PIN_REFUSED: LazyLock<prometheus::IntCounterVec> = LazyLock::new(|| {
     .expect("valid metric definition")
 });
 
-/// Registers the pin-refusal counter on the service registry.
+static PIN_REPLAYED: LazyLock<prometheus::IntCounterVec> = LazyLock::new(|| {
+    // The definition is a compile-time constant; construction cannot fail.
+    #[allow(clippy::expect_used)]
+    prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_outbound_pin_replayed_total",
+            "Validly signed outbound entries dropped because their stamp was already executed (replay), by platform/op",
+        ),
+        &["platform", "op"],
+    )
+    .expect("valid metric definition")
+});
+
+static REPLAY_CHECK_FAILED: LazyLock<prometheus::IntCounterVec> = LazyLock::new(|| {
+    // The definition is a compile-time constant; construction cannot fail.
+    #[allow(clippy::expect_used)]
+    prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_outbound_replay_check_failed_total",
+            "Outbound entries NOT executed because the single-use check could not reach Valkey, by platform/op",
+        ),
+        &["platform", "op"],
+    )
+    .expect("valid metric definition")
+});
+
+/// Registers the pin-refusal, replay and replay-check counters on the
+/// service registry.
 ///
 /// # Errors
 /// Propagates a duplicate-registration error from `prometheus`.
 pub fn register_metrics(registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
-    registry.register(Box::new(PIN_REFUSED.clone()))
+    registry.register(Box::new(PIN_REFUSED.clone()))?;
+    registry.register(Box::new(PIN_REPLAYED.clone()))?;
+    registry.register(Box::new(REPLAY_CHECK_FAILED.clone()))
+}
+
+/// Records one replayed (already-executed) stamp: WARN + `pin_replayed`
+/// counter, PII-free (platform/op only; not even the digest is logged).
+pub fn record_replay(platform: &str, op: &'static str) {
+    tracing::warn!(
+        platform,
+        op,
+        reason = "pin_replayed",
+        "outbound dropped: signed entry was already executed (replay)"
+    );
+    PIN_REPLAYED.with_label_values(&[platform, op]).inc();
+}
+
+/// Current `pin_replayed` count (test/observability helper).
+#[must_use]
+pub fn replay_count(platform: &str, op: &str) -> u64 {
+    PIN_REPLAYED.with_label_values(&[platform, op]).get()
+}
+
+/// Records one single-use check that could not complete (Valkey down): the
+/// entry is NOT executed.
+pub fn record_replay_check_failed(platform: &str, op: &'static str) {
+    tracing::error!(
+        platform,
+        op,
+        reason = "replay_check_unavailable",
+        "outbound NOT executed: single-use (replay) check could not reach Valkey"
+    );
+    REPLAY_CHECK_FAILED.with_label_values(&[platform, op]).inc();
+}
+
+/// Current replay-check-failure count (test/observability helper).
+#[must_use]
+pub fn replay_check_failed_count(platform: &str, op: &str) -> u64 {
+    REPLAY_CHECK_FAILED.with_label_values(&[platform, op]).get()
 }
 
 /// Records one refusal: a warn log + counter, both PII-free.
@@ -441,7 +560,7 @@ mod tests {
                 message_id: "",
                 text: "x",
                 user_id,
-                op_id: "",
+                op_id: "t-op",
                 exp_ms,
                 community_id: 0,
                 tenant_id: 0,
@@ -449,6 +568,7 @@ mod tests {
             .unwrap();
         let mut v = serde_json::json!({
             "op": op, "origin_channel": "1", "text": "x", "exp_ms": exp_ms, "pin_sig": sig,
+            "op_id": "t-op",
         });
         if !channel.is_empty() {
             v["channel"] = channel.into();
@@ -472,7 +592,7 @@ mod tests {
                 message_id: "",
                 text: "x",
                 user_id: "",
-                op_id: "",
+                op_id: "t-op",
                 exp_ms,
                 community_id,
                 tenant_id: 0,
@@ -480,7 +600,7 @@ mod tests {
             .unwrap();
         let mut v = serde_json::json!({
             "op": "chat.send", "channel": "1", "origin_channel": "1", "text": "x",
-            "exp_ms": exp_ms, "pin_sig": sig,
+            "exp_ms": exp_ms, "pin_sig": sig, "op_id": "t-op",
         });
         if community_id != 0 {
             v["community_id"] = community_id.into();
@@ -495,7 +615,7 @@ mod tests {
         let keys = test_keys();
         let signed = community_entry(7);
         assert_eq!(
-            verify_stamp_at(&signed, "discord", Some(&keys), NOW),
+            verify_stamp_at(&signed, "discord", Some(&keys), NOW).map(|_| ()),
             Ok(())
         );
         let mut v: serde_json::Value = serde_json::from_str(&signed).unwrap();
@@ -520,7 +640,10 @@ mod tests {
         );
         // Signed with no community: adding one is refused.
         let none = community_entry(0);
-        assert_eq!(verify_stamp_at(&none, "discord", Some(&keys), NOW), Ok(()));
+        assert_eq!(
+            verify_stamp_at(&none, "discord", Some(&keys), NOW).map(|_| ()),
+            Ok(())
+        );
         let mut a: serde_json::Value = serde_json::from_str(&none).unwrap();
         a["community_id"] = 7.into();
         assert_eq!(
@@ -565,7 +688,10 @@ mod tests {
     fn verify_stamp_rules() {
         let keys = test_keys();
         let ok = signed_entry("chat.send", "", "1", NOW + 60_000);
-        assert_eq!(verify_stamp_at(&ok, "discord", Some(&keys), NOW), Ok(()));
+        assert_eq!(
+            verify_stamp_at(&ok, "discord", Some(&keys), NOW).map(|_| ()),
+            Ok(())
+        );
         // Same bytes under another platform's queue: not valid.
         assert_eq!(
             verify_stamp_at(&ok, "twitch", Some(&keys), NOW),
@@ -607,7 +733,10 @@ mod tests {
     fn dm_send_is_signed_and_verified() {
         let keys = test_keys();
         let dm = signed_entry("dm.send", "42", "", NOW + 60_000);
-        assert_eq!(verify_stamp_at(&dm, "discord", Some(&keys), NOW), Ok(()));
+        assert_eq!(
+            verify_stamp_at(&dm, "discord", Some(&keys), NOW).map(|_| ()),
+            Ok(())
+        );
         let unsigned =
             r#"{"op":"dm.send","user_id":"42","text":"x","origin_channel":"1","exp_ms":1000060}"#;
         assert_eq!(
@@ -653,7 +782,10 @@ mod tests {
             Err(PinError::ExpiryInvalid)
         );
         let edge = signed_entry("chat.send", "", "1", NOW + MAX_EXP_AHEAD_MS);
-        assert_eq!(verify_stamp_at(&edge, "discord", Some(&keys), NOW), Ok(()));
+        assert_eq!(
+            verify_stamp_at(&edge, "discord", Some(&keys), NOW).map(|_| ()),
+            Ok(())
+        );
         let ok = signed_entry("chat.send", "", "1", NOW + 1000);
         let extended = ok.replace("1001000", "1090000");
         assert_ne!(ok, extended);
@@ -672,6 +804,137 @@ mod tests {
             verify_stamp_at(&missing, "discord", Some(&keys), NOW),
             Err(PinError::ExpiryInvalid)
         );
+    }
+
+    /// An authentic entry with no op_id has no per-op identity: refused with
+    /// its own counted reason (rollout signal), after the signature check.
+    #[test]
+    fn an_authentic_entry_without_an_op_id_is_refused_distinctly() {
+        let keys = test_keys();
+        let sig = keys
+            .sign(&PinFields {
+                platform: "discord",
+                op: "chat.send",
+                channel: "1",
+                origin_channel: "1",
+                message_id: "",
+                text: "x",
+                user_id: "",
+                op_id: "",
+                exp_ms: NOW + 60_000,
+                community_id: 0,
+                tenant_id: 0,
+            })
+            .unwrap();
+        let raw = serde_json::json!({
+            "op": "chat.send", "channel": "1", "origin_channel": "1", "text": "x",
+            "exp_ms": NOW + 60_000, "pin_sig": sig,
+        })
+        .to_string();
+        assert_eq!(
+            verify_stamp_at(&raw, "discord", Some(&keys), NOW),
+            Err(PinError::MissingOpId)
+        );
+        assert_eq!(PinError::MissingOpId.reason(), "no_op_id");
+        // A forged unsigned entry still reports the signature failure first.
+        let forged = r#"{"op":"chat.send","channel":"1","origin_channel":"1","text":"x","exp_ms":1000060,"pin_sig":"k1:00"}"#;
+        assert_eq!(
+            verify_stamp_at(forged, "discord", Some(&keys), NOW),
+            Err(PinError::BadSignature)
+        );
+    }
+
+    /// The dedupe key is per-op (distinct op_ids -> distinct keys), carries
+    /// only a SHA-256 digest (no channel/user/text), and its TTL is the time
+    /// left on the signed expiry.
+    #[test]
+    fn replay_key_is_per_op_hash_only_and_ttl_tracks_expiry() {
+        let keys = test_keys();
+        let a = signed_entry("chat.send", "", "1", NOW + 60_000);
+        let stamp = verify_stamp_at(&a, "discord", Some(&keys), NOW).unwrap();
+        assert_eq!(stamp.ttl_ms, 60_000);
+        let key = replay_key("discord", &stamp);
+        assert!(key.starts_with("outbound:seen:discord:"));
+        let digest = key.rsplit(':').next().unwrap();
+        assert_eq!(digest.len(), 64);
+        assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(!key.contains("t-op") && !key.contains(r#""1""#));
+        // Same bytes -> same key (that is what makes a replay detectable).
+        let again = verify_stamp_at(&a, "discord", Some(&keys), NOW).unwrap();
+        assert_eq!(replay_key("discord", &again), key);
+        // Different op_id (re-signed) -> different key.
+        let mut v: serde_json::Value = serde_json::from_str(&a).unwrap();
+        v["op_id"] = "t-op-2".into();
+        let sig2 = keys
+            .sign(&PinFields {
+                platform: "discord",
+                op: "chat.send",
+                channel: "1",
+                origin_channel: "1",
+                message_id: "",
+                text: "x",
+                user_id: "",
+                op_id: "t-op-2",
+                exp_ms: NOW + 60_000,
+                community_id: 0,
+                tenant_id: 0,
+            })
+            .unwrap();
+        v["pin_sig"] = sig2.into();
+        let b = verify_stamp_at(&v.to_string(), "discord", Some(&keys), NOW).unwrap();
+        assert_ne!(replay_key("discord", &b), key);
+        // Platform is namespaced.
+        assert!(replay_key("twitch", &stamp).starts_with("outbound:seen:twitch:"));
+        // TTL floor: an entry expiring this very ms still gets a >=1ms key.
+        let edge = signed_entry("chat.send", "", "1", NOW);
+        let s = verify_stamp_at(&edge, "discord", Some(&keys), NOW).unwrap();
+        assert_eq!(s.ttl_ms, 1);
+    }
+
+    /// regression (review): the hex decoder is case-insensitive, so a re-cased
+    /// `pin_sig` used to verify yet hash to a different replay key. Only the
+    /// canonical lowercase spelling verifies now, and the digest is over
+    /// kid + canonical tag.
+    #[test]
+    fn a_recased_pin_sig_is_refused_and_cannot_dodge_the_replay_key() {
+        let keys = test_keys();
+        let ok = signed_entry("chat.send", "", "1", NOW + 60_000);
+        let stamp = verify_stamp_at(&ok, "discord", Some(&keys), NOW).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        let sig = v["pin_sig"].as_str().unwrap().to_string();
+        let (kid, tag) = sig.split_once(':').unwrap();
+        for recased in [
+            format!("{kid}:{}", tag.to_ascii_uppercase()),
+            format!("{kid}:{}{}", tag[..10].to_ascii_uppercase(), &tag[10..]),
+        ] {
+            v["pin_sig"] = recased.into();
+            assert_eq!(
+                verify_stamp_at(&v.to_string(), "discord", Some(&keys), NOW),
+                Err(PinError::BadSignature)
+            );
+        }
+        // Digest is of kid + canonical tag, not an arbitrary spelling.
+        assert_eq!(
+            stamp.replay_digest,
+            sha256_hex(format!("{kid}:{tag}").as_bytes())
+        );
+    }
+
+    #[test]
+    fn replay_metrics_count_and_register() {
+        let (r0, f0) = (
+            replay_count("discord", "role.remove"),
+            replay_check_failed_count("discord", "role.remove"),
+        );
+        record_replay("discord", "role.remove");
+        record_replay_check_failed("discord", "role.remove");
+        assert_eq!(replay_count("discord", "role.remove"), r0 + 1);
+        assert_eq!(replay_check_failed_count("discord", "role.remove"), f0 + 1);
+        let reg = prometheus::Registry::new();
+        register_metrics(&reg).expect("register");
+        record_replay("twitch", "role.add");
+        let names: Vec<String> = reg.gather().iter().map(|f| f.name().to_string()).collect();
+        assert!(names.contains(&"svc_ingest_outbound_pin_replayed_total".to_string()));
     }
 
     #[test]

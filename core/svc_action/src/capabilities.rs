@@ -343,6 +343,10 @@ const DM_SEND_APP_LIMIT: u64 = 10;
 /// hard any bundle (or several) can hammer a single person.
 const DM_SEND_TARGET_LIMIT: u64 = 3;
 
+/// Max `role.add`/`role.remove` ops per `(tenant, community, app)` per
+/// [`DM_SEND_WINDOW_SECS`] window (same Valkey fixed-window mechanism).
+const ROLE_OP_APP_LIMIT: u64 = 20;
+
 /// Version stamped on every outbound action envelope this host queues
 /// (`"v"`). The consumer (`svc_ingest::outbound_ops`) treats a missing `v`
 /// as the legacy text-only shape and rejects any version above the one it
@@ -357,6 +361,10 @@ pub(crate) enum RelayOp {
     ChatSend,
     ChatDelete,
     DmSend,
+    /// `role.add` -- grant a community-managed role (Discord, executor path).
+    RoleAdd,
+    /// `role.remove` -- revoke a community-managed role.
+    RoleRemove,
 }
 
 impl RelayOp {
@@ -367,6 +375,8 @@ impl RelayOp {
             "chat.send" => Some(Self::ChatSend),
             "chat.delete" => Some(Self::ChatDelete),
             "dm.send" => Some(Self::DmSend),
+            "role.add" => Some(Self::RoleAdd),
+            "role.remove" => Some(Self::RoleRemove),
             _ => None,
         }
     }
@@ -377,16 +387,27 @@ impl RelayOp {
             Self::ChatSend => "chat.send",
             Self::ChatDelete => "chat.delete",
             Self::DmSend => "dm.send",
+            Self::RoleAdd => "role.add",
+            Self::RoleRemove => "role.remove",
         }
     }
 
-    /// The catalog permission id this op requires for `provider`.
+    /// The catalog permission id this op requires for `provider`. Role
+    /// grant/revoke is a moderation-class action, so it rides the existing
+    /// dangerous `moderation.<platform>` permission rather than a new family.
     fn permission(self, provider: &str) -> PermissionId {
         match self {
             Self::ChatSend => PermissionId::ChatSend(provider.to_string()),
             Self::ChatDelete => PermissionId::ChatDelete(provider.to_string()),
             Self::DmSend => PermissionId::DmSend(provider.to_string()),
+            Self::RoleAdd | Self::RoleRemove => PermissionId::Moderation(provider.to_string()),
         }
+    }
+
+    /// `true` for the ops whose executor-side handling needs the numeric
+    /// tenant (user detokenization): `dm.send` and the role ops.
+    fn needs_tenant(self) -> bool {
+        matches!(self, Self::DmSend | Self::RoleAdd | Self::RoleRemove)
     }
 }
 
@@ -408,7 +429,11 @@ pub(crate) fn relay_op_supported(provider: &str, op: RelayOp) -> bool {
         ("twitch", RelayOp::ChatSend)
             | (
                 "discord",
-                RelayOp::ChatSend | RelayOp::ChatDelete | RelayOp::DmSend
+                RelayOp::ChatSend
+                    | RelayOp::ChatDelete
+                    | RelayOp::DmSend
+                    | RelayOp::RoleAdd
+                    | RelayOp::RoleRemove
             )
     )
 }
@@ -432,6 +457,10 @@ struct EnvelopeFields<'a> {
     /// guest input): the drain resolves THIS community's own bot credential
     /// for the send. Omitted for a tenant-wide scope (`0`).
     community_id: Option<i64>,
+    /// Numeric `tenants.id` of the invoke scope -- stamped ONLY for the ops
+    /// that need it (`dm.send`, `role.*`; [`RelayOp::needs_tenant`]) and only
+    /// ever from the verified scope, never from the bundle's payload.
+    tenant_id: Option<i64>,
 }
 
 /// Producer-side builder for the versioned outbound queue envelope
@@ -463,8 +492,67 @@ fn build_outbound_envelope(
         if let Some(c) = fields.community_id {
             obj.insert("community_id".to_string(), serde_json::Value::from(c));
         }
+        if let Some(t) = fields.tenant_id {
+            obj.insert("tenant_id".to_string(), serde_json::Value::from(t));
+        }
     }
     env
+}
+
+/// The numeric community the drain resolves the credential for, from the
+/// binding-verified scope (`None` for a tenant-wide scope).
+fn scope_community(scope: &InvokeScope) -> Option<i64> {
+    (scope.community_id > 0).then_some(i64::from(scope.community_id))
+}
+
+/// The numeric tenant to stamp for `op`, from the verified scope only.
+/// `None` for ops that do not need it; a typed refusal when the op needs it
+/// and the scope carries no resolved tenant (the drain would refuse
+/// `no_tenant_scope` anyway -- fail at the producer, before queueing).
+fn tenant_stamp(op: RelayOp, scope: &InvokeScope) -> Result<Option<i64>, HostResultError> {
+    if !op.needs_tenant() {
+        return Ok(None);
+    }
+    if scope.tenant_id >= 1 {
+        Ok(Some(i64::from(scope.tenant_id)))
+    } else {
+        tracing::error!(
+            op = op.as_str(),
+            app_id = %scope.app_id,
+            "relay op needs a resolved numeric tenant but the invoke scope has none; refusing, nothing queued"
+        );
+        Err(denied(
+            "tenant_scope_missing",
+            format!(
+                "relay {} refused: the invoke has no resolved tenant scope",
+                op.as_str()
+            ),
+        ))
+    }
+}
+
+/// `true` for a canonical tokenized-user placeholder `{user:<uuid>}`.
+fn is_user_placeholder(s: &str) -> bool {
+    let Some(inner) = s.strip_prefix("{user:").and_then(|r| r.strip_suffix('}')) else {
+        return false;
+    };
+    let b = inner.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            // Canonical LOWERCASE only (the drain's `canonical_uuid` spelling),
+            // so the throttle key and queued `user_id` cannot vary by case.
+            _ => c.is_ascii_digit() || (b'a'..=b'f').contains(c),
+        })
+}
+
+/// `true` for a managed-role KEY `[a-z][a-z0-9_-]{0,31}` -- the same charset
+/// the drain's binding allowlist uses; a Discord snowflake can never match.
+fn is_role_key(s: &str) -> bool {
+    let mut b = s.bytes();
+    s.len() <= 32
+        && b.next().is_some_and(|c| c.is_ascii_lowercase())
+        && b.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
 }
 
 /// Stamps the confirmation handshake onto a queued envelope: `op_id` (the
@@ -1015,6 +1103,22 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// # Errors
     /// `relay_unavailable` when no signing key is configured or signing fails.
     fn sign_envelope(&self, env: &mut serde_json::Value) -> Result<(), HostResultError> {
+        // EVERY signed entry carries a unique per-op nonce bound into the MAC:
+        // the drain's single-use (replay) key is derived from the signature, so
+        // two sends of identical text must never share one. A Discord op that
+        // already minted its ack `op_id` keeps it.
+        if env
+            .get("op_id")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            if let Some(obj) = env.as_object_mut() {
+                obj.insert(
+                    "op_id".to_string(),
+                    serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
+                );
+            }
+        }
         if env.get("exp_ms").is_none() {
             if let Some(obj) = env.as_object_mut() {
                 obj.insert(
@@ -1217,7 +1321,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         let op = peek_relay_op(args).map_err(|raw| {
             denied(
                 "unknown_op",
-                format!("relay op {raw:?} is not one of chat.send/chat.delete/dm.send"),
+                format!("relay op {raw:?} is not one of chat.send/chat.delete/dm.send/role.add/role.remove"),
             )
         })?;
         // Gate call FIRST (spec SS5), now that `provider` and `op` are known
@@ -1396,7 +1500,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 text: Some(&text),
                 // Host-pin stamp: the drain refuses unless channel == this.
                 origin_channel: Some(&channel),
-                community_id: (scope.community_id > 0).then_some(i64::from(scope.community_id)),
+                community_id: scope_community(scope),
                 ..EnvelopeFields::default()
             },
         );
@@ -1537,6 +1641,51 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             }
         }
         Ok(())
+    }
+
+    /// Fixed-window throttle on `role.add`/`role.remove` per `(tenant,
+    /// community, app)`, shared by every replica via Valkey. Fails closed when
+    /// the limiter cannot be read.
+    async fn throttle_role_op(&self, scope: &InvokeScope) -> Result<(), HostResultError> {
+        let key = format!(
+            "waddles:ratelimit:role.op:app:{}:{}:{}",
+            scope.tenant_id, scope.community_id, scope.app_id
+        );
+        match self
+            .relay_queue
+            .incr_window(&key, DM_SEND_WINDOW_SECS)
+            .await
+        {
+            Ok(count) if count <= ROLE_OP_APP_LIMIT => Ok(()),
+            Ok(count) => {
+                tracing::warn!(
+                    provider = "discord",
+                    app_id = %scope.app_id,
+                    count,
+                    limit = ROLE_OP_APP_LIMIT,
+                    "role op rate limit exceeded; refusing op, nothing queued"
+                );
+                Err(denied(
+                    "rate_limited",
+                    format!(
+                        "discord role op rate limit exceeded for this app in this community \
+                         ({ROLE_OP_APP_LIMIT} per {DM_SEND_WINDOW_SECS}s)"
+                    ),
+                ))
+            }
+            Err(e) => {
+                tracing::error!(
+                    provider = "discord",
+                    app_id = %scope.app_id,
+                    error = %e,
+                    "role op rate limiter unavailable; refusing op (fail closed), nothing queued"
+                );
+                Err(denied(
+                    "relay_unavailable",
+                    format!("discord role op refused: rate limiter unavailable: {e}"),
+                ))
+            }
+        }
     }
 
     /// Waits for the drain's result for `op_id` and maps it onto this host
@@ -1721,6 +1870,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 channel_id: &'a str,
                 text: &'a str,
             },
+            Role {
+                origin_channel: &'a str,
+                user: &'a str,
+                role_key: &'a str,
+            },
         }
         let pending = match op {
             RelayOp::ChatDelete => {
@@ -1741,11 +1895,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             RelayOp::DmSend => {
                 let origin_channel = origin("dm.send")?;
                 let user_id = str_field("user_id")
-                    .filter(|id| is_discord_snowflake(id))
+                    .filter(|id| is_discord_snowflake(id) || is_user_placeholder(id))
                     .ok_or_else(|| {
                         denied(
                             "invalid_args",
-                            "discord dm.send requires a snowflake 'user_id'",
+                            "discord dm.send requires a snowflake or {user:<uuid>} 'user_id'",
                         )
                     })?;
                 let text = str_field("text").ok_or_else(|| {
@@ -1778,7 +1932,40 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 })?;
                 Pending::Chat { channel_id, text }
             }
+            RelayOp::RoleAdd | RelayOp::RoleRemove => {
+                let what = op.as_str();
+                let origin_channel = origin(what)?;
+                // The bundle names a tokenized user and a managed-role KEY --
+                // never a role snowflake, never a guild (the drain maps the key
+                // through the community's binding allowlist and pins the guild
+                // itself). Any `guild_id`/`role_id`/`channel` it adds is ignored.
+                let user = str_field("user_id")
+                    .filter(|id| is_user_placeholder(id))
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            format!("discord {what} requires a {{user:<uuid>}} 'user_id'"),
+                        )
+                    })?;
+                let role_key = str_field("role_key")
+                    .filter(|k| is_role_key(k))
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            format!("discord {what} requires a managed-role 'role_key' ([a-z][a-z0-9_-]{{0,31}})"),
+                        )
+                    })?;
+                Pending::Role {
+                    origin_channel,
+                    user,
+                    role_key,
+                }
+            }
         };
+        // The numeric tenant is stamped for dm.send / role ops from the
+        // verified scope; refused before any I/O when the scope has none.
+        let tenant_id = tenant_stamp(op, scope)?;
+        let community_id = scope_community(scope);
 
         // Phase 2: producer-side safety checks, cheapest and most
         // fundamental first -- is anything draining, then is this call within
@@ -1786,6 +1973,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         self.require_discord_drain_ready(scope, op).await?;
         if let Pending::Dm { user_id, .. } = &pending {
             self.throttle_dm_send(scope, user_id).await?;
+        }
+        // The role ops are throttled per (tenant, community, app): a bundle
+        // cannot hammer the guild's role API through the shared bot.
+        if matches!(pending, Pending::Role { .. }) {
+            self.throttle_role_op(scope).await?;
         }
 
         // Phase 3: build the envelope (the DM text passes through the egress
@@ -1801,6 +1993,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                     channel: Some(channel_id),
                     message_id: Some(message_id),
                     origin_channel: Some(channel_id),
+                    community_id,
+                    tenant_id,
                     ..EnvelopeFields::default()
                 },
             ),
@@ -1815,6 +2009,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                         channel: Some(channel_id),
                         text: Some(&text),
                         origin_channel: Some(channel_id),
+                        community_id,
+                        tenant_id,
                         ..EnvelopeFields::default()
                     },
                 )
@@ -1834,10 +2030,30 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                         text: Some(&text),
                         user_id: Some(user_id),
                         origin_channel: Some(origin_channel),
+                        community_id,
+                        tenant_id,
                         ..EnvelopeFields::default()
                     },
                 )
             }
+            // The role KEY rides in the MAC-covered `text` field (the drain
+            // reads it back as `role_key`); it is not detokenized.
+            Pending::Role {
+                origin_channel,
+                user,
+                role_key,
+            } => build_outbound_envelope(
+                op,
+                "discord",
+                &EnvelopeFields {
+                    text: Some(role_key),
+                    user_id: Some(user),
+                    origin_channel: Some(origin_channel),
+                    community_id,
+                    tenant_id,
+                    ..EnvelopeFields::default()
+                },
+            ),
         };
 
         let op_id = uuid::Uuid::new_v4().to_string();
@@ -2985,6 +3201,7 @@ mod tests {
                 "chat.delete:discord",
                 "dm.send:twitch",
                 "dm.send:discord",
+                "moderation.discord",
                 "net.http.fqdn:example.com",
                 "storage.tables",
                 "flags.read",
@@ -3081,6 +3298,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
         let sig = v["pin_sig"].as_str().expect("pin_sig stamped");
         let exp_ms = v["exp_ms"].as_u64().expect("exp_ms stamped");
+        let op_id = v["op_id"].as_str().expect("op_id stamped").to_string();
         let now = now_epoch_ms();
         assert!(
             exp_ms > now && exp_ms <= now + PIN_TTL_MS + 5_000,
@@ -3096,7 +3314,7 @@ mod tests {
                     message_id: "",
                     text,
                     user_id: "",
-                    op_id: "",
+                    op_id: &op_id,
                     exp_ms,
                     community_id: v["community_id"].as_i64().unwrap_or(0),
                     tenant_id: 0,
@@ -3134,6 +3352,7 @@ mod tests {
         assert_eq!(v["community_id"], 3, "scope's id, never the bundle's");
         let sig = v["pin_sig"].as_str().unwrap();
         let exp_ms = v["exp_ms"].as_u64().unwrap();
+        let op_id = v["op_id"].as_str().expect("op_id stamped").to_string();
         let verify = |community_id: i64| {
             test_pin_keys().verify(
                 &PinFields {
@@ -3144,7 +3363,7 @@ mod tests {
                     message_id: "",
                     text: "hi",
                     user_id: "",
-                    op_id: "",
+                    op_id: &op_id,
                     exp_ms,
                     community_id,
                     tenant_id: 0,
@@ -3220,6 +3439,7 @@ mod tests {
         caps.sign_envelope(&mut env).expect("signed");
         let sig = env["pin_sig"].as_str().unwrap().to_string();
         let exp_ms = env["exp_ms"].as_u64().unwrap();
+        let op_id = env["op_id"].as_str().expect("op_id stamped").to_string();
         let f = |tenant_id: i64| PinFields {
             platform: "twitch",
             op: "chat.send",
@@ -3228,7 +3448,7 @@ mod tests {
             message_id: "",
             text: "hi",
             user_id: "",
-            op_id: "",
+            op_id: &op_id,
             exp_ms,
             community_id: 3,
             tenant_id,
@@ -4360,6 +4580,425 @@ mod tests {
             );
         }
         assert_ne!(d["op_id"], m["op_id"], "each op gets its own id");
+    }
+
+    const UUID_A: &str = "3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5f";
+
+    fn user_ph() -> String {
+        format!("{{user:{UUID_A}}}")
+    }
+
+    fn role_message(op: &str) -> serde_json::Value {
+        serde_json::json!({"op": op, "user_id": user_ph(), "role_key": "vip"})
+    }
+
+    /// Verifies `env`'s `pin_sig` with the numeric ids given (wire fields
+    /// otherwise as stamped).
+    fn verifies(
+        env: &serde_json::Value,
+        community_id: i64,
+        tenant_id: i64,
+    ) -> Result<(), crate::pin_sig::PinSigError> {
+        let g = |k: &str| env[k].as_str().unwrap_or("");
+        test_pin_keys().verify(
+            &PinFields {
+                platform: g("platform"),
+                op: g("op"),
+                channel: g("channel"),
+                origin_channel: g("origin_channel"),
+                message_id: g("message_id"),
+                text: g("text"),
+                user_id: g("user_id"),
+                op_id: g("op_id"),
+                exp_ms: env["exp_ms"].as_u64().unwrap(),
+                community_id,
+                tenant_id,
+            },
+            env["pin_sig"].as_str().unwrap(),
+        )
+    }
+
+    /// p6a producer-completeness (2): every signed entry -- Twitch chat sends
+    /// included -- carries a unique `op_id` bound into the MAC, so two sends of
+    /// IDENTICAL text are two distinct, individually single-use entries.
+    #[tokio::test]
+    async fn two_identical_twitch_sends_get_different_op_ids_bound_in_the_mac() {
+        let caps = caps(FakeRelayQueue::default());
+        let send = || {
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"same\"}"}),
+            )
+        };
+        caps.handle(&twitch_scope(), send()).await.unwrap();
+        caps.handle(&twitch_scope(), send()).await.unwrap();
+        let envs = caps.relay_queue.envelopes();
+        let (a, b) = (&envs[0], &envs[1]);
+        let (ida, idb) = (a["op_id"].as_str().unwrap(), b["op_id"].as_str().unwrap());
+        assert!(!ida.is_empty() && !idb.is_empty());
+        assert_ne!(ida, idb, "identical text must not share an op_id");
+        assert_ne!(
+            a["pin_sig"], b["pin_sig"],
+            "so the drain's dedupe key differs"
+        );
+        // The op_id is IN the MAC: swapping it on a signed entry breaks it.
+        assert_eq!(verifies(a, 3, 0), Ok(()));
+        let mut swapped = a.clone();
+        swapped["op_id"] = b["op_id"].clone();
+        assert!(verifies(&swapped, 3, 0).is_err());
+        let mut stripped = a.clone();
+        stripped.as_object_mut().unwrap().remove("op_id");
+        assert!(verifies(&stripped, 3, 0).is_err());
+    }
+
+    /// `sign_envelope` mints an op_id when absent and keeps an existing one.
+    #[test]
+    fn sign_envelope_mints_an_op_id_only_when_absent() {
+        let caps = caps(FakeRelayQueue::default());
+        let mut env = build_outbound_envelope(
+            RelayOp::ChatSend,
+            "twitch",
+            &EnvelopeFields {
+                channel: Some("#c"),
+                text: Some("hi"),
+                origin_channel: Some("#c"),
+                ..EnvelopeFields::default()
+            },
+        );
+        caps.sign_envelope(&mut env).unwrap();
+        let minted = env["op_id"].as_str().unwrap().to_string();
+        assert_eq!(minted.len(), 36, "uuid v4");
+        let mut keep =
+            build_outbound_envelope(RelayOp::ChatSend, "twitch", &EnvelopeFields::default());
+        keep["op_id"] = "mine-1".into();
+        caps.sign_envelope(&mut keep).unwrap();
+        assert_eq!(keep["op_id"], "mine-1");
+        let mut empty =
+            build_outbound_envelope(RelayOp::ChatSend, "twitch", &EnvelopeFields::default());
+        empty["op_id"] = "".into();
+        caps.sign_envelope(&mut empty).unwrap();
+        assert_eq!(
+            empty["op_id"].as_str().unwrap().len(),
+            36,
+            "empty is not an id"
+        );
+    }
+
+    /// p6a producer-completeness (3): `dm.send` stamps the numeric tenant from
+    /// the verified invoke scope (MAC-bound); a bundle-supplied
+    /// `tenant_id`/`community_id` is ignored. chat.send/chat.delete carry none.
+    #[tokio::test]
+    async fn dm_send_stamps_the_scope_tenant_and_ignores_the_bundle_s() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        let msg = serde_json::json!({
+            "op":"dm.send","user_id":"333","text":"hi","tenant_id":999,"community_id":888
+        });
+        caps.handle(&discord_scope(), discord_call(&msg))
+            .await
+            .unwrap();
+        caps.handle(&discord_scope(), discord_call(&delete_message()))
+            .await
+            .unwrap();
+        let envs = caps.relay_queue.envelopes();
+        let (dm, del) = (&envs[0], &envs[1]);
+        assert_eq!(dm["tenant_id"], 7, "scope's tenant, never the bundle's");
+        assert_eq!(
+            dm["community_id"], 3,
+            "scope's community, never the bundle's"
+        );
+        assert_eq!(verifies(dm, 3, 7), Ok(()));
+        for (c, t) in [(3, 999), (3, 0), (888, 7), (0, 7)] {
+            assert!(verifies(dm, c, t).is_err(), "({c},{t}) must not verify");
+        }
+        assert!(
+            del.get("tenant_id").is_none(),
+            "chat.delete needs no tenant"
+        );
+        assert_eq!(del["community_id"], 3);
+        assert_eq!(verifies(del, 3, 0), Ok(()));
+    }
+
+    /// dm.send / role ops with no resolved tenant are refused up front with a
+    /// typed code and nothing is queued (the drain would refuse
+    /// `no_tenant_scope` anyway).
+    #[test]
+    fn tenant_needing_ops_refuse_an_unresolved_tenant() {
+        // Defense in depth: the gate already fails an unresolved tenant closed,
+        // so this guard is unit-tested directly.
+        let sc = InvokeScope {
+            tenant_id: 0,
+            ..discord_scope()
+        };
+        for op in [RelayOp::DmSend, RelayOp::RoleAdd, RelayOp::RoleRemove] {
+            let err = tenant_stamp(op, &sc).unwrap_err();
+            assert_eq!(err.code, "tenant_scope_missing", "{}", op.as_str());
+        }
+        // Ops that do not need a tenant are unaffected.
+        assert_eq!(tenant_stamp(RelayOp::ChatDelete, &sc).unwrap(), None);
+    }
+
+    /// dm.send also accepts the tokenized `{user:<uuid>}` form (the only form
+    /// the executor's duty accepts).
+    #[tokio::test]
+    async fn dm_send_accepts_a_tokenized_user_placeholder() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        let msg = serde_json::json!({"op":"dm.send","user_id":user_ph(),"text":"hi"});
+        caps.handle(&discord_scope(), discord_call(&msg))
+            .await
+            .unwrap();
+        assert_eq!(caps.relay_queue.envelopes()[0]["user_id"], user_ph());
+    }
+
+    /// p6a producer-completeness (4): `role.add`/`role.remove` are queued with
+    /// the host-pinned origin channel, the role KEY in the MAC-covered `text`,
+    /// the `{user:<uuid>}` user and the scope's numeric ids; a bundle-supplied
+    /// guild/role snowflake/channel/tenant is ignored; confirmed on ack.
+    #[tokio::test]
+    async fn role_ops_are_queued_host_pinned_with_the_key_in_text() {
+        for op in ["role.add", "role.remove"] {
+            let caps = caps(FakeRelayQueue::with_live_drain());
+            let mut msg = role_message(op);
+            msg["guild_id"] = "111111111111111111".into();
+            msg["role_id"] = "222222222222222222".into();
+            msg["channel"] = "999999999999999999".into();
+            msg["tenant_id"] = 999.into();
+            let out = caps
+                .handle(&discord_scope(), discord_call(&msg))
+                .await
+                .unwrap();
+            assert_eq!(out["confirmed"], true);
+            assert_eq!(out["op"], op);
+            let envs = caps.relay_queue.envelopes();
+            let e = &envs[0];
+            assert_eq!(e["op"], op);
+            assert_eq!(e["platform"], "discord");
+            assert_eq!(e["text"], "vip", "role KEY rides in the MAC-covered text");
+            assert_eq!(e["user_id"], user_ph());
+            assert_eq!(e["origin_channel"], "123456789012345678");
+            assert_eq!(
+                (e["tenant_id"].as_i64(), e["community_id"].as_i64()),
+                (Some(7), Some(3))
+            );
+            for ignored in ["guild_id", "role_id", "channel"] {
+                assert!(
+                    e.get(ignored).is_none(),
+                    "{ignored} must not reach the queue"
+                );
+            }
+            assert!(e["op_id"].as_str().is_some_and(|i| !i.is_empty()));
+            assert_eq!(verifies(e, 3, 7), Ok(()));
+            // The key is MAC-bound: another key does not verify.
+            let mut other = e.clone();
+            other["text"] = "admin".into();
+            assert!(verifies(&other, 3, 7).is_err());
+        }
+    }
+
+    /// Role ops are typed-refused (and queue nothing) for a bad key, a
+    /// non-tokenized user, a missing/foreign origin, an unready drain, and a
+    /// drain that refuses.
+    #[tokio::test]
+    async fn role_ops_refuse_bad_input_and_surface_drain_refusals() {
+        let bad = [
+            serde_json::json!({"op":"role.add","user_id":user_ph(),"role_key":"222222222222222222"}),
+            serde_json::json!({"op":"role.add","user_id":user_ph(),"role_key":"VIP"}),
+            serde_json::json!({"op":"role.add","user_id":user_ph(),"role_key":"a".repeat(33)}),
+            serde_json::json!({"op":"role.add","user_id":user_ph()}),
+            serde_json::json!({"op":"role.add","user_id":"333","role_key":"vip"}),
+            serde_json::json!({"op":"role.add","user_id":"{user:not-a-uuid}","role_key":"vip"}),
+            serde_json::json!({"op":"role.remove","role_key":"vip"}),
+        ];
+        for m in bad {
+            let caps = caps(FakeRelayQueue::with_live_drain());
+            let err = caps
+                .handle(&discord_scope(), discord_call(&m))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "invalid_args", "{m}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+        }
+        // No origin channel (non-channel event).
+        let caps_a = caps(FakeRelayQueue::with_live_drain());
+        let err = caps_a
+            .handle(&scope(), discord_call(&role_message("role.add")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+        // Drain not ready: nothing queued.
+        let caps_b = caps(FakeRelayQueue::default());
+        let err = caps_b
+            .handle(&discord_scope(), discord_call(&role_message("role.add")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+        assert!(caps_b.relay_queue.pushed.lock().unwrap().is_empty());
+        // The drain's stable refusal codes reach the bundle as typed errors.
+        let caps_c = caps(FakeRelayQueue::with_drain_result(
+            r#"{"ok":false,"code":"unsupported"}"#,
+        ));
+        let err = caps_c
+            .handle(&discord_scope(), discord_call(&role_message("role.add")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unsupported_op");
+        // Twitch has no role op.
+        let caps_d = caps(FakeRelayQueue::default());
+        let err = caps_d
+            .handle(
+                &twitch_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider":"twitch","message_json": role_message("role.add").to_string()}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        // No `moderation.twitch` grant AND no twitch role sender: refused either way.
+        assert!(
+            matches!(err.code.as_str(), "not_granted" | "unsupported_op"),
+            "{}",
+            err.code
+        );
+    }
+
+    /// Role ops ride the `moderation.<platform>` permission: not granted =>
+    /// denied at the gate, nothing queued, even if dm.send is granted.
+    #[tokio::test]
+    async fn role_ops_require_the_moderation_grant() {
+        assert_eq!(
+            RelayOp::RoleAdd.permission("discord"),
+            PermissionId::Moderation("discord".to_string())
+        );
+        assert_eq!(
+            RelayOp::RoleRemove.permission("discord"),
+            PermissionId::Moderation("discord".to_string())
+        );
+        let caps: StageCapabilities<FakeRelayQueue> = StageCapabilities::new(
+            FakeRelayQueue::with_live_drain(),
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            deny_all_gate(),
+        );
+        let err = caps
+            .handle(&discord_scope(), discord_call(&role_message("role.add")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    /// Role ops are throttled per (tenant, community, app) and the limiter
+    /// fails closed.
+    #[tokio::test]
+    async fn role_ops_are_throttled_and_the_limiter_fails_closed() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        for _ in 0..ROLE_OP_APP_LIMIT {
+            caps.handle(&discord_scope(), discord_call(&role_message("role.add")))
+                .await
+                .unwrap();
+        }
+        let err = caps
+            .handle(&discord_scope(), discord_call(&role_message("role.add")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "rate_limited");
+        let down = caps_with_usage(
+            FakeRelayQueue {
+                fail_incr: true,
+                ..FakeRelayQueue::with_live_drain()
+            },
+            Arc::new(Mutex::new(UsageBatcher::new())),
+        );
+        let err = down
+            .handle(&discord_scope(), discord_call(&role_message("role.remove")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+        assert!(down.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    /// regression (review): a mixed-case `{user:<uuid>}` must not get its own
+    /// DM throttle bucket (per-target limit bypass). Only canonical lowercase
+    /// is accepted, so both spellings can never coexist; the lowercase one
+    /// shares a single bucket across sends.
+    #[tokio::test]
+    async fn dm_throttle_cannot_be_bypassed_by_uuid_case() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        let lower = serde_json::json!({"op":"dm.send","user_id":user_ph(),"text":"x"});
+        let upper = serde_json::json!({
+            "op":"dm.send","user_id":format!("{{user:{}}}", UUID_A.to_ascii_uppercase()),"text":"x"
+        });
+        caps.handle(&discord_scope(), discord_call(&lower))
+            .await
+            .unwrap();
+        let err = caps
+            .handle(&discord_scope(), discord_call(&upper))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+        caps.handle(&discord_scope(), discord_call(&lower))
+            .await
+            .unwrap();
+        caps.handle(&discord_scope(), discord_call(&lower))
+            .await
+            .unwrap();
+        let err = caps
+            .handle(&discord_scope(), discord_call(&lower))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "rate_limited", "4th to one target in the window");
+        let targets: Vec<_> = caps
+            .relay_queue
+            .windows
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|k| k.contains("dm.send:target"))
+            .cloned()
+            .collect();
+        assert_eq!(targets.len(), 1, "one canonical bucket: {targets:?}");
+    }
+
+    #[test]
+    fn role_key_user_placeholder_and_op_tables() {
+        for ok in ["vip", "a", "mod-team_2", &"a".repeat(32)] {
+            assert!(is_role_key(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "1abc",
+            "Vip",
+            "a b",
+            "a:b",
+            "222222222222222222",
+            &"a".repeat(33),
+        ] {
+            assert!(!is_role_key(bad), "{bad}");
+        }
+        assert!(is_user_placeholder(&user_ph()));
+        for bad in [
+            UUID_A,
+            "{user:}",
+            "{user:3f2b8c1e}",
+            "333",
+            "{user:3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5z}",
+        ] {
+            assert!(!is_user_placeholder(bad), "{bad}");
+        }
+        assert_eq!(RelayOp::parse("role.add"), Some(RelayOp::RoleAdd));
+        assert_eq!(RelayOp::parse("role.remove"), Some(RelayOp::RoleRemove));
+        assert!(relay_op_supported("discord", RelayOp::RoleAdd));
+        assert!(relay_op_supported("discord", RelayOp::RoleRemove));
+        assert!(!relay_op_supported("twitch", RelayOp::RoleAdd));
+        for op in [RelayOp::DmSend, RelayOp::RoleAdd, RelayOp::RoleRemove] {
+            assert!(op.needs_tenant());
+        }
+        assert!(!RelayOp::ChatSend.needs_tenant() && !RelayOp::ChatDelete.needs_tenant());
+        let sc = scope();
+        assert_eq!(tenant_stamp(RelayOp::ChatSend, &sc).unwrap(), None);
+        assert_eq!(tenant_stamp(RelayOp::DmSend, &sc).unwrap(), Some(7));
     }
 
     #[tokio::test]
