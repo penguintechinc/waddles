@@ -67,29 +67,71 @@ fn base_refs() -> Vec<(String, String)> {
     ]
 }
 
-/// Validates + sanitizes user text. Rejects empty/oversize text and any `{{`
-/// (a hostile text must never smuggle a slot the host would substitute).
+/// True for characters that can hide or reshape a slot: C0/C1 controls, line
+/// and paragraph separators, and invisible format characters (zero-width,
+/// bidi controls, word joiner, BOM, soft hyphen, tag characters).
+pub fn is_unsafe_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}')
+}
+
+/// The ONE gate for every guest-/user-derived string that reaches a request
+/// template. Rejects (never strips) unsafe characters first, then any brace
+/// pair that could form or close a host slot, so no later transformation can
+/// assemble a live `{{...}}`.
+pub fn reject_unsafe(label: &str, raw: &str) -> Result<(), FrameErr> {
+    if raw.chars().any(is_unsafe_char) {
+        return Err(FrameErr::Malformed(format!(
+            "{label} contains control or invisible characters"
+        )));
+    }
+    if raw.contains("{{") || raw.contains("}}") {
+        return Err(FrameErr::Malformed(format!(
+            "{label} contains reserved brace pair"
+        )));
+    }
+    Ok(())
+}
+
+/// Validates user text: rejects (not strips) unsafe input, empty and oversize.
 fn clean_text(payload: &Value) -> Result<String, FrameErr> {
     let raw = payload
         .get("text")
         .or_else(|| payload.get("message"))
         .and_then(Value::as_str)
         .ok_or_else(|| FrameErr::Malformed("payload needs string `text`".to_string()))?;
-    if raw.contains("{{") {
-        return Err(FrameErr::Malformed(
-            "text contains reserved `{{`".to_string(),
-        ));
-    }
-    let text: String = raw.chars().filter(|c| !c.is_control()).collect();
-    if text.trim().is_empty() {
+    reject_unsafe("text", raw)?;
+    if raw.trim().is_empty() {
         return Err(FrameErr::Malformed("text is empty".to_string()));
     }
-    if text.chars().count() > MAX_TEXT_CHARS {
+    if raw.chars().count() > MAX_TEXT_CHARS {
         return Err(FrameErr::Malformed(
             "text exceeds 500 characters".to_string(),
         ));
     }
-    Ok(text)
+    Ok(raw.to_string())
+}
+
+/// Defence in depth on the finished template: the only `{{` / `}}` pairs
+/// present must be the slots this module declares in `secret_refs`.
+fn verify_slots(t: &Tpl) -> Result<(), FrameErr> {
+    let mut all = format!("{} {:?}", t.url, t.headers);
+    if let Some(b) = &t.body {
+        all.push_str(&String::from_utf8_lossy(b));
+    }
+    let expected: usize = t
+        .secret_refs
+        .iter()
+        .map(|(slot, _)| all.matches(slot.as_str()).count())
+        .sum();
+    if all.matches("{{").count() != expected || all.matches("}}").count() != expected {
+        return Err(FrameErr::Malformed(
+            "template carries an undeclared slot".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn id_arg(payload: &Value, key: &str, digits_only: bool) -> Result<String, FrameErr> {
@@ -97,6 +139,7 @@ fn id_arg(payload: &Value, key: &str, digits_only: bool) -> Result<String, Frame
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| FrameErr::Malformed(format!("payload needs string `{key}`")))?;
+    reject_unsafe(key, v)?;
     let ok = !v.is_empty()
         && v.len() <= 64
         && v.bytes().all(|b| {
@@ -115,7 +158,7 @@ fn id_arg(payload: &Value, key: &str, digits_only: bool) -> Result<String, Frame
 
 /// Builds the template for `kind`. `target_source_id` must be non-empty: the
 /// host resolves and pins the destination from it (never from this output).
-pub fn build_request(
+fn build_unchecked(
     kind: &str,
     target_source_id: &str,
     payload_json: &str,
@@ -182,6 +225,18 @@ pub fn build_request(
     }
 }
 
+/// Builds the template for `kind`. `target_source_id` must be non-empty: the
+/// host resolves and pins the destination from it (never from this output).
+pub fn build_request(
+    kind: &str,
+    target_source_id: &str,
+    payload_json: &str,
+) -> Result<Tpl, FrameErr> {
+    let t = build_unchecked(kind, target_source_id, payload_json)?;
+    verify_slots(&t)?;
+    Ok(t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,13 +281,102 @@ mod tests {
         assert!(matches!(e, Err(FrameErr::Malformed(_))));
     }
 
+    /// Regression: the check used to run BEFORE control chars were stripped, so
+    /// `{<NUL>{TWITCH_TOKEN}}` assembled a live slot after filtering.
+    #[test]
+    fn control_or_invisible_chars_between_braces_are_rejected() {
+        for sep in [
+            '\u{0}',
+            '\u{1}',
+            '\u{7f}',
+            '\u{200B}',
+            '\u{2060}',
+            '\u{FEFF}',
+            '\u{202E}',
+            '\u{E0041}',
+            '\u{2028}',
+            '\u{AD}',
+        ] {
+            let t = format!("{{{sep}{{TWITCH_TOKEN}}{sep}}}");
+            for kind in ["chat.send", "dm.send"] {
+                let p = json!({"text": t, "to_user_id": "1"}).to_string();
+                assert!(
+                    matches!(build_request(kind, "s", &p), Err(FrameErr::Malformed(_))),
+                    "{kind} accepted U+{:04X}",
+                    sep as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lone_close_braces_and_every_slot_literal_are_rejected() {
+        for t in [
+            "}}",
+            "a }} b",
+            "{{",
+            "{{TWITCH_BROADCASTER_ID}}",
+            "{{TWITCH_SENDER_ID}}",
+            "{{TWITCH_CLIENT_ID}}",
+        ] {
+            assert!(build_request("chat.send", "s", &text(t)).is_err(), "{t}");
+        }
+    }
+
+    /// Lookalike braces are not slot syntax (the host matches ASCII bytes), so
+    /// they pass as plain text but can never form a declared slot.
+    #[test]
+    fn unicode_lookalike_braces_never_form_a_slot() {
+        let t = build_request(
+            "chat.send",
+            "s",
+            &text("\u{FF5B}\u{FF5B}TWITCH_TOKEN\u{FF5D}\u{FF5D}"),
+        )
+        .unwrap();
+        let body = String::from_utf8(t.body.clone().unwrap()).unwrap();
+        assert_eq!(body.matches(SLOT_TOKEN).count(), 0);
+        assert_eq!(
+            body.matches("{{").count(),
+            2,
+            "only the two declared body slots"
+        );
+    }
+
+    #[test]
+    fn reject_unsafe_layer_alone_blocks_each_class() {
+        assert!(reject_unsafe("x", "a}}b").is_err());
+        assert!(reject_unsafe("x", "a{{b").is_err());
+        assert!(reject_unsafe("x", "a\u{0}b").is_err());
+        assert!(reject_unsafe("x", "a\u{200B}b").is_err());
+        assert!(reject_unsafe("x", "plain {single} braces ok").is_ok());
+    }
+
+    #[test]
+    fn verify_slots_catches_undeclared_slot() {
+        let mut t = build_request("chat.send", "s", &text("hi")).unwrap();
+        assert!(verify_slots(&t).is_ok());
+        t.url.push_str("&x={{EVIL}}");
+        assert!(verify_slots(&t).is_err());
+        let mut t2 = build_request("chat.send", "s", &text("hi")).unwrap();
+        t2.headers.push(("X".to_string(), "}}".to_string()));
+        assert!(verify_slots(&t2).is_err());
+    }
+
+    #[test]
+    fn id_fields_reject_unsafe_characters() {
+        let p = json!({"message_id": "ab\u{0}c"}).to_string();
+        assert!(build_request("chat.delete", "s", &p).is_err());
+        let p = json!({"to_user_id": "12\u{200B}3", "text": "x"}).to_string();
+        assert!(build_request("dm.send", "s", &p).is_err());
+    }
+
     #[test]
     fn text_rules() {
         assert!(build_request("chat.send", "s", &text("   ")).is_err());
         assert!(build_request("chat.send", "s", &text(&"x".repeat(501))).is_err());
         assert!(build_request("chat.send", "s", "{}").is_err());
-        let t = build_request("chat.send", "s", &text("a\r\nPRIVMSG b")).unwrap();
-        assert!(!String::from_utf8(t.body.unwrap()).unwrap().contains('\r'));
+        // Control characters are REJECTED, never silently stripped.
+        assert!(build_request("chat.send", "s", &text("a\r\nPRIVMSG b")).is_err());
         // `message` alias accepted.
         let m = json!({"message":"hey"}).to_string();
         assert!(build_request("chat.send", "s", &m).is_ok());

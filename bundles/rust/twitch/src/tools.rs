@@ -9,6 +9,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use waddle_sdk::tool::{ToolError, ToolRegistry};
 
+use crate::sender::{SLOT_BROADCASTER, SLOT_SENDER};
+
 const HELIX: &str = "https://api.twitch.tv/helix";
 /// Header secret-ref names the host injects (header -> secret ref).
 pub const SECRET_REFS: &[(&str, &str)] = &[
@@ -28,15 +30,17 @@ pub trait IdentityHost: Send + Sync {
     fn uuid_for(&self, twitch_user_id: &str) -> Result<String, ToolError>;
 }
 
-fn digits(args: &Value, key: &str) -> Result<String, ToolError> {
-    let v = args
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| ToolError::InvalidArgs(format!("missing string field {key}")))?;
-    if v.is_empty() || v.len() > 20 || !v.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(ToolError::InvalidArgs(format!("{key} must be numeric")));
+/// Caller-supplied destination ids are refused outright: the channel and
+/// moderator come from the host-pinned slots, never from tool arguments.
+fn reject_destination_args(args: &Value) -> Result<(), ToolError> {
+    for k in crate::sender::IGNORED_TARGET_KEYS {
+        if args.get(*k).is_some() {
+            return Err(ToolError::InvalidArgs(format!(
+                "{k} is host-pinned and may not be supplied"
+            )));
+        }
     }
-    Ok(v.to_string())
+    Ok(())
 }
 
 fn paging(args: &Value) -> Result<String, ToolError> {
@@ -118,10 +122,9 @@ pub fn build_registry(helix: Arc<dyn HelixHost>, ident: Arc<dyn IdentityHost>) -
     {
         let (h, i) = (helix.clone(), ident.clone());
         r.register("get_chatters", move |_ctx, args| {
+            reject_destination_args(&args)?;
             let url = format!(
-                "{HELIX}/chat/chatters?broadcaster_id={}&moderator_id={}{}",
-                digits(&args, "broadcaster_id")?,
-                digits(&args, "moderator_id")?,
+                "{HELIX}/chat/chatters?broadcaster_id={SLOT_BROADCASTER}&moderator_id={SLOT_SENDER}{}",
                 paging(&args)?
             );
             let resp = fetch(h.as_ref(), &url)?;
@@ -132,9 +135,9 @@ pub fn build_registry(helix: Arc<dyn HelixHost>, ident: Arc<dyn IdentityHost>) -
     {
         let (h, i) = (helix.clone(), ident.clone());
         r.register("get_followers", move |_ctx, args| {
+            reject_destination_args(&args)?;
             let url = format!(
-                "{HELIX}/channels/followers?broadcaster_id={}{}",
-                digits(&args, "broadcaster_id")?,
+                "{HELIX}/channels/followers?broadcaster_id={SLOT_BROADCASTER}{}",
                 paging(&args)?
             );
             let resp = fetch(h.as_ref(), &url)?;
@@ -145,9 +148,9 @@ pub fn build_registry(helix: Arc<dyn HelixHost>, ident: Arc<dyn IdentityHost>) -
     {
         let (h, i) = (helix, ident);
         r.register("get_subscriptions", move |_ctx, args| {
+            reject_destination_args(&args)?;
             let url = format!(
-                "{HELIX}/subscriptions?broadcaster_id={}{}",
-                digits(&args, "broadcaster_id")?,
+                "{HELIX}/subscriptions?broadcaster_id={SLOT_BROADCASTER}{}",
                 paging(&args)?
             );
             let resp = fetch(h.as_ref(), &url)?;
@@ -200,17 +203,12 @@ mod tests {
             200,
             r#"{"data":[{"user_id":"7","user_login":"bob","user_name":"Bob"}],"total":1,"pagination":{"cursor":"c1"}}"#,
         );
-        let v = call(
-            &r,
-            "get_chatters",
-            json!({"broadcaster_id":"1","moderator_id":"2","first":5,"after":"ab-1"}),
-        )
-        .unwrap();
+        let v = call(&r, "get_chatters", json!({"first":5,"after":"ab-1"})).unwrap();
         assert_eq!(v["chatters"][0]["user"], "uuid-7");
         assert!(!v.to_string().contains("bob"), "no handle may leak");
         assert_eq!(v["cursor"], "c1");
         let u = f.urls.lock().unwrap()[0].clone();
-        assert!(u.ends_with("broadcaster_id=1&moderator_id=2&first=5&after=ab-1"));
+        assert!(u.ends_with("broadcaster_id={{TWITCH_BROADCASTER_ID}}&moderator_id={{TWITCH_SENDER_ID}}&first=5&after=ab-1"), "{u}");
     }
 
     #[test]
@@ -219,23 +217,50 @@ mod tests {
             200,
             r#"{"data":[{"user_id":"7","followed_at":"t","tier":"1000","is_gift":false}],"total":9}"#,
         );
-        let v = call(&r, "get_followers", json!({"broadcaster_id":"1"})).unwrap();
+        let v = call(&r, "get_followers", json!({})).unwrap();
         assert_eq!(v["followers"][0]["followed_at"], "t");
         assert_eq!(v["total"], 9);
         assert_eq!(v["cursor"], Value::Null);
-        let v = call(&r, "get_subscriptions", json!({"broadcaster_id":"1"})).unwrap();
+        let v = call(&r, "get_subscriptions", json!({})).unwrap();
         assert_eq!(v["subscriptions"][0]["tier"], "1000");
+    }
+
+    /// Pinning: a caller can never name another channel/moderator; the host
+    /// substitutes the pinned ids into the slots.
+    #[test]
+    fn caller_supplied_destination_ids_are_rejected_and_urls_use_slots() {
+        for tool in ["get_chatters", "get_followers", "get_subscriptions"] {
+            for key in [
+                "broadcaster_id",
+                "moderator_id",
+                "channel",
+                "room_id",
+                "sender_id",
+            ] {
+                let (r, f) = reg(200, "{}");
+                let e = call(&r, tool, json!({ key: "999" })).unwrap_err();
+                assert!(matches!(e, ToolError::InvalidArgs(_)), "{tool}/{key}");
+                assert!(f.urls.lock().unwrap().is_empty());
+            }
+            let (r, f) = reg(200, r#"{"data":[]}"#);
+            call(&r, tool, json!({})).unwrap();
+            let u = f.urls.lock().unwrap()[0].clone();
+            assert!(
+                u.contains("broadcaster_id={{TWITCH_BROADCASTER_ID}}"),
+                "{u}"
+            );
+            assert!(!u.contains("999"));
+        }
     }
 
     #[test]
     fn argument_validation() {
         let (r, f) = reg(200, "{}");
         for bad in [
-            json!({"broadcaster_id":"1x","moderator_id":"2"}),
-            json!({"broadcaster_id":"1"}),
-            json!({"broadcaster_id":"1","moderator_id":"2","first":0}),
-            json!({"broadcaster_id":"1","moderator_id":"2","first":1001}),
-            json!({"broadcaster_id":"1","moderator_id":"2","after":"a&b"}),
+            json!({"first":0}),
+            json!({"first":1001}),
+            json!({"after":"a&b"}),
+            json!({"after":"{{TWITCH_TOKEN}}"}),
         ] {
             assert!(matches!(
                 call(&r, "get_chatters", bad),
@@ -254,7 +279,7 @@ mod tests {
 
     #[test]
     fn upstream_status_mapping() {
-        let a = json!({"broadcaster_id":"1"});
+        let a = json!({});
         for (status, ok) in [
             (401u16, "forbidden"),
             (403, "forbidden"),

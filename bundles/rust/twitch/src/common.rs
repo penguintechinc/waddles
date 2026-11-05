@@ -41,3 +41,46 @@ impl NormEvent {
         Value::Object(self.payload.clone()).to_string()
     }
 }
+
+/// Cutover gate decision, split out of the wasm glue so it is host-testable:
+/// flag OFF (the default; an unseen/unreachable flag reads OFF) refuses every
+/// overlay entry point so the hardcoded path stays the only live one.
+pub fn gate_decision(flag_enabled: bool) -> Result<(), FrameErr> {
+    if flag_enabled {
+        Ok(())
+    } else {
+        Err(FrameErr::Unsupported(
+            "overlay-twitch flag is off".to_string(),
+        ))
+    }
+}
+
+/// Default the glue passes to `flags::enabled(OVERLAY_FLAG, ..)`: OFF.
+pub const OVERLAY_FLAG_DEFAULT: bool = false;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flag_off_refuses_and_default_is_off() {
+        assert_eq!(OVERLAY_FLAG, "waddles.overlay-twitch");
+        assert!(!std::hint::black_box(OVERLAY_FLAG_DEFAULT));
+        assert!(matches!(
+            gate_decision(OVERLAY_FLAG_DEFAULT),
+            Err(FrameErr::Unsupported(_))
+        ));
+        assert!(gate_decision(true).is_ok());
+    }
+
+    #[test]
+    fn payload_json_round_trips() {
+        let e = NormEvent {
+            event_type: "message".into(),
+            actor: None,
+            payload: Map::new(),
+            occurred_at: "t".into(),
+        };
+        assert_eq!(e.payload_json(), "{}");
+    }
+}

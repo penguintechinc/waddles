@@ -27,7 +27,7 @@ mod component {
     use super::bindings::waddle::connector::types::{
         ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
     };
-    use super::common::{FrameErr, OVERLAY_FLAG, PLATFORM};
+    use super::common::{FrameErr, OVERLAY_FLAG, OVERLAY_FLAG_DEFAULT, PLATFORM, gate_decision};
     use super::tools::{HelixHost, IdentityHost, SECRET_REFS, build_registry};
     use super::{eventsub, irc, sender};
     use waddle_sdk::tool::{ToolError, ToolRegistry};
@@ -45,13 +45,7 @@ mod component {
     /// Defence in depth behind the host's own cutover: flag OFF (default) =
     /// the overlay refuses to run.
     fn gate() -> Result<(), FrameError> {
-        if flags::enabled(OVERLAY_FLAG, false) {
-            Ok(())
-        } else {
-            Err(FrameError::Unsupported(
-                "overlay-twitch flag is off".to_string(),
-            ))
-        }
+        gate_decision(flags::enabled(OVERLAY_FLAG, OVERLAY_FLAG_DEFAULT)).map_err(fe)
     }
 
     /// One PII-free line: op + counts only.
@@ -90,7 +84,7 @@ mod component {
             let res = if is_json {
                 eventsub::normalize_eventsub(&frame.bytes, &frame.received_at)
             } else {
-                irc::normalize_frame(&frame.bytes, &frame.received_at, None)
+                irc::normalize_frame(&frame.bytes, &frame.received_at, irc::GUEST_SELF_NICK)
             };
             let evs = res.map_err(fe)?;
             log_op(if is_json { "eventsub" } else { "irc" }, evs.len());

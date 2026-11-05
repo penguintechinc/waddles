@@ -302,3 +302,25 @@ mod tests {
         assert!(parse_privmsg_line("@nospace").is_none());
     }
 }
+
+/// Self nick the guest passes to [`normalize_frame`]. `None` until the host
+/// self-filter (or a `self-nick` in `connection-ctx`) lands; enabling the
+/// overlay REQUIRES that host-side filter.
+pub const GUEST_SELF_NICK: Option<&str> = None;
+
+#[cfg(test)]
+mod gap_tests {
+    use super::*;
+
+    /// Pins the open self-echo gap: with no guest self identity the bot's own
+    /// echoed PRIVMSG is still published. When the host filter / ctx self-nick
+    /// lands and `GUEST_SELF_NICK` becomes `Some`, THIS TEST FAILS on purpose:
+    /// flip it to assert the echo is dropped and update the README.
+    #[test]
+    fn self_echo_gap_is_pinned_until_host_filter_lands() {
+        let echo = b":WaddleBot!w@w PRIVMSG #c :echo of our own reply";
+        let got = normalize_frame(echo, "2026-11-05T00:00:00.000Z", GUEST_SELF_NICK).unwrap();
+        assert_eq!(GUEST_SELF_NICK, None);
+        assert_eq!(got.len(), 1, "gap closed? update this test + README");
+    }
+}

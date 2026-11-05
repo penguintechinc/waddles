@@ -53,20 +53,14 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      broadcaster_id: &id001
-        type: string
-        pattern: ^[0-9]{1,20}$
-      moderator_id: *id001
-      first: &id002
+      first: &id001
         type: integer
         minimum: 1
         maximum: 1000
-      after: &id003
+      after: &id002
         type: string
         maxLength: 512
-    required:
-    - broadcaster_id
-    - moderator_id
+    required: []
     additionalProperties: false
   output_schema:
     type: object
@@ -76,11 +70,9 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      broadcaster_id: *id001
-      first: *id002
-      after: *id003
-    required:
-    - broadcaster_id
+      first: *id001
+      after: *id002
+    required: []
     additionalProperties: false
   output_schema:
     type: object
@@ -90,11 +82,9 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      broadcaster_id: *id001
-      first: *id002
-      after: *id003
-    required:
-    - broadcaster_id
+      first: *id001
+      after: *id002
+    required: []
     additionalProperties: false
   output_schema:
     type: object
