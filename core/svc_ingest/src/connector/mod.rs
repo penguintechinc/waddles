@@ -37,6 +37,7 @@
 
 pub mod driver;
 pub(crate) mod egress_guard;
+pub mod gateway_rules;
 pub mod invoker;
 pub mod lifecycle;
 #[cfg(test)]
@@ -60,6 +61,7 @@ pub use driver::{
     ConnectionEnd, ConnectionReport, ConnectorDriver, DriverError, RunEnd,
     DEFAULT_HEARTBEAT_SEND_TIMEOUT, MAX_HEARTBEAT_INTERVAL, MIN_HEARTBEAT_INTERVAL,
 };
+pub use gateway_rules::{HandshakeAfter, HeartbeatAck, ReconnectUrlCapture};
 pub use invoker::{ConnectorInvokeError, ConnectorInvoker};
 pub use lifecycle::{
     CaptureRule, CloseCodeRule, FrameDirective, FrameMatch, HeartbeatCapture, HttpAction,

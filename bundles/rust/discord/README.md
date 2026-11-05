@@ -58,13 +58,19 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
   key as the route's secret-ref). A forged interaction is rejected with a uniform 403 **before** `on-frame`; the
   overlay never sees unverified traffic and never holds the key.
 * **IDENTIFY budget / `session_start_limit` / shard buckets / fail-open policy** — see table.
-* **Heartbeat timer and ACK-timeout reconnect.**
+* **Heartbeat timer and ACK-timeout reconnect** -- built host-side (`SessionRules.heartbeat_ack`, metric `svc_ingest_transport_heartbeat_ack_timeout_total`); see `docs/connector-host-capability.md` "Gateway gaps closed".
 
 ## Host duties required to switch the flag ON (integrator checklist)
 
 1. **WsConfig** for `platform: discord`, url `wss://gateway.discord.gg/?v=10&encoding=json`,
    `handles {"discord-bot" -> <bot-token connection>}`, **`slot_prefixes: [ "\"token\":\"" ]`**
    (`TOKEN_PREFIX`), `egress_allow` empty. The credential slot is `{{DISCORD_BOT_TOKEN}}`.
+1b. **Gateway rules (host).** Add `reconnect_url` (READY `/d/resume_gateway_url`, `allowed_hosts: ["*.discord.gg"]`,
+   `query: "v=10&encoding=json"`), `heartbeat_ack` (op 11, `max_unacked: 1`), `handshake_after: FirstFrame` (HELLO before
+   IDENTIFY/RESUME) and `jitter_first_heartbeat` to the session rules -- full example in `docs/connector-host-capability.md`.
+   The host (not the overlay) captures and validates the resume URL; the overlay's `resume_gateway_url` session-token field is
+   no longer needed for dialling. **Intents** stay `33281` (identical to the hardcoded path, no extra privileged intent);
+   **sharding** is single-shard (no `shard` field), identify buckets / `session_start_limit` remain host-only.
 2. **Session token.** `ctx.session-token` MUST be the JSON in `session.rs` (`{"session_id","seq",
    "resume_gateway_url","self_user_id"}`, all optional), maintained by the host from the frames
    (`tool classify_frame` returns the `READY` session; `seq` is the frame's `s`). A non-JSON token (e.g. the

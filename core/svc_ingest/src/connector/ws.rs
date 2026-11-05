@@ -25,7 +25,8 @@ use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
@@ -39,6 +40,10 @@ use super::transport_common::{
 };
 pub use super::transport_common::{AutoReplyRule, FrameRuleError, SelfEchoFilter};
 use super::types::{ConnectionCtx, Handshake};
+
+/// Close code sent on a heartbeat-ACK timeout (anything but 1000/1001 keeps a
+/// gateway session resumable).
+const DEAD_CONNECTION_CLOSE_CODE: u16 = 4000;
 
 /// Largest accepted `dedup_window`.
 pub const MAX_DEDUP_WINDOW: usize = 65_536;
@@ -124,6 +129,10 @@ pub struct WsTransport<S: TransportSecretSource> {
     engine: SessionEngine,
     /// Heartbeat interval captured from the CURRENT connection's frames.
     dyn_heartbeat: Option<Duration>,
+    /// Set when a missed heartbeat ACK ended the connection: the close is
+    /// sent with a non-1000 code so the upstream keeps the session
+    /// resumable (a 1000/1001 close invalidates it).
+    dead_close: bool,
 }
 
 impl<S: TransportSecretSource> WsTransport<S> {
@@ -142,7 +151,7 @@ impl<S: TransportSecretSource> WsTransport<S> {
         }
         let rules = FrameRules::new(cfg.auto_replies.clone(), cfg.self_echo.clone())
             .map_err(|e| TransportError::Connect(e.to_string()))?;
-        let engine = SessionEngine::new(cfg.session.clone())
+        let engine = SessionEngine::new_with(cfg.session.clone(), cfg.allow_loopback_insecure)
             .map_err(|e| TransportError::Connect(e.to_string()))?;
         if engine.has_token_template() && cfg.resume_token.is_some() {
             return Err(TransportError::Connect(
@@ -166,6 +175,7 @@ impl<S: TransportSecretSource> WsTransport<S> {
             metrics: None,
             engine,
             dyn_heartbeat: None,
+            dead_close: false,
         })
     }
 
@@ -352,15 +362,40 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
         self.dyn_heartbeat = None;
         // A reply owed to the previous connection must never reach this one.
         self.pending.clear();
+        self.engine.begin_connection();
+        self.dead_close = false;
         let wsc = WebSocketConfig::default()
             .max_message_size(Some(self.cfg.max_frame_bytes))
             .max_frame_size(Some(self.cfg.max_frame_bytes));
+        // A validated reconnect URL (e.g. a gateway resume host) replaces the
+        // configured one only while a session exists to resume.
+        let resume = match self.engine.reconnect_target() {
+            Some(t) => Some(
+                reqwest::Url::parse(t)
+                    .map_err(|_| TransportError::Connect("invalid reconnect url".into()))?,
+            ),
+            None => None,
+        };
+        let target = match &resume {
+            Some(u) => u,
+            None => &self.url,
+        };
         // Resolve + validate + PIN the address; the client never re-resolves.
-        let pinned = resolve_pinned(&self.url, &self.cfg.egress_allow)
-            .await
-            .map_err(TransportError::Connect)?;
-        let req = self
-            .url
+        let pinned = match resolve_pinned(target, &self.cfg.egress_allow).await {
+            Ok(p) => p,
+            Err(e) => {
+                if resume.is_some() {
+                    // The SSRF guard refused the reconnect host: drop the
+                    // session so the next attempt is a fresh identify on the
+                    // configured URL -- counted and logged, never silent.
+                    self.engine.clear();
+                    self.count("reconnect_url", "refused_cleared", 1);
+                    tracing::warn!(platform = %self.cfg.platform, "reconnect url refused by the egress guard; session dropped, next connect is fresh");
+                }
+                return Err(TransportError::Connect(e));
+            }
+        };
+        let req = target
             .as_str()
             .into_client_request()
             .map_err(|_| TransportError::Connect("invalid websocket request".into()))?;
@@ -375,6 +410,9 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
             .await
             .map_err(|_| TransportError::Connect("connect timed out".into()))?
             .map_err(classify_connect)?;
+        if resume.is_some() {
+            self.count("reconnect_url", "used", 1);
+        }
         self.stream = Some(stream);
         self.connected_at = Instant::now();
         self.last_data = self.connected_at;
@@ -432,6 +470,9 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
             match self.engine.observe(&bytes) {
                 Ok(obs) => {
                     self.count("session_capture", "stored", obs.captured as u64);
+                    if obs.reconnect_url {
+                        self.count("reconnect_url", "stored", 1);
+                    }
                     if let Some(d) = obs.heartbeat {
                         self.dyn_heartbeat = Some(d);
                         self.count("heartbeat_interval", "applied", 1);
@@ -442,10 +483,10 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
                     }
                 }
                 Err(e) => {
-                    let rule = if e == LifecycleError::BadHeartbeat {
-                        "heartbeat_interval"
-                    } else {
-                        "session_capture"
+                    let rule = match e {
+                        LifecycleError::BadHeartbeat => "heartbeat_interval",
+                        LifecycleError::BadReconnectUrl => "reconnect_url",
+                        _ => "session_capture",
                     };
                     self.count(rule, "rejected", 1);
                     return Err(TransportError::Read(e.to_string()));
@@ -486,6 +527,17 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
                 "heartbeat sent but no heartbeat_interval configured".into(),
             ));
         }
+        // Zombie-connection rule: a heartbeat is due but the previous one was
+        // never acknowledged -> the connection is dead. End it (the driver
+        // reconnects; session state is kept so it RESUMEs).
+        if !self.engine.heartbeat_due() {
+            if let Some(m) = &self.metrics {
+                m.ack_timeout(&self.cfg.platform);
+            }
+            self.dead_close = true;
+            tracing::warn!(platform = %self.cfg.platform, "heartbeat not acknowledged before the next was due; treating the connection as dead, reconnecting to resume");
+            return Err(TransportError::Send("heartbeat ack timeout".into()));
+        }
         // The guest cannot see the live sequence; a host-owned heartbeat
         // replaces its body with the host-rendered one.
         let bytes = if self.engine.host_owned_heartbeat() {
@@ -511,9 +563,28 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
         self.send_heartbeat(body).await
     }
 
+    fn handshake_after_first_frame(&self) -> Option<Duration> {
+        self.cfg.session.handshake_after.first_frame_wait()
+    }
+
+    fn first_heartbeat_jitter(&self) -> bool {
+        self.cfg.session.jitter_first_heartbeat
+    }
+
     async fn close(&mut self, _reason: &str) {
         if let Some(mut s) = self.stream.take() {
-            let _ = s.close(None).await;
+            // Non-1000 on a dead connection keeps the session resumable; the
+            // wait is bounded because a zombie peer never answers the close.
+            let frame = self.dead_close.then(|| CloseFrame {
+                code: CloseCode::Library(DEAD_CONNECTION_CLOSE_CODE),
+                reason: "heartbeat ack timeout".into(),
+            });
+            match tokio::time::timeout(self.cfg.connect_timeout, s.close(frame)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => {
+                    tracing::debug!(platform = %self.cfg.platform, "websocket close did not complete cleanly");
+                }
+            }
         }
     }
 }
