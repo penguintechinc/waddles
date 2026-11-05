@@ -14,6 +14,9 @@
 
 use std::sync::LazyLock;
 
+pub use crate::pin_sig::PinKeys;
+use crate::pin_sig::{PinFields, PinSigError};
+
 /// Why a queued target failed the host-pin check. Each maps to a stable
 /// machine `reason` code ([`PinError::reason`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -32,6 +35,17 @@ pub enum PinError {
     /// The platform has no pin policy (fail closed, not open).
     #[error("no pin policy for platform")]
     UnsupportedPlatform,
+    /// The entry has no `pin_sig` integrity stamp (un-stamped producer, or a
+    /// writer that is not `svc_action`).
+    #[error("outbound entry has no pin signature")]
+    MissingSignature,
+    /// `pin_sig` is malformed, names an unknown key, or does not match.
+    #[error("outbound pin signature is invalid")]
+    BadSignature,
+    /// This process has no usable `ENVELOPE_BINDING_KEYS`, so no entry can
+    /// be verified -- every chat op is refused (fail closed, never open).
+    #[error("outbound pin verification key is not configured")]
+    KeyUnconfigured,
 }
 
 impl PinError {
@@ -44,17 +58,18 @@ impl PinError {
             Self::InvalidChannel => "invalid_channel",
             Self::ChannelMismatch => "channel_not_pinned",
             Self::UnsupportedPlatform => "unsupported_platform",
+            Self::MissingSignature => "no_pin_sig",
+            Self::BadSignature => "bad_pin_sig",
+            Self::KeyUnconfigured => "pin_key_unconfigured",
         }
     }
 }
 
-/// Canonical Twitch login: strip control chars and a leading `#`, lowercase.
+/// Canonical Twitch login: at most ONE leading `#` removed, ASCII-lowercased.
+/// No other normalization -- a stamp is machine-produced, so control chars,
+/// whitespace, or repeated `#` stay in the string and fail [`is_twitch_login`].
 fn canonical_twitch(raw: &str) -> String {
-    raw.chars()
-        .filter(|c| !c.is_control())
-        .collect::<String>()
-        .trim_start_matches('#')
-        .to_ascii_lowercase()
+    raw.strip_prefix('#').unwrap_or(raw).to_ascii_lowercase()
 }
 
 /// A valid Twitch login: `^[a-z0-9_]{1,25}$`, not all digits (a numeric
@@ -66,9 +81,11 @@ fn is_twitch_login(c: &str) -> bool {
         && !c.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// A Discord snowflake: 1..=20 ASCII digits (unsigned 64-bit decimal).
+/// A Discord snowflake: plain ASCII digits that parse as a non-zero `u64`
+/// (the Discord adapter parses the same way), so 20-digit ids above
+/// `u64::MAX` and `0` are refused.
 fn is_snowflake(id: &str) -> bool {
-    (1..=20).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit())
+    id.bytes().all(|b| b.is_ascii_digit()) && id.parse::<u64>().is_ok_and(|n| n != 0)
 }
 
 /// Verifies `channel` is exactly the host-pinned `origin` for `platform`
@@ -104,6 +121,63 @@ pub fn pin_target(platform: &str, channel: &str, origin: Option<&str>) -> Result
         }
         _ => Err(PinError::UnsupportedPlatform),
     }
+}
+
+/// The destination-bearing wire fields the producer's `pin_sig` covers.
+#[derive(serde::Deserialize)]
+struct StampWire {
+    #[serde(default)]
+    op: Option<String>,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    origin_channel: Option<String>,
+    #[serde(default)]
+    message_id: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    pin_sig: Option<String>,
+}
+
+/// Verifies the producer's integrity stamp on a raw queue entry BEFORE it is
+/// acted on. The Valkey ACL lets any app client write the outbound list, so
+/// `origin_channel == channel` is only meaningful if the stamp was made by
+/// `svc_action` (HMAC under `ENVELOPE_BINDING_KEYS`, constant-time verify).
+/// `chat.send`/`chat.delete` only -- `dm.send` carries no pinned channel.
+///
+/// # Errors
+/// [`PinError::MissingOrigin`], [`PinError::KeyUnconfigured`],
+/// [`PinError::MissingSignature`] or [`PinError::BadSignature`] -- fail closed.
+pub fn verify_stamp(raw: &str, platform: &str, keys: Option<&PinKeys>) -> Result<(), PinError> {
+    let wire: StampWire = serde_json::from_str(raw).map_err(|_| PinError::BadSignature)?;
+    let op = wire.op.as_deref().unwrap_or("chat.send");
+    if op == "dm.send" {
+        return Ok(());
+    }
+    let origin = wire
+        .origin_channel
+        .as_deref()
+        .filter(|o| !o.is_empty())
+        .ok_or(PinError::MissingOrigin)?;
+    let keys = keys.ok_or(PinError::KeyUnconfigured)?;
+    let sig = wire
+        .pin_sig
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or(PinError::MissingSignature)?;
+    let fields = PinFields {
+        platform,
+        op,
+        channel: wire.channel.as_deref().unwrap_or(""),
+        origin_channel: origin,
+        message_id: wire.message_id.as_deref().unwrap_or(""),
+        text: wire.text.as_deref().unwrap_or(""),
+    };
+    keys.verify(&fields, sig).map_err(|e| match e {
+        PinSigError::MissingSignature => PinError::MissingSignature,
+        _ => PinError::BadSignature,
+    })
 }
 
 static PIN_REFUSED: LazyLock<prometheus::IntCounterVec> = LazyLock::new(|| {
@@ -216,6 +290,108 @@ mod tests {
             pin_target("discord", long, Some(long)),
             Err(PinError::InvalidChannel)
         );
+    }
+
+    /// regression: p987 review -- a 20-digit id above `u64::MAX` is not a
+    /// snowflake (the Discord adapter parses u64); zero is not either.
+    #[test]
+    fn discord_snowflake_must_fit_u64_and_be_nonzero() {
+        let max = u64::MAX.to_string();
+        assert_eq!(
+            pin_target("discord", &max, Some(&max)).as_deref(),
+            Ok(max.as_str())
+        );
+        for bad in ["18446744073709551616", "99999999999999999999", "0", "00"] {
+            assert_eq!(
+                pin_target("discord", bad, Some(bad)),
+                Err(PinError::InvalidChannel),
+                "{bad}"
+            );
+        }
+    }
+
+    /// regression: p987 review -- a stamp is machine-produced, so malformed
+    /// input is refused rather than normalized (no `##a`, control chars,
+    /// uppercase without `#` prefix rules beyond one optional `#`).
+    #[test]
+    fn twitch_is_strict_not_normalizing() {
+        for bad in ["##foo", "#fo\u{0}o", "#fo\ro", " #foo", "#foo ", "\n#foo"] {
+            assert_eq!(
+                pin_target("twitch", bad, Some("#foo")),
+                Err(PinError::InvalidChannel),
+                "channel {bad:?}"
+            );
+            assert_eq!(
+                pin_target("twitch", "#foo", Some(bad)),
+                Err(PinError::InvalidChannel),
+                "origin {bad:?}"
+            );
+        }
+        assert_eq!(
+            pin_target("twitch", "foo", Some("#foo")).as_deref(),
+            Ok("#foo")
+        );
+    }
+
+    /// The producer's copy of the signing module must stay byte-identical.
+    #[test]
+    fn pin_sig_copies_do_not_drift() {
+        assert_eq!(
+            include_str!("pin_sig.rs"),
+            include_str!("../../svc_action/src/pin_sig.rs")
+        );
+    }
+
+    #[test]
+    fn verify_stamp_rules() {
+        let keys = PinKeys::parse("k1:000102030405060708090a0b0c0d0e0f", Some("k1")).unwrap();
+        let sig = keys
+            .sign(&PinFields {
+                platform: "discord",
+                op: "chat.send",
+                channel: "1",
+                origin_channel: "1",
+                message_id: "",
+                text: "x",
+            })
+            .unwrap();
+        let ok = format!(
+            r#"{{"op":"chat.send","channel":"1","origin_channel":"1","text":"x","pin_sig":"{sig}"}}"#
+        );
+        assert_eq!(verify_stamp(&ok, "discord", Some(&keys)), Ok(()));
+        // Same bytes under another platform's queue: not valid.
+        assert_eq!(
+            verify_stamp(&ok, "twitch", Some(&keys)),
+            Err(PinError::BadSignature)
+        );
+        assert_eq!(
+            verify_stamp(&ok, "discord", None),
+            Err(PinError::KeyUnconfigured)
+        );
+        let no_sig = r#"{"op":"chat.send","channel":"1","origin_channel":"1","text":"x"}"#;
+        assert_eq!(
+            verify_stamp(no_sig, "discord", Some(&keys)),
+            Err(PinError::MissingSignature)
+        );
+        let no_origin = r#"{"op":"chat.send","channel":"1","text":"x"}"#;
+        assert_eq!(
+            verify_stamp(no_origin, "discord", Some(&keys)),
+            Err(PinError::MissingOrigin)
+        );
+        // dm.send carries no pinned channel (community-bound in the adapter).
+        let dm = r#"{"op":"dm.send","user_id":"1","text":"x","origin_channel":"1"}"#;
+        assert_eq!(verify_stamp(dm, "discord", Some(&keys)), Ok(()));
+        assert_eq!(
+            verify_stamp("not json", "discord", Some(&keys)),
+            Err(PinError::BadSignature)
+        );
+        for e in [
+            PinError::MissingSignature,
+            PinError::BadSignature,
+            PinError::KeyUnconfigured,
+        ] {
+            assert!(!e.reason().is_empty() && !e.to_string().is_empty());
+        }
     }
 
     #[test]

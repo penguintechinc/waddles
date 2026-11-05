@@ -60,6 +60,7 @@ use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
 use crate::egress::EgressGuard;
 use crate::flags::FeatureFlag;
+use crate::pin_sig::{PinFields, PinKeys};
 use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
@@ -931,6 +932,12 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// `None` until [`Self::with_tool`] -- every `tool.*` call denies
     /// `target_unavailable` in that state (never a silent no-op).
     tool: Option<ToolWiring>,
+    /// Signing keys for the outbound `pin_sig` integrity stamp
+    /// ([`crate::pin_sig`]). `None` until [`Self::with_outbound_pin_keys`];
+    /// every `chat.send`/`chat.delete` relay is then refused
+    /// (`relay_unavailable`) -- an unsigned entry would only be dropped by
+    /// the drain, so failing here is the loud, early version of that.
+    pin_keys: Option<Arc<PinKeys>>,
 }
 
 /// The outbound PII-detokenization dependency: a live resolver over
@@ -976,7 +983,58 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             stage_metrics: stage_metrics::stage_metrics(),
             egress_dispatcher_flag: None,
             tool: None,
+            pin_keys: None,
         }
+    }
+
+    /// Wires the signing keys (`ENVELOPE_BINDING_KEYS` + active kid) used to
+    /// stamp `pin_sig` on every outbound `chat.send`/`chat.delete` envelope,
+    /// proving to the drain that `svc_action` -- not any other writer of the
+    /// shared Valkey list -- produced the pinned destination.
+    #[must_use]
+    pub fn with_outbound_pin_keys(mut self, keys: PinKeys) -> Self {
+        self.pin_keys = Some(Arc::new(keys));
+        self
+    }
+
+    /// Stamps `pin_sig` onto a `chat.send`/`chat.delete` envelope (`dm.send`
+    /// carries no pinned channel and is left as is).
+    ///
+    /// # Errors
+    /// `relay_unavailable` when no signing key is configured or signing fails.
+    fn sign_envelope(&self, env: &mut serde_json::Value) -> Result<(), HostResultError> {
+        let get = |k: &str| env.get(k).and_then(serde_json::Value::as_str).unwrap_or("");
+        let op = get("op");
+        if op == "dm.send" {
+            return Ok(());
+        }
+        let keys = self.pin_keys.as_ref().ok_or_else(|| {
+            tracing::error!("outbound pin signing key not configured; relay chat op refused");
+            denied(
+                "relay_unavailable",
+                "relay send refused: outbound pin signing key is not configured",
+            )
+        })?;
+        let sig = keys
+            .sign(&PinFields {
+                platform: get("platform"),
+                op,
+                channel: get("channel"),
+                origin_channel: get("origin_channel"),
+                message_id: get("message_id"),
+                text: get("text"),
+            })
+            .map_err(|e| {
+                tracing::error!(error = %e, "outbound pin signing failed; relay chat op refused");
+                denied(
+                    "relay_unavailable",
+                    "relay send refused: outbound pin signing failed",
+                )
+            })?;
+        if let Some(obj) = env.as_object_mut() {
+            obj.insert("pin_sig".to_string(), serde_json::Value::String(sig));
+        }
+        Ok(())
     }
 
     /// Wires the egress-via-dispatcher toggle. Without it
@@ -1301,7 +1359,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         // upgraded consumer (which ignores unknown fields) still delivers it
         // during a rolling upgrade; `v`/`op`/`platform` are what the new
         // consumer dispatches on.
-        let payload = build_outbound_envelope(
+        let mut envelope = build_outbound_envelope(
             op,
             provider,
             &EnvelopeFields {
@@ -1311,8 +1369,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 origin_channel: Some(&channel),
                 ..EnvelopeFields::default()
             },
-        )
-        .to_string();
+        );
+        self.sign_envelope(&mut envelope)?;
+        let payload = envelope.to_string();
         let outbound_bytes = payload.len() as u64;
         self.relay_queue
             .lpush(&key, payload)
@@ -1755,6 +1814,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         let exp_ms = now_epoch_ms().saturating_add(
             u64::try_from(self.discord_ack_timeout.as_millis()).unwrap_or(u64::MAX),
         );
+        self.sign_envelope(&mut payload)?;
         stamp_handshake(&mut payload, &op_id, exp_ms);
         let payload = payload.to_string();
         let outbound_bytes = payload.len() as u64;
@@ -2963,6 +3023,72 @@ mod tests {
         usage: Arc<Mutex<UsageBatcher>>,
     ) -> StageCapabilities<FakeRelayQueue> {
         StageCapabilities::new(queue, test_egress(), usage, permissive_gate())
+            .with_outbound_pin_keys(test_pin_keys())
+    }
+
+    /// Test signing keyring (active kid `k1`) shared by every relay test.
+    pub(super) fn test_pin_keys() -> PinKeys {
+        PinKeys::parse("k1:000102030405060708090a0b0c0d0e0f", Some("k1")).unwrap()
+    }
+
+    /// regression: p987 provenance -- every queued chat.send carries a
+    /// `pin_sig` the drain's verifier accepts, covering the pinned fields.
+    #[tokio::test]
+    async fn relay_send_stamps_a_verifiable_pin_sig() {
+        let caps = caps(FakeRelayQueue::default());
+        caps.handle(
+            &twitch_scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi\"}"}),
+            ),
+        )
+        .await
+        .expect("relay send succeeds");
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        let sig = v["pin_sig"].as_str().expect("pin_sig stamped");
+        let verify = |text: &str| {
+            test_pin_keys().verify(
+                &PinFields {
+                    platform: "twitch",
+                    op: "chat.send",
+                    channel: "#somechannel",
+                    origin_channel: "#somechannel",
+                    message_id: "",
+                    text,
+                },
+                sig,
+            )
+        };
+        assert_eq!(verify("hi"), Ok(()));
+        assert!(verify("tampered").is_err());
+    }
+
+    /// regression: p987 -- with no signing key configured a chat relay is
+    /// refused loudly and nothing is queued (never an unsigned entry).
+    #[tokio::test]
+    async fn relay_send_without_signing_key_is_refused_and_queues_nothing() {
+        let caps: StageCapabilities<FakeRelayQueue> = StageCapabilities::new(
+            FakeRelayQueue::default(),
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            permissive_gate(),
+        );
+        let err = caps
+            .handle(
+                &twitch_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi\"}"}),
+                ),
+            )
+            .await
+            .expect_err("must refuse");
+        assert_eq!(err.code, "relay_unavailable");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
     }
 
     /// Grants `storage.kv` to `"waddles.bot.commands.default"` -- the

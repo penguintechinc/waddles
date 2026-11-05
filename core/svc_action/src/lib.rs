@@ -81,6 +81,7 @@ pub mod hop;
 pub mod host_api;
 pub mod http;
 pub mod metrics_facade;
+pub mod pin_sig;
 pub mod retry;
 pub mod senders;
 pub mod stage_metrics;
@@ -909,6 +910,14 @@ async fn build_stage_capabilities(
     // default OFF (unseen/absent => inline path); this is the only
     // production wiring that makes the dispatcher path reachable.
     let caps = caps.with_egress_dispatcher_flag(flags::egress_dispatcher_flag());
+    // Outbound `pin_sig` signing keys (same `ENVELOPE_BINDING_KEYS` ring
+    // + active kid the hop MAC uses). Missing/invalid => ERROR and every
+    // chat relay op is refused loudly (`relay_unavailable`), never sent
+    // unsigned: the drain would drop it anyway.
+    let caps = match resolve_outbound_pin_keys(cli) {
+        Some(keys) => caps.with_outbound_pin_keys(keys),
+        None => caps,
+    };
     // `tool.invoke` (bundle-MCP-tools P3b): resolves targets against the live
     // active-version snapshot and runs the nested invoke on whichever executor
     // connection is active at call time.
@@ -917,6 +926,25 @@ async fn build_stage_capabilities(
         snapshot: app_version_snapshot,
     });
     Some(Arc::new(caps))
+}
+
+/// Loads the outbound `pin_sig` signing keys from `ENVELOPE_BINDING_KEYS` and
+/// `ENVELOPE_BINDING_ACTIVE_KID`; logs ERROR (no key material) and returns
+/// `None` when either is missing/invalid.
+fn resolve_outbound_pin_keys(cli: &config::CliConfig) -> Option<pin_sig::PinKeys> {
+    let Ok(raw) = std::env::var("ENVELOPE_BINDING_KEYS") else {
+        tracing::error!(
+            "ENVELOPE_BINDING_KEYS not set; relay chat.send/chat.delete will be refused (relay_unavailable)"
+        );
+        return None;
+    };
+    match pin_sig::PinKeys::parse(&raw, cli.envelope_binding_active_kid.as_deref()) {
+        Ok(keys) => Some(keys),
+        Err(err) => {
+            tracing::error!(error = %err, "outbound pin signing keys unusable (check ENVELOPE_BINDING_KEYS / ENVELOPE_BINDING_ACTIVE_KID); relay chat.send/chat.delete will be refused");
+            None
+        }
+    }
 }
 
 /// Starts the host-API mTLS listener as its own background task and
