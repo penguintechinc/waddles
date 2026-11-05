@@ -43,6 +43,7 @@ use crate::outbound_ops::{
     dispatch_to, parse_outbound, parse_outbound_entry, route, DiscordSender, SenderError,
     TwitchSender,
 };
+use crate::outbound_pin::PinKeys;
 
 /// The queue key this module drains -- byte-identical to
 /// `core/svc_action/src/capabilities.rs::outbound_relay_queue_key("twitch")`,
@@ -195,6 +196,28 @@ impl IrcOutbound for RealIrcOutbound {
     }
 }
 
+/// Integrity gate run on every raw entry before it is acted on: refuses
+/// (typed [`SenderError::Rejected`], counted + WARN via
+/// [`crate::outbound_pin::record_refusal`]) an entry whose `pin_sig` is
+/// missing/invalid, so a queue writer other than `svc_action` cannot inject a
+/// destination. A refused entry has already been popped, so it is never
+/// retried -- it is dropped (Discord: negatively acked) and counted.
+fn check_stamp(
+    raw: &str,
+    platform: &'static str,
+    op: &'static str,
+    pin: Option<&PinKeys>,
+) -> Result<(), SenderError> {
+    crate::outbound_pin::verify_stamp(raw, platform, pin).map_err(|e| {
+        crate::outbound_pin::record_refusal(platform, op, e);
+        SenderError::Rejected {
+            platform,
+            op,
+            reason: e.reason(),
+        }
+    })
+}
+
 /// Runs the `BRPOP`/parse/send loop until `shutdown` resolves. Split out
 /// from [`run`] (which builds the real Valkey connection and IRC sender)
 /// so this control flow is exercised in tests against fakes -- no live
@@ -214,6 +237,7 @@ impl IrcOutbound for RealIrcOutbound {
 async fn drain_loop<Q, S>(
     mut queue: Q,
     sender: &S,
+    pin: Option<&PinKeys>,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
 ) where
@@ -228,6 +252,9 @@ async fn drain_loop<Q, S>(
                     backoff.reset();
                     match parse_outbound(&raw, "twitch") {
                         Ok(action) => {
+                            if check_stamp(&raw, "twitch", action.op(), pin).is_err() {
+                                continue;
+                            }
                             let twitch = TwitchSender::new(sender);
                             if let Err(err) = route("twitch", &action, &twitch, &DiscordSender::unconfigured()).await {
                                 match err {
@@ -270,13 +297,14 @@ async fn drain_loop<Q, S>(
 pub async fn run(
     spine_cfg: &penguin_spine::SpineConfig,
     identity: TwitchOutboundIdentity,
+    pin: Option<PinKeys>,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), redis::RedisError> {
     let client = build_redis_client(spine_cfg)?;
     let conn = connect_with_response_timeout(&client, BLOCKING_CONN_RESPONSE_TIMEOUT).await?;
     let sender = RealIrcOutbound::new(identity);
     let backoff = Backoff::new(Duration::from_secs(30));
-    drain_loop(conn, &sender, backoff, shutdown).await;
+    drain_loop(conn, &sender, pin.as_ref(), backoff, shutdown).await;
     Ok(())
 }
 
@@ -418,7 +446,12 @@ fn now_ms() -> u64 {
 /// waiting and reported failure, so performing the op now would contradict
 /// that report (a late DM after "please resend" would be a duplicate). Logs
 /// carry platform/op/code only -- never content, ids or error bodies.
-async fn handle_discord_entry<C: DrainControl>(raw: &str, sender: &DiscordSender<'_>, ctl: &C) {
+async fn handle_discord_entry<C: DrainControl>(
+    raw: &str,
+    sender: &DiscordSender<'_>,
+    ctl: &C,
+    pin: Option<&PinKeys>,
+) {
     let entry = match parse_outbound_entry(raw, "discord") {
         Ok(entry) => entry,
         Err(err) => {
@@ -433,6 +466,13 @@ async fn handle_discord_entry<C: DrainControl>(raw: &str, sender: &DiscordSender
             op,
             "outbound op already past its deadline (producer stopped waiting); dropping unexecuted"
         );
+        return;
+    }
+    // An entry whose stamp does not verify is NOT authentic: it is dropped
+    // (counted + WARN by `check_stamp`, already popped so never retried) and
+    // gets NO ack -- acking would let an unauthenticated queue writer settle
+    // another producer's `op_id` by reusing it.
+    if check_stamp(raw, "discord", op, pin).is_err() {
         return;
     }
     let result = dispatch_to(sender, &entry.action).await;
@@ -465,6 +505,7 @@ async fn discord_drain_loop<Q, C>(
     mut queue: Q,
     sender: &DiscordSender<'_>,
     ctl: &C,
+    pin: Option<&PinKeys>,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
 ) where
@@ -477,7 +518,7 @@ async fn discord_drain_loop<Q, C>(
             popped = queue.brpop_one() => match popped {
                 Ok(Some(raw)) => {
                     backoff.reset();
-                    handle_discord_entry(&raw, sender, ctl).await;
+                    handle_discord_entry(&raw, sender, ctl, pin).await;
                 }
                 Ok(None) => backoff.reset(),
                 Err(err) => {
@@ -517,6 +558,7 @@ async fn heartbeat_loop<C: DrainControl>(ctl: &C) {
 pub async fn run_discord(
     spine_cfg: &penguin_spine::SpineConfig,
     rest: &crate::discord_rest::DiscordRestClient,
+    pin: Option<PinKeys>,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), redis::RedisError> {
     let client = build_redis_client(spine_cfg)?;
@@ -539,6 +581,7 @@ pub async fn run_discord(
             queue,
             &sender,
             &ctl,
+            pin.as_ref(),
             Backoff::new(Duration::from_secs(30)),
             shutdown,
         ) => {}
@@ -576,11 +619,75 @@ mod tests {
         idx: AtomicUsize,
     }
 
+    /// Shared test keyring (signing `k1`) -- the drain verifies with it.
+    pub(super) const TEST_KEYS: &str = "k1:000102030405060708090a0b0c0d0e0f";
+
+    fn test_pin_keys() -> PinKeys {
+        PinKeys::parse(TEST_KEYS, Some("k1")).unwrap()
+    }
+
+    /// Stamps a chat entry the way `svc_action` does so pre-existing tests keep
+    /// exercising the drain. A `RAW:` prefix opts out (forged/un-stamped).
+    fn stamp_for_test(raw: &str) -> String {
+        if let Some(rest) = raw.strip_prefix("RAW:") {
+            return rest.to_string();
+        }
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return raw.to_string();
+        };
+        let snapshot = v.clone();
+        let get = |k: &str| {
+            snapshot
+                .get(k)
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let op = if snapshot.get("op").is_some() {
+            get("op")
+        } else {
+            "chat.send".to_string()
+        };
+        let (channel, origin) = (get("channel"), get("origin_channel"));
+        if origin.is_empty() {
+            return raw.to_string();
+        }
+        // Producer always stamps a fresh exp_ms; keep an explicit one (tests
+        // of the deadline path).
+        if v.get("exp_ms").is_none() {
+            v["exp_ms"] = serde_json::Value::from(super::now_ms() + 60_000);
+        }
+        let exp_ms = v["exp_ms"].as_u64().unwrap_or(0);
+        // Platform-less test entries: legacy (no `op`) = twitch, else discord.
+        let platform = if snapshot.get("platform").is_some() {
+            get("platform")
+        } else if snapshot.get("op").is_some() {
+            "discord".to_string()
+        } else {
+            "twitch".to_string()
+        };
+        let sig = test_pin_keys()
+            .sign(&crate::pin_sig::PinFields {
+                platform: &platform,
+                op: &op,
+                channel: &channel,
+                origin_channel: &origin,
+                message_id: &get("message_id"),
+                text: &get("text"),
+                user_id: &get("user_id"),
+                op_id: &get("op_id"),
+                exp_ms,
+            })
+            .unwrap();
+        v["pin_sig"] = serde_json::Value::String(sig);
+        v.to_string()
+    }
+
     impl RelaySource for FakeQueue {
         async fn brpop_one(&mut self) -> Result<Option<String>, String> {
             let i = self.idx.fetch_add(1, Ordering::SeqCst);
             match self.payloads.get(i) {
-                Some(result) => result.clone(),
+                Some(result) => result.clone().map(|o| o.map(|r| stamp_for_test(&r))),
                 None => Err("simulated queue exhausted".to_string()),
             }
         }
@@ -636,13 +743,35 @@ mod tests {
         }
     }
 
-    /// Backward compat: a legacy text-only entry (queued by a pre-upgrade
-    /// svc_action) and the new versioned envelope both still send chat.
+    /// regression: P0 host-pin -- a legacy / un-stamped entry (no
+    /// `origin_channel`) is refused by the drain, never sent.
+    #[tokio::test]
+    async fn unpinned_legacy_payload_is_refused_not_sent() {
+        let queue = FakeQueue {
+            payloads: vec![Ok(Some("{\"channel\":\"#c\",\"text\":\"hi\"}".to_string()))],
+            idx: AtomicUsize::new(0),
+        };
+        let sender = RecordingSender::default();
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_loop(
+                queue,
+                &sender,
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+        assert!(sender.calls.lock().unwrap().is_empty());
+    }
+
+    /// A pinned versioned envelope (stamped `origin_channel`) sends chat.
     #[tokio::test]
     async fn legacy_and_versioned_chat_send_payloads_both_send() {
         for raw in [
-            "{\"channel\":\"#c\",\"text\":\"hi\"}",
-            "{\"v\":1,\"op\":\"chat.send\",\"platform\":\"twitch\",\"channel\":\"#c\",\"text\":\"hi\"}",
+            "{\"v\":1,\"op\":\"chat.send\",\"platform\":\"twitch\",\"channel\":\"#c\",\"text\":\"hi\",\"origin_channel\":\"#c\"}",
         ] {
             let queue = FakeQueue {
                 payloads: vec![Ok(Some(raw.to_string()))],
@@ -652,7 +781,7 @@ mod tests {
             let (_tx, rx) = oneshot::channel();
             let _ = tokio::time::timeout(
                 Duration::from_secs(5),
-                drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+                drain_loop(queue, &sender, Some(&test_pin_keys()), Backoff::new(Duration::from_secs(30)), rx),
             )
             .await;
             assert_eq!(
@@ -680,7 +809,13 @@ mod tests {
             let (_tx, rx) = oneshot::channel();
             let _ = tokio::time::timeout(
                 Duration::from_secs(5),
-                drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+                drain_loop(
+                    queue,
+                    &sender,
+                    Some(&test_pin_keys()),
+                    Backoff::new(Duration::from_secs(30)),
+                    rx,
+                ),
             )
             .await;
             assert!(sender.calls.lock().unwrap().is_empty(), "{raw}");
@@ -707,7 +842,9 @@ mod tests {
         // `tokio::time::sleep` -- `tokio::time::timeout` bounds the
         // resulting backoff loop from the outside.
         let queue = FakeQueue {
-            payloads: vec![Ok(Some("{\"channel\":\"#c\",\"text\":\"hi\"}".to_string()))],
+            payloads: vec![Ok(Some(
+                "{\"channel\":\"#c\",\"text\":\"hi\",\"origin_channel\":\"#c\"}".to_string(),
+            ))],
             idx: AtomicUsize::new(0),
         };
         let sender = RecordingSender::default();
@@ -715,7 +852,13 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+            drain_loop(
+                queue,
+                &sender,
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
         )
         .await;
         assert!(
@@ -737,14 +880,23 @@ mod tests {
         let sender = RecordingSender::default();
         let (tx, rx) = oneshot::channel();
         tx.send(()).unwrap();
-        drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx).await;
+        drain_loop(
+            queue,
+            &sender,
+            Some(&test_pin_keys()),
+            Backoff::new(Duration::from_secs(30)),
+            rx,
+        )
+        .await;
         assert!(sender.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn send_failure_is_logged_and_does_not_stop_the_loop() {
         let queue = FakeQueue {
-            payloads: vec![Ok(Some("{\"channel\":\"#c\",\"text\":\"hi\"}".to_string()))],
+            payloads: vec![Ok(Some(
+                "{\"channel\":\"#c\",\"text\":\"hi\",\"origin_channel\":\"#c\"}".to_string(),
+            ))],
             idx: AtomicUsize::new(0),
         };
         let sender = RecordingSender {
@@ -757,7 +909,13 @@ mod tests {
         // panic and not hang retrying the same message forever.
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+            drain_loop(
+                queue,
+                &sender,
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
         )
         .await;
         assert!(result.is_ok());
@@ -774,7 +932,13 @@ mod tests {
         tx.send(()).unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+            drain_loop(
+                queue,
+                &sender,
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
         )
         .await;
         assert!(result.is_ok());
@@ -792,7 +956,13 @@ mod tests {
         tx.send(()).unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+            drain_loop(
+                queue,
+                &sender,
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
         )
         .await;
         assert!(result.is_ok(), "must not hang retrying forever");
@@ -845,7 +1015,7 @@ mod tests {
 
         let _ = tokio::time::timeout(
             Duration::from_secs(600),
-            drain_loop(queue, &sender, backoff, rx),
+            drain_loop(queue, &sender, Some(&test_pin_keys()), backoff, rx),
         )
         .await;
 
@@ -952,6 +1122,7 @@ mod tests {
                 queue,
                 &sender,
                 ctl,
+                Some(&test_pin_keys()),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
             ),
@@ -988,16 +1159,16 @@ mod tests {
             vec![
                 Ok(Some("not json".to_string())),
                 Ok(Some(
-                    r#"{"v":1,"op":"chat.send","platform":"twitch","channel":"1","text":"x"}"#
+                    r#"{"v":1,"op":"chat.send","platform":"twitch","channel":"1","origin_channel":"1","text":"x"}"#
                         .to_string(),
                 )),
                 Ok(Some(
-                    r#"{"v":1,"op":"chat.send","platform":"discord","channel":"1","text":"x","op_id":"send-1"}"#
+                    r#"{"v":1,"op":"chat.send","platform":"discord","channel":"1","origin_channel":"1","text":"x","op_id":"send-1"}"#
                         .to_string(),
                 )),
                 Ok(None),
                 Ok(Some(
-                    r#"{"v":1,"op":"chat.delete","platform":"discord","channel":"1","message_id":"2","op_id":"del-1"}"#
+                    r#"{"v":1,"op":"chat.delete","platform":"discord","channel":"1","origin_channel":"1","message_id":"2","op_id":"del-1"}"#
                         .to_string(),
                 )),
             ],
@@ -1028,7 +1199,7 @@ mod tests {
             None,
             &ctl,
             vec![Ok(Some(
-                r#"{"op":"chat.delete","channel":"1","message_id":"2","op_id":"u-1"}"#.to_string(),
+                r#"{"op":"chat.delete","channel":"1","origin_channel":"1","message_id":"2","op_id":"u-1"}"#.to_string(),
             ))],
         )
         .await;
@@ -1060,7 +1231,8 @@ mod tests {
             Some(&rest),
             &ctl,
             vec![Ok(Some(
-                r#"{"op":"chat.delete","channel":"1","message_id":"2"}"#.to_string(),
+                r#"{"op":"chat.delete","channel":"1","origin_channel":"1","message_id":"2"}"#
+                    .to_string(),
             ))],
         )
         .await;
@@ -1086,7 +1258,7 @@ mod tests {
             Some(&rest),
             &ctl,
             vec![Ok(Some(
-                r#"{"op":"chat.delete","channel":"1","message_id":"2","op_id":"old-1","exp_ms":1}"#
+                r#"{"op":"chat.delete","channel":"1","origin_channel":"1","message_id":"2","op_id":"old-1","exp_ms":1}"#
                     .to_string(),
             ))],
         )
@@ -1161,7 +1333,7 @@ mod tests {
             ..Default::default()
         };
         let entry =
-            r#"{"op":"chat.delete","channel":"1","message_id":"2","op_id":"x-1"}"#.to_string();
+            r#"{"op":"chat.delete","channel":"1","origin_channel":"1","message_id":"2","op_id":"x-1"}"#.to_string();
         drive_discord_drain(
             Some(&rest),
             &ctl,
@@ -1180,6 +1352,244 @@ mod tests {
             reason: "not_in_community",
         }));
         assert_eq!(rejected, r#"{"ok":false,"code":"not_in_community"}"#);
+    }
+
+    /// Runs the Twitch drain over raw payloads with the given keys.
+    async fn drive_twitch(payloads: Vec<&str>, pin: Option<&PinKeys>) -> RecordingSender {
+        let queue = FakeQueue {
+            payloads: payloads
+                .into_iter()
+                .map(|p| Ok(Some(p.to_string())))
+                .collect(),
+            idx: AtomicUsize::new(0),
+        };
+        let sender = RecordingSender::default();
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_loop(
+                queue,
+                &sender,
+                pin,
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+        sender
+    }
+
+    const GOOD_TWITCH: &str = r##"{"v":1,"op":"chat.send","platform":"twitch","channel":"#c","text":"hi","origin_channel":"#c"}"##;
+
+    /// regression: p987 provenance -- an entry with a matching
+    /// channel/origin_channel but NO `pin_sig` (any queue writer other than
+    /// svc_action) is refused, counted, and never sent; the next stamped entry
+    /// is still delivered (popped once -- no poison loop).
+    #[tokio::test]
+    async fn twitch_unsigned_entry_refused_counted_and_loop_survives() {
+        let before = crate::outbound_pin::refusal_count("twitch", "chat.send", "no_pin_sig");
+        let forged = format!("RAW:{GOOD_TWITCH}");
+        let sender = drive_twitch(vec![&forged, GOOD_TWITCH], Some(&test_pin_keys())).await;
+        assert_eq!(
+            sender.calls.lock().unwrap().as_slice(),
+            &[("#c".to_string(), "hi".to_string())]
+        );
+        assert!(crate::outbound_pin::refusal_count("twitch", "chat.send", "no_pin_sig") > before);
+    }
+
+    /// regression: p987 provenance -- a stamp that does not cover the fields
+    /// on the wire (tampered channel/text, unknown kid, other key) is refused.
+    #[tokio::test]
+    async fn twitch_tampered_or_foreign_signature_refused() {
+        let signed = stamp_for_test(GOOD_TWITCH);
+        let tampered_text = signed.replace("\"text\":\"hi\"", "\"text\":\"evil\"");
+        assert_ne!(signed, tampered_text);
+        let sig = serde_json::from_str::<serde_json::Value>(&signed).unwrap()["pin_sig"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let unknown_kid = signed.replace(&sig, &sig.replacen("k1:", "k9:", 1));
+        let foreign = PinKeys::parse("k1:ffffffffffffffffffffffffffffffff", Some("k1")).unwrap();
+        let foreign_signed = {
+            let exp_ms = super::now_ms() + 60_000;
+            let mut v: serde_json::Value = serde_json::from_str(GOOD_TWITCH).unwrap();
+            v["exp_ms"] = exp_ms.into();
+            let sig = foreign
+                .sign(&crate::pin_sig::PinFields {
+                    platform: "twitch",
+                    op: "chat.send",
+                    channel: "#c",
+                    origin_channel: "#c",
+                    message_id: "",
+                    text: "hi",
+                    user_id: "",
+                    op_id: "",
+                    exp_ms,
+                })
+                .unwrap();
+            v["pin_sig"] = serde_json::Value::String(sig);
+            v.to_string()
+        };
+        for bad in [tampered_text, unknown_kid, foreign_signed] {
+            let raw = format!("RAW:{bad}");
+            let sender = drive_twitch(vec![&raw], Some(&test_pin_keys())).await;
+            assert!(sender.calls.lock().unwrap().is_empty(), "{bad}");
+        }
+    }
+
+    /// regression: p987 -- with no verification key configured the drain
+    /// refuses every chat op (fail closed), it never sends unverified.
+    #[tokio::test]
+    async fn twitch_drain_without_keys_refuses_everything() {
+        let sender = drive_twitch(vec![GOOD_TWITCH], None).await;
+        assert!(sender.calls.lock().unwrap().is_empty());
+        assert!(
+            crate::outbound_pin::refusal_count("twitch", "chat.send", "pin_key_unconfigured") >= 1
+        );
+    }
+
+    /// Rolling upgrade: an un-stamped in-flight entry (no `origin_channel`,
+    /// as written by a pre-P6a svc_action) is dropped and counted under
+    /// `no_origin_pin`.
+    #[tokio::test]
+    async fn rolling_upgrade_unstamped_entry_counted_as_no_origin_pin() {
+        let before = crate::outbound_pin::refusal_count("twitch", "chat.send", "no_origin_pin");
+        let sender = drive_twitch(
+            vec![r##"{"channel":"#c","text":"hi"}"##],
+            Some(&test_pin_keys()),
+        )
+        .await;
+        assert!(sender.calls.lock().unwrap().is_empty());
+        assert!(
+            crate::outbound_pin::refusal_count("twitch", "chat.send", "no_origin_pin") > before
+        );
+    }
+
+    /// regression: p987 4b -- a Discord entry whose stamp fails is dropped
+    /// and counted, gets NO ack (an unauthenticated writer must not settle
+    /// another producer's op_id), is popped exactly once (never retried),
+    /// and the next valid entry still runs.
+    #[tokio::test]
+    async fn discord_rejected_entry_is_acked_not_retried_and_loop_continues() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/channels/1/messages/2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let rest = rest_for(&server);
+        let ctl = FakeCtl::default();
+        let before = crate::outbound_pin::refusal_count("discord", "chat.delete", "no_pin_sig");
+        drive_discord_drain(
+            Some(&rest),
+            &ctl,
+            vec![
+                Ok(Some(
+                    r#"RAW:{"v":1,"op":"chat.delete","platform":"discord","channel":"9","origin_channel":"9","message_id":"2","op_id":"forged-1"}"#.to_string(),
+                )),
+                Ok(Some(
+                    r#"{"v":1,"op":"chat.delete","platform":"discord","channel":"1","origin_channel":"1","message_id":"2","op_id":"del-1"}"#.to_string(),
+                )),
+            ],
+        )
+        .await;
+        assert_eq!(
+            ctl.acks.lock().unwrap().as_slice(),
+            &[("del-1".to_string(), r#"{"ok":true}"#.to_string())],
+            "a forged entry's op_id must NOT be acked (would settle another producer's op)"
+        );
+        assert!(
+            crate::outbound_pin::refusal_count("discord", "chat.delete", "no_pin_sig") > before
+        );
+    }
+
+    /// regression: p987 4a -- Discord `chat.delete` is channel-scoped: the REST
+    /// path is built from the pinned channel + message id (never from the
+    /// message id alone), and a legitimately-signed entry whose `channel`
+    /// differs from `origin_channel` makes no REST call at all.
+    #[tokio::test]
+    async fn discord_delete_is_channel_scoped_and_mismatch_never_hits_rest() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let rest = rest_for(&server);
+        let ctl = FakeCtl::default();
+        // Signed by a real key holder but channel != origin: pin refuses.
+        let exp_ms = super::now_ms() + 60_000;
+        let signed = test_pin_keys()
+            .sign(&crate::pin_sig::PinFields {
+                platform: "discord",
+                op: "chat.delete",
+                channel: "3",
+                origin_channel: "1",
+                message_id: "2",
+                text: "",
+                user_id: "",
+                op_id: "m-1",
+                exp_ms,
+            })
+            .unwrap();
+        let raw = format!(
+            r#"RAW:{{"v":1,"op":"chat.delete","platform":"discord","channel":"3","origin_channel":"1","message_id":"2","op_id":"m-1","exp_ms":{exp_ms},"pin_sig":"{signed}"}}"#
+        );
+        drive_discord_drain(Some(&rest), &ctl, vec![Ok(Some(raw))]).await;
+        assert_eq!(
+            ctl.acks.lock().unwrap().as_slice(),
+            &[(
+                "m-1".to_string(),
+                r#"{"ok":false,"code":"channel_not_pinned"}"#.to_string()
+            )]
+        );
+    }
+
+    /// regression: p987 review -- a signed-but-expired Twitch entry (captured
+    /// and replayed after its `exp_ms`) is refused and counted `pin_expired`.
+    #[tokio::test]
+    async fn twitch_expired_signed_entry_is_refused_as_replay() {
+        let before = crate::outbound_pin::refusal_count("twitch", "chat.send", "pin_expired");
+        let stale = r##"{"v":1,"op":"chat.send","platform":"twitch","channel":"#c","text":"hi","origin_channel":"#c","exp_ms":1}"##;
+        let sender = drive_twitch(vec![stale], Some(&test_pin_keys())).await;
+        assert!(sender.calls.lock().unwrap().is_empty());
+        assert!(crate::outbound_pin::refusal_count("twitch", "chat.send", "pin_expired") > before);
+    }
+
+    /// regression: p987 review (HIGH) -- an unsigned `dm.send` is refused
+    /// (`no_pin_sig`, NOT acked) and makes NO REST call; a signed
+    /// one still goes through.
+    #[tokio::test]
+    async fn discord_unsigned_dm_send_is_refused_and_never_hits_rest() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let rest = rest_for(&server);
+        let ctl = FakeCtl::default();
+        let before = crate::outbound_pin::refusal_count("discord", "dm.send", "no_pin_sig");
+        drive_discord_drain(
+            Some(&rest),
+            &ctl,
+            vec![Ok(Some(
+                r#"RAW:{"v":1,"op":"dm.send","platform":"discord","user_id":"42","text":"x","origin_channel":"1","op_id":"dm-9","exp_ms":99999999999999}"#.to_string(),
+            ))],
+        )
+        .await;
+        assert!(
+            ctl.acks.lock().unwrap().is_empty(),
+            "an unsigned entry carrying an op_id must produce no ack"
+        );
+        assert!(crate::outbound_pin::refusal_count("discord", "dm.send", "no_pin_sig") > before);
     }
 
     /// The heartbeat asserts readiness immediately and then every interval:

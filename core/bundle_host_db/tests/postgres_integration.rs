@@ -4,7 +4,7 @@
 //! about SQL strings, and only a real server proves the actual
 //! `waddles_bundle_runtime` role, RLS policy, and advisory lock agree with
 //! them. Mirrors `bundle_host_kv/tests/valkey_integration.rs`'s pattern
-//! (own container per scenario, `testcontainers::runners::AsyncRunner`).
+//! (own container per scenario, via the `docker` CLI helper in `core/test_support`).
 //!
 //! **DDL provenance -- the test DDL mirrors production, type for type.**
 //! `alembic/versions/0030_bundle_app_schemas.py` (merged) creates the
@@ -25,34 +25,33 @@
 //! statement failed against the real hub-api-created schema -- keep this
 //! helper byte-identical to the generator, never "simplified".
 //!
-//! Requires Docker (via `testcontainers`) -- CI (`rust-bundle-host-db.yml`,
+//! Requires Docker (the `docker` CLI, `core/test_support`) -- CI (`rust-bundle-host-db.yml`,
 //! alongside `rust-bundle-host-kv.yml`) runs on `ubuntu-latest`, which ships
 //! Docker; local runs need it too. The crate's self dev-dependency enables
 //! the `test-util` feature for this test automatically, so plain
 //! `cargo test --test postgres_integration` is enough.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bundle_host_db::{
     AppSchema, CapabilitySnapshot, ColumnDef, ColumnType, DbBackend, DbError, DbHost, DbScope,
     DbValue, OrderBy, PostgresBackend, Row, SchemaCache, TableSchema, TENANT_WIDE_COMMUNITY_ID,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement, TransactionTrait};
-use testcontainers::core::logs::LogSource;
-use testcontainers::core::wait::LogWaitStrategy;
-use testcontainers::core::{ContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+#[allow(dead_code)]
+#[path = "../../test_support/tests/docker_container.rs"]
+mod docker_container;
+use docker_container::{start_container, DockerContainer};
 
 /// Exact upstream version tag -- confirmed at the time this was pinned to
 /// resolve to `sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3`
 /// (`docker inspect --format='{{index .RepoDigests 0}}' postgres:17.6-bookworm`).
-/// `testcontainers`' `GenericImage::new(name, tag)` API pulls by `name:tag`,
+/// `docker run name:tag` pulls by tag here,
 /// not `name@sha256:digest` (see `bundle_host_kv`'s own `VALKEY_IMAGE` doc
 /// for the same limitation) -- this is the most specific pin it supports:
 /// an exact version+distro tag, never a floating `17`/`latest`.
-const POSTGRES_IMAGE: &str = "postgres";
-const POSTGRES_TAG: &str = "17.6-bookworm";
+const POSTGRES_IMAGE: &str = "postgres:17.6-bookworm";
 
 const SUPERUSER_PASSWORD: &str = "postgres_test_superuser_pw";
 const RUNTIME_PASSWORD: &str = "waddles_bundle_runtime_test_pw";
@@ -78,32 +77,20 @@ const TENANT_WIDE: i32 = TENANT_WIDE_COMMUNITY_ID;
 /// connection URL -- callers open additional connections (as the
 /// superuser, for setup/assertions, or as `waddles_bundle_runtime`, for the
 /// backend under test and the DDL-denial check) against the same server.
-async fn start() -> (ContainerAsync<GenericImage>, String) {
-    let container = GenericImage::new(POSTGRES_IMAGE, POSTGRES_TAG)
-        .with_exposed_port(ContainerPort::Tcp(5432))
-        .with_wait_for(WaitFor::log(
-            // Postgres logs this line twice: once on stdout for the
-            // initdb-time throwaway server, once on stderr for the real
-            // one -- `BothStd` + `with_times(2)` waits for both, so this
-            // never races a connection against the restart in between
-            // (confirmed empirically: `docker logs --tags` shows the first
-            // occurrence on stdout, the second on stderr).
-            LogWaitStrategy::new(
-                LogSource::BothStd,
-                "database system is ready to accept connections",
-            )
-            .with_times(2),
-        ))
-        .with_env_var("POSTGRES_PASSWORD", SUPERUSER_PASSWORD)
-        .with_env_var("POSTGRES_DB", "waddles_test")
-        .start()
-        .await
-        .expect("postgres test container starts");
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("container port");
+async fn start() -> (DockerContainer, String) {
+    let container = start_container(
+        POSTGRES_IMAGE,
+        5432,
+        &[
+            ("POSTGRES_PASSWORD", SUPERUSER_PASSWORD),
+            ("POSTGRES_DB", "waddles_test"),
+        ],
+        &["pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
+        Duration::from_secs(240),
+    )
+    .await;
+    let host = container.host();
+    let port = container.port();
     (
         container,
         format!("postgres://postgres:{SUPERUSER_PASSWORD}@{host}:{port}/waddles_test"),

@@ -223,6 +223,10 @@ fn caps(
         Arc::new(Mutex::new(UsageBatcher::new())),
         gate(),
     )
+    .with_outbound_pin_keys(
+        svc_action::pin_sig::PinKeys::parse("k1:000102030405060708090a0b0c0d0e0f", Some("k1"))
+            .expect("test keys"),
+    )
     .with_discord(transport, Secret::new("t"))
     .with_egress_dispatcher_flag(boxed(StaticFlag(on)))
 }
