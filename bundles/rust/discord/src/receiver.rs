@@ -401,6 +401,21 @@ mod tests {
         assert_eq!(evs[0].occurred_at, "ts");
     }
 
+    /// Pins a KNOWN GAP (host duty): with no `self_user_id` in the session token the
+    /// overlay cannot filter the bot's own messages. The host-side self-identity
+    /// filter (feature/p6b-host-transport-support) must populate it before the flag
+    /// is enabled; if this ever starts filtering, update the README too.
+    #[test]
+    fn without_a_self_id_the_bots_own_messages_are_not_filtered() {
+        let h = FakeHost::default();
+        assert_eq!(
+            on_frame(&h, &ctx(None), &mc("999", None), "t")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     #[test]
     fn lookup_failure_fails_closed_and_logs_without_pii() {
         let h = FakeHost::default();

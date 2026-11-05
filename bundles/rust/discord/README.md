@@ -104,6 +104,20 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
 * Status: executed by the host once T6d lands; the executor's `ConnectorHost` does not yet expose the
   sender export, so `build-request` is covered by native unit tests (and its presence is checked at load).
 
+## Credential-slot smuggling guard (`sanitize.rs`)
+
+Every string that reaches a template (message `content`, `target-source-id`, user refs) is REJECTED — never
+stripped or normalized — if it holds a control character (`\n`/`\t` allowed in `content` only), a zero-width /
+bidi / BOM / soft-hyphen character, or a brace lookalike (fullwidth, ornamental, math); then `{{` / `}}` are
+rejected on both the raw string and a whitespace-collapsed copy. This closes the strip-then-check bypass
+(`{<ctrl>{SECRET}}`). Regression + mutation-checked tests: `sanitize.rs`, `sender.rs`.
+
+## Tools take no host-pinnable ids
+
+`classify_frame` / `classify_close_code` take only a gateway frame / close code (no guild/channel/user ids,
+no network, no credential). Anything that needs a guild/channel/user is a `sender` action whose destination is
+a host-pinned `{target.*}` slot with the `discord-bot` handle, all listed in "Host duties" above (T6d).
+
 ## Normalized events
 
 * `message` — identical to the hardcoded event (see table; `tests/parity.rs`, 10/10 corpus vectors).

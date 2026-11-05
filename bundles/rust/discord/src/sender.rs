@@ -18,6 +18,7 @@
 use serde_json::{Map, Value, json};
 
 use crate::error::{OverlayError, Result};
+use crate::sanitize::guard_text;
 use crate::session::is_snowflake;
 
 /// Discord REST base the host pins egress to.
@@ -94,6 +95,7 @@ fn snowflake(map: &Map<String, Value>, key: &str) -> Result<String> {
 /// renders (the overlay holds no `connector.pii.read`, so it cannot resolve it).
 fn user_ref(map: &Map<String, Value>, key: &str) -> Result<String> {
     let s = str_field(map, key)?;
+    guard_text(key, s, false)?;
     let placeholder = s
         .strip_prefix("{user:")
         .and_then(|r| r.strip_suffix('}'))
@@ -109,6 +111,7 @@ fn user_ref(map: &Map<String, Value>, key: &str) -> Result<String> {
 
 fn content(map: &Map<String, Value>) -> Result<&str> {
     let c = str_field(map, "content")?;
+    guard_text("content", c, true)?;
     if c.is_empty() {
         return Err(OverlayError::Malformed("content is empty".into()));
     }
@@ -158,6 +161,7 @@ pub fn build_request(action: &Action) -> Result<HttpTpl> {
     if action.target_source_id.is_empty() || action.target_source_id.len() > 128 {
         return Err(OverlayError::Malformed("target-source-id invalid".into()));
     }
+    guard_text("target-source-id", &action.target_source_id, false)?;
     let p = action.payload_json.as_str();
     match action.kind.as_str() {
         "chat.send" => {
@@ -333,5 +337,40 @@ mod tests {
         assert!(build_request(&a).is_err());
         a.target_source_id = "x".repeat(129);
         assert!(build_request(&a).is_err());
+    }
+
+    #[test]
+    fn slot_smuggling_in_any_templated_string_is_rejected() {
+        // regression (Twitch overlay HIGH): control/zero-width/lookalike chars around braces.
+        for evil in [
+            "{\\u0001{SECRET}}",
+            "{\\u200B{SECRET}}",
+            "{\\uFF5B{SECRET}}",
+            "{{SECRET}}",
+            "{\\n{SECRET}\\n}",
+        ] {
+            let p = format!(r#"{{"content":"{evil}"}}"#);
+            assert!(
+                build_request(&act("chat.send", &p)).is_err(),
+                "content {evil}"
+            );
+            let p = format!(r#"{{"dm_channel_id":"1","content":"{evil}"}}"#);
+            assert!(
+                build_request(&act("dm.post", &p)).is_err(),
+                "dm.post {evil}"
+            );
+            let p = format!(r#"{{"recipient_id":"{evil}"}}"#);
+            assert!(
+                build_request(&act("dm.send", &p)).is_err(),
+                "recipient {evil}"
+            );
+            let p = format!(r#"{{"user_id":"{evil}","role_id":"2"}}"#);
+            assert!(build_request(&act("role.add", &p)).is_err(), "user {evil}");
+            let mut a = act("chat.send", r#"{"content":"x"}"#);
+            a.target_source_id = serde_json::from_str::<String>(&format!("\"{evil}\"")).unwrap();
+            assert!(build_request(&a).is_err(), "target {evil}");
+        }
+        // Multi-line text with no delimiters still works.
+        assert!(build_request(&act("chat.send", r#"{"content":"a\nb"}"#)).is_ok());
     }
 }

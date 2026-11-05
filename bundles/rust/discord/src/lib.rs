@@ -12,6 +12,7 @@ pub mod gateway;
 pub mod normalize;
 pub mod perms;
 pub mod receiver;
+pub mod sanitize;
 pub mod sender;
 pub mod session;
 pub mod tools;
