@@ -716,10 +716,8 @@ async fn hostile_slot_values_are_encoded_per_position_and_cannot_break_out() {
         )
         .await;
         let a = chat_send("#chan", Some("#chan"), "t");
-        r.exec
-            .execute(&req("twitch", &a, Some(1)))
-            .await
-            .unwrap_or_else(|e| panic!("{v:?}: {e}"));
+        let res = r.exec.execute(&req("twitch", &a, Some(1))).await;
+        assert!(res.is_ok(), "{v:?}: {res:?}");
         let got = sent(&r).await;
         assert_eq!(got.len(), 1, "{v:?}");
         let g = &got[0];

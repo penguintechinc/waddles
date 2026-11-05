@@ -64,10 +64,6 @@ bundle-host-db = { path = ".", features = ["test-util"] }
 # `test-util` (paused virtual time) lets the unit tests prove the per-call
 # deadline fires without really sleeping `CALL_DEADLINE`; it adds no crates.
 tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "test-util"] }
-# Integration test against a real Postgres container -- same rationale and
-# exact version as `core/bundle_host_kv`'s `testcontainers` dev-dependency
-# (RustSec-patched `astral-tokio-tar` line via `testcontainers` >=0.28.0).
-testcontainers = "=0.28.0"
 # `mock` adds `MockDatabase` for the Docker-free unit tests in
 # `src/backend.rs` (scripted query/exec results + transaction-log
 # assertions); it pulls in no extra crates.
