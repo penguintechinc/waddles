@@ -413,6 +413,10 @@ pub(crate) fn relay_op_supported(provider: &str, op: RelayOp) -> bool {
     )
 }
 
+/// Lifetime of a signed Twitch chat envelope (`exp_ms` = now + this); the
+/// drain refuses a stamp past its expiry. Discord entries use the ack timeout.
+const PIN_TTL_MS: u64 = 60_000;
+
 /// Optional fields of the outbound queue envelope beyond the always-present
 /// `v`/`op`/`platform`; only the ones an op needs are set.
 #[derive(Default)]
@@ -997,17 +1001,27 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         self
     }
 
-    /// Stamps `pin_sig` onto a `chat.send`/`chat.delete` envelope (`dm.send`
-    /// carries no pinned channel and is left as is).
+    /// Stamps `exp_ms` (when absent) and `pin_sig` onto EVERY outbound
+    /// envelope (`chat.send`, `chat.delete`, `dm.send`); the MAC binds the
+    /// freshness deadline so a captured entry cannot be replayed later.
     ///
     /// # Errors
     /// `relay_unavailable` when no signing key is configured or signing fails.
     fn sign_envelope(&self, env: &mut serde_json::Value) -> Result<(), HostResultError> {
+        if env.get("exp_ms").is_none() {
+            if let Some(obj) = env.as_object_mut() {
+                obj.insert(
+                    "exp_ms".to_string(),
+                    serde_json::Value::from(now_epoch_ms().saturating_add(PIN_TTL_MS)),
+                );
+            }
+        }
+        let exp_ms = env
+            .get("exp_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         let get = |k: &str| env.get(k).and_then(serde_json::Value::as_str).unwrap_or("");
         let op = get("op");
-        if op == "dm.send" {
-            return Ok(());
-        }
         let keys = self.pin_keys.as_ref().ok_or_else(|| {
             tracing::error!("outbound pin signing key not configured; relay chat op refused");
             denied(
@@ -1023,6 +1037,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 origin_channel: get("origin_channel"),
                 message_id: get("message_id"),
                 text: get("text"),
+                user_id: get("user_id"),
+                exp_ms,
             })
             .map_err(|e| {
                 tracing::error!(error = %e, "outbound pin signing failed; relay chat op refused");
@@ -1814,8 +1830,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         let exp_ms = now_epoch_ms().saturating_add(
             u64::try_from(self.discord_ack_timeout.as_millis()).unwrap_or(u64::MAX),
         );
-        self.sign_envelope(&mut payload)?;
         stamp_handshake(&mut payload, &op_id, exp_ms);
+        // Signed AFTER the handshake so the MAC binds `exp_ms`.
+        self.sign_envelope(&mut payload)?;
         let payload = payload.to_string();
         let outbound_bytes = payload.len() as u64;
         self.relay_queue
@@ -3049,6 +3066,12 @@ mod tests {
         let pushed = caps.relay_queue.pushed.lock().unwrap();
         let v: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
         let sig = v["pin_sig"].as_str().expect("pin_sig stamped");
+        let exp_ms = v["exp_ms"].as_u64().expect("exp_ms stamped");
+        let now = now_epoch_ms();
+        assert!(
+            exp_ms > now && exp_ms <= now + PIN_TTL_MS + 5_000,
+            "short signed TTL"
+        );
         let verify = |text: &str| {
             test_pin_keys().verify(
                 &PinFields {
@@ -3058,12 +3081,47 @@ mod tests {
                     origin_channel: "#somechannel",
                     message_id: "",
                     text,
+                    user_id: "",
+                    exp_ms,
                 },
                 sig,
             )
         };
         assert_eq!(verify("hi"), Ok(()));
         assert!(verify("tampered").is_err());
+    }
+
+    /// regression: p987 review -- `sign_envelope` covers dm.send too (user_id
+    /// and exp_ms are in the MAC) and leaves no op unsigned.
+    #[test]
+    fn sign_envelope_signs_dm_send_and_binds_user_id_and_exp() {
+        let caps = caps(FakeRelayQueue::default());
+        let mut env = build_outbound_envelope(
+            RelayOp::DmSend,
+            "discord",
+            &EnvelopeFields {
+                text: Some("hi"),
+                user_id: Some("42"),
+                origin_channel: Some("1"),
+                ..EnvelopeFields::default()
+            },
+        );
+        caps.sign_envelope(&mut env).expect("signed");
+        let sig = env["pin_sig"].as_str().expect("dm signed").to_string();
+        let exp_ms = env["exp_ms"].as_u64().expect("exp stamped");
+        let f = |user_id: &'static str, exp_ms: u64| PinFields {
+            platform: "discord",
+            op: "dm.send",
+            channel: "",
+            origin_channel: "1",
+            message_id: "",
+            text: "hi",
+            user_id,
+            exp_ms,
+        };
+        assert_eq!(test_pin_keys().verify(&f("42", exp_ms), &sig), Ok(()));
+        assert!(test_pin_keys().verify(&f("43", exp_ms), &sig).is_err());
+        assert!(test_pin_keys().verify(&f("42", exp_ms + 1), &sig).is_err());
     }
 
     /// regression: p987 -- with no signing key configured a chat relay is

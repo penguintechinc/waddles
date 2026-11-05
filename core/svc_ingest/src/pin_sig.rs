@@ -5,9 +5,11 @@
 //! see `k8s/helm/waddlebot/templates/infrastructure/valkey-durable.yaml`), so
 //! `origin_channel == channel` alone proves nothing about provenance. The
 //! producer (`svc_action`) therefore signs the destination-bearing fields with
-//! HMAC-SHA256 under a key from `ENVELOPE_BINDING_KEYS` (`kid:hexkey[,...]`,
-//! the keyring both services already hold) and the drain (`svc_ingest`)
-//! verifies in constant time before it sends anything.
+//! HMAC-SHA256 under a DEDICATED key `OUTBOUND_PIN_KEYS` (`kid:hexkey[,...]`,
+//! active kid `OUTBOUND_PIN_ACTIVE_KID`), mounted only into svc-action (signer)
+//! and svc-ingest (verifier), and the drain (`svc_ingest`) verifies in
+//! constant time before it sends anything. Every op is signed (chat.send,
+//! chat.delete AND dm.send) together with an `exp_ms` freshness bound.
 //!
 //! This file is byte-identical in `core/svc_action/src/pin_sig.rs`
 //! (separate crates, no shared lib); a test in `svc_ingest` fails if the
@@ -60,6 +62,10 @@ pub struct PinFields<'a> {
     pub message_id: &'a str,
     /// `""` when the op has none.
     pub text: &'a str,
+    /// DM target (`dm.send`); `""` otherwise.
+    pub user_id: &'a str,
+    /// Producer deadline, epoch ms (always present; bounds replay).
+    pub exp_ms: u64,
 }
 
 /// A rotation-friendly keyring: any held `kid` verifies, `active` signs.
@@ -100,7 +106,7 @@ fn hex_encode(b: &[u8]) -> String {
 }
 
 impl PinKeys {
-    /// Parses `kid1:hexkey1,kid2:hexkey2` (the `ENVELOPE_BINDING_KEYS` shape).
+    /// Parses `kid1:hexkey1,kid2:hexkey2` (the `OUTBOUND_PIN_KEYS` shape).
     /// `active_kid` selects the signing key (verify-only deployments pass
     /// `None`).
     ///
@@ -139,6 +145,7 @@ impl PinKeys {
     fn mac(key: &[u8], f: &PinFields<'_>) -> Result<HmacSha256, PinSigError> {
         let mut mac = HmacSha256::new_from_slice(key).map_err(|_| PinSigError::MalformedKeys)?;
         mac.update(LABEL);
+        let exp = f.exp_ms.to_string();
         for part in [
             f.platform,
             f.op,
@@ -146,6 +153,8 @@ impl PinKeys {
             f.origin_channel,
             f.message_id,
             f.text,
+            f.user_id,
+            exp.as_str(),
         ] {
             // Length-prefixed so field boundaries can never be shifted.
             let len = u32::try_from(part.len()).map_err(|_| PinSigError::MalformedSignature)?;
@@ -197,6 +206,8 @@ mod tests {
             origin_channel: "123",
             message_id: "",
             text: "hi",
+            user_id: "",
+            exp_ms: 1_700_000_000_000,
         }
     }
 
@@ -206,7 +217,7 @@ mod tests {
         let k = PinKeys::parse(KEYS, Some("k1")).unwrap();
         assert_eq!(
             k.sign(&fields()).unwrap(),
-            "k1:d2b0dbafcf15a1fe4317ef81809666ca1eefb95ce996a0fb4e02b8582592415e"
+            "k1:788fb24d2b87682d6c253fe0d2fa72eb688b1776a581b9ae1d803b730791f935"
         );
     }
 
@@ -247,6 +258,14 @@ mod tests {
             },
             PinFields {
                 message_id: "9",
+                ..fields()
+            },
+            PinFields {
+                user_id: "7",
+                ..fields()
+            },
+            PinFields {
+                exp_ms: 1_700_000_000_001,
                 ..fields()
             },
         ] {

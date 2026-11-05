@@ -135,6 +135,14 @@ spec:
         - name: TWITCH_RESOLVE_TIMEOUT_SECS
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchResolveTimeoutSecs | default 10 | quote }}
         {{- end }}
+        # P6a T6: dedicated outbound pin key (NOT the shared envFrom Secret) -- templates/outbound-pin-secret.yaml.
+        - name: OUTBOUND_PIN_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.outboundPinSecretName" . }}
+              key: OUTBOUND_PIN_KEYS
+        - name: OUTBOUND_PIN_ACTIVE_KID
+          value: {{ .Values.outboundPin.activeKid | default "k1" | quote }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid }}
         - name: ENVELOPE_BINDING_ACTIVE_KID
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid | quote }}

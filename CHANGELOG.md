@@ -19,12 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 - Outbound relay host-pin provenance (P6a T6 review): the durable Valkey ACL does not restrict who can `LPUSH` the outbound
-  chat queue, so `svc_action` now HMAC-signs every `chat.send`/`chat.delete` envelope (`pin_sig`, key ring
-  `ENVELOPE_BINDING_KEYS`, signer `ENVELOPE_BINDING_ACTIVE_KID`) and the svc_ingest drain verifies before sending; unsigned/forged
-  entries are refused and counted (`svc_ingest_outbound_pin_refused_total{reason=no_pin_sig|bad_pin_sig|pin_key_unconfigured}`).
+  queue, so `svc_action` now HMAC-signs EVERY outbound envelope (`chat.send`, `chat.delete`, `dm.send`; `pin_sig`, MAC binds a
+  60s `exp_ms`) under a DEDICATED `OUTBOUND_PIN_KEYS` secret (+ `OUTBOUND_PIN_ACTIVE_KID`) mounted only into svc-action and svc-ingest
+  (`templates/outbound-pin-secret.yaml`, `outboundPin.existingSecret`), and the svc_ingest drain verifies signature + freshness before
+  sending; refusals are counted (`svc_ingest_outbound_pin_refused_total{reason=no_pin_sig|bad_pin_sig|pin_expired|pin_exp_invalid|pin_key_unconfigured}`).
   Also: Discord ids must fit a non-zero u64; Twitch stamps are validated strictly, not normalized.
   **Rollout: deploy svc_action first, then svc_ingest; in-flight pre-upgrade entries are dropped (`reason=no_origin_pin`) -- accepted on alpha.**
-  Ensure `ENVELOPE_BINDING_ACTIVE_KID` is set for svc-action (chat relays are refused `relay_unavailable` otherwise). See `core/svc_ingest/README.md`.
+  See `core/svc_ingest/README.md`.
 - Discord mass-mention backstop: every Discord create-message REST body the Rust data plane emits (svc-action relay `chat.send` +
   webhook-body helper, svc-ingest `chat.send`/`dm.send`) now carries `allowed_mentions: {"parse": ["users"]}` from one shared helper
   (`core/discord_mentions`), so no bundle -- or content a bundle echoes -- can ping `@everyone`/`@here`/a role; plain user mentions

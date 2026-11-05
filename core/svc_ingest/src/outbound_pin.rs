@@ -42,7 +42,13 @@ pub enum PinError {
     /// `pin_sig` is malformed, names an unknown key, or does not match.
     #[error("outbound pin signature is invalid")]
     BadSignature,
-    /// This process has no usable `ENVELOPE_BINDING_KEYS`, so no entry can
+    /// The entry's `exp_ms` is in the past (stale or replayed).
+    #[error("outbound entry is past its signed expiry")]
+    Expired,
+    /// `exp_ms` is missing or implausibly far in the future.
+    #[error("outbound entry has no plausible signed expiry")]
+    ExpiryInvalid,
+    /// This process has no usable `OUTBOUND_PIN_KEYS`, so no entry can
     /// be verified -- every chat op is refused (fail closed, never open).
     #[error("outbound pin verification key is not configured")]
     KeyUnconfigured,
@@ -60,6 +66,8 @@ impl PinError {
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::MissingSignature => "no_pin_sig",
             Self::BadSignature => "bad_pin_sig",
+            Self::Expired => "pin_expired",
+            Self::ExpiryInvalid => "pin_exp_invalid",
             Self::KeyUnconfigured => "pin_key_unconfigured",
         }
     }
@@ -137,24 +145,51 @@ struct StampWire {
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    exp_ms: Option<u64>,
+    #[serde(default)]
     pin_sig: Option<String>,
+}
+
+/// Furthest-future `exp_ms` the drain accepts (producer TTL is 60s at most
+/// for chat, the ack timeout for Discord); anything beyond is not a stamp
+/// this system produced.
+const MAX_EXP_AHEAD_MS: u64 = 300_000;
+
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Verifies the producer's integrity stamp on a raw queue entry BEFORE it is
 /// acted on. The Valkey ACL lets any app client write the outbound list, so
 /// `origin_channel == channel` is only meaningful if the stamp was made by
-/// `svc_action` (HMAC under `ENVELOPE_BINDING_KEYS`, constant-time verify).
-/// `chat.send`/`chat.delete` only -- `dm.send` carries no pinned channel.
+/// `svc_action` (HMAC under `OUTBOUND_PIN_KEYS`, constant-time verify). EVERY
+/// op is covered (`chat.send`, `chat.delete`, `dm.send`) and the MAC binds
+/// `exp_ms`, which must be in the future and within [`MAX_EXP_AHEAD_MS`].
 ///
 /// # Errors
 /// [`PinError::MissingOrigin`], [`PinError::KeyUnconfigured`],
-/// [`PinError::MissingSignature`] or [`PinError::BadSignature`] -- fail closed.
+/// [`PinError::MissingSignature`], [`PinError::BadSignature`],
+/// [`PinError::ExpiryInvalid`] or [`PinError::Expired`] -- fail closed.
 pub fn verify_stamp(raw: &str, platform: &str, keys: Option<&PinKeys>) -> Result<(), PinError> {
+    verify_stamp_at(raw, platform, keys, now_epoch_ms())
+}
+
+/// [`verify_stamp`] with an injectable clock (tests).
+///
+/// # Errors
+/// As [`verify_stamp`].
+pub fn verify_stamp_at(
+    raw: &str,
+    platform: &str,
+    keys: Option<&PinKeys>,
+    now_ms: u64,
+) -> Result<(), PinError> {
     let wire: StampWire = serde_json::from_str(raw).map_err(|_| PinError::BadSignature)?;
     let op = wire.op.as_deref().unwrap_or("chat.send");
-    if op == "dm.send" {
-        return Ok(());
-    }
     let origin = wire
         .origin_channel
         .as_deref()
@@ -166,6 +201,7 @@ pub fn verify_stamp(raw: &str, platform: &str, keys: Option<&PinKeys>) -> Result
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or(PinError::MissingSignature)?;
+    let exp_ms = wire.exp_ms.ok_or(PinError::ExpiryInvalid)?;
     let fields = PinFields {
         platform,
         op,
@@ -173,11 +209,21 @@ pub fn verify_stamp(raw: &str, platform: &str, keys: Option<&PinKeys>) -> Result
         origin_channel: origin,
         message_id: wire.message_id.as_deref().unwrap_or(""),
         text: wire.text.as_deref().unwrap_or(""),
+        user_id: wire.user_id.as_deref().unwrap_or(""),
+        exp_ms,
     };
+    // Signature first: an attacker must not learn expiry rules from forgeries.
     keys.verify(&fields, sig).map_err(|e| match e {
         PinSigError::MissingSignature => PinError::MissingSignature,
         _ => PinError::BadSignature,
-    })
+    })?;
+    if exp_ms < now_ms {
+        return Err(PinError::Expired);
+    }
+    if exp_ms > now_ms.saturating_add(MAX_EXP_AHEAD_MS) {
+        return Err(PinError::ExpiryInvalid);
+    }
+    Ok(())
 }
 
 static PIN_REFUSED: LazyLock<prometheus::IntCounterVec> = LazyLock::new(|| {
@@ -342,56 +388,135 @@ mod tests {
         );
     }
 
-    #[test]
-    fn verify_stamp_rules() {
-        let keys = PinKeys::parse("k1:000102030405060708090a0b0c0d0e0f", Some("k1")).unwrap();
-        let sig = keys
+    const NOW: u64 = 1_000_000;
+
+    fn test_keys() -> PinKeys {
+        PinKeys::parse("k1:000102030405060708090a0b0c0d0e0f", Some("k1")).unwrap()
+    }
+
+    /// Builds a signed entry for `op` with the given fields.
+    fn signed_entry(op: &str, user_id: &str, channel: &str, exp_ms: u64) -> String {
+        let sig = test_keys()
             .sign(&PinFields {
                 platform: "discord",
-                op: "chat.send",
-                channel: "1",
+                op,
+                channel,
                 origin_channel: "1",
                 message_id: "",
                 text: "x",
+                user_id,
+                exp_ms,
             })
             .unwrap();
-        let ok = format!(
-            r#"{{"op":"chat.send","channel":"1","origin_channel":"1","text":"x","pin_sig":"{sig}"}}"#
-        );
-        assert_eq!(verify_stamp(&ok, "discord", Some(&keys)), Ok(()));
+        let mut v = serde_json::json!({
+            "op": op, "origin_channel": "1", "text": "x", "exp_ms": exp_ms, "pin_sig": sig,
+        });
+        if !channel.is_empty() {
+            v["channel"] = channel.into();
+        }
+        if !user_id.is_empty() {
+            v["user_id"] = user_id.into();
+        }
+        v.to_string()
+    }
+
+    #[test]
+    fn verify_stamp_rules() {
+        let keys = test_keys();
+        let ok = signed_entry("chat.send", "", "1", NOW + 60_000);
+        assert_eq!(verify_stamp_at(&ok, "discord", Some(&keys), NOW), Ok(()));
         // Same bytes under another platform's queue: not valid.
         assert_eq!(
-            verify_stamp(&ok, "twitch", Some(&keys)),
+            verify_stamp_at(&ok, "twitch", Some(&keys), NOW),
             Err(PinError::BadSignature)
         );
         assert_eq!(
-            verify_stamp(&ok, "discord", None),
+            verify_stamp_at(&ok, "discord", None, NOW),
             Err(PinError::KeyUnconfigured)
         );
         let no_sig = r#"{"op":"chat.send","channel":"1","origin_channel":"1","text":"x"}"#;
         assert_eq!(
-            verify_stamp(no_sig, "discord", Some(&keys)),
+            verify_stamp_at(no_sig, "discord", Some(&keys), NOW),
             Err(PinError::MissingSignature)
         );
         let no_origin = r#"{"op":"chat.send","channel":"1","text":"x"}"#;
         assert_eq!(
-            verify_stamp(no_origin, "discord", Some(&keys)),
+            verify_stamp_at(no_origin, "discord", Some(&keys), NOW),
             Err(PinError::MissingOrigin)
         );
-        // dm.send carries no pinned channel (community-bound in the adapter).
-        let dm = r#"{"op":"dm.send","user_id":"1","text":"x","origin_channel":"1"}"#;
-        assert_eq!(verify_stamp(dm, "discord", Some(&keys)), Ok(()));
         assert_eq!(
-            verify_stamp("not json", "discord", Some(&keys)),
+            verify_stamp_at("not json", "discord", Some(&keys), NOW),
             Err(PinError::BadSignature)
         );
         for e in [
             PinError::MissingSignature,
             PinError::BadSignature,
             PinError::KeyUnconfigured,
+            PinError::Expired,
+            PinError::ExpiryInvalid,
         ] {
             assert!(!e.reason().is_empty() && !e.to_string().is_empty());
         }
+    }
+
+    /// regression: p987 review -- `dm.send` is signed and verified like every
+    /// other op: an unsigned DM is refused (`no_pin_sig`) and a tampered
+    /// `user_id` fails the MAC.
+    #[test]
+    fn dm_send_is_signed_and_verified() {
+        let keys = test_keys();
+        let dm = signed_entry("dm.send", "42", "", NOW + 60_000);
+        assert_eq!(verify_stamp_at(&dm, "discord", Some(&keys), NOW), Ok(()));
+        let unsigned =
+            r#"{"op":"dm.send","user_id":"42","text":"x","origin_channel":"1","exp_ms":1000060}"#;
+        assert_eq!(
+            verify_stamp_at(unsigned, "discord", Some(&keys), NOW),
+            Err(PinError::MissingSignature)
+        );
+        let tampered = dm.replace(r#""user_id":"42""#, r#""user_id":"43""#);
+        assert_ne!(dm, tampered);
+        assert_eq!(
+            verify_stamp_at(&tampered, "discord", Some(&keys), NOW),
+            Err(PinError::BadSignature)
+        );
+    }
+
+    /// regression: p987 review -- freshness: expired, missing and
+    /// implausibly-far-future `exp_ms` are refused (the MAC binds exp_ms, so
+    /// extending it breaks the signature).
+    #[test]
+    fn exp_ms_is_bound_and_bounded() {
+        let keys = test_keys();
+        let expired = signed_entry("chat.send", "", "1", NOW - 1);
+        assert_eq!(
+            verify_stamp_at(&expired, "discord", Some(&keys), NOW),
+            Err(PinError::Expired)
+        );
+        let far = signed_entry("chat.send", "", "1", NOW + MAX_EXP_AHEAD_MS + 1);
+        assert_eq!(
+            verify_stamp_at(&far, "discord", Some(&keys), NOW),
+            Err(PinError::ExpiryInvalid)
+        );
+        let edge = signed_entry("chat.send", "", "1", NOW + MAX_EXP_AHEAD_MS);
+        assert_eq!(verify_stamp_at(&edge, "discord", Some(&keys), NOW), Ok(()));
+        let ok = signed_entry("chat.send", "", "1", NOW + 1000);
+        let extended = ok.replace("1001000", "1090000");
+        assert_ne!(ok, extended);
+        assert_eq!(
+            verify_stamp_at(&extended, "discord", Some(&keys), NOW),
+            Err(PinError::BadSignature)
+        );
+        let missing = ok.replace(r#""exp_ms":1001000,"#, "");
+        let missing = if missing == ok {
+            ok.replace(r#","exp_ms":1001000"#, "")
+        } else {
+            missing
+        };
+        assert_ne!(ok, missing);
+        assert_eq!(
+            verify_stamp_at(&missing, "discord", Some(&keys), NOW),
+            Err(PinError::ExpiryInvalid)
+        );
     }
 
     #[test]

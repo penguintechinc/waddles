@@ -688,7 +688,7 @@ fn try_start_twitch_outbound(config: &config::Config) {
         use_tls: config.cli.twitch_irc_use_tls,
     };
 
-    let pin = resolve_outbound_pin_keys(config, "twitch");
+    let pin = resolve_outbound_pin_keys("twitch");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         shutdown_signal().await;
@@ -732,7 +732,7 @@ fn try_start_discord_outbound(config: &config::Config) {
             return;
         }
     };
-    let pin = resolve_outbound_pin_keys(config, "discord");
+    let pin = resolve_outbound_pin_keys("discord");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         shutdown_signal().await;
@@ -925,25 +925,23 @@ fn resolve_binding_keyring(
     }
 }
 
-/// Loads the outbound `pin_sig` verification keys from
-/// `ENVELOPE_BINDING_KEYS`. Missing/invalid keys are logged at ERROR and
-/// yield `None`: the drain still runs but then refuses EVERY chat op
-/// (`pin_key_unconfigured`) -- fail closed and loud, never accept unverified.
-fn resolve_outbound_pin_keys(
-    config: &config::Config,
-    platform: &str,
-) -> Option<outbound_pin::PinKeys> {
-    let Some(raw) = config.envelope_binding_keys.as_ref() else {
+/// Loads the outbound `pin_sig` verification keys from the DEDICATED
+/// `OUTBOUND_PIN_KEYS` (never the shared `ENVELOPE_BINDING_KEYS` ring).
+/// Missing/invalid keys are logged at ERROR and yield `None`: the drain still
+/// runs but then refuses EVERY op (`pin_key_unconfigured`) -- fail closed and
+/// loud, never accept unverified.
+fn resolve_outbound_pin_keys(platform: &str) -> Option<outbound_pin::PinKeys> {
+    let Ok(raw) = std::env::var("OUTBOUND_PIN_KEYS") else {
         tracing::error!(
             platform,
-            "ENVELOPE_BINDING_KEYS not set; outbound drain will REFUSE every chat.send/chat.delete (pin_key_unconfigured)"
+            "OUTBOUND_PIN_KEYS not set; outbound drain will REFUSE every op (pin_key_unconfigured)"
         );
         return None;
     };
-    match outbound_pin::PinKeys::parse(raw.expose(), None) {
+    match outbound_pin::PinKeys::parse(&raw, None) {
         Ok(keys) => Some(keys),
         Err(err) => {
-            tracing::error!(platform, error = %err, "ENVELOPE_BINDING_KEYS unusable for outbound pin verification; drain will REFUSE every chat.send/chat.delete");
+            tracing::error!(platform, error = %err, "OUTBOUND_PIN_KEYS unusable; drain will REFUSE every op");
             None
         }
     }

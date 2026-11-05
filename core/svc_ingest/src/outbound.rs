@@ -633,20 +633,33 @@ mod tests {
         let Ok(mut v) = serde_json::from_str::<serde_json::Value>(raw) else {
             return raw.to_string();
         };
-        let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let op = if v.get("op").is_some() {
+        let snapshot = v.clone();
+        let get = |k: &str| {
+            snapshot
+                .get(k)
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let op = if snapshot.get("op").is_some() {
             get("op")
         } else {
             "chat.send".to_string()
         };
         let (channel, origin) = (get("channel"), get("origin_channel"));
-        if op == "dm.send" || origin.is_empty() {
+        if origin.is_empty() {
             return raw.to_string();
         }
+        // Producer always stamps a fresh exp_ms; keep an explicit one (tests
+        // of the deadline path).
+        if v.get("exp_ms").is_none() {
+            v["exp_ms"] = serde_json::Value::from(super::now_ms() + 60_000);
+        }
+        let exp_ms = v["exp_ms"].as_u64().unwrap_or(0);
         // Platform-less test entries: legacy (no `op`) = twitch, else discord.
-        let platform = if v.get("platform").is_some() {
+        let platform = if snapshot.get("platform").is_some() {
             get("platform")
-        } else if v.get("op").is_some() {
+        } else if snapshot.get("op").is_some() {
             "discord".to_string()
         } else {
             "twitch".to_string()
@@ -659,6 +672,8 @@ mod tests {
                 origin_channel: &origin,
                 message_id: &get("message_id"),
                 text: &get("text"),
+                user_id: &get("user_id"),
+                exp_ms,
             })
             .unwrap();
         v["pin_sig"] = serde_json::Value::String(sig);
@@ -1393,7 +1408,9 @@ mod tests {
         let unknown_kid = signed.replace(&sig, &sig.replacen("k1:", "k9:", 1));
         let foreign = PinKeys::parse("k1:ffffffffffffffffffffffffffffffff", Some("k1")).unwrap();
         let foreign_signed = {
-            let v: serde_json::Value = serde_json::from_str(GOOD_TWITCH).unwrap();
+            let exp_ms = super::now_ms() + 60_000;
+            let mut v: serde_json::Value = serde_json::from_str(GOOD_TWITCH).unwrap();
+            v["exp_ms"] = exp_ms.into();
             let sig = foreign
                 .sign(&crate::pin_sig::PinFields {
                     platform: "twitch",
@@ -1402,9 +1419,10 @@ mod tests {
                     origin_channel: "#c",
                     message_id: "",
                     text: "hi",
+                    user_id: "",
+                    exp_ms,
                 })
                 .unwrap();
-            let mut v = v;
             v["pin_sig"] = serde_json::Value::String(sig);
             v.to_string()
         };
@@ -1506,6 +1524,7 @@ mod tests {
         let rest = rest_for(&server);
         let ctl = FakeCtl::default();
         // Signed by a real key holder but channel != origin: pin refuses.
+        let exp_ms = super::now_ms() + 60_000;
         let signed = test_pin_keys()
             .sign(&crate::pin_sig::PinFields {
                 platform: "discord",
@@ -1514,10 +1533,12 @@ mod tests {
                 origin_channel: "1",
                 message_id: "2",
                 text: "",
+                user_id: "",
+                exp_ms,
             })
             .unwrap();
         let raw = format!(
-            r#"RAW:{{"v":1,"op":"chat.delete","platform":"discord","channel":"3","origin_channel":"1","message_id":"2","op_id":"m-1","pin_sig":"{signed}"}}"#
+            r#"RAW:{{"v":1,"op":"chat.delete","platform":"discord","channel":"3","origin_channel":"1","message_id":"2","op_id":"m-1","exp_ms":{exp_ms},"pin_sig":"{signed}"}}"#
         );
         drive_discord_drain(Some(&rest), &ctl, vec![Ok(Some(raw))]).await;
         assert_eq!(
@@ -1527,6 +1548,51 @@ mod tests {
                 r#"{"ok":false,"code":"channel_not_pinned"}"#.to_string()
             )]
         );
+    }
+
+    /// regression: p987 review -- a signed-but-expired Twitch entry (captured
+    /// and replayed after its `exp_ms`) is refused and counted `pin_expired`.
+    #[tokio::test]
+    async fn twitch_expired_signed_entry_is_refused_as_replay() {
+        let before = crate::outbound_pin::refusal_count("twitch", "chat.send", "pin_expired");
+        let stale = r##"{"v":1,"op":"chat.send","platform":"twitch","channel":"#c","text":"hi","origin_channel":"#c","exp_ms":1}"##;
+        let sender = drive_twitch(vec![stale], Some(&test_pin_keys())).await;
+        assert!(sender.calls.lock().unwrap().is_empty());
+        assert!(crate::outbound_pin::refusal_count("twitch", "chat.send", "pin_expired") > before);
+    }
+
+    /// regression: p987 review (HIGH) -- an unsigned `dm.send` is refused
+    /// (`no_pin_sig`, acked to the producer) and makes NO REST call; a signed
+    /// one still goes through.
+    #[tokio::test]
+    async fn discord_unsigned_dm_send_is_refused_and_never_hits_rest() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let rest = rest_for(&server);
+        let ctl = FakeCtl::default();
+        let before = crate::outbound_pin::refusal_count("discord", "dm.send", "no_pin_sig");
+        drive_discord_drain(
+            Some(&rest),
+            &ctl,
+            vec![Ok(Some(
+                r#"RAW:{"v":1,"op":"dm.send","platform":"discord","user_id":"42","text":"x","origin_channel":"1","op_id":"dm-9","exp_ms":99999999999999}"#.to_string(),
+            ))],
+        )
+        .await;
+        assert_eq!(
+            ctl.acks.lock().unwrap().as_slice(),
+            &[(
+                "dm-9".to_string(),
+                r#"{"ok":false,"code":"no_pin_sig"}"#.to_string()
+            )]
+        );
+        assert!(crate::outbound_pin::refusal_count("discord", "dm.send", "no_pin_sig") > before);
     }
 
     /// The heartbeat asserts readiness immediately and then every interval:

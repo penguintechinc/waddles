@@ -910,11 +910,10 @@ async fn build_stage_capabilities(
     // default OFF (unseen/absent => inline path); this is the only
     // production wiring that makes the dispatcher path reachable.
     let caps = caps.with_egress_dispatcher_flag(flags::egress_dispatcher_flag());
-    // Outbound `pin_sig` signing keys (same `ENVELOPE_BINDING_KEYS` ring
-    // + active kid the hop MAC uses). Missing/invalid => ERROR and every
+    // Outbound `pin_sig` signing keys (dedicated `OUTBOUND_PIN_KEYS`). Missing/invalid => ERROR and every
     // chat relay op is refused loudly (`relay_unavailable`), never sent
     // unsigned: the drain would drop it anyway.
-    let caps = match resolve_outbound_pin_keys(cli) {
+    let caps = match resolve_outbound_pin_keys() {
         Some(keys) => caps.with_outbound_pin_keys(keys),
         None => caps,
     };
@@ -928,20 +927,23 @@ async fn build_stage_capabilities(
     Some(Arc::new(caps))
 }
 
-/// Loads the outbound `pin_sig` signing keys from `ENVELOPE_BINDING_KEYS` and
-/// `ENVELOPE_BINDING_ACTIVE_KID`; logs ERROR (no key material) and returns
-/// `None` when either is missing/invalid.
-fn resolve_outbound_pin_keys(cli: &config::CliConfig) -> Option<pin_sig::PinKeys> {
-    let Ok(raw) = std::env::var("ENVELOPE_BINDING_KEYS") else {
+/// Loads the outbound `pin_sig` signing keys from the DEDICATED
+/// `OUTBOUND_PIN_KEYS` (`kid:hexkey[,...]`) and `OUTBOUND_PIN_ACTIVE_KID`
+/// (mounted only into svc-action + svc-ingest, never the shared binding-key
+/// ring); logs ERROR (no key material) and returns `None` when either is
+/// missing/invalid, in which case every chat relay op is refused loudly.
+fn resolve_outbound_pin_keys() -> Option<pin_sig::PinKeys> {
+    let Ok(raw) = std::env::var("OUTBOUND_PIN_KEYS") else {
         tracing::error!(
-            "ENVELOPE_BINDING_KEYS not set; relay chat.send/chat.delete will be refused (relay_unavailable)"
+            "OUTBOUND_PIN_KEYS not set; relay chat.send/chat.delete/dm.send will be refused (relay_unavailable)"
         );
         return None;
     };
-    match pin_sig::PinKeys::parse(&raw, cli.envelope_binding_active_kid.as_deref()) {
+    let active = std::env::var("OUTBOUND_PIN_ACTIVE_KID").ok();
+    match pin_sig::PinKeys::parse(&raw, active.as_deref()) {
         Ok(keys) => Some(keys),
         Err(err) => {
-            tracing::error!(error = %err, "outbound pin signing keys unusable (check ENVELOPE_BINDING_KEYS / ENVELOPE_BINDING_ACTIVE_KID); relay chat.send/chat.delete will be refused");
+            tracing::error!(error = %err, "outbound pin signing keys unusable (check OUTBOUND_PIN_KEYS / OUTBOUND_PIN_ACTIVE_KID); relay ops will be refused");
             None
         }
     }

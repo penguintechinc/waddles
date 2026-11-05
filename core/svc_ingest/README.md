@@ -59,7 +59,8 @@ entries are refused loudly, never guessed at).
 | `invalid_channel` | malformed id (incl. IRC multi-target `#a,#b`) |
 | `unsupported_platform` | no pin policy -> fail closed |
 | `no_pin_sig` / `bad_pin_sig` | missing / invalid `pin_sig` integrity stamp (see Provenance) |
-| `pin_key_unconfigured` | no verification keys -> every chat op refused |
+| `pin_key_unconfigured` | no verification keys -> every op refused |
+| `pin_expired` / `pin_exp_invalid` | signed `exp_ms` in the past / missing or > 5 min ahead |
 
 Refusals surface as `SenderError::Rejected`, bump `svc_ingest_outbound_pin_refused_total{platform,op,reason}`
 and log a PII-free WARN (platform/op/reason only -- never a channel, id or message text).
@@ -77,17 +78,20 @@ password-only `default` user with `~*` and `+@write` (`k8s/helm/waddlebot/templa
 the list directly -- only through the `relay` host capability in `svc_action`
 (`core/svc_action/src/capabilities.rs`, `outbound_relay_queue_key`).
 
-Trust boundary enforced in code instead: `svc_action` signs `platform|op|channel|origin_channel|message_id|text`
-(HMAC-SHA256, domain label `waddles.outbound-pin.v1`, length-prefixed) and puts `pin_sig` = `kid:hexmac` on the envelope;
-the drain verifies in constant time **before** the pin check and refuses `no_pin_sig` / `bad_pin_sig` /
-`pin_key_unconfigured` (no usable keys => every chat op refused, ERROR at startup). `dm.send` is not covered (no pinned
-channel; community-bound in the adapter).
+Trust boundary enforced in code instead: `svc_action` signs `platform|op|channel|origin_channel|message_id|text|user_id|exp_ms`
+(HMAC-SHA256, domain label `waddles.outbound-pin.v1`, length-prefixed) for EVERY op (`chat.send`, `chat.delete`, `dm.send`)
+and puts `pin_sig` = `kid:hexmac` plus `exp_ms` on the envelope; the drain verifies in constant time **before** the pin
+check and refuses `no_pin_sig` / `bad_pin_sig` / `pin_key_unconfigured` (no usable keys => every op refused, ERROR at startup)
+and, after the MAC passes, `pin_expired` (exp in the past) / `pin_exp_invalid` (missing, or more than 5 min ahead).
+Chat entries live 60s (`PIN_TTL_MS`); Discord entries use the ack timeout.
 
-- Key: the existing `ENVELOPE_BINDING_KEYS` (`kid:hexkey[,...]`, >=16 bytes each) -- same Secret both pods already mount; no new secret.
-  Signer uses `ENVELOPE_BINDING_ACTIVE_KID` (**must be set on svc-action**, else chat relays are refused `relay_unavailable`);
-  the drain accepts any kid in the ring, so rotation = add new kid to the ring, flip the signer's active kid, later drop the old one.
-- Residual: a holder of the binding key (svc_ingest, svc_process, svc_action) can still forge; a captured valid entry can be
-  replayed to the SAME channel only (op_id/exp_ms are not signed). Per-service key separation is a follow-up.
+- Key: a DEDICATED secret `OUTBOUND_PIN_KEYS` (`kid:hexkey[,...]`, >=16 bytes each) + `OUTBOUND_PIN_ACTIVE_KID`, mounted by
+  `secretKeyRef` ONLY into svc-action-rust (signer) and svc-ingest-rust (verifier) -- not the shared envFrom Secret, not the
+  binding-key ring (`templates/outbound-pin-secret.yaml`; `outboundPin.existingSecret` for ExternalSecret/SealedSecret,
+  alpha/local auto-generate, other tiers fail closed). Rotation: add the new kid to the ring, flip `outboundPin.activeKid`,
+  later drop the old kid (the drain accepts any kid it holds).
+- Symmetric, so a holder of the key (svc-action, svc-ingest) can still forge; Ed25519 (signer-only private key) is the follow-up.
+  The Valkey ACL is defense in depth only. Replay inside the TTL to the SAME channel is possible (no seen-op_id set yet).
 - `core/svc_ingest/src/pin_sig.rs` and `core/svc_action/src/pin_sig.rs` are byte-identical (test `pin_sig_copies_do_not_drift`).
 
 ### Rollout order (required) and dropped entries
@@ -95,6 +99,6 @@ channel; community-bound in the adapter).
 Deploy **svc_action first, then svc_ingest**, with the queue drained between if possible. The new drain hard-refuses
 anything not signed by the new svc_action: entries queued by a pre-P6a svc_action have no `origin_channel` and are dropped
 with a WARN and counted `svc_ingest_outbound_pin_refused_total{reason="no_origin_pin"}` (stamped-but-unsigned entries from an
-intermediate build: `no_pin_sig`). A Discord op with an `op_id` is acked `{"ok":false,"code":"<reason>"}` so the producer
+intermediate build: `no_pin_sig`; stamped but without `exp_ms`: `pin_exp_invalid`). A Discord op with an `op_id` is acked `{"ok":false,"code":"<reason>"}` so the producer
 fails fast instead of timing out. On alpha, accept the loss of in-flight chat ops. (The metric label is `no_origin_pin`, not
 `missing_origin`.) A refused entry is already popped (`BRPOP`) so it is never retried; there is no poison loop.
