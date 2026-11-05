@@ -113,6 +113,33 @@ pub enum DiscordRestError {
     BadResponse(&'static str),
 }
 
+/// Verdict of a `GET /guilds/{guild}/members/{user}` answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Membership {
+    /// 2xx: the user is in the guild.
+    Member,
+    /// 404 with Discord's "Unknown Member"/"Unknown User" code.
+    NotMember,
+    /// Anything else (permissions, 5xx, other 404): never read as yes OR no.
+    Unknown,
+}
+
+/// The ONE membership interpretation shared by the legacy REST client and the
+/// generic executor's `send_dm_in_community` gate (`sender_exec::discord_duties`).
+pub(crate) fn classify_membership(status: u16, body: &[u8]) -> Membership {
+    if (200..300).contains(&status) {
+        return Membership::Member;
+    }
+    let code = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("code").and_then(serde_json::Value::as_u64));
+    if status == 404 && matches!(code, Some(CODE_UNKNOWN_MEMBER | CODE_UNKNOWN_USER)) {
+        Membership::NotMember
+    } else {
+        Membership::Unknown
+    }
+}
+
 /// `true` for a Discord snowflake: 1..=20 ASCII digits (u64 decimal).
 #[must_use]
 pub fn is_snowflake(id: &str) -> bool {
@@ -349,14 +376,14 @@ impl DiscordRestClient {
                 None,
             )
             .await?;
-        let code = serde_json::from_slice::<serde_json::Value>(&resp.body)
-            .ok()
-            .and_then(|v| v.get("code").and_then(serde_json::Value::as_u64));
-        if resp.status == 404 && matches!(code, Some(CODE_UNKNOWN_MEMBER | CODE_UNKNOWN_USER)) {
-            return Ok(false);
+        match classify_membership(resp.status, &resp.body) {
+            Membership::Member => Ok(true),
+            Membership::NotMember => Ok(false),
+            Membership::Unknown => {
+                ensure_success(&resp, false)?;
+                Ok(true)
+            }
         }
-        ensure_success(&resp, false)?;
-        Ok(true)
     }
 
     /// Sends one request honoring the per-route bucket and bounded `429`

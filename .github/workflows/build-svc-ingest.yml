@@ -34,6 +34,9 @@ on:
       - 'core/svc_ingest/**'
       - 'core/service_auth/**'
       - 'core/discord_mentions/**'
+      - 'core/hub_client/**'
+      - 'core/connection_resolver/**'
+      - 'proto/**'
       - '.version'
       - '.github/workflows/build-svc-ingest.yml'
   pull_request:
@@ -42,6 +45,9 @@ on:
       - 'core/svc_ingest/**'
       - 'core/service_auth/**'
       - 'core/discord_mentions/**'
+      - 'core/hub_client/**'
+      - 'core/connection_resolver/**'
+      - 'proto/**'
   merge_group:
     types: [checks_requested]
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
@@ -226,6 +232,10 @@ jobs:
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
           context: ${{ env.BUILD_CONTEXT }}
+          # `hub_client`'s build.rs compiles the repo-root `proto/` tree (sibling of
+          # `core/`), supplied as a named build context like build-svc-process.yml.
+          build-contexts: |
+            proto=proto
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
           push: true
           platforms: ${{ matrix.platform }}
@@ -258,6 +268,10 @@ jobs:
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
           context: ${{ env.BUILD_CONTEXT }}
+          # `hub_client`'s build.rs compiles the repo-root `proto/` tree (sibling of
+          # `core/`), supplied as a named build context like build-svc-process.yml.
+          build-contexts: |
+            proto=proto
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
           push: false
           load: true

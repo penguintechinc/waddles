@@ -13,6 +13,8 @@ on:
       - 'core/connector_e2e/**'
       - 'core/svc_ingest/**'
       - 'core/discord_mentions/**'
+      - 'core/hub_client/**'
+      - 'proto/**'
       - 'core/bundle_executor/**'
       - 'wit/waddle-connector/**'
       - '.github/workflows/rust-connector-e2e.yml'
@@ -23,6 +25,8 @@ on:
       - 'core/connector_e2e/**'
       - 'core/svc_ingest/**'
       - 'core/discord_mentions/**'
+      - 'core/hub_client/**'
+      - 'proto/**'
       - 'core/bundle_executor/**'
       - 'wit/waddle-connector/**'
   workflow_dispatch:
@@ -42,5 +46,6 @@ jobs:
       crate_name: connector-e2e
       working_directory: core/connector_e2e
       # ring/aws-lc-sys need a C/C++ toolchain; cmake for aws-lc-sys.
-      extra_apt_packages: 'cmake build-essential'
-      extra_apt_reason: 'for aws-lc-sys/ring (cmake, C/C++ toolchain)'
+      # protoc: hub_client's build.rs (svc-ingest path dependency).
+      extra_apt_packages: 'cmake build-essential protobuf-compiler'
+      extra_apt_reason: 'for aws-lc-sys/ring (cmake, C/C++ toolchain) + hub_client (protoc)'

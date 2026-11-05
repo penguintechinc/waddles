@@ -23,6 +23,14 @@
 
 FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
 
+# protobuf-compiler (protoc) is required by `hub_client`'s build.rs
+# (tonic-prost-build, compiling `proto/waddles/hub/internal/v1/*.proto`) --
+# svc-ingest path-depends on `hub_client` for the Discord platform-user
+# detokenizer (`src/platform_users.rs`).
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y protobuf-compiler=3.21.12-3+deb12u1 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /build
 COPY svc_ingest/Cargo.toml svc_ingest/Cargo.lock ./svc_ingest/
 COPY svc_ingest/src ./svc_ingest/src
@@ -32,6 +40,13 @@ COPY circuit_breaker ./circuit_breaker
 COPY service_auth ./service_auth
 COPY discord_mentions ./discord_mentions
 COPY connection_resolver ./connection_resolver
+COPY hub_client ./hub_client
+# `hub_client`'s build.rs resolves protos at `CARGO_MANIFEST_DIR/../../proto`
+# -- for `/build/hub_client` that is `/proto`. The repo-root `proto/` tree is a
+# sibling of `core/` (this Dockerfile's build context), so it is supplied as the
+# named `proto` build context (see build-svc-ingest.yml's `build-contexts`),
+# exactly like core/svc_process/Dockerfile.rust.
+COPY --from=proto . /proto
 WORKDIR /build/svc_ingest
 RUN cargo build --release --locked
 

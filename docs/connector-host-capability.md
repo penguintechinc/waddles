@@ -312,5 +312,7 @@ Contract, slot table, verification rules, status and the T6d-2 plug-in points: `
 policy (declared egress hosts, slot positions, header allowlist, no template-set `Authorization`), substitutes pinned-target slots
 from the signed origin stamp / per-community connection and credential slots per call (never cached; zeroizing), percent-encodes
 URL positions and JSON-escapes body positions, and sends ONLY through `GuardedClient`. `dm.send` and `role.*` host duties
-(DM channel open, `send_dm_in_community`, managed-role allowlist) are the T6d-2 `DutyHook`. The wire does not yet carry
+(DM channel open, `send_dm_in_community`, community-scoped `{user:<uuid>}`, managed-role allowlist refusing ADMINISTRATOR /
+MANAGE_ROLES / MANAGE_GUILD, per-community bot credential) are the Discord `DutyHook` (`sender_exec/discord_duties.rs`,
+`discord_slots.rs`; table + gaps: `core/svc_ingest/README.md` "Discord host duties (T6d-2)"). The wire does not yet carry
 `build-request` (no `ExportKind::ConnectorBuildRequest` in `penguin-bundle-host` 0.4.0): see "T6d-1 status".

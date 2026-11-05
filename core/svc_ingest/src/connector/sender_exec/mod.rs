@@ -27,8 +27,11 @@
 //! Supported kinds (see [`PlatformPolicy`]): `chat.send` and `chat.delete`
 //! on Twitch and Discord, `chat.send` on YouTube. `dm.send` is declared but
 //! refused with [`ExecError::HostDutyMissing`] until a [`DutyHook`] claims it
-//! (T6d-2); `role.*` are [`ExecError::UnsupportedKind`].
+//! (T6d-2). With `discord_duties::DiscordDuties` registered, Discord `dm.send`
+//! and `role.add`/`role.remove` run as host duties.
 
+pub mod discord_duties;
+pub mod discord_slots;
 pub mod policy;
 pub mod subst;
 pub mod twitch_slots;
@@ -195,6 +198,10 @@ pub struct DutyCx<'a> {
     pub community_id: Option<i64>,
     /// Stamp-verified channel, if any.
     pub pinned_channel: Option<&'a str>,
+    /// The executor's SSRF-guarded client, for duties that must call the
+    /// platform (role list, membership, DM open). The only egress handle a
+    /// duty gets.
+    pub client: &'a GuardedClient,
 }
 
 /// T6d-2 plug-in point: platform host duties that need more than slot
@@ -210,6 +217,19 @@ pub trait DutyHook: Send + Sync {
     /// Policy gate run BEFORE a template is built (e.g.
     /// `send_dm_in_community`).
     async fn gate(&self, cx: &DutyCx<'_>) -> Result<(), ExecError>;
+
+    /// Normalizes the overlay's template BEFORE verification. Runs only for
+    /// duty kinds. A hook may rewrite the placeholders and strip the
+    /// pseudo-headers that carry exactly the values the HOST put into the
+    /// payload (so the verifier still refuses every other placeholder). The
+    /// default leaves the template untouched.
+    async fn bind_template(
+        &self,
+        _cx: &DutyCx<'_>,
+        _tpl: &mut RequestTpl,
+    ) -> Result<(), ExecError> {
+        Ok(())
+    }
 
     /// The `payload-json` handed to `build-request` for a claimed kind
     /// (e.g. a `{user:<uuid>}` recipient placeholder).
@@ -526,6 +546,8 @@ fn kind_label(k: &str) -> &'static str {
         "chat.send" => "chat.send",
         "chat.delete" => "chat.delete",
         "dm.send" => "dm.send",
+        "role.add" => "role.add",
+        "role.remove" => "role.remove",
         _ => "other",
     }
 }
@@ -636,6 +658,7 @@ where
             action: req.action,
             community_id: req.community_id,
             pinned_channel: pinned.as_deref(),
+            client: &self.client,
         };
 
         let payload_json = if kind.needs_duty {
@@ -654,13 +677,16 @@ where
                 .map_or_else(|| "unscoped".to_string(), |c| format!("community-{c}")),
             payload_json,
         };
-        let built = self
+        let mut built = self
             .builder
             .build_request(req.platform, &action)
             .await
             .map_err(ExecError::Build)?;
         if built.component_digest != *digest {
             return Err(ExecError::DigestMismatch);
+        }
+        if kind.needs_duty {
+            self.duties.bind_template(&cx, &mut built.tpl).await?;
         }
         let verified = verify::verify(policy, kind, &built.tpl).map_err(ExecError::Template)?;
         drop(built);
@@ -779,7 +805,8 @@ fn pin_channel(
             origin_channel,
             ..
         } => (channel.as_str(), origin_channel.as_deref()),
-        OutboundAction::DmSend { origin_channel, .. } => {
+        OutboundAction::DmSend { origin_channel, .. }
+        | OutboundAction::RoleOp { origin_channel, .. } => {
             (origin_channel.as_str(), Some(origin_channel.as_str()))
         }
     };
@@ -806,10 +833,14 @@ fn default_payload(kind: &KindPolicy, action: &OutboundAction) -> Result<String,
         OutboundAction::ChatDelete { message_id, .. } => {
             serde_json::json!({ "message_id": message_id })
         }
-        OutboundAction::DmSend { .. } => return Err(ExecError::BadAction),
+        OutboundAction::DmSend { .. } | OutboundAction::RoleOp { .. } => {
+            return Err(ExecError::BadAction)
+        }
     };
     serde_json::to_string(&v).map_err(|_| ExecError::BadAction)
 }
 
+#[cfg(test)]
+mod discord_tests;
 #[cfg(test)]
 pub(crate) mod tests;

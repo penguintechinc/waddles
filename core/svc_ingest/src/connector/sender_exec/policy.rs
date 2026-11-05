@@ -157,6 +157,42 @@ fn resolver_slot(
     }
 }
 
+/// A slot the [`super::DutyHook`] fills (never the guest, never the payload).
+fn duty_slot(name: &'static str) -> SlotDecl {
+    SlotDecl {
+        name,
+        handle: "",
+        origin: SlotOrigin::Duty,
+        shape: SlotShape::Id,
+        positions: vec![Position::Path],
+    }
+}
+
+/// Discord `PUT|DELETE /guilds/{guild}/members/{user}/roles/{role}`: every
+/// path slot is host-filled and the request has no body.
+fn role_kind(kind: &'static str, method: &'static str, cred: HeaderCred) -> KindPolicy {
+    KindPolicy {
+        kind,
+        method,
+        path: vec![
+            PathSeg::Lit("api"),
+            PathSeg::Lit("v10"),
+            PathSeg::Lit("guilds"),
+            PathSeg::Slot("target.guild_id"),
+            PathSeg::Lit("members"),
+            PathSeg::Slot("target.user"),
+            PathSeg::Lit("roles"),
+            PathSeg::Slot("target.role"),
+        ],
+        query: vec![],
+        slots: vec!["target.guild_id", "target.user", "target.role"],
+        header_creds: vec![cred],
+        max_body: None,
+        text_key: "content",
+        needs_duty: true,
+    }
+}
+
 impl PlatformPolicy {
     /// Index of the slot declared as `name`.
     pub(crate) fn slot_index(&self, name: &str) -> Option<usize> {
@@ -277,7 +313,8 @@ impl PlatformPolicy {
 
     /// Discord REST policy (overlay README "Outbound (T6d)"). Only
     /// `{target.channel_id}` is a stamp slot; `dm.send` needs a host duty
-    /// (T6d-2) and `role.*` are not supported yet (typed refusal).
+    /// and `role.*` are host duties (`discord_duties`): their
+    /// placeholders are normalized by the hook, then filled by it.
     #[must_use]
     pub fn discord() -> Self {
         let cred = HeaderCred {
@@ -300,13 +337,19 @@ impl PlatformPolicy {
             platform: "discord",
             syntax: SlotSyntax::Single,
             hosts: vec!["discord.com".to_string()],
-            slots: vec![SlotDecl {
-                name: "target.channel_id",
-                handle: "",
-                origin: SlotOrigin::Stamp,
-                shape: SlotShape::Id,
-                positions: vec![Position::Path],
-            }],
+            slots: vec![
+                SlotDecl {
+                    name: "target.channel_id",
+                    handle: "",
+                    origin: SlotOrigin::Stamp,
+                    shape: SlotShape::Id,
+                    positions: vec![Position::Path],
+                },
+                duty_slot("dm.channel_id"),
+                duty_slot("target.guild_id"),
+                duty_slot("target.user"),
+                duty_slot("target.role"),
+            ],
             kinds: vec![
                 KindPolicy {
                     kind: "chat.send",
@@ -333,14 +376,22 @@ impl PlatformPolicy {
                 KindPolicy {
                     kind: "dm.send",
                     method: "POST",
-                    path: vec![],
+                    path: vec![
+                        PathSeg::Lit("api"),
+                        PathSeg::Lit("v10"),
+                        PathSeg::Lit("channels"),
+                        PathSeg::Slot("dm.channel_id"),
+                        PathSeg::Lit("messages"),
+                    ],
                     query: vec![],
-                    slots: vec![],
+                    slots: vec!["dm.channel_id"],
                     header_creds: vec![cred],
                     max_body: Some(16_384),
                     text_key: "content",
                     needs_duty: true,
                 },
+                role_kind("role.add", "PUT", cred),
+                role_kind("role.remove", "DELETE", cred),
             ],
             auth_prefixes: vec![],
             allowed_headers: vec!["content-type", "accept", "user-agent"],

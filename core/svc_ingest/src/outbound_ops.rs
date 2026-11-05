@@ -84,6 +84,24 @@ pub enum OutboundAction {
         user_id: String,
         text: String,
         origin_channel: String,
+        /// Numeric tenant id from the MAC-bound stamp (`None` = absent); the
+        /// executor's user detokenization needs it.
+        tenant_id: Option<i64>,
+    },
+    /// `role.add` / `role.remove` (T6d-2, executor path only) -- grant or
+    /// revoke the managed role `role_key` for the (tokenized) user
+    /// `user_id`. The producer names a managed-role KEY, never a role
+    /// snowflake, and never a guild: the host maps the key through the
+    /// community's binding allowlist and pins the guild itself. The key
+    /// travels in the wire `text` field so the `pin_sig` MAC covers it.
+    RoleOp {
+        /// `true` = `role.add`, `false` = `role.remove`.
+        add: bool,
+        user_id: String,
+        role_key: String,
+        origin_channel: String,
+        /// Numeric tenant id from the MAC-bound stamp, as for [`Self::DmSend`].
+        tenant_id: Option<i64>,
     },
 }
 
@@ -95,6 +113,8 @@ impl OutboundAction {
             Self::ChatSend { .. } => "chat.send",
             Self::ChatDelete { .. } => "chat.delete",
             Self::DmSend { .. } => "dm.send",
+            Self::RoleOp { add: true, .. } => "role.add",
+            Self::RoleOp { add: false, .. } => "role.remove",
         }
     }
 }
@@ -148,6 +168,8 @@ struct WireEnvelope {
     exp_ms: Option<u64>,
     #[serde(default)]
     community_id: Option<i64>,
+    #[serde(default)]
+    tenant_id: Option<i64>,
 }
 
 /// Longest accepted `op_id` (it becomes part of a Valkey key).
@@ -175,6 +197,15 @@ fn is_valid_op_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_OP_ID_LEN
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// The `&'static` spelling of a role op (error payloads are static).
+fn role_op_name(op: &str) -> &'static str {
+    if op == "role.add" {
+        "role.add"
+    } else {
+        "role.remove"
+    }
 }
 
 fn require(
@@ -251,7 +282,18 @@ pub fn parse_outbound_entry(
             user_id: require(wire.user_id, "dm.send", "user_id")?,
             text: require(wire.text, "dm.send", "text")?,
             origin_channel: require(wire.origin_channel, "dm.send", "origin_channel")?,
+            tenant_id: wire.tenant_id.filter(|t| *t > 0),
         },
+        op @ ("role.add" | "role.remove") => {
+            let name = role_op_name(op);
+            OutboundAction::RoleOp {
+                add: op == "role.add",
+                user_id: require(wire.user_id, name, "user_id")?,
+                role_key: require(wire.text, name, "text")?,
+                origin_channel: require(wire.origin_channel, name, "origin_channel")?,
+                tenant_id: wire.tenant_id.filter(|t| *t > 0),
+            }
+        }
         other => return Err(OutboundParseError::UnknownOp(other.to_string())),
     };
     Ok(OutboundEntry {
@@ -373,7 +415,14 @@ pub async fn dispatch_to<S: PlatformSender>(
             user_id,
             text,
             origin_channel,
+            ..
         } => sender.send_dm(user_id, text, origin_channel).await,
+        // Role ops exist only on the generic executor path; a per-platform
+        // sender has no such method -- fail loud, never a silent no-op.
+        OutboundAction::RoleOp { .. } => Err(SenderError::Unsupported {
+            platform: sender.platform().to_string(),
+            op: action.op(),
+        }),
     }
 }
 
@@ -475,7 +524,7 @@ where
             } => {
                 enforce_pin(platform, "chat.delete", channel, origin_channel)?;
             }
-            OutboundAction::DmSend { .. } => {}
+            OutboundAction::DmSend { .. } | OutboundAction::RoleOp { .. } => {}
         }
         self.execute(&ExecRequest {
             platform,
@@ -748,7 +797,8 @@ mod tests {
             OutboundAction::DmSend {
                 user_id: "u1".into(),
                 text: "hi".into(),
-                origin_channel: "c1".into()
+                origin_channel: "c1".into(),
+                tenant_id: None,
             }
         );
     }
@@ -988,6 +1038,7 @@ mod tests {
             user_id: "u".into(),
             text: "t".into(),
             origin_channel: "c".into(),
+            tenant_id: None,
         };
         for (platform, action, op) in [
             ("twitch", &del_tw, "chat.delete"),
@@ -1110,6 +1161,7 @@ mod tests {
                 user_id: "3".into(),
                 text: "hi".into(),
                 origin_channel: "1".into(),
+                tenant_id: None,
             },
         ] {
             route("discord", &action, &twitch, &discord).await.unwrap();
