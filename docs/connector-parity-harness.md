@@ -33,6 +33,11 @@ make test-connector-parity PLATFORM=discord
 | `PARITY_OVERLAY_APP_ID` | default `waddles.core.parity.<platform>` (must be `waddles.core.*`) |
 | `PARITY_OVERLAY_WORLD` | `connector-tools` (default) or `connector` |
 
+**Use a per-agent `CARGO_TARGET_DIR`** (e.g. `/mnt/ssd/cargo-target-<agent>`): a shared target dir lets another
+checkout's build overwrite the cached test artifact. The harness never trusts compiled-in paths — it locates
+the repo root at runtime (`CONNECTOR_PARITY_ROOT`, set by the make target, else walk up from cwd) and enforces
+`examined == expected vectors == corpus files` (all printed, any mismatch or zero fails).
+
 The target fails if the expected files are stale, if zero vectors were examined, or if any vector differs.
 Exact failing command in CI form: `cd core/bundle_executor && PARITY_PLATFORM=twitch PARITY_OVERLAY_WASM=<abs path> cargo test --locked --test connector_parity overlay_parity -- --ignored --nocapture`.
 

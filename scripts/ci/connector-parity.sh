@@ -34,12 +34,21 @@ echo "[connector-parity] === on-frame parity: $PLATFORM ==="
 out="$(mktemp)"
 trap 'rm -f "$out"' EXIT
 set +e
-(cd core/bundle_executor && PARITY_PLATFORM="$PLATFORM" cargo test --locked --test connector_parity overlay_parity -- --ignored --nocapture) 2>&1 | tee "$out"
+(cd core/bundle_executor && CONNECTOR_PARITY_ROOT="$REPO_ROOT" PARITY_PLATFORM="$PLATFORM" cargo test --locked --test connector_parity overlay_parity -- --ignored --nocapture) 2>&1 | tee "$out"
 rc=${PIPESTATUS[0]}
 set -e
 [ "$rc" -eq 0 ] || { echo "[connector-parity] FAIL: parity run exited $rc" >&2; exit "$rc"; }
 grep -Eq '^connector_parity: .* examined=[1-9][0-9]* passed=[1-9][0-9]* failed=0 ' "$out" \
     || { echo "[connector-parity] FAIL: denominator line missing/zero -- nothing examined" >&2; exit 1; }
+# Denominator: expected vectors must equal the corpus file count (both non-zero) AND all were examined.
+read -r vecs files < <(sed -nE 's/^connector_parity: corpus_ready .* vectors=([0-9]+) corpus_files=([0-9]+)$/\1 \2/p' "$out" | head -1)
+exam="$(sed -nE 's/^connector_parity: .* examined=([0-9]+) passed.*/\1/p' "$out" | head -1)"
+if [ -z "${vecs:-}" ] || [ "$vecs" -eq 0 ] || [ "$vecs" != "$files" ] \
+    || { [ -n "${PARITY_OVERLAY_WASM+x}" ] && [ "$exam" != "$vecs" ]; }; then
+    echo "[connector-parity] FAIL: denominator mismatch vectors=${vecs:-?} corpus_files=${files:-?} examined=${exam:-?}" >&2
+    exit 1
+fi
+echo "[connector-parity] denominator ok: vectors=$vecs corpus_files=$files"
 if [ -z "${PARITY_OVERLAY_WASM+x}" ]; then
     echo "[connector-parity] NOTE: harness self-check only (no PARITY_OVERLAY_WASM) -- NOT overlay parity"
 fi
