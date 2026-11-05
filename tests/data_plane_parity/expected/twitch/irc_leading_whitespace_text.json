@@ -1,0 +1,39 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "9",
+        "raw_handle": "padded",
+        "uuid": "2caaebe2-8aa5-5466-9be8-12ce5343fb2a"
+      },
+      "event_type": "message",
+      "payload": {
+        "author": "padded",
+        "author_id": "9",
+        "badges": [],
+        "channel_name": "somechannel",
+        "display_name": "Padded",
+        "is_broadcaster": false,
+        "is_mod": false,
+        "is_subscriber": false,
+        "is_vip": false,
+        "message_id": null,
+        "room_id": null,
+        "text": "   leading spaces kept?",
+        "user_id": "9"
+      },
+      "platform": "twitch"
+    }
+  ],
+  "id": "twitch/irc_leading_whitespace_text",
+  "input": {
+    "encoding": "utf8",
+    "text": "@user-id=9;display-name=Padded :padded!padded@padded.tmi.twitch.tv PRIVMSG #somechannel :   leading spaces kept?"
+  },
+  "outcome": "event",
+  "path": "twitch_irc",
+  "platform": "twitch"
+}

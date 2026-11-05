@@ -1,0 +1,39 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "7",
+        "raw_handle": "someuser",
+        "uuid": "ab24fb29-1d01-594c-bb71-b337a13d7f24"
+      },
+      "event_type": "message",
+      "payload": {
+        "author": "someuser",
+        "author_id": "7",
+        "badges": [],
+        "channel_name": "somechannel",
+        "display_name": "Valueless",
+        "is_broadcaster": false,
+        "is_mod": false,
+        "is_subscriber": false,
+        "is_vip": false,
+        "message_id": null,
+        "room_id": null,
+        "text": "odd tags",
+        "user_id": "7"
+      },
+      "platform": "twitch"
+    }
+  ],
+  "id": "twitch/irc_valueless_and_doubled_separators",
+  "input": {
+    "encoding": "utf8",
+    "text": "@;user-id=7;;mod;display-name=Valueless :someuser!someuser@someuser.tmi.twitch.tv PRIVMSG #somechannel :odd tags"
+  },
+  "outcome": "event",
+  "path": "twitch_irc",
+  "platform": "twitch"
+}

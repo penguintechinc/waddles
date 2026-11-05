@@ -1,0 +1,36 @@
+{
+  "context": {
+    "message_type": "notification"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "111",
+        "raw_handle": "somechannel",
+        "uuid": "71cc585d-3de8-5005-a66f-3211f98ff3be"
+      },
+      "event_type": "channel.subscription.gift",
+      "payload": {
+        "broadcaster_id": "111",
+        "broadcaster_login": "somechannel",
+        "metadata": {
+          "is_anonymous": true,
+          "tier": "1000",
+          "total": 1
+        },
+        "user_display_name": null,
+        "user_id": null,
+        "user_login": null
+      },
+      "platform": "twitch"
+    }
+  ],
+  "id": "twitch/eventsub_subscription_gift_anonymous",
+  "input": {
+    "encoding": "json",
+    "text": "{\"event\":{\"broadcaster_user_id\":\"111\",\"broadcaster_user_login\":\"somechannel\",\"is_anonymous\":true,\"total\":1,\"user_id\":null,\"user_login\":null},\"subscription\":{\"condition\":{\"broadcaster_user_id\":\"111\"},\"id\":\"sub-1\",\"type\":\"channel.subscription.gift\",\"version\":\"1\"}}"
+  },
+  "outcome": "event",
+  "path": "twitch_eventsub",
+  "platform": "twitch"
+}

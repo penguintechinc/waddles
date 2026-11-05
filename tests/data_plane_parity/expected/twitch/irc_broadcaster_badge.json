@@ -1,0 +1,41 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "111",
+        "raw_handle": "somechannel",
+        "uuid": "71cc585d-3de8-5005-a66f-3211f98ff3be"
+      },
+      "event_type": "message",
+      "payload": {
+        "author": "somechannel",
+        "author_id": "111",
+        "badges": [
+          "broadcaster"
+        ],
+        "channel_name": "somechannel",
+        "display_name": "SomeChannel",
+        "is_broadcaster": true,
+        "is_mod": false,
+        "is_subscriber": true,
+        "is_vip": false,
+        "message_id": null,
+        "room_id": "111",
+        "text": "stream starting",
+        "user_id": "111"
+      },
+      "platform": "twitch"
+    }
+  ],
+  "id": "twitch/irc_broadcaster_badge",
+  "input": {
+    "encoding": "utf8",
+    "text": "@badges=broadcaster/1;display-name=SomeChannel;user-id=111;room-id=111;mod=0;subscriber=1 :somechannel!somechannel@somechannel.tmi.twitch.tv PRIVMSG #somechannel :stream starting"
+  },
+  "outcome": "event",
+  "path": "twitch_irc",
+  "platform": "twitch"
+}

@@ -1,0 +1,36 @@
+{
+  "context": {
+    "message_type": "notification"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "222",
+        "raw_handle": "gifter",
+        "uuid": "858f0990-f75e-5482-ab55-99ec584c85a8"
+      },
+      "event_type": "channel.subscription.gift",
+      "payload": {
+        "broadcaster_id": "111",
+        "broadcaster_login": "somechannel",
+        "metadata": {
+          "is_anonymous": false,
+          "tier": "1000",
+          "total": 5
+        },
+        "user_display_name": "Gifter",
+        "user_id": "222",
+        "user_login": "gifter"
+      },
+      "platform": "twitch"
+    }
+  ],
+  "id": "twitch/eventsub_subscription_gift",
+  "input": {
+    "encoding": "json",
+    "text": "{\"event\":{\"broadcaster_user_id\":\"111\",\"broadcaster_user_login\":\"somechannel\",\"is_anonymous\":false,\"tier\":\"1000\",\"total\":5,\"user_id\":\"222\",\"user_login\":\"gifter\",\"user_name\":\"Gifter\"},\"subscription\":{\"condition\":{\"broadcaster_user_id\":\"111\"},\"id\":\"sub-1\",\"type\":\"channel.subscription.gift\",\"version\":\"1\"}}"
+  },
+  "outcome": "event",
+  "path": "twitch_eventsub",
+  "platform": "twitch"
+}

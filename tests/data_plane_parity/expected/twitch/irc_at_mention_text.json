@@ -1,0 +1,39 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "6",
+        "raw_handle": "alice",
+        "uuid": "9d2a077a-af8f-5d0a-9cf1-bd696e27ffd5"
+      },
+      "event_type": "message",
+      "payload": {
+        "author": "alice",
+        "author_id": "6",
+        "badges": [],
+        "channel_name": "somechannel",
+        "display_name": "Alice",
+        "is_broadcaster": false,
+        "is_mod": false,
+        "is_subscriber": false,
+        "is_vip": false,
+        "message_id": null,
+        "room_id": null,
+        "text": "@Bob_99 hi there, @bob_99",
+        "user_id": "6"
+      },
+      "platform": "twitch"
+    }
+  ],
+  "id": "twitch/irc_at_mention_text",
+  "input": {
+    "encoding": "utf8",
+    "text": "@user-id=6;display-name=Alice :alice!alice@alice.tmi.twitch.tv PRIVMSG #somechannel :@Bob_99 hi there, @bob_99"
+  },
+  "outcome": "event",
+  "path": "twitch_irc",
+  "platform": "twitch"
+}

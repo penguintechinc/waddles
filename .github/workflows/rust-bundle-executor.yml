@@ -7,6 +7,7 @@ on:
       - 'core/bundle_executor/**'
       - 'wit/waddle-bundle/**'
       - 'wit/waddle-connector/**'
+      - 'tests/data_plane_parity/**'
       - 'sdk/waddle-sdk/src/**'
       - '.github/workflows/rust-bundle-executor.yml'
       - '.github/workflows/rust-crate-ci.yml'
@@ -16,6 +17,7 @@ on:
       - 'core/bundle_executor/**'
       - 'wit/waddle-bundle/**'
       - 'wit/waddle-connector/**'
+      - 'tests/data_plane_parity/**'
       - 'sdk/waddle-sdk/src/**'
   workflow_dispatch:
 
