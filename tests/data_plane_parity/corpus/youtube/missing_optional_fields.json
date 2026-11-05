@@ -1,0 +1,35 @@
+{
+  "context": {},
+  "frame": {
+    "channel_id": "UCabc123",
+    "live_chat_id": "chat123",
+    "platform": "youtube",
+    "text": "  hello chat  "
+  },
+  "golden": {
+    "actor": "unknown",
+    "event_type": "message",
+    "payload": {
+      "author_id": null,
+      "display_name": null,
+      "is_mod": false,
+      "is_owner": false,
+      "is_sponsor": false,
+      "live_chat_id": "chat123",
+      "message_id": null,
+      "published_at": null,
+      "text": "hello chat",
+      "video_id": null
+    },
+    "platform": "youtube"
+  },
+  "golden_origin": "python",
+  "id": "youtube/missing_optional_fields",
+  "outcome": "event",
+  "path": "youtube_live_poll",
+  "pii_classifier": "reject:is_owner,is_sponsor,live_chat_id,published_at,video_id",
+  "platform": "youtube",
+  "python_divergences": [],
+  "rust_path": null,
+  "seed": "core/svc_ingest/tests/test_builtin_youtube_live_ingest.py"
+}

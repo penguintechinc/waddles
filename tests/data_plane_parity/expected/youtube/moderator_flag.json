@@ -1,0 +1,34 @@
+{
+  "context": {},
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "UCviewer1",
+        "raw_handle": "UCviewer1",
+        "uuid": "8114454d-6d4a-5dba-8050-bf46acee434c"
+      },
+      "event_type": "message",
+      "payload": {
+        "author_id": "UCviewer1",
+        "display_name": "Alice",
+        "is_mod": true,
+        "is_owner": false,
+        "is_sponsor": false,
+        "live_chat_id": "chat123",
+        "message_id": "msg-1",
+        "published_at": "2026-09-11T00:00:00Z",
+        "text": "mod here",
+        "video_id": "vid123"
+      },
+      "platform": "youtube"
+    }
+  ],
+  "id": "youtube/moderator_flag",
+  "input": {
+    "encoding": "json",
+    "text": "{\"author_id\":\"UCviewer1\",\"channel_id\":\"UCabc123\",\"display_name\":\"Alice\",\"is_mod\":true,\"is_owner\":false,\"is_sponsor\":false,\"live_chat_id\":\"chat123\",\"message_id\":\"msg-1\",\"platform\":\"youtube\",\"published_at\":\"2026-09-11T00:00:00Z\",\"text\":\"mod here\",\"video_id\":\"vid123\"}"
+  },
+  "outcome": "event",
+  "path": "youtube_live_poll",
+  "platform": "youtube"
+}

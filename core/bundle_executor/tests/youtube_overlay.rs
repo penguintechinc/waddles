@@ -42,7 +42,8 @@ async fn host() -> (ConnectorHost, tokio::task::JoinHandle<()>) {
     let linkers = LinkerCache::new(engine.clone());
     let bytes = wasm();
     let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
-    let manifest = VerifiedManifest::new(APP, digest, WitWorld::ConnectorTools, HashSet::new());
+    let perms: HashSet<String> = HashSet::from(["connector.pii.read".to_string()]);
+    let manifest = VerifiedManifest::new(APP, digest, WitWorld::ConnectorTools, perms);
     let host = ConnectorHost::load(
         &engine,
         &linkers,
@@ -81,54 +82,27 @@ fn frame(bytes: &[u8]) -> RawFrame {
     }
 }
 
-const LIST: &str = r#"{"pollingIntervalMillis":5000,"nextPageToken":"T","items":[{"id":"msg-1",
-"snippet":{"displayMessage":"  hello chat  ","publishedAt":"2026-09-11T00:00:00Z","liveChatId":"chat123"},
-"authorDetails":{"channelId":"UCviewer1","displayName":"Alice","isChatModerator":false,
-"isChatOwner":false,"isChatSponsor":false}}]}"#;
-
+/// Handshake/heartbeat are identity-free; frame normalization (which needs the identity
+/// bridge) is covered by the shared harness (`make test-connector-parity PLATFORM=youtube`).
+/// Without a bridge, `on-frame` for an actor MUST fail loud, never emit a raw handle.
 #[tokio::test]
 #[ignore = "needs built wasm; run scripts/test-overlay-youtube.sh"]
-async fn real_component_normalizes_a_poll_response() {
+async fn real_component_connect_heartbeat_and_no_identity_fails_loud() {
     let (host, _t) = host().await;
     let hs = host.on_connect(ctx()).await.unwrap();
     assert!(hs.value.bytes.is_empty() && hs.value.secret_refs.is_empty());
-
-    let ev = host.on_frame(frame(LIST.as_bytes())).await.unwrap().value;
-    assert_eq!(ev.len(), 1);
-    assert_eq!(ev[0].platform, "youtube");
-    assert_eq!(ev[0].event_type, "message");
-    assert_eq!(ev[0].actor.as_deref(), Some("UCviewer1"));
-    assert_eq!(ev[0].occurred_at, "2026-09-11T00:00:00Z");
-    let p: serde_json::Value = serde_json::from_str(&ev[0].payload_json).unwrap();
-    assert_eq!(p["text"], "hello chat");
-    assert_eq!(p["live_chat_id"], "chat123");
-    assert_eq!(p["message_id"], "msg-1");
-    assert_eq!(p["is_mod"], false);
-
     assert_eq!(host.on_heartbeat_due(ctx()).await.unwrap().value, None);
-}
 
-#[tokio::test]
-#[ignore = "needs built wasm; run scripts/test-overlay-youtube.sh"]
-async fn real_component_corpus_raw_frame_and_malformed() {
-    let (host, _t) = host().await;
-    let corpus: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/data_plane_parity/corpus/youtube/live_chat_message.json"
+    let err = host
+        .on_frame(frame(
+            br#"{"text":"hi","live_chat_id":"c","author_id":"UCx"}"#,
         ))
-        .unwrap(),
-    )
-    .unwrap();
-    let ev = host
-        .on_frame(frame(&serde_json::to_vec(&corpus["frame"]).unwrap()))
         .await
-        .unwrap()
-        .value;
-    let p: serde_json::Value = serde_json::from_str(&ev[0].payload_json).unwrap();
-    assert_eq!(p, corpus["golden"]["payload"]);
-    assert_eq!(ev[0].actor.as_deref(), corpus["golden"]["actor"].as_str());
-
+        .unwrap_err();
+    assert!(
+        matches!(err, ConnectorCallError::Guest(FrameError::Backend(_))),
+        "{err:?}"
+    );
     let err = host.on_frame(frame(b"not json")).await.unwrap_err();
     assert!(
         matches!(err, ConnectorCallError::Guest(FrameError::Malformed(_))),
@@ -181,6 +155,7 @@ async fn real_component_tools_poll_plan_classify_and_send_template() {
     )
     .unwrap();
     assert_eq!(t["secret_refs"][0][1], "youtube.oauth");
+    assert_eq!(t["secret_refs"][1][1], "youtube.live_chat_id");
     assert!(!t.to_string().contains("ya29"), "no literal token");
 
     let err = call("nope", serde_json::json!({})).await.unwrap_err();

@@ -17,10 +17,12 @@ mod component {
     };
     use super::bindings::waddle::bundle::log;
     use super::bindings::waddle::bundle::tool::ToolError as WitError;
+    use super::bindings::waddle::connector::identity::{self, Error as IdError, IdentityKey};
     use super::bindings::waddle::connector::types::{
         ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
     };
     use super::logic::{self, LogicError};
+    use std::collections::HashMap;
 
     pub struct Component;
 
@@ -34,6 +36,28 @@ mod component {
         match e {
             LogicError::Malformed(m) => FrameError::Malformed(m),
             LogicError::Unsupported(m) => FrameError::Unsupported(m),
+        }
+    }
+
+    /// Resolution of one platform author id: a canonical UUID, or erased (drop).
+    enum Resolved {
+        Uuid(String),
+        Erased,
+    }
+
+    /// Tokenizes `author_id` via `identity.lookup`; typed failures fail the frame loud.
+    fn resolve(author_id: &str) -> Result<Resolved, FrameError> {
+        match identity::lookup(&IdentityKey::PlatformIdentity((
+            "youtube".to_string(),
+            author_id.to_string(),
+        ))) {
+            Ok(rec) => Ok(Resolved::Uuid(rec.uuid)),
+            Err(IdError::NotFound) => Ok(Resolved::Erased),
+            Err(IdError::RateLimited(_)) => {
+                Err(FrameError::Backend("identity rate-limited".into()))
+            }
+            Err(IdError::Denied(_)) => Err(FrameError::Backend("identity denied".into())),
+            Err(IdError::Backend(_)) => Err(FrameError::Backend("identity backend error".into())),
         }
     }
 
@@ -55,27 +79,46 @@ mod component {
                     return Err(frame_err(e));
                 }
             };
+            // Tokenize actors (spec S3.3): one lookup per distinct author per frame.
+            let mut cache: HashMap<String, Resolved> = HashMap::new();
+            let mut erased = 0usize;
+            let mut out = Vec::with_capacity(parsed.events.len());
+            for e in parsed.events {
+                let actor = match e.actor.as_deref() {
+                    None => None,
+                    Some(id) => {
+                        if !cache.contains_key(id) {
+                            cache.insert(id.to_string(), resolve(id)?);
+                        }
+                        match cache.get(id) {
+                            Some(Resolved::Uuid(u)) => Some(u.clone()),
+                            _ => {
+                                erased += 1;
+                                continue;
+                            }
+                        }
+                    }
+                };
+                out.push(NormalizedEvent {
+                    platform: e.platform,
+                    event_type: e.event_type,
+                    actor,
+                    payload_json: e.payload_json,
+                    occurred_at: e.occurred_at,
+                });
+            }
+            let skipped = parsed.skipped + erased;
             log_counts(
-                if parsed.skipped > 0 {
+                if skipped > 0 {
                     log::Level::Warn
                 } else {
                     log::Level::Debug
                 },
                 "on_frame",
-                parsed.events.len(),
-                parsed.skipped,
+                out.len(),
+                skipped,
             );
-            Ok(parsed
-                .events
-                .into_iter()
-                .map(|e| NormalizedEvent {
-                    platform: e.platform,
-                    event_type: e.event_type,
-                    actor: e.actor,
-                    payload_json: e.payload_json,
-                    occurred_at: e.occurred_at,
-                })
-                .collect())
+            Ok(out)
         }
 
         /// Poll transports have no keepalive.

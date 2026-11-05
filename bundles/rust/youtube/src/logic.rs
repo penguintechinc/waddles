@@ -24,10 +24,24 @@ pub const MAX_CONSECUTIVE_QUOTA_ERRORS: u32 = 5;
 pub const LIVE_SEARCH_MAX_RESULTS: u32 = 5;
 /// Longest chat message YouTube accepts (characters).
 pub const MAX_CHAT_CHARS: usize = 200;
+/// Actor used when the platform supplies no author id (Python parity).
+pub const UNKNOWN_ACTOR: &str = "unknown";
 /// Placeholder the host substitutes with the bearer token (never a literal).
 pub const TOKEN_SLOT: &str = "{{YT_OAUTH_TOKEN}}";
 /// Opaque handle the host resolves through the credential adapter.
 pub const TOKEN_HANDLE: &str = "youtube.oauth";
+/// Host-pinned slot: the live chat id (host discovery/binding state, never caller-chosen).
+pub const CHAT_ID_SLOT: &str = "{{YT_LIVE_CHAT_ID}}";
+/// Handle the host resolves for [`CHAT_ID_SLOT`].
+pub const CHAT_ID_HANDLE: &str = "youtube.live_chat_id";
+/// Host-pinned slot: the monitored channel id.
+pub const CHANNEL_ID_SLOT: &str = "{{YT_CHANNEL_ID}}";
+/// Handle the host resolves for [`CHANNEL_ID_SLOT`].
+pub const CHANNEL_ID_HANDLE: &str = "youtube.channel_id";
+/// Host-pinned slot: the discovered live video id.
+pub const VIDEO_ID_SLOT: &str = "{{YT_VIDEO_ID}}";
+/// Handle the host resolves for [`VIDEO_ID_SLOT`].
+pub const VIDEO_ID_HANDLE: &str = "youtube.video_id";
 
 const QUOTA_REASONS: [&str; 4] = [
     "quotaExceeded",
@@ -52,7 +66,7 @@ pub struct Event {
     pub platform: String,
     /// Event type (`message`).
     pub event_type: String,
-    /// Raw actor id (tokenized downstream by the PII stage).
+    /// Raw platform author id; the component tokenizes it via `identity.lookup`.
     pub actor: Option<String>,
     /// JSON payload text.
     pub payload_json: String,
@@ -111,7 +125,7 @@ pub fn normalize_raw(raw: &Map<String, Value>, received_at: &str) -> Result<Even
     };
     let actor = match raw.get("author_id") {
         Some(Value::String(a)) if !a.is_empty() => a.clone(),
-        _ => "unknown".to_string(),
+        _ => UNKNOWN_ACTOR.to_string(),
     };
     let platform = match raw.get("platform") {
         Some(Value::String(p)) if !p.is_empty() => p.clone(),
@@ -233,9 +247,12 @@ pub struct PollPlan {
 }
 
 /// Honors the API's own `nextPageToken`/`pollingIntervalMillis` (floored).
-pub fn poll_plan(body: &Value) -> PollPlan {
+pub fn poll_plan(body: &Value) -> Result<PollPlan, LogicError> {
     let token = match body.get("nextPageToken") {
-        Some(Value::String(t)) if !t.is_empty() => Some(t.clone()),
+        Some(Value::String(t)) if !t.is_empty() => {
+            check_template_safe("nextPageToken", t)?;
+            Some(t.clone())
+        }
         _ => None,
     };
     let ms = match body.get("pollingIntervalMillis") {
@@ -245,10 +262,10 @@ pub fn poll_plan(body: &Value) -> PollPlan {
             .unwrap_or(DEFAULT_POLL_INTERVAL_MS),
         _ => DEFAULT_POLL_INTERVAL_MS,
     };
-    PollPlan {
+    Ok(PollPlan {
         next_page_token: token,
         interval_ms: ms.max(MIN_POLL_INTERVAL_MS),
-    }
+    })
 }
 
 /// Google's error `reason` from a 403 body (Python `_describe_403_reason`).
@@ -359,17 +376,43 @@ pub struct RequestTpl {
     pub secret_refs: Vec<(String, String)>,
 }
 
-/// RFC 3986 percent-encoding of a query value.
-pub fn pct(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(char::from(b));
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
+/// True for control characters and invisible/format characters that could hide
+/// or forge a `{{SLOT}}` marker (C0/C1 controls, zero-width, bidi, BOM, line/para
+/// separators, soft hyphen, variation-free joiners) or lookalike braces.
+fn is_forbidden_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                // lookalike braces
+                | '\u{FF5B}' | '\u{FF5D}' | '\u{2774}' | '\u{2775}'
+                | '\u{FE5B}' | '\u{FE5C}' | '\u{2983}' | '\u{2984}'
+        )
+}
+
+/// Rejects (never strips or normalizes) any string that will reach an HTTP
+/// request template if it holds control/invisible characters or a `{{`/`}}`
+/// marker. Checked on the raw string first, so no character-removal step can
+/// ever assemble a live secret slot from `{<ctrl>{SECRET}}`.
+pub fn check_template_safe(field: &str, s: &str) -> Result<(), LogicError> {
+    if s.chars().any(is_forbidden_char) {
+        return Err(LogicError::Malformed(format!(
+            "{field} contains control or invisible characters"
+        )));
     }
-    out
+    if s.contains("{{") || s.contains("}}") {
+        return Err(LogicError::Malformed(format!(
+            "{field} contains a template marker"
+        )));
+    }
+    Ok(())
 }
 
 fn require<'a>(v: &'a Value, key: &str) -> Result<&'a str, LogicError> {
@@ -379,68 +422,96 @@ fn require<'a>(v: &'a Value, key: &str) -> Result<&'a str, LogicError> {
     }
 }
 
-fn bearer_get(url: String) -> RequestTpl {
+/// Authenticated GET carrying the bearer slot plus any host-pinned id slots.
+fn bearer_get(url: String, pinned: &[(&str, &str)]) -> RequestTpl {
+    let mut secret_refs = vec![(TOKEN_SLOT.to_string(), TOKEN_HANDLE.to_string())];
+    secret_refs.extend(pinned.iter().map(|(s, h)| (s.to_string(), h.to_string())));
     RequestTpl {
         method: "GET".into(),
         url,
         headers: vec![("Authorization".into(), format!("Bearer {TOKEN_SLOT}"))],
         body: None,
-        secret_refs: vec![(TOKEN_SLOT.into(), TOKEN_HANDLE.into())],
+        secret_refs,
     }
 }
 
 /// `search.list?eventType=live` template (100 quota units; only while no chat is known).
-pub fn discovery_search_request(channel_id: &str) -> RequestTpl {
-    bearer_get(format!(
-        "{API_BASE}/search?part=id%2Csnippet&channelId={}&eventType=live&type=video&maxResults={LIVE_SEARCH_MAX_RESULTS}",
-        pct(channel_id)
-    ))
+/// The channel is a HOST-pinned slot (`youtube.channel_id`), never caller-chosen.
+pub fn discovery_search_request() -> RequestTpl {
+    bearer_get(
+        format!(
+            "{API_BASE}/search?part=id%2Csnippet&channelId={CHANNEL_ID_SLOT}&eventType=live&type=video&maxResults={LIVE_SEARCH_MAX_RESULTS}"
+        ),
+        &[(CHANNEL_ID_SLOT, CHANNEL_ID_HANDLE)],
+    )
 }
 
-/// `videos.list?part=liveStreamingDetails` template (1 quota unit).
-pub fn discovery_videos_request(video_id: &str) -> RequestTpl {
-    bearer_get(format!(
-        "{API_BASE}/videos?part=liveStreamingDetails&id={}",
-        pct(video_id)
-    ))
+/// `videos.list?part=liveStreamingDetails` template (1 quota unit); the video id
+/// is a HOST-pinned slot (`youtube.video_id`, the search result the host holds).
+pub fn discovery_videos_request() -> RequestTpl {
+    bearer_get(
+        format!("{API_BASE}/videos?part=liveStreamingDetails&id={VIDEO_ID_SLOT}"),
+        &[(VIDEO_ID_SLOT, VIDEO_ID_HANDLE)],
+    )
 }
 
-/// `liveChat/messages` poll template for the host's poll-config builder.
-pub fn poll_request(live_chat_id: &str, max_results: u32) -> RequestTpl {
-    bearer_get(format!(
-        "{API_BASE}/liveChat/messages?part=id%2Csnippet%2CauthorDetails&liveChatId={}&maxResults={max_results}",
-        pct(live_chat_id)
-    ))
+/// `liveChat/messages` poll template for the host's poll-config builder; the
+/// chat id is a HOST-pinned slot (`youtube.live_chat_id`).
+pub fn poll_request(max_results: u32) -> RequestTpl {
+    bearer_get(
+        format!(
+            "{API_BASE}/liveChat/messages?part=id%2Csnippet%2CauthorDetails&liveChatId={CHAT_ID_SLOT}&maxResults={max_results}"
+        ),
+        &[(CHAT_ID_SLOT, CHAT_ID_HANDLE)],
+    )
 }
 
-/// First candidate `videoId` from a `search.list` response.
-pub fn parse_search(body: &Value) -> Option<String> {
-    body.get("items")?.as_array()?.iter().find_map(|i| {
-        match i.get("id").and_then(|id| id.get("videoId")) {
-            Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
-            _ => None,
+/// Validates an id the host will pin into later templates.
+fn safe_id(field: &str, v: &Value) -> Result<Option<String>, LogicError> {
+    match v {
+        Value::String(s) if !s.is_empty() => {
+            check_template_safe(field, s)?;
+            Ok(Some(s.clone()))
         }
-    })
+        _ => Ok(None),
+    }
 }
 
-/// `activeLiveChatId` from a `videos.list` response.
-pub fn parse_videos(body: &Value) -> Option<String> {
+/// First candidate `videoId` from a `search.list` response (unsafe id = typed error).
+pub fn parse_search(body: &Value) -> Result<Option<String>, LogicError> {
+    let Some(items) = body.get("items").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    for i in items {
+        if let Some(id) = i.get("id").and_then(|id| id.get("videoId"))
+            && let Some(v) = safe_id("videoId", id)?
+        {
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
+}
+
+/// `activeLiveChatId` from a `videos.list` response (unsafe id = typed error).
+pub fn parse_videos(body: &Value) -> Result<Option<String>, LogicError> {
     let live = body
-        .get("items")?
-        .as_array()?
-        .first()?
-        .get("liveStreamingDetails")?;
-    match live.get("activeLiveChatId") {
-        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
-        _ => None,
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(|i| i.get("liveStreamingDetails"));
+    match live.and_then(|l| l.get("activeLiveChatId")) {
+        Some(id) => safe_id("activeLiveChatId", id),
+        None => Ok(None),
     }
 }
 
 /// Builds the `liveChatMessages.insert` template for verb `chat.send`.
 ///
-/// `target` is the HOST-resolved opaque source id for the binding (for YouTube
-/// it is the `liveChatId`); the payload supplies only the text, so an app
-/// cannot redirect a message to another chat. The credential is a slot the
+/// `target` is the HOST-resolved opaque source id for the binding; it is validated
+/// but never embedded. The destination chat is the host-pinned slot
+/// `{{YT_LIVE_CHAT_ID}}` and the payload supplies only the text, so an app
+/// cannot redirect a message. Text containing control/invisible characters or a
+/// `{{`/`}}` marker is REJECTED (never stripped). The credential is a slot the
 /// host substitutes -- the overlay never holds a token.
 pub fn build_chat_send(
     kind: &str,
@@ -455,9 +526,13 @@ pub fn build_chat_send(
     if target.is_empty() {
         return Err(LogicError::Malformed("target-source-id is empty".into()));
     }
+    check_template_safe("target-source-id", target)?;
     let payload: Value = serde_json::from_str(payload_json)
         .map_err(|_| LogicError::Malformed("payload is not JSON".into()))?;
-    let text = py_strip(require(&payload, "text")?);
+    let raw_text = require(&payload, "text")?;
+    check_template_safe("text", raw_text)?;
+    let text = py_strip(raw_text);
+    check_template_safe("text", text)?;
     if text.is_empty() {
         return Err(LogicError::Malformed("text is blank".into()));
     }
@@ -467,7 +542,7 @@ pub fn build_chat_send(
         )));
     }
     let body = json!({"snippet": {
-        "liveChatId": target,
+        "liveChatId": CHAT_ID_SLOT,
         "type": "textMessageEvent",
         "textMessageDetails": {"messageText": text},
     }});
@@ -479,7 +554,10 @@ pub fn build_chat_send(
             ("Content-Type".into(), "application/json".into()),
         ],
         body: Some(body.to_string().into_bytes()),
-        secret_refs: vec![(TOKEN_SLOT.into(), TOKEN_HANDLE.into())],
+        secret_refs: vec![
+            (TOKEN_SLOT.into(), TOKEN_HANDLE.into()),
+            (CHAT_ID_SLOT.into(), CHAT_ID_HANDLE.into()),
+        ],
     })
 }
 
@@ -506,20 +584,15 @@ pub fn run_tool(name: &str, args: &Value) -> Result<Value, LogicError> {
     };
     match name {
         "discovery_request" => match require(args, "step")? {
-            "search" => Ok(tpl_json(&discovery_search_request(require(
-                args,
-                "channel_id",
-            )?))),
-            "videos" => Ok(tpl_json(&discovery_videos_request(require(
-                args, "video_id",
-            )?))),
+            "search" => Ok(tpl_json(&discovery_search_request())),
+            "videos" => Ok(tpl_json(&discovery_videos_request())),
             s => Err(LogicError::Malformed(format!(
                 "unknown discovery step: {s}"
             ))),
         },
         "discovery_parse" => match require(args, "step")? {
-            "search" => Ok(json!({"video_id": parse_search(body()?)})),
-            "videos" => Ok(json!({"live_chat_id": parse_videos(body()?)})),
+            "search" => Ok(json!({"video_id": parse_search(body()?)?})),
+            "videos" => Ok(json!({"live_chat_id": parse_videos(body()?)?})),
             s => Err(LogicError::Malformed(format!(
                 "unknown discovery step: {s}"
             ))),
@@ -535,9 +608,9 @@ pub fn run_tool(name: &str, args: &Value) -> Result<Value, LogicError> {
                 ));
             }
             let max = u32::try_from(max).unwrap_or(200);
-            Ok(tpl_json(&poll_request(require(args, "live_chat_id")?, max)))
+            Ok(tpl_json(&poll_request(max)))
         }
-        "poll_plan" => ser(poll_plan(body()?)),
+        "poll_plan" => ser(poll_plan(body()?)?),
         "classify_error" => {
             let status = args
                 .get("status")

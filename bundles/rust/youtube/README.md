@@ -34,14 +34,37 @@ app bundles --> tool-provider.call (poll_plan, classify_error, discovery_*, buil
 
 ## Tools (all read-only template/classification helpers; none performs I/O)
 
-`discovery_request`, `discovery_parse`, `poll_request`, `poll_plan`, `classify_error`, `build_send_chat_request`.
+`discovery_request{step}`, `discovery_parse`, `poll_request{max_results?}`, `poll_plan`, `classify_error`,
+`build_send_chat_request{target_source_id, payload{text}}`. Request tools take no ids (slots, above).
 
 ## Sender (Part B)
 
-`build-request` supports `chat.send` -> `POST liveChat/messages?part=snippet` with `target-source-id` as the
-`liveChatId` (host-resolved from the binding; the payload can supply ONLY `text`, <=200 chars, so an app cannot
-retarget a message) and the credential slot above. Real execution needs T6d (generic host outbound); the
+`build-request` supports `chat.send` -> `POST liveChat/messages?part=snippet`. `target-source-id` is validated but not
+embedded: the destination is the host-pinned `{{YT_LIVE_CHAT_ID}}` slot and the payload can supply ONLY `text`
+(<=200 chars), so an app cannot retarget a message; credential slot as above. Real execution needs T6d (generic host outbound); the
 executor `ConnectorHost` does not export `sender` yet, so the template is proven at the component level only.
+
+## Host config (slots the host must pin and substitute)
+
+The overlay never takes or embeds caller-chosen ids or credentials. Templates carry slots; `secret_refs`
+pairs each slot with a handle. The host substitutes at send time (URL-encode in URLs, JSON-escape in bodies).
+
+| Slot | Handle | Pinned from |
+|---|---|---|
+| `{{YT_OAUTH_TOKEN}}` | `youtube.oauth` | per-tenant bot credential (credential adapter) |
+| `{{YT_LIVE_CHAT_ID}}` | `youtube.live_chat_id` | host discovery state / outbound binding |
+| `{{YT_CHANNEL_ID}}` | `youtube.channel_id` | the monitored source's config |
+| `{{YT_VIDEO_ID}}` | `youtube.video_id` | the live video the host discovered |
+
+Input hardening: every string that reaches a template (chat text, target-source-id, API-returned ids, page
+tokens) is REJECTED with a typed error if it holds a control character, a zero-width/format/bidi character,
+or lookalike braces, and then if it holds `{{` or `}}` -- rejected, never stripped (stripping first let
+`{<ctrl>{SECRET}}` forge a slot in the Twitch overlay review). Chat text with a newline is therefore refused.
+
+Actor tokenization: `on-frame` resolves each distinct author via `identity.lookup(platform-identity)` (needs the
+core `connector.pii.read` grant, which the hub permission catalog does not know -- see gaps). No `author_id`
+-> the literal `unknown` is looked up, exactly as the Python path tokenized it. Erased users drop the event
+(counted); rate-limited/denied/backend lookups fail the frame (host holds the cursor and retries).
 
 ## Gaps for the integrator (not in this bundle's scope)
 
@@ -51,6 +74,8 @@ executor `ConnectorHost` does not export `sender` yet, so the template is proven
 - No host-side discovery loop (search -> videos -> set `liveChatId` in the URL).
 - `hub_api/services/bundle_manifest_v2.py` has no connector `receiver`/`sender` stage; this manifest uses the
   `action` stage with `tool-provider#call` like economy.
+- `connector.pii.read` is not in `hub_api/services/bundle_permission_catalog.py` (manifest parse rejects it), so it
+  cannot be declared in `hub-manifest.yaml`; the executor-side grant must come from the seeder/connector path.
 - `.ci/builtin-handler-map.yaml` still lists `youtube_live_ingest` as pending; flip it once this lands + T4.
 
 ## Parity evidence
@@ -58,8 +83,13 @@ executor `ConnectorHost` does not export `sender` yet, so the template is proven
 - `tests/parity.rs`: corpus `youtube/live_chat_message.json` + goldens from `test_builtin_youtube_live_ingest.py`
   and `test_receivers_youtube_live_poll.py` fixtures (strip semantics incl. 0x1c-0x1f, flags fail closed, `unknown`
   actor, occurred_at fallback, skipped items). Edge cases were run through the real Python `normalize()` once.
+- Shared harness: `PARITY_OVERLAY_WASM=<built wasm> PLATFORM=youtube make test-connector-parity` -> 8 vectors
+  (corpus `live_chat_message` + 7 added: moderator/owner+sponsor flags, truthy non-bool flags, missing optionals,
+  unicode text, super-chat text, explicit occurred_at; goldens blessed from the real Python path).
 - `core/bundle_executor/tests/youtube_overlay.rs`: the REAL compiled component through production
   `ConnectorHost::load` (`scripts/test-overlay-youtube.sh`).
+- Security regressions (`tests/tools_sender.rs`, `tests/forbidden_chars.rs`): slot smuggling, control/zero-width/
+  bidi/lookalike chars, mutation-checked (9/10 mutants killed; the 10th is the redundant raw-vs-cleaned guard).
 
 ## Build / test
 

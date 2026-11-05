@@ -3,6 +3,9 @@
 # Credentials are NEVER in this file or the component: the overlay returns request templates
 # carrying the opaque secret-ref slot `{{YT_OAUTH_TOKEN}}` -> handle `youtube.oauth`, which the
 # host's credential adapter (per-tenant bot credentials spec) resolves at send time.
+# Host-pinned slots (the overlay never takes caller-chosen ids; the host substitutes, URL-encoding
+# in URLs and JSON-escaping in bodies): {{YT_OAUTH_TOKEN}}->youtube.oauth, {{YT_LIVE_CHAT_ID}}->
+# youtube.live_chat_id, {{YT_CHANNEL_ID}}->youtube.channel_id, {{YT_VIDEO_ID}}->youtube.video_id.
 # Cutover flag: PostHog `waddles.overlay-youtube` (default OFF; the Python svc_ingest path runs
 # unchanged while OFF).
 schema_version: 2
@@ -45,8 +48,6 @@ exported_tools:
       type: object
       properties:
         step: {type: string, enum: [search, videos]}
-        channel_id: {type: string, minLength: 1}
-        video_id: {type: string, minLength: 1}
       required: [step]
       additionalProperties: false
     output_schema: {type: object}
@@ -67,9 +68,8 @@ exported_tools:
     input_schema:
       type: object
       properties:
-        live_chat_id: {type: string, minLength: 1}
         max_results: {type: integer, minimum: 1, maximum: 2000}
-      required: [live_chat_id]
+      required: []
       additionalProperties: false
     output_schema: {type: object}
   - name: poll_plan
