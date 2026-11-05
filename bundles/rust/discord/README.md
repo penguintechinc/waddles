@@ -105,6 +105,13 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
    `hub_api/services/bundle_permission_catalog.py`, so the V2 validator rejects it: integrator adds it to the
    catalog (dangerous, core-only) and then adds the permission to `hub-manifest.yaml` (see the comment there).
 
+`ConnectorHost::load` REFUSES this component unless `connector.pii.read` is granted (it imports `identity`).
+
+Shared parity harness (`chore/connector-parity-harness`, `make test-connector-parity PLATFORM=discord`):
+`examined=10 passed=10 failed=0 identity_lookups=9`, with 3 vectors carrying declared divergences
+(`tests/data_plane_parity/expected/discord/divergences.json`: `is_mod`/`is_broadcaster` fail closed because the
+harness does not bridge the guest `http` lookup).
+
 ## Sender (`build-request`) — part B
 
 | kind | request | payload (allow-list; anything else is rejected) |
