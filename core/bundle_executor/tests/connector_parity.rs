@@ -35,11 +35,29 @@ use sha2::{Digest, Sha256};
 const FIXTURE_WASM: &[u8] = include_bytes!("fixtures/connector_tools_fixture.wasm");
 const RECEIVED_AT: &str = "2026-11-04T00:00:00.000Z";
 
+/// Repo root resolved at RUNTIME, never baked into a cached test artifact: worktrees
+/// share one `CARGO_TARGET_DIR`, so a compile-time path can point at another checkout's
+/// corpus. `CONNECTOR_PARITY_ROOT` wins; else walk up from the current dir until
+/// `tests/data_plane_parity/expected` is found. Not found = panic, never a guess.
 fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("repo root")
+    if let Ok(r) = std::env::var("CONNECTOR_PARITY_ROOT") {
+        let p = PathBuf::from(&r);
+        assert!(
+            p.join("tests/data_plane_parity/expected").is_dir(),
+            "CONNECTOR_PARITY_ROOT={r} has no tests/data_plane_parity/expected"
+        );
+        return p;
+    }
+    let mut dir = std::env::current_dir().expect("cwd");
+    loop {
+        if dir.join("tests/data_plane_parity/expected").is_dir() {
+            return dir;
+        }
+        assert!(
+            dir.pop(),
+            "repo root not found walking up from cwd; set CONNECTOR_PARITY_ROOT"
+        );
+    }
 }
 
 fn expected_dir(platform: &str) -> PathBuf {
@@ -48,8 +66,28 @@ fn expected_dir(platform: &str) -> PathBuf {
         .join(platform)
 }
 
+fn corpus_dir(platform: &str) -> PathBuf {
+    repo_root()
+        .join("tests/data_plane_parity/corpus")
+        .join(platform)
+}
+
 fn fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/parity/fixture")
+    repo_root().join("core/bundle_executor/tests/fixtures/parity/fixture")
+}
+
+/// Authoritative denominator: the number of vector `*.json` files in `dir`,
+/// counted independently of the loader (a loader that skips a file cannot lower it).
+fn json_count(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .filter_map(Result::ok)
+        .filter(|e| {
+            let p = e.path();
+            p.extension().is_some_and(|x| x == "json")
+                && p.file_name().is_some_and(|n| n != "divergences.json")
+        })
+        .count()
 }
 
 // ---------------------------------------------------------------- vectors
@@ -133,7 +171,7 @@ fn load_vectors(dir: &Path) -> Result<Vec<Vector>, String> {
     if paths.is_empty() {
         return Err(format!("{}: zero expected vectors", dir.display()));
     }
-    paths
+    let vectors = paths
         .iter()
         .map(|p| {
             let raw = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -141,7 +179,34 @@ fn load_vectors(dir: &Path) -> Result<Vec<Vector>, String> {
                 serde_json::from_str(&raw).map_err(|e| format!("{}: {e}", p.display()))?;
             parse_vector(&v).map_err(|e| format!("{}: {e}", p.display()))
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    let on_disk = json_count(dir);
+    if vectors.len() != on_disk {
+        return Err(format!(
+            "{}: loaded {} vectors but {on_disk} files are on disk",
+            dir.display(),
+            vectors.len()
+        ));
+    }
+    Ok(vectors)
+}
+
+/// Loads `expected_dir` and enforces the DENOMINATOR against the runtime corpus:
+/// `examined` must equal the number of corpus vector files, both printed on
+/// failure. Zero or a mismatch is an error -- a harness pointed at a stale or
+/// foreign directory cannot pass.
+fn checked_vectors(expected_dir: &Path, corpus_dir: &Path) -> Result<Vec<Vector>, String> {
+    let vectors = load_vectors(expected_dir)?;
+    let corpus_n = json_count(corpus_dir);
+    if vectors.is_empty() || corpus_n == 0 || vectors.len() != corpus_n {
+        return Err(format!(
+            "denominator mismatch: expected/ has {} vectors, corpus {} has {corpus_n} (must be equal and non-zero); \
+             run `make gen-connector-parity-expected`",
+            vectors.len(),
+            corpus_dir.display()
+        ));
+    }
+    Ok(vectors)
 }
 
 /// `divergences.json`: `{ "<vector id>": [ {"path","reason","tracking"} ] }`.
@@ -416,6 +481,13 @@ async fn run(
             rep.failures.push((v.id.clone(), diffs));
         }
     }
+    if rep.examined != vectors.len() {
+        return Err(format!(
+            "{label}: examined {} != {} vectors supplied",
+            rep.examined,
+            vectors.len()
+        ));
+    }
     rep.host_calls = overlay.calls.lock().expect("call log").clone();
     Ok(rep)
 }
@@ -494,11 +566,14 @@ async fn overlay_parity() {
         ["twitch", "discord", "youtube"].contains(&platform.as_str()),
         "unknown PARITY_PLATFORM {platform:?}"
     );
-    let vectors = load_vectors(&expected_dir(&platform)).expect("expected vectors");
+    let vectors = checked_vectors(&expected_dir(&platform), &corpus_dir(&platform))
+        .unwrap_or_else(|e| panic!("{e}"));
     let div = load_divergences(&expected_dir(&platform)).expect("divergences");
     println!(
-        "connector_parity: corpus_ready platform={platform} vectors={}",
-        vectors.len()
+        "connector_parity: corpus_ready platform={platform} root={} vectors={} corpus_files={}",
+        repo_root().display(),
+        vectors.len(),
+        json_count(&corpus_dir(&platform))
     );
     match std::env::var("PARITY_OVERLAY_WASM") {
         Ok(path) => {
@@ -698,11 +773,7 @@ fn expected_files_cover_the_corpus_and_actors_match_the_stub() {
     let mut total = 0;
     for (platform, min) in [("twitch", 23), ("discord", 10), ("youtube", 1)] {
         let vectors = load_vectors(&expected_dir(platform)).expect("expected vectors");
-        let corpus_n = std::fs::read_dir(corpus.join(platform))
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .count();
+        let corpus_n = json_count(&corpus.join(platform));
         assert_eq!(
             vectors.len(),
             corpus_n,
@@ -763,4 +834,60 @@ async fn identity_bridge_serves_real_lookups() {
         .unwrap();
     let calls = overlay.calls.lock().unwrap().clone();
     assert!(calls.iter().any(|c| c == "identity.lookup"), "{calls:?}");
+}
+
+/// Writes `n` minimal valid expected vectors into a fresh temp dir.
+fn temp_vectors(tag: &str, n: usize) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("parity-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for i in 0..n {
+        let v = serde_json::json!({
+            "id": format!("t/{i}"), "platform": "t", "context": {},
+            "input": {"encoding": "utf8", "text": "x"}, "outcome": "dropped", "events": []
+        });
+        std::fs::write(dir.join(format!("v{i}.json")), v.to_string()).unwrap();
+    }
+    dir
+}
+
+/// Regression (gate integrity): the harness reports exactly N for N files and the
+/// denominator check fails on any mismatch or empty dir, so a harness reading the
+/// wrong/stale directory (shared CARGO_TARGET_DIR, baked paths) cannot pass.
+#[test]
+fn denominator_is_enforced_against_the_runtime_corpus() {
+    let exp = temp_vectors("exp", 5);
+    let corpus = temp_vectors("corpus", 5);
+    assert_eq!(load_vectors(&exp).unwrap().len(), 5);
+    assert_eq!(checked_vectors(&exp, &corpus).unwrap().len(), 5);
+
+    // Corpus grew (or the harness skipped a file): examined != corpus -> FAIL, both numbers printed.
+    std::fs::write(corpus.join("extra.json"), "{}").unwrap();
+    let e = checked_vectors(&exp, &corpus).unwrap_err();
+    assert!(e.contains("expected/ has 5") && e.contains("has 6"), "{e}");
+    std::fs::remove_file(corpus.join("extra.json")).unwrap();
+
+    // Junk is a parse error, never silently skipped.
+    std::fs::write(exp.join("junk.json"), "{}").unwrap();
+    assert!(load_vectors(&exp).is_err());
+    std::fs::remove_file(exp.join("junk.json")).unwrap();
+
+    // Empty expected dir / empty corpus dir -> FAIL.
+    let empty = temp_vectors("empty", 0);
+    assert!(checked_vectors(&empty, &corpus).is_err());
+    assert!(checked_vectors(&exp, &empty).is_err());
+    for d in [exp, corpus, empty] {
+        std::fs::remove_dir_all(d).unwrap();
+    }
+}
+
+/// The root is found at runtime (cwd walk-up / env), never from a compiled-in path.
+#[test]
+fn repo_root_is_resolved_at_runtime() {
+    let r = repo_root();
+    assert!(
+        r.join("tests/data_plane_parity/expected/twitch").is_dir(),
+        "{}",
+        r.display()
+    );
+    assert!(corpus_dir("twitch").is_dir());
 }
