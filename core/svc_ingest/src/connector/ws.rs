@@ -30,6 +30,8 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use super::egress_guard::resolve_pinned;
+use super::lifecycle::{LifecycleAction, SessionEngine};
+pub use super::lifecycle::{LifecycleError, SessionRules};
 use super::secrets::{Destination, TransportSecretSource};
 use super::transport::{Transport, TransportError};
 use super::transport_common::{
@@ -94,6 +96,10 @@ pub struct WsConfig {
     /// How often the driver asks the connector for a heartbeat body
     /// (`None` = this source has no heartbeat). The driver range-checks it.
     pub heartbeat_interval: Option<Duration>,
+    /// Host-owned session lifecycle (captured session state, dynamic
+    /// heartbeat interval, reconnect/park directives, close-code
+    /// classification); `SessionRules::default()` = none.
+    pub session: SessionRules,
 }
 
 /// WebSocket transport over tokio-tungstenite.
@@ -113,6 +119,11 @@ pub struct WsTransport<S: TransportSecretSource> {
     /// send, so a cancelled `next_frame` re-sends instead of losing one.
     pending: VecDeque<Vec<u8>>,
     metrics: Option<FrameRuleMetrics>,
+    /// Per-source session state + lifecycle rules (survives reconnects so a
+    /// RESUME can use it; dropped by `reconnect_fresh`).
+    engine: SessionEngine,
+    /// Heartbeat interval captured from the CURRENT connection's frames.
+    dyn_heartbeat: Option<Duration>,
 }
 
 impl<S: TransportSecretSource> WsTransport<S> {
@@ -131,6 +142,13 @@ impl<S: TransportSecretSource> WsTransport<S> {
         }
         let rules = FrameRules::new(cfg.auto_replies.clone(), cfg.self_echo.clone())
             .map_err(|e| TransportError::Connect(e.to_string()))?;
+        let engine = SessionEngine::new(cfg.session.clone())
+            .map_err(|e| TransportError::Connect(e.to_string()))?;
+        if engine.has_token_template() && cfg.resume_token.is_some() {
+            return Err(TransportError::Connect(
+                "session_token_template and a static resume_token are mutually exclusive".into(),
+            ));
+        }
         let now = Instant::now();
         Ok(Self {
             source_id: opaque_id("ws", &cfg.source_key),
@@ -146,6 +164,8 @@ impl<S: TransportSecretSource> WsTransport<S> {
             rules,
             pending: VecDeque::new(),
             metrics: None,
+            engine,
+            dyn_heartbeat: None,
         })
     }
 
@@ -222,6 +242,21 @@ impl<S: TransportSecretSource> WsTransport<S> {
         }
         let dest = Destination::from_url(&self.url)
             .ok_or_else(|| TransportError::Handshake("not connected".into()))?;
+        // Host session slots first (validated, charset-safe values; secret
+        // slots are not state names and pass through untouched), then the
+        // secret pass over the rendered bytes.
+        let handshake = if self.engine.is_inert() {
+            handshake
+        } else {
+            let bytes = self
+                .engine
+                .render_handshake(&handshake.bytes)
+                .ok_or_else(|| TransportError::Handshake("session slot has no value".into()))?;
+            Handshake {
+                bytes,
+                secret_refs: handshake.secret_refs,
+            }
+        };
         let prefixes: Vec<Vec<u8>> = self
             .cfg
             .slot_prefixes
@@ -252,6 +287,49 @@ impl<S: TransportSecretSource> WsTransport<S> {
     }
 }
 
+impl<S: TransportSecretSource> WsTransport<S> {
+    /// Test-only view of the token the next connect would carry.
+    #[cfg(test)]
+    pub(crate) fn session_token_for_test(&self) -> Option<String> {
+        self.engine.render_session_token()
+    }
+
+    /// Applies a lifecycle action: reconnect = clean end (the driver
+    /// reconnects under backoff), fresh = drop state first, park = terminal.
+    fn apply_action(
+        &mut self,
+        action: LifecycleAction,
+        what: &'static str,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
+        match action {
+            LifecycleAction::Reconnect => Ok(None),
+            LifecycleAction::ReconnectFresh => {
+                self.engine.clear();
+                Ok(None)
+            }
+            LifecycleAction::Park => Err(TransportError::Fatal(format!("{what} classified fatal"))),
+        }
+    }
+
+    /// Handles a received Close frame: classified codes act per the host
+    /// rules; an unclassified code is a plain remote close (reconnect, state
+    /// kept) exactly as before.
+    fn on_close(&mut self, code: Option<u16>) -> Result<Option<Vec<u8>>, TransportError> {
+        match code.and_then(|c| self.engine.classify_close(c)) {
+            Some(action) => {
+                self.count("close_code", action.label(), 1);
+                self.apply_action(action, "close code")
+            }
+            None => {
+                if code.is_some() {
+                    self.count("close_code", "unclassified", 1);
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
 fn classify_connect(e: WsError) -> TransportError {
     match e {
         WsError::Http(r) if matches!(r.status().as_u16(), 401 | 403) => {
@@ -270,6 +348,8 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
 
     async fn connect(&mut self) -> Result<ConnectionCtx, TransportError> {
         self.stream = None;
+        // The interval is per connection (re-announced in the next HELLO).
+        self.dyn_heartbeat = None;
         // A reply owed to the previous connection must never reach this one.
         self.pending.clear();
         let wsc = WebSocketConfig::default()
@@ -305,7 +385,11 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
             platform: self.cfg.platform.clone(),
             source_id: self.source_id.clone(),
             connection_id: self.connection_id.clone(),
-            session_token: self.cfg.resume_token.clone(),
+            session_token: self
+                .cfg
+                .resume_token
+                .clone()
+                .or_else(|| self.engine.render_session_token()),
         })
     }
 
@@ -332,7 +416,10 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
                 .await
                 .map_err(|_| TransportError::Read("idle or lifetime limit reached".into()))?;
             let bytes = match item {
-                None | Some(Ok(Message::Close(_))) => return Ok(None),
+                Some(Ok(Message::Close(frame))) => {
+                    return self.on_close(frame.map(|f| u16::from(f.code)))
+                }
+                None => return Ok(None),
                 Some(Err(WsError::ConnectionClosed | WsError::AlreadyClosed)) => return Ok(None),
                 Some(Err(e)) => return Err(TransportError::Read(e.to_string())),
                 Some(Ok(Message::Text(t))) => t.as_bytes().to_vec(),
@@ -342,6 +429,28 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
                 Some(Ok(_)) => continue,
             };
             self.last_data = Instant::now();
+            match self.engine.observe(&bytes) {
+                Ok(obs) => {
+                    self.count("session_capture", "stored", obs.captured as u64);
+                    if let Some(d) = obs.heartbeat {
+                        self.dyn_heartbeat = Some(d);
+                        self.count("heartbeat_interval", "applied", 1);
+                    }
+                    if let Some(action) = obs.action {
+                        self.count("directive", action.label(), 1);
+                        return self.apply_action(action, "frame directive");
+                    }
+                }
+                Err(e) => {
+                    let rule = if e == LifecycleError::BadHeartbeat {
+                        "heartbeat_interval"
+                    } else {
+                        "session_capture"
+                    };
+                    self.count(rule, "rejected", 1);
+                    return Err(TransportError::Read(e.to_string()));
+                }
+            }
             let bytes = match self.rules.apply(&bytes) {
                 Ok(Applied {
                     forward,
@@ -368,19 +477,38 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
     }
 
     fn heartbeat_interval(&self) -> Option<Duration> {
-        self.cfg.heartbeat_interval
+        self.dyn_heartbeat.or(self.cfg.heartbeat_interval)
     }
 
     async fn send_heartbeat(&mut self, bytes: Vec<u8>) -> Result<(), TransportError> {
-        if self.cfg.heartbeat_interval.is_none() {
+        if self.heartbeat_interval().is_none() {
             return Err(TransportError::Send(
                 "heartbeat sent but no heartbeat_interval configured".into(),
             ));
         }
+        // The guest cannot see the live sequence; a host-owned heartbeat
+        // replaces its body with the host-rendered one.
+        let bytes = if self.engine.host_owned_heartbeat() {
+            self.engine
+                .render_default_heartbeat()
+                .ok_or_else(|| TransportError::Send("heartbeat slot has no value".into()))?
+        } else {
+            bytes
+        };
         if bytes.is_empty() || bytes.len() > self.cfg.max_frame_bytes {
             return Err(TransportError::Send("heartbeat body size invalid".into()));
         }
         self.write_frame(&bytes).await
+    }
+
+    async fn send_default_heartbeat(&mut self) -> Result<(), TransportError> {
+        let body = self.engine.render_default_heartbeat().ok_or_else(|| {
+            TransportError::Send(
+                "no default_heartbeat configured (or a slot has no value) for a connector that asked for the platform default"
+                    .into(),
+            )
+        })?;
+        self.send_heartbeat(body).await
     }
 
     async fn close(&mut self, _reason: &str) {
@@ -444,6 +572,7 @@ mod tests {
             auto_replies: vec![],
             self_echo: None,
             heartbeat_interval: None,
+            session: SessionRules::default(),
         }
     }
 

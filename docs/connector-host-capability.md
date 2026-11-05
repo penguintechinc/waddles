@@ -136,7 +136,7 @@ settings. All default OFF; an invalid value is refused by `WsTransport::new` (`T
 |---|---|
 | `auto_replies: Vec<AutoReplyRule>` | Line rule `prefix` -> host-built `reply_prefix + token + reply_suffix` (e.g. `PING :` -> `PONG :`). The overlay never sees a consumed line unless `forward_to_guest`. Only the token after `prefix` is reflected: `[A-Za-z0-9.:_/+=@-]`, `1..=max_token_len` (hard cap 256); anything else (CR, LF, space, non-ASCII, empty, too long) is a `TransportError::Read` -- never a reply. Max 8 rules (non-overlapping prefixes), 8 replies per frame. Matching is per line, so a batched frame is answered and the remaining lines are still forwarded. Replies are queued and flushed at the top of the next `next_frame` (cancel-safe: popped only after a completed send; cleared on reconnect) |
 | `self_echo: Option<SelfEchoFilter>` | Drops lines `[@tags ]<open><self_id><close><user@host> <command> ...` whose id equals `self_id` (ASCII case-insensitive) -- the bot's own echoed `PRIVMSG`. Host-side because the frozen `connector` WIT gives the guest no self identity; no WIT change. `self_id` is the bot's public login supplied by host config (never a secret, never guest data) |
-| `heartbeat_interval: Option<Duration>` | Enables the driver's heartbeat loop for this source; `send_heartbeat` writes the connector's body (non-empty, `<= max_frame_bytes`). `send_default_heartbeat` still FAILS LOUD (no platform default is defined) |
+| `heartbeat_interval: Option<Duration>` | Enables the driver's heartbeat loop for this source; `send_heartbeat` writes the connector's body (non-empty, `<= max_frame_bytes`). `send_default_heartbeat` FAILS LOUD unless `session.default_heartbeat` is configured (below); the interval may instead be captured from a frame (`session.heartbeat`) |
 
 Metrics: `FrameRuleMetrics::register(&registry)` once, then `WsTransport::with_metrics`:
 `svc_ingest_transport_frame_rules_total{platform,rule,outcome}` (`auto_reply`: `replied`/`reply_failed`/`rejected`;
@@ -149,6 +149,106 @@ others pass) and `transport_common.rs`.
 
 Permission catalog: `connector.pii.read` (Dangerous, global-approved, first-party-core only) gates `identity.lookup`;
 cataloged in `core/bundle_capability_gate/src/permission.rs` and `hub_api/services/bundle_permission_catalog.py`.
+
+## Session lifecycle: captured state, dynamic heartbeat, reconnect/park, poll hints (P6b session lifecycle)
+
+Platform overlays (Discord gateway, YouTube poll) need the host to run session mechanics a stateless guest cannot.
+Design rule (same as `auto_replies`): **generic, declarative rules owned by host config** -- never from a guest, no
+platform named in the transport, **no change to the frozen `connector` world or the WIT contract**. The host feeds
+state back to the guest through the EXISTING opaque `session-token` and the handshake bytes it already returns.
+Code: `connector/lifecycle.rs` (rules, engine, validation), wired into `ws.rs`, `poll.rs`, `driver.rs`. All rule sets
+default empty (= byte-for-byte the previous behaviour); every misconfiguration is refused at `*Transport::new`
+(`TransportError::Connect`, fail loud).
+
+### WebSocket: `WsConfig.session: SessionRules`
+
+| Field | Behaviour |
+|---|---|
+| `captures: Vec<CaptureRule>` | `when` (JSON conditions `[(pointer, Int/Bool/Str)]`, or an IRC command) + `pointer` -> named value in per-transport host state. Value = JSON string or non-negative integer; absent/`null` is skipped (heartbeat ACK `s:null`). **Rejected, never sanitized**: charset `[A-Za-z0-9._:/+=-]`, 1..=128 bytes; anything else (CR, LF, quote, brace, space, wrong type, negative) fails the frame (`TransportError::Read`) and stores nothing from it. Max 8 rules / 8 distinct names `[A-Z][A-Z0-9_]{0,31}` |
+| `heartbeat: Option<HeartbeatCapture>` | Captures a millisecond number (HELLO `/d/heartbeat_interval`) as the transport's `heartbeat_interval()`. Outside `MIN..=MAX_HEARTBEAT_INTERVAL` (100 ms..1 h) -> rejected (`Read`). Per connection: reset on `connect()` (the next HELLO re-announces) |
+| `directives: Vec<FrameDirective>` | Matched frame -> `Reconnect` (clean end, state kept, driver reconnects under backoff), `ReconnectFresh` (state dropped first), `Park` (`Fatal`, source parked). The frame is consumed. First match wins, max 8. `IrcCommand("RECONNECT")` matches the command token only, so `PRIVMSG #c :RECONNECT` (attacker text) never fires |
+| `close_codes: Vec<CloseCodeRule>` | Inclusive ranges (1000..=4999, non-overlapping, max 16) -> same actions. Unclassified code = previous behaviour (plain close, reconnect, state kept) |
+| `session_token_template` | Rendered into `ConnectionCtx.session_token` on every `connect()` when each `{{NAME}}` has a value (or `{{NAME\|default}}`); otherwise `None` = start fresh. Mutually exclusive with a static `resume_token` |
+| handshake slots | `{{NAME}}` / `{{NAME\|default}}` for DECLARED state names inside the connector's handshake bytes are substituted host-side BEFORE the secret pass (values are charset-safe; secret slots are not state names and pass through). A declared slot with no value and no default fails the handshake loudly before any byte or secret leaves |
+| `default_heartbeat` / `host_owned_heartbeat` | Host-built heartbeat body (`{"op":1,"d":{{SEQ\|null}}}`) used for `send_default_heartbeat` (connector answered `none`); with `host_owned_heartbeat` it also REPLACES a connector-supplied body (the guest cannot see the live sequence) |
+
+State: per transport, bounded, survives reconnects (that is what RESUME needs), dropped by `ReconnectFresh`/a fresh-class
+close code, never logged (`SessionEngine`'s `Debug` prints only the held count), never a metric label.
+
+**Driver:** the heartbeat schedule now follows `Transport::heartbeat_interval()` live. The pump re-reads it after every
+frame and publishes a change over a watch channel; the loop restarts its schedule (first beat one period later). A value
+outside the driver bounds ends the connection (`TransportError`). With the flag OFF everything stays dormant.
+Known limit: the driver still sends the `on-connect` handshake right after the socket opens (before HELLO is read);
+the gateway tolerates an early IDENTIFY/RESUME.
+
+Metrics (`FrameRuleMetrics`, same series): `svc_ingest_transport_frame_rules_total{platform,rule,outcome}` with
+`session_capture` (`stored`/`rejected`), `heartbeat_interval` (`applied`/`rejected`), `directive` and `close_code`
+(`reconnect`/`reconnect_fresh`/`park`; close also `unclassified`). Bounded enums only.
+
+Discord overlay host config (matches the overlay's session-token JSON `{"session_id","seq"}`; the overlay should answer
+`on-heartbeat-due` with `none` and let `host_owned_heartbeat` supply the live `d:<seq>`):
+
+```rust
+let op = |n| ("/op".to_string(), Scalar::Int(n));
+SessionRules {
+    captures: vec![
+        CaptureRule { when: FrameMatch::Json(vec![op(0), ("/t".into(), Scalar::Str("READY".into()))]),
+                      pointer: "/d/session_id".into(), name: "SESSION_ID".into() },
+        CaptureRule { when: FrameMatch::Json(vec![op(0)]), pointer: "/s".into(), name: "SEQ".into() },
+    ],
+    heartbeat: Some(HeartbeatCapture { when: FrameMatch::Json(vec![op(10)]),
+                                       pointer: "/d/heartbeat_interval".into() }),
+    directives: vec![
+        FrameDirective { when: Json([op(7)]),                          action: Reconnect },
+        FrameDirective { when: Json([op(9), ("/d", Bool(true))]),      action: Reconnect },       // resumable
+        FrameDirective { when: Json([op(9), ("/d", Bool(false))]),     action: ReconnectFresh },  // re-IDENTIFY
+    ],
+    close_codes: vec![ // fatal auth/config: 4004, 4010-4014 (+4013/4014 intents); fresh: 4007, 4009; resume: 4000-4003, 4005, 4008
+        CloseCodeRule { from: 4004, to: 4004, action: Park },  CloseCodeRule { from: 4010, to: 4014, action: Park },
+        CloseCodeRule { from: 4007, to: 4007, action: ReconnectFresh }, CloseCodeRule { from: 4009, to: 4009, action: ReconnectFresh },
+        CloseCodeRule { from: 4000, to: 4003, action: Reconnect }, CloseCodeRule { from: 4005, to: 4005, action: Reconnect },
+        CloseCodeRule { from: 4008, to: 4008, action: Reconnect },
+    ],
+    session_token_template: Some(r#"{"session_id":"{{SESSION_ID}}","seq":{{SEQ}}}"#.into()),
+    default_heartbeat: Some(r#"{"op":1,"d":{{SEQ|null}}}"#.into()),
+    host_owned_heartbeat: true,
+}
+```
+Plus `slot_prefixes: [r#""token":""#]`, `handles {"discord-bot" -> bot-token connection}` as before. Not covered here
+(explicit): `resume_gateway_url` redirection (a captured value is not used as a connect URL -- would need an SSRF-checked
+URL capture), heartbeat-ACK timeout, the IDENTIFY budget (host-only, unchanged).
+
+### Poll: `PollConfig.lifecycle: PollLifecycle`
+
+| Field | Behaviour |
+|---|---|
+| `interval_hint: Option<IntervalHint>` | `pointer` (e.g. `/pollingIntervalMillis`, integer or numeric string) -> next gap, **clamped** to `[min, max]` (max <= 24 h); no usable hint reverts to `PollConfig.interval`. `PollTransport::interval()` exposes it. Metric `poll_interval`: `applied`/`clamped`/`ignored` |
+| `error_rules: Vec<HttpErrorRule>` | `status` (400..=599) + `reason_pointer` + `reasons` (charset `[A-Za-z0-9_.-]`, max 8) -> `Backoff{base,max,honor_retry_after}` or `Park`. Backoff pauses polling (not an error: no driver backoff/reconnect), doubles per consecutive hit, capped at `max` (<= 24 h); a numeric `Retry-After` replaces the computed wait (still capped). Reset by the next good response. A 403 matching no rule (or an unparsable body) keeps the old **Fatal** behaviour; 401 stays Fatal. The body is only read for a status some rule targets, bounded by `max_body_bytes`. Metric `poll_http`: `backoff`/`park`/`unclassified` |
+| `query_secret: Option<QuerySecret>` | `{param, handle}`: the secret resolved from `handle` (must be in `handles` = the manifest `secret_ref`; `param` must not equal `cursor_param` nor already be in the URL) is appended with strict form-urlencoding (everything outside `[A-Za-z0-9*-._]` is `%XX`, so it cannot end the parameter or add one). Resolved per request, never cached. Every transport error is a fixed class string -- the URL (which carries the key) is in no error, log or metric (tests enumerate refused-connect, 5xx, 403-park and captured tracing output). Residual: the `Url`/hyper own a non-zeroizing copy until the request completes |
+
+YouTube overlay host config:
+
+```rust
+PollConfig { /* url = ".../liveChat/messages?part=id,snippet,authorDetails&liveChatId=...", cursor_param "pageToken",
+                cursor_pointer "/nextPageToken", interval 5s */
+    lifecycle: PollLifecycle {
+        interval_hint: Some(IntervalHint { pointer: "/pollingIntervalMillis".into(),
+                                           min: 2s, max: 60s }),            // overlay's 2 s floor
+        error_rules: vec![
+            HttpErrorRule { status: 403, reason_pointer: "/error/errors/0/reason".into(),
+                reasons: vec!["quotaExceeded","rateLimitExceeded","dailyLimitExceeded","userRateLimitExceeded"],
+                action: Backoff { base: 30s, max: 1h, honor_retry_after: true } },     // exponential, bounded
+            HttpErrorRule { status: 403, reason_pointer: "/error/errors/0/reason".into(),
+                reasons: vec!["forbidden","insufficientPermissions"], action: Park },
+        ],
+        query_secret: Some(QuerySecret { param: "key".into(), handle: "youtube.api_key".into() }),
+    }, ..
+}
+```
+`liveChatEnded`-style 403s are left unclassified (Fatal) on purpose: rediscovery is the overlay/host discovery loop's
+job (not in this change). Tests: `connector/lifecycle_tests.rs` (real local WS + HTTP servers, wire asserted),
+`tests/connector_session_lifecycle.rs` (real driver + `WsTransport`: HELLO -> heartbeat with live seq -> op 7 -> RESUME
+-> 4004 parks), `tests/connector_heartbeat.rs` (announced interval start/re-schedule/out-of-range/flag-off).
 
 ## Connector tools (`world connector-tools`, P6a Task 4)
 

@@ -79,6 +79,15 @@ The connector driver schedules `receiver.on-heartbeat-due` per connection when a
 `ingest.connector-heartbeat`, default OFF). See `docs/connector-host-capability.md` "Heartbeat scheduling".
 Tests: `cargo test --locked --test connector_heartbeat`.
 
+## Connector session lifecycle (P6b)
+
+Host-owned declarative rules (`WsConfig.session`, `PollConfig.lifecycle`; `connector/lifecycle.rs`) give platform
+overlays what a stateless guest cannot: captured session state fed back through `session-token`/handshake slots, a
+frame-announced heartbeat interval, reconnect/park directives and WS close-code classification, poll interval hints,
+403-reason back-off vs park, and a percent-encoded API-key query slot. No WIT change. Config examples (Discord,
+YouTube), limits, metrics: `docs/connector-host-capability.md` "Session lifecycle". Tests:
+`cargo test --locked --lib connector::lifecycle`, `--test connector_session_lifecycle`, `--test connector_heartbeat`.
+
 ## Connector egress (SSRF guard)
 
 Poll/WebSocket connector transports resolve and pin their endpoint through `connector::egress_guard`, a thin
