@@ -107,18 +107,24 @@ spoofed platform, rejected/failed events, truncation) are sampled -- 5 per 30s p
 ## Heartbeat scheduling (P6a Task 5, spec S3.5)
 
 `ConnectorDriver` runs a per-connection heartbeat loop concurrently with the frame pump (same task, bounded
-`mpsc(1)` hand-off, so at most ONE `on-heartbeat-due` is in flight and a slow one never delays `on-frame`).
+`mpsc(1)` hand-off, so at most ONE `on-heartbeat-due` is in flight). A due heartbeat is written even while a
+frame is still being processed (`on-frame` + publish only borrow the invoker/sink, never the transport). One
+structural limit: the transport is a single `&mut`, so reading the NEXT frame pauses while a heartbeat write is
+in progress; that write has a deadline (default 5s, `with_heartbeat_send_timeout`) after which it is cancelled and
+the connection torn down + reconnected.
 
 | Piece | Behaviour |
 |---|---|
-| `Transport::heartbeat_interval()` | `None` (default) = no heartbeat; `Some(0)` = `DriverError::ZeroHeartbeatInterval` (before connect) |
-| `Transport::send_heartbeat(bytes)` | sends the connector body; the default FAILS LOUD (`TransportError::Send`) |
+| `Transport::heartbeat_interval()` | `None` (default) = no heartbeat; outside `MIN_HEARTBEAT_INTERVAL..=MAX_HEARTBEAT_INTERVAL` (100ms..=1h, zero included) = `DriverError::HeartbeatIntervalOutOfRange` (before connect, only when the flag is ON) |
+| `Transport::send_heartbeat(bytes)` | sends the connector body; the default FAILS LOUD (`TransportError::Send`); must be cancel-safe |
+| `Transport::send_default_heartbeat()` | called when the connector returns `none` (WIT: "host sends its platform-default heartbeat unchanged"); the default FAILS LOUD |
 | Schedule | first beat one period after establishment; missed ticks are delayed, never burst |
-| Flag | `ConnectorDriver::with_heartbeat_enabled(bool)`; caller resolves PostHog `ingest.connector-heartbeat` (default OFF). OFF + declared interval = WARN per connection, no beat |
-| Outcomes (`svc_ingest_connector_heartbeats_total{platform,outcome}`) | `sent`, `empty`, `guest_error` (connection stays up), `send_failed` (fatal parks, else reconnect), trap/`unavailable` kinds (teardown + backoff) |
+| Flag | `ConnectorDriver::with_heartbeat_enabled(bool)`; caller resolves PostHog `ingest.connector-heartbeat` (default OFF). OFF = no effect at all: no validation/refusal, no timer, one DEBUG line per connection |
+| Outcomes (`svc_ingest_connector_heartbeats_total{platform,outcome}`) | `sent`, `default_sent`, `guest_error` (connection stays up), `send_failed` (fatal parks, else reconnect), `send_timeout` (reconnect), trap/`unavailable` kinds (teardown + backoff) |
 | Latency | `svc_ingest_connector_heartbeat_duration_seconds{platform}`; span `connector.on_heartbeat_due` |
 
-Shutdown cancels an in-flight heartbeat promptly. Tests: `core/svc_ingest/tests/connector_heartbeat.rs`
+Shutdown cancels an in-flight heartbeat (and an in-flight frame, reported to the transport as dropped) promptly;
+the heartbeat future is dropped before `on-disconnect` runs. Tests: `core/svc_ingest/tests/connector_heartbeat.rs`
 (paused-clock + real-time).
 
 ## Not in B0 (explicit, typed, not silent)
