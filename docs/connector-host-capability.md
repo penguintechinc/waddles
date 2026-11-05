@@ -153,8 +153,8 @@ through `tool.invoke`, never a platform-specific host path.
 - **`tool` import.** Linked via the shared `HasExecState` host impl; authority stays with the stage (grants, kind
   matrix, depth). With no stage bridge it answers a typed `target-unavailable`.
 - **Gating / flag.** The executor only exposes the mechanism; nothing in production pins a `connector-tools`
-  component yet (the first one is a P6b overlay). The pin/routing site gates on PostHog flag
-  `waddles.connector-tools`, default OFF, when P6b wires it. Telemetry: `waddles_executor_connector_calls_total` /
+  component yet (the first one is a P6b overlay). The flag `waddles.connector-tools` (default OFF) is ENFORCED by the
+  outbound executor (P6a T6d-1, `svc_ingest::connector::sender_exec`): flag OFF => `FlagOff`, nothing is built or sent. Telemetry: `waddles_executor_connector_calls_total` /
   `_call_seconds` with `export="tool-call"`; logs carry `app_id` only (never args or results).
 - **Tests.** `core/bundle_executor/tests/connector_tools.rs` (real compiled fixtures through the production
   engine/linker/wire path), `src/connector_wire.rs` and `src/manifest.rs` unit tests.
@@ -180,3 +180,14 @@ cd core/connector_e2e   && cargo test                                           
 ```
 
 Rebuilding the fixtures: see `core/bundle_executor/tests/fixtures/README.md`.
+
+## Outbound executor (`sender.build-request`, P6a Task 6d-1)
+
+The host executes a connector's `build-request` -> `http-request-tpl` in `core/svc_ingest/src/connector/sender_exec/`.
+Contract, slot table, verification rules, status and the T6d-2 plug-in points: `core/svc_ingest/README.md`
+"Generic outbound executor". Summary: the overlay returns slots only; the HOST verifies the template against a per-platform/kind
+policy (declared egress hosts, slot positions, header allowlist, no template-set `Authorization`), substitutes pinned-target slots
+from the signed origin stamp / per-community connection and credential slots per call (never cached; zeroizing), percent-encodes
+URL positions and JSON-escapes body positions, and sends ONLY through `GuardedClient`. `dm.send` and `role.*` host duties
+(DM channel open, `send_dm_in_community`, managed-role allowlist) are the T6d-2 `DutyHook`. The wire does not yet carry
+`build-request` (no `ExportKind::ConnectorBuildRequest` in `penguin-bundle-host` 0.4.0): see "T6d-1 status".

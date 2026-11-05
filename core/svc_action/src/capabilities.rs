@@ -3200,6 +3200,45 @@ mod tests {
         assert!(test_pin_keys().verify(&f("42", exp_ms + 1), &sig).is_err());
     }
 
+    /// regression: p6a-t6d1 -- a `tenant_id` present on the envelope is bound
+    /// by the MAC too (the drain refuses it being added, changed or stripped).
+    #[test]
+    fn sign_envelope_binds_tenant_id_when_present() {
+        let caps = caps(FakeRelayQueue::default());
+        let mut env = build_outbound_envelope(
+            RelayOp::ChatSend,
+            "twitch",
+            &EnvelopeFields {
+                channel: Some("#c"),
+                text: Some("hi"),
+                origin_channel: Some("#c"),
+                community_id: Some(3),
+                ..EnvelopeFields::default()
+            },
+        );
+        env["tenant_id"] = serde_json::Value::from(5);
+        caps.sign_envelope(&mut env).expect("signed");
+        let sig = env["pin_sig"].as_str().unwrap().to_string();
+        let exp_ms = env["exp_ms"].as_u64().unwrap();
+        let f = |tenant_id: i64| PinFields {
+            platform: "twitch",
+            op: "chat.send",
+            channel: "#c",
+            origin_channel: "#c",
+            message_id: "",
+            text: "hi",
+            user_id: "",
+            op_id: "",
+            exp_ms,
+            community_id: 3,
+            tenant_id,
+        };
+        assert_eq!(test_pin_keys().verify(&f(5), &sig), Ok(()));
+        for other in [0, 4, 6] {
+            assert!(test_pin_keys().verify(&f(other), &sig).is_err(), "{other}");
+        }
+    }
+
     /// regression: p987 -- with no signing key configured a chat relay is
     /// refused loudly and nothing is queued (never an unsigned entry).
     #[tokio::test]

@@ -130,8 +130,8 @@ password-only `default` user with `~*` and `+@write` (`k8s/helm/waddlebot/templa
 the list directly -- only through the `relay` host capability in `svc_action`
 (`core/svc_action/src/capabilities.rs`, `outbound_relay_queue_key`).
 
-Trust boundary enforced in code instead: `svc_action` signs `platform|op|channel|origin_channel|message_id|text|user_id|exp_ms`
-(HMAC-SHA256, domain label `waddles.outbound-pin.v1`, length-prefixed) for EVERY op (`chat.send`, `chat.delete`, `dm.send`)
+Trust boundary enforced in code instead: `svc_action` signs `platform|op|channel|origin_channel|message_id|text|user_id|op_id|exp_ms|community_id|tenant_id`
+(HMAC-SHA256, domain label `waddles.outbound-pin.v2`, length-prefixed; numeric ids, `0` = absent) for EVERY op (`chat.send`, `chat.delete`, `dm.send`)
 and puts `pin_sig` = `kid:hexmac` plus `exp_ms` on the envelope; the drain verifies in constant time **before** the pin
 check and refuses `no_pin_sig` / `bad_pin_sig` / `pin_key_unconfigured` (no usable keys => every op refused, ERROR at startup)
 and, after the MAC passes, `pin_expired` (exp in the past) / `pin_exp_invalid` (missing, or more than 5 min ahead).
@@ -145,6 +145,17 @@ Chat entries live 60s (`PIN_TTL_MS`); Discord entries use the ack timeout.
 - Symmetric, so a holder of the key (svc-action, svc-ingest) can still forge; Ed25519 (signer-only private key) is the follow-up.
   The Valkey ACL is defense in depth only. Replay inside the TTL to the SAME channel is possible (no seen-op_id set yet).
 - `core/svc_ingest/src/pin_sig.rs` and `core/svc_action/src/pin_sig.rs` are byte-identical (test `pin_sig_copies_do_not_drift`).
+
+### `community_id` / `tenant_id` are MAC-bound (pin_sig v2, P6a T6d-1)
+
+The numeric `community_id` (and `tenant_id` when present) the drain resolves the credential for is part of the MAC, so a queue
+writer replaying a validly signed entry can neither change it to another community, add one, nor strip it (each => `bad_pin_sig`).
+An entry signed under the v1 label (no community/tenant in the MAC) is authentic but unscoped: it is refused with its own
+counted reason `svc_ingest_outbound_pin_refused_total{reason="pin_sig_legacy"}` (`PinSigError::LegacyUnscoped` ->
+`PinError::LegacyStamp`), never accepted. **Rollout: svc_action first (signs v2), then svc_ingest (verifies v2).** Between the two
+deploys the old verifier rejects v2 entries as `bad_pin_sig`; after, any v1 entry still queued is `pin_sig_legacy`. In-flight
+entries are lost, not replayed (they are already popped; alpha is disposable and the producer's ack timeout reports it).
+Golden vectors: v2 in `pin_sig.rs::golden_vector_is_stable_across_services`, v1 in `a_v1_signature_is_classified_legacy_never_accepted`.
 
 ### Rollout order (required) and dropped entries
 
@@ -172,3 +183,84 @@ redirect/rebind tests live in `core/bundle_host_http/tests/guarded_real_path.rs`
 Follow-up: `poll.rs::pinned_client` should call `egress_guard::pinned_client` once PR #982 lands (kept out of this
 change to avoid conflicting with it); the Discord REST/outbound client (`outbound.rs`, PR #987 area) is not yet routed
 through the guard.
+
+## Generic outbound executor (P6a T6d-1, `src/connector/sender_exec/`)
+
+The host half of `sender.build-request`. A platform overlay (`bundles/rust/{twitch,discord,youtube}`, `world connector-tools`)
+returns an `http-request-tpl` made of SLOTS; this module verifies it, fills the slots from HOST state, and sends it through
+`bundle_host_http::guarded::GuardedClient` only.
+
+```
+queue entry --(drain: pin_sig HMAC + expiry, FIRST gate)--> ActionExecutor::execute_action --(pin re-check, enforce_pin)-->
+  FlagGate waddles.connector-tools (OFF => FlagOff, nothing runs) -> digest pin -> TemplateBuilder (pinned component)
+  -> verify::verify (typed TemplateError) -> SlotSource (per community, per call, uncached) -> subst::render
+  -> GuardedClient (SSRF guard, per-hop revalidation, 64 KiB / 10 s bounds, redirects NOT followed) -> 2xx | typed ExecError
+```
+
+| Module | Role |
+|---|---|
+| `policy.rs` | per-platform/kind contract: hosts, slots + allowed positions, header allowlist, path/query shape, body bound |
+| `verify.rs` | `verify()` -> `VerifiedTemplate` (the only type `subst` accepts) |
+| `subst.rs` | percent-encode URL positions, JSON-escape body (rebuilt via `serde_json`), header-safe ASCII; zeroizing `SlotValue` |
+| `mod.rs` | `SenderExecutor`, `FlagGate`/`LicenseFlagGate`, `TemplateBuilder`, `SlotSource`, `DutyHook`, `ExecError`, metrics |
+| `twitch_slots.rs` | `TwitchSlots`: `SlotSource` over `outbound_creds::TwitchCredentialSource` + one guarded `GET /helix/users` for numeric ids |
+
+**Supported kinds:** `chat.send`, `chat.delete` (Twitch, Discord), `chat.send` (YouTube). `dm.send` is declared but returns
+`ExecError::HostDutyMissing` (`SenderError::Unsupported`) until a `DutyHook` claims it (T6d-2); `role.*` -> `UnsupportedKind`.
+
+**Slot table** (token = exact text between the braces; handle = the overlay's `secret-refs` handle):
+
+| Platform | Slot | Handle | Source | Positions | Shape |
+|---|---|---|---|---|---|
+| twitch | `TWITCH_TOKEN` | `token` | resolver (per-community OAuth) | `Authorization: Bearer <slot>` | secret |
+| twitch | `TWITCH_CLIENT_ID` | `client_id` | resolver (app client id) | `Client-Id` | id |
+| twitch | `TWITCH_BROADCASTER_ID` | `broadcaster_id` | resolver (Helix id of the stamp-pinned channel) | body `/broadcaster_id`, query `broadcaster_id` | id |
+| twitch | `TWITCH_SENDER_ID` | `sender_id` | resolver (Helix id of the connection's bot login) | body `/sender_id`, query `moderator_id` | id |
+| discord | `{target.channel_id}` | - | the signed origin stamp (`origin_channel`) | one path segment | id |
+| discord | `Authorization` (header-credential convention) | `discord-bot` | resolver; host composes `Bot <token>` | header | secret |
+| youtube | `YT_OAUTH_TOKEN` | `youtube.oauth` | resolver | `Authorization: Bearer <slot>` | secret |
+| youtube | `YT_LIVE_CHAT_ID` | `youtube.live_chat_id` | resolver | body `/snippet/liveChatId` | id |
+| youtube | `YT_CHANNEL_ID`, `YT_VIDEO_ID` | `youtube.channel_id`, `youtube.video_id` | resolver | declared for the read path; refused in every outbound kind | id |
+
+Shapes: `id` = `[A-Za-z0-9_-]{1,128}`, `secret` = visible ASCII 1..4096 bytes. Fixed endpoints: Twitch `POST /helix/chat/messages`,
+`DELETE /helix/moderation/chat?broadcaster_id&moderator_id&message_id`; Discord `POST /api/v10/channels/{c}/messages`,
+`DELETE /api/v10/channels/{c}/messages/<id>`; YouTube `POST /youtube/v3/liveChat/messages?part=...`. Hosts: `api.twitch.tv`,
+`discord.com`, `www.googleapis.com` (narrow-only via `PlatformPolicy::with_manifest_hosts`).
+
+**What `verify` refuses** (all typed, content-free `TemplateError`s): method/path/query differing from the kind; a slot not declared,
+not allowed for the kind, or in a position its declaration forbids; any `{{`/`}}`/brace outside a declared slot; control, zero-width,
+bidi, tag characters; userinfo, fragment, non-`https`, a host not in the declared list (port included); a header outside the allowlist or
+in the forbidden set (`Host`, `Cookie`, `Proxy-*`, `X-Forwarded-*`, `X-Waddle-Host-*`, ...); `Authorization` set by the template other
+than `<allowed prefix><credential slot>`; `secret-refs` unknown / wrong handle / duplicate / missing; a body where none is allowed, over
+the bound, not a JSON object, deeper than 8 or wider than 512 nodes, or without `Content-Type: application/json`.
+
+**Never logged / never in an error / never a metric label:** URL, header value, slot text, credential, message text, ids. Errors carry
+a stable code only (`ExecError::code`). Metrics (bounded labels): `svc_ingest_sender_exec_total{platform,kind,outcome}`,
+`svc_ingest_sender_exec_seconds{platform,kind}`; unknown platform/kind collapse to `other`.
+
+**Config:** flag `waddles.connector-tools` (default OFF, enforced, fail-closed); `SENDER_EXEC_DIGEST_<PLATFORM>` = `sha256:<64 hex>` of the
+pinned connector component (a template built by any other digest is `DigestMismatch`; no pin is `NotPinned`).
+
+### T6d-1 status (read before enabling)
+
+* **Template source.** `build-request` is called through the `TemplateBuilder` seam. The production wire (`penguin-bundle-host` 0.4.0
+  `ExportKind`) has NO `ConnectorBuildRequest` export, so no production `TemplateBuilder` exists yet and boot (`lib.rs`) still starts
+  the legacy drains. Needed: `penguin-libs` `ExportKind::ConnectorBuildRequest` (breaking minor), `ConnectorHost::build_request` +
+  `connector_wire` dispatch in `core/bundle_executor`, and a `WireTemplateBuilder` here. The drains are already executor-ready:
+  `outbound::run_exec` / `run_discord_exec` (readiness key, acks, stamp gate unchanged).
+* **Legacy egress still present** (removed once the above lands): `outbound.rs` `RealIrcOutbound` (IRC), `discord_rest.rs` (Discord REST).
+  `connector/poll.rs` is the INBOUND poll path (its own pinned client) and is unchanged.
+* **Slot sources.** Only Twitch has one (`TwitchSlots`); it needs the connection record to expose a usable bot login (it does) and uses a
+  per-send Helix lookup for numeric ids. Discord's per-community bot credential and YouTube's OAuth/live-chat-id sources are not
+  implemented (the credential model for them is the per-tenant bot credentials spec); until then those platforms stay on the legacy path.
+
+### Plugging in T6d-2 (Discord DM / managed roles)
+
+Implement `DutyHook` and extend `PlatformPolicy::discord()`: (1) `claims("discord", "dm.send")`; (2) `gate` = `send_dm_in_community`
+(recipient must be in the guild of the triggering channel) -> `ExecError::Slot(SlotError::Refused("not_in_community"))`; (3) `payload`
+= the overlay payload with the `{user:<uuid>}` recipient (community-scoped tokenization); (4) `dynamic_slot("dm.channel_id")` = the `id`
+of the reply to the host's own `POST /users/@me/channels` (use the `GuardedClient` passed in); (5) add the `dm.channel_id`
+`SlotOrigin::Duty` slot, the real `dm.send` path (`/api/v10/channels/{dm.channel_id}/messages`) and the pseudo-header
+`X-Waddle-Host-Dm-Recipient` handling (it is currently refused as forbidden); (6) managed roles: add `role.add`/`role.remove` kinds with
+a per-binding managed-role allowlist that refuses roles carrying `ADMINISTRATOR`/`MANAGE_ROLES`/`MANAGE_GUILD`. A registered hook with a test
+policy is exercised by `sender_exec::tests::a_registered_duty_hook_gates_shapes_the_payload_and_fills_its_slot`.

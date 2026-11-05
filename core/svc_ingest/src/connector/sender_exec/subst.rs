@@ -255,3 +255,60 @@ pub fn render(
         body,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn secrets_and_requests_never_debug_print_their_content() {
+        let v = SlotValue::new("tok-123".to_string());
+        assert_eq!(format!("{v:?}"), "SlotValue([REDACTED])");
+        let p = PreparedRequest {
+            method: "POST".into(),
+            url: "https://h/secret-path".into(),
+            headers: vec![("authorization".into(), v)],
+            body: Some(b"private text".to_vec()),
+        };
+        let shown = format!("{p:?}");
+        assert!(shown.contains("POST") && shown.contains("authorization"));
+        for needle in ["tok-123", "secret-path", "private text"] {
+            assert!(!shown.contains(needle), "{needle}");
+        }
+    }
+
+    #[test]
+    fn errors_have_distinct_codes_and_messages() {
+        let all = [
+            SubstError::MissingValue,
+            SubstError::ShapeInvalid,
+            SubstError::UrlInvalid,
+            SubstError::BodyTooLarge,
+            SubstError::BodyPosition,
+        ];
+        let codes: std::collections::BTreeSet<_> = all.iter().map(|e| e.code()).collect();
+        assert_eq!(codes.len(), all.len());
+        assert!(all.iter().all(|e| !e.to_string().is_empty()));
+    }
+
+    #[test]
+    fn pct_encode_keeps_only_unreserved() {
+        assert_eq!(pct_encode("aZ09-._~"), "aZ09-._~");
+        assert_eq!(pct_encode("a b/c?d&e=f#g%"), "a%20b%2Fc%3Fd%26e%3Df%23g%25");
+        assert_eq!(pct_encode("\u{e9}"), "%C3%A9");
+    }
+
+    #[test]
+    fn a_used_slot_without_a_value_is_a_typed_error() {
+        use crate::connector::sender_exec::policy::PlatformPolicy;
+        use crate::connector::sender_exec::verify::{tests::twitch_send, verify};
+        let policy = PlatformPolicy::twitch();
+        let v = verify(&policy, policy.kind("chat.send").unwrap(), &twitch_send()).unwrap();
+        let empty = BTreeMap::new();
+        assert_eq!(
+            render(&policy, &v, &empty, &BTreeMap::new()).err(),
+            Some(SubstError::MissingValue)
+        );
+    }
+}
