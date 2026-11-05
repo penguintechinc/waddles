@@ -68,6 +68,7 @@ pub use sink::{
     SpineEventSink,
 };
 pub use transport::{FrameDropReason, FrameOutcome, Transport, TransportError};
+pub use transport_common::FrameRuleMetrics;
 pub use types::{ConnectionCtx, ConnectorEvent, ConnectorFrameError, Handshake, RawFrame};
 pub use wire_invoker::{AttachError, ExecutorLink, WireConnectorInvoker};
-pub use ws::{WsConfig, WsTransport};
+pub use ws::{AutoReplyRule, FrameRuleError, SelfEchoFilter, WsConfig, WsTransport};

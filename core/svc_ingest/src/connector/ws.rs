@@ -32,7 +32,10 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use super::egress_guard::resolve_pinned;
 use super::secrets::{Destination, TransportSecretSource};
 use super::transport::{Transport, TransportError};
-use super::transport_common::{opaque_id, substitute_slots, validate_endpoint};
+use super::transport_common::{
+    opaque_id, substitute_slots, validate_endpoint, Applied, FrameRuleMetrics, FrameRules,
+};
+pub use super::transport_common::{AutoReplyRule, FrameRuleError, SelfEchoFilter};
 use super::types::{ConnectionCtx, Handshake};
 
 /// Largest accepted `dedup_window`.
@@ -81,6 +84,16 @@ pub struct WsConfig {
     /// connector-authored handshake (e.g. `PASS oauth:`). Empty = the handshake
     /// may not carry any secret slot (fail closed); never derived from guest data.
     pub slot_prefixes: Vec<String>,
+    /// Host-owned, declarative auto-reply rules (e.g. a keepalive
+    /// `PING :<t>` -> `PONG :<t>`), answered by the transport itself because
+    /// the connector's `on-frame` can only return events. Empty = none (the
+    /// default stance); an invalid rule set is refused at construction.
+    pub auto_replies: Vec<AutoReplyRule>,
+    /// Host-side drop of the connection's own echoed lines; `None` = off.
+    pub self_echo: Option<SelfEchoFilter>,
+    /// How often the driver asks the connector for a heartbeat body
+    /// (`None` = this source has no heartbeat). The driver range-checks it.
+    pub heartbeat_interval: Option<Duration>,
 }
 
 /// WebSocket transport over tokio-tungstenite.
@@ -95,6 +108,11 @@ pub struct WsTransport<S: TransportSecretSource> {
     connection_id: String,
     seen: HashSet<[u8; 32]>,
     order: VecDeque<[u8; 32]>,
+    rules: FrameRules,
+    /// Host-built replies not yet written; popped only after a completed
+    /// send, so a cancelled `next_frame` re-sends instead of losing one.
+    pending: VecDeque<Vec<u8>>,
+    metrics: Option<FrameRuleMetrics>,
 }
 
 impl<S: TransportSecretSource> WsTransport<S> {
@@ -111,6 +129,8 @@ impl<S: TransportSecretSource> WsTransport<S> {
         {
             return Err(TransportError::Connect("invalid ws limits".into()));
         }
+        let rules = FrameRules::new(cfg.auto_replies.clone(), cfg.self_echo.clone())
+            .map_err(|e| TransportError::Connect(e.to_string()))?;
         let now = Instant::now();
         Ok(Self {
             source_id: opaque_id("ws", &cfg.source_key),
@@ -123,7 +143,57 @@ impl<S: TransportSecretSource> WsTransport<S> {
             last_data: now,
             seen: HashSet::new(),
             order: VecDeque::new(),
+            rules,
+            pending: VecDeque::new(),
+            metrics: None,
         })
+    }
+
+    /// Attaches the frame-rule counters (the integrator registers them once
+    /// per registry via [`FrameRuleMetrics::register`]).
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: FrameRuleMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    fn count(&self, rule: &str, outcome: &str, n: u64) {
+        if n > 0 {
+            if let Some(m) = &self.metrics {
+                m.add(&self.cfg.platform, rule, outcome, n);
+            }
+        }
+    }
+
+    /// Writes one frame (text when UTF-8, else binary) bounded by the
+    /// connect timeout.
+    async fn write_frame(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| TransportError::Send("not connected".into()))?;
+        let msg = match std::str::from_utf8(bytes) {
+            Ok(t) => Message::text(t),
+            Err(_) => Message::binary(bytes.to_vec()),
+        };
+        tokio::time::timeout(self.cfg.connect_timeout, stream.send(msg))
+            .await
+            .map_err(|_| TransportError::Send("send timed out".into()))?
+            .map_err(|e| TransportError::Send(e.to_string()))
+    }
+
+    /// Flushes queued auto-replies, oldest first. Cancel-safe: an entry
+    /// leaves the queue only after its send completed.
+    async fn flush_pending(&mut self) -> Result<(), TransportError> {
+        while let Some(front) = self.pending.front().cloned() {
+            if let Err(e) = self.write_frame(&front).await {
+                self.count("auto_reply", "reply_failed", 1);
+                return Err(TransportError::Read(format!("auto-reply {e}")));
+            }
+            self.pending.pop_front();
+            self.count("auto_reply", "replied", 1);
+        }
+        Ok(())
     }
 
     /// True when `frame` was seen within the dedup window; records it.
@@ -200,6 +270,8 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
 
     async fn connect(&mut self) -> Result<ConnectionCtx, TransportError> {
         self.stream = None;
+        // A reply owed to the previous connection must never reach this one.
+        self.pending.clear();
         let wsc = WebSocketConfig::default()
             .max_message_size(Some(self.cfg.max_frame_bytes))
             .max_frame_size(Some(self.cfg.max_frame_bytes));
@@ -249,6 +321,7 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
 
     async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
         loop {
+            self.flush_pending().await?;
             let idle_at = self.last_data + self.cfg.idle_timeout;
             let life_at = self.connected_at + self.cfg.max_lifetime;
             let stream = self
@@ -269,11 +342,45 @@ impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
                 Some(Ok(_)) => continue,
             };
             self.last_data = Instant::now();
+            let bytes = match self.rules.apply(&bytes) {
+                Ok(Applied {
+                    forward,
+                    replies,
+                    echo_dropped,
+                }) => {
+                    self.count("self_echo", "dropped", echo_dropped as u64);
+                    self.pending.extend(replies);
+                    match forward {
+                        Some(b) => b,
+                        None => continue,
+                    }
+                }
+                Err(e) => {
+                    self.count("auto_reply", "rejected", 1);
+                    return Err(TransportError::Read(e.to_string()));
+                }
+            };
             if self.is_replay(&bytes) {
                 continue;
             }
             return Ok(Some(bytes));
         }
+    }
+
+    fn heartbeat_interval(&self) -> Option<Duration> {
+        self.cfg.heartbeat_interval
+    }
+
+    async fn send_heartbeat(&mut self, bytes: Vec<u8>) -> Result<(), TransportError> {
+        if self.cfg.heartbeat_interval.is_none() {
+            return Err(TransportError::Send(
+                "heartbeat sent but no heartbeat_interval configured".into(),
+            ));
+        }
+        if bytes.is_empty() || bytes.len() > self.cfg.max_frame_bytes {
+            return Err(TransportError::Send("heartbeat body size invalid".into()));
+        }
+        self.write_frame(&bytes).await
     }
 
     async fn close(&mut self, _reason: &str) {
@@ -334,6 +441,9 @@ mod tests {
             dedup_window: 0,
             allow_loopback_insecure: true,
             slot_prefixes: vec![r#""token":""#.into()],
+            auto_replies: vec![],
+            self_echo: None,
+            heartbeat_interval: None,
         }
     }
 
@@ -570,5 +680,207 @@ mod tests {
         let start = Instant::now();
         assert!(matches!(t.next_frame().await, Err(TE::Read(_))));
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    fn irc_cfg(addr: std::net::SocketAddr) -> WsConfig {
+        let mut c = cfg(addr);
+        c.auto_replies = vec![AutoReplyRule {
+            prefix: "PING :".into(),
+            reply_prefix: "PONG :".into(),
+            reply_suffix: "\r\n".into(),
+            max_token_len: 64,
+            forward_to_guest: false,
+        }];
+        c.self_echo = Some(SelfEchoFilter {
+            self_id: "WaddleBot".into(),
+            sender_open: ":".into(),
+            sender_close: "!".into(),
+            command: "PRIVMSG".into(),
+        });
+        c
+    }
+
+    /// Server: sends `frames`, then reports every client message it gets
+    /// until the client closes (or 300ms of silence).
+    async fn serve_collect(
+        l: TcpListener,
+        frames: Vec<&'static str>,
+        got: tokio::sync::mpsc::UnboundedSender<String>,
+    ) {
+        let (tcp, _) = l.accept().await.unwrap();
+        let mut ws = accept_async(tcp).await.unwrap();
+        for f in frames {
+            ws.send(Message::text(f)).await.unwrap();
+        }
+        while let Ok(Some(Ok(m))) =
+            tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+        {
+            if let Message::Text(t) = m {
+                got.send(t.to_string()).unwrap();
+            }
+        }
+    }
+
+    fn secrets() -> CountingSecrets {
+        CountingSecrets(Arc::new(AtomicUsize::new(0)))
+    }
+
+    fn counter(reg: &prometheus::Registry, outcome: &str) -> u64 {
+        reg.gather()
+            .iter()
+            .flat_map(|f| f.get_metric().iter())
+            .filter(|m| m.get_label().iter().any(|l| l.value() == outcome))
+            .map(|m| m.get_counter().value() as u64)
+            .sum()
+    }
+
+    /// Real-path: the server PINGs, the transport answers PONG with the
+    /// echoed token, and the connector-facing stream never sees the PING.
+    #[tokio::test]
+    async fn server_ping_is_ponged_and_hidden_from_the_overlay() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve_collect(
+            l,
+            vec!["PING :tmi.twitch.tv\r\n", "real-frame"],
+            tx,
+        ));
+        let reg = prometheus::Registry::new();
+        let m = FrameRuleMetrics::register(&reg).unwrap();
+        let mut t = WsTransport::new(irc_cfg(addr), secrets())
+            .unwrap()
+            .with_metrics(m);
+        t.connect().await.unwrap();
+        assert_eq!(t.next_frame().await.unwrap().unwrap(), b"real-frame");
+        // the reply is flushed at the top of the next read
+        let _ = tokio::time::timeout(Duration::from_millis(100), t.next_frame()).await;
+        assert_eq!(rx.recv().await.unwrap(), "PONG :tmi.twitch.tv\r\n");
+        assert_eq!(counter(&reg, "replied"), 1);
+    }
+
+    #[tokio::test]
+    async fn forward_to_guest_config_lets_the_overlay_see_the_ping() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve_collect(l, vec!["PING :abc\r\n"], tx));
+        let mut c = irc_cfg(addr);
+        c.auto_replies[0].forward_to_guest = true;
+        let mut t = WsTransport::new(c, secrets()).unwrap();
+        t.connect().await.unwrap();
+        assert_eq!(t.next_frame().await.unwrap().unwrap(), b"PING :abc\r\n");
+        let _ = tokio::time::timeout(Duration::from_millis(100), t.next_frame()).await;
+        assert_eq!(rx.recv().await.unwrap(), "PONG :abc\r\n");
+    }
+
+    /// regression: p6b-crlf -- a hostile token is a loud read error and
+    /// NOTHING is written back upstream.
+    #[tokio::test]
+    async fn hostile_ping_token_is_a_read_error_and_never_reflected() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve_collect(l, vec!["PING :a\rJOIN #evil\r\n"], tx));
+        let reg = prometheus::Registry::new();
+        let m = FrameRuleMetrics::register(&reg).unwrap();
+        let mut t = WsTransport::new(irc_cfg(addr), secrets())
+            .unwrap()
+            .with_metrics(m);
+        t.connect().await.unwrap();
+        assert!(matches!(t.next_frame().await, Err(TE::Read(_))));
+        t.close("x").await;
+        assert!(rx.recv().await.is_none(), "no frame was written back");
+        assert_eq!(counter(&reg, "rejected"), 1);
+    }
+
+    #[tokio::test]
+    async fn own_echo_is_dropped_and_other_users_pass() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve_collect(
+            l,
+            vec![
+                ":waddlebot!waddlebot@waddlebot.tmi.twitch.tv PRIVMSG #c :me\r\n",
+                ":alice!alice@alice.tmi.twitch.tv PRIVMSG #c :hello\r\n",
+            ],
+            tx,
+        ));
+        let reg = prometheus::Registry::new();
+        let m = FrameRuleMetrics::register(&reg).unwrap();
+        let mut t = WsTransport::new(irc_cfg(addr), secrets())
+            .unwrap()
+            .with_metrics(m);
+        t.connect().await.unwrap();
+        assert_eq!(
+            t.next_frame().await.unwrap().unwrap(),
+            b":alice!alice@alice.tmi.twitch.tv PRIVMSG #c :hello\r\n"
+        );
+        assert_eq!(counter(&reg, "dropped"), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_reply_is_dropped_on_reconnect_and_failed_flush_is_loud() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve_collect(l, vec![], tx));
+        let reg = prometheus::Registry::new();
+        let m = FrameRuleMetrics::register(&reg).unwrap();
+        let mut t = WsTransport::new(irc_cfg(addr), secrets())
+            .unwrap()
+            .with_metrics(m);
+        t.pending.push_back(b"PONG :stale\r\n".to_vec());
+        t.connect().await.unwrap();
+        assert!(
+            t.pending.is_empty(),
+            "stale reply must not cross connections"
+        );
+        t.close("x").await;
+        t.pending.push_back(b"PONG :x\r\n".to_vec());
+        assert!(matches!(t.next_frame().await, Err(TE::Read(_))));
+        assert_eq!(counter(&reg, "reply_failed"), 1);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_is_sent_when_configured_and_loud_otherwise() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve_collect(l, vec![], tx));
+        let mut c = cfg(addr);
+        assert_eq!(
+            WsTransport::new(c.clone(), secrets())
+                .unwrap()
+                .heartbeat_interval(),
+            None
+        );
+        c.heartbeat_interval = Some(Duration::from_secs(30));
+        let mut t = WsTransport::new(c, secrets()).unwrap();
+        assert_eq!(t.heartbeat_interval(), Some(Duration::from_secs(30)));
+        t.connect().await.unwrap();
+        t.send_heartbeat(b"PING :keepalive\r\n".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(rx.recv().await.unwrap(), "PING :keepalive\r\n");
+        assert!(t.send_heartbeat(vec![]).await.is_err());
+        assert!(t.send_heartbeat(vec![b'x'; 2048]).await.is_err());
+        // the platform-default heartbeat stays fail-loud (never a silent no-op)
+        assert!(t.send_default_heartbeat().await.is_err());
+        // no interval configured -> a heartbeat write is refused
+        let mut off = WsTransport::new(cfg(addr), secrets()).unwrap();
+        assert!(off.send_heartbeat(b"x".to_vec()).await.is_err());
+    }
+
+    #[test]
+    fn invalid_frame_rules_refuse_construction() {
+        let a: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let mut c = irc_cfg(a);
+        c.auto_replies[0].reply_suffix = "\r\nJOIN #x".into();
+        assert!(matches!(
+            WsTransport::new(c, secrets()),
+            Err(TE::Connect(_))
+        ));
     }
 }
