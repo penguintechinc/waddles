@@ -56,7 +56,7 @@ class TestTenantApp:
         yt_db.dal.commit()
         response = await self._put(yt_client, self._tenant_admin(yt_db), OWN_APP)
         assert response.status_code == 200
-        assert await response.get_json() == {"success": True}
+        assert await response.get_json() == {"success": True, "invalidatedConnections": 0}
         row = self._row(yt_db)
         assert row is not None and APP_CLIENT_SECRET not in row.credentials_ciphertext
 

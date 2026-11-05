@@ -488,6 +488,20 @@ admin ──POST …/<conn>/discover (or PATCH metadata.live_chat_id)──▶ b
   `client_id` (`409 YOUTUBE_APP_CONFLICT`; the secret of the same app may rotate), a tenant never falls
   back to the global app and the global tenant cannot store one. Without an app:
   `422 YOUTUBE_APP_NOT_CONFIGURED`.
+  **Replacing** an app with a different `client_id` needs the explicit `"replace": true` (otherwise
+  `409`); a tenant admin doing so expires every YouTube connection minted under the old app
+  (`status=expired`, `status_reason=app_replaced`, sealed refresh token dropped, rows kept so each admin
+  reconnects) BEFORE the new app is stored, logs `audit youtube_app_replaced tenant_id= actor_id=
+  invalidated=` (no secrets), and the HTTP audit chain records the write like any scope-gated mutation;
+  the response carries `invalidatedConnections`. The community flow can never replace or overwrite.
+  **Audit query** (the adapter is new, so this should return zero rows; run it after any deploy to flag an
+  app written by someone who is not a tenant admin -- the tenant-admin check is `tenant_admins`):
+  ```sql
+  SELECT a.tenant_id, a.installed_by_user_id, a.updated_at
+    FROM tenant_platform_apps a
+    LEFT JOIN tenant_admins t ON t.tenant_id = a.tenant_id AND t.user_id = a.installed_by_user_id
+   WHERE a.platform = 'youtube' AND t.user_id IS NULL;
+  ```
 - **OAuth security**: authorization code + PKCE (`S256`) with `access_type=offline&prompt=consent`;
   single-use CSRF `state` (Redis `GETDEL`, 10 min TTL) carrying tenant/community/admin -- the public
   callback reads nothing tenant-shaped from the query; the verifier rides in the state AES-GCM-sealed

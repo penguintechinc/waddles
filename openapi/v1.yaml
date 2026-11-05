@@ -23089,6 +23089,10 @@ paths:
                 client_secret:
                   title: Client Secret
                   type: string
+                replace:
+                  default: false
+                  title: Replace
+                  type: boolean
               required:
               - client_id
               - client_secret
@@ -23101,11 +23105,15 @@ paths:
               schema:
                 description: 'Response of the app write: no field can carry the secret.'
                 properties:
+                  invalidatedConnections:
+                    title: Invalidatedconnections
+                    type: integer
                   success:
                     title: Success
                     type: boolean
                 required:
                 - success
+                - invalidatedConnections
                 title: YoutubeAppResponse
                 type: object
           description: 'Response of the app write: no field can carry the secret.'

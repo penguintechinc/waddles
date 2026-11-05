@@ -89,6 +89,9 @@ class YoutubeAppRequest:
 
     client_id: str
     client_secret: str = field(repr=False)
+    #: Explicit confirmation to REPLACE an existing app with a different ``client_id`` (which
+    #: expires every connection minted under the old one). Without it such a write is a 409.
+    replace: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -96,6 +99,7 @@ class YoutubeAppResponse:
     """Response of the app write: no field can carry the secret."""
 
     success: bool
+    invalidatedConnections: int  # noqa: N815 - camelCase is the wire shape of every DTO
 
 
 def _client_field(value: str, name: str) -> str:
@@ -131,18 +135,21 @@ async def put_youtube_app(data: YoutubeAppRequest) -> YoutubeAppResponse:
     client_id = _client_field(data.client_id, "client_id")
     client_secret = _client_field(data.client_secret, "client_secret")
     try:
-        await install.store_tenant_app(
+        invalidated = await install.store_tenant_app(
             current_app.config["dal"],
+            _service(),
             tenant_id=ctx.tenant_id,
             is_default_tenant=ctx.is_default,
             user_id=actor,
             client_id=client_id,
             client_secret=client_secret,
+            replace=data.replace,
         )
     except install.YoutubeInstallError as exc:
         if exc.code == install.ERR_APP_CONFLICT:
             raise ApiError(
-                "This tenant already has a YouTube OAuth application with a different client_id.",
+                "This tenant already has a YouTube OAuth application with a different client_id; "
+                "send replace=true to replace it (expires its connections).",
                 409,
                 "YOUTUBE_APP_CONFLICT",
             ) from exc
@@ -152,7 +159,7 @@ async def put_youtube_app(data: YoutubeAppRequest) -> YoutubeAppResponse:
             "YOUTUBE_APP_NOT_CONFIGURED",
         ) from exc
     logger.info("youtube_connections.app_stored tenant_id=%d", ctx.tenant_id)
-    return YoutubeAppResponse(success=True)
+    return YoutubeAppResponse(success=True, invalidatedConnections=invalidated)
 
 
 @youtube_connections_bp.route(_BASE + "/youtube/authorize", methods=["POST"])

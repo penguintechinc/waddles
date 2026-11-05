@@ -327,6 +327,7 @@ NOT_USABLE_REASONS: Final = frozenset(
         "token_expired",
         "refresh_rejected",
         "refresh_not_configured",
+        "app_replaced",
     }
 )
 

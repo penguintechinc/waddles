@@ -238,19 +238,24 @@ async def begin_install(
 
 async def store_tenant_app(
     dal: Any,
+    service: ProviderConnectionService,
     *,
     tenant_id: int,
     is_default_tenant: bool,
     user_id: int,
     client_id: str,
     client_secret: str,
-) -> None:
+    replace: bool,
+) -> int:
     """Persist a tenant's own Google OAuth application (tenant-admin only; sealed at rest).
 
-    The global tenant cannot (it uses the platform app). An existing application with a DIFFERENT
-    ``client_id`` is never replaced -- every connection already minted under it could no longer
-    refresh -- so only the secret of the same application can be rotated. Raises
-    :class:`YoutubeInstallError` ``app_not_configured`` (global tenant) or ``app_conflict``.
+    Returns how many connections were invalidated (0 unless an app was replaced). The global tenant
+    cannot store one. With no app yet, or the SAME ``client_id`` (secret rotation), it is a plain
+    write. A DIFFERENT ``client_id`` is refused (``app_conflict``) unless ``replace`` is the admin's
+    explicit confirmation; then every connection minted under the old application is expired with
+    its refresh token dropped (``app_replaced``) BEFORE the new one is stored, so nothing keeps
+    working under an application that was just revoked, and a PII/secret-free audit line (tenant,
+    actor, count) is logged. Raises :class:`YoutubeInstallError`.
     """
     if is_default_tenant:
         raise YoutubeInstallError(ERR_APP)
@@ -258,8 +263,19 @@ async def store_tenant_app(
         existing_id, _ = await resolve_app_credentials(dal, tenant_id=tenant_id)
     except AppCredentialsUnavailable:
         existing_id = None
+    invalidated = 0
     if existing_id is not None and existing_id != client_id:
-        raise YoutubeInstallError(ERR_APP_CONFLICT)
+        if not replace:
+            raise YoutubeInstallError(ERR_APP_CONFLICT)
+        invalidated = await service.invalidate_app_connections(
+            tenant_id=tenant_id, provider=PROVIDER_ID, client_id=existing_id
+        )
+        logger.warning(
+            "audit youtube_app_replaced tenant_id=%d actor_id=%d invalidated=%d",
+            tenant_id,
+            user_id,
+            invalidated,
+        )
     store_tenant_credentials(
         dal,
         tenant_id=tenant_id,
@@ -268,6 +284,7 @@ async def store_tenant_app(
         payload={"client_id": client_id, "client_secret": client_secret},
         installed_by_user_id=user_id,
     )
+    return invalidated
 
 
 async def consume_state(state: str, nonce: str | None) -> InstallState | None:

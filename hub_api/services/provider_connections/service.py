@@ -584,6 +584,31 @@ class ProviderConnectionService:
             )
             return self._view(updated)
 
+    async def invalidate_app_connections(
+        self, *, tenant_id: int, provider: str, client_id: str
+    ) -> int:
+        """Expire every connection of this tenant minted under OAuth app ``client_id``.
+
+        Called when a tenant admin REPLACES the tenant's OAuth application: reason ``app_replaced``,
+        refresh tokens dropped, rows kept so each admin can reconnect. Returns the count.
+        """
+        spec = self._registry.get(provider).spec
+        count = await store.invalidate_for_app(
+            self._db,
+            tenant_id=tenant_id,
+            platform=spec.platform,
+            client_id=client_id,
+            reason="app_replaced",
+            now=self._clock(),
+        )
+        logger.info(
+            "provider_connections.app_connections_invalidated provider=%s tenant_id=%d count=%d",
+            provider,
+            tenant_id,
+            count,
+        )
+        return count
+
     # -- admin: delete ---------------------------------------------------------------------
 
     async def delete(self, *, tenant_id: int, community_id: int, connection_id: int) -> bool:
