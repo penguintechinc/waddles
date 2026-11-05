@@ -1,0 +1,35 @@
+{
+  "context": {
+    "message_type": "notification"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "222",
+        "raw_handle": "cheerer",
+        "uuid": "858f0990-f75e-5482-ab55-99ec584c85a8"
+      },
+      "event_type": "channel.cheer",
+      "payload": {
+        "broadcaster_id": "111",
+        "broadcaster_login": "somechannel",
+        "metadata": {
+          "bits": 500,
+          "is_anonymous": false
+        },
+        "user_display_name": "Cheerer",
+        "user_id": "222",
+        "user_login": "cheerer"
+      },
+      "platform": "twitch"
+    }
+  ],
+  "id": "twitch/eventsub_cheer",
+  "input": {
+    "encoding": "json",
+    "text": "{\"event\":{\"bits\":500,\"broadcaster_user_id\":\"111\",\"broadcaster_user_login\":\"somechannel\",\"is_anonymous\":false,\"user_id\":\"222\",\"user_login\":\"cheerer\",\"user_name\":\"Cheerer\"},\"subscription\":{\"condition\":{\"broadcaster_user_id\":\"111\"},\"id\":\"sub-1\",\"type\":\"channel.cheer\",\"version\":\"1\"}}"
+  },
+  "outcome": "event",
+  "path": "twitch_eventsub",
+  "platform": "twitch"
+}

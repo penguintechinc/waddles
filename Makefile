@@ -9,7 +9,7 @@
         test-seaweedfs-sse-kms test-helm-pending-recover \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
-        test-data-plane-parity check-builtin-handler-inventory
+        test-data-plane-parity test-connector-parity gen-connector-parity-expected check-builtin-handler-inventory
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -121,6 +121,16 @@ check-builtin-handler-inventory:
 # (scripts/ci/install-unit-test-deps.sh) + the pinned Rust toolchain; see tests/data_plane_parity/README.md.
 test-data-plane-parity:
 	@bash scripts/ci/data-plane-parity.sh
+
+# Connector-overlay golden-payload parity (P6b):
+#   PARITY_OVERLAY_WASM=<built .wasm> make test-connector-parity PLATFORM=<twitch|discord|youtube>
+# (no PARITY_OVERLAY_WASM => fixture harness self-check; a set-but-missing path fails). docs/connector-parity-harness.md
+test-connector-parity:
+	@bash scripts/ci/connector-parity.sh
+
+# Regenerate tests/data_plane_parity/expected/ from the corpus goldens (review the diff); the gate runs it with --check.
+gen-connector-parity-expected:
+	@python3 -I scripts/ci/gen-connector-parity-expected.py
 
 test:
 	@$(MAKE) test-unit

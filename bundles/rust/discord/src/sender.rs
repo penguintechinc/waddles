@@ -1,0 +1,474 @@
+//! `sender.build-request`: Discord REST request TEMPLATES (part B).
+//!
+//! The overlay never holds a token and never picks a destination:
+//!
+//! * the credential is a `secret-refs` entry (`Authorization` -> opaque handle);
+//!   the host substitutes the real `Bot ...` value at send time;
+//! * the destination channel / guild is a `{target.channel_id}` /
+//!   `{target.guild_id}` placeholder the HOST fills from the binding resolved
+//!   from `target-source-id` (`app_outbound_bindings`). Payloads that try to
+//!   name a destination are REFUSED (unknown fields are rejected), so an app
+//!   bundle cannot steer a send to a channel it does not own;
+//! * delete is channel-scoped (`/channels/{target.channel_id}/messages/{id}`),
+//!   never resolved from a message id alone.
+//!
+//! Every message body carries `allowed_mentions: {"parse":["users"]}` (the
+//! `discord_mentions` backstop of the hardcoded REST client).
+
+use serde_json::{Map, Value, json};
+
+use crate::error::{OverlayError, Result};
+use crate::sanitize::guard_text;
+use crate::session::is_snowflake;
+
+/// Discord REST base the host pins egress to.
+pub const API_BASE: &str = "https://discord.com/api/v10";
+/// Host-substituted placeholder: the bound channel.
+pub const TARGET_CHANNEL: &str = "{target.channel_id}";
+/// Host-substituted placeholder: the bound guild.
+pub const TARGET_GUILD: &str = "{target.guild_id}";
+/// Host-substituted placeholder for a DM: the channel the HOST opened itself
+/// (`POST /users/@me/channels`) for this operation's recipient, filled ONLY from
+/// Discord's reply to that call. The host rejects any other source for it.
+pub const DM_CHANNEL: &str = "{dm.channel_id}";
+/// Host-only pseudo-header carrying the `{user:<uuid>}` recipient of a `dm.send`.
+/// The host MUST consume and strip it; it is never sent to Discord.
+pub const HOST_DM_RECIPIENT_HEADER: &str = "X-Waddle-Host-Dm-Recipient";
+/// Opaque secret handle for the bot credential.
+pub const AUTH_HANDLE: &str = "discord-bot";
+/// Discord's hard message-content limit (characters).
+pub const MAX_CONTENT_CHARS: usize = 2000;
+
+/// Mirror of WIT `sender.action`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Action {
+    /// `chat.send`, `chat.delete`, `dm.send`, `role.add`, `role.remove`.
+    pub kind: String,
+    /// Opaque binding id the host resolves.
+    pub target_source_id: String,
+    /// Kind-specific JSON object.
+    pub payload_json: String,
+}
+
+/// Mirror of WIT `sender.http-request-tpl`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpTpl {
+    /// HTTP method.
+    pub method: String,
+    /// URL with host-substituted `{target.*}` placeholders.
+    pub url: String,
+    /// Non-secret headers.
+    pub headers: Vec<(String, String)>,
+    /// Request body, if any.
+    pub body: Option<Vec<u8>>,
+    /// `(header slot, opaque handle)`.
+    pub secret_refs: Vec<(String, String)>,
+}
+
+/// Parses the payload as an object whose keys are exactly within `allowed`.
+fn object(payload: &str, allowed: &[&str]) -> Result<Map<String, Value>> {
+    let v: Value = serde_json::from_str(payload)
+        .map_err(|_| OverlayError::Malformed("payload is not JSON".into()))?;
+    let Value::Object(map) = v else {
+        return Err(OverlayError::Malformed("payload is not an object".into()));
+    };
+    if let Some(k) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
+        // Includes any attempt to supply channel_id / guild_id.
+        return Err(OverlayError::Malformed(format!(
+            "payload field `{k}` is not accepted for this action"
+        )));
+    }
+    Ok(map)
+}
+
+fn str_field<'a>(map: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
+    map.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| OverlayError::Malformed(format!("missing string `{key}`")))
+}
+
+fn snowflake(map: &Map<String, Value>, key: &str) -> Result<String> {
+    let s = str_field(map, key)?;
+    if is_snowflake(s) {
+        Ok(s.to_string())
+    } else {
+        Err(OverlayError::Malformed(format!(
+            "`{key}` is not a snowflake"
+        )))
+    }
+}
+
+/// A user reference: ONLY the `{user:<uuid>}` placeholder. The host resolves it
+/// through its community-scoped tokenization; a raw platform id never crosses
+/// this boundary (repo PII rule), so snowflakes are refused.
+fn user_ref(map: &Map<String, Value>, key: &str) -> Result<String> {
+    let s = str_field(map, key)?;
+    guard_text(key, s, false)?;
+    let placeholder = s
+        .strip_prefix("{user:")
+        .and_then(|r| r.strip_suffix('}'))
+        .is_some_and(|u| u.len() == 36 && u.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'));
+    if placeholder {
+        Ok(s.to_string())
+    } else {
+        Err(OverlayError::Malformed(format!(
+            "`{key}` must be a {{user:<uuid>}} placeholder"
+        )))
+    }
+}
+
+/// A managed-role KEY (`[a-z][a-z0-9_-]{0,31}`), never a snowflake. The host maps
+/// the key through the binding's managed-roles allowlist.
+fn role_key(map: &Map<String, Value>) -> Result<String> {
+    let s = str_field(map, "role")?;
+    guard_text("role", s, false)?;
+    let mut bytes = s.bytes();
+    let ok = s.len() <= 32
+        && bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    if ok {
+        Ok(s.to_string())
+    } else {
+        Err(OverlayError::Malformed(
+            "`role` must be a managed-role key ([a-z][a-z0-9_-]{0,31})".into(),
+        ))
+    }
+}
+
+fn content(map: &Map<String, Value>) -> Result<&str> {
+    let c = str_field(map, "content")?;
+    guard_text("content", c, true)?;
+    if c.is_empty() {
+        return Err(OverlayError::Malformed("content is empty".into()));
+    }
+    if c.chars().count() > MAX_CONTENT_CHARS {
+        return Err(OverlayError::Malformed(
+            "content exceeds 2000 characters".into(),
+        ));
+    }
+    Ok(c)
+}
+
+fn message_body(text: &str) -> Result<Vec<u8>> {
+    serde_json::to_vec(&json!({
+        "content": text,
+        "allowed_mentions": { "parse": ["users"] },
+    }))
+    .map_err(|e| OverlayError::Backend(e.to_string()))
+}
+
+fn tpl(method: &str, path: String, body: Option<Vec<u8>>) -> HttpTpl {
+    let headers = if body.is_some() {
+        vec![("Content-Type".to_string(), "application/json".to_string())]
+    } else {
+        Vec::new()
+    };
+    HttpTpl {
+        method: method.to_string(),
+        url: format!("{API_BASE}{path}"),
+        headers,
+        body,
+        secret_refs: vec![("Authorization".to_string(), AUTH_HANDLE.to_string())],
+    }
+}
+
+/// Builds the request template for `action`.
+///
+/// `dm.send` returns the MESSAGE request against `{dm.channel_id}`; the HOST opens
+/// the DM channel for the `{user:<uuid>}` recipient itself and fills the
+/// placeholder only from Discord's reply to that call. The host MUST also enforce
+/// the `send_dm_in_community` gate and managed-role allowlist -- the overlay
+/// cannot (see README "Host duties").
+///
+/// # Errors
+/// [`OverlayError::Unsupported`] for an unknown kind; [`OverlayError::Malformed`]
+/// for an empty target, a non-object payload, a field outside the kind's
+/// allow-list (notably any destination), a bad snowflake, or bad content.
+pub fn build_request(action: &Action) -> Result<HttpTpl> {
+    if action.target_source_id.is_empty() || action.target_source_id.len() > 128 {
+        return Err(OverlayError::Malformed("target-source-id invalid".into()));
+    }
+    guard_text("target-source-id", &action.target_source_id, false)?;
+    let p = action.payload_json.as_str();
+    match action.kind.as_str() {
+        "chat.send" => {
+            let m = object(p, &["content"])?;
+            let body = message_body(content(&m)?)?;
+            Ok(tpl(
+                "POST",
+                format!("/channels/{TARGET_CHANNEL}/messages"),
+                Some(body),
+            ))
+        }
+        "chat.delete" => {
+            let m = object(p, &["message_id"])?;
+            let id = snowflake(&m, "message_id")?;
+            Ok(tpl(
+                "DELETE",
+                format!("/channels/{TARGET_CHANNEL}/messages/{id}"),
+                None,
+            ))
+        }
+        "dm.send" => {
+            let m = object(p, &["recipient_id", "content"])?;
+            let rid = user_ref(&m, "recipient_id")?;
+            let body = message_body(content(&m)?)?;
+            let mut t = tpl(
+                "POST",
+                format!("/channels/{DM_CHANNEL}/messages"),
+                Some(body),
+            );
+            t.headers.push((HOST_DM_RECIPIENT_HEADER.to_string(), rid));
+            Ok(t)
+        }
+        "role.add" | "role.remove" => {
+            let m = object(p, &["user_id", "role"])?;
+            let user = user_ref(&m, "user_id")?;
+            let role = format!("{{target.role.{}}}", role_key(&m)?);
+            let method = if action.kind == "role.add" {
+                "PUT"
+            } else {
+                "DELETE"
+            };
+            Ok(tpl(
+                method,
+                format!("/guilds/{TARGET_GUILD}/members/{user}/roles/{role}"),
+                None,
+            ))
+        }
+        other => Err(OverlayError::Unsupported(format!("action kind `{other}`"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn act(kind: &str, payload: &str) -> Action {
+        Action {
+            kind: kind.into(),
+            target_source_id: "bind-1".into(),
+            payload_json: payload.into(),
+        }
+    }
+
+    #[test]
+    fn chat_send_is_host_pinned_guarded_and_tokenless() {
+        let t = build_request(&act("chat.send", r#"{"content":"hello @everyone"}"#)).unwrap();
+        assert_eq!(t.method, "POST");
+        assert_eq!(
+            t.url,
+            "https://discord.com/api/v10/channels/{target.channel_id}/messages"
+        );
+        assert_eq!(
+            t.secret_refs,
+            vec![("Authorization".to_string(), "discord-bot".to_string())]
+        );
+        let b: Value = serde_json::from_slice(t.body.as_ref().unwrap()).unwrap();
+        assert_eq!(b["content"], "hello @everyone");
+        assert_eq!(b["allowed_mentions"], json!({"parse":["users"]}));
+        assert!(
+            t.headers
+                .iter()
+                .all(|(k, _)| !k.eq_ignore_ascii_case("authorization"))
+        );
+    }
+
+    const UUID_REF: &str = "{user:123e4567-e89b-12d3-a456-426614174000}";
+
+    #[test]
+    fn a_payload_can_never_name_the_destination_recipient_or_privilege() {
+        let cases: Vec<(&str, String)> = vec![
+            ("chat.send", r#"{"content":"x","channel_id":"123"}"#.into()),
+            ("chat.send", r#"{"content":"x","guild_id":"1"}"#.into()),
+            (
+                "chat.delete",
+                r#"{"message_id":"1","channel_id":"2"}"#.into(),
+            ),
+            (
+                "role.add",
+                format!(r#"{{"user_id":"{UUID_REF}","role":"vip","guild_id":"3"}}"#),
+            ),
+            // regression: raw role snowflake = privilege escalation
+            (
+                "role.add",
+                format!(r#"{{"user_id":"{UUID_REF}","role_id":"2"}}"#),
+            ),
+            (
+                "role.remove",
+                format!(r#"{{"user_id":"{UUID_REF}","role_id":"2"}}"#),
+            ),
+            (
+                "role.add",
+                format!(r#"{{"user_id":"{UUID_REF}","role":"vip","role_id":"2"}}"#),
+            ),
+            // regression: dm destination steering
+            (
+                "dm.send",
+                format!(r#"{{"recipient_id":"{UUID_REF}","content":"x","dm_channel_id":"9"}}"#),
+            ),
+            (
+                "dm.send",
+                format!(r#"{{"recipient_id":"{UUID_REF}","content":"x","channel_id":"9"}}"#),
+            ),
+        ];
+        for (k, p) in cases {
+            assert!(
+                matches!(build_request(&act(k, &p)), Err(OverlayError::Malformed(_))),
+                "{k} {p}"
+            );
+        }
+        // dm.post no longer exists: the host runs the whole two-step from dm.send.
+        assert!(matches!(
+            build_request(&act("dm.post", r#"{"dm_channel_id":"88","content":"hi"}"#)),
+            Err(OverlayError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn delete_is_channel_scoped() {
+        let t = build_request(&act("chat.delete", r#"{"message_id":"555"}"#)).unwrap();
+        assert_eq!(t.method, "DELETE");
+        assert_eq!(
+            t.url,
+            "https://discord.com/api/v10/channels/{target.channel_id}/messages/555"
+        );
+        assert!(t.body.is_none() && t.headers.is_empty());
+        assert!(build_request(&act("chat.delete", r#"{"message_id":"../x"}"#)).is_err());
+        assert!(build_request(&act("chat.delete", r#"{}"#)).is_err());
+    }
+
+    #[test]
+    fn dm_send_carries_content_and_a_host_filled_channel_placeholder() {
+        let t = build_request(&act(
+            "dm.send",
+            &format!(r#"{{"recipient_id":"{UUID_REF}","content":"hi"}}"#),
+        ))
+        .unwrap();
+        assert_eq!(t.method, "POST");
+        assert_eq!(
+            t.url,
+            "https://discord.com/api/v10/channels/{dm.channel_id}/messages"
+        );
+        let b: Value = serde_json::from_slice(t.body.as_ref().unwrap()).unwrap();
+        assert_eq!(b["content"], "hi");
+        assert_eq!(b["allowed_mentions"], json!({"parse":["users"]}));
+        // The recipient travels in a host-only pseudo-header (stripped before sending).
+        assert!(
+            t.headers
+                .contains(&(HOST_DM_RECIPIENT_HEADER.to_string(), UUID_REF.to_string()))
+        );
+        // Only the {user:<uuid>} placeholder: raw snowflakes and malformed refs are refused.
+        for bad in [
+            "444",
+            "{user:zz}",
+            "{user:123e4567-e89b-12d3-a456-42661417400}",
+            "",
+        ] {
+            let p = format!(r#"{{"recipient_id":"{bad}","content":"hi"}}"#);
+            assert!(build_request(&act("dm.send", &p)).is_err(), "{bad}");
+        }
+        assert!(
+            build_request(&act(
+                "dm.send",
+                &format!(r#"{{"recipient_id":"{UUID_REF}"}}"#)
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn role_ops_use_a_managed_role_key_user_placeholder_and_the_pinned_guild() {
+        let add = build_request(&act(
+            "role.add",
+            &format!(r#"{{"user_id":"{UUID_REF}","role":"verified"}}"#),
+        ))
+        .unwrap();
+        assert_eq!(add.method, "PUT");
+        assert_eq!(
+            add.url,
+            format!(
+                "https://discord.com/api/v10/guilds/{{target.guild_id}}/members/{UUID_REF}/roles/{{target.role.verified}}"
+            )
+        );
+        let rm = build_request(&act(
+            "role.remove",
+            &format!(r#"{{"user_id":"{UUID_REF}","role":"verified"}}"#),
+        ))
+        .unwrap();
+        assert_eq!(rm.method, "DELETE");
+        let long = "a".repeat(33);
+        for bad_role in [
+            "",
+            "Verified",
+            "1",
+            "a b",
+            "../x",
+            "x}.{target.guild_id",
+            &long,
+        ] {
+            let p = format!(r#"{{"user_id":"{UUID_REF}","role":"{bad_role}"}}"#);
+            assert!(build_request(&act("role.add", &p)).is_err(), "{bad_role}");
+        }
+        // Raw snowflake user ids are refused too.
+        assert!(build_request(&act("role.add", r#"{"user_id":"1","role":"vip"}"#)).is_err());
+    }
+
+    #[test]
+    fn content_rules_and_input_validation_fail_loud() {
+        assert!(build_request(&act("chat.send", r#"{"content":""}"#)).is_err());
+        let big = format!(r#"{{"content":"{}"}}"#, "a".repeat(2001));
+        assert!(build_request(&act("chat.send", &big)).is_err());
+        let ok = format!(r#"{{"content":"{}"}}"#, "é".repeat(2000));
+        assert!(build_request(&act("chat.send", &ok)).is_ok());
+        assert!(build_request(&act("chat.send", "[]")).is_err());
+        assert!(build_request(&act("chat.send", "nope")).is_err());
+        assert!(build_request(&act("chat.send", r#"{}"#)).is_err());
+        assert!(matches!(
+            build_request(&act("moderation.ban", "{}")),
+            Err(OverlayError::Unsupported(_))
+        ));
+        let mut a = act("chat.send", r#"{"content":"x"}"#);
+        a.target_source_id.clear();
+        assert!(build_request(&a).is_err());
+        a.target_source_id = "x".repeat(129);
+        assert!(build_request(&a).is_err());
+    }
+
+    #[test]
+    fn slot_smuggling_in_any_templated_string_is_rejected() {
+        // regression (Twitch overlay HIGH): control/zero-width/lookalike chars around braces.
+        for evil in [
+            "{\\u0001{SECRET}}",
+            "{\\u200B{SECRET}}",
+            "{\\uFF5B{SECRET}}",
+            "{{SECRET}}",
+            "{\\n{SECRET}\\n}",
+        ] {
+            let p = format!(r#"{{"content":"{evil}"}}"#);
+            assert!(
+                build_request(&act("chat.send", &p)).is_err(),
+                "content {evil}"
+            );
+            let p = format!(r#"{{"recipient_id":"{UUID_REF}","content":"{evil}"}}"#);
+            assert!(
+                build_request(&act("dm.send", &p)).is_err(),
+                "dm.send content {evil}"
+            );
+            let p = format!(r#"{{"recipient_id":"{evil}","content":"x"}}"#);
+            assert!(
+                build_request(&act("dm.send", &p)).is_err(),
+                "recipient {evil}"
+            );
+            let p = format!(r#"{{"user_id":"{evil}","role":"vip"}}"#);
+            assert!(build_request(&act("role.add", &p)).is_err(), "user {evil}");
+            let p = format!(r#"{{"user_id":"{UUID_REF}","role":"{evil}"}}"#);
+            assert!(build_request(&act("role.add", &p)).is_err(), "role {evil}");
+            let mut a = act("chat.send", r#"{"content":"x"}"#);
+            a.target_source_id = serde_json::from_str::<String>(&format!("\"{evil}\"")).unwrap();
+            assert!(build_request(&a).is_err(), "target {evil}");
+        }
+        // Multi-line text with no delimiters still works.
+        assert!(build_request(&act("chat.send", r#"{"content":"a\nb"}"#)).is_ok());
+    }
+}

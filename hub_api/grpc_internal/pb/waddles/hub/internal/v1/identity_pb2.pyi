@@ -122,3 +122,39 @@ class ResolveHandleResponse(_message.Message):
     def __init__(
         self, uuid: _Optional[str] = ..., match_kind: _Optional[_Union[MatchKind, str]] = ...
     ) -> None: ...
+
+class ResolvePlatformUserRequest(_message.Message):
+    __slots__ = ("tenant_id", "community_id", "platform", "uuids")
+    TENANT_ID_FIELD_NUMBER: _ClassVar[int]
+    COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
+    PLATFORM_FIELD_NUMBER: _ClassVar[int]
+    UUIDS_FIELD_NUMBER: _ClassVar[int]
+    tenant_id: str
+    community_id: int
+    platform: str
+    uuids: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(
+        self,
+        tenant_id: _Optional[str] = ...,
+        community_id: _Optional[int] = ...,
+        platform: _Optional[str] = ...,
+        uuids: _Optional[_Iterable[str]] = ...,
+    ) -> None: ...
+
+class ResolvedPlatformUser(_message.Message):
+    __slots__ = ("uuid", "platform_user_id")
+    UUID_FIELD_NUMBER: _ClassVar[int]
+    PLATFORM_USER_ID_FIELD_NUMBER: _ClassVar[int]
+    uuid: str
+    platform_user_id: str
+    def __init__(
+        self, uuid: _Optional[str] = ..., platform_user_id: _Optional[str] = ...
+    ) -> None: ...
+
+class ResolvePlatformUserResponse(_message.Message):
+    __slots__ = ("users",)
+    USERS_FIELD_NUMBER: _ClassVar[int]
+    users: _containers.RepeatedCompositeFieldContainer[ResolvedPlatformUser]
+    def __init__(
+        self, users: _Optional[_Iterable[_Union[ResolvedPlatformUser, _Mapping]]] = ...
+    ) -> None: ...

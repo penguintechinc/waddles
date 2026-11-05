@@ -1,0 +1,33 @@
+[package]
+name = "waddle-bundle-youtube-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "YouTube platform OVERLAY service bundle (P6b T3): a `kind: service` connector on the `connector-tools` world. Parses YouTube Live chat poll frames into normalized events (parity with the Python svc_ingest path), builds Data API request templates, classifies quota/backoff, and exports tools. The host owns transport and credentials."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-youtube-service"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-connector"
+world = "connector-tools"
+
+[package.metadata.component.dependencies]
+
+[package.metadata.component.target.dependencies]
+"waddle:bundle" = { path = "../../../wit/waddle-connector/deps/waddle-bundle" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

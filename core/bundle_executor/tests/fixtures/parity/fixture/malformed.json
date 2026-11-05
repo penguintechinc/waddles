@@ -1,0 +1,9 @@
+{
+  "id": "fixture/malformed",
+  "platform": "fixture",
+  "context": {},
+  "input": {"encoding": "utf8", "text": "nope"},
+  "outcome": "frame_error",
+  "frame_error_kind": "malformed",
+  "events": []
+}

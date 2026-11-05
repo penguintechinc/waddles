@@ -191,6 +191,10 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
 
     requests_per_second: float = 50.0
     burst: float = 100.0
+    #: Full method name -> ``(requests_per_second, burst)`` for RPCs that need a tighter
+    #: budget than the default (a PII-returning RPC). Such a method has its OWN bucket per
+    #: caller, so it neither borrows from nor drains the shared one.
+    method_limits: dict[str, tuple[float, float]] = field(default_factory=dict)
     _buckets: dict[str, _Bucket] = field(default_factory=dict)
 
     async def intercept_service(
@@ -205,11 +209,15 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
         if handler is None or handler.unary_unary is None:
             return handler
         inner = handler.unary_unary
+        method = handler_call_details.method
+        limit = self.method_limits.get(method)
 
         async def wrapped(request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> Any:
             claims = service_claims.get()
             key = claims["sub"] if claims else "unknown"
-            if not self._take(key):
+            if limit is not None:
+                key = f"{key}|{method}"
+            if not self._take(key, limit):
                 await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "rate limit exceeded")
             return await inner(request, cast(grpc.ServicerContext, context))
 
@@ -219,14 +227,15 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
             response_serializer=handler.response_serializer,
         )
 
-    def _take(self, key: str) -> bool:
+    def _take(self, key: str, limit: tuple[float, float] | None = None) -> bool:
+        rate, burst = limit if limit is not None else (self.requests_per_second, self.burst)
         now = time.monotonic()
         bucket = self._buckets.get(key)
         if bucket is None:
-            bucket = _Bucket(tokens=self.burst, last_refill=now)
+            bucket = _Bucket(tokens=burst, last_refill=now)
             self._buckets[key] = bucket
         elapsed = now - bucket.last_refill
-        bucket.tokens = min(self.burst, bucket.tokens + elapsed * self.requests_per_second)
+        bucket.tokens = min(burst, bucket.tokens + elapsed * rate)
         bucket.last_refill = now
         if bucket.tokens < 1.0:
             return False

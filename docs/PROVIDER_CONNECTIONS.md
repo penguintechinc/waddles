@@ -27,7 +27,8 @@ asks hub-api which connections to run and for a fresh token to run them with.
 | `GET/POST /api/v1/internal/...` data-plane endpoints (list + resolve) | **shipped (this change)** |
 | `svc-ingest` (Rust) resolves connections dynamically instead of static env | per-community Twitch sessions behind `INGEST_DYNAMIC_CONNECTIONS` (alpha) -- runbook: `core/svc_ingest/README.md` |
 | webui connection UI, CLI connection commands | follow-ups (call the API below unchanged) |
-| Discord / Slack / Kick / YouTube adapters | follow-ups (one adapter + one registry line each) |
+| Discord adapter (bot token + guild + managed-roles binding metadata) | **shipped** -- see [Discord provider](#discord-provider-guild--managed-roles) |
+| Slack / Kick / YouTube adapters | follow-ups (one adapter + one registry line each) |
 | Redirect-style installs (OAuth connect, Discord invite link) | follow-up -- see [Limitations](#limitations-and-follow-ups) |
 
 ## Data model
@@ -232,7 +233,7 @@ allow-listed identity carries. The allow-list is chart config, rendered into hub
 
 | Piece | Where |
 |---|---|
-| Identity + scope policy | `k8s/helm/waddlebot/values.yaml` `serviceJwt.identities.svc-ingest` -- `spiffe://penguintech.io/<env>/svc-ingest`, `allowedScopes: ["connections:resolve", "connections:list", "dataplane:resolve-scope"]` (never `connections:resolve:static`), `tenant: system` | **Rendered only when `pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=true`** (default false in `values.yaml`, true in `values-alpha.yaml`): the grant, the `SERVICE_JWT_*` env and the bootstrap-token mount are absent otherwise, so an internet-facing svc-ingest pod cannot mint a cross-tenant `system` token while the feature is off.
+| Identity + scope policy | `k8s/helm/waddlebot/values.yaml` `serviceJwt.identities.svc-ingest` -- `spiffe://penguintech.io/<env>/svc-ingest`, `allowedScopes: ["connections:resolve", "connections:list", "dataplane:resolve-scope", "identity:platform-user:resolve"]` (never `connections:resolve:static`; the last scope is the gRPC detokenizer, see [identity-resolve-platform-user](reference/identity-resolve-platform-user.md)), `tenant: system` | **Rendered only when `pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=true`** (default false in `values.yaml`, true in `values-alpha.yaml`): the grant, the `SERVICE_JWT_*` env and the bootstrap-token mount are absent otherwise, so an internet-facing svc-ingest pod cannot mint a cross-tenant `system` token while the feature is off.
 | Dedicated ServiceAccount | `k8s/helm/waddlebot/templates/service-jwt-rbac.yaml` (`svc-ingest`); the identity matches on namespace + this name, so no other pod can bootstrap it |
 | Caller wiring | `templates/svc-ingest-rust.yaml`: `serviceAccountName: svc-ingest`, projected token (audience `hub-api`), `SERVICE_JWT_TOKEN_ENDPOINT`, `SERVICE_JWT_SA_TOKEN_PATH` |
 | Verification | `hub_api/tests/provider_connections/test_chart_service_identity_grant.py` (renders the chart, mints through the real issuer, hits the real routes) and `k8s/helm/waddlebot/tests/test_svc_ingest_connections_scope_render.py` |
@@ -405,6 +406,38 @@ python with hub-api's requirements via `HUB_PYTHON`) boots Postgres 17 at Alembi
 cross-community `NotFound`, tampered ciphertext -> fixed error with no secret text, legacy `X-Service-Key` -> `401`,
 and the chart's scope split. It prints the pass count and the resolver's log/span/metric counts and fails on zero.
 Only the Kubernetes TokenReview call and the PostHog/licence backends are stubbed. Amd64-only for now.
+
+## Discord provider (guild + managed roles)
+
+`discord` (`services/provider_connections/discord.py`) is a `PLATFORM_OAUTH`-kind, **non-refreshable**
+provider: the credential is the community's **bot token** (verified with `GET /users/@me` using the
+`Bot` scheme; a user token is refused), the resource is the **guild** (verified with
+`GET /guilds/{id}`; a bot that is not a member is a 422). Resolve returns the bot token as the kind-1
+`accessToken` (there is no refresh token). The binding contract the outbound executor
+(`core/svc_ingest` `outbound_creds_discord.rs`) reads is **non-secret resource metadata**:
+
+| Metadata field | Required | Validation | Stored / served as |
+|---|---|---|---|
+| `guild_id` | yes | numeric snowflake, 17-20 digits; the bot must be a member | `guild_id` (also the connection's `resource_id`) |
+| `managed_roles` | no | object `key -> role snowflake` (or the canonical string); **<= 32 entries**; key `[a-z][a-z0-9_]{0,31}`; role id numeric string 17-20 digits (JSON numbers refused -- precision loss); duplicates refused | canonical string `key:snowflake,key:snowflake`, sorted by key; omitted when empty |
+
+Notes:
+
+- **Keys must start with a letter.** The documented `^[a-z0-9_]{1,32}$` would admit `1abc`/`_x`, but the
+  executor's `is_role_key` (`[a-z][a-z0-9_-]{0,31}`) rejects those and then refuses the WHOLE binding
+  (fail closed). hub-api validates the intersection so an accepted binding is always usable.
+- **Admin-only**: set through the ordinary connection routes (`POST` / `PATCH
+  /api/v1/communities/<id>/provider-connections`), i.e. `connections:admin` **and** the DB-backed
+  `authorize_community(admin=True)` check -- the same gate as every other connection write. The tenant
+  comes from the token. `PATCH` with `metadata` **replaces** the whole metadata set (omit `managed_roles`
+  to clear it) and re-verifies the guild.
+- **Request shape**: `metadata` values may be a string or (for `managed_roles`) an object; unknown keys,
+  a bad key, a non-numeric id, > 32 entries -> `400` naming only the field, never the value.
+- **Where it surfaces**: the admin view (`metadata`), the internal list (`items[].metadata`) and resolve
+  (`metadata`) -- exactly `{"guild_id": "...", "managed_roles": "key:id,..."}`. A binding with no
+  `guild_id` is skipped by list and is `409 metadata_incomplete` on resolve.
+- No migration: `resource_type = 'discord_guild'` was already in migration 0035's allow-list and the
+  metadata rides the existing `resource_metadata` JSON column.
 
 ## Adding a provider
 

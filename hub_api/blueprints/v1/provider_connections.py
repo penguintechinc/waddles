@@ -234,7 +234,7 @@ class CreateConnectionRequest:
     provider: str
     credentials: CredentialsBody | None = None
     secret: SecretBody | None = None
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, str | dict[str, str]] = field(default_factory=dict)
     enabled: bool = True
 
 
@@ -245,7 +245,7 @@ class UpdateConnectionRequest:
     __pydantic_config__ = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
-    metadata: dict[str, str] | None = None
+    metadata: dict[str, str | dict[str, str]] | None = None
     credentials: CredentialsBody | None = None
 
 

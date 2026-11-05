@@ -1,0 +1,17 @@
+{
+  "context": {
+    "guild_owner_id": "900",
+    "guild_roles": [],
+    "member_role_ids": [],
+    "self_user_id": "999"
+  },
+  "events": [],
+  "id": "discord/self_message_dropped",
+  "input": {
+    "encoding": "json",
+    "text": "{\"op\":0,\"t\":\"MESSAGE_CREATE\",\"s\":1,\"d\":{\"author\":{\"bot\":false,\"id\":\"999\",\"username\":\"WaddleBot\"},\"channel_id\":\"222\",\"content\":\"hello chat\",\"guild_id\":\"111\",\"id\":\"333\",\"type\":0}}"
+  },
+  "outcome": "dropped",
+  "path": "discord_gateway",
+  "platform": "discord"
+}

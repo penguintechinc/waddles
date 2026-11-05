@@ -6,6 +6,8 @@ on:
     paths:
       - 'core/svc_ingest/**'
       - 'core/discord_mentions/**'
+      - 'core/hub_client/**'
+      - 'proto/**'
       - '.github/workflows/rust-svc-ingest.yml'
       - '.github/workflows/rust-crate-ci.yml'
       - 'hub_api/tests/live/**'
@@ -15,6 +17,8 @@ on:
     paths:
       - 'core/svc_ingest/**'
       - 'core/discord_mentions/**'
+      - 'core/hub_client/**'
+      - 'proto/**'
   workflow_dispatch:
 
 permissions:
@@ -33,6 +37,10 @@ jobs:
       working_directory: core/svc_ingest
       # The lease + real-socket + live-hub tests fail loudly without a real Valkey.
       valkey: true
+      # protoc is needed by hub_client's build.rs (tonic-prost-build), a path dependency
+      # for the Discord platform-user detokenizer.
+      extra_apt_packages: protobuf-compiler
+      extra_apt_reason: 'for hub_client (protoc)'
 
   # Per-community Twitch sessions against a REAL hub-api + Postgres + Valkey + IRC test server
   # (scripts/ci/twitch-sessions-live.sh -- fails on zero tests run / zero telemetry).

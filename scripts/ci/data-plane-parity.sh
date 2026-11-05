@@ -11,6 +11,7 @@
 #   3. PII gate       -- core/svc_process/tests/parity_pii_tokenize.rs: every corpus event through
 #                        the closed-schema pii_tokenize classifier.
 #   4. Handler map    -- scripts/ci/check-builtin-handler-inventory.py (+ its planted-violation self-test).
+#   5. Overlay expected -- connector-overlay expected/ files are current with the corpus goldens.
 #
 # Env: PYTHON_BIN (default python3, must have the svc_ingest unit-test deps --
 # scripts/ci/install-unit-test-deps.sh), CARGO_TARGET_DIR (optional, share across worktrees).
@@ -71,6 +72,12 @@ run_and_require '[1-9][0-9]* passed' \
     "$PYTHON_BIN" -m pytest scripts/ci/tests/test_check_builtin_handler_inventory.py -q -p no:cacheprovider
 run_and_require '^\[handler-inventory\] handlers=[1-9][0-9]* ' \
     "$PYTHON_BIN" scripts/ci/check-builtin-handler-inventory.py
+
+step "5/5 connector-overlay expected/ current with corpus goldens (docs/connector-parity-harness.md)"
+run_and_require '^\[connector-parity-gen\] OK examined=[1-9][0-9]* ' \
+    "$PYTHON_BIN" -I scripts/ci/gen-connector-parity-expected.py --check
+run_and_require '[1-9][0-9]* passed' \
+    "$PYTHON_BIN" -m pytest scripts/ci/tests/test_gen_connector_parity_expected.py -q -p no:cacheprovider
 
 echo
 echo "[parity] ALL GATES PASSED"

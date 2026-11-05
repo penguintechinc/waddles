@@ -1,0 +1,48 @@
+{
+  "context": {
+    "guild_owner_id": "900",
+    "guild_roles": [
+      [
+        "role-admin",
+        8
+      ],
+      [
+        "111",
+        0
+      ]
+    ],
+    "member_role_ids": [
+      "role-admin",
+      "111"
+    ],
+    "self_user_id": "999"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "901",
+        "raw_handle": "someuser",
+        "uuid": "0b01dad3-8072-53a0-8084-14a7b4c6a3f6"
+      },
+      "event_type": "message",
+      "payload": {
+        "author_id": "901",
+        "channel_id": "222",
+        "guild_id": "111",
+        "is_broadcaster": true,
+        "is_mod": true,
+        "message_id": "333",
+        "text": "hello chat"
+      },
+      "platform": "discord"
+    }
+  ],
+  "id": "discord/administrator_role",
+  "input": {
+    "encoding": "json",
+    "text": "{\"op\":0,\"t\":\"MESSAGE_CREATE\",\"s\":1,\"d\":{\"author\":{\"bot\":false,\"id\":\"901\",\"username\":\"someuser\"},\"channel_id\":\"222\",\"content\":\"hello chat\",\"guild_id\":\"111\",\"id\":\"333\",\"type\":0}}"
+  },
+  "outcome": "event",
+  "path": "discord_gateway",
+  "platform": "discord"
+}

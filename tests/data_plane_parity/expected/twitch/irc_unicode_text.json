@@ -1,0 +1,39 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "8",
+        "raw_handle": "penguin",
+        "uuid": "6ee4a7f6-065e-59c4-b367-7111e7602f2d"
+      },
+      "event_type": "message",
+      "payload": {
+        "author": "penguin",
+        "author_id": "8",
+        "badges": [],
+        "channel_name": "somechannel",
+        "display_name": "Penguin",
+        "is_broadcaster": false,
+        "is_mod": false,
+        "is_subscriber": false,
+        "is_vip": false,
+        "message_id": null,
+        "room_id": null,
+        "text": "hello 🐧 café 日本語",
+        "user_id": "8"
+      },
+      "platform": "twitch"
+    }
+  ],
+  "id": "twitch/irc_unicode_text",
+  "input": {
+    "encoding": "utf8",
+    "text": "@user-id=8;display-name=Penguin :penguin!penguin@penguin.tmi.twitch.tv PRIVMSG #somechannel :hello 🐧 café 日本語"
+  },
+  "outcome": "event",
+  "path": "twitch_irc",
+  "platform": "twitch"
+}

@@ -1,0 +1,36 @@
+{
+  "context": {
+    "guild_owner_id": "900",
+    "guild_roles": [],
+    "member_role_ids": [],
+    "self_user_id": "999"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "900",
+        "raw_handle": "someuser",
+        "uuid": "4844004e-b780-5f63-b81d-25af7d435796"
+      },
+      "event_type": "message",
+      "payload": {
+        "author_id": "900",
+        "channel_id": "222",
+        "guild_id": "111",
+        "is_broadcaster": true,
+        "is_mod": true,
+        "message_id": "333",
+        "text": "hello chat"
+      },
+      "platform": "discord"
+    }
+  ],
+  "id": "discord/guild_owner_is_broadcaster",
+  "input": {
+    "encoding": "json",
+    "text": "{\"op\":0,\"t\":\"MESSAGE_CREATE\",\"s\":1,\"d\":{\"author\":{\"bot\":false,\"id\":\"900\",\"username\":\"someuser\"},\"channel_id\":\"222\",\"content\":\"hello chat\",\"guild_id\":\"111\",\"id\":\"333\",\"type\":0}}"
+  },
+  "outcome": "event",
+  "path": "discord_gateway",
+  "platform": "discord"
+}

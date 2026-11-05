@@ -11,7 +11,7 @@ fn main() {
     let proto_dir = proto_root.join("waddles/hub/internal/v1");
 
     tonic_prost_build::configure()
-        .build_server(false)
+        .build_server(true)
         .build_client(true)
         .compile_protos(
             &[
