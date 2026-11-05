@@ -57,3 +57,7 @@ and a real `SIGTERM` delivered to the test process (`lib::tests::a_real_sigterm_
 `ConnectorCallError`s for guest errors, traps, fuel exhaustion, deadline, memory cap and pool exhaustion. Knobs:
 `EXECUTOR_CONNECTOR_FUEL_LIMIT`, `EXECUTOR_CONNECTOR_POOL_SIZE`. It is an in-process API for now: the host-API wire
 (`penguin-libs` `ExportKind`) has no connector kinds yet. Design note: `docs/connector-host-capability.md`.
+
+A connector loaded under `WitWorld::ConnectorTools` (`world connector-tools`, P6a T4) additionally exports
+`tool-provider`: `ConnectorHost::call_tool` / `ExportKind::ToolCall` run its tools, and its `tool` import is linked.
+`world connector` is frozen. See "Connector tools" in `docs/connector-host-capability.md`.

@@ -184,3 +184,26 @@ world connector {
   export receiver;
   export sender;
 }
+
+/// `world connector-tools` (P6a T4): `connector` plus the P3b tool surface, so a
+/// connector overlay can EXPOSE normalized platform tools (`get_chatters`,
+/// `send_chat`) via `tool-provider` and (optionally) call other bundles' tools
+/// via `tool`. A NEW world, never an edit of `connector` above: compiled
+/// connector components bake `connector`'s shape, and they would stop linking
+/// if `connector` itself grew a required export. Reuses
+/// `waddle:bundle/tool@1.0.0` + `tool-provider@1.0.0` verbatim (resolved from
+/// `deps/waddle-bundle/tool.wit`, a byte-identical copy of
+/// `wit/waddle-bundle/tool.wit`). Whoever extends `connector` with an import
+/// or export MUST mirror it here.
+world connector-tools {
+  import identity;
+  import waddle:bundle/http@1.0.0;
+  import waddle:bundle/log@1.0.0;
+  import waddle:bundle/clock@1.0.0;
+  import waddle:bundle/%flags@1.0.0;
+  import waddle:bundle/tool@1.0.0;
+
+  export receiver;
+  export sender;
+  export waddle:bundle/tool-provider@1.0.0;
+}
