@@ -83,6 +83,10 @@ use crate::stage_metrics::{self, StageMetrics};
 mod tool;
 pub use tool::ToolContext;
 
+/// The community scope the verified caller must hold for `reputation.override`
+/// (mirrors the reputation bundle's manifest `required_scope`).
+const REPUTATION_OVERRIDE_SCOPE: &str = "community:admin";
+
 /// The durable rolling-24h absolute-delta caps the store enforces for
 /// `reputation.community.write` -- the catalog's own `per_user_daily_abs_max`
 /// (per community, user) and `per_scope_daily_abs_max` (per app across the
@@ -1606,6 +1610,27 @@ impl<K: KvBackend> StageCapabilities<K> {
                 .map(|(event_id, ordinal)| (event_id.to_string(), ordinal));
             (kind, slot)
         });
+
+        // `override` is ADMIN-only: the bundle's `reputation.community.admin`
+        // grant says the APP may override, not that THIS caller may. Require
+        // the host-VERIFIED actor (directory-resolved from the MAC-verified
+        // envelope, never guest input) to hold `community:admin` -- so no
+        // other tool in the component, nor a direct WIT call, can override on
+        // behalf of a non-admin. Checked BEFORE the gate so a refused caller
+        // never burns the admin quota (10/min) a real admin needs.
+        if matches!(op, Op::Override { .. }) {
+            let actor = self.resolve_verified_actor().await;
+            if !actor.has_scope(REPUTATION_OVERRIDE_SCOPE) {
+                tracing::info!(
+                    app_id = %self.app_id, community_id = self.community_id,
+                    "reputation.override refused: caller lacks community:admin"
+                );
+                return Err(denied(
+                    "forbidden",
+                    format!("reputation.override requires the caller to hold {REPUTATION_OVERRIDE_SCOPE}"),
+                ));
+            }
+        }
 
         match &op {
             Op::Override { user, .. } => self.authorize_reputation(

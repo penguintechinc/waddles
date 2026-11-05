@@ -625,14 +625,76 @@ fn admin_grants() -> GrantSet {
     ])
 }
 
+const ACTOR_UUID: &str = "11111111-1111-4111-8111-111111111111";
+
+/// Membership directory double: one platform account holding `role`
+/// (`None` = no role on record -> `NotLinked`, never defaulted).
+struct RoleDirectory {
+    role: Option<&'static str>,
+}
+
+impl crate::identity::MemberDirectory for RoleDirectory {
+    fn member_by_platform_id<'a>(
+        &'a self,
+        _scope: crate::identity::IdentityScope,
+        _platform: &'a str,
+        _platform_user_id: &'a str,
+    ) -> crate::identity::BoxFuture<'a, Result<Uuid, crate::identity::IdentityError>> {
+        Box::pin(async move { Ok(Uuid::parse_str(ACTOR_UUID).unwrap()) })
+    }
+    fn role_for<'a>(
+        &'a self,
+        _scope: crate::identity::IdentityScope,
+        _platform: &'a str,
+        _platform_user_id: &'a str,
+    ) -> crate::identity::BoxFuture<'a, Result<String, crate::identity::IdentityError>> {
+        Box::pin(async move {
+            self.role
+                .map(str::to_string)
+                .ok_or(crate::identity::IdentityError::NotLinked)
+        })
+    }
+    fn confirm_member<'a>(
+        &'a self,
+        _scope: crate::identity::IdentityScope,
+        user: Uuid,
+    ) -> crate::identity::BoxFuture<'a, Result<Uuid, crate::identity::IdentityError>> {
+        Box::pin(async move { Ok(user) })
+    }
+}
+
 /// A fixture whose invocation carries a replay-stable event id (the mutating
-/// ops derive their idempotency key from it).
+/// ops derive their idempotency key from it) and a host-verified actor holding
+/// the community role `role` (`None` = actor with no role on record).
+fn ext_fixture_as(grant_set: GrantSet, role: Option<&'static str>) -> Fixture {
+    let Fixture {
+        caps,
+        store,
+        member,
+        other,
+    } = fixture_with(grant_set, true, true, Some(("main", COMMUNITY_ID)));
+    let caps = caps.with_identity(
+        crate::identity::IdentityWiring {
+            directory: Arc::new(RoleDirectory { role }),
+            handles: None,
+            flag: Arc::new(FixedGate(true)),
+        },
+        Arc::new(
+            InvocationIdentity::new("twitch", Some("1001".to_string()), vec![])
+                .with_event_id(EVENT_ID),
+        ),
+    );
+    Fixture {
+        caps,
+        store,
+        member,
+        other,
+    }
+}
+
+/// [`ext_fixture_as`] with a community admin (the legitimate `override` caller).
 fn ext_fixture(grant_set: GrantSet) -> Fixture {
-    let mut f = fixture_with(grant_set, true, true, Some(("main", COMMUNITY_ID)));
-    f.caps.invocation_identity = Some(Arc::new(
-        InvocationIdentity::new("twitch", None, vec![]).with_event_id(EVENT_ID),
-    ));
-    f
+    ext_fixture_as(grant_set, Some("community-admin"))
 }
 
 fn rep_scope() -> ReputationScope {
@@ -726,8 +788,32 @@ async fn override_is_gated_on_membership_and_validates_arguments() {
 
 #[tokio::test]
 async fn a_mutation_without_a_replay_stable_event_id_is_refused_not_unkeyed() {
-    // Plain fixture: no invocation identity at all.
-    let f = fixture_with(admin_grants(), true, true, Some(("main", COMMUNITY_ID)));
+    // A verified admin actor, but an invocation with NO event id.
+    let Fixture {
+        caps,
+        store,
+        member,
+        other,
+    } = fixture_with(admin_grants(), true, true, Some(("main", COMMUNITY_ID)));
+    let f = Fixture {
+        caps: caps.with_identity(
+            crate::identity::IdentityWiring {
+                directory: Arc::new(RoleDirectory {
+                    role: Some("community-admin"),
+                }),
+                handles: None,
+                flag: Arc::new(FixedGate(true)),
+            },
+            Arc::new(InvocationIdentity::new(
+                "twitch",
+                Some("1001".to_string()),
+                vec![],
+            )),
+        ),
+        store,
+        member,
+        other,
+    };
     let args = serde_json::json!({
         "user": f.member.to_string(), "absolute_score": 1, "reason": "r",
     });
@@ -1026,5 +1112,122 @@ async fn an_idempotency_conflict_surfaces_with_its_stable_code() {
     assert_eq!(
         code_of(&f, "reputation.override", args).await,
         "idempotency_conflict"
+    );
+}
+
+// ---- review #983: caller scope enforced host-side on override ----
+
+fn override_args_for(user: Uuid) -> serde_json::Value {
+    serde_json::json!({
+        "user": user.to_string(), "absolute_score": 100, "reason": "admin.fix",
+    })
+}
+
+fn override_args(f: &Fixture) -> serde_json::Value {
+    override_args_for(f.member)
+}
+
+/// regression: #983 review -- the bundle holds `reputation.community.admin`, but
+/// a non-admin caller reaching `override-score` (any other tool, or the WIT
+/// import called directly) must be refused by the HOST, never reaching the store.
+#[tokio::test]
+async fn override_by_a_non_admin_caller_is_forbidden_even_with_the_admin_grant() {
+    for role in [
+        Some("member"),
+        Some("moderator"),
+        Some("vip"),
+        Some("bogus"),
+        None,
+    ] {
+        let f = ext_fixture_as(admin_grants(), role);
+        assert_eq!(
+            code_of(&f, "reputation.override", override_args(&f)).await,
+            "forbidden",
+            "role {role:?}"
+        );
+        assert_eq!(f.store.ext_count(), 0, "role {role:?}");
+    }
+}
+
+#[tokio::test]
+async fn override_with_no_verified_actor_at_all_is_forbidden() {
+    // No identity wiring and no actor account: fail closed.
+    let mut f = fixture_with(admin_grants(), true, true, Some(("main", COMMUNITY_ID)));
+    f.caps.invocation_identity = Some(Arc::new(
+        InvocationIdentity::new("twitch", None, vec![]).with_event_id(EVENT_ID),
+    ));
+    assert_eq!(
+        code_of(&f, "reputation.override", override_args(&f)).await,
+        "forbidden"
+    );
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn override_by_admin_and_owner_callers_is_allowed() {
+    for role in ["community-admin", "community-owner", "owner"] {
+        let f = ext_fixture_as(admin_grants(), Some(role));
+        f.store.answer(Ok(100));
+        f.caps
+            .handle(rep_call("reputation.override", override_args(&f)))
+            .await
+            .unwrap_or_else(|e| panic!("role {role}: {e:?}"));
+        assert_eq!(f.store.ext_count(), 1);
+    }
+}
+
+/// A refused (non-admin) caller never burns the admin quota: after a flood of
+/// forbidden attempts a real admin still gets all 10 calls of the window.
+#[tokio::test]
+async fn forbidden_callers_do_not_consume_the_admin_quota() {
+    let f = ext_fixture_as(admin_grants(), Some("member"));
+    for _ in 0..25 {
+        assert_eq!(
+            code_of(&f, "reputation.override", override_args(&f)).await,
+            "forbidden"
+        );
+    }
+    // Same gate, same quota ledger: swap in an admin actor.
+    let caps = f.caps.with_identity(
+        crate::identity::IdentityWiring {
+            directory: Arc::new(RoleDirectory {
+                role: Some("community-admin"),
+            }),
+            handles: None,
+            flag: Arc::new(FixedGate(true)),
+        },
+        Arc::new(
+            InvocationIdentity::new("twitch", Some("1001".to_string()), vec![])
+                .with_event_id(EVENT_ID),
+        ),
+    );
+    f.store.answer(Ok(1));
+    for n in 0..10 {
+        caps.handle(rep_call("reputation.override", override_args_for(f.member)))
+            .await
+            .unwrap_or_else(|e| panic!("admin call {n}: {e:?}"));
+    }
+}
+
+/// regression: #983 review -- the catalog's 10 calls / 60 s quota on
+/// `reputation.community.admin` is enforced on the host cap path.
+#[tokio::test]
+async fn override_is_rate_limited_to_ten_calls_per_window_on_the_cap_path() {
+    let f = ext_fixture(admin_grants());
+    f.store.answer(Ok(1));
+    for n in 0..10 {
+        f.caps
+            .handle(rep_call("reputation.override", override_args(&f)))
+            .await
+            .unwrap_or_else(|e| panic!("call {n}: {e:?}"));
+    }
+    assert_eq!(
+        code_of(&f, "reputation.override", override_args(&f)).await,
+        "rate_limited"
+    );
+    assert_eq!(
+        f.store.ext_count(),
+        10,
+        "the 11th call never reached the store"
     );
 }
