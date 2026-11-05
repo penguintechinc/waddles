@@ -46,6 +46,7 @@ pub mod poll;
 pub(crate) mod ratelimit;
 pub mod registry;
 pub mod secrets;
+pub mod sender_exec;
 pub mod sink;
 pub mod transport;
 pub(crate) mod transport_common;

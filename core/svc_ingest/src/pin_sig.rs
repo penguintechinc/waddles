@@ -11,6 +11,16 @@
 //! constant time before it sends anything. Every op is signed (chat.send,
 //! chat.delete AND dm.send) together with an `exp_ms` freshness bound.
 //!
+//! **v2 (P6a T6d-1): the numeric `community_id` and `tenant_id` are in the
+//! MAC** (`0` = absent), so a queue writer who replays a validly signed entry
+//! can neither change nor add nor strip the community whose credential the
+//! drain will resolve. An entry signed under the v1 label (no community /
+//! tenant) is authentic but UNSCOPED: it verifies as
+//! [`PinSigError::LegacyUnscoped`], a distinct refusal, never as success.
+//! Rollout: deploy `svc_action` (signer) first, then `svc_ingest` (verifier);
+//! in-flight v1 entries are refused (counted) and dropped -- they are not
+//! replayed (alpha is disposable; the producer's ack timeout reports them).
+//!
 //! This file is byte-identical in `core/svc_action/src/pin_sig.rs`
 //! (separate crates, no shared lib); a test in `svc_ingest` fails if the
 //! two copies drift. Never logs key material, MACs, channel ids or text.
@@ -21,7 +31,10 @@ use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Domain-separation label: a MAC for one purpose can never validate here.
-const LABEL: &[u8] = b"waddles.outbound-pin.v1";
+const LABEL: &[u8] = b"waddles.outbound-pin.v2";
+/// The v1 label (pre-community binding), accepted ONLY to classify an old
+/// entry as [`PinSigError::LegacyUnscoped`] -- never to authorize a send.
+const LABEL_V1: &[u8] = b"waddles.outbound-pin.v1";
 /// Shortest accepted key (bytes); a weaker key is refused, not used.
 const MIN_KEY_BYTES: usize = 16;
 
@@ -49,6 +62,11 @@ pub enum PinSigError {
     /// The MAC does not match the envelope fields.
     #[error("outbound pin signature mismatch")]
     BadSignature,
+    /// The entry carries a valid v1 signature (no community/tenant binding):
+    /// authentic but unscoped, so refused. Distinct so a rolling upgrade is
+    /// visible in the refusal counter.
+    #[error("outbound pin signature predates community binding")]
+    LegacyUnscoped,
 }
 
 /// The destination-bearing fields the MAC covers (all as placed on the wire).
@@ -69,6 +87,11 @@ pub struct PinFields<'a> {
     pub op_id: &'a str,
     /// Producer deadline, epoch ms (always present; bounds replay).
     pub exp_ms: u64,
+    /// Numeric `communities.id` the drain resolves the credential for
+    /// (`0` = none / tenant-wide). Bound by the MAC since v2.
+    pub community_id: i64,
+    /// Numeric tenant id when the entry carries one (`0` = absent).
+    pub tenant_id: i64,
 }
 
 /// A rotation-friendly keyring: any held `kid` verifies, `active` signs.
@@ -145,11 +168,12 @@ impl PinKeys {
             .map(|(_, v)| v.as_slice())
     }
 
-    fn mac(key: &[u8], f: &PinFields<'_>) -> Result<HmacSha256, PinSigError> {
+    fn mac(key: &[u8], f: &PinFields<'_>, legacy: bool) -> Result<HmacSha256, PinSigError> {
         let mut mac = HmacSha256::new_from_slice(key).map_err(|_| PinSigError::MalformedKeys)?;
-        mac.update(LABEL);
+        mac.update(if legacy { LABEL_V1 } else { LABEL });
         let exp = f.exp_ms.to_string();
-        for part in [
+        let (community, tenant) = (f.community_id.to_string(), f.tenant_id.to_string());
+        let mut parts = vec![
             f.platform,
             f.op,
             f.channel,
@@ -159,7 +183,12 @@ impl PinKeys {
             f.user_id,
             f.op_id,
             exp.as_str(),
-        ] {
+        ];
+        if !legacy {
+            parts.push(community.as_str());
+            parts.push(tenant.as_str());
+        }
+        for part in parts {
             // Length-prefixed so field boundaries can never be shifted.
             let len = u32::try_from(part.len()).map_err(|_| PinSigError::MalformedSignature)?;
             mac.update(&len.to_be_bytes());
@@ -175,7 +204,7 @@ impl PinKeys {
     pub fn sign(&self, fields: &PinFields<'_>) -> Result<String, PinSigError> {
         let kid = self.active.as_deref().ok_or(PinSigError::NoActiveKey)?;
         let key = self.key_for(kid).ok_or(PinSigError::NoActiveKey)?;
-        let tag = Self::mac(key, fields)?.finalize().into_bytes();
+        let tag = Self::mac(key, fields, false)?.finalize().into_bytes();
         Ok(format!("{kid}:{}", hex_encode(&tag)))
     }
 
@@ -189,9 +218,15 @@ impl PinKeys {
         let tag = hex_decode(tag_hex).ok_or(PinSigError::MalformedSignature)?;
         let key = self.key_for(kid).ok_or(PinSigError::UnknownKid)?;
         // `verify_slice` compares in constant time (`subtle`).
-        Self::mac(key, fields)?
-            .verify_slice(&tag)
-            .map_err(|_| PinSigError::BadSignature)
+        if Self::mac(key, fields, false)?.verify_slice(&tag).is_ok() {
+            return Ok(());
+        }
+        // A v1 MAC over the same fields: authentic, but it never bound a
+        // community. Classified, never accepted.
+        if Self::mac(key, fields, true)?.verify_slice(&tag).is_ok() {
+            return Err(PinSigError::LegacyUnscoped);
+        }
+        Err(PinSigError::BadSignature)
     }
 }
 
@@ -213,6 +248,8 @@ mod tests {
             user_id: "",
             op_id: "",
             exp_ms: 1_700_000_000_000,
+            community_id: 7,
+            tenant_id: 0,
         }
     }
 
@@ -222,8 +259,79 @@ mod tests {
         let k = PinKeys::parse(KEYS, Some("k1")).unwrap();
         assert_eq!(
             k.sign(&fields()).unwrap(),
-            "k1:1ff2c00b8d4eea50b0371acd512329475b9b4397c49148092c8a34436f62100f"
+            "k1:3eb99db7ab2c791e9120e405b16377e605652692127c13441f858013089f57e1"
         );
+    }
+
+    /// The pre-v2 golden (signed WITHOUT community/tenant under the v1
+    /// label): still recognised, but only as `LegacyUnscoped`.
+    #[test]
+    fn a_v1_signature_is_classified_legacy_never_accepted() {
+        let k = PinKeys::parse(KEYS, Some("k1")).unwrap();
+        let v1 = "k1:1ff2c00b8d4eea50b0371acd512329475b9b4397c49148092c8a34436f62100f";
+        for f in [
+            fields(),
+            PinFields {
+                community_id: 0,
+                ..fields()
+            },
+        ] {
+            assert_eq!(k.verify(&f, v1), Err(PinSigError::LegacyUnscoped));
+        }
+        // v1 over a tampered field is just a bad signature.
+        let tampered = PinFields {
+            text: "ho",
+            ..fields()
+        };
+        assert_eq!(k.verify(&tampered, v1), Err(PinSigError::BadSignature));
+    }
+
+    /// regression: p6a-t6d1 -- community_id / tenant_id are MAC-bound:
+    /// changing, swapping, adding or stripping either breaks the signature.
+    #[test]
+    fn community_and_tenant_are_bound_by_the_mac() {
+        let k = PinKeys::parse(KEYS, Some("k1")).unwrap();
+        let sig = k.sign(&fields()).unwrap();
+        for f in [
+            PinFields {
+                community_id: 8,
+                ..fields()
+            },
+            PinFields {
+                community_id: 0,
+                ..fields()
+            },
+            PinFields {
+                community_id: -7,
+                ..fields()
+            },
+            PinFields {
+                tenant_id: 1,
+                ..fields()
+            },
+        ] {
+            assert_eq!(k.verify(&f, &sig), Err(PinSigError::BadSignature), "{f:?}");
+        }
+        // Signed with no community: adding one later is refused too.
+        let none = PinFields {
+            community_id: 0,
+            ..fields()
+        };
+        let sig0 = k.sign(&none).unwrap();
+        assert_eq!(k.verify(&none, &sig0), Ok(()));
+        assert_eq!(k.verify(&fields(), &sig0), Err(PinSigError::BadSignature));
+        // community 1 + tenant 23 != community 12 + tenant 3 (length-prefixed).
+        let a = PinFields {
+            community_id: 1,
+            tenant_id: 23,
+            ..fields()
+        };
+        let b = PinFields {
+            community_id: 12,
+            tenant_id: 3,
+            ..fields()
+        };
+        assert_ne!(k.sign(&a).unwrap(), k.sign(&b).unwrap());
     }
 
     #[test]
