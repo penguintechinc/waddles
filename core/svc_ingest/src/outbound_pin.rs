@@ -147,6 +147,8 @@ struct StampWire {
     #[serde(default)]
     user_id: Option<String>,
     #[serde(default)]
+    op_id: Option<String>,
+    #[serde(default)]
     exp_ms: Option<u64>,
     #[serde(default)]
     pin_sig: Option<String>,
@@ -210,6 +212,7 @@ pub fn verify_stamp_at(
         message_id: wire.message_id.as_deref().unwrap_or(""),
         text: wire.text.as_deref().unwrap_or(""),
         user_id: wire.user_id.as_deref().unwrap_or(""),
+        op_id: wire.op_id.as_deref().unwrap_or(""),
         exp_ms,
     };
     // Signature first: an attacker must not learn expiry rules from forgeries.
@@ -405,6 +408,7 @@ mod tests {
                 message_id: "",
                 text: "x",
                 user_id,
+                op_id: "",
                 exp_ms,
             })
             .unwrap();
@@ -477,6 +481,20 @@ mod tests {
         assert_ne!(dm, tampered);
         assert_eq!(
             verify_stamp_at(&tampered, "discord", Some(&keys), NOW),
+            Err(PinError::BadSignature)
+        );
+    }
+
+    /// regression: p987 review -- `op_id` is MAC-bound: re-labelling a signed
+    /// entry with another producer's op_id (to settle its ack) is refused.
+    #[test]
+    fn op_id_is_bound_into_the_mac() {
+        let keys = test_keys();
+        let signed = signed_entry("chat.send", "", "1", NOW + 60_000);
+        let mut v: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        v["op_id"] = "victim-op-1".into();
+        assert_eq!(
+            verify_stamp_at(&v.to_string(), "discord", Some(&keys), NOW),
             Err(PinError::BadSignature)
         );
     }

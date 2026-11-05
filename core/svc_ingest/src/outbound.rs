@@ -468,12 +468,14 @@ async fn handle_discord_entry<C: DrainControl>(
         );
         return;
     }
-    // Unstamped/forged entries are refused (counted, WARN) and negatively
-    // acked below; they are already popped, so never retried.
-    let result = match check_stamp(raw, "discord", op, pin) {
-        Ok(()) => dispatch_to(sender, &entry.action).await,
-        Err(refused) => Err(refused),
-    };
+    // An entry whose stamp does not verify is NOT authentic: it is dropped
+    // (counted + WARN by `check_stamp`, already popped so never retried) and
+    // gets NO ack -- acking would let an unauthenticated queue writer settle
+    // another producer's `op_id` by reusing it.
+    if check_stamp(raw, "discord", op, pin).is_err() {
+        return;
+    }
+    let result = dispatch_to(sender, &entry.action).await;
     match &result {
         Ok(()) => {}
         Err(err @ SenderError::Unsupported { .. }) => {
@@ -673,6 +675,7 @@ mod tests {
                 message_id: &get("message_id"),
                 text: &get("text"),
                 user_id: &get("user_id"),
+                op_id: &get("op_id"),
                 exp_ms,
             })
             .unwrap();
@@ -1420,6 +1423,7 @@ mod tests {
                     message_id: "",
                     text: "hi",
                     user_id: "",
+                    op_id: "",
                     exp_ms,
                 })
                 .unwrap();
@@ -1461,10 +1465,10 @@ mod tests {
         );
     }
 
-    /// regression: p987 4b -- a Discord entry refused by policy is acked
-    /// negatively with its stable code (producer is not left to time out),
-    /// makes NO REST call, is popped exactly once (never retried), and the
-    /// next valid entry still runs.
+    /// regression: p987 4b -- a Discord entry whose stamp fails is dropped
+    /// and counted, gets NO ack (an unauthenticated writer must not settle
+    /// another producer's op_id), is popped exactly once (never retried),
+    /// and the next valid entry still runs.
     #[tokio::test]
     async fn discord_rejected_entry_is_acked_not_retried_and_loop_continues() {
         use wiremock::matchers::{method, path};
@@ -1494,13 +1498,8 @@ mod tests {
         .await;
         assert_eq!(
             ctl.acks.lock().unwrap().as_slice(),
-            &[
-                (
-                    "forged-1".to_string(),
-                    r#"{"ok":false,"code":"no_pin_sig"}"#.to_string()
-                ),
-                ("del-1".to_string(), r#"{"ok":true}"#.to_string()),
-            ]
+            &[("del-1".to_string(), r#"{"ok":true}"#.to_string())],
+            "a forged entry's op_id must NOT be acked (would settle another producer's op)"
         );
         assert!(
             crate::outbound_pin::refusal_count("discord", "chat.delete", "no_pin_sig") > before
@@ -1534,6 +1533,7 @@ mod tests {
                 message_id: "2",
                 text: "",
                 user_id: "",
+                op_id: "m-1",
                 exp_ms,
             })
             .unwrap();
@@ -1562,7 +1562,7 @@ mod tests {
     }
 
     /// regression: p987 review (HIGH) -- an unsigned `dm.send` is refused
-    /// (`no_pin_sig`, acked to the producer) and makes NO REST call; a signed
+    /// (`no_pin_sig`, NOT acked) and makes NO REST call; a signed
     /// one still goes through.
     #[tokio::test]
     async fn discord_unsigned_dm_send_is_refused_and_never_hits_rest() {
@@ -1585,12 +1585,9 @@ mod tests {
             ))],
         )
         .await;
-        assert_eq!(
-            ctl.acks.lock().unwrap().as_slice(),
-            &[(
-                "dm-9".to_string(),
-                r#"{"ok":false,"code":"no_pin_sig"}"#.to_string()
-            )]
+        assert!(
+            ctl.acks.lock().unwrap().is_empty(),
+            "an unsigned entry carrying an op_id must produce no ack"
         );
         assert!(crate::outbound_pin::refusal_count("discord", "dm.send", "no_pin_sig") > before);
     }

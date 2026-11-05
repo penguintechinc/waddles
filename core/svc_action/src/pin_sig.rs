@@ -64,6 +64,9 @@ pub struct PinFields<'a> {
     pub text: &'a str,
     /// DM target (`dm.send`); `""` otherwise.
     pub user_id: &'a str,
+    /// Producer op id (`""` when none): binds the ack handshake so a signed
+    /// entry cannot be re-labelled to settle another producer's op.
+    pub op_id: &'a str,
     /// Producer deadline, epoch ms (always present; bounds replay).
     pub exp_ms: u64,
 }
@@ -154,6 +157,7 @@ impl PinKeys {
             f.message_id,
             f.text,
             f.user_id,
+            f.op_id,
             exp.as_str(),
         ] {
             // Length-prefixed so field boundaries can never be shifted.
@@ -207,6 +211,7 @@ mod tests {
             message_id: "",
             text: "hi",
             user_id: "",
+            op_id: "",
             exp_ms: 1_700_000_000_000,
         }
     }
@@ -217,7 +222,7 @@ mod tests {
         let k = PinKeys::parse(KEYS, Some("k1")).unwrap();
         assert_eq!(
             k.sign(&fields()).unwrap(),
-            "k1:788fb24d2b87682d6c253fe0d2fa72eb688b1776a581b9ae1d803b730791f935"
+            "k1:1ff2c00b8d4eea50b0371acd512329475b9b4397c49148092c8a34436f62100f"
         );
     }
 
@@ -262,6 +267,10 @@ mod tests {
             },
             PinFields {
                 user_id: "7",
+                ..fields()
+            },
+            PinFields {
+                op_id: "op-1",
                 ..fields()
             },
             PinFields {

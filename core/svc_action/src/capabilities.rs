@@ -1038,6 +1038,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 message_id: get("message_id"),
                 text: get("text"),
                 user_id: get("user_id"),
+                op_id: get("op_id"),
                 exp_ms,
             })
             .map_err(|e| {
@@ -3082,6 +3083,7 @@ mod tests {
                     message_id: "",
                     text,
                     user_id: "",
+                    op_id: "",
                     exp_ms,
                 },
                 sig,
@@ -3106,6 +3108,7 @@ mod tests {
                 ..EnvelopeFields::default()
             },
         );
+        env["op_id"] = serde_json::Value::from("op-7");
         caps.sign_envelope(&mut env).expect("signed");
         let sig = env["pin_sig"].as_str().expect("dm signed").to_string();
         let exp_ms = env["exp_ms"].as_u64().expect("exp stamped");
@@ -3117,9 +3120,15 @@ mod tests {
             message_id: "",
             text: "hi",
             user_id,
+            op_id: "op-7",
             exp_ms,
         };
         assert_eq!(test_pin_keys().verify(&f("42", exp_ms), &sig), Ok(()));
+        let relabelled = PinFields {
+            op_id: "op-8",
+            ..f("42", exp_ms)
+        };
+        assert!(test_pin_keys().verify(&relabelled, &sig).is_err());
         assert!(test_pin_keys().verify(&f("43", exp_ms), &sig).is_err());
         assert!(test_pin_keys().verify(&f("42", exp_ms + 1), &sig).is_err());
     }

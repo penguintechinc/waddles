@@ -99,6 +99,6 @@ Chat entries live 60s (`PIN_TTL_MS`); Discord entries use the ack timeout.
 Deploy **svc_action first, then svc_ingest**, with the queue drained between if possible. The new drain hard-refuses
 anything not signed by the new svc_action: entries queued by a pre-P6a svc_action have no `origin_channel` and are dropped
 with a WARN and counted `svc_ingest_outbound_pin_refused_total{reason="no_origin_pin"}` (stamped-but-unsigned entries from an
-intermediate build: `no_pin_sig`; stamped but without `exp_ms`: `pin_exp_invalid`). A Discord op with an `op_id` is acked `{"ok":false,"code":"<reason>"}` so the producer
-fails fast instead of timing out. On alpha, accept the loss of in-flight chat ops. (The metric label is `no_origin_pin`, not
+intermediate build: `no_pin_sig`; stamped but without `exp_ms`: `pin_exp_invalid`). A Discord entry whose stamp fails verification is dropped and counted but NEVER acked (an unauthenticated
+writer must not settle another producer's `op_id`); the real producer times out. `op_id` is MAC-bound. On alpha, accept the loss of in-flight chat ops. (The metric label is `no_origin_pin`, not
 `missing_origin`.) A refused entry is already popped (`BRPOP`) so it is never retried; there is no poison loop.
