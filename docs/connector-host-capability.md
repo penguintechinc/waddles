@@ -178,8 +178,8 @@ close code, never logged (`SessionEngine`'s `Debug` prints only the held count),
 **Driver:** the heartbeat schedule now follows `Transport::heartbeat_interval()` live. The pump re-reads it after every
 frame and publishes a change over a watch channel; the loop restarts its schedule (first beat one period later). A value
 outside the driver bounds ends the connection (`TransportError`). With the flag OFF everything stays dormant.
-Known limit: the driver still sends the `on-connect` handshake right after the socket opens (before HELLO is read);
-the gateway tolerates an early IDENTIFY/RESUME.
+Handshake ordering: by default the driver sends the `on-connect` handshake right after the socket opens (IRC and
+every transport that does not opt in). `handshake_after: FirstFrame{timeout}` (below) makes it wait for the first frame.
 
 Metrics (`FrameRuleMetrics`, same series): `svc_ingest_transport_frame_rules_total{platform,rule,outcome}` with
 `session_capture` (`stored`/`rejected`), `heartbeat_interval` (`applied`/`rejected`), `directive` and `close_code`
@@ -215,8 +215,49 @@ SessionRules {
 }
 ```
 Plus `slot_prefixes: [r#""token":""#]`, `handles {"discord-bot" -> bot-token connection}` as before. Not covered here
-(explicit): `resume_gateway_url` redirection (a captured value is not used as a connect URL -- would need an SSRF-checked
-URL capture), heartbeat-ACK timeout, the IDENTIFY budget (host-only, unchanged).
+(explicit): the IDENTIFY budget / shard buckets (host-only, unchanged), intents and sharding (see below).
+
+### Gateway gaps closed (P6b gateway gaps): reconnect URL, heartbeat-ACK timeout, handshake ordering
+
+Code: `connector/gateway_rules.rs` (rules + URL validation), wired through `SessionRules`/`SessionEngine`, `ws.rs`, `driver.rs`.
+All three default OFF/empty (= previous behaviour) and are refused at `WsTransport::new` when malformed.
+
+| `SessionRules` field | Behaviour |
+|---|---|
+| `reconnect_url: Option<ReconnectUrlCapture{when, pointer, allowed_hosts, query}>` | Captures the URL the NEXT connect dials (READY `/d/resume_gateway_url`) -- only while a session exists to resume (`session_token_template` renders); otherwise the configured URL. **Validated strictly, rejected never sanitized** (the frame fails with `TransportError::Read`, nothing from it is stored, not even `session_id`): printable ASCII <= 256 B (CR/LF/space/NUL/non-ASCII refused), `wss://` only (`ws://` only to loopback under the test switch), no userinfo, no explicit port, path `/` only, no query/fragment, no trailing dot, host in the host-pinned `allowed_hosts` (exact, or `*.suffix` with a >= 2-label suffix and a non-numeric TLD -- `*.gg`, `*`, `*.0.1` refused; an IP literal only matches an exact entry). The host-configured `query` (`[A-Za-z0-9=&._-]`, e.g. `v=10&encoding=json`) is appended afterwards. A guest or frame can never choose the scheme, port, path or query. |
+| SSRF guard on the reconnect dial | The accepted URL still goes through the same `resolve_pinned` (`bundle_host_http::guarded`, #989) as the configured one: every resolved address must pass the denylist (or be in `egress_allow`) and the connection is pinned to it. A refusal drops the session (`SessionEngine::clear`) so the next attempt is a fresh IDENTIFY on the configured URL -- logged (WARN, no URL) and counted `reconnect_url`/`refused_cleared`. A plain network failure keeps the session and retries (same URL) under driver backoff. |
+| cleared on fresh identify | `ReconnectFresh` (op 9 d=false, close 4007/4009) and `clear()` drop the URL with the session state. |
+| `heartbeat_ack: Option<HeartbeatAck{when, max_unacked}>` | Zombie-connection rule. Each heartbeat sent increments an unacked counter; a frame matching `when` (op 11) resets it. When a heartbeat is due with `max_unacked` (1..=3; 1 = Discord) already outstanding it is NOT sent: the transport returns `TransportError::Send("heartbeat ack timeout")`, the driver ends the connection (non-fatal -> reconnect under backoff, session state KEPT so the next connect RESUMEs on the reconnect URL). The socket is closed with code **4000** (never 1000/1001, which invalidate a gateway session) under a `connect_timeout` bound (a zombie peer never answers a close). Needs the driver heartbeat flag (`ingest.connector-heartbeat`) ON. Metric `svc_ingest_transport_heartbeat_ack_timeout_total{platform}` |
+| `handshake_after: HandshakeAfter::{Connect (default), FirstFrame{timeout}}` | `FirstFrame`: the driver (via `Transport::handshake_after_first_frame`) calls `on-connect`, then reads ONE frame bounded by `timeout` (100 ms..=60 s) -- the transport applies its captures (heartbeat interval, session state) -- then sends the handshake, then processes that frame normally (`on-frame`, `on_frame_outcome`) so HELLO still reaches the guest. Timeout / close / read error before the first frame: NOTHING is sent (no IDENTIFY, no secret resolved), `ConnectionEnd::HandshakeFailed` (a fatal read parks), WARN, `svc_ingest_connector_connects_total{outcome="first_frame_timeout"}`. |
+| `jitter_first_heartbeat: bool` | The first heartbeat of a connection is delayed by a random fraction `[0,1)` of the interval (Discord HELLO jitter) instead of a full period; later schedules unchanged. |
+
+Metrics added: `svc_ingest_transport_heartbeat_ack_timeout_total{platform}`; `frame_rules_total` gains rule `reconnect_url`
+(`stored`/`rejected`/`used`/`refused_cleared`). Residual, deliberate: the secret **destination** for the credential slot stays the
+CONFIGURED gateway host (the provider-approved destination); the resume host is trusted only as far as the host-pinned
+`allowed_hosts` + SSRF guard, so the RESUME payload (which carries the token) goes over TLS to an allow-listed host only.
+
+Discord host config additions (to the example above; `allowed_hosts` is the platform's declared egress allow-list):
+
+```rust
+SessionRules {
+    // ... captures/heartbeat/directives/close_codes/session_token_template/default_heartbeat as above ...
+    reconnect_url: Some(ReconnectUrlCapture {
+        when: FrameMatch::Json(vec![op(0), ("/t".into(), Scalar::Str("READY".into()))]),
+        pointer: "/d/resume_gateway_url".into(),
+        allowed_hosts: vec!["*.discord.gg".into()],
+        query: "v=10&encoding=json".into(),
+    }),
+    heartbeat_ack: Some(HeartbeatAck { when: FrameMatch::Json(vec![op(11)]), max_unacked: 1 }),
+    handshake_after: HandshakeAfter::FirstFrame { timeout: Duration::from_secs(10) },
+    jitter_first_heartbeat: true,
+}
+```
+
+Intents / sharding (documented, deliberately not built): the overlay sends `GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT` = 33281
+in IDENTIFY exactly like the hardcoded gateway (`bundles/rust/discord/README.md` parity table); no `shard` field is sent (single
+shard, Discord's default), so `shard_id % max_concurrency` identify buckets and `session_start_limit` are host-only
+fleet concerns that stay with the IDENTIFY budget. Multi-shard operation would need a per-shard host config (one `WsConfig`
+per shard + a shard slot in the IDENTIFY template) -- not required for the current single-bot deployment.
 
 ### Poll: `PollConfig.lifecycle: PollLifecycle`
 

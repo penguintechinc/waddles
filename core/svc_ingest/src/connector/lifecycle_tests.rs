@@ -157,6 +157,7 @@ fn discord_rules() -> SessionRules {
         session_token_template: Some(r#"{"session_id":"{{SESSION_ID}}","seq":{{SEQ}}}"#.into()),
         default_heartbeat: Some(r#"{"op":1,"d":{{SEQ|null}}}"#.into()),
         host_owned_heartbeat: true,
+        ..SessionRules::default()
     }
 }
 

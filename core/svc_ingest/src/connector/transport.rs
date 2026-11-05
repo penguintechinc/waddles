@@ -152,6 +152,23 @@ pub trait Transport: Send {
         ))
     }
 
+    /// `Some(wait)` = the driver must NOT send the on-connect handshake right
+    /// after connecting: it first reads one frame (bounded by `wait`, a
+    /// timeout fails the connection loudly), lets the transport apply that
+    /// frame's captures, sends the handshake, and only then processes the
+    /// frame normally (gateway HELLO -> IDENTIFY/RESUME). `None` (default) =
+    /// handshake immediately, the historical behaviour.
+    fn handshake_after_first_frame(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Whether the FIRST heartbeat of a connection is delayed by a random
+    /// fraction of the interval (gateway HELLO jitter) rather than one full
+    /// period. Default `false`.
+    fn first_heartbeat_jitter(&self) -> bool {
+        false
+    }
+
     /// Closes the connection; best effort, called on every teardown path.
     async fn close(&mut self, reason: &str);
 

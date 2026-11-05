@@ -43,6 +43,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use super::driver::{MAX_HEARTBEAT_INTERVAL, MIN_HEARTBEAT_INTERVAL};
+use super::gateway_rules::{
+    validate_reconnect_url, HandshakeAfter, HeartbeatAck, ReconnectUrlCapture,
+};
 
 /// Most capture rules one transport may declare.
 pub const MAX_CAPTURES: usize = 8;
@@ -80,6 +83,10 @@ pub enum LifecycleError {
     /// A heartbeat capture matched but its value is not an in-range interval.
     #[error("captured heartbeat interval rejected (not a number or out of range)")]
     BadHeartbeat,
+    /// A reconnect-URL capture matched but the URL failed strict validation
+    /// (scheme, userinfo, port, path, charset or host allow-list).
+    #[error("captured reconnect url rejected")]
+    BadReconnectUrl,
 }
 
 /// A scalar a JSON field is compared against.
@@ -192,6 +199,16 @@ pub struct SessionRules {
     /// Ignore the connector's heartbeat body and always send
     /// `default_heartbeat` (the guest cannot see the live sequence).
     pub host_owned_heartbeat: bool,
+    /// Validated capture of the URL the next reconnect must dial (Discord
+    /// `resume_gateway_url`); `None` = always dial the configured URL.
+    pub reconnect_url: Option<ReconnectUrlCapture>,
+    /// Heartbeat-ACK timeout (zombie-connection rule); `None` = off.
+    pub heartbeat_ack: Option<HeartbeatAck>,
+    /// When the on-connect handshake is sent (default: right after connect).
+    pub handshake_after: HandshakeAfter,
+    /// Delay the FIRST heartbeat of a connection by a random fraction of the
+    /// interval (Discord's HELLO jitter) instead of a full period.
+    pub jitter_first_heartbeat: bool,
 }
 
 /// What one frame did to the session.
@@ -203,9 +220,13 @@ pub struct Observation {
     pub action: Option<LifecycleAction>,
     /// Values stored by captures.
     pub captured: usize,
+    /// A new reconnect URL passed validation and was stored.
+    pub reconnect_url: bool,
+    /// The frame was a heartbeat acknowledgement.
+    pub acked: bool,
 }
 
-fn pointer_ok(p: &str) -> bool {
+pub(super) fn pointer_ok(p: &str) -> bool {
     p.starts_with('/')
         && p.len() <= MAX_POINTER_LEN
         && p.bytes().all(|b| (0x20..=0x7e).contains(&b))
@@ -226,7 +247,7 @@ fn value_ok(v: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._:/+=-".contains(&b))
 }
 
-fn match_ok(m: &FrameMatch) -> bool {
+pub(super) fn match_ok(m: &FrameMatch) -> bool {
     match m {
         FrameMatch::Json(conds) => {
             !conds.is_empty()
@@ -347,6 +368,12 @@ pub struct SessionEngine {
     declared: Vec<String>,
     state: HashMap<String, String>,
     needs_json: bool,
+    /// Validated reconnect URL (never a captured-state value: it has its own
+    /// stricter validation and is dropped with the session).
+    reconnect_url: Option<String>,
+    /// Heartbeats sent on this connection and not yet acknowledged.
+    unacked: u8,
+    allow_loopback_insecure: bool,
 }
 
 impl std::fmt::Debug for SessionEngine {
@@ -355,6 +382,7 @@ impl std::fmt::Debug for SessionEngine {
         f.debug_struct("SessionEngine")
             .field("rules", &self.rules)
             .field("held", &self.state.len())
+            .field("has_reconnect_url", &self.reconnect_url.is_some())
             .finish()
     }
 }
@@ -362,6 +390,23 @@ impl std::fmt::Debug for SessionEngine {
 impl SessionEngine {
     /// Validates the rules; any malformed rule is refused (fail loud).
     pub fn new(rules: SessionRules) -> Result<Self, LifecycleError> {
+        Self::new_with(rules, false)
+    }
+
+    /// As [`Self::new`]; `allow_loopback_insecure` (tests only, mirrors
+    /// `WsConfig.allow_loopback_insecure`) lets a captured reconnect URL be a
+    /// loopback `ws://` address.
+    pub fn new_with(
+        rules: SessionRules,
+        allow_loopback_insecure: bool,
+    ) -> Result<Self, LifecycleError> {
+        if let Some(r) = &rules.reconnect_url {
+            r.validate()?;
+        }
+        if let Some(a) = &rules.heartbeat_ack {
+            a.validate()?;
+        }
+        rules.handshake_after.validate()?;
         if rules.captures.len() > MAX_CAPTURES
             || rules.directives.len() > MAX_DIRECTIVES
             || rules.close_codes.len() > MAX_CLOSE_RULES
@@ -421,12 +466,17 @@ impl SessionEngine {
             .map(|c| &c.when)
             .chain(rules.heartbeat.iter().map(|h| &h.when))
             .chain(rules.directives.iter().map(|d| &d.when))
+            .chain(rules.reconnect_url.iter().map(|r| &r.when))
+            .chain(rules.heartbeat_ack.iter().map(|a| &a.when))
             .any(|m| matches!(m, FrameMatch::Json(_)));
         Ok(Self {
             rules,
             declared: names,
             state: HashMap::new(),
             needs_json,
+            reconnect_url: None,
+            unacked: 0,
+            allow_loopback_insecure,
         })
     }
 
@@ -445,11 +495,45 @@ impl SessionEngine {
             && self.rules.close_codes.is_empty()
             && self.rules.default_heartbeat.is_none()
             && self.rules.session_token_template.is_none()
+            && self.rules.reconnect_url.is_none()
+            && self.rules.heartbeat_ack.is_none()
     }
 
     /// Drops every captured value (identify-fresh).
     pub fn clear(&mut self) {
         self.state.clear();
+        self.reconnect_url = None;
+    }
+
+    /// Per-connection reset: nothing is unacknowledged on a new socket.
+    pub fn begin_connection(&mut self) {
+        self.unacked = 0;
+    }
+
+    /// The validated URL the next connect must dial, when a session exists
+    /// to resume (with a token template, only if it renders). `None` = dial
+    /// the configured URL (a fresh identify).
+    #[must_use]
+    pub fn reconnect_target(&self) -> Option<&str> {
+        let url = self.reconnect_url.as_deref()?;
+        if self.has_token_template() && self.render_session_token().is_none() {
+            return None;
+        }
+        Some(url)
+    }
+
+    /// Notes that a heartbeat is due. `false` = the connection is dead: the
+    /// previous heartbeat(s) were never acknowledged (nothing is sent).
+    /// Always `true` when no `heartbeat_ack` rule is configured.
+    pub fn heartbeat_due(&mut self) -> bool {
+        let Some(rule) = &self.rules.heartbeat_ack else {
+            return true;
+        };
+        if self.unacked >= rule.max_unacked {
+            return false;
+        }
+        self.unacked += 1;
+        true
     }
 
     /// Number of values currently held (never the values).
@@ -531,9 +615,37 @@ impl SessionEngine {
                 }
             }
         }
+        let mut staged_url: Option<String> = None;
+        if let Some(r) = &self.rules.reconnect_url {
+            if matches(&r.when) {
+                match json.as_ref().and_then(|j| j.pointer(&r.pointer)) {
+                    None | Some(serde_json::Value::Null) => {}
+                    Some(serde_json::Value::String(raw)) => {
+                        staged_url = Some(validate_reconnect_url(
+                            raw,
+                            r,
+                            self.allow_loopback_insecure,
+                        )?);
+                    }
+                    Some(_) => return Err(LifecycleError::BadReconnectUrl),
+                }
+            }
+        }
+        if let Some(a) = &self.rules.heartbeat_ack {
+            if matches(&a.when) {
+                obs.acked = true;
+            }
+        }
         obs.captured = staged.len();
         for (k, v) in staged {
             self.state.insert(k, v);
+        }
+        if let Some(u) = staged_url {
+            self.reconnect_url = Some(u);
+            obs.reconnect_url = true;
+        }
+        if obs.acked {
+            self.unacked = 0;
         }
         obs.action = self
             .rules
