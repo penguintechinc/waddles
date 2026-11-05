@@ -81,6 +81,7 @@ pub mod hop;
 pub mod host_api;
 pub mod http;
 pub mod metrics_facade;
+pub mod pin_sig;
 pub mod retry;
 pub mod senders;
 pub mod stage_metrics;
@@ -909,6 +910,13 @@ async fn build_stage_capabilities(
     // default OFF (unseen/absent => inline path); this is the only
     // production wiring that makes the dispatcher path reachable.
     let caps = caps.with_egress_dispatcher_flag(flags::egress_dispatcher_flag());
+    // Outbound `pin_sig` signing keys (dedicated `OUTBOUND_PIN_KEYS`). Missing/invalid => ERROR and every
+    // chat relay op is refused loudly (`relay_unavailable`), never sent
+    // unsigned: the drain would drop it anyway.
+    let caps = match resolve_outbound_pin_keys() {
+        Some(keys) => caps.with_outbound_pin_keys(keys),
+        None => caps,
+    };
     // `tool.invoke` (bundle-MCP-tools P3b): resolves targets against the live
     // active-version snapshot and runs the nested invoke on whichever executor
     // connection is active at call time.
@@ -917,6 +925,28 @@ async fn build_stage_capabilities(
         snapshot: app_version_snapshot,
     });
     Some(Arc::new(caps))
+}
+
+/// Loads the outbound `pin_sig` signing keys from the DEDICATED
+/// `OUTBOUND_PIN_KEYS` (`kid:hexkey[,...]`) and `OUTBOUND_PIN_ACTIVE_KID`
+/// (mounted only into svc-action + svc-ingest, never the shared binding-key
+/// ring); logs ERROR (no key material) and returns `None` when either is
+/// missing/invalid, in which case every chat relay op is refused loudly.
+fn resolve_outbound_pin_keys() -> Option<pin_sig::PinKeys> {
+    let Ok(raw) = std::env::var("OUTBOUND_PIN_KEYS") else {
+        tracing::error!(
+            "OUTBOUND_PIN_KEYS not set; relay chat.send/chat.delete/dm.send will be refused (relay_unavailable)"
+        );
+        return None;
+    };
+    let active = std::env::var("OUTBOUND_PIN_ACTIVE_KID").ok();
+    match pin_sig::PinKeys::parse(&raw, active.as_deref()) {
+        Ok(keys) => Some(keys),
+        Err(err) => {
+            tracing::error!(error = %err, "outbound pin signing keys unusable (check OUTBOUND_PIN_KEYS / OUTBOUND_PIN_ACTIVE_KID); relay ops will be refused");
+            None
+        }
+    }
 }
 
 /// Starts the host-API mTLS listener as its own background task and
