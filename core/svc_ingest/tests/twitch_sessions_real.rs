@@ -206,6 +206,7 @@ impl ConnectionResolve for Hub {
                 access_token: SecretString::new(b.token),
             },
             expires_at: b.expires_at,
+            metadata: Default::default(),
         })
     }
 

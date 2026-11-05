@@ -94,8 +94,31 @@ entries are refused loudly, never guessed at).
 Refusals surface as `SenderError::Rejected`, bump `svc_ingest_outbound_pin_refused_total{platform,op,reason}`
 and log a PII-free WARN (platform/op/reason only -- never a channel, id or message text).
 Bundles only ever supply message content. Tests: `cargo test --lib outbound` (regression tests named
-`*unpinned*`/`*regression_p0*`). Follow-up (not in this change): per-community credential resolution via
-`connection_resolver` replacing the single process-wide Twitch bot identity.
+`*unpinned*`/`*regression_p0*`).
+
+## Per-community Twitch outbound credentials (`src/outbound_creds.rs`)
+
+Design: `docs/superpowers/specs/2026-11-02-per-tenant-bot-credentials.md`. Replaces the single process-wide
+Twitch bot identity on the outbound drain.
+
+- `svc_action` stamps the invoke scope's NUMERIC `community_id` on each queued `chat.send` (never bundle input).
+- On **every send** the drain resolves that community's own twitch connection via `connection_resolver`
+  (binding list -> the community's binding that owns the pinned channel -> `resolve`), asserts the answer is the
+  same community/connection/provider/OAuth kind, and uses the token once. The secret is **never cached**
+  (`SecretString`, zeroizing, redacted `Debug`); keys are numeric ids, never slug/name.
+- Failure is loud and typed, with NO fallback credential (`CredError` -> `SenderError::Rejected`/`Failed`,
+  stable reason in the ack): `no_community_scope`, `no_connection`, `channel_not_owned` (incl. a channel
+  claimed by another community), `connection_not_usable`, `credential_unavailable` (retryable, `Failed`).
+- Telemetry: `svc_ingest_outbound_credential_resolve_total{platform,outcome}`, PII-free logs (community id +
+  reason only; never token/login/channel/text); resolver hub-api calls keep their own spans/metrics.
+- **Switch / migration:** governed by the existing `waddles.ingest-dynamic-connections` flag (env baseline
+  `INGEST_DYNAMIC_CONNECTIONS`, default OFF). ON = per-community (misconfig is a fatal startup error; a set
+  `TWITCH_IRC_OAUTH_TOKEN` is ignored with a WARN). OFF = the LEGACY single-identity path
+  (`StaticCredentialSource`, needs `TWITCH_IRC_NICK`+`TWITCH_IRC_OAUTH_TOKEN`, else the drain does not start and
+  logs why) -- single-tenant dev only; removed when the flag is retired. The two are never mixed per call.
+- Known follow-up: each send pages the (non-secret) binding list; a community-filtered hub-api endpoint or a
+  short-TTL cache of non-secret binding metadata would cut that cost. Secrets stay uncached regardless.
+- Tests: `cargo test -p svc-ingest --lib outbound` (regressions tagged `p6a-t6b`).
 
 ### Provenance: who can write the outbound queue (`src/pin_sig.rs`)
 
