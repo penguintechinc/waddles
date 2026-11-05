@@ -230,6 +230,9 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .register(Box::new(discord_permissions_total.clone()))
         .expect("register svc_ingest_discord_permissions_total");
 
+    crate::outbound_pin::register_metrics(registry)
+        .expect("register svc_ingest_outbound_pin_refused_total");
+
     let eventsub_verifications_total = prometheus::IntCounterVec::new(
         prometheus::Opts::new(
             "svc_ingest_eventsub_verifications_total",
