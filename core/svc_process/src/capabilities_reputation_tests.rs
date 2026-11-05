@@ -61,6 +61,9 @@ impl RecordingStore {
     fn answer(&self, r: Result<i64, ReputationError>) {
         *self.next.lock().unwrap() = Some(r);
     }
+    fn answer_unit(&self, r: Result<(), ReputationError>) {
+        *self.next_unit.lock().unwrap() = Some(r);
+    }
     fn call_count(&self) -> usize {
         self.calls.lock().unwrap().len()
     }
@@ -930,6 +933,67 @@ async fn adjust_many_refuses_the_whole_batch_when_any_item_is_denied() {
         "user_not_in_scope"
     );
     assert_eq!(f.store.ext_count(), 0, "nothing reached the store");
+}
+
+/// regression: #983 review -- a batch refused at a LATER item must hand back the
+/// gate quota already consumed by its earlier (authorized) items, or a caller
+/// can burn a member's daily budget with batches that never apply.
+#[tokio::test]
+async fn a_refused_batch_refunds_the_quota_its_earlier_items_consumed() {
+    let f = ext_fixture(admin_grants()); // per-user daily cap 5, per-call bound 5
+    for _ in 0..20 {
+        assert_eq!(
+            code_of(
+                &f,
+                "reputation.adjust_many",
+                serde_json::json!({
+                    "adjustments": [
+                        {"user": f.member.to_string(), "delta": 5},
+                        {"user": f.other.to_string(), "delta": 6}, // out of bounds
+                    ],
+                    "reason": "r",
+                })
+            )
+            .await,
+            "delta_out_of_bounds"
+        );
+    }
+    // The member's full daily budget is still intact.
+    f.caps
+        .handle(rep_call(
+            "reputation.adjust_many",
+            serde_json::json!({
+                "adjustments": [{"user": f.member.to_string(), "delta": 5}],
+                "reason": "r",
+            }),
+        ))
+        .await
+        .expect("budget must not have been burned by refused batches");
+    assert_eq!(f.store.ext_count(), 1);
+}
+
+/// A batch whose items all pass the gate but which the store definitively
+/// refuses (all-or-nothing, nothing applied) also hands its quota back.
+#[tokio::test]
+async fn a_batch_the_store_refuses_outright_refunds_its_quota() {
+    let f = ext_fixture(admin_grants());
+    let body = |u: Uuid| {
+        serde_json::json!({
+            "adjustments": [{"user": u.to_string(), "delta": 5}], "reason": "r",
+        })
+    };
+    for _ in 0..20 {
+        f.store.answer_unit(Err(ReputationError::NotAMember));
+        assert_eq!(
+            code_of(&f, "reputation.adjust_many", body(f.member)).await,
+            "not_a_member"
+        );
+    }
+    f.store.answer_unit(Ok(()));
+    f.caps
+        .handle(rep_call("reputation.adjust_many", body(f.member)))
+        .await
+        .expect("budget intact after store refusals");
 }
 
 #[tokio::test]

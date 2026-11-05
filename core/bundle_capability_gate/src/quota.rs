@@ -58,6 +58,19 @@ impl Window {
     fn record(&mut self, now: Instant, amount: i64) {
         self.entries.push((now, amount));
     }
+
+    /// Removes the most recent entry of exactly `amount` (a refund of one
+    /// earlier consumption). Returns whether one was found -- an entry that
+    /// already aged out of the window needs no refund.
+    fn unrecord(&mut self, amount: i64) -> bool {
+        match self.entries.iter().rposition(|(_, a)| *a == amount) {
+            Some(i) => {
+                self.entries.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// Checks and, on success, consumes one unit of a permission's quota for a
@@ -90,6 +103,22 @@ pub trait QuotaLedger: Send + Sync {
         window: Duration,
         amount: i64,
     ) -> Result<(), QuotaDenial>;
+
+    /// Hands back one earlier successful [`Self::check_and_consume`] of exactly
+    /// `amount` (same `key`/`canonical_permission_id`) -- for a multi-item
+    /// call refused after some of its items were already authorized, so the
+    /// refusal does not burn quota for work that never applied. A no-op when
+    /// the consumption already aged out of its window.
+    fn refund(&self, key: &GrantScopeKey, canonical_permission_id: &str, amount: i64);
+
+    /// The per-target-user counterpart of [`Self::refund`].
+    fn refund_per_user(
+        &self,
+        key: &GrantScopeKey,
+        canonical_permission_id: &str,
+        target_user: uuid::Uuid,
+        amount: i64,
+    );
 }
 
 /// A single-process, in-memory [`QuotaLedger`] -- sufficient for gate-level
@@ -183,9 +212,49 @@ impl QuotaLedger for InMemoryQuotaLedger {
             .or_insert_with(|| Mutex::new(Window::new(window)));
         Self::check_window(entry, window, max_abs_total, amount)
     }
+
+    fn refund(&self, key: &GrantScopeKey, canonical_permission_id: &str, amount: i64) {
+        self.refund_impl(key, canonical_permission_id, amount);
+    }
+
+    fn refund_per_user(
+        &self,
+        key: &GrantScopeKey,
+        canonical_permission_id: &str,
+        target_user: uuid::Uuid,
+        amount: i64,
+    ) {
+        let map_key = (
+            key.clone(),
+            canonical_permission_id.to_string(),
+            target_user,
+        );
+        let existing = self
+            .user_windows
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = existing.get(&map_key) {
+            entry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unrecord(amount);
+        }
+    }
 }
 
 impl InMemoryQuotaLedger {
+    /// Poisoned locks are recovered (the window data is plain counters): a
+    /// refund must never panic the host.
+    fn refund_impl(&self, key: &GrantScopeKey, canonical_permission_id: &str, amount: i64) {
+        let mut windows = self
+            .scope_windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(w) = windows.get_mut(&(key.clone(), canonical_permission_id.to_string())) {
+            w.unrecord(amount);
+        }
+    }
+
     fn check_window(
         entry: &Mutex<Window>,
         window: Duration,
@@ -243,6 +312,34 @@ mod tests {
             ledger.check_and_consume(&key(), "overlay.media", &quota, 1),
             Err(QuotaDenial::RateLimited)
         );
+    }
+
+    #[test]
+    fn refund_hands_back_exactly_one_consumption_scope_and_per_user() {
+        let ledger = InMemoryQuotaLedger::new();
+        let quota = Quota::ReputationDelta {
+            per_call_abs_max: 5,
+            per_user_daily_abs_max: 5,
+            per_scope_daily_abs_max: 5,
+        };
+        let user = uuid::Uuid::new_v4();
+        let day = Duration::from_secs(86_400);
+        let id = "reputation.community.write";
+        ledger.check_and_consume(&key(), id, &quota, 5).unwrap();
+        ledger
+            .check_and_consume_per_user(&key(), id, user, 5, day, 5)
+            .unwrap();
+        // Exhausted both.
+        assert!(ledger.check_and_consume(&key(), id, &quota, 1).is_err());
+        ledger.refund(&key(), id, 5);
+        ledger.refund_per_user(&key(), id, user, 5);
+        assert!(ledger.check_and_consume(&key(), id, &quota, 5).is_ok());
+        assert!(ledger
+            .check_and_consume_per_user(&key(), id, user, 5, day, 5)
+            .is_ok());
+        // Refunding something never consumed is a harmless no-op.
+        ledger.refund(&key(), "never.used", 3);
+        ledger.refund_per_user(&key(), "never.used", user, 3);
     }
 
     /// Quota-exhaustion regression: a scope-level aggregate cap (spec SS7.3's

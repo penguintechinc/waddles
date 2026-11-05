@@ -307,6 +307,26 @@ impl CapabilityGate {
 }
 
 impl CapabilityGate {
+    /// Hands back the quota a previously AUTHORIZED reputation delta call
+    /// consumed -- for a multi-item caller (`adjust_many`) that must refuse the
+    /// whole batch after some items already passed [`Self::authorize`]. Only
+    /// `ReputationScoped` calls carrying a delta consumed per-user/aggregate
+    /// quota; any other `resource` is a no-op. `permission`/`resource` must be
+    /// exactly what was authorized.
+    pub fn refund(&self, scope: &InvokeScope, permission: PermissionId, resource: &ResourceRef) {
+        let ResourceRef::ReputationScoped(target) = resource else {
+            return;
+        };
+        let (Some(delta), Some(user)) = (target.delta, target.target_user) else {
+            return;
+        };
+        let key = GrantScopeKey::from_scope(scope);
+        let canonical_id = permission.canonical_id();
+        self.quota
+            .refund_per_user(&key, &canonical_id, user, i64::from(delta));
+        self.quota.refund(&key, &canonical_id, i64::from(delta));
+    }
+
     /// The `economy.*` quota step of [`Self::authorize`] (issue #714).
     ///
     /// A call with no metered amount (a read, or `economy.wager`'s `max-bet`)

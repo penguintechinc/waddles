@@ -1458,6 +1458,23 @@ impl<K: KvBackend> StageCapabilities<K> {
             .map_err(denied_from_gate)
     }
 
+    /// Hands back the gate quota consumed by `items` (each authorized as a
+    /// capped `reputation.community.write` delta) because the batch they
+    /// belonged to did not apply.
+    fn refund_adjust_many(&self, items: &[(uuid::Uuid, i32)]) {
+        for (user, delta) in items {
+            self.gate.refund(
+                &self.gate_scope(),
+                PermissionId::ReputationCommunityWrite,
+                &ResourceRef::ReputationScoped(ReputationTarget {
+                    target_user: Some(*user),
+                    scope_kind: ScopeKind::Community,
+                    delta: Some(*delta),
+                }),
+            );
+        }
+    }
+
     /// `reputation.override` / `adjust_many` / `get_many` / `leaderboard`
     /// (bundle-MCP-tools P5 Task 1), the host-cap ops that sit beside
     /// `get`/`adjust`. Same fail-loud order as [`Self::handle_reputation`]:
@@ -1639,12 +1656,17 @@ impl<K: KvBackend> StageCapabilities<K> {
                 None,
             )?,
             Op::AdjustMany { items, .. } => {
-                for (user, delta) in items {
-                    self.authorize_reputation(
+                for (i, (user, delta)) in items.iter().enumerate() {
+                    if let Err(denial) = self.authorize_reputation(
                         PermissionId::ReputationCommunityWrite,
                         Some(*user),
                         Some(*delta),
-                    )?;
+                    ) {
+                        // All-or-nothing: the batch is refused, so hand back the
+                        // quota the earlier, already-authorized items consumed.
+                        self.refund_adjust_many(&items[..i]);
+                        return Err(denial);
+                    }
                 }
             }
             Op::GetMany(users) => {
@@ -1735,6 +1757,14 @@ impl<K: KvBackend> StageCapabilities<K> {
             (reservation, &result)
         {
             invocation.release_mutation(kind, ordinal);
+        }
+        // The store's batch is all-or-nothing: a DEFINITIVE refusal (anything but
+        // an indeterminate backend failure) applied nothing, so its gate quota is
+        // handed back. A backend failure may have committed -- keep it consumed.
+        if let (Op::AdjustMany { items, .. }, Err(e)) = (&op, &result) {
+            if !matches!(e, ReputationError::Backend(_)) {
+                self.refund_adjust_many(items);
+            }
         }
         result.map_err(reputation_error_to_host)
     }
