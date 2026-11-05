@@ -1790,20 +1790,32 @@ mod tests {
         );
     }
 
+    /// A connection to the real Valkey (`VALKEY_URL`, provided by the
+    /// svc-ingest CI job like the other real-Valkey suites). Unset FAILS,
+    /// never skips.
+    async fn real_valkey() -> (redis::Client, String) {
+        let url = std::env::var("VALKEY_URL")
+            .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
+        let prefix = format!(
+            "outbound:seen:test-{}-{}",
+            std::process::id(),
+            OP_SEQ.fetch_add(1, Ordering::SeqCst)
+        );
+        (redis::Client::open(url).unwrap(), prefix)
+    }
+
     /// Real-Valkey proof of the atomic `SET NX PX` claim: first claim wins, the
-    /// duplicate loses, the key carries the PX ttl, and expiry frees it.
-    /// `#[ignore]`d for plain `cargo test` (no Valkey); run explicitly with
-    /// `WADDLES_TEST_VALKEY_URL=redis://127.0.0.1:<port>/ cargo test -- --ignored
-    /// real_valkey` (it FAILS, never skips, if the URL is unset).
+    /// duplicate loses, the key carries the PX ttl, expiry frees it, and 32
+    /// concurrent claimers of one key produce EXACTLY ONE winner. Runs in CI
+    /// (svc-ingest job sets `VALKEY_URL`); the racer/winner counts are
+    /// asserted so a vacuous run cannot pass.
     #[tokio::test]
-    #[ignore = "needs a real Valkey: set WADDLES_TEST_VALKEY_URL and run with --ignored"]
     async fn real_valkey_replay_guard_is_atomic_single_use_with_ttl() {
-        let url = std::env::var("WADDLES_TEST_VALKEY_URL")
-            .expect("WADDLES_TEST_VALKEY_URL must be set for the real-Valkey test");
-        let client = redis::Client::open(url).unwrap();
+        const RACERS: usize = 32;
+        let (client, prefix) = real_valkey().await;
         let guard =
             ValkeyReplayGuard::new(client.get_multiplexed_async_connection().await.unwrap());
-        let key = format!("outbound:seen:test:{}", super::now_ms());
+        let key = format!("{prefix}:a");
         assert!(guard.claim(&key, 400).await.unwrap(), "first claim wins");
         assert!(!guard.claim(&key, 400).await.unwrap(), "duplicate loses");
         let mut conn = client.get_multiplexed_async_connection().await.unwrap();
@@ -1818,32 +1830,92 @@ mod tests {
             guard.claim(&key, 400).await.unwrap(),
             "expired key is claimable"
         );
-        // 32 concurrent claimers of one key: exactly one winner.
-        let race = format!("{key}:race");
+        let race = format!("{prefix}:race");
         let g = std::sync::Arc::new(guard);
-        let mut tasks = Vec::new();
-        for _ in 0..32 {
-            let (g, k) = (g.clone(), race.clone());
-            tasks.push(tokio::spawn(
-                async move { g.claim(&k, 5_000).await.unwrap() },
-            ));
-        }
+        let tasks: Vec<_> = (0..RACERS)
+            .map(|_| {
+                let (g, k) = (g.clone(), race.clone());
+                tokio::spawn(async move { g.claim(&k, 5_000).await.unwrap() })
+            })
+            .collect();
+        assert_eq!(tasks.len(), RACERS, "denominator: all racers started");
         let mut winners = 0;
+        let mut finished = 0;
         for t in tasks {
+            finished += 1;
             if t.await.unwrap() {
                 winners += 1;
             }
         }
-        assert_eq!(winners, 1);
+        assert_eq!(
+            (finished, winners),
+            (RACERS, 1),
+            "exactly one winner of {RACERS}"
+        );
         let _: () = redis::cmd("DEL")
             .arg(&race)
             .arg(&key)
             .query_async(&mut conn)
             .await
             .unwrap();
-        // A dead server is an Err (the fail-closed input), never Ok(true).
-        let dead = redis::Client::open("redis://127.0.0.1:1/").unwrap();
-        assert!(dead.get_multiplexed_async_connection().await.is_err());
+    }
+
+    /// Real-Valkey fail-closed: when the connection to Valkey dies (a TCP proxy
+    /// in front of it is killed after connect) `claim` returns Err and
+    /// `claim_once` yields a typed `Failed` -- never a pass-through. Uses a
+    /// private proxy so the shared CI Valkey is untouched.
+    #[tokio::test]
+    async fn real_valkey_outage_fails_closed() {
+        let (client, prefix) = real_valkey().await;
+        let info = client.get_connection_info().clone();
+        let addr = info.addr().to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let upstream = addr.trim_start_matches("redis://").to_string();
+        let proxy = tokio::spawn(async move {
+            // Owned by this task: aborting the proxy drops the set and so
+            // aborts every proxied connection too.
+            let mut conns = tokio::task::JoinSet::new();
+            loop {
+                let Ok((mut inbound, _)) = listener.accept().await else {
+                    return;
+                };
+                let upstream = upstream.clone();
+                conns.spawn(async move {
+                    if let Ok(mut out) = tokio::net::TcpStream::connect(&upstream).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut out).await;
+                    }
+                });
+            }
+        });
+        let via = redis::Client::open(format!("redis://{proxy_addr}/")).unwrap();
+        let guard = ValkeyReplayGuard::new(
+            connect_with_response_timeout(&via, Duration::from_millis(500))
+                .await
+                .unwrap(),
+        );
+        let stamp = VerifiedStamp {
+            replay_digest: format!("{prefix}-outage"),
+            ttl_ms: 5_000,
+        };
+        // Healthy path through the proxy: first sight executes.
+        assert!(claim_once(&guard, "discord", "chat.send", &stamp)
+            .await
+            .is_ok());
+        // Kill the proxy and every proxied connection.
+        proxy.abort();
+        let _ = proxy.await;
+        let before = crate::outbound_pin::replay_check_failed_count("discord", "chat.send");
+        let stamp2 = VerifiedStamp {
+            replay_digest: format!("{prefix}-outage2"),
+            ttl_ms: 5_000,
+        };
+        let res = claim_once(&guard, "discord", "chat.send", &stamp2).await;
+        assert!(
+            matches!(res, Err(SenderError::Failed { .. })),
+            "outage must fail closed, got {res:?}"
+        );
+        assert!(crate::outbound_pin::replay_check_failed_count("discord", "chat.send") > before);
     }
 
     /// `claim_once` maps the guard's three outcomes onto typed results.

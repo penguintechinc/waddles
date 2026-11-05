@@ -188,8 +188,9 @@ entry is `pin_expired` anyway.
 | Valkey unreachable | **fail CLOSED**: NOT executed, typed `SenderError::Failed` (Discord producer gets ack code `failed`, Twitch is logged), `svc_ingest_outbound_replay_check_failed_total{platform,op}` + ERROR. An outage never opens a replay window. Like every post-pop failure the entry is dropped (best-effort relay, never re-queued); a waiting Discord producer sees `failed` and may resend under a fresh `op_id` |
 
 Entries without an `op_id` are refused `no_op_id` (the verifier needs a per-op identity). Real-Valkey proof (atomic claim, PX ttl,
-32-way race => 1 winner): `WADDLES_TEST_VALKEY_URL=redis://127.0.0.1:<port>/ cargo test --lib -- --ignored real_valkey` (fails, never
-skips, if the URL is unset; run against a throwaway `valkey/valkey:8-alpine` container).
+32-way race => exactly 1 winner, and a killed connection => fail-closed typed `Failed`): `real_valkey_*` lib tests, run in CI by the
+svc-ingest job (`VALKEY_URL`, same as the other real-Valkey suites; unset FAILS, never skips; no `#[ignore]`). Locally:
+`VALKEY_URL=redis://127.0.0.1:<port> cargo test --lib real_valkey` against a throwaway `valkey/valkey:8-alpine` container.
 
 ## Connector heartbeat (P6a T5)
 
