@@ -836,6 +836,14 @@ mod tests {
                 user_id: &get("user_id"),
                 op_id: &get("op_id"),
                 exp_ms,
+                community_id: snapshot
+                    .get("community_id")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0),
+                tenant_id: snapshot
+                    .get("tenant_id")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0),
             })
             .unwrap();
         v["pin_sig"] = serde_json::Value::String(sig);
@@ -1595,6 +1603,8 @@ mod tests {
                     user_id: "",
                     op_id: "",
                     exp_ms,
+                    community_id: 0,
+                    tenant_id: 0,
                 })
                 .unwrap();
             v["pin_sig"] = serde_json::Value::String(sig);
@@ -1705,6 +1715,8 @@ mod tests {
                 user_id: "",
                 op_id: "m-1",
                 exp_ms,
+                community_id: 0,
+                tenant_id: 0,
             })
             .unwrap();
         let raw = format!(

@@ -1317,3 +1317,19 @@ fn a_dm_entry_cannot_become_a_plain_payload() {
         ExecError::BadAction
     );
 }
+
+#[tokio::test]
+async fn a_malformed_header_credential_is_refused_and_never_sent() {
+    for bad in ["tok en", "tok\nen", "t\u{f6}k", ""] {
+        let slots = MapSlots::with(&[("discord-bot", bad)]);
+        let r = rig(PlatformPolicy::discord(), discord_send(), slots, true).await;
+        let a = chat_send("123456789", Some("123456789"), "hi");
+        let e = r
+            .exec
+            .execute(&req("discord", &a, Some(3)))
+            .await
+            .unwrap_err();
+        assert_eq!(e, ExecError::Subst(SubstError::ShapeInvalid), "{bad:?}");
+        assert!(sent(&r).await.is_empty());
+    }
+}

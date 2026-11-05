@@ -1028,6 +1028,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let get = |k: &str| env.get(k).and_then(serde_json::Value::as_str).unwrap_or("");
+        // Numeric ids ride in the MAC (pin_sig v2) so a replayed entry cannot
+        // be re-pointed at another community's credential.
+        let num = |k: &str| env.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
         let op = get("op");
         let keys = self.pin_keys.as_ref().ok_or_else(|| {
             tracing::error!("outbound pin signing key not configured; relay chat op refused");
@@ -1047,6 +1050,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 user_id: get("user_id"),
                 op_id: get("op_id"),
                 exp_ms,
+                community_id: num("community_id"),
+                tenant_id: num("tenant_id"),
             })
             .map_err(|e| {
                 tracing::error!(error = %e, "outbound pin signing failed; relay chat op refused");
@@ -3093,12 +3098,64 @@ mod tests {
                     user_id: "",
                     op_id: "",
                     exp_ms,
+                    community_id: v["community_id"].as_i64().unwrap_or(0),
+                    tenant_id: 0,
                 },
                 sig,
             )
         };
         assert_eq!(verify("hi"), Ok(()));
         assert!(verify("tampered").is_err());
+    }
+
+    /// regression: p6a-t6d1 -- the numeric community id the producer stamps
+    /// (from the binding-verified scope) is bound by the MAC: the entry
+    /// verifies for that community only; another community's id, or none,
+    /// fails.
+    #[tokio::test]
+    async fn relay_send_binds_the_community_id_in_the_pin_sig() {
+        let caps = caps(FakeRelayQueue::default());
+        let scope = InvokeScope {
+            community_id: 3,
+            ..twitch_scope()
+        };
+        caps.handle(
+            &scope,
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi\",\"community_id\":99}"}),
+            ),
+        )
+        .await
+        .expect("relay send succeeds");
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(v["community_id"], 3, "scope's id, never the bundle's");
+        let sig = v["pin_sig"].as_str().unwrap();
+        let exp_ms = v["exp_ms"].as_u64().unwrap();
+        let verify = |community_id: i64| {
+            test_pin_keys().verify(
+                &PinFields {
+                    platform: "twitch",
+                    op: "chat.send",
+                    channel: "#somechannel",
+                    origin_channel: "#somechannel",
+                    message_id: "",
+                    text: "hi",
+                    user_id: "",
+                    op_id: "",
+                    exp_ms,
+                    community_id,
+                    tenant_id: 0,
+                },
+                sig,
+            )
+        };
+        assert_eq!(verify(3), Ok(()));
+        for other in [0, 4, 99] {
+            assert!(verify(other).is_err(), "community {other} must not verify");
+        }
     }
 
     /// regression: p987 review -- `sign_envelope` covers dm.send too (user_id
@@ -3130,6 +3187,8 @@ mod tests {
             user_id,
             op_id: "op-7",
             exp_ms,
+            community_id: 0,
+            tenant_id: 0,
         };
         assert_eq!(test_pin_keys().verify(&f("42", exp_ms), &sig), Ok(()));
         let relabelled = PinFields {

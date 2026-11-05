@@ -42,6 +42,11 @@ pub enum PinError {
     /// `pin_sig` is malformed, names an unknown key, or does not match.
     #[error("outbound pin signature is invalid")]
     BadSignature,
+    /// The entry is signed under the pre-community-binding (v1) MAC:
+    /// authentic but unscoped, so refused. Distinct so a rolling upgrade
+    /// (svc_action must be deployed first) shows up in the counter.
+    #[error("outbound pin signature predates community binding")]
+    LegacyStamp,
     /// The entry's `exp_ms` is in the past (stale or replayed).
     #[error("outbound entry is past its signed expiry")]
     Expired,
@@ -66,6 +71,7 @@ impl PinError {
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::MissingSignature => "no_pin_sig",
             Self::BadSignature => "bad_pin_sig",
+            Self::LegacyStamp => "pin_sig_legacy",
             Self::Expired => "pin_expired",
             Self::ExpiryInvalid => "pin_exp_invalid",
             Self::KeyUnconfigured => "pin_key_unconfigured",
@@ -152,6 +158,12 @@ struct StampWire {
     exp_ms: Option<u64>,
     #[serde(default)]
     pin_sig: Option<String>,
+    /// Numeric community the credential is resolved for; MAC-bound (v2).
+    #[serde(default)]
+    community_id: Option<i64>,
+    /// Numeric tenant id when present; MAC-bound (v2).
+    #[serde(default)]
+    tenant_id: Option<i64>,
 }
 
 /// Furthest-future `exp_ms` the drain accepts (producer TTL is 60s at most
@@ -214,10 +226,13 @@ pub fn verify_stamp_at(
         user_id: wire.user_id.as_deref().unwrap_or(""),
         op_id: wire.op_id.as_deref().unwrap_or(""),
         exp_ms,
+        community_id: wire.community_id.unwrap_or(0),
+        tenant_id: wire.tenant_id.unwrap_or(0),
     };
     // Signature first: an attacker must not learn expiry rules from forgeries.
     keys.verify(&fields, sig).map_err(|e| match e {
         PinSigError::MissingSignature => PinError::MissingSignature,
+        PinSigError::LegacyUnscoped => PinError::LegacyStamp,
         _ => PinError::BadSignature,
     })?;
     if exp_ms < now_ms {
@@ -410,6 +425,8 @@ mod tests {
                 user_id,
                 op_id: "",
                 exp_ms,
+                community_id: 0,
+                tenant_id: 0,
             })
             .unwrap();
         let mut v = serde_json::json!({
@@ -422,6 +439,108 @@ mod tests {
             v["user_id"] = user_id.into();
         }
         v.to_string()
+    }
+
+    /// A discord chat.send entry signed for `community_id` (0 = none), as the
+    /// v2 producer does; `community_id` is also written on the wire.
+    fn community_entry(community_id: i64) -> String {
+        let exp_ms = NOW + 60_000;
+        let sig = test_keys()
+            .sign(&PinFields {
+                platform: "discord",
+                op: "chat.send",
+                channel: "1",
+                origin_channel: "1",
+                message_id: "",
+                text: "x",
+                user_id: "",
+                op_id: "",
+                exp_ms,
+                community_id,
+                tenant_id: 0,
+            })
+            .unwrap();
+        let mut v = serde_json::json!({
+            "op": "chat.send", "channel": "1", "origin_channel": "1", "text": "x",
+            "exp_ms": exp_ms, "pin_sig": sig,
+        });
+        if community_id != 0 {
+            v["community_id"] = community_id.into();
+        }
+        v.to_string()
+    }
+
+    /// regression: p6a-t6d1 -- a replayed, validly signed entry cannot be
+    /// re-pointed at another community (nor given, nor stripped of one).
+    #[test]
+    fn community_id_on_a_signed_entry_cannot_be_changed_added_or_stripped() {
+        let keys = test_keys();
+        let signed = community_entry(7);
+        assert_eq!(
+            verify_stamp_at(&signed, "discord", Some(&keys), NOW),
+            Ok(())
+        );
+        let mut v: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        // Another community's id swapped in.
+        v["community_id"] = 8.into();
+        assert_eq!(
+            verify_stamp_at(&v.to_string(), "discord", Some(&keys), NOW),
+            Err(PinError::BadSignature)
+        );
+        // Community stripped (tenant-wide scope).
+        v.as_object_mut().unwrap().remove("community_id");
+        assert_eq!(
+            verify_stamp_at(&v.to_string(), "discord", Some(&keys), NOW),
+            Err(PinError::BadSignature)
+        );
+        // Tenant id injected.
+        let mut t: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        t["tenant_id"] = 1.into();
+        assert_eq!(
+            verify_stamp_at(&t.to_string(), "discord", Some(&keys), NOW),
+            Err(PinError::BadSignature)
+        );
+        // Signed with no community: adding one is refused.
+        let none = community_entry(0);
+        assert_eq!(verify_stamp_at(&none, "discord", Some(&keys), NOW), Ok(()));
+        let mut a: serde_json::Value = serde_json::from_str(&none).unwrap();
+        a["community_id"] = 7.into();
+        assert_eq!(
+            verify_stamp_at(&a.to_string(), "discord", Some(&keys), NOW),
+            Err(PinError::BadSignature)
+        );
+        // A non-integer community id is not a stamp this system produced.
+        let mut bad: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        bad["community_id"] = "7".into();
+        assert_eq!(
+            verify_stamp_at(&bad.to_string(), "discord", Some(&keys), NOW),
+            Err(PinError::BadSignature)
+        );
+    }
+
+    /// An entry signed by a pre-community-binding (v1) producer is refused
+    /// with its own counted reason, not as an anonymous bad signature -- the
+    /// rolling-upgrade signal (deploy svc_action first).
+    #[test]
+    fn a_v1_signed_entry_is_refused_with_a_distinct_counted_reason() {
+        let keys = test_keys();
+        // The same v1 golden pin_sig.rs asserts; v1 covered these exact fields.
+        let v1 = "k1:1ff2c00b8d4eea50b0371acd512329475b9b4397c49148092c8a34436f62100f";
+        let raw = serde_json::json!({
+            "op": "chat.send", "channel": "123", "origin_channel": "123", "text": "hi",
+            "exp_ms": 1_700_000_000_000u64, "pin_sig": v1, "community_id": 7,
+        })
+        .to_string();
+        // platform "discord" (the golden's), clock inside the window.
+        let err = verify_stamp_at(&raw, "discord", Some(&keys), 1_700_000_000_000 - 1_000);
+        assert_eq!(err, Err(PinError::LegacyStamp));
+        assert_eq!(PinError::LegacyStamp.reason(), "pin_sig_legacy");
+        let before = refusal_count("discord", "chat.send", "pin_sig_legacy");
+        record_refusal("discord", "chat.send", PinError::LegacyStamp);
+        assert_eq!(
+            refusal_count("discord", "chat.send", "pin_sig_legacy"),
+            before + 1
+        );
     }
 
     #[test]
