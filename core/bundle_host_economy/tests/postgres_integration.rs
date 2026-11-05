@@ -3296,3 +3296,34 @@ async fn conditional_debit_is_its_own_kind_and_binds_min_balance() {
         Err(EconomyError::UserQuotaExceeded { cap: 25 })
     );
 }
+
+/// regression: p981-claim-H -- a flood of concurrent retries of one keyed mint /
+/// admin adjust is serialised by the community advisory lock BEFORE the replay
+/// read, so every retry returns the one original result (never a unique
+/// violation, never a second movement).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_retries_of_one_credit_and_admin_adjust_apply_exactly_once() {
+    let f = fixture().await;
+    let store = Arc::new(PostgresEconomyStore::new(f.eco_conn.clone()));
+    let kc = Arc::new(key_of("evt-h:credit:0"));
+    let ka = Arc::new(key_of("evt-h:admin_adjust:0"));
+    let mut tasks = Vec::new();
+    for _ in 0..20 {
+        let (s, k, u) = (Arc::clone(&store), Arc::clone(&kc), f.alice);
+        tasks.push(tokio::spawn(async move {
+            s.credit(&scope(), u, 40, 100, MAX_SUPPLY, caps(), &k).await
+        }));
+        let (s, k, u) = (Arc::clone(&store), Arc::clone(&ka), f.bob);
+        tasks.push(tokio::spawn(async move {
+            s.admin_adjust(&scope(), u, AdminAdjust::Delta(25), MAX_SUPPLY, true, &k)
+                .await
+        }));
+    }
+    for t in tasks {
+        let r = t.await.unwrap();
+        assert!(matches!(r, Ok(40) | Ok(25)), "retry saw {r:?}");
+    }
+    assert_eq!(balance_of(&f, f.alice).await, 40);
+    assert_eq!(balance_of(&f, f.bob).await, 25);
+    assert_eq!(ledger_count(&f).await, 2);
+}

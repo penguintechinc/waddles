@@ -132,22 +132,38 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
 
     /// Resolve identity without fetching a role for an already-authorized write.
     /// The verified UUID binds retry keys across users without granting any scope.
-    async fn resolve_write_actor(&self) -> bundle_tool_call::ActorContext {
+    ///
+    /// Only the genuinely actor-less outcomes (no linked/active member behind the
+    /// event) bind the empty actor. A resolver outage or backend failure fails
+    /// CLOSED: an unattributed write must never run because a lookup broke.
+    async fn resolve_write_actor(&self) -> Result<bundle_tool_call::ActorContext, ToolRefusal> {
         let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
-            return bundle_tool_call::ActorContext::none();
+            return Ok(bundle_tool_call::ActorContext::none());
         };
         let scope = IdentityScope {
             tenant_id: self.tenant_id,
             community_id: self.community_id,
         };
         match identity::resolve_actor(wiring, invocation, scope).await {
-            Ok(user) => bundle_tool_call::ActorContext {
+            Ok(user) => Ok(bundle_tool_call::ActorContext {
                 actor: Some(user.to_string()),
                 scopes: Vec::new(),
-            },
-            Err(error) => {
+            }),
+            Err(
+                error @ (identity::IdentityError::NotLinked | identity::IdentityError::NotAMember),
+            ) => {
                 tracing::debug!(code = error.wire_code(), "tool write actor unresolved");
-                bundle_tool_call::ActorContext::none()
+                Ok(bundle_tool_call::ActorContext::none())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    app_id = %self.app_id, community_id = self.community_id,
+                    code = error.wire_code(),
+                    "tool write refused: actor identity could not be resolved"
+                );
+                Err(ToolRefusal::TargetUnavailable(
+                    "actor identity could not be resolved; retry".to_string(),
+                ))
             }
         }
     }
@@ -277,7 +293,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         let actor = if authorized.required_scope().is_some() {
             self.resolve_verified_actor().await
         } else if authorized.is_write() {
-            self.resolve_write_actor().await
+            self.resolve_write_actor().await?
         } else {
             bundle_tool_call::ActorContext::none()
         };

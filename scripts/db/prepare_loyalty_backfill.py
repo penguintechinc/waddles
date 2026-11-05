@@ -55,6 +55,39 @@ def scope_key(row: dict[str, Any]) -> tuple[int, int, str]:
     )
 
 
+def plan_digest(movements: list[dict[str, Any]]) -> str:
+    """Deterministic SHA-256 over the canonical, sorted movement list."""
+    canonical = json.dumps(movements, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def validated_movements(raw: object) -> list[dict[str, Any]]:
+    """Re-validate every movement of an (untrusted) plan before it is rendered into SQL."""
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("plan has no movements")
+    movements: list[dict[str, Any]] = []
+    for row in raw:
+        if not isinstance(row, dict) or set(row) != {
+            "tenant_id",
+            "community_id",
+            "user_uuid",
+            "amount",
+        }:
+            raise ValueError("malformed movement")
+        user_uuid = row["user_uuid"]
+        if not isinstance(user_uuid, str) or str(UUID(user_uuid)) != user_uuid:
+            raise ValueError("movement requires a canonical UUID")
+        movements.append(
+            {
+                "tenant_id": integer(row["tenant_id"], "tenant_id"),
+                "community_id": integer(row["community_id"], "community_id"),
+                "user_uuid": user_uuid,
+                "amount": integer(row["amount"], "amount", 0),
+            }
+        )
+    return movements
+
+
 def prepare(
     rows: list[dict[str, Any]],
     mapping: list[dict[str, Any]],
@@ -107,8 +140,7 @@ def prepare(
     movements.sort(
         key=lambda row: (row["tenant_id"], row["community_id"], row["user_uuid"])
     )
-    canonical = json.dumps(movements, sort_keys=True, separators=(",", ":"))
-    digest = hashlib.sha256(canonical.encode()).hexdigest()
+    digest = plan_digest(movements)
     return {
         "status": "REQUIRES_EXPLICIT_APPROVAL",
         "plan_id": digest,
@@ -129,11 +161,20 @@ def migration_sql(plan: dict[str, Any]) -> str:
     Locks serialize this maintenance transaction with all balance writers. A replay
     aborts visibly instead of adding funds again; the legacy source remains intact.
     """
+    movements = validated_movements(plan.get("movements"))
+    plan_id = plan.get("plan_id")
+    # plan_id is interpolated into a LIKE pattern and a string literal below: it
+    # must be exactly the lowercase-hex digest of THESE movements, nothing else.
+    if (
+        not isinstance(plan_id, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", plan_id)
+        or plan_id != plan_digest(movements)
+    ):
+        raise ValueError("plan_id is not the digest of the plan's movements")
     values = ",\n".join(
         f"({row['tenant_id']},{row['community_id']},'{row['user_uuid']}'::uuid,{row['amount']})"
-        for row in plan["movements"]
+        for row in movements
     )
-    plan_id = plan["plan_id"]
     # Re-validated here: a plan loaded from a report file is untrusted input.
     cap = validated_cap(plan["max_supply"])
     return f"""-- REVIEW ONLY: explicit approval and a frozen legacy export are required.

@@ -82,3 +82,31 @@ def test_max_supply_cannot_exceed_the_runtime_ceiling() -> None:
         module.migration_sql({**plan, "max_supply": ceiling + 1})
     with pytest.raises(ValueError, match="runtime supply ceiling"):
         module.migration_sql({**plan, "max_supply": "1; DROP TABLE economy_ledger"})
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["x' OR '1'='1", "%", "a" * 63, "A" * 64, "z" * 64, "0" * 64 + "%", ""],
+)
+def test_plan_id_is_exact_hex_before_it_reaches_sql(bad_id: str) -> None:
+    """regression: p981-claim-F -- plan_id is interpolated into a LIKE; it must be exact lowercase hex."""
+    rows, mapping = sample()
+    plan = module.prepare(rows, mapping)
+    with pytest.raises(ValueError, match="plan_id"):
+        module.migration_sql({**plan, "plan_id": bad_id})
+    assert plan["plan_id"] in module.migration_sql(plan)
+
+
+def test_movements_are_revalidated_before_sql() -> None:
+    """regression: p981-claim-F -- an imported plan's movement fields never reach SQL unchecked."""
+    rows, mapping = sample()
+    plan = module.prepare(rows, mapping)
+    for patch in (
+        {"user_uuid": "11111111-1111-4111-8111-111111111111'); DROP TABLE x;--"},
+        {"amount": "5; DROP TABLE x"},
+        {"tenant_id": True},
+        {"amount": -1},
+    ):
+        bad = {**plan, "movements": [{**plan["movements"][0], **patch}]}
+        with pytest.raises(ValueError):
+            module.migration_sql(bad)

@@ -881,6 +881,8 @@ const ACTOR_UUID: &str = "11111111-1111-4111-8111-111111111111";
 struct RoleDirectory {
     role: Option<&'static str>,
     role_lookups: Mutex<u32>,
+    /// When set, every member lookup fails with a backend error (directory outage).
+    outage: bool,
 }
 
 impl MemberDirectory for RoleDirectory {
@@ -891,6 +893,9 @@ impl MemberDirectory for RoleDirectory {
         platform_user_id: &'a str,
     ) -> BoxFuture<'a, Result<uuid::Uuid, IdentityError>> {
         Box::pin(async move {
+            if self.outage {
+                return Err(IdentityError::Backend("directory down".to_string()));
+            }
             if platform_user_id == "1001" {
                 Ok(uuid::Uuid::parse_str(ACTOR_UUID).unwrap())
             } else {
@@ -947,6 +952,7 @@ fn admin_caps(
     let dir = Arc::new(RoleDirectory {
         role,
         role_lookups: Mutex::new(0),
+        outage: false,
     });
     let c = caps_with(
         admin_rows(),
@@ -1347,4 +1353,63 @@ fn read_only_propagates_to_the_nested_capabilities() {
     let write_plan = mutation_plan();
     let nested = parent.for_tool_target(&write_plan, ctx.clone());
     assert!(!nested.tool.as_ref().unwrap().read_only);
+}
+
+/// `world_rows` caps whose identity wiring is `directory` and whose event names `account`.
+fn world_caps_with_directory(
+    exec: &FakeExecutor,
+    directory: Arc<RoleDirectory>,
+    account: Option<&str>,
+) -> StageCapabilities {
+    caps_with(
+        world_rows(),
+        default_gate(),
+        Arc::clone(&exec.registry),
+        vec![APP.into()],
+        None,
+    )
+    .with_identity(
+        IdentityWiring {
+            directory: directory as Arc<dyn MemberDirectory>,
+            handles: None,
+            flag: Arc::new(FixedGate(true)),
+        },
+        Arc::new(InvocationIdentity::new(
+            "twitch",
+            account.map(str::to_string),
+            vec![],
+        )),
+    )
+}
+
+/// regression: p981-claim-D -- a directory outage while resolving a write's actor fails
+/// CLOSED with a typed refusal (never a silently unattributed write), while a
+/// legitimately actor-less event (scheduled/system) still binds the empty actor.
+#[tokio::test]
+async fn write_actor_directory_outage_fails_closed_but_actorless_events_proceed() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    let down = Arc::new(RoleDirectory {
+        role: None,
+        role_lookups: Mutex::new(0),
+        outage: true,
+    });
+    let c = world_caps_with_directory(&exec, down, Some("1001"));
+    assert_eq!(
+        run(&c, spoofing_call("adjust", Some("k-outage")))
+            .await
+            .unwrap_err(),
+        "target_unavailable"
+    );
+    assert!(recorded(&exec).is_empty(), "the write never ran");
+    // No platform account on the event at all: not an outage, the write proceeds.
+    let up = Arc::new(RoleDirectory {
+        role: None,
+        role_lookups: Mutex::new(0),
+        outage: false,
+    });
+    let c = world_caps_with_directory(&exec, up, None);
+    run(&c, spoofing_call("adjust", Some("k-none")))
+        .await
+        .unwrap();
+    assert_eq!(recorded(&exec).len(), 1);
 }

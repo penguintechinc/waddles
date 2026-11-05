@@ -12,7 +12,8 @@
 -- New kinds (all <= 16 chars, the column width): `credit` (mint, one user),
 -- `debit` (spend/burn), `admin_adjust` (privileged absolute-set or delta),
 -- `pot_payout` (a pot account's debit row and each winner's credit row),
--- `exchange` (external-points claim credited as currency), `cond_debit` (a
+-- `exchange` (external-points claim credited as currency; `batch_credit` has
+-- no kind of its own: each of its rows is a `credit`), `cond_debit` (a
 -- conditional debit; its own kind so it never shares an idempotency identity
 -- with a plain `debit`).
 --
