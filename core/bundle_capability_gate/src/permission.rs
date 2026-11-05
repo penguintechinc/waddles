@@ -284,6 +284,12 @@ pub enum PermissionFamily {
     /// `user_uuid` that `economy.*`/`reputation.*` name their targets by.
     /// UUID-only: the bundle never receives a platform id, handle or name.
     IdentityResolve,
+    /// `connector.pii.read` -- gates the connector world's `identity.lookup`
+    /// import, the ONE capability that returns raw PII (handle, display name)
+    /// to a guest. `Dangerous`; global-approved, first-party-core-only (the
+    /// executor additionally refuses to link it for a non-`waddles.core.`
+    /// app_id, `VerifiedManifest::may_link_identity`).
+    ConnectorPiiRead,
     FlagsRead,
     PlatformScheduled,
     PlatformContext,
@@ -346,6 +352,7 @@ impl PermissionFamily {
         Self::EconomyAdminAdjust,
         Self::EconomyPotPay,
         Self::IdentityResolve,
+        Self::ConnectorPiiRead,
         Self::FlagsRead,
         Self::PlatformScheduled,
         Self::PlatformContext,
@@ -386,6 +393,7 @@ impl PermissionFamily {
             Self::EconomyAdminAdjust => "economy.admin_adjust",
             Self::EconomyPotPay => "economy.pot.pay",
             Self::IdentityResolve => "identity.resolve",
+            Self::ConnectorPiiRead => "connector.pii.read",
             Self::FlagsRead => "flags.read",
             Self::PlatformScheduled => "platform.scheduled",
             Self::PlatformContext => "platform.context",
@@ -766,6 +774,19 @@ impl PermissionFamily {
                         fail-closed on unlinked/non-member/ambiguous; mention lookups are \
                         limited to references present in the triggering message",
             },
+            Self::ConnectorPiiRead => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Identity,
+                default_quota: Quota::Descriptive(
+                    "enforced in the identity.lookup host import: per-connector-digest rate \
+                     limit + 5 min TTL cache, tenant-scoped reads via the security-barrier \
+                     views, counts-only audit",
+                ),
+                notes: "connector world only; returns raw PII (handle, display name) to a \
+                        first-party core connector/overlay -- never grantable to a vendor \
+                        bundle (spec connector-bundles SS3.1/3.3); op `identity.lookup`",
+            },
             Self::FlagsRead => CatalogEntry {
                 family: *self,
                 risk: Risk::Normal,
@@ -867,6 +888,7 @@ pub enum PermissionId {
     EconomyAdminAdjust,
     EconomyPotPay,
     IdentityResolve,
+    ConnectorPiiRead,
     FlagsRead,
     PlatformScheduled,
     PlatformContext,
@@ -940,6 +962,7 @@ impl PermissionId {
             Self::EconomyAdminAdjust => PermissionFamily::EconomyAdminAdjust,
             Self::EconomyPotPay => PermissionFamily::EconomyPotPay,
             Self::IdentityResolve => PermissionFamily::IdentityResolve,
+            Self::ConnectorPiiRead => PermissionFamily::ConnectorPiiRead,
             Self::FlagsRead => PermissionFamily::FlagsRead,
             Self::PlatformScheduled => PermissionFamily::PlatformScheduled,
             Self::PlatformContext => PermissionFamily::PlatformContext,
@@ -1169,6 +1192,7 @@ impl PermissionId {
             "economy.admin_adjust" => Ok(Self::EconomyAdminAdjust),
             "economy.pot.pay" => Ok(Self::EconomyPotPay),
             "identity.resolve" => Ok(Self::IdentityResolve),
+            "connector.pii.read" => Ok(Self::ConnectorPiiRead),
             "flags.read" => Ok(Self::FlagsRead),
             "platform.scheduled" => Ok(Self::PlatformScheduled),
             "platform.context" => Ok(Self::PlatformContext),
@@ -1221,6 +1245,28 @@ mod tests {
             id.family().catalog_entry().capability_kind,
             CapabilityKind::Interaction
         );
+    }
+
+    /// regression: p6b -- the Twitch overlay's read tools call `identity.lookup`
+    /// but the catalog had no id for its gate.
+    #[test]
+    fn connector_pii_read_is_dangerous_and_round_trips() {
+        let id = PermissionId::parse("connector.pii.read").unwrap();
+        assert_eq!(id.canonical_id(), "connector.pii.read");
+        assert_eq!(id, PermissionId::ConnectorPiiRead);
+        assert_eq!(id.family(), PermissionFamily::ConnectorPiiRead);
+        assert_eq!(id.risk(), Risk::Dangerous);
+        assert_eq!(
+            id.family().catalog_entry().capability_kind,
+            CapabilityKind::Identity
+        );
+        assert!(!id.family().is_parameterized());
+        // the executor's gate constant and the catalog id must never drift
+        assert_eq!(
+            PermissionFamily::ConnectorPiiRead.id_prefix(),
+            "connector.pii.read"
+        );
+        assert!(PermissionId::parse("connector.pii.read:x").is_err());
     }
 
     #[test]

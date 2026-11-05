@@ -37,6 +37,7 @@ Verified against `release/v3.0.X` (`1e6b0056`) plus in-flight PRs #741, #749, #7
 | Reputation | `reputation.read`, `reputation.community.write`, `reputation.tenant.write` | Normal / Dangerous / Dangerous | `reputation` (stage-next) | IN-FLIGHT #741; `reputation.tenant.write` CATALOG-ONLY |
 | Economy | `economy.read`, `economy.wager`, `economy.transfer`, `economy.credit`, `economy.debit`, `economy.admin_adjust`, `economy.pot.pay` | Normal / Dangerous (x6) | `economy` (stage-next) | IN-FLIGHT #751 (stacked on #741) |
 | Overlay widgets | `overlay.media` | Dangerous | `overlay` (stage-next) | WIT MERGED; no host handler |
+| Connector PII read | `connector.pii.read` | Dangerous | `identity.lookup` (connector worlds; core-namespace only) | MERGED catalog id; global-approved, never vendor-grantable |
 | Streaming hooks | `streaming.lifecycle.subscribe` | Normal | `streaming-lifecycle` export (stage-next) | WIT MERGED; host registration deferred |
 | Moderation | `moderation.<platform>` | Dangerous | none | CATALOG-ONLY |
 | AI generation | `ai.generate` | Dangerous | `ai` (stage-next) | NOT PRODUCTION-READY -- do not enable `waddles.bundle-ai-capability` in any environment until issue #858 is resolved (`svc_process` only; self-hosted model) |

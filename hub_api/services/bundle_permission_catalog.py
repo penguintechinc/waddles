@@ -144,6 +144,13 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     #: already hold (the `{user:<uuid>}` placeholder), grants no write, and is
     #: rate limited; the host fails closed on unlinked/non-member/ambiguous.
     "identity.resolve": "normal",
+    #: Gates the connector world's `identity.lookup` -- the one capability that
+    #: returns raw PII (handle, display name) to a guest
+    #: (`core/bundle_capability_gate`'s `connector.pii.read`). `dangerous`;
+    #: global-approved and first-party-core-only: the executor refuses to link
+    #: it for a non-`waddles.core.` app_id, and a vendor namespace can never
+    #: carry a core app_id (`vendor_bundle_authz.enforce_vendor_namespace`).
+    "connector.pii.read": "dangerous",
     "flags.read": "normal",
     "platform.scheduled": "normal",
     "platform.context": "normal",

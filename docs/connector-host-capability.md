@@ -127,6 +127,29 @@ Shutdown cancels an in-flight heartbeat promptly, and an in-flight frame too; th
 as `Dropped`, so a stateful cursor transport re-yields it. The heartbeat future is dropped before `on-disconnect`
 runs. Tests: `core/svc_ingest/tests/connector_heartbeat.rs` (paused-clock + real-time).
 
+## WebSocket host-side frame rules and heartbeat (P6b host transport support)
+
+`WsConfig` (`core/svc_ingest/src/connector/ws.rs`, rules in `transport_common.rs`) carries three opt-in, host-owned
+settings. All default OFF; an invalid value is refused by `WsTransport::new` (`TransportError::Connect`, fail loud).
+
+| Setting | Behaviour |
+|---|---|
+| `auto_replies: Vec<AutoReplyRule>` | Line rule `prefix` -> host-built `reply_prefix + token + reply_suffix` (e.g. `PING :` -> `PONG :`). The overlay never sees a consumed line unless `forward_to_guest`. Only the token after `prefix` is reflected: `[A-Za-z0-9.:_/+=@-]`, `1..=max_token_len` (hard cap 256); anything else (CR, LF, space, non-ASCII, empty, too long) is a `TransportError::Read` -- never a reply. Max 8 rules (non-overlapping prefixes), 8 replies per frame. Matching is per line, so a batched frame is answered and the remaining lines are still forwarded. Replies are queued and flushed at the top of the next `next_frame` (cancel-safe: popped only after a completed send; cleared on reconnect) |
+| `self_echo: Option<SelfEchoFilter>` | Drops lines `[@tags ]<open><self_id><close><user@host> <command> ...` whose id equals `self_id` (ASCII case-insensitive) -- the bot's own echoed `PRIVMSG`. Host-side because the frozen `connector` WIT gives the guest no self identity; no WIT change. `self_id` is the bot's public login supplied by host config (never a secret, never guest data) |
+| `heartbeat_interval: Option<Duration>` | Enables the driver's heartbeat loop for this source; `send_heartbeat` writes the connector's body (non-empty, `<= max_frame_bytes`). `send_default_heartbeat` still FAILS LOUD (no platform default is defined) |
+
+Metrics: `FrameRuleMetrics::register(&registry)` once, then `WsTransport::with_metrics`:
+`svc_ingest_transport_frame_rules_total{platform,rule,outcome}` (`auto_reply`: `replied`/`reply_failed`/`rejected`;
+`self_echo`: `dropped`). Labels are bounded; frame content and tokens are never logged or labeled.
+
+Twitch IRC example: `auto_replies = [{prefix:"PING :", reply_prefix:"PONG :", reply_suffix:"\r\n", max_token_len:64}]`,
+`self_echo = {self_id:<bot nick>, sender_open:":", sender_close:"!", command:"PRIVMSG"}`. Tests: `ws.rs`
+(real local WS server: PING -> PONG, overlay never sees the PING, hostile token never reflected, own echo dropped,
+others pass) and `transport_common.rs`.
+
+Permission catalog: `connector.pii.read` (Dangerous, global-approved, first-party-core only) gates `identity.lookup`;
+cataloged in `core/bundle_capability_gate/src/permission.rs` and `hub_api/services/bundle_permission_catalog.py`.
+
 ## Connector tools (`world connector-tools`, P6a Task 4)
 
 A connector overlay can EXPOSE normalized platform tools (`get_chatters`, `send_chat`, ...) and optionally CALL other

@@ -37,6 +37,14 @@ def test_interaction_pii_receive_is_dangerous() -> None:
     assert is_known_permission("interaction.pii.receive")
 
 
+def test_connector_pii_read_is_dangerous() -> None:
+    """`identity.lookup`'s gate returns raw PII to a guest: `dangerous`, mirrors Rust."""
+    assert resolve_risk("connector.pii.read") == "dangerous"
+    assert is_dangerous("connector.pii.read")
+    assert is_known_permission("connector.pii.read")
+    assert resolve_risk("connector.pii.read:x") is None
+
+
 def test_streaming_lifecycle_subscribe_is_normal() -> None:
     """Read-only subscribe to svc-streaming-rust's lifecycle hooks (issue #456) is `normal`."""
     assert resolve_risk("streaming.lifecycle.subscribe") == "normal"
