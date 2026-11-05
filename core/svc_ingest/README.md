@@ -90,6 +90,8 @@ entries are refused loudly, never guessed at).
 | `no_pin_sig` / `bad_pin_sig` | missing / invalid `pin_sig` integrity stamp (see Provenance) |
 | `pin_key_unconfigured` | no verification keys -> every op refused |
 | `pin_expired` / `pin_exp_invalid` | signed `exp_ms` in the past / missing or > 5 min ahead |
+| `no_op_id` | authentic entry with no MAC-bound `op_id` nonce (rollout signal: pre-nonce `svc_action`) |
+| `pin_replayed` | single-use check: this exact signed entry was already executed (counted on `svc_ingest_outbound_pin_replayed_total{platform,op}`, not the refusal counter) |
 
 Refusals surface as `SenderError::Rejected`, bump `svc_ingest_outbound_pin_refused_total{platform,op,reason}`
 and log a PII-free WARN (platform/op/reason only -- never a channel, id or message text).
@@ -159,12 +161,36 @@ Golden vectors: v2 in `pin_sig.rs::golden_vector_is_stable_across_services`, v1 
 
 ### Rollout order (required) and dropped entries
 
-Deploy **svc_action first, then svc_ingest**, with the queue drained between if possible. The new drain hard-refuses
+Deploy **svc_action first, then svc_ingest**, with the queue drained between if possible. (P6a producer-completeness adds two
+more distinct, counted refusals: an authentic entry with no `op_id` is `no_op_id`; a `dm.send`/`role.*` entry with no MAC-bound
+`tenant_id` is refused by the executor duty as `no_tenant_scope` (`svc_ingest_discord_duty_refused_total`). The new svc_action stamps
+both, so they only appear for entries signed by the OLD svc_action. Entries in flight across the svc_ingest deploy are lost -- alpha
+is disposable; Discord producers time out `relay_unconfirmed`.) The new drain hard-refuses
 anything not signed by the new svc_action: entries queued by a pre-P6a svc_action have no `origin_channel` and are dropped
 with a WARN and counted `svc_ingest_outbound_pin_refused_total{reason="no_origin_pin"}` (stamped-but-unsigned entries from an
 intermediate build: `no_pin_sig`; stamped but without `exp_ms`: `pin_exp_invalid`). A Discord entry whose stamp fails verification is dropped and counted but NEVER acked (an unauthenticated
 writer must not settle another producer's `op_id`); the real producer times out. `op_id` is MAC-bound. On alpha, accept the loss of in-flight chat ops. (The metric label is `no_origin_pin`, not
 `missing_origin`.) A refused entry is already popped (`BRPOP`) so it is never retried; there is no poison loop.
+
+### Single-use execution (replay protection, P6a producer-completeness)
+
+The Valkey ACL lets any app client write the queue and a stamp is valid until `exp_ms`, so a captured, validly signed entry could be
+re-pushed inside its TTL. After `verify_stamp` succeeds and BEFORE any send/ack, both drains (Twitch and Discord) atomically claim the
+entry: `SET outbound:seen:<platform>:<sha256(pin_sig)> 1 NX PX <exp_ms - now>` on the existing Valkey (a dedicated non-blocking
+connection, `ValkeyReplayGuard`). `pin_sig` is a MAC over the per-op `op_id`, so the key is per op (two sends of identical text are two
+keys) and hash-only (no channel/user id/text/op_id in the key or logs). Its TTL is the time left on the signed expiry; after that the
+entry is `pin_expired` anyway.
+
+| Outcome | Behaviour |
+|---|---|
+| first sight | executed |
+| duplicate | dropped, **not executed**, **no ack** (the original execution already answered the producer; a second ack would overwrite its result); `svc_ingest_outbound_pin_replayed_total{platform,op}` + PII-free WARN |
+| Valkey unreachable | **fail CLOSED**: NOT executed, typed `SenderError::Failed` (Discord producer gets ack code `failed`, Twitch is logged), `svc_ingest_outbound_replay_check_failed_total{platform,op}` + ERROR. An outage never opens a replay window. Like every post-pop failure the entry is dropped (best-effort relay, never re-queued); a waiting Discord producer sees `failed` and may resend under a fresh `op_id` |
+
+Entries without an `op_id` are refused `no_op_id` (the verifier needs a per-op identity). Real-Valkey proof (atomic claim, PX ttl,
+32-way race => exactly 1 winner, and a killed connection => fail-closed typed `Failed`): `real_valkey_*` lib tests, run in CI by the
+svc-ingest job (`VALKEY_URL`, same as the other real-Valkey suites; unset FAILS, never skips; no `#[ignore]`). Locally:
+`VALKEY_URL=redis://127.0.0.1:<port> cargo test --lib real_valkey` against a throwaway `valkey/valkey:8-alpine` container.
 
 ## Connector heartbeat (P6a T5)
 
@@ -331,7 +357,13 @@ uuids}` (1..=25 canonical uuids, one RPC per call, never per-uuid probing: any m
 `UNAUTHENTICATED` -> `Denied`, `RESOURCE_EXHAUSTED` -> `RateLimited` (backoff, not a refusal), transport/circuit -> `Unavailable`.
 Build needs `protoc` + the repo-root `proto/` tree (Dockerfile.rust installs protoc and takes `proto` as a named build context, like svc_process).
 
-**Gaps (not silent):** (1) `svc_action` does not yet emit `role.*` queue entries (or `tenant_id` on `dm.send` -- the signer must put the
-numeric tenant in the stamp; entries without it are refused `no_tenant_scope`); (2) YouTube has a slot source and a hub-api
-provider adapter (see "YouTube slot source"); (3) the executor and `HubPlatformUserResolver::connect` are not wired at boot (T6d-1 status above);
+**Producer side (done, P6a producer-completeness):** `svc_action` emits `role.add`/`role.remove` (`relay.send` with
+`{"op":"role.add","user_id":"{user:<uuid>}","role_key":"vip"}`; authorized by the existing dangerous `moderation.discord` grant;
+host-pinned to the event's channel exactly like `chat.send`/`dm.send`; any bundle `guild_id`/`role_id`/`channel`/`tenant_id` is
+ignored; throttled 20/min per (tenant, community, app); the role KEY rides in the MAC-covered `text`) and stamps the numeric
+`tenant_id` + `community_id` from the verified invoke scope on `dm.send` and the role ops (never from the bundle). `dm.send` also
+accepts a `{user:<uuid>}` recipient, the only form this executor's duty accepts. Every signed entry carries a unique `op_id`.
+
+**Gaps (not silent):** (1) YouTube has a slot source and a hub-api
+provider adapter (see "YouTube slot source"); (2) the executor and `HubPlatformUserResolver::connect` are not wired at boot (T6d-1 status above);
 the default `NoUserResolver` refuses every DM/role op loudly until it is.

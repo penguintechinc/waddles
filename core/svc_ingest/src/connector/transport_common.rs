@@ -428,6 +428,7 @@ impl FrameRules {
 #[derive(Clone)]
 pub struct FrameRuleMetrics {
     total: prometheus::IntCounterVec,
+    ack_timeout: prometheus::IntCounterVec,
 }
 
 impl FrameRuleMetrics {
@@ -440,8 +441,21 @@ impl FrameRuleMetrics {
             ),
             &["platform", "rule", "outcome"],
         )?;
+        let ack_timeout = prometheus::IntCounterVec::new(
+            prometheus::Opts::new(
+                "svc_ingest_transport_heartbeat_ack_timeout_total",
+                "Connections ended because a heartbeat went unacknowledged, by platform",
+            ),
+            &["platform"],
+        )?;
         registry.register(Box::new(total.clone()))?;
-        Ok(Self { total })
+        registry.register(Box::new(ack_timeout.clone()))?;
+        Ok(Self { total, ack_timeout })
+    }
+
+    /// Counts one heartbeat-ACK timeout (zombie connection ended).
+    pub fn ack_timeout(&self, platform: &str) {
+        self.ack_timeout.with_label_values(&[platform]).inc();
     }
 
     /// Counts `n` occurrences.

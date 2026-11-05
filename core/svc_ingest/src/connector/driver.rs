@@ -178,6 +178,17 @@ pub(crate) fn should_reset_backoff(report: &ConnectionReport, connected_for: Dur
         && !matches!(report.end, ConnectionEnd::ConnectorFault(_))
 }
 
+/// Delay before a connection's first heartbeat: a full period, or with
+/// `jitter` a fraction `0..1` of it drawn from `entropy` (gateway HELLO
+/// jitter). Pure so the bound and the wiring are testable.
+fn first_beat_delay(every: Duration, jitter: bool, entropy: u64) -> Duration {
+    if !jitter {
+        return every;
+    }
+    let frac = (entropy % 1000) as f64 / 1000.0;
+    every.mul_f64(frac)
+}
+
 /// Decrements a gauge on drop, so a cancelled/aborted `serve_connection`
 /// future cannot leak a permanently-"up" connection.
 struct UpGuard(IntGauge);
@@ -351,6 +362,49 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                 return Ok(report(end, false, 0));
             }
         };
+        // Gateway ordering (HELLO -> IDENTIFY/RESUME): when the transport asks
+        // for it, read ONE frame first (its captures, e.g. the heartbeat
+        // interval, are applied by the transport), then send the handshake,
+        // then process that frame normally in the pump.
+        let mut first_frame: Option<Vec<u8>> = None;
+        if let Some(wait) = transport.handshake_after_first_frame() {
+            let read = tokio::select! {
+                _ = &mut *shutdown => {
+                    transport.close("shutdown").await;
+                    return Ok(report(ConnectionEnd::Shutdown, false, 0));
+                }
+                r = tokio::time::timeout(wait, transport.next_frame()) => r,
+            };
+            match read {
+                Ok(Ok(Some(bytes))) => first_frame = Some(bytes),
+                Ok(Ok(None)) => {
+                    warn!(platform = %platform, "connection closed before the first frame; handshake not sent");
+                    transport.close("closed_before_first_frame").await;
+                    return Ok(report(ConnectionEnd::HandshakeFailed, false, 0));
+                }
+                Ok(Err(e)) => {
+                    warn!(platform = %platform, kind = e.kind(), "reading the first frame failed; handshake not sent");
+                    debug!(platform = %platform, reason = %e, "first frame failure reason");
+                    if e.is_fatal() {
+                        self.park(&platform);
+                        transport.close("parked").await;
+                        return Ok(report(ConnectionEnd::Parked, false, 0));
+                    }
+                    transport.close("first_frame_failed").await;
+                    return Ok(report(ConnectionEnd::HandshakeFailed, false, 0));
+                }
+                Err(_elapsed) => {
+                    self.metrics
+                        .connects_total
+                        .with_label_values(&[&platform, "first_frame_timeout"])
+                        .inc();
+                    warn!(platform = %platform, wait_ms = wait.as_millis() as u64,
+                        "no first frame within the bounded wait; handshake not sent, connection failed");
+                    transport.close("first_frame_timeout").await;
+                    return Ok(report(ConnectionEnd::HandshakeFailed, false, 0));
+                }
+            }
+        }
         if let Err(e) = transport.send_handshake(handshake).await {
             warn!(platform = %platform, kind = e.kind(), "connector handshake send failed");
             debug!(platform = %platform, reason = %e, "connector handshake failure reason");
@@ -377,11 +431,12 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         // `Transport::heartbeat_interval` after every frame and publishes a
         // change here; the loop restarts its schedule on it.
         let (interval_tx, interval_rx) = watch::channel(heartbeat_every);
+        let jitter_first = transport.first_heartbeat_jitter();
         // Scoped so the heartbeat future (and any `on-heartbeat-due` still in
         // flight inside it) is DROPPED here, before `on-disconnect` runs --
         // never left suspended across teardown holding invoker resources.
         let (end, frames_ok) = {
-            let beats = self.heartbeat_loop(&platform, &ctx, interval_rx, beat_tx);
+            let beats = self.heartbeat_loop(&platform, &ctx, interval_rx, beat_tx, jitter_first);
             tokio::pin!(beats);
             let pump = self.pump(
                 transport,
@@ -391,6 +446,7 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                 &ctx,
                 &mut beat_rx,
                 &interval_tx,
+                first_frame,
             );
             tokio::select! {
                 out = pump => out,
@@ -429,7 +485,9 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         ctx: &ConnectionCtx,
         mut interval: watch::Receiver<Option<Duration>>,
         tx: mpsc::Sender<HeartbeatResult>,
+        jitter_first: bool,
     ) {
+        let mut first_schedule = jitter_first;
         loop {
             let Some(every) = *interval.borrow_and_update() else {
                 if interval.changed().await.is_err() {
@@ -437,7 +495,15 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                 }
                 continue;
             };
-            let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            // The first beat of a connection may be jittered (a random
+            // fraction of the interval); later schedules start a full period out.
+            let first_in = first_beat_delay(
+                every,
+                std::mem::take(&mut first_schedule),
+                uuid::Uuid::new_v4().as_u128() as u64,
+            );
+            let mut ticker =
+                tokio::time::interval_at(tokio::time::Instant::now() + first_in, every);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
@@ -655,6 +721,7 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         ctx: &ConnectionCtx,
         beat_rx: &mut mpsc::Receiver<HeartbeatResult>,
         interval_tx: &watch::Sender<Option<Duration>>,
+        mut first_frame: Option<Vec<u8>>,
     ) -> (ConnectionEnd, u64) {
         let heartbeat_on = self.heartbeat_enabled;
         let mut frames_ok = 0u64;
@@ -662,7 +729,12 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         loop {
             // Unbiased: frames and heartbeat results get fair turns, so
             // neither starves the other.
-            let next = tokio::select! {
+            // A frame pre-read for the handshake ordering is processed first.
+            let pre = first_frame.take().map(|b| Ok(Some(b)));
+            let next = if let Some(pre) = pre {
+                pre
+            } else {
+                tokio::select! {
                 _ = &mut *shutdown => return (ConnectionEnd::Shutdown, frames_ok),
                 beat = beat_rx.recv(), if heartbeat_on => {
                     let idle = std::future::pending::<()>();
@@ -677,6 +749,7 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                     continue;
                 }
                 next = transport.next_frame() => next,
+                }
             };
             let bytes = match next {
                 Ok(Some(bytes)) => bytes,
@@ -938,6 +1011,23 @@ fn now_rfc3339_millis() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Gateway HELLO jitter: never later than the interval, off = a full
+    /// period, and the draw scales across the whole range.
+    #[test]
+    fn first_beat_delay_is_jittered_within_the_interval_only_when_asked() {
+        let every = Duration::from_millis(1000);
+        assert_eq!(first_beat_delay(every, false, 123), every);
+        assert_eq!(first_beat_delay(every, false, 0), every);
+        assert_eq!(first_beat_delay(every, true, 0), Duration::ZERO);
+        assert_eq!(
+            first_beat_delay(every, true, 500),
+            Duration::from_millis(500)
+        );
+        for e in [1u64, 7, 999, 1000, 123_456_789, u64::MAX] {
+            assert!(first_beat_delay(every, true, e) < every);
+        }
+    }
 
     /// regression: a poison frame at position >= 2 used to reset the backoff
     /// (`frames_ok > 0`) every cycle, giving a fast reconnect loop.

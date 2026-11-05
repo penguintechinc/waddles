@@ -18,6 +18,23 @@ caller acts on the `Destination`.
 Flag OFF: unchanged inline REST send. Flag ON: Discord `chat.send` is queued
 to the outbound drain (detokenize -> LPUSH -> ack-wait -> meter once).
 
+### Outbound producer contract (P6a producer-completeness)
+
+- Every signed outbound entry (Twitch and Discord, every op) carries a unique `op_id` (UUIDv4, minted in `sign_envelope` when absent)
+  bound into the `pin_sig` MAC; svc_ingest keys its single-use (replay) check off the signature, so two sends of identical text are
+  two distinct entries. Entries without an `op_id` are refused by the new drain (`no_op_id`).
+- `dm.send`, `role.add`, `role.remove` stamp the numeric `tenant_id` from the verified `InvokeScope` (never the bundle payload; a
+  bundle-supplied `tenant_id`/`community_id` is ignored) and Discord ops stamp the scope's `community_id`. A scope with no resolved
+  tenant is refused `tenant_scope_missing` before anything is queued.
+- `relay.send` `{"op":"role.add"|"role.remove","user_id":"{user:<uuid>}","role_key":"<managed-role key>"}` (Discord): the guild is
+  pinned host-side by the drain from the community's binding, the channel is the event's origin channel, the key is
+  `[a-z][a-z0-9_-]{0,31}` (never a role snowflake). Authorized by the dangerous `moderation.discord` grant; throttled 20/min per
+  (tenant, community, app), limiter fails closed. Typed refusals: `invalid_args`, `tenant_scope_missing`, `rate_limited`,
+  `relay_unavailable`, `not_granted`, plus the drain's `unsupported_op` / `relay_failed` ack codes (and its `role_not_managed` /
+  `role_privileged` / `no_tenant_scope` duty refusals, surfaced by the ack).
+- Rollout: **svc_action first, then svc_ingest**; in-flight entries signed without an `op_id` are lost (counted `no_op_id`) -- alpha
+  is disposable.
+
 ### Drain-down divergence and rollback
 
 Flag ON with the drain down: the op is refused `relay_unavailable` and
