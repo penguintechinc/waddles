@@ -75,6 +75,7 @@ pub mod normalize;
 pub mod outbound;
 pub mod outbound_creds;
 pub mod outbound_creds_discord;
+pub mod outbound_creds_youtube;
 pub mod outbound_ops;
 pub mod outbound_pin;
 pub mod pin_sig;

@@ -332,14 +332,23 @@ async fn discord_delete_is_scoped_to_the_pinned_channel() {
 }
 
 #[tokio::test]
-async fn youtube_chat_send_needs_no_stamp_and_fills_the_live_chat_id_in_the_body() {
+async fn youtube_chat_send_is_stamp_pinned_and_fills_the_live_chat_id_in_the_body() {
     let slots = MapSlots::with(&[
         ("youtube.oauth", TOKEN),
         ("youtube.live_chat_id", "Cg0KC-live_ID"),
     ]);
     let r = rig(PlatformPolicy::youtube(), youtube_send(), slots, true).await;
-    let a = chat_send("ignored", None, "yo");
+    let a = chat_send("Cg0KC-live_ID", Some("Cg0KC-live_ID"), "yo");
     r.exec.execute(&req("youtube", &a, Some(9))).await.unwrap();
+    // No stamp -> refused before anything is resolved.
+    let unstamped = chat_send("Cg0KC-live_ID", None, "yo");
+    assert_eq!(
+        r.exec
+            .execute(&req("youtube", &unstamped, Some(9)))
+            .await
+            .unwrap_err(),
+        ExecError::Pin(PinError::MissingOrigin)
+    );
     let g = &sent(&r).await[0];
     assert_eq!(g.url.path(), "/youtube/v3/liveChat/messages");
     assert_eq!(g.url.query(), Some("part=snippet"));

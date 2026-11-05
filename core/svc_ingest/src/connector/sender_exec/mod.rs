@@ -36,6 +36,7 @@ pub mod policy;
 pub mod subst;
 pub mod twitch_slots;
 pub mod verify;
+pub mod youtube_slots;
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
@@ -786,9 +787,10 @@ fn retry_after_ms(headers: &[(String, String)]) -> Option<u64> {
         .map(|s| s.min(3600) * 1000)
 }
 
-/// Re-runs the destination pin and returns the canonical channel. A platform
-/// the pin gate does not know (`youtube`: no stamped transport yet) is only
-/// tolerated when the kind uses no stamp slot.
+/// Re-runs the destination pin and returns the canonical channel (`#login`,
+/// snowflake, or the YouTube live-chat id the resolver must prove the
+/// community owns). A platform the pin gate does not know is only tolerated
+/// when the kind uses no stamp slot.
 fn pin_channel(
     platform: &str,
     action: &OutboundAction,
@@ -810,7 +812,7 @@ fn pin_channel(
             (origin_channel.as_str(), Some(origin_channel.as_str()))
         }
     };
-    if !matches!(platform, "twitch" | "discord") {
+    if !matches!(platform, "twitch" | "discord" | "youtube") {
         return if uses_stamp {
             Err(ExecError::Pin(PinError::UnsupportedPlatform))
         } else {
@@ -844,3 +846,5 @@ fn default_payload(kind: &KindPolicy, action: &OutboundAction) -> Result<String,
 mod discord_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod youtube_tests;
