@@ -2067,3 +2067,64 @@ def test_real_catalog_bundle_yaml_and_hub_manifest_agree() -> None:
         seeder._assert_manifest_files_agree(entry, bundles_dir, hub)
         checked += 1
     assert checked > 0
+
+
+_OVERLAY_APP_IDS = (
+    "waddles.core.service.twitch",
+    "waddles.core.service.discord",
+    "waddles.core.service.youtube",
+)
+
+
+def test_real_catalog_has_the_three_connector_tools_overlay_rows() -> None:
+    """P6b: twitch/discord/youtube overlays are catalog rows with the connector-tools shape."""
+    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+    by_id = {e.app_id: e for e in load_catalog(bundles_dir / "core-bundles.yaml")}
+    raw = yaml.safe_load((bundles_dir / "core-bundles.yaml").read_text())["bundles"]
+    raw_by_id = {r["app_id"]: r for r in raw}
+    for app_id in _OVERLAY_APP_IDS:
+        platform = app_id.rsplit(".", 1)[1]
+        assert app_id in by_id, app_id
+        row = raw_by_id[app_id]
+        assert (row["language"], row["wit_world"], row["kind"]) == (
+            "rust",
+            "connector-tools",
+            "service",
+        )
+        assert row["source_dir"] == f"rust/{platform}"
+        assert row["artifact_path"] == f"{platform}.wasm"
+
+
+@pytest.mark.parametrize("app_id", _OVERLAY_APP_IDS)
+async def test_seed_one_seeds_each_real_overlay_row_and_grants_pii_read(
+    app_id: str, install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seeds every overlay from the REAL catalog + REAL hub-manifest (wasm bytes faked).
+
+    `wit_world: connector-tools` never reaches the seeder's validation, so the row seeds like any
+    rust service; as a `waddles.core.*` bundle the seeder pre-grants every declared permission,
+    including the dangerous `connector.pii.read`.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+    catalog = {e.app_id: e for e in load_catalog(bundles_dir / "core-bundles.yaml")}
+    real = catalog[app_id]
+    (tmp_path / real.manifest_path).write_bytes(
+        (bundles_dir / real.source_dir / "hub-manifest.yaml").read_bytes()
+    )
+    (tmp_path / real.artifact_path).write_bytes(_COMPONENT_BYTES)
+    community_id = await _seed_community(install_dal)
+    entry = CatalogEntry(
+        app_id=real.app_id,
+        version=real.version,
+        language=real.language,
+        manifest_path=real.manifest_path,
+        artifact_path=real.artifact_path,
+        activation_targets=(ActivationTarget(tenant_slug=TENANT_SLUG, community_id=community_id),),
+    )
+
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+    grants = await install_dal(install_dal.community_permission_grants.app_id == app_id).select()
+    assert "connector.pii.read" in {row.permission_id for row in grants}

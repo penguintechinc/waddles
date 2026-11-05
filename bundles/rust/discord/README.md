@@ -101,9 +101,8 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
    honour `429` `Retry-After`.
 7. **Actor tokenization needs `connector.pii.read`.** `on-frame` calls
    `identity.lookup(platform-identity("discord", author_id))` and emits the UUID as `actor` (never the raw
-   handle; no raw-handle fallback — a failed lookup fails the frame). `connector.pii.read` is not yet in
-   `hub_api/services/bundle_permission_catalog.py`, so the V2 validator rejects it: integrator adds it to the
-   catalog (dangerous, core-only) and then adds the permission to `hub-manifest.yaml` (see the comment there).
+   handle; no raw-handle fallback — a failed lookup fails the frame). `connector.pii.read` is declared in
+   `hub-manifest.yaml` (catalog id: dangerous, core-only); the core seeder pre-grants it (P6b integration).
 
 `ConnectorHost::load` REFUSES this component unless `connector.pii.read` is granted (it imports `identity`).
 
