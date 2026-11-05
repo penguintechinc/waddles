@@ -49,7 +49,8 @@
 use serde::Deserialize;
 
 use crate::discord_rest::{DiscordRestClient, DiscordRestError};
-use crate::outbound::IrcOutbound;
+use crate::outbound::{IrcOutbound, IrcSendError};
+use crate::outbound_creds::CredError;
 
 /// Highest queue-envelope schema version this consumer understands.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -142,6 +143,8 @@ struct WireEnvelope {
     op_id: Option<String>,
     #[serde(default)]
     exp_ms: Option<u64>,
+    #[serde(default)]
+    community_id: Option<i64>,
 }
 
 /// Longest accepted `op_id` (it becomes part of a Valkey key).
@@ -157,6 +160,10 @@ pub struct OutboundEntry {
     pub op_id: Option<String>,
     /// Epoch-ms deadline after which the producer stopped waiting.
     pub exp_ms: Option<u64>,
+    /// Numeric `communities.id` whose credential this send uses, stamped by
+    /// the producer from the binding-verified scope. `None` when absent or
+    /// not a positive id (never defaulted; a per-community drain refuses it).
+    pub community_id: Option<i64>,
 }
 
 /// `true` for a safe `op_id`: 1..=[`MAX_OP_ID_LEN`] ASCII alphanumerics or
@@ -211,6 +218,7 @@ pub fn parse_outbound_entry(
         }
     }
     let (op_id, exp_ms) = (wire.op_id.clone(), wire.exp_ms);
+    let community_id = wire.community_id.filter(|c| *c > 0);
     if let Some(v) = wire.v {
         if v > SCHEMA_VERSION {
             return Err(OutboundParseError::UnsupportedVersion(v));
@@ -247,6 +255,7 @@ pub fn parse_outbound_entry(
         action,
         op_id,
         exp_ms,
+        community_id,
     })
 }
 
@@ -394,13 +403,15 @@ pub async fn route<T: PlatformSender, D: PlatformSender>(
 /// `Unsupported` until the Twitch Helix client lands (follow-up PR).
 pub struct TwitchSender<'a, S: IrcOutbound> {
     irc: &'a S,
+    community_id: Option<i64>,
 }
 
 impl<'a, S: IrcOutbound> TwitchSender<'a, S> {
-    /// Wraps the existing IRC chat sender.
+    /// Wraps the IRC chat sender for one entry's `community_id` (the
+    /// community whose credential the send uses).
     #[must_use]
-    pub fn new(irc: &'a S) -> Self {
-        Self { irc }
+    pub fn new(irc: &'a S, community_id: Option<i64>) -> Self {
+        Self { irc, community_id }
     }
 }
 
@@ -411,12 +422,26 @@ impl<S: IrcOutbound> PlatformSender for TwitchSender<'_, S> {
 
     async fn send_chat(&self, channel: &str, text: &str) -> Result<(), SenderError> {
         self.irc
-            .send(channel, text)
+            .send(self.community_id, channel, text)
             .await
-            .map_err(|e| SenderError::Failed {
-                platform: "twitch",
-                op: "chat.send",
-                message: e.to_string(),
+            .map_err(|e| match e {
+                // Typed, content-free refusal: nothing was sent and there is
+                // no fallback credential.
+                IrcSendError::Credential(c @ CredError::Unavailable) => SenderError::Failed {
+                    platform: "twitch",
+                    op: "chat.send",
+                    message: c.reason().to_string(),
+                },
+                IrcSendError::Credential(c) => SenderError::Rejected {
+                    platform: "twitch",
+                    op: "chat.send",
+                    reason: c.reason(),
+                },
+                IrcSendError::Send(e) => SenderError::Failed {
+                    platform: "twitch",
+                    op: "chat.send",
+                    message: e.to_string(),
+                },
             })
     }
 
@@ -543,7 +568,6 @@ impl PlatformSender for DiscordSender<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use penguin_connector_twitch::TwitchError;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -552,7 +576,12 @@ mod tests {
     }
 
     impl IrcOutbound for RecordingIrc {
-        async fn send(&self, channel: &str, text: &str) -> Result<(), TwitchError> {
+        async fn send(
+            &self,
+            _community_id: Option<i64>,
+            channel: &str,
+            text: &str,
+        ) -> Result<(), IrcSendError> {
             self.calls
                 .lock()
                 .unwrap()
@@ -740,7 +769,7 @@ mod tests {
     #[tokio::test]
     async fn chat_send_routes_to_the_twitch_irc_sender() {
         let irc = RecordingIrc::default();
-        let twitch = TwitchSender::new(&irc);
+        let twitch = TwitchSender::new(&irc, Some(7));
         let action = OutboundAction::ChatSend {
             channel: "#c".into(),
             text: "hi".into(),
@@ -761,7 +790,7 @@ mod tests {
     #[tokio::test]
     async fn chat_send_to_unpinned_channel_is_refused_and_never_sent() {
         let irc = RecordingIrc::default();
-        let twitch = TwitchSender::new(&irc);
+        let twitch = TwitchSender::new(&irc, Some(7));
         let before =
             crate::outbound_pin::refusal_count("twitch", "chat.send", "channel_not_pinned");
         for (channel, origin, reason) in [
@@ -792,7 +821,7 @@ mod tests {
     #[tokio::test]
     async fn chat_delete_to_unpinned_discord_channel_is_refused() {
         let irc = RecordingIrc::default();
-        let twitch = TwitchSender::new(&irc);
+        let twitch = TwitchSender::new(&irc, Some(7));
         let action = OutboundAction::ChatDelete {
             channel: "2".into(),
             message_id: "9".into(),
@@ -830,7 +859,7 @@ mod tests {
     #[tokio::test]
     async fn new_ops_route_to_the_adapter_and_return_unsupported() {
         let irc = RecordingIrc::default();
-        let twitch = TwitchSender::new(&irc);
+        let twitch = TwitchSender::new(&irc, Some(7));
         let del = OutboundAction::ChatDelete {
             channel: "1".into(),
             message_id: "m".into(),
@@ -871,7 +900,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_platform_is_unsupported_not_a_silent_noop() {
         let irc = RecordingIrc::default();
-        let twitch = TwitchSender::new(&irc);
+        let twitch = TwitchSender::new(&irc, Some(7));
         let action = OutboundAction::ChatSend {
             channel: "c".into(),
             text: "t".into(),
@@ -950,7 +979,7 @@ mod tests {
         mount_member_of_guild(&server).await;
         let client = rest(&server);
         let irc = RecordingIrc::default();
-        let twitch = TwitchSender::new(&irc);
+        let twitch = TwitchSender::new(&irc, Some(7));
         let discord = DiscordSender::new(&client);
         for action in [
             OutboundAction::ChatSend {

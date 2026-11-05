@@ -5,22 +5,16 @@
 //! `{"channel", "text"}` message over a fresh
 //! `penguin_connector_twitch::irc::TwitchIrcSender` connection.
 //!
-//! **Credential resolution.** The outbound credential is this process's
-//! own configured Twitch IRC identity (`TWITCH_IRC_NICK`/
-//! `TWITCH_IRC_OAUTH_TOKEN`, the same one the receive side uses,
-//! `crate::ingest::twitch`) -- never a per-message tenant/community
-//! lookup. `svc_action::capabilities::outbound_relay_queue_key`'s own doc
-//! comment is explicit about why: "One key per provider (not per tenant/
-//! community), matching the inbound side's single-socket model" -- there
-//! is exactly one configured Twitch bot account per `svc_ingest` replica
-//! today, so "resolve the credential from the process's own configuration"
-//! (spec S4.3's platform-credential rule) and "resolve it from the
-//! envelope's tenant/community" collapse to the same single answer under
-//! the current single-socket-per-provider architecture. A genuine per-
-//! tenant multi-account model would need a per-tenant queue key and
-//! per-tenant credential store neither `svc_action`'s push side nor this
-//! drain implements yet -- flagged as a follow-up, not silently assumed
-//! away.
+//! **Credential resolution.** Per-community, resolved on every send
+//! ([`crate::outbound_creds`]): the queue entry carries the numeric
+//! `community_id` (stamped by `svc_action` from the binding-verified scope),
+//! the drain resolves that community's own Twitch connection through
+//! `connection_resolver` for each message and never caches the secret. A
+//! missing/unresolvable credential is a typed refusal -- there is NO fallback
+//! to any process-wide token. The single process-wide identity
+//! (`TWITCH_IRC_NICK`/`TWITCH_IRC_OAUTH_TOKEN`) survives only as the
+//! documented legacy [`crate::outbound_creds::StaticCredentialSource`],
+//! chosen at startup while `waddles.ingest-dynamic-connections` is OFF.
 //!
 //! `penguin_spine::SpineClient` is Streams-only (`XADD`/`XREADGROUP`); the
 //! relay queue is a plain list (`LPUSH`/`BRPOP`), out of that surface on
@@ -39,8 +33,9 @@ use penguin_connector_twitch::TwitchError;
 use tokio::sync::oneshot;
 
 use crate::ingest::Backoff;
+use crate::outbound_creds::{CredError, TwitchCredentialSource};
 use crate::outbound_ops::{
-    dispatch_to, parse_outbound, parse_outbound_entry, route, DiscordSender, SenderError,
+    dispatch_to, parse_outbound_entry, route, DiscordSender, OutboundEntry, SenderError,
     TwitchSender,
 };
 
@@ -120,13 +115,11 @@ pub(crate) fn build_redis_client(
     }
 }
 
-/// This process's own Twitch IRC identity, reused for every outbound
-/// relay send (see this module's "Credential resolution" doc).
-pub struct TwitchOutboundIdentity {
+/// Twitch IRC endpoint settings shared by every community (the credential
+/// is per-community and comes from the [`TwitchCredentialSource`]).
+pub struct TwitchIrcEndpoint {
     pub host: String,
     pub port: u16,
-    pub nick: String,
-    pub oauth_token: String,
     pub use_tls: bool,
 }
 
@@ -155,43 +148,66 @@ impl RelaySource for redis::aio::MultiplexedConnection {
     }
 }
 
+/// Why a chat send did not happen: the credential could not be produced
+/// (typed, nothing was sent) or the IRC send itself failed.
+#[derive(Debug, thiserror::Error)]
+pub enum IrcSendError {
+    /// No credential for this community/channel; see [`CredError`].
+    #[error("credential: {0}")]
+    Credential(#[from] CredError),
+    /// The IRC connection/send failed.
+    #[error("{0}")]
+    Send(#[from] TwitchError),
+}
+
 /// Abstraction over sending one chat message to a Twitch channel -- lets
 /// [`drain_loop`] be tested without a live Twitch IRC connection.
 #[allow(async_fn_in_trait)] // pub trait, service binary only -- see publish.rs::EventAppender's doc
 pub trait IrcOutbound: Send + Sync {
-    /// Connects fresh, registers, `PRIVMSG`s `channel`, and `QUIT`s
-    /// (Twitch chat sends never hold a persistent connection --
-    /// `penguin_connector_twitch::irc`'s own module doc).
-    async fn send(&self, channel: &str, text: &str) -> Result<(), TwitchError>;
+    /// Resolves the credential for `community_id` + `channel` (fresh, per
+    /// call), connects, registers, `PRIVMSG`s `channel`, and `QUIT`s (Twitch
+    /// chat sends never hold a persistent connection).
+    async fn send(
+        &self,
+        community_id: Option<i64>,
+        channel: &str,
+        text: &str,
+    ) -> Result<(), IrcSendError>;
 }
 
-/// The production [`IrcOutbound`]: builds a fresh `IrcConfig` (this
-/// process's own identity + the message's own `channel`) and sends via
-/// `TwitchIrcSender` -- one connection per outbound message, matching
-/// Twitch chat's real semantics (`penguin_connector_twitch::irc`'s own
-/// "sender: opens a fresh IRC connection per outbound chat message" doc).
-pub struct RealIrcOutbound {
-    identity: TwitchOutboundIdentity,
+/// The production [`IrcOutbound`]: per message, asks its
+/// [`TwitchCredentialSource`] for the community's identity, builds a fresh
+/// `IrcConfig` and sends via `TwitchIrcSender` -- one connection per
+/// message, matching Twitch chat's real semantics.
+pub struct RealIrcOutbound<C: TwitchCredentialSource> {
+    endpoint: TwitchIrcEndpoint,
+    creds: C,
 }
 
-impl RealIrcOutbound {
+impl<C: TwitchCredentialSource> RealIrcOutbound<C> {
     #[must_use]
-    pub fn new(identity: TwitchOutboundIdentity) -> Self {
-        Self { identity }
+    pub fn new(endpoint: TwitchIrcEndpoint, creds: C) -> Self {
+        Self { endpoint, creds }
     }
 }
 
-impl IrcOutbound for RealIrcOutbound {
-    async fn send(&self, channel: &str, text: &str) -> Result<(), TwitchError> {
+impl<C: TwitchCredentialSource> IrcOutbound for RealIrcOutbound<C> {
+    async fn send(
+        &self,
+        community_id: Option<i64>,
+        channel: &str,
+        text: &str,
+    ) -> Result<(), IrcSendError> {
+        let cred = self.creds.credential(community_id, channel).await?;
         let cfg = crate::ingest::twitch::irc_config(
-            &self.identity.host,
-            self.identity.port,
-            &self.identity.nick,
+            &self.endpoint.host,
+            self.endpoint.port,
+            &cred.nick,
             channel,
-            &self.identity.oauth_token,
-            self.identity.use_tls,
+            cred.oauth_token.expose(),
+            self.endpoint.use_tls,
         );
-        TwitchIrcSender::new(cfg).send(text).await
+        Ok(TwitchIrcSender::new(cfg).send(text).await?)
     }
 }
 
@@ -226,9 +242,9 @@ async fn drain_loop<Q, S>(
             popped = queue.brpop_one() => match popped {
                 Ok(Some(raw)) => {
                     backoff.reset();
-                    match parse_outbound(&raw, "twitch") {
-                        Ok(action) => {
-                            let twitch = TwitchSender::new(sender);
+                    match parse_outbound_entry(&raw, "twitch") {
+                        Ok(OutboundEntry { action, community_id, .. }) => {
+                            let twitch = TwitchSender::new(sender, community_id);
                             if let Err(err) = route("twitch", &action, &twitch, &DiscordSender::unconfigured()).await {
                                 match err {
                                     // A new op with no implementation yet is an
@@ -267,14 +283,15 @@ async fn drain_loop<Q, S>(
 /// [`RealIrcOutbound`] sender, then runs [`drain_loop`] until `shutdown`
 /// resolves. This is the function `crate::lib::try_start_twitch_outbound`
 /// spawns as its own background task.
-pub async fn run(
+pub async fn run<C: TwitchCredentialSource>(
     spine_cfg: &penguin_spine::SpineConfig,
-    identity: TwitchOutboundIdentity,
+    endpoint: TwitchIrcEndpoint,
+    creds: C,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), redis::RedisError> {
     let client = build_redis_client(spine_cfg)?;
     let conn = connect_with_response_timeout(&client, BLOCKING_CONN_RESPONSE_TIMEOUT).await?;
-    let sender = RealIrcOutbound::new(identity);
+    let sender = RealIrcOutbound::new(endpoint, creds);
     let backoff = Backoff::new(Duration::from_secs(30));
     drain_loop(conn, &sender, backoff, shutdown).await;
     Ok(())
@@ -620,13 +637,24 @@ mod tests {
     #[derive(Default)]
     struct RecordingSender {
         calls: Mutex<Vec<(String, String)>>,
+        communities: Mutex<Vec<Option<i64>>>,
         fail: bool,
+        cred_err: Option<CredError>,
     }
 
     impl IrcOutbound for RecordingSender {
-        async fn send(&self, channel: &str, text: &str) -> Result<(), TwitchError> {
+        async fn send(
+            &self,
+            community_id: Option<i64>,
+            channel: &str,
+            text: &str,
+        ) -> Result<(), IrcSendError> {
+            self.communities.lock().unwrap().push(community_id);
+            if let Some(e) = self.cred_err {
+                return Err(e.into());
+            }
             if self.fail {
-                return Err(TwitchError::Connection("simulated failure".to_string()));
+                return Err(TwitchError::Connection("simulated failure".to_string()).into());
             }
             self.calls
                 .lock()
@@ -1224,5 +1252,128 @@ mod tests {
     #[test]
     fn readiness_ttl_spans_several_heartbeats() {
         assert!(DRAIN_READY_TTL_SECS >= 3 * DRAIN_HEARTBEAT_INTERVAL.as_secs());
+    }
+
+    async fn drive(raw: &str, sender: &RecordingSender) {
+        let queue = FakeQueue {
+            payloads: vec![Ok(Some(raw.to_string()))],
+            idx: AtomicUsize::new(0),
+        };
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            drain_loop(queue, sender, Backoff::new(Duration::from_secs(30)), rx),
+        )
+        .await;
+    }
+
+    fn chat_entry(extra: &str) -> String {
+        format!(
+            r##"{{"v":1,"op":"chat.send","platform":"twitch","channel":"#c","text":"hi","origin_channel":"#c"{extra}}}"##
+        )
+    }
+
+    /// regression: p6a-t6b -- the entry's numeric community_id reaches the
+    /// credential-resolving sender (so community A's message is sent with A's
+    /// credential, B's with B's); non-positive/absent ids are `None`.
+    #[tokio::test]
+    async fn community_id_is_threaded_per_entry() {
+        for (extra, want) in [
+            (r#","community_id":1"#, Some(1)),
+            (r#","community_id":2"#, Some(2)),
+            (r#","community_id":0"#, None),
+            ("", None),
+        ] {
+            let sender = RecordingSender::default();
+            drive(&chat_entry(extra), &sender).await;
+            assert_eq!(
+                sender.communities.lock().unwrap().as_slice(),
+                &[want],
+                "{extra}"
+            );
+        }
+    }
+
+    /// regression: p6a-t6b -- a credential failure sends nothing (no fallback
+    /// to a process-wide token) and every kind is refused.
+    #[tokio::test]
+    async fn credential_failure_sends_nothing_for_every_kind() {
+        for e in [
+            CredError::NoCommunityScope,
+            CredError::NoBinding,
+            CredError::ChannelNotOwned,
+            CredError::NotUsable,
+            CredError::Unavailable,
+        ] {
+            let sender = RecordingSender {
+                cred_err: Some(e),
+                ..RecordingSender::default()
+            };
+            drive(&chat_entry(r#","community_id":1"#), &sender).await;
+            assert!(sender.calls.lock().unwrap().is_empty(), "{e:?}");
+            assert_eq!(sender.communities.lock().unwrap().len(), 1, "{e:?}");
+        }
+    }
+
+    /// The pin still refuses a non-owned channel BEFORE any credential is
+    /// resolved (the sender is never reached).
+    #[tokio::test]
+    async fn non_pinned_channel_is_refused_before_credential_resolution() {
+        let raw = r##"{"v":1,"op":"chat.send","platform":"twitch","channel":"#victim","text":"hi","origin_channel":"#mine","community_id":1}"##;
+        let sender = RecordingSender::default();
+        drive(raw, &sender).await;
+        assert!(sender.communities.lock().unwrap().is_empty());
+        assert!(sender.calls.lock().unwrap().is_empty());
+    }
+
+    /// regression: p6a-t6b -- through the real `RealIrcOutbound`: one
+    /// credential resolve per message, and a missing credential fails loudly
+    /// before any IRC connect.
+    #[tokio::test]
+    async fn real_outbound_resolves_per_message_and_fails_loud() {
+        use crate::outbound_creds::{
+            StaticCredentialSource, TwitchCredential, TwitchCredentialSource,
+        };
+        struct Counting(AtomicUsize);
+        impl TwitchCredentialSource for Counting {
+            async fn credential(
+                &self,
+                community_id: Option<i64>,
+                _channel: &str,
+            ) -> Result<TwitchCredential, CredError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                match community_id {
+                    Some(1) => Err(CredError::NoBinding),
+                    _ => Err(CredError::NoCommunityScope),
+                }
+            }
+        }
+        let ep = || TwitchIrcEndpoint {
+            host: "127.0.0.1".into(),
+            port: 1,
+            use_tls: false,
+        };
+        let real = RealIrcOutbound::new(ep(), Counting(AtomicUsize::new(0)));
+        for (c, want) in [
+            (Some(1), CredError::NoBinding),
+            (Some(1), CredError::NoBinding),
+            (None, CredError::NoCommunityScope),
+        ] {
+            let err = real.send(c, "#c", "hi").await.unwrap_err();
+            assert!(
+                matches!(err, IrcSendError::Credential(e) if e == want),
+                "{err}"
+            );
+        }
+        assert_eq!(
+            real.creds.0.load(Ordering::SeqCst),
+            3,
+            "one resolve per use"
+        );
+        // The legacy source still yields a credential (the connect then fails on port 1).
+        let legacy =
+            RealIrcOutbound::new(ep(), StaticCredentialSource::new("n".into(), "t".into()));
+        let err = legacy.send(None, "#c", "hi").await.unwrap_err();
+        assert!(matches!(err, IrcSendError::Send(_)), "{err}");
     }
 }

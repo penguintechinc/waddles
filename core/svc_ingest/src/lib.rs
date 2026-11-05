@@ -73,6 +73,7 @@ pub mod ingest;
 pub mod license;
 pub mod normalize;
 pub mod outbound;
+pub mod outbound_creds;
 pub mod outbound_ops;
 pub mod outbound_pin;
 pub mod publish;
@@ -301,7 +302,12 @@ where
             Arc::clone(&receiver_readiness),
             dek_provider.clone(),
         );
-        try_start_twitch_outbound(&config);
+        if config.cli.dynamic_connections {
+            // Per-community credentials: never the process-wide identity.
+            try_start_twitch_outbound_percommunity(&config)?;
+        } else {
+            try_start_twitch_outbound(&config);
+        }
         try_start_discord_outbound(&config);
         state.eventsub =
             try_build_eventsub_state(&config, ingest_metrics.clone(), dek_provider).await;
@@ -679,13 +685,17 @@ fn try_start_twitch_outbound(config: &config::Config) {
         }
     };
 
-    let identity = outbound::TwitchOutboundIdentity {
+    let endpoint = outbound::TwitchIrcEndpoint {
         host: config.cli.twitch_irc_host.clone(),
         port: config.cli.twitch_irc_port,
-        nick: config.cli.twitch_irc_nick.clone(),
-        oauth_token,
         use_tls: config.cli.twitch_irc_use_tls,
     };
+    // LEGACY single-identity path: only reachable while
+    // `waddles.ingest-dynamic-connections` is OFF (see the call site).
+    let creds = outbound_creds::StaticCredentialSource::new(
+        config.cli.twitch_irc_nick.clone(),
+        oauth_token,
+    );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
@@ -693,10 +703,56 @@ fn try_start_twitch_outbound(config: &config::Config) {
         let _ = shutdown_tx.send(());
     });
     tokio::spawn(async move {
-        if let Err(err) = outbound::run(&spine_cfg, identity, shutdown_rx).await {
+        if let Err(err) = outbound::run(&spine_cfg, endpoint, creds, shutdown_rx).await {
             tracing::error!(error = %err, "twitch outbound relay drain exited");
         }
     });
+}
+
+/// Starts the Twitch outbound relay drain with PER-COMMUNITY credentials
+/// (`waddles.ingest-dynamic-connections` ON): each send resolves the entry's
+/// community connection through hub-api (`connection_resolver`), never caches
+/// the secret, and never falls back to `TWITCH_IRC_OAUTH_TOKEN`. Every
+/// misconfiguration is a fatal `Err` (the process must not run with a drain
+/// that would silently use another identity or nothing at all).
+fn try_start_twitch_outbound_percommunity(config: &config::Config) -> anyhow::Result<()> {
+    let cli = &config.cli;
+    twitch_sessions::boot::validate_dynamic_prereqs(cli, publish::scope_resolver_installed())?;
+    if config.twitch_irc_oauth_token.is_some() {
+        tracing::warn!(
+            "TWITCH_IRC_OAUTH_TOKEN is set but IGNORED: per-community outbound credentials \
+             are resolved per send; the process-wide token is never used as a fallback"
+        );
+    }
+    let spine_cfg = penguin_spine::SpineConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("spine config unavailable for twitch outbound: {e}"))?;
+    let resolver = connection_resolver::ConnectionResolver::new(
+        connection_resolver::ResolverConfig::new(
+            cli.hub_api_url.clone(),
+            cli.environment.clone(),
+            cli.service_jwt_token_endpoint.clone(),
+            cli.service_jwt_sa_token_path.clone(),
+        ),
+        std::sync::Arc::new(twitch_sessions::boot::ResolverTelemetry),
+    )
+    .map_err(|e| anyhow::anyhow!("connection resolver unavailable: {e}"))?;
+    let endpoint = outbound::TwitchIrcEndpoint {
+        host: cli.twitch_irc_host.clone(),
+        port: cli.twitch_irc_port,
+        use_tls: cli.twitch_irc_use_tls,
+    };
+    let creds = outbound_creds::ResolverTwitchCredentials::new(resolver);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(());
+    });
+    tokio::spawn(async move {
+        if let Err(err) = outbound::run(&spine_cfg, endpoint, creds, shutdown_rx).await {
+            tracing::error!(error = %err, "twitch outbound relay drain exited");
+        }
+    });
+    Ok(())
 }
 
 /// Attempts to start the Discord outbound drain (`crate::outbound::
@@ -1261,6 +1317,17 @@ mod tests {
             test_readiness(),
             test_dek_provider(),
         );
+    }
+
+    /// regression: p6a-t6b -- per-community mode with its prerequisites
+    /// missing is a fatal `Err`, never a silent start on the static token.
+    #[tokio::test]
+    async fn percommunity_outbound_misconfig_is_fatal_never_static_fallback() {
+        let mut config = base_config();
+        config.cli.dynamic_connections = true;
+        config.twitch_irc_oauth_token = Some(crate::config::Secret::new("test-token"));
+        config.cli.twitch_irc_nick = "waddlebot".to_string();
+        assert!(try_start_twitch_outbound_percommunity(&config).is_err());
     }
 
     #[tokio::test]
