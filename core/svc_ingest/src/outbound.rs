@@ -364,6 +364,29 @@ async fn drain_loop<Q, S>(
 /// Retry/ack semantics are identical either way: a refused or failed entry
 /// is already popped, logged PII-free and dropped, never re-queued.
 async fn drain_loop_with<Q, S, X, G>(
+    queue: Q,
+    sender: &S,
+    exec: Option<&X>,
+    guard: &G,
+    pin: Option<&PinKeys>,
+    backoff: Backoff,
+    shutdown: oneshot::Receiver<()>,
+) where
+    Q: RelaySource,
+    S: IrcOutbound,
+    X: ActionExecutor,
+    G: ReplayGuard,
+{
+    drain_platform_loop("twitch", queue, sender, exec, guard, pin, backoff, shutdown).await;
+}
+
+/// The list-drain loop for one IRC-style platform queue. `platform` is the
+/// stamp/replay/metric label; a platform other than `twitch` has no legacy
+/// sender, so it is only ever started with `exec = Some(_)` (the generic
+/// executor -- see [`run_youtube_exec`]).
+#[allow(clippy::too_many_arguments)]
+async fn drain_platform_loop<Q, S, X, G>(
+    platform: &'static str,
     mut queue: Q,
     sender: &S,
     exec: Option<&X>,
@@ -383,17 +406,21 @@ async fn drain_loop_with<Q, S, X, G>(
             popped = queue.brpop_one() => match popped {
                 Ok(Some(raw)) => {
                     backoff.reset();
-                    match parse_outbound_entry(&raw, "twitch") {
+                    match parse_outbound_entry(&raw, platform) {
                         Ok(OutboundEntry { action, community_id, .. }) => {
-                            let Ok(stamp) = check_stamp(&raw, "twitch", action.op(), pin) else {
+                            let Ok(stamp) = check_stamp(&raw, platform, action.op(), pin) else {
                                 continue;
                             };
                             // Single-use: claim the stamp BEFORE any send so a
                             // replayed (or unverifiable-by-outage) entry never runs.
-                            let result = match claim_once(guard, "twitch", action.op(), &stamp).await {
+                            let result = match claim_once(guard, platform, action.op(), &stamp).await {
                                 Err(e) => Err(e),
                                 Ok(()) => match exec {
-                                    Some(x) => x.execute_action("twitch", community_id, &action).await,
+                                    Some(x) => x.execute_action(platform, community_id, &action).await,
+                                    None if platform != "twitch" => Err(SenderError::Unsupported {
+                                        platform: platform.to_string(),
+                                        op: action.op(),
+                                    }),
                                     None => {
                                         let twitch = TwitchSender::new(sender, community_id);
                                         route("twitch", &action, &twitch, &DiscordSender::unconfigured()).await
@@ -404,14 +431,14 @@ async fn drain_loop_with<Q, S, X, G>(
                                 match err {
                                     // A new op with no implementation yet is an
                                     // actionable failure, not degraded service.
-                                    SenderError::Unsupported { .. } => tracing::error!(platform = "twitch", op = action.op(), error = %err, "outbound op unsupported, dropping"),
-                                    SenderError::Failed { .. } => tracing::warn!(platform = "twitch", op = action.op(), error = %err, "outbound relay send failed"),
-                                    SenderError::Rejected { .. } => tracing::warn!(platform = "twitch", op = action.op(), error = %err, "outbound op refused by policy"),
+                                    SenderError::Unsupported { .. } => tracing::error!(platform, op = action.op(), error = %err, "outbound op unsupported, dropping"),
+                                    SenderError::Failed { .. } => tracing::warn!(platform, op = action.op(), error = %err, "outbound relay send failed"),
+                                    SenderError::Rejected { .. } => tracing::warn!(platform, op = action.op(), error = %err, "outbound op refused by policy"),
                                 }
                             }
                         }
                         Err(err) => {
-                            tracing::warn!(platform = "twitch", error = %err, "malformed outbound relay payload, dropping");
+                            tracing::warn!(platform, error = %err, "malformed outbound relay payload, dropping");
                         }
                     }
                 }
@@ -422,7 +449,7 @@ async fn drain_loop_with<Q, S, X, G>(
                     backoff.reset();
                 }
                 Err(err) => {
-                    tracing::warn!(platform = "twitch", error = %err, "outbound relay queue read error, retrying");
+                    tracing::warn!(platform, error = %err, "outbound relay queue read error, retrying");
                     let delay = backoff.delay();
                     tokio::select! {
                         _ = &mut shutdown => return,
@@ -492,6 +519,47 @@ pub async fn run_exec<X: ActionExecutor>(
         &guard,
         pin.as_ref(),
         backoff,
+        shutdown,
+    )
+    .await;
+    Ok(())
+}
+
+/// The queue key the YouTube outbound drain reads: the same
+/// `waddles:transport:irc:{provider}:outbound` shape
+/// `svc_action::capabilities::outbound_relay_queue_key("youtube")` produces
+/// (duplicated, not imported: separate crates). YouTube has NO legacy sender;
+/// this drain exists only in executor mode.
+pub const YOUTUBE_OUTBOUND_QUEUE_KEY: &str = "waddles:transport:irc:youtube:outbound";
+
+/// The YouTube drain: same stamp gate, single-use claim and generic executor
+/// as [`run_exec`], reading [`YOUTUBE_OUTBOUND_QUEUE_KEY`]. There is no legacy
+/// YouTube path to fall back to, so it is only started with the executor.
+///
+/// # Errors
+/// [`redis::RedisError`] if the Valkey connect fails.
+pub async fn run_youtube_exec<X: ActionExecutor>(
+    spine_cfg: &penguin_spine::SpineConfig,
+    exec: &X,
+    pin: Option<PinKeys>,
+    shutdown: oneshot::Receiver<()>,
+) -> Result<(), redis::RedisError> {
+    let client = build_redis_client(spine_cfg)?;
+    let queue = ListQueue {
+        conn: connect_with_response_timeout(&client, BLOCKING_CONN_RESPONSE_TIMEOUT).await?,
+        key: YOUTUBE_OUTBOUND_QUEUE_KEY,
+    };
+    let guard = ValkeyReplayGuard::new(
+        connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
+    );
+    drain_platform_loop(
+        "youtube",
+        queue,
+        &NoIrc,
+        Some(exec),
+        &guard,
+        pin.as_ref(),
+        Backoff::new(Duration::from_secs(30)),
         shutdown,
     )
     .await;
@@ -2570,6 +2638,70 @@ mod tests {
         );
         assert!(sender.calls.lock().unwrap().is_empty());
         assert!(sender.communities.lock().unwrap().is_empty());
+    }
+
+    /// The YouTube drain runs the same stamp-first gate under the `youtube`
+    /// label: a signed youtube entry reaches the executor with its numeric
+    /// community; a twitch-platform entry on that queue never does.
+    #[tokio::test]
+    async fn youtube_drain_stamps_and_executes_only_youtube_entries() {
+        const YT_SEND: &str = r##"{"v":1,"op":"chat.send","platform":"youtube","channel":"lc1","text":"hi","origin_channel":"lc1","community_id":7}"##;
+        let exec = ScriptedExec::new(|_, _| Ok(()));
+        let queue = FakeQueue {
+            payloads: vec![
+                Ok(Some(format!("RAW:{YT_SEND}"))),
+                Ok(Some(TW_SEND.to_string())),
+                Ok(Some(YT_SEND.to_string())),
+            ],
+            idx: AtomicUsize::new(0),
+        };
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_platform_loop(
+                "youtube",
+                queue,
+                &NoIrc,
+                Some(&exec),
+                &MemoryReplayGuard::default(),
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+        assert_eq!(
+            exec.calls.lock().unwrap().as_slice(),
+            &[("youtube", Some(7), "chat.send")]
+        );
+    }
+
+    /// A non-twitch platform has no legacy sender: without an executor the
+    /// entry fails loud (Unsupported) instead of reaching the twitch sender.
+    #[tokio::test]
+    async fn a_non_twitch_drain_without_an_executor_never_uses_the_twitch_sender() {
+        const YT_SEND: &str = r##"{"v":1,"op":"chat.send","platform":"youtube","channel":"lc1","text":"hi","origin_channel":"lc1","community_id":7}"##;
+        let sender = RecordingSender::default();
+        let queue = FakeQueue {
+            payloads: vec![Ok(Some(YT_SEND.to_string()))],
+            idx: AtomicUsize::new(0),
+        };
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_platform_loop(
+                "youtube",
+                queue,
+                &sender,
+                None::<&NoExecutor>,
+                &MemoryReplayGuard::default(),
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+        assert!(sender.calls.lock().unwrap().is_empty());
     }
 
     /// Refused / failed / unsupported outcomes are consumed (already popped),

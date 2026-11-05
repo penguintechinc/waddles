@@ -1,0 +1,374 @@
+//! The mTLS host-API listener svc_ingest exposes to the bundle executor.
+//!
+//! The executor DIALS its stage and speaks first (spec S6.6), so for the
+//! generic outbound executor (`sender.build-request`) svc_ingest is the
+//! listening side: this module owns the TCP accept loop and the mutual-TLS
+//! handshake, then hands each authenticated stream to
+//! [`ExecutorLink::attach`] (hello/hello-ok + request multiplexing).
+//!
+//! Security posture, same as `svc_action::host_api`: the client certificate
+//! is REQUIRED and verified against the configured CA before a single frame
+//! is read; there is no plaintext mode and no optional-client-auth mode. A
+//! failed handshake is logged (no peer-supplied text) and the loop keeps
+//! accepting -- per-connection, not whole-listener, failure.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use rustls::server::WebPkiClientVerifier;
+use rustls::{RootCertStore, ServerConfig};
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use tokio::net::TcpListener;
+use tokio::sync::{oneshot, Semaphore};
+use tokio_rustls::TlsAcceptor;
+
+use super::ExecutorLink;
+
+/// Upper bound on one TLS handshake.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connections being handshaken/attached at once; the excess is dropped.
+const MAX_PENDING: usize = 8;
+
+/// File locations of the listener's TLS material (paths only, never bytes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostApiTls {
+    /// PEM server certificate chain.
+    pub server_cert: PathBuf,
+    /// PEM server private key.
+    pub server_key: PathBuf,
+    /// PEM CA bundle the executor's client certificate must chain to.
+    pub client_ca: PathBuf,
+}
+
+/// Why the listener could not be built. Names the file role, never content.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ListenerError {
+    /// A TLS file could not be read or parsed.
+    #[error("host-api TLS file unusable: {0}")]
+    File(&'static str),
+    /// The certificate/key/CA combination was rejected by rustls.
+    #[error("host-api TLS configuration rejected: {0}")]
+    Tls(&'static str),
+}
+
+fn certs(path: &Path, role: &'static str) -> Result<Vec<CertificateDer<'static>>, ListenerError> {
+    let list = CertificateDer::pem_file_iter(path)
+        .map_err(|_| ListenerError::File(role))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ListenerError::File(role))?;
+    if list.is_empty() {
+        return Err(ListenerError::File(role));
+    }
+    Ok(list)
+}
+
+/// Builds the mTLS acceptor: server identity plus REQUIRED client-cert
+/// verification against the CA bundle.
+///
+/// # Errors
+/// [`ListenerError`] for an unreadable/empty/malformed file or a rejected
+/// cert/key pair.
+pub fn build_acceptor(tls: &HostApiTls) -> Result<TlsAcceptor, ListenerError> {
+    crate::crypto::ensure_installed();
+    let chain = certs(&tls.server_cert, "server_cert")?;
+    let key = PrivateKeyDer::from_pem_file(&tls.server_key)
+        .map_err(|_| ListenerError::File("server_key"))?;
+    let mut roots = RootCertStore::empty();
+    for ca in certs(&tls.client_ca, "client_ca")? {
+        roots.add(ca).map_err(|_| ListenerError::Tls("client_ca"))?;
+    }
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .map_err(|_| ListenerError::Tls("client_verifier"))?;
+    let cfg = ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(chain, key)
+        .map_err(|_| ListenerError::Tls("server_identity"))?;
+    Ok(TlsAcceptor::from(Arc::new(cfg)))
+}
+
+/// Accepts executor connections until `shutdown` resolves, attaching each
+/// mutually-authenticated stream to `link`. Never returns an error for a
+/// single bad connection.
+pub async fn serve(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    link: Arc<ExecutorLink>,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    let permits = Arc::new(Semaphore::new(MAX_PENDING));
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return,
+            accepted = listener.accept() => {
+                let tcp = match accepted {
+                    Ok((tcp, _)) => tcp,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "host-api accept failed");
+                        continue;
+                    }
+                };
+                let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+                    tracing::warn!("host-api connection dropped: too many pending handshakes");
+                    continue;
+                };
+                let acceptor = acceptor.clone();
+                let link = Arc::clone(&link);
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+                        Ok(Ok(stream)) => {
+                            if let Err(e) = link.attach(stream).await {
+                                tracing::warn!(error = %e, "host-api executor attach failed");
+                            }
+                        }
+                        Ok(Err(_)) => tracing::warn!("host-api mTLS handshake refused"),
+                        Err(_) => tracing::warn!("host-api mTLS handshake timed out"),
+                    }
+                });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use penguin_bundle_host::wire::message::PROTOCOL_VERSION;
+    use penguin_bundle_host::wire::{
+        read_frame, write_frame, Frame, HelloBody, Message, SandboxInfo,
+    };
+    use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
+    use std::io::Write;
+
+    struct Pki {
+        dir: tempfile_dir::Dir,
+        tls: HostApiTls,
+        ca_pem: String,
+        client_cert_pem: String,
+        client_key_pem: String,
+        rogue_cert_pem: String,
+        rogue_key_pem: String,
+    }
+
+    /// Minimal self-cleaning temp dir (no extra dependency).
+    mod tempfile_dir {
+        use std::path::{Path, PathBuf};
+        pub struct Dir(PathBuf);
+        impl Dir {
+            pub fn new(tag: &str) -> Self {
+                let p = std::env::temp_dir().join(format!(
+                    "svc-ingest-hostapi-{tag}-{}-{:?}",
+                    std::process::id(),
+                    std::thread::current().id()
+                ));
+                std::fs::create_dir_all(&p).unwrap();
+                Self(p)
+            }
+            pub fn path(&self) -> &Path {
+                &self.0
+            }
+        }
+        impl Drop for Dir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    fn ca(name: &str) -> (rcgen::Certificate, rcgen::Issuer<'static, KeyPair>) {
+        let mut p = CertificateParams::new(Vec::<String>::new()).unwrap();
+        p.distinguished_name.push(DnType::CommonName, name);
+        p.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let k = KeyPair::generate().unwrap();
+        let cert = p.self_signed(&k).unwrap();
+        (cert, rcgen::Issuer::new(p, k))
+    }
+
+    fn leaf(
+        name: &str,
+        sans: Vec<String>,
+        issuer: &(rcgen::Certificate, rcgen::Issuer<'static, KeyPair>),
+    ) -> (String, String) {
+        let mut p = CertificateParams::new(sans).unwrap();
+        p.distinguished_name.push(DnType::CommonName, name);
+        let k = KeyPair::generate().unwrap();
+        let c = p.signed_by(&k, &issuer.1).unwrap();
+        (c.pem(), k.serialize_pem())
+    }
+
+    fn pki(tag: &str) -> Pki {
+        crate::crypto::ensure_installed();
+        let dir = tempfile_dir::Dir::new(tag);
+        let good = ca("good-ca");
+        let rogue = ca("rogue-ca");
+        let (srv_c, srv_k) = leaf("svc-ingest", vec!["localhost".into()], &good);
+        let (cli_c, cli_k) = leaf("executor", vec!["executor".into()], &good);
+        let (rg_c, rg_k) = leaf("executor", vec!["executor".into()], &rogue);
+        let w = |n: &str, s: &str| {
+            let p = dir.path().join(n);
+            std::fs::File::create(&p)
+                .unwrap()
+                .write_all(s.as_bytes())
+                .unwrap();
+            p
+        };
+        let ca_pem = good.0.pem();
+        let tls = HostApiTls {
+            server_cert: w("srv.pem", &srv_c),
+            server_key: w("srv.key", &srv_k),
+            client_ca: w("ca.pem", &ca_pem),
+        };
+        Pki {
+            dir,
+            tls,
+            ca_pem,
+            client_cert_pem: cli_c,
+            client_key_pem: cli_k,
+            rogue_cert_pem: rg_c,
+            rogue_key_pem: rg_k,
+        }
+    }
+
+    fn client(p: &Pki, cert: &str, key: &str) -> tokio_rustls::TlsConnector {
+        let mut roots = RootCertStore::empty();
+        for c in CertificateDer::pem_slice_iter(p.ca_pem.as_bytes()) {
+            roots.add(c.unwrap()).unwrap();
+        }
+        let chain: Vec<_> = CertificateDer::pem_slice_iter(cert.as_bytes())
+            .map(Result::unwrap)
+            .collect();
+        let key = PrivateKeyDer::from_pem_slice(key.as_bytes()).unwrap();
+        let cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(chain, key)
+            .unwrap();
+        tokio_rustls::TlsConnector::from(Arc::new(cfg))
+    }
+
+    async fn start(p: &Pki) -> (std::net::SocketAddr, Arc<ExecutorLink>, oneshot::Sender<()>) {
+        let acceptor = build_acceptor(&p.tls).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let link = Arc::new(ExecutorLink::new());
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(serve(listener, acceptor, Arc::clone(&link), rx));
+        (addr, link, tx)
+    }
+
+    async fn hello_over(
+        addr: std::net::SocketAddr,
+        c: tokio_rustls::TlsConnector,
+    ) -> Result<Message, String> {
+        let tcp = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| e.to_string())?;
+        let name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
+        let mut tls = c.connect(name, tcp).await.map_err(|e| e.to_string())?;
+        let hello = Frame::new(
+            1,
+            Message::Hello(HelloBody {
+                protocol_version: u32::from(PROTOCOL_VERSION),
+                executor_version: "t".to_string(),
+                wasmtime_version: "t".to_string(),
+                wasmtime_abi: "t".to_string(),
+                collector: "drc".to_string(),
+                sandbox: SandboxInfo {
+                    runtime: "runc".to_string(),
+                    verified: false,
+                },
+            }),
+        );
+        write_frame(&mut tls, &hello)
+            .await
+            .map_err(|e| e.to_string())?;
+        read_frame(&mut tls)
+            .await
+            .map(|f| f.message)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn a_ca_signed_executor_attaches_and_gets_hello_ok() {
+        let p = pki("ok");
+        let (addr, link, _stop) = start(&p).await;
+        let reply = hello_over(addr, client(&p, &p.client_cert_pem, &p.client_key_pem))
+            .await
+            .unwrap();
+        assert!(matches!(reply, Message::HelloOk(_)));
+        assert!(link.is_attached());
+        drop(p.dir);
+    }
+
+    #[tokio::test]
+    async fn a_client_cert_from_another_ca_is_refused_and_nothing_attaches() {
+        let p = pki("rogue");
+        let (addr, link, _stop) = start(&p).await;
+        let res = hello_over(addr, client(&p, &p.rogue_cert_pem, &p.rogue_key_pem)).await;
+        assert!(res.is_err(), "rogue client must not get a reply");
+        assert!(!link.is_attached());
+    }
+
+    #[tokio::test]
+    async fn a_client_without_a_certificate_is_refused() {
+        let p = pki("nocert");
+        let (addr, link, _stop) = start(&p).await;
+        let mut roots = RootCertStore::empty();
+        for c in CertificateDer::pem_slice_iter(p.ca_pem.as_bytes()) {
+            roots.add(c.unwrap()).unwrap();
+        }
+        let cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let res = hello_over(addr, tokio_rustls::TlsConnector::from(Arc::new(cfg))).await;
+        assert!(res.is_err());
+        assert!(!link.is_attached());
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_the_accept_loop() {
+        let p = pki("stop");
+        let acceptor = build_acceptor(&p.tls).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (tx, rx) = oneshot::channel();
+        let h = tokio::spawn(serve(listener, acceptor, Arc::new(ExecutorLink::new()), rx));
+        tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), h)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn build_acceptor_names_the_unusable_file_role_only() {
+        let p = pki("bad");
+        let mut t = p.tls.clone();
+        t.server_cert = p.dir.path().join("missing.pem");
+        assert_eq!(
+            build_acceptor(&t).err(),
+            Some(ListenerError::File("server_cert"))
+        );
+        let mut t = p.tls.clone();
+        t.server_key = p.tls.client_ca.clone(); // a cert, not a key
+        assert_eq!(
+            build_acceptor(&t).err(),
+            Some(ListenerError::File("server_key"))
+        );
+        let mut t = p.tls.clone();
+        t.client_ca = p.dir.path().join("missing.pem");
+        assert_eq!(
+            build_acceptor(&t).err(),
+            Some(ListenerError::File("client_ca"))
+        );
+        let mut t = p.tls.clone();
+        let empty = p.dir.path().join("empty.pem");
+        std::fs::write(&empty, "").unwrap();
+        t.client_ca = empty;
+        assert_eq!(
+            build_acceptor(&t).err(),
+            Some(ListenerError::File("client_ca"))
+        );
+    }
+}

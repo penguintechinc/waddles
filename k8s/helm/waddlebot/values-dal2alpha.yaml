@@ -346,6 +346,10 @@ pipeline:
       # (alpha only; the base values.yaml default is false so beta/prod never render them).
       dynamicConnections:
         enabled: true
+      # P6a generic outbound executor (waddles.connector-tools): OFF until the pinned connector
+      # digests exist and a bundle-executor dials the host-api port (core/svc_ingest/README.md).
+      connectorTools:
+        enabled: false
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }

@@ -25,6 +25,24 @@
 # own doc comment), so unlike svc-process-rust/svc-action-rust there is no db-migrate
 # initContainer here.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcIngest.enabled }}
+{{- /* P6a -- waddles.connector-tools (generic outbound executor). Resolved ONCE at render: every
+prerequisite is required here too, so a half-configured ON deployment fails `helm template`
+instead of crash-looping at boot (svc_ingest itself also refuses to start, naming the item). */}}
+{{- $ct := .Values.pipeline.rustDataPlane.svcIngest.connectorTools | default dict }}
+{{- if $ct.enabled }}
+{{- if not .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+{{- fail "svcIngest.connectorTools.enabled requires svcIngest.dynamicConnections.enabled (the executor resolves per-community credentials and platform users through hub-api)" }}
+{{- end }}
+{{- if not .Values.pipeline.hubApi.enabled }}
+{{- fail "svcIngest.connectorTools.enabled requires pipeline.hubApi.enabled (hub-api gRPC platform-user resolver + CA)" }}
+{{- end }}
+{{- range $p := list "twitch" "discord" "youtube" }}
+{{- $d := index ($ct.digests | default dict) $p | default "" }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $d) }}
+{{- fail (printf "svcIngest.connectorTools.digests.%s must be the pinned connector component digest sha256:<64 lowercase hex> (got %q)" $p $d) }}
+{{- end }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -93,6 +111,12 @@ spec:
         - name: metrics
           containerPort: {{ .Values.pipeline.rustDataPlane.svcIngest.metricsPort }}
           protocol: TCP
+        {{- if $ct.enabled }}
+        # Host-API mTLS listener the bundle executor dials (generic outbound executor).
+        - name: host-api
+          containerPort: {{ $ct.hostApiPort | default 8301 }}
+          protocol: TCP
+        {{- end }}
         envFrom:
         - configMapRef:
             name: {{ include "waddlebot.fullname" . }}-config
@@ -143,6 +167,32 @@ spec:
               key: OUTBOUND_PIN_KEYS
         - name: OUTBOUND_PIN_ACTIVE_KID
           value: {{ .Values.outboundPin.activeKid | default "k1" | quote }}
+        {{- if $ct.enabled }}
+        # waddles.connector-tools env baseline (default OFF = legacy drains). ON: the executor path;
+        # svc_ingest refuses to start if any item below is missing/malformed (no silent legacy fallback).
+        - name: CONNECTOR_TOOLS_ENABLED
+          value: "true"
+        - name: SENDER_EXEC_HOST_API_PORT
+          value: {{ $ct.hostApiPort | default 8301 | quote }}
+        # Host-pinned connector component digests -- never from the queue or the guest.
+        - name: SENDER_EXEC_DIGEST_TWITCH
+          value: {{ $ct.digests.twitch | quote }}
+        - name: SENDER_EXEC_DIGEST_DISCORD
+          value: {{ $ct.digests.discord | quote }}
+        - name: SENDER_EXEC_DIGEST_YOUTUBE
+          value: {{ $ct.digests.youtube | quote }}
+        # Public Helix application client id, from the operator-managed platform-credentials Secret.
+        - name: TWITCH_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
+              key: TWITCH_CLIENT_ID
+        # hub-api internal gRPC (IdentityService.ResolvePlatformUser, scope identity:platform-user:resolve).
+        - name: HUB_API_GRPC_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+        {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}
+        {{- end }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid }}
         - name: ENVELOPE_BINDING_ACTIVE_KID
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid | quote }}
@@ -250,11 +300,19 @@ spec:
         {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- if $ct.enabled }}
+        {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
+        {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
       {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
+      {{- end }}
+      {{- if $ct.enabled }}
+      {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
       {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
@@ -278,9 +336,15 @@ spec:
     targetPort: metrics
     protocol: TCP
     name: metrics
+  {{- if $ct.enabled }}
+  - port: {{ $ct.hostApiPort | default 8301 }}
+    targetPort: host-api
+    protocol: TCP
+    name: host-api
+  {{- end }}
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-ingest-rust
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
-{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-ingest-rust" "ports" (list $.Values.pipeline.rustDataPlane.svcIngest.port $.Values.pipeline.rustDataPlane.svcIngest.metricsPort) "runtime" "rust" "binaries" (list "/app/svc-ingest")) }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-ingest-rust" "ports" (ternary (list $.Values.pipeline.rustDataPlane.svcIngest.port $.Values.pipeline.rustDataPlane.svcIngest.metricsPort ($ct.hostApiPort | default 8301)) (list $.Values.pipeline.rustDataPlane.svcIngest.port $.Values.pipeline.rustDataPlane.svcIngest.metricsPort) (default false $ct.enabled)) "runtime" "rust" "binaries" (list "/app/svc-ingest")) }}
 {{- end }}

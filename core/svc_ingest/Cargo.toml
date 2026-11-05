@@ -184,6 +184,10 @@ rustls = { version = "=0.23.46", default-features = false, features = [
     "std",
     "ring",
 ] }
+# mTLS host-API listener the bundle executor dials for the generic outbound executor
+# (`src/connector/host_api_listener.rs`); same exact pins as `core/svc_action`.
+tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
+rustls-pki-types = "=1.15.1"
 # Twitch EventSub webhook signature verification (`src/ingest/
 # twitch_eventsub.rs`): HMAC-SHA256 over `message_id + timestamp + body`,
 # byte-identical to the legacy Python module's own algorithm (see that
@@ -271,6 +275,8 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # `rest.rs` tests (see that crate's `Cargo.toml`), kept in lockstep so a
 # future bump there is a known-compatible precedent here too.
 wiremock = "=0.6.5"
+# Ephemeral CA/leaf certs for the host-API mTLS listener tests (no key material in git).
+rcgen = "=0.14.10"
 # Real tonic server on loopback for the `platform_users` tests (the generated
 # `IdentityService` server comes from hub_client's build.rs).
 tonic = { version = "=0.14.6", features = ["transport"] }

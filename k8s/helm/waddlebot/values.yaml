@@ -1561,6 +1561,21 @@ pipeline:
         # enabled. A new/removed Twitch binding takes effect within <= one reconcile interval.
         twitchReconcileIntervalSecs: 60
         twitchResolveTimeoutSecs: 10
+      # P6a -- `waddles.connector-tools` env baseline (CONNECTOR_TOOLS_ENABLED). OFF (default) =
+      # the legacy outbound drains, nothing below renders. ON = the generic outbound executor:
+      # requires dynamicConnections.enabled + hubApi.enabled, the three pinned connector digests,
+      # the operator-managed platform-credentials Secret key TWITCH_CLIENT_ID, and the
+      # OUTBOUND_PIN_KEYS secret (outboundPin). A half-configured ON fails `helm template`.
+      # Rollout order: svc-action first (pin_sig v2), then svc-ingest; rollback = enabled:false.
+      # A bundle-executor must dial this pod's host-api port (see core/svc_ingest/README.md).
+      connectorTools:
+        enabled: false
+        hostApiPort: 8301
+        # Pinned connector component digests, sha256:<64 lowercase hex> (docs/connector-host-capability.md).
+        digests:
+          twitch: ""
+          discord: ""
+          youtube: ""
       resources:
         requests:
           cpu: "100m"

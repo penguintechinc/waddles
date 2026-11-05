@@ -331,6 +331,11 @@ pipeline:
         # Static TWITCH_IRC_NICK/TWITCH_IRC_CHANNEL must NOT be set here (fatal with the flag on).
         twitchReconcileIntervalSecs: 30
         twitchResolveTimeoutSecs: 10
+      # P6a generic outbound executor (waddles.connector-tools): OFF until the pinned connector
+      # digests exist and a bundle-executor dials the host-api port. To enable: set enabled: true
+      # and digests.{twitch,discord,youtube} (sha256:<hex>); see core/svc_ingest/README.md.
+      connectorTools:
+        enabled: false
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }

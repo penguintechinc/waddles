@@ -822,7 +822,7 @@ joined: a stable hash input for waddlebot.hostApiTlsSansSha256, and directly
 {{- define "waddlebot.hostApiTlsDesiredDnsNames" -}}
 {{- $fullname := include "waddlebot.fullname" . -}}
 {{- $ns := .Values.namespace -}}
-{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-bundle-executor" $fullname) (printf "*.%s.svc.cluster.local" $ns) | sortAlpha | join "," -}}
+{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-svc-ingest-rust" $fullname) (printf "%s-bundle-executor" $fullname) (printf "*.%s.svc.cluster.local" $ns) | sortAlpha | join "," -}}
 {{- end }}
 
 {{/* sha256 of waddlebot.hostApiTlsDesiredDnsNames -- the waddlebot.io/cert-sans-sha256
