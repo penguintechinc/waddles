@@ -1,0 +1,110 @@
+schema_version: 2
+app_id: waddles.core.service.twitch
+name: Twitch Platform Overlay (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: service
+stages:
+  action:
+    entry: waddle:bundle/tool-provider#call
+egress:
+- host: api.twitch.tv
+  methods:
+  - GET
+  - POST
+  - DELETE
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: net.http.fqdn:api.twitch.tv
+  justification: Helix read tools and host-templated chat/whisper/delete requests;
+    credentials are host-injected secret refs
+  params:
+    methods:
+    - GET
+    - POST
+    - DELETE
+- id: chat.send:twitch
+  justification: Template Twitch chat messages; the host pins the channel and substitutes
+    the credential
+- id: dm.send:twitch
+  justification: Template Twitch whispers; the host substitutes the sender id and
+    credential
+- id: chat.delete:twitch
+  justification: Template Twitch chat message deletion in the host-pinned channel
+- id: moderation.twitch
+  justification: Chat deletion is a moderation action; admin-approved dangerous grant,
+    host-pinned channel and moderator
+routes_to: []
+exported_tools:
+- name: get_chatters
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      broadcaster_id: &id001
+        type: string
+        pattern: ^[0-9]{1,20}$
+      moderator_id: *id001
+      first: &id002
+        type: integer
+        minimum: 1
+        maximum: 1000
+      after: &id003
+        type: string
+        maxLength: 512
+    required:
+    - broadcaster_id
+    - moderator_id
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: get_followers
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      broadcaster_id: *id001
+      first: *id002
+      after: *id003
+    required:
+    - broadcaster_id
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: get_subscriptions
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      broadcaster_id: *id001
+      first: *id002
+      after: *id003
+    required:
+    - broadcaster_id
+    additionalProperties: false
+  output_schema:
+    type: object
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/twitch
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: 1.0.0
+  min_version: 1.0.0
+  max_version: null
