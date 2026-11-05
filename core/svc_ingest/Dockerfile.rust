@@ -46,6 +46,8 @@ COPY hub_client ./hub_client
 # sibling of `core/` (this Dockerfile's build context), so it is supplied as the
 # named `proto` build context (see build-svc-ingest.yml's `build-contexts`),
 # exactly like core/svc_process/Dockerfile.rust.
+# `proto` is a named build context (--build-context), not a FROM alias -> DL3022 false positive.
+# hadolint ignore=DL3022
 COPY --from=proto . /proto
 WORKDIR /build/svc_ingest
 RUN cargo build --release --locked
