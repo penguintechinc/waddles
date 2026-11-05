@@ -824,6 +824,38 @@ def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: 
     assert entries[0].activation_targets == (ActivationTarget(tenant_slug="global"),)
 
 
+def test_load_catalog_accepts_a_connector_tools_wit_world_row(tmp_path: Path) -> None:
+    """A platform-overlay row (`wit_world: connector-tools`) loads like any rust service row.
+
+    The seeder never validates `wit_world` (only the python build script does, for python rows),
+    so overlay rows must parse and keep their app_id/version/activation targets intact.
+    """
+    catalog_path = tmp_path / "catalog.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": "waddles.core.service.twitch",
+                        "version": "1.0.0",
+                        "language": "rust",
+                        "wit_world": "connector-tools",
+                        "kind": "service",
+                        "source_dir": "rust/twitch",
+                        "manifest_path": "twitch.manifest.yaml",
+                        "artifact_path": "twitch.wasm",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    entries = load_catalog(catalog_path)
+    assert [(e.app_id, e.language, e.source_dir) for e in entries] == [
+        ("waddles.core.service.twitch", "rust", "rust/twitch")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # CORE_BUNDLES_TENANT_SLUGS env override
 # ---------------------------------------------------------------------------

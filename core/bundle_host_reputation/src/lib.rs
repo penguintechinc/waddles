@@ -68,6 +68,77 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Longest accepted `reason` code (matches the ledger's `VARCHAR(100)`).
 pub const MAX_REASON_LEN: usize = 100;
 
+/// Lowest score the store will persist. Every write is clamped into
+/// `MIN_SCORE..=MAX_SCORE`; the `ck_bundle_reputation_scores_balance_range`
+/// CHECK (`scripts/db/bundle_reputation_host_ops.sql`) is the DB backstop and
+/// MUST stay in lockstep with these two. Both fit `i32` doubled, so the
+/// ledger's `INTEGER delta` can hold even a full-range override.
+pub const MIN_SCORE: i64 = -1_000_000;
+/// Highest score the store will persist (see [`MIN_SCORE`]).
+pub const MAX_SCORE: i64 = 1_000_000;
+
+/// Largest batch `adjust_many` / `get_many` accept (bounds one transaction's
+/// lock set and one round-trip's size).
+pub const MAX_BATCH: usize = 100;
+
+/// Largest `leaderboard` page.
+pub const MAX_LEADERBOARD_LIMIT: u32 = 100;
+
+/// Longest accepted idempotency key (the ledger column is `VARCHAR(128)`).
+pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 128;
+
+/// Clamps a raw score into the persisted range.
+pub fn clamp_score(raw: i64) -> i64 {
+    raw.clamp(MIN_SCORE, MAX_SCORE)
+}
+
+/// The replay-stable identity of ONE mutating call (`override`,
+/// `adjust_many`), scoped by the store to `(tenant, community, app)`. Built by
+/// the HOST from the event id + mutation ordinal -- never taken from a guest --
+/// so a redelivered call is applied at most once. Same charset/length rules as
+/// the economy's key: `[A-Za-z0-9:_.-]`, `1..=`[`MAX_IDEMPOTENCY_KEY_LEN`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IdempotencyKey(String);
+
+impl IdempotencyKey {
+    /// Validates `raw`. The error never echoes the offending value.
+    pub fn new(raw: impl Into<String>) -> Result<Self, ReputationError> {
+        let raw = raw.into();
+        if raw.is_empty() || raw.len() > MAX_IDEMPOTENCY_KEY_LEN {
+            return Err(ReputationError::Invalid(format!(
+                "idempotency key must be 1..={MAX_IDEMPOTENCY_KEY_LEN} bytes"
+            )));
+        }
+        if !raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'.' | b'-'))
+        {
+            return Err(ReputationError::Invalid(
+                "idempotency key may contain only [A-Za-z0-9:_.-]".to_string(),
+            ));
+        }
+        Ok(Self(raw))
+    }
+
+    /// The key of the `ordinal`-th `kind` mutation made while handling the
+    /// event `event_id`: `"<event_id>:<kind>:<ordinal>"`.
+    pub fn for_event(event_id: &str, kind: &str, ordinal: u32) -> Result<Self, ReputationError> {
+        Self::new(format!("{event_id}:{kind}:{ordinal}"))
+    }
+
+    /// The key text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// One leaderboard / batch-read row: a member (UUID only) and their score.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScoreEntry {
+    pub user: uuid::Uuid,
+    pub score: i64,
+}
+
 /// The host-derived scope of one reputation call (never guest-supplied).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReputationScope {
@@ -94,6 +165,10 @@ pub enum ReputationError {
     /// so a bundle sees one code however the aggregate cap tripped.
     #[error("rolling-24h per-scope reputation cap ({cap}) would be exceeded")]
     ScopeQuotaExceeded { cap: i64 },
+    /// The idempotency key was already used by a DIFFERENT operation (or the
+    /// same one with different parameters): nothing was applied.
+    #[error("idempotency key was already used by a different reputation operation")]
+    IdempotencyConflict,
     /// Malformed argument (bad `reason`, zero `delta`, ...).
     #[error("invalid argument: {0}")]
     Invalid(String),
@@ -109,6 +184,7 @@ impl ReputationError {
             Self::NotAMember => "not_a_member",
             Self::DailyCapExceeded { .. } => "daily_cap_exceeded",
             Self::ScopeQuotaExceeded { .. } => "quota_exceeded",
+            Self::IdempotencyConflict => "idempotency_conflict",
             Self::Invalid(_) => "invalid_args",
             Self::Backend(_) => "backend",
         }
@@ -184,6 +260,54 @@ pub trait ReputationStore: Send + Sync {
         reason: &'a str,
         caps: ReputationCaps,
     ) -> BoxFuture<'a, Result<i64, ReputationError>>;
+
+    /// ADMIN override: sets `user`'s score to `absolute_score` (clamped into
+    /// [`MIN_SCORE`]..=[`MAX_SCORE`]) and returns the NEW score. NOT a capped
+    /// delta -- the rolling-24h caps neither bind nor are consumed by it --
+    /// so the caller (the host) MUST have authorized the dedicated admin
+    /// permission first. Ledgered as kind `admin_override`; idempotent on
+    /// `key` (a replay with the same parameters returns the original result,
+    /// different parameters are [`ReputationError::IdempotencyConflict`]).
+    fn override_score<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: uuid::Uuid,
+        absolute_score: i64,
+        reason: &'a str,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, ReputationError>>;
+
+    /// Atomically applies every `(user, delta)` in ONE transaction: either
+    /// all land or none do. Per-user and per-scope rolling-24h caps apply
+    /// exactly as for [`Self::adjust`] (the batch's total counts against the
+    /// per-scope cap). `1..=`[`MAX_BATCH`] items, no duplicate users, no zero
+    /// delta. Idempotent on `key`.
+    fn adjust_many<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        items: &'a [(uuid::Uuid, i32)],
+        reason: &'a str,
+        caps: ReputationCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<(), ReputationError>>;
+
+    /// Scores of `users` in one round-trip, in the request order (duplicates
+    /// collapsed). `1..=`[`MAX_BATCH`] users; any non-member fails the whole
+    /// call with [`ReputationError::NotAMember`] (fail-closed).
+    fn get_many<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        users: &'a [uuid::Uuid],
+    ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>>;
+
+    /// Top `limit` (`1..=`[`MAX_LEADERBOARD_LIMIT`]) ACTIVE members by score,
+    /// highest first, ties broken by user UUID. Members with no score row
+    /// (never adjusted, implicitly 0) are not listed.
+    fn leaderboard<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        limit: u32,
+    ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>>;
 }
 
 #[cfg(test)]
@@ -229,6 +353,35 @@ mod tests {
     }
 
     #[test]
+    fn clamp_pins_to_the_persisted_range() {
+        assert_eq!(clamp_score(0), 0);
+        assert_eq!(clamp_score(i64::MAX), MAX_SCORE);
+        assert_eq!(clamp_score(i64::MIN), MIN_SCORE);
+        assert_eq!(clamp_score(MAX_SCORE + 1), MAX_SCORE);
+        assert_eq!(clamp_score(MIN_SCORE - 1), MIN_SCORE);
+        // A full-range override delta must fit the ledger's INTEGER column.
+        assert!(i32::try_from(MAX_SCORE - MIN_SCORE).is_ok());
+    }
+
+    #[test]
+    fn idempotency_keys_are_validated_and_event_derived() {
+        assert_eq!(
+            IdempotencyKey::for_event("evt-1", "override", 2)
+                .unwrap()
+                .as_str(),
+            "evt-1:override:2"
+        );
+        for bad in ["", "has space", "semi;colon", "new\nline"] {
+            assert!(
+                matches!(IdempotencyKey::new(bad), Err(ReputationError::Invalid(_))),
+                "{bad:?}"
+            );
+        }
+        assert!(IdempotencyKey::new("a".repeat(MAX_IDEMPOTENCY_KEY_LEN)).is_ok());
+        assert!(IdempotencyKey::new("a".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1)).is_err());
+    }
+
+    #[test]
     fn wire_codes_are_stable() {
         assert_eq!(ReputationError::NotAMember.wire_code(), "not_a_member");
         assert_eq!(
@@ -246,6 +399,10 @@ mod tests {
         assert_eq!(
             ReputationError::Backend(String::new()).wire_code(),
             "backend"
+        );
+        assert_eq!(
+            ReputationError::IdempotencyConflict.wire_code(),
+            "idempotency_conflict"
         );
     }
 }
