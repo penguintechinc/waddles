@@ -65,6 +65,9 @@ fn answer(body: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
             "tenant": PARITY_TENANT, "community": null, "app_id": "parity"
         })),
         CapabilityKind::Log | CapabilityKind::Clock => Ok(serde_json::json!({})),
+        // The parity run models a flag-ON host: an overlay that gates itself on its own cutover
+        // flag (twitch's `waddles.overlay-twitch`) must read ON, else every frame is refused.
+        CapabilityKind::Flags if body.op == "enabled" => Ok(serde_json::json!({ "enabled": true })),
         CapabilityKind::Db if body.op == "identity.lookup" => {
             let a = &body.args;
             if a["kind"] == "platform-identity" {

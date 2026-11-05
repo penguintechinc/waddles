@@ -22,6 +22,9 @@ on:
       - 'bundles/Dockerfile.core-bundles'
       - 'bundles/core-bundles.yaml'
       - 'bundles/rust/ping/**'
+      - 'bundles/rust/twitch/**'
+      - 'bundles/rust/discord/**'
+      - 'bundles/rust/youtube/**'
       - 'bundles/python/pyping/**'
       - 'sdk/waddle-sdk-rs/**'
       - 'sdk/waddle-sdk/src/**'
@@ -34,6 +37,9 @@ on:
       - 'bundles/Dockerfile.core-bundles'
       - 'bundles/core-bundles.yaml'
       - 'bundles/rust/ping/**'
+      - 'bundles/rust/twitch/**'
+      - 'bundles/rust/discord/**'
+      - 'bundles/rust/youtube/**'
       - 'bundles/python/pyping/**'
       - 'sdk/waddle-sdk-rs/**'
       - 'sdk/waddle-sdk/src/**'
@@ -62,5 +68,5 @@ jobs:
       # Docker Engine + buildx ship preinstalled on ubuntu-latest runners -- no setup-buildx
       # action needed for a plain `docker build` (no multi-platform/cache-export requirement
       # here; the whole point is a from-scratch, uncached build).
-      - name: Verify core bundles are byte-reproducible (ping only -- pyping tracked at #521)
+      - name: Verify core bundles are byte-reproducible (ping + twitch/discord/youtube overlays -- pyping tracked at #521)
         run: bash scripts/verify-core-bundles-reproducible.sh
