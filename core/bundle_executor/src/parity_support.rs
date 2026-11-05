@@ -68,8 +68,15 @@ fn answer(body: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
         CapabilityKind::Db if body.op == "identity.lookup" => {
             let a = &body.args;
             if a["kind"] == "platform-identity" {
-                let platform = a["platform"].as_str().unwrap_or_default();
-                let id = a["platform_user_id"].as_str().unwrap_or_default();
+                let (Some(platform), Some(id)) =
+                    (a["platform"].as_str(), a["platform_user_id"].as_str())
+                else {
+                    return Err(HostResultError {
+                        code: "invalid_args".to_string(),
+                        message: "platform-identity lookup missing platform/platform_user_id"
+                            .to_string(),
+                    });
+                };
                 Ok(serde_json::json!({
                     "uuid": pseudonym_uuid(platform, id),
                     "linked": false,
