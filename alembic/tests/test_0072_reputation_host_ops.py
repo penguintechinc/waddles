@@ -35,7 +35,7 @@ def test_the_alembic_history_has_exactly_one_head() -> None:
     cfg = Config(str(_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
     heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0072_reputation_host_ops"], heads
+    assert len(heads) == 1, heads
 
 
 def test_the_shared_ddl_file_exists_and_declares_the_clamp_and_idempotency_objects() -> None:

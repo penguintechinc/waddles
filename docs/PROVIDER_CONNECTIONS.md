@@ -28,7 +28,8 @@ asks hub-api which connections to run and for a fresh token to run them with.
 | `svc-ingest` (Rust) resolves connections dynamically instead of static env | per-community Twitch sessions behind `INGEST_DYNAMIC_CONNECTIONS` (alpha) -- runbook: `core/svc_ingest/README.md` |
 | webui connection UI, CLI connection commands | follow-ups (call the API below unchanged) |
 | Discord adapter (bot token + guild + managed-roles binding metadata) | **shipped** -- see [Discord provider](#discord-provider-guild--managed-roles) |
-| Slack / Kick / YouTube adapters | follow-ups (one adapter + one registry line each) |
+| YouTube adapter (OAuth connect + `live_chat_id` binding + discovery) | **shipped** -- see [YouTube provider](#youtube-provider-channel--live-chat-oauth-connect) |
+| Slack / Kick adapters | follow-ups (one adapter + one registry line each) |
 | Redirect-style installs (OAuth connect, Discord invite link) | follow-up -- see [Limitations](#limitations-and-follow-ups) |
 
 ## Data model
@@ -289,6 +290,7 @@ slash). Twitch accepts `http://` only for `localhost`, which is why alpha sets t
 |---|---|
 | Community Connections OAuth (Twitch) | `<base>/api/v1/connections/callback/twitch` |
 | Tenant Twitch bot-install | `<base>/api/v1/tenant/twitch-install/callback` |
+| YouTube connect (Google OAuth) | `<base>/api/v1/provider-connections/youtube/callback` |
 
 Alpha (`values-alpha.yaml`: `connectionsCallbackBaseUrl: "http://localhost:30879"`, webui NodePort
 30879) -- the literal URIs to register:
@@ -439,6 +441,76 @@ Notes:
 - No migration: `resource_type = 'discord_guild'` was already in migration 0035's allow-list and the
   metadata rides the existing `resource_metadata` JSON column.
 
+## YouTube provider (channel + live chat, OAuth connect)
+
+`youtube` (`services/provider_connections/youtube.py`, install flow `services/youtube_install.py`,
+routes `blueprints/v1/youtube_connections.py`) is a `PLATFORM_OAUTH`-kind, **refreshable** provider and
+the first `installKind: oauth_connect` one. The community connects its **own YouTube channel**; the
+outbound executor (`core/svc_ingest` `outbound_creds_youtube.rs` / `youtube_slots.rs`) then posts to
+the **live chat** pinned by the binding.
+
+```
+admin ──POST …/provider-connections/youtube/authorize──▶ hub-api: state + PKCE ──▶ Google consent URL
+browser ◀── redirect ── Google ── code ──▶ GET /api/v1/provider-connections/youtube/callback (PUBLIC)
+                          state (GETDEL) ─▶ code+verifier exchange ─▶ service.create ─▶ sealed tokens
+admin ──POST …/<conn>/discover (or PATCH metadata.live_chat_id)──▶ binding complete ──▶ data plane
+```
+
+**What the data plane receives** (`POST /api/v1/internal/communities/<id>/provider-connections/<conn>/resolve`):
+`kind: 1` + `accessToken` (the executor's `ConnectionSecret::OAuthAccessToken`), `expiresAt`
+(RFC 3339; the executor refuses a token expiring within 30 s, hub-api refreshes inside a 120 s skew),
+`metadata: {"live_chat_id": "..."}`, `secret: null`. Never the refresh token, client id/secret or tenant.
+
+| Metadata field | Required | Validation | Stored / served as |
+|---|---|---|---|
+| `live_chat_id` | for the data plane (binding), not at create | `^[A-Za-z0-9_-]{1,128}$` (the executor's `is_live_chat_id`) | `live_chat_id` |
+
+- **The binding is incomplete until `live_chat_id` is set**: the OAuth callback cannot know it, so a
+  fresh connection is created without it, is skipped by the internal list and is `409
+  metadata_incomplete` on resolve. Set it by `PATCH` (`{"metadata": {"live_chat_id": "..."}}`) or by
+  **discovery**.
+- **Discovery** -- `POST /api/v1/communities/<id>/provider-connections/<conn>/discover` (admin): one
+  `liveBroadcasts.list?mine=true` call (1 quota unit) picks the channel's own `live` (else `testing`)
+  broadcast, most recently started first, and writes its `liveChatId` through the same
+  validate-and-verify path as a typed value. Guarded: SSRF guard + host allowlist, one page,
+  one call per connection per 30 s (cross-replica Redis cooldown, `429 TOO_MANY_REQUESTS`), Google
+  `quotaExceeded` -> `429 PROVIDER_QUOTA_EXCEEDED`, no active broadcast -> `422 RESOURCE_NOT_FOUND`
+  (nothing written), a shared connection -> `409`. Provider-generic hook: an adapter implementing
+  `MetadataDiscoverer` gets this endpoint for free; others answer `400`.
+- **Scope**: exactly `https://www.googleapis.com/auth/youtube.force-ssl` (read + post live chat). No
+  `readonly`. A token without it is `422 INSUFFICIENT_SCOPES`.
+- **Per-tenant Google application** ([spec](superpowers/specs/2026-11-02-per-tenant-bot-credentials.md)):
+  the **global** tenant uses the platform app from `YOUTUBE_CLIENT_ID` / `YOUTUBE_CLIENT_SECRET`
+  (Helm: the `waddlebot-platform-credentials` secret, already `envFrom`'d into hub-api); every other
+  tenant brings its own -- `POST …/youtube/authorize` takes `{"client_id", "client_secret"}` (stored
+  sealed in `tenant_platform_apps` only after the install succeeds) or uses the one a previous install
+  stored. A tenant never falls back to the global app; the global tenant cannot supply its own. Without
+  an app: `422 YOUTUBE_APP_NOT_CONFIGURED`.
+- **OAuth security**: authorization code + PKCE (`S256`) with `access_type=offline&prompt=consent`;
+  single-use CSRF `state` (Redis `GETDEL`, 10 min TTL) carrying tenant/community/admin -- the public
+  callback reads nothing tenant-shaped from the query; the verifier and any supplied client secret ride
+  in the state AES-GCM-sealed with AAD bound to tenant + community; the redirect URI is the
+  server-configured callback (never client input); a response without a refresh token is refused
+  (`no_refresh_token`); a replay, forged, expired or tampered state is `400 invalid_or_expired_state`.
+  Hosts are an explicit allowlist (`accounts.google.com`, `oauth2.googleapis.com`,
+  `www.googleapis.com`) *and* the shared SSRF guard; no redirects, bounded responses, tokens only in a
+  header or form body.
+- **Refresh**: Google access tokens last ~1 h. The framework refreshes under the row lock using the
+  tenant's own app (the framework stamps `tenant_id` into `resource_metadata`; never served). Google
+  normally omits the refresh token from a refresh answer (kept); if it rotates, the new one is stored
+  sealed. `invalid_grant` (revoked / expired -- apps in "Testing" mode expire refresh tokens after 7
+  days) marks the connection `status=expired, status_reason=refresh_rejected` (kept, `usable: false`,
+  resolve `409 reason: refresh_rejected`) until the admin **reconnects** -- running `authorize` again
+  for the same channel rotates the credentials of the existing connection in place. `invalid_client` /
+  a token from another app -> `refresh_not_configured` (the token is NOT marked dead); an outage
+  changes nothing.
+- **Redirect URI to register in the Google Cloud console**: `<base>/api/v1/provider-connections/youtube/callback`
+  (see [Redirect URIs](#redirect-uris-register-these-in-the-provider-console)).
+- **Migration**: `0073_youtube_connection_resource` adds `youtube_channel` to the `resource_type` CHECK.
+- **Quota**: connect = 2 units (`channels.list`), discovery = +1 per run (plus the re-verification),
+  the executor's `liveChatMessages.insert` is the dominant cost (default 10,000 units/day per Google
+  project, ~50 units per insert) -- a per-tenant app isolates tenants' quotas.
+
 ## Adding a provider
 
 A provider is **one adapter module + one registry line**. Nothing else changes -- the service,
@@ -512,8 +584,9 @@ sqlite test mirror, FK/unique enforcement, JSONB/timestamptz, and the concurrent
   redirect-style installs (`oauth_connect`, Discord `bot_invite_link`, Slack `app_manifest`) described
   in `CONNECTION_MODEL.local.md` and the existing per-community OAuth page
   (`/communities/{id}/connections/...`, stored in `platform_integrations`) are **not** folded in
-  yet; the descriptor's `installKind` is `credentials` for now. Converging them onto this store is
-  Step 2.
+  yet; the descriptor's `installKind` is `credentials` for Twitch/Discord. YouTube is the first
+  `oauth_connect` provider (its own connect flow, see [YouTube provider](#youtube-provider-channel--live-chat-oauth-connect));
+  converging the rest onto this store is Step 2.
 * **Sharing/approval flow.** Grants support `pending`, but there is no endpoint yet to request access
   to an existing link; creating a duplicate is a `409`.
 * **Per-community admin delegation.** `connections:admin` is carried by tenant owners (and global

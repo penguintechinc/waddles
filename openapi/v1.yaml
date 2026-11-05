@@ -14886,6 +14886,70 @@ paths:
           description: Response wrapping one connection.
       summary: '``POST`` -- verify the credential upstream, resolve the resource,
         store it sealed.'
+  /api/v1/communities/{community_id}/provider-connections/youtube/authorize:
+    post:
+      description: ''
+      operationId: post_authorize_youtube
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: 'Body of ``authorize``: the tenant''s OWN Google OAuth
+                application, or nothing.
+
+
+                Both fields together (a non-global tenant bringing its own application)
+                or neither (the global
+
+                tenant''s platform application, or one this tenant stored in an earlier
+                install). The secret is
+
+                write-only: sealed into the single-use state and never echoed.'
+              properties:
+                client_id:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Client Id
+                client_secret:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Client Secret
+              title: YoutubeAuthorizeRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response of ``authorize``: where the admin''s browser
+                  goes next.'
+                properties:
+                  authorizeUrl:
+                    title: Authorizeurl
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - authorizeUrl
+                title: YoutubeAuthorizeResponse
+                type: object
+          description: 'Response of ``authorize``: where the admin''s browser goes
+            next.'
+      summary: '``POST`` -- mint state + PKCE and return Google''s consent URL for
+        this community.'
   /api/v1/communities/{community_id}/provider-connections/{connection_id}:
     delete:
       description: ''
@@ -15024,6 +15088,47 @@ paths:
           description: Response wrapping one connection.
       summary: '``PATCH`` -- enable/disable for this community, re-target the resource,
         rotate the token.'
+  /api/v1/communities/{community_id}/provider-connections/{connection_id}/discover:
+    post:
+      description: '
+
+        One YouTube call (1 quota unit), at most one per connection per cooldown window.
+        A provider
+
+        without discovery answers 400; "no live broadcast right now" is 422 and writes
+        nothing.'
+      operationId: post_discover_live_chat
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: connection_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response wrapping one connection.
+                properties:
+                  connection:
+                    $ref: '#/components/schemas/ProviderConnectionDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - connection
+                title: ProviderConnectionResponse
+                type: object
+          description: Response wrapping one connection.
+      summary: '``POST`` -- find the channel''s active live chat and store it as the
+        binding.'
   /api/v1/communities/{community_id}/streams:
     get:
       description: ''
@@ -19664,6 +19769,16 @@ paths:
                 type: object
           description: Response DTO for `{success, message}` endpoints.
       summary: Update user role.
+  /api/v1/provider-connections/youtube/callback:
+    get:
+      description: ''
+      operationId: get_youtube_callback
+      parameters: []
+      responses:
+        default:
+          description: Undocumented response
+      summary: '``GET`` -- PUBLIC, Google''s redirect target; finishes the install
+        from the state alone.'
   /api/v1/public/banner:
     get:
       description: ''

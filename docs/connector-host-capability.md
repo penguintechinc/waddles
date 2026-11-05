@@ -316,5 +316,5 @@ URL positions and JSON-escapes body positions, and sends ONLY through `GuardedCl
 MANAGE_ROLES / MANAGE_GUILD, per-community bot credential) are the Discord `DutyHook` (`sender_exec/discord_duties.rs`,
 `discord_slots.rs`; table + gaps: `core/svc_ingest/README.md` "Discord host duties (T6d-2)"). YouTube `chat.send` is stamp-pinned to the live chat
 and its OAuth token + chat id come from the community's own connection (`youtube_slots.rs`; `core/svc_ingest/README.md` "YouTube slot
-source"; expired token -> retryable `token_expired`; hub-api has no YouTube provider adapter yet). The wire does not yet carry
+source"; expired token -> retryable `token_expired`; the hub-api `youtube` provider adapter -- OAuth connect, refresh, `live_chat_id` binding -- is `docs/PROVIDER_CONNECTIONS.md` "YouTube provider"). The wire does not yet carry
 `build-request` (no `ExportKind::ConnectorBuildRequest` in `penguin-bundle-host` 0.4.0): see "T6d-1 status".

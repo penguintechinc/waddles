@@ -41,6 +41,7 @@ from services.provider_connections.adapter import (
     AdapterRegistry,
     AdapterSpec,
     Credentials,
+    MetadataDiscoverer,
     ProviderAdapter,
     validate_credentials_shape,
     validate_metadata,
@@ -85,6 +86,8 @@ logger = logging.getLogger(__name__)
 
 #: Refresh a token this long before it expires so a caller never holds one that dies in flight.
 DEFAULT_REFRESH_SKEW: Final = timedelta(seconds=120)
+#: Reserved ``resource_metadata`` key stamped by the framework (see :meth:`create`).
+FACT_TENANT_ID: Final = "tenant_id"
 #: Hard ceiling on one data-plane list page.
 MAX_PAGE_SIZE: Final = 1000
 
@@ -229,6 +232,9 @@ class ProviderConnectionService:
             resource = await adapter.resolve_resource(credentials, account, clean_metadata)
             facts = self._compose_facts(adapter, account.scopes, resource.facts)
             facts.update(self._metadata_inputs(spec, clean_metadata))
+            # Framework-owned, never in an adapter allow-list (so never served): lets a refresh
+            # find the tenant's own OAuth application (per-tenant bot credentials).
+            facts[FACT_TENANT_ID] = tenant_id
             now = self._clock()
             # The row's immutable identity is minted first: it is part of the tokens' AAD (M4).
             public_id = uuid4()
@@ -510,6 +516,7 @@ class ProviderConnectionService:
             raise ConnectionConflict("those credentials authorize a different resource")
         facts = self._compose_facts(adapter, account.scopes, resource.facts)
         facts.update(self._metadata_inputs(spec, clean_metadata))
+        facts[FACT_TENANT_ID] = tenant_id
         values["resource_id"] = resource.resource_id
         values["resource_metadata"] = facts
         return await store.update_link(
@@ -520,6 +527,62 @@ class ProviderConnectionService:
             values=values,
             now=self._clock(),
         )
+
+    async def discover_metadata(
+        self, *, tenant_id: int, community_id: int, connection_id: int
+    ) -> ConnectionView:
+        """Ask the provider for the binding metadata and store it (admin-triggered, bounded).
+
+        Only for adapters implementing :class:`MetadataDiscoverer`. The connection's own token is
+        refreshed if stale, the adapter makes its bounded call(s), and the result is stored through
+        the same validate-and-verify path as an admin-typed ``metadata`` update -- so a discovered
+        value is held to exactly the rules a pasted one is.
+        """
+        binding = await store.get_binding(
+            self._db, tenant_id=tenant_id, community_id=community_id, connection_id=connection_id
+        )
+        if binding is None:
+            raise ConnectionNotFound("connection not found")
+        adapter = self._registry.get(binding.connection.platform)
+        spec = adapter.spec
+        if not isinstance(adapter, MetadataDiscoverer) or spec.kind is not (
+            ConnectionKind.PLATFORM_OAUTH
+        ):
+            raise InvalidConnectionInput("this provider does not support metadata discovery")
+        if binding.shared_with > 0:
+            raise ConnectionConflict(
+                "this connection is shared with other communities and cannot be changed here"
+            )
+        with operation_span(spec.provider, "discover"):
+            plaintext, _ = await self._fresh_token(
+                adapter, connection_id, community_id=community_id
+            )
+            found = await adapter.discover_metadata(
+                Credentials(access_token=plaintext), binding.connection.resource_metadata
+            )
+            stored = binding.connection.resource_metadata
+            merged: dict[str, Any] = {
+                item.name: str(stored[item.name])
+                for item in spec.metadata_fields
+                if item.name in stored
+            }
+            merged.update(found)
+            updated = await self._update_link(
+                adapter,
+                binding,
+                tenant_id=tenant_id,
+                community_id=community_id,
+                metadata=merged,
+                access_token=None,
+                refresh_token=None,
+            )
+            logger.info(
+                "provider_connections.discovered provider=%s connection_id=%d community_id=%d",
+                spec.provider,
+                connection_id,
+                community_id,
+            )
+            return self._view(updated)
 
     # -- admin: delete ---------------------------------------------------------------------
 
