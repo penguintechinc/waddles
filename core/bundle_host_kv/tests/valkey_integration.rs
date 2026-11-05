@@ -6,7 +6,7 @@
 //! admit/quota/TTL semantics, and only a real server proves the actual
 //! `EVAL` scripts agree with it.
 //!
-//! Requires Docker (via `testcontainers`) -- CI (`rust-bundle-host-kv.yml`)
+//! Requires Docker (the `docker` CLI, `core/test_support`) -- CI (`rust-bundle-host-kv.yml`)
 //! runs on `ubuntu-latest`, which ships Docker; local runs need it too.
 
 use std::sync::Arc;
@@ -18,40 +18,29 @@ use bundle_host_kv::{
     MAX_KEYS_PER_APP, MAX_VALUE_BYTES,
 };
 use redis::aio::MultiplexedConnection;
-use testcontainers::core::{ContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage};
 use tokio::task::JoinSet;
 
-/// Exact, immutable Valkey image version -- not `testcontainers-modules`'s
-/// prebuilt "redis" module, which pins a `testcontainers` line whose
-/// `astral-tokio-tar` transitive dependency carries four unpatched RustSec
-/// advisories (see `Cargo.toml`'s dependency comment). `testcontainers`'
-/// own `GenericImage::new(name, tag)` API pulls by `name:tag`, not
-/// `name@sha256:digest`, so this pins the most specific equivalent it
-/// supports: an exact upstream version tag (confirmed to resolve to
+/// Exact, immutable Valkey image version, pulled by `docker run` as
+/// `name:tag`: an exact upstream version tag (confirmed to resolve to
 /// `sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507`
 /// at the time this was pinned), never a floating `8`/`8-alpine`/`latest`.
-const VALKEY_IMAGE: &str = "valkey/valkey";
-const VALKEY_TAG: &str = "8.1.10-alpine";
+const VALKEY_IMAGE: &str = "valkey/valkey:8.1.10-alpine";
 
 /// Starts one Valkey container and returns it alongside its connection
 /// URL, so a test can open as many independent connections as it needs
 /// (e.g. one for `KvHost`, a second to seed state directly for a quota
 /// test) against the same server.
-async fn start() -> (ContainerAsync<GenericImage>, String) {
-    let container = GenericImage::new(VALKEY_IMAGE, VALKEY_TAG)
-        .with_exposed_port(ContainerPort::Tcp(6379))
-        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-        .start()
-        .await
-        .expect("valkey test container starts");
-    let host = container.get_host().await.expect("container host");
-    let port = container
-        .get_host_port_ipv4(6379)
-        .await
-        .expect("container port");
-    (container, format!("redis://{host}:{port}/"))
+async fn start() -> (DockerContainer, String) {
+    let container = start_container(
+        VALKEY_IMAGE,
+        6379,
+        &[],
+        &["valkey-cli", "ping"],
+        Duration::from_secs(120),
+    )
+    .await;
+    let url = format!("redis://{}:{}/", container.host(), container.port());
+    (container, url)
 }
 
 async fn connect(url: &str) -> MultiplexedConnection {
@@ -857,6 +846,10 @@ return {1, count}
     }
 }
 use legacy_pod::LegacyPod;
+#[allow(dead_code)]
+#[path = "../../test_support/tests/docker_container.rs"]
+mod docker_container;
+use docker_container::{start_container, DockerContainer};
 
 /// A write from a pod running THIS code, through the real `KvBackend`
 /// scripts at the mixed-version ceiling (reconcile-if-missing, then the quota
