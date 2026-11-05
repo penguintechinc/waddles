@@ -346,6 +346,7 @@ fn caps_scoped(
         chain,
         deadline,
         trace: None,
+        read_only: false,
     })
 }
 
@@ -1254,4 +1255,96 @@ async fn unrestricted_write_binds_actor_without_role_lookup() {
         invokes[0].payload["args"]["__ctx"]["scopes"],
         serde_json::json!([])
     );
+}
+
+/// Rows where SVC (a service) requests SVC2's WRITE tool `mint`.
+fn read_to_write_world() -> (Vec<ActiveBundleRow>, Arc<CapabilityGate>) {
+    let rows = vec![
+        row(
+            APP,
+            APP_VERSION,
+            app(&[(SVC, "get_balance", false), (SVC, "adjust", true)]),
+        ),
+        row(
+            SVC,
+            22,
+            service(
+                &[("get_balance", false), ("adjust", true)],
+                &[(SVC2, "mint", true)],
+            ),
+        ),
+        row(SVC2, 33, service(&[("mint", true)], &[])),
+    ];
+    let gate = gate(&[
+        (APP, APP_VERSION, SVC, "get_balance"),
+        (APP, APP_VERSION, SVC, "adjust"),
+        (SVC, 22, SVC2, "mint"),
+    ]);
+    (rows, gate)
+}
+
+/// SVC's guest invoking `mint` with a retry token, from chain `[APP, SVC]`.
+fn svc_calls_mint() -> HostCallBody {
+    let mut call = tool_call(SVC2, "mint", Some("k1"));
+    call.app_id = SVC.to_string();
+    call
+}
+
+/// regression: p981-claim-2 -- a tool invoked as READ must not reach a WRITE
+/// tool downstream (a read-labelled call mutating funds). The refusal happens
+/// before any executor traffic.
+#[tokio::test]
+async fn a_read_tool_may_not_reach_a_write_tool_downstream() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    let (rows, gate) = read_to_write_world();
+    let mut c = caps_with(
+        rows,
+        gate,
+        Arc::clone(&exec.registry),
+        vec![APP.to_string(), SVC.to_string()],
+        None,
+    );
+    c.tool.as_mut().unwrap().read_only = true;
+    assert_eq!(run(&c, svc_calls_mint()).await.unwrap_err(), "forbidden");
+    assert!(recorded(&exec).is_empty());
+}
+
+/// The same service->service write is allowed when no hop was a read.
+#[tokio::test]
+async fn a_write_tool_may_reach_a_write_tool_downstream() {
+    let exec = fake_executor(Behavior::Reply(serde_json::json!({"ok": 1}))).await;
+    let (rows, gate) = read_to_write_world();
+    let c = caps_with(
+        rows,
+        gate,
+        Arc::clone(&exec.registry),
+        vec![APP.to_string(), SVC.to_string()],
+        None,
+    );
+    assert_eq!(
+        run(&c, svc_calls_mint()).await.unwrap(),
+        serde_json::json!({"ok": 1})
+    );
+    assert_eq!(recorded(&exec).len(), 1);
+}
+
+/// Read-only is sticky down the chain: a READ hop makes the derived target
+/// capability set read-only, a WRITE hop from a clean chain does not.
+#[test]
+fn read_only_propagates_to_the_nested_capabilities() {
+    let parent = caps_with(
+        world_rows(),
+        default_gate(),
+        Arc::new(ConnectionRegistry::new()),
+        vec![APP.to_string()],
+        None,
+    );
+    let ctx = parent.tool.as_ref().unwrap().clone();
+    let mut read_plan = mutation_plan();
+    read_plan.write = false;
+    let nested = parent.for_tool_target(&read_plan, ctx.clone());
+    assert!(nested.tool.as_ref().unwrap().read_only);
+    let write_plan = mutation_plan();
+    let nested = parent.for_tool_target(&write_plan, ctx.clone());
+    assert!(!nested.tool.as_ref().unwrap().read_only);
 }

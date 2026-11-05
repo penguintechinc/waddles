@@ -329,6 +329,7 @@ impl EconomyWorld {
             chain: vec![CALLER.into()],
             deadline: Some(Instant::now() + Duration::from_secs(30)),
             trace: None,
+            read_only: false,
         })
         .with_economy(EconomyWiring {
             store: Arc::new(PostgresEconomyStore::new(self.db.runtime.clone()))

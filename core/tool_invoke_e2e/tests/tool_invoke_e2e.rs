@@ -456,6 +456,7 @@ impl World {
             chain: vec![app.to_string()],
             deadline,
             trace: None,
+            read_only: false,
         })
         .with_stage_metrics(Arc::clone(&self.metrics));
         let c = match &self.identity {

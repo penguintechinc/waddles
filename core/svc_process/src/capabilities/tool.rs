@@ -52,6 +52,11 @@ pub struct ToolContext {
     pub deadline: Option<Instant>,
     /// The caller's trace context, forwarded onto the nested invoke.
     pub trace: Option<TraceContext>,
+    /// `true` once any hop of the chain was invoked as a READ tool: the whole
+    /// downstream subtree is then read-only and may not invoke a write tool
+    /// (a read-labelled call must never mutate, and has no retry token of its
+    /// own to make a nested write replay-safe).
+    pub read_only: bool,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -117,7 +122,11 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
                 .map(|identity| Arc::new(identity.for_tool_call(mutation_event_id))),
             verified_scope: self.verified_scope,
             stage_metrics: Arc::clone(&self.stage_metrics),
-            tool: Some(ctx),
+            tool: Some(ToolContext {
+                // Sticky: once any hop ran as a READ, the whole subtree is read-only.
+                read_only: ctx.read_only || !plan.write,
+                ..ctx
+            }),
         }
     }
 
@@ -253,6 +262,18 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             &self.gate,
             &gate_scope,
         )?;
+        // A read-invoked chain may never reach a write tool: a read-labelled
+        // call must not mutate, and it has no retry token of its own to make a
+        // nested write replay-safe. Refused before any directory lookup.
+        if ctx.read_only && authorized.is_write() {
+            tracing::info!(
+                app_id = %self.app_id, community_id = self.community_id,
+                "tool.invoke refused: a read tool may not invoke a write tool"
+            );
+            return Err(ToolRefusal::Forbidden(
+                "a tool invoked as read may not invoke a write tool".to_string(),
+            ));
+        }
         let actor = if authorized.required_scope().is_some() {
             self.resolve_verified_actor().await
         } else if authorized.is_write() {
