@@ -30,6 +30,11 @@ use crate::resource::{
 use crate::scope::{GrantScopeKey, InvokeScope};
 
 const REPUTATION_AGGREGATE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+/// `reputation.adjust_many` call-rate ceiling per (scope, app): bounds how often
+/// the serialized per-community transaction can be taken, refused or not.
+pub const REPUTATION_BATCH_CALLS: u32 = 30;
+/// The window [`REPUTATION_BATCH_CALLS`] is counted over.
+pub const REPUTATION_BATCH_CALLS_WINDOW: Duration = Duration::from_secs(60);
 const ECONOMY_AGGREGATE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The gate's held state: a hot-path grant snapshot, a hot-path membership
@@ -307,6 +312,36 @@ impl CapabilityGate {
 }
 
 impl CapabilityGate {
+    /// Charges ONE call against `permission`'s separate CALL-RATE limit
+    /// ([`REPUTATION_BATCH_CALLS`] per [`REPUTATION_BATCH_CALLS_WINDOW`], keyed
+    /// `<canonical_id>#calls`, the economy path's pattern). Charged on EVERY
+    /// batch call and never refunded -- the magnitude quota is refunded when a
+    /// batch applies nothing, so without this a loop of refused batches could
+    /// flood the serialized per-community transaction lane for free. Checked
+    /// AFTER the grant exists (an ungranted app is `NotGranted`, not charged).
+    pub fn charge_call_rate(
+        &self,
+        scope: &InvokeScope,
+        permission: PermissionId,
+    ) -> Result<(), Denied> {
+        let key = GrantScopeKey::from_scope(scope);
+        let canonical_id = permission.canonical_id();
+        let granted = self
+            .snapshot
+            .current(&key)
+            .is_some_and(|g| g.get(&canonical_id).is_some());
+        if !granted {
+            return Err(self.deny(scope, &permission, Denied::NotGranted));
+        }
+        let rate = Quota::CallsPerWindow {
+            max_calls: REPUTATION_BATCH_CALLS,
+            window: REPUTATION_BATCH_CALLS_WINDOW,
+        };
+        self.quota
+            .check_and_consume(&key, &format!("{canonical_id}#calls"), &rate, 1)
+            .map_err(|_| self.deny(scope, &permission, Denied::RateLimited))
+    }
+
     /// Hands back the quota a previously AUTHORIZED reputation delta call
     /// consumed -- for a multi-item caller (`adjust_many`) that must refuse the
     /// whole batch after some items already passed [`Self::authorize`]. Only

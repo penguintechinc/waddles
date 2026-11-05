@@ -1656,6 +1656,13 @@ impl<K: KvBackend> StageCapabilities<K> {
                 None,
             )?,
             Op::AdjustMany { items, .. } => {
+                // Separate CALL-RATE limit, charged on every call and never
+                // refunded: the magnitude quota below is handed back when a
+                // batch applies nothing, so this is what stops a loop of
+                // refused batches flooding the per-community transaction lane.
+                self.gate
+                    .charge_call_rate(&self.gate_scope(), PermissionId::ReputationCommunityWrite)
+                    .map_err(denied_from_gate)?;
                 for (i, (user, delta)) in items.iter().enumerate() {
                     if let Err(denial) = self.authorize_reputation(
                         PermissionId::ReputationCommunityWrite,
@@ -1758,11 +1765,18 @@ impl<K: KvBackend> StageCapabilities<K> {
         {
             invocation.release_mutation(kind, ordinal);
         }
-        // Deliberately NO refund here: a call the store refused already took the
-        // per-community serialized transaction, so it stays charged against the
-        // magnitude quota -- that is what cuts a denial loop off at the gate
-        // (in-memory) instead of letting it hammer the DB. Only gate-side
-        // refusals (above) are refunded, since they never reach the store.
+        // MAGNITUDE quota (points that may move): the store's batch is
+        // all-or-nothing, so a DEFINITIVE refusal (anything but an
+        // indeterminate backend failure, which may have committed) applied
+        // nothing and hands its points back -- one bad target must not drain
+        // the shared scope/per-user budget. The CALL-RATE limit charged above
+        // is deliberately never refunded, so refunds cannot turn a loop of
+        // refused batches into free access to the serialized transaction lane.
+        if let (Op::AdjustMany { items, .. }, Err(e)) = (&op, &result) {
+            if !matches!(e, ReputationError::Backend(_)) {
+                self.refund_adjust_many(items);
+            }
+        }
         result.map_err(reputation_error_to_host)
     }
 

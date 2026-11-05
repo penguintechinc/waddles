@@ -972,35 +972,92 @@ async fn a_refused_batch_refunds_the_quota_its_earlier_items_consumed() {
     assert_eq!(f.store.ext_count(), 1);
 }
 
-/// regression: #983 review -- a batch the STORE refuses (it took the per-community
-/// serialized transaction) is NOT refunded: refusals that reach the DB lane stay
-/// charged against the magnitude quota, so a loop of store-refused batches stops
-/// reaching the store once the budget is spent (the gate then refuses
-/// in-memory, before any DB work). Only gate-side refusals are refunded.
+/// MAGNITUDE quota: a batch the store definitively refuses (all-or-nothing,
+/// nothing applied) hands its points back, so refused batches cannot drain the
+/// shared scope/per-user budget.
 #[tokio::test]
-async fn store_refused_batches_stay_charged_so_a_denial_loop_cannot_hammer_the_store() {
+async fn a_batch_the_store_refuses_outright_refunds_its_magnitude_quota() {
     let f = ext_fixture(admin_grants()); // per-user daily cap 5
     let body = |u: Uuid| {
         serde_json::json!({
             "adjustments": [{"user": u.to_string(), "delta": 5}], "reason": "r",
         })
     };
-    f.store.answer_unit(Err(ReputationError::NotAMember));
-    assert_eq!(
-        code_of(&f, "reputation.adjust_many", body(f.member)).await,
-        "not_a_member"
-    );
-    for _ in 0..50 {
+    for _ in 0..20 {
+        f.store.answer_unit(Err(ReputationError::NotAMember));
         assert_eq!(
             code_of(&f, "reputation.adjust_many", body(f.member)).await,
-            "quota_exceeded"
+            "not_a_member"
         );
     }
+    f.store.answer_unit(Ok(()));
+    f.caps
+        .handle(rep_call("reputation.adjust_many", body(f.member)))
+        .await
+        .expect("magnitude budget intact after store refusals");
+}
+
+/// An indeterminate backend failure MAY have committed, so its magnitude stays
+/// charged (never refunded).
+#[tokio::test]
+async fn a_backend_failure_keeps_its_magnitude_charged() {
+    let f = ext_fixture(admin_grants());
+    let body = serde_json::json!({
+        "adjustments": [{"user": f.member.to_string(), "delta": 5}], "reason": "r",
+    });
+    f.store
+        .answer_unit(Err(ReputationError::Backend("boom".into())));
     assert_eq!(
-        f.store.ext_count(),
-        1,
-        "only the first call reached the store; the loop was cut off at the gate"
+        code_of(&f, "reputation.adjust_many", body.clone()).await,
+        "backend"
     );
+    assert_eq!(
+        code_of(&f, "reputation.adjust_many", body).await,
+        "quota_exceeded"
+    );
+}
+
+/// CALL-RATE limit on the serialized per-community lane: charged on EVERY
+/// `adjust_many` call and NEVER refunded, so a loop of refused batches is cut
+/// off after N calls even though each refund keeps the magnitude budget whole.
+#[tokio::test]
+async fn looping_refused_batches_is_stopped_by_the_never_refunded_call_rate_limit() {
+    const N: usize = 30; // the gate's adjust_many calls/min
+                         // (1) gate-side refusals (one bad target per batch).
+    let f = ext_fixture(admin_grants());
+    let bad = serde_json::json!({
+        "adjustments": [
+            {"user": f.member.to_string(), "delta": 5},
+            {"user": f.other.to_string(), "delta": 6},
+        ],
+        "reason": "r",
+    });
+    for n in 0..N {
+        assert_eq!(
+            code_of(&f, "reputation.adjust_many", bad.clone()).await,
+            "delta_out_of_bounds",
+            "call {n}"
+        );
+    }
+    for _ in 0..20 {
+        assert_eq!(
+            code_of(&f, "reputation.adjust_many", bad.clone()).await,
+            "rate_limited"
+        );
+    }
+    // (2) store-side refusals: the store is reached at most N times.
+    let g = ext_fixture(admin_grants());
+    let one = serde_json::json!({
+        "adjustments": [{"user": g.member.to_string(), "delta": 1}], "reason": "r",
+    });
+    for _ in 0..(N + 20) {
+        g.store.answer_unit(Err(ReputationError::NotAMember));
+        let _ = g
+            .caps
+            .handle(rep_call("reputation.adjust_many", one.clone()))
+            .await;
+    }
+    assert_eq!(g.store.ext_count(), N, "the lane saw at most N calls");
 }
 
 #[tokio::test]
