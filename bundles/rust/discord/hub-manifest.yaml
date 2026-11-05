@@ -1,0 +1,74 @@
+# hub-api install-pipeline manifest (schema_version 2) for the Discord platform OVERLAY.
+# NOT the app bundle bundles/python/discord (waddles.core.example.discord) -- this is the
+# connector-tools `kind: service` overlay (P6b T2). Cutover flag: waddles.overlay-discord
+# (PostHog, default OFF); while OFF the hardcoded svc_ingest Discord path runs unchanged.
+# No secrets here: the bot token is a host-side connection resolved by opaque handle
+# `discord-bot` (see README "Secrets"). Transports (Gateway WS, interactions webhook route +
+# Ed25519 verify) are HOST configuration, not manifest fields.
+schema_version: 2
+app_id: waddles.core.service.discord
+name: Discord Platform Overlay (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: service
+stages:
+  action:
+    entry: waddle:bundle/tool-provider#call
+egress:
+  - host: discord.com
+    methods: ["GET"]
+  - host: gateway.discord.gg
+    methods: ["GET"]
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: net.http.fqdn:discord.com
+    justification: "read-only guild + member lookups (GET /guilds/{id}, /guilds/{id}/members/{id}) to derive is_mod/is_broadcaster; the bot token is a secret-ref, never in the component. Sends/deletes/role ops are host-executed templates, not guest http."
+    params:
+      methods: ["GET"]
+  - id: net.http.fqdn:gateway.discord.gg
+    justification: "declares the Gateway WebSocket upgrade host the HOST transport connects to for this overlay; the guest never calls it"
+    params:
+      methods: ["GET"]
+  - id: platform.log
+    justification: "bounded, PII-free lifecycle and fail-closed warnings (community/op/class only)"
+routes_to: []
+exported_tools:
+  - name: classify_frame
+    access: read
+    risk: normal
+    input_schema:
+      type: object
+      properties:
+        frame:
+          type: object
+      required:
+        - frame
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: classify_close_code
+    access: read
+    risk: normal
+    input_schema:
+      type: object
+      properties:
+        code:
+          type: integer
+          minimum: 0
+          maximum: 65535
+      required:
+        - code
+      additionalProperties: false
+    output_schema:
+      type: object
