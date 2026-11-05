@@ -1,0 +1,14 @@
+{
+  "context": {
+    "self_nick": "waddlebot"
+  },
+  "events": [],
+  "id": "twitch/irc_self_message_dropped",
+  "input": {
+    "encoding": "utf8",
+    "text": "@user-id=1;display-name=WaddleBot :WaddleBot!WaddleBot@WaddleBot.tmi.twitch.tv PRIVMSG #somechannel :echo of our own reply"
+  },
+  "outcome": "dropped",
+  "path": "twitch_irc",
+  "platform": "twitch"
+}

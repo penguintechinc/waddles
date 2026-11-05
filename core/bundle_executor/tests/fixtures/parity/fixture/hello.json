@@ -1,0 +1,8 @@
+{
+  "id": "fixture/hello",
+  "platform": "fixture",
+  "context": {},
+  "input": {"encoding": "json", "text": "{\"text\":\"hello\"}"},
+  "outcome": "event",
+  "events": [{"platform": "fixture", "event_type": "message", "actor": null, "payload": {"text": "hello"}}]
+}

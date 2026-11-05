@@ -1,0 +1,32 @@
+{
+  "context": {
+    "message_type": "notification"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "222",
+        "raw_handle": "follower",
+        "uuid": "858f0990-f75e-5482-ab55-99ec584c85a8"
+      },
+      "event_type": "channel.follow",
+      "payload": {
+        "broadcaster_id": "111",
+        "broadcaster_login": "somechannel",
+        "metadata": {},
+        "user_display_name": "Follower",
+        "user_id": "222",
+        "user_login": "follower"
+      },
+      "platform": "twitch"
+    }
+  ],
+  "id": "twitch/eventsub_follow",
+  "input": {
+    "encoding": "json",
+    "text": "{\"event\":{\"broadcaster_user_id\":\"111\",\"broadcaster_user_login\":\"somechannel\",\"broadcaster_user_name\":\"SomeChannel\",\"followed_at\":\"2026-09-28T00:00:00Z\",\"user_id\":\"222\",\"user_login\":\"follower\",\"user_name\":\"Follower\"},\"subscription\":{\"condition\":{\"broadcaster_user_id\":\"111\"},\"id\":\"sub-1\",\"type\":\"channel.follow\",\"version\":\"1\"}}"
+  },
+  "outcome": "event",
+  "path": "twitch_eventsub",
+  "platform": "twitch"
+}

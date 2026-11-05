@@ -1,0 +1,14 @@
+{
+  "context": {
+    "message_type": "notification"
+  },
+  "events": [],
+  "id": "twitch/eventsub_unknown_type_ignored",
+  "input": {
+    "encoding": "json",
+    "text": "{\"event\":{\"broadcaster_user_id\":\"111\",\"broadcaster_user_login\":\"somechannel\",\"title\":\"new title\"},\"subscription\":{\"condition\":{\"broadcaster_user_id\":\"111\"},\"id\":\"sub-1\",\"type\":\"channel.update\",\"version\":\"1\"}}"
+  },
+  "outcome": "dropped",
+  "path": "twitch_eventsub",
+  "platform": "twitch"
+}
