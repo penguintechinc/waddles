@@ -51,6 +51,8 @@ fn limits() -> ConnectorLimits {
         memory_limit_mb: 64,
         pool_size: 4,
         pool_wait: Duration::from_millis(200),
+        max_tool_args_bytes: 900_000,
+        max_tool_result_bytes: 900_000,
     }
 }
 

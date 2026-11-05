@@ -9,9 +9,15 @@ use connection_resolver::{ConnectionRef, SecretString};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use super::secrets::{Destination, ResolvedAuth, TransportSecretSource};
 use super::transport::TransportError;
-use super::webhook::{SecretError, WebhookSecretSource};
+use super::webhook::SecretError;
 use super::webhook_verify::hex_encode;
+
+/// Test-only: serializes the process-wide proxy-env mutation in poll's pin test
+/// against tests whose HTTP clients read that env (reader = client user).
+#[cfg(test)]
+pub(crate) static PROXY_ENV: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 /// Validates a transport endpoint: `https`/`wss` only (plain `http`/`ws` is
 /// accepted solely for a loopback host and only when `allow_loopback_insecure`
@@ -47,16 +53,17 @@ pub(crate) fn opaque_id(prefix: &str, source_key: &str) -> String {
 
 /// Resolves one handle through the secret source, fresh on every call (the
 /// source MUST NOT cache; this layer never stores the value).
-pub(crate) async fn resolve_handle<S: WebhookSecretSource>(
+pub(crate) async fn resolve_handle<S: TransportSecretSource>(
     secrets: &S,
     handles: &HashMap<String, ConnectionRef>,
     handle: &str,
-) -> Result<SecretString, TransportError> {
+    dest: &Destination,
+) -> Result<ResolvedAuth, TransportError> {
     let r = handles
         .get(handle)
         .copied()
         .ok_or_else(|| TransportError::Handshake("unknown secret handle".into()))?;
-    secrets.resolve(r).await.map_err(|e| match e {
+    secrets.resolve(r, dest.clone()).await.map_err(|e| match e {
         SecretError::Missing => TransportError::Fatal("secret unavailable for handle".into()),
         SecretError::Unavailable => TransportError::Handshake("secret backend unavailable".into()),
     })
@@ -77,17 +84,45 @@ fn uniform() -> TransportError {
     TransportError::Handshake("handshake secret substitution failed".into())
 }
 
+/// True when EVERY occurrence of `slot` in `bytes` sits directly after one of
+/// the host-pinned `prefixes` and directly before a terminator (end, `"`, CR or
+/// LF). The connector authors the template, so without this a hostile one could
+/// place the credential in a message body or target (e.g. `PRIVMSG #x :{{AUTH}}`)
+/// and publish it. No prefixes configured = nothing may be substituted.
+fn placement_ok(bytes: &[u8], slot: &[u8], prefixes: &[Vec<u8>]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(slot) {
+            let after = bytes.get(i + slot.len()).copied();
+            let term_ok = matches!(after, None | Some(b'"' | b'\r' | b'\n'));
+            let pre_ok = prefixes
+                .iter()
+                .any(|p| !p.is_empty() && bytes[..i].ends_with(p));
+            if !(term_ok && pre_ok) {
+                return false;
+            }
+            i += slot.len();
+        } else {
+            i += 1;
+        }
+    }
+    true
+}
+
 /// Substitutes every `(slot, handle)` pair into `bytes` in ONE pass over the
 /// IMMUTABLE original (already-substituted text is never re-scanned). `slot`
 /// is the literal placeholder the connector put in the handshake; each must
 /// occur at least once, none may be empty, duplicated, or a substring of
 /// another slot. Output is a pre-sized zeroizing buffer (no realloc copies);
-/// resolved secrets zeroize on drop inside this call.
-pub(crate) async fn substitute_slots<S: WebhookSecretSource>(
+/// resolved secrets zeroize on drop inside this call. Every slot occurrence must
+/// satisfy [`placement_ok`] against the host-owned `prefixes` (fail closed).
+pub(crate) async fn substitute_slots<S: TransportSecretSource>(
     secrets: &S,
     handles: &HashMap<String, ConnectionRef>,
     bytes: &[u8],
     refs: &[(String, String)],
+    prefixes: &[Vec<u8>],
+    dest: &Destination,
 ) -> Result<Zeroizing<Vec<u8>>, TransportError> {
     if refs.len() > MAX_SECRET_REFS {
         return Err(uniform());
@@ -97,7 +132,10 @@ pub(crate) async fn substitute_slots<S: WebhookSecretSource>(
             || refs.iter().enumerate().any(|(j, (o, _))| {
                 j != i && (o == slot || o.contains(slot.as_str()) || slot.contains(o.as_str()))
             });
-        if bad_shape || !handles.contains_key(handle) || count_matches(bytes, slot.as_bytes()) == 0
+        if bad_shape
+            || !handles.contains_key(handle)
+            || count_matches(bytes, slot.as_bytes()) == 0
+            || !placement_ok(bytes, slot.as_bytes(), prefixes)
         {
             return Err(uniform());
         }
@@ -105,7 +143,7 @@ pub(crate) async fn substitute_slots<S: WebhookSecretSource>(
     let mut resolved: Vec<(&[u8], SecretString)> = Vec::with_capacity(refs.len());
     let mut extra = 0usize;
     for (slot, handle) in refs {
-        let secret = resolve_handle(secrets, handles, handle).await?;
+        let secret = resolve_handle(secrets, handles, handle, dest).await?.secret;
         if !splice_safe(secret.expose()) {
             return Err(TransportError::Fatal("secret not splice-safe".into()));
         }
@@ -183,14 +221,25 @@ mod tests {
 
     /// Per-ref secret map (handle id -> value), counts resolves.
     struct MapSecrets(HashMap<i64, &'static str>);
-    impl WebhookSecretSource for MapSecrets {
-        fn resolve(&self, r: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
+    impl TransportSecretSource for MapSecrets {
+        fn resolve(
+            &self,
+            r: ConnectionRef,
+            _d: Destination,
+        ) -> BoxFut<'_, Result<ResolvedAuth, SecretError>> {
             let v = self.0.get(&r.connection_id).copied();
             Box::pin(async move {
-                v.map(|s| SecretString::new(s.into()))
-                    .ok_or(SecretError::Missing)
+                v.map(|s| ResolvedAuth {
+                    secret: SecretString::new(s.into()),
+                    header: None,
+                })
+                .ok_or(SecretError::Missing)
             })
         }
+    }
+
+    fn dest() -> Destination {
+        Destination::from_url(&reqwest::Url::parse("https://api.twitch.tv/x").unwrap()).unwrap()
     }
 
     fn handles() -> HashMap<String, ConnectionRef> {
@@ -222,12 +271,14 @@ mod tests {
         let out = substitute_slots(
             &s,
             &handles(),
-            b"{{A}}|{{B}}|{{A}}",
+            b"k={{A}}\nk={{B}}\nk={{A}}",
             &refs(&[("{{A}}", "a"), ("{{B}}", "b")]),
+            &[b"k=".to_vec()],
+            &dest(),
         )
         .await
         .unwrap();
-        assert_eq!(&out[..], b"x{{B}}y|SECOND|x{{B}}y");
+        assert_eq!(&out[..], b"k=x{{B}}y\nk=SECOND\nk=x{{B}}y");
     }
 
     #[tokio::test]
@@ -243,15 +294,98 @@ mod tests {
         ];
         let mut msgs = Vec::new();
         for c in cases {
-            let e = substitute_slots(&s, &h, b"{{A}} {{A}}x", &refs(&c))
-                .await
-                .unwrap_err();
+            let e = substitute_slots(
+                &s,
+                &h,
+                b"{{A}} {{A}}x",
+                &refs(&c),
+                &[b" ".to_vec()],
+                &dest(),
+            )
+            .await
+            .unwrap_err();
             msgs.push(e);
         }
         assert!(msgs.windows(2).all(|w| w[0] == w[1]), "uniform error");
         let many: Vec<(String, String)> = (0..=MAX_SECRET_REFS)
             .map(|i| (format!("{{{{S{i}}}}}"), "a".into()))
             .collect();
-        assert!(substitute_slots(&s, &h, b"x", &many).await.is_err());
+        assert!(substitute_slots(&s, &h, b"x", &many, &[], &dest())
+            .await
+            .is_err());
+    }
+
+    /// regression: p982-A -- a connector-authored template must not be able to
+    /// place the credential in a message body/target (publishing it to a
+    /// channel); only host-pinned prefixes may precede a slot.
+    #[tokio::test]
+    async fn slot_only_substituted_after_host_pinned_prefix() {
+        let s = MapSecrets(HashMap::from([(1, "tok"), (2, "x")]));
+        let h = handles();
+        let r = refs(&[("{{AUTH}}", "a")]);
+        let pins = [b"PASS oauth:".to_vec()];
+        let ok = substitute_slots(
+            &s,
+            &h,
+            b"PASS oauth:{{AUTH}}\r\nNICK bot",
+            &r,
+            &pins,
+            &dest(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(&ok[..], b"PASS oauth:tok\r\nNICK bot");
+        for evil in [
+            &b"PRIVMSG #attacker :{{AUTH}}"[..],
+            b"PASS oauth:{{AUTH}}\r\nPRIVMSG #attacker :{{AUTH}}",
+            b"PASS oauth:{{AUTH}}extra",
+            b"{{AUTH}}",
+        ] {
+            assert!(
+                substitute_slots(&s, &h, evil, &r, &pins, &dest())
+                    .await
+                    .is_err(),
+                "{}",
+                String::from_utf8_lossy(evil)
+            );
+        }
+        // No pins configured = deny everything (fail closed).
+        assert!(
+            substitute_slots(&s, &h, b"PASS oauth:{{AUTH}}", &r, &[], &dest())
+                .await
+                .is_err()
+        );
+    }
+
+    /// regression: p982-C -- CRLF in the guest template cannot move the
+    /// credential outside the pinned position (injected commands never get it).
+    #[tokio::test]
+    async fn crlf_injected_template_cannot_relocate_secret() {
+        let s = MapSecrets(HashMap::from([(1, "tok")]));
+        let r = refs(&[("{{AUTH}}", "a")]);
+        let pins = [b"PASS oauth:".to_vec()];
+        let out = substitute_slots(
+            &s,
+            &handles(),
+            b"JOIN #a\r\nPASS oauth:{{AUTH}}\r\nPRIVMSG #a :hi",
+            &r,
+            &pins,
+            &dest(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.windows(3).filter(|w| *w == b"tok").count(),
+            1,
+            "secret appears exactly once"
+        );
+        // CRLF-injected second line that tries to echo the secret into a body.
+        let hostile = b"PASS oauth:{{AUTH}}\r\nPRIVMSG #a :{{AUTH}}";
+        assert!(
+            substitute_slots(&s, &handles(), hostile, &r, &pins, &dest())
+                .await
+                .is_err(),
+            "CRLF-injected body slot must be refused"
+        );
     }
 }
