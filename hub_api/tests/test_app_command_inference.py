@@ -183,6 +183,7 @@ def test_every_core_hub_manifest_infers_a_row() -> None:
             known_custom_platforms=frozenset(),
             allow_wildcard_consumes=False,
             allow_prebuilt=True,
+            trusted_source=True,  # in-repo core manifests are a trusted install path
         )
         examined += 1
         assert resolve_desired_commands(manifest), f"{path}: resolved zero rows"
