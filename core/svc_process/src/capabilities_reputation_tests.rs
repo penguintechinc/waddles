@@ -1299,7 +1299,7 @@ async fn override_by_admin_and_owner_callers_is_allowed() {
         f.caps
             .handle(rep_call("reputation.override", override_args(&f)))
             .await
-            .unwrap_or_else(|e| panic!("role {role}: {e:?}"));
+            .expect("admin/owner caller must be allowed");
         assert_eq!(f.store.ext_count(), 1);
     }
 }
@@ -1330,10 +1330,10 @@ async fn forbidden_callers_do_not_consume_the_admin_quota() {
         ),
     );
     f.store.answer(Ok(1));
-    for n in 0..10 {
+    for _ in 0..10 {
         caps.handle(rep_call("reputation.override", override_args_for(f.member)))
             .await
-            .unwrap_or_else(|e| panic!("admin call {n}: {e:?}"));
+            .expect("real admin keeps the full window");
     }
 }
 
@@ -1343,11 +1343,11 @@ async fn forbidden_callers_do_not_consume_the_admin_quota() {
 async fn override_is_rate_limited_to_ten_calls_per_window_on_the_cap_path() {
     let f = ext_fixture(admin_grants());
     f.store.answer(Ok(1));
-    for n in 0..10 {
+    for _ in 0..10 {
         f.caps
             .handle(rep_call("reputation.override", override_args(&f)))
             .await
-            .unwrap_or_else(|e| panic!("call {n}: {e:?}"));
+            .expect("within the 10-call window");
     }
     assert_eq!(
         code_of(&f, "reputation.override", override_args(&f)).await,

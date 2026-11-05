@@ -1680,9 +1680,8 @@ async fn leaderboard_query_uses_an_index_not_a_seq_scan_on_the_scores_table() {
          ANALYZE bundle_reputation_scores; ANALYZE community_members; ANALYZE communities;",
     )
     .await;
-    let rows = f
-        .su
-        .query_all_raw(Statement::from_string(
+    let rows =
+        f.su.query_all_raw(Statement::from_string(
             sea_orm::DbBackend::Postgres,
             "EXPLAIN SELECT s.user_uuid AS user_uuid, s.balance AS balance \
              FROM bundle_reputation_scores s \
