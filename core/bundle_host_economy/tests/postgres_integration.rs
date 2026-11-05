@@ -8,7 +8,7 @@
 //! (`tenants`, `communities`, `community_members`; the full legacy baseline
 //! needs the whole docker stack, see `alembic/tests/pg_docker.py`).
 //!
-//! Requires Docker via `testcontainers`. Run with
+//! Requires Docker (the `docker` CLI, `core/test_support`). Run with
 //! `cargo test -p bundle-host-economy --test postgres_integration`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -25,15 +25,13 @@ use bundle_host_economy::{
 };
 use bundle_host_economy::{pot_account, AdminAdjust};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
-use testcontainers::core::logs::LogSource;
-use testcontainers::core::wait::LogWaitStrategy;
-use testcontainers::core::{ContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use uuid::Uuid;
+#[allow(dead_code)]
+#[path = "../../test_support/tests/docker_container.rs"]
+mod docker_container;
+use docker_container::{start_container, DockerContainer};
 
-const POSTGRES_IMAGE: &str = "postgres";
-const POSTGRES_TAG: &str = "17.6-bookworm";
+const POSTGRES_IMAGE: &str = "postgres:17.6-bookworm";
 const SUPERUSER_PASSWORD: &str = "postgres_test_superuser_pw";
 const ECONOMY_PASSWORD: &str = "waddles_economy_runtime_test_pw";
 const APP_ID: &str = "waddles.core.test-economy";
@@ -63,7 +61,7 @@ fn start_gate() -> &'static tokio::sync::Semaphore {
 }
 
 struct Fixture {
-    _container: ContainerAsync<GenericImage>,
+    _container: DockerContainer,
     su: DatabaseConnection,
     store: PostgresEconomyStore,
     eco_conn: DatabaseConnection,
@@ -101,24 +99,20 @@ async fn fixture() -> Fixture {
         .acquire()
         .await
         .expect("the start gate is never closed");
-    let container = GenericImage::new(POSTGRES_IMAGE, POSTGRES_TAG)
-        .with_exposed_port(ContainerPort::Tcp(5432))
-        .with_wait_for(WaitFor::log(
-            LogWaitStrategy::new(
-                LogSource::BothStd,
-                "database system is ready to accept connections",
-            )
-            .with_times(2),
-        ))
-        .with_env_var("POSTGRES_PASSWORD", SUPERUSER_PASSWORD)
-        .with_env_var("POSTGRES_DB", "waddles_test")
-        .with_startup_timeout(CONTAINER_STARTUP_TIMEOUT)
-        .start()
-        .await
-        .expect("postgres test container starts");
+    let container = start_container(
+        POSTGRES_IMAGE,
+        5432,
+        &[
+            ("POSTGRES_PASSWORD", SUPERUSER_PASSWORD),
+            ("POSTGRES_DB", "waddles_test"),
+        ],
+        &["pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
+        CONTAINER_STARTUP_TIMEOUT,
+    )
+    .await;
     drop(permit);
-    let host = container.get_host().await.unwrap().to_string();
-    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let host = container.host().to_string();
+    let port = container.port();
     let su_url = format!("postgres://postgres:{SUPERUSER_PASSWORD}@{host}:{port}/waddles_test");
     let su = Database::connect(&su_url)
         .await
