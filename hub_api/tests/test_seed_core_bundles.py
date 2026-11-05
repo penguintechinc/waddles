@@ -2092,7 +2092,10 @@ def test_real_catalog_has_the_three_connector_tools_overlay_rows() -> None:
             "service",
         )
         assert row["source_dir"] == f"rust/{platform}"
-        assert row["artifact_path"] == f"{platform}.wasm"
+        # discord's flat filename is `discord-overlay.*`: plain `discord.*` is the python app's.
+        stem = "discord-overlay" if platform == "discord" else platform
+        assert row["artifact_path"] == f"{stem}.wasm"
+        assert row["manifest_path"] == f"{stem}.manifest.yaml"
 
 
 @pytest.mark.parametrize("app_id", _OVERLAY_APP_IDS)
@@ -2128,3 +2131,18 @@ async def test_seed_one_seeds_each_real_overlay_row_and_grants_pii_read(
     assert [r.outcome for r in results] == ["made_available", "activated"]
     grants = await install_dal(install_dal.community_permission_grants.app_id == app_id).select()
     assert "connector.pii.read" in {row.permission_id for row in grants}
+
+
+def test_real_catalog_manifest_and_artifact_filenames_are_unique() -> None:
+    """regression: the overlay `discord.wasm` collided with the python discord app's output.
+
+    Every row lands in ONE flat `/core-bundles/` dir (python rows via `dist/.` COPY), so a
+    duplicate `manifest_path`/`artifact_path` silently overwrites another bundle's files.
+    """
+    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+    rows = yaml.safe_load((bundles_dir / "core-bundles.yaml").read_text())["bundles"]
+    assert len(rows) > 50, f"only {len(rows)} catalog rows examined"
+    for key in ("manifest_path", "artifact_path"):
+        names = [r[key] for r in rows]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        assert not dupes, f"duplicate {key} in core-bundles.yaml: {dupes}"

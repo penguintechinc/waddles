@@ -1494,8 +1494,8 @@ bundles:
     wit_world: connector-tools
     kind: service
     source_dir: rust/discord
-    manifest_path: discord.manifest.yaml
-    artifact_path: discord.wasm
+    manifest_path: discord-overlay.manifest.yaml
+    artifact_path: discord-overlay.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null
