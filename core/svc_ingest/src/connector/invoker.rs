@@ -99,10 +99,9 @@ pub trait ConnectorInvoker: Send + Sync {
         frame: RawFrame,
     ) -> Result<Vec<ConnectorEvent>, ConnectorInvokeError>;
 
-    /// `receiver.on-heartbeat-due`. Scheduling it (a dedicated per-connection
-    /// task, never the `on-frame` dispatch path, spec S3.5) belongs to the
-    /// first heartbeat-bearing transport (IRC/Discord); B0 only carries the
-    /// seam so the executor's export is reachable.
+    /// `receiver.on-heartbeat-due`. Scheduled by the driver's per-connection
+    /// heartbeat loop (never the `on-frame` dispatch path, spec S3.5) whenever
+    /// the transport declares a `Transport::heartbeat_interval`.
     async fn on_heartbeat_due(
         &self,
         platform: &str,
