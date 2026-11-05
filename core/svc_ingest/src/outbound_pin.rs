@@ -225,6 +225,14 @@ pub fn verify_stamp_at(
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or(PinError::MissingSignature)?;
+    // One spelling only: the hex decoder is case-insensitive, so a re-cased
+    // tag would still verify while hashing differently in the replay key.
+    // Refuse anything but canonical lowercase hex (the kid is case-sensitive
+    // and compared verbatim, so it is already canonical).
+    let (kid, tag_hex) = sig.split_once(':').ok_or(PinError::BadSignature)?;
+    if tag_hex.bytes().any(|c| c.is_ascii_uppercase()) {
+        return Err(PinError::BadSignature);
+    }
     let exp_ms = wire.exp_ms.ok_or(PinError::ExpiryInvalid)?;
     let fields = PinFields {
         platform,
@@ -258,7 +266,7 @@ pub fn verify_stamp_at(
         return Err(PinError::MissingOpId);
     }
     Ok(VerifiedStamp {
-        replay_digest: sha256_hex(sig.as_bytes()),
+        replay_digest: sha256_hex(format!("{kid}:{tag_hex}").as_bytes()),
         ttl_ms: exp_ms.saturating_sub(now_ms).max(1),
     })
 }
@@ -863,6 +871,35 @@ mod tests {
         let edge = signed_entry("chat.send", "", "1", NOW);
         let s = verify_stamp_at(&edge, "discord", Some(&keys), NOW).unwrap();
         assert_eq!(s.ttl_ms, 1);
+    }
+
+    /// regression (review): the hex decoder is case-insensitive, so a re-cased
+    /// `pin_sig` used to verify yet hash to a different replay key. Only the
+    /// canonical lowercase spelling verifies now, and the digest is over
+    /// kid + canonical tag.
+    #[test]
+    fn a_recased_pin_sig_is_refused_and_cannot_dodge_the_replay_key() {
+        let keys = test_keys();
+        let ok = signed_entry("chat.send", "", "1", NOW + 60_000);
+        let stamp = verify_stamp_at(&ok, "discord", Some(&keys), NOW).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        let sig = v["pin_sig"].as_str().unwrap().to_string();
+        let (kid, tag) = sig.split_once(':').unwrap();
+        for recased in [
+            format!("{kid}:{}", tag.to_ascii_uppercase()),
+            format!("{kid}:{}{}", tag[..10].to_ascii_uppercase(), &tag[10..]),
+        ] {
+            v["pin_sig"] = recased.into();
+            assert_eq!(
+                verify_stamp_at(&v.to_string(), "discord", Some(&keys), NOW),
+                Err(PinError::BadSignature)
+            );
+        }
+        // Digest is of kid + canonical tag, not an arbitrary spelling.
+        assert_eq!(
+            stamp.replay_digest,
+            sha256_hex(format!("{kid}:{tag}").as_bytes())
+        );
     }
 
     #[test]

@@ -540,7 +540,9 @@ fn is_user_placeholder(s: &str) -> bool {
     b.len() == 36
         && b.iter().enumerate().all(|(i, c)| match i {
             8 | 13 | 18 | 23 => *c == b'-',
-            _ => c.is_ascii_hexdigit(),
+            // Canonical LOWERCASE only (the drain's `canonical_uuid` spelling),
+            // so the throttle key and queued `user_id` cannot vary by case.
+            _ => c.is_ascii_digit() || (b'a'..=b'f').contains(c),
         })
 }
 
@@ -4915,6 +4917,48 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, "relay_unavailable");
         assert!(down.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    /// regression (review): a mixed-case `{user:<uuid>}` must not get its own
+    /// DM throttle bucket (per-target limit bypass). Only canonical lowercase
+    /// is accepted, so both spellings can never coexist; the lowercase one
+    /// shares a single bucket across sends.
+    #[tokio::test]
+    async fn dm_throttle_cannot_be_bypassed_by_uuid_case() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        let lower = serde_json::json!({"op":"dm.send","user_id":user_ph(),"text":"x"});
+        let upper = serde_json::json!({
+            "op":"dm.send","user_id":format!("{{user:{}}}", UUID_A.to_ascii_uppercase()),"text":"x"
+        });
+        caps.handle(&discord_scope(), discord_call(&lower))
+            .await
+            .unwrap();
+        let err = caps
+            .handle(&discord_scope(), discord_call(&upper))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+        caps.handle(&discord_scope(), discord_call(&lower))
+            .await
+            .unwrap();
+        caps.handle(&discord_scope(), discord_call(&lower))
+            .await
+            .unwrap();
+        let err = caps
+            .handle(&discord_scope(), discord_call(&lower))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "rate_limited", "4th to one target in the window");
+        let targets: Vec<_> = caps
+            .relay_queue
+            .windows
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|k| k.contains("dm.send:target"))
+            .cloned()
+            .collect();
+        assert_eq!(targets.len(), 1, "one canonical bucket: {targets:?}");
     }
 
     #[test]
