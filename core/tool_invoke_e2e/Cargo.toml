@@ -32,7 +32,6 @@ opentelemetry = "=0.32.0"
 bundle-host-economy = { path = "../bundle_host_economy", version = "=0.1.0" }
 bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
 sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid"] }
-testcontainers = "=0.28.0"
 redis = { version = "=1.7.0", features = ["tokio-comp"] }
 
 opentelemetry_sdk = { version = "=0.32.1", features = ["testing"] }

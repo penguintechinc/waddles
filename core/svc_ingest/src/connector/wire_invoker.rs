@@ -109,6 +109,18 @@ struct Session {
     max_in_flight: usize,
 }
 
+/// Releases one reply slot on drop so a cancelled call cannot leak it.
+struct SlotGuard<'a> {
+    session: &'a Session,
+    id: u64,
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        self.session.forget(self.id);
+    }
+}
+
 impl Session {
     /// Marks the session closed and fails every awaiting call (their senders
     /// drop, which callers see as a lost connection). Idempotent.
@@ -334,6 +346,12 @@ impl ExecutorLink {
             .current_session()
             .ok_or_else(|| unavailable("no executor is connected to this stage"))?;
         let (id, rx) = session.register()?;
+        // Frees the slot however this future ends, including being dropped
+        // mid-await (cancellation); `forget` is idempotent.
+        let _slot = SlotGuard {
+            session: &session,
+            id,
+        };
         let frame = Frame::new(
             id,
             Message::Invoke(InvokeBody {
@@ -1044,6 +1062,27 @@ mod tests {
         assert!(matches!(err, ConnectorInvokeError::Unavailable(ref m) if m.contains("in time")));
         let session = link.current_session().unwrap();
         assert!(session.pending.lock().unwrap().is_empty());
+    }
+
+    /// regression: a call cancelled mid-flight (the driver drops an in-flight
+    /// `on-heartbeat-due`/`on-frame` on teardown/shutdown) left its reply slot
+    /// counted against `max_in_flight` until the session closed.
+    #[tokio::test]
+    async fn a_cancelled_call_frees_its_reply_slot() {
+        let (link, inv, mut exec) = rig().await;
+        let call = tokio::spawn({
+            let inv = Arc::clone(&inv);
+            async move { inv.on_heartbeat_due(PLATFORM, &ctx()).await }
+        });
+        let (_id, _) = exec.next_invoke().await;
+        let session = link.current_session().unwrap();
+        assert_eq!(session.pending.lock().unwrap().len(), 1);
+        call.abort();
+        let _ = call.await;
+        assert!(
+            session.pending.lock().unwrap().is_empty(),
+            "a cancelled call must free its slot"
+        );
     }
 
     #[tokio::test]

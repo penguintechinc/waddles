@@ -72,6 +72,73 @@ and counts.
 | `make test-svc-ingest-twitch-live` | live e2e: real hub-api + Postgres + Valkey + IRC server; binding created/deleted through the admin API starts/stops a session; prints and gates on counts (docker + helm + cargo; `HUB_PYTHON` = python with `hub_api/requirements-dev.txt` + `libs/flask_core/requirements.txt`) |
 | `helm` render: `k8s/helm/waddlebot/tests/test_svc_ingest_twitch_sessions_render.py` | alpha renders the flag + timing envs and no static pair; beta/prod unchanged; egress to hub-api |
 
+## Outbound relay host-pin (`src/outbound_pin.rs`)
+
+The outbound drain never trusts a destination it was handed. `svc_action` pins every
+channel-targeted relay op (Twitch `chat.send`; Discord `chat.send`/`chat.delete`) to the
+triggering event's own channel and stamps it as `origin_channel`; the drain then refuses any
+entry whose `channel` is not exactly that stamp, is not a well-formed id (Twitch login
+`^[a-z0-9_]{1,25}$`, non-numeric, one optional `#` and nothing else normalized; Discord snowflake = non-zero `u64`), or has no stamp at all (pre-upgrade
+entries are refused loudly, never guessed at).
+
+| Refusal reason | Meaning |
+|---|---|
+| `channel_not_pinned` | `channel` differs from `origin_channel` |
+| `no_origin_pin` | entry has no `origin_channel` |
+| `invalid_channel` | malformed id (incl. IRC multi-target `#a,#b`) |
+| `unsupported_platform` | no pin policy -> fail closed |
+| `no_pin_sig` / `bad_pin_sig` | missing / invalid `pin_sig` integrity stamp (see Provenance) |
+| `pin_key_unconfigured` | no verification keys -> every op refused |
+| `pin_expired` / `pin_exp_invalid` | signed `exp_ms` in the past / missing or > 5 min ahead |
+
+Refusals surface as `SenderError::Rejected`, bump `svc_ingest_outbound_pin_refused_total{platform,op,reason}`
+and log a PII-free WARN (platform/op/reason only -- never a channel, id or message text).
+Bundles only ever supply message content. Tests: `cargo test --lib outbound` (regression tests named
+`*unpinned*`/`*regression_p0*`). Follow-up (not in this change): per-community credential resolution via
+`connection_resolver` replacing the single process-wide Twitch bot identity.
+
+### Provenance: who can write the outbound queue (`src/pin_sig.rs`)
+
+**The Valkey ACL does not restrict the writers.** Every app client authenticates as the shared
+password-only `default` user with `~*` and `+@write` (`k8s/helm/waddlebot/templates/infrastructure/valkey-durable.yaml`,
+`--user default on ... '~*' ... +@write`); the per-service users in `config/redis/users.acl` are not loaded by this durable instance
+(it takes `--user` flags inline). So any pod holding the durable Valkey password (svc_process, hub-api, seeder, ...) can `LPUSH`
+`waddles:transport:irc:{twitch,discord}:outbound`; `origin_channel == channel` alone proves nothing. WASM bundles cannot write
+the list directly -- only through the `relay` host capability in `svc_action`
+(`core/svc_action/src/capabilities.rs`, `outbound_relay_queue_key`).
+
+Trust boundary enforced in code instead: `svc_action` signs `platform|op|channel|origin_channel|message_id|text|user_id|exp_ms`
+(HMAC-SHA256, domain label `waddles.outbound-pin.v1`, length-prefixed) for EVERY op (`chat.send`, `chat.delete`, `dm.send`)
+and puts `pin_sig` = `kid:hexmac` plus `exp_ms` on the envelope; the drain verifies in constant time **before** the pin
+check and refuses `no_pin_sig` / `bad_pin_sig` / `pin_key_unconfigured` (no usable keys => every op refused, ERROR at startup)
+and, after the MAC passes, `pin_expired` (exp in the past) / `pin_exp_invalid` (missing, or more than 5 min ahead).
+Chat entries live 60s (`PIN_TTL_MS`); Discord entries use the ack timeout.
+
+- Key: a DEDICATED secret `OUTBOUND_PIN_KEYS` (`kid:hexkey[,...]`, >=16 bytes each) + `OUTBOUND_PIN_ACTIVE_KID`, mounted by
+  `secretKeyRef` ONLY into svc-action-rust (signer) and svc-ingest-rust (verifier) -- not the shared envFrom Secret, not the
+  binding-key ring (`templates/outbound-pin-secret.yaml`; `outboundPin.existingSecret` for ExternalSecret/SealedSecret,
+  alpha/local auto-generate, other tiers fail closed). Rotation: add the new kid to the ring, flip `outboundPin.activeKid`,
+  later drop the old kid (the drain accepts any kid it holds).
+- Symmetric, so a holder of the key (svc-action, svc-ingest) can still forge; Ed25519 (signer-only private key) is the follow-up.
+  The Valkey ACL is defense in depth only. Replay inside the TTL to the SAME channel is possible (no seen-op_id set yet).
+- `core/svc_ingest/src/pin_sig.rs` and `core/svc_action/src/pin_sig.rs` are byte-identical (test `pin_sig_copies_do_not_drift`).
+
+### Rollout order (required) and dropped entries
+
+Deploy **svc_action first, then svc_ingest**, with the queue drained between if possible. The new drain hard-refuses
+anything not signed by the new svc_action: entries queued by a pre-P6a svc_action have no `origin_channel` and are dropped
+with a WARN and counted `svc_ingest_outbound_pin_refused_total{reason="no_origin_pin"}` (stamped-but-unsigned entries from an
+intermediate build: `no_pin_sig`; stamped but without `exp_ms`: `pin_exp_invalid`). A Discord entry whose stamp fails verification is dropped and counted but NEVER acked (an unauthenticated
+writer must not settle another producer's `op_id`); the real producer times out. `op_id` is MAC-bound. On alpha, accept the loss of in-flight chat ops. (The metric label is `no_origin_pin`, not
+`missing_origin`.) A refused entry is already popped (`BRPOP`) so it is never retried; there is no poison loop.
+
+## Connector heartbeat (P6a T5)
+
+The connector driver schedules `receiver.on-heartbeat-due` per connection when a transport declares
+`Transport::heartbeat_interval()` and the driver is opted in (`with_heartbeat_enabled`, PostHog
+`ingest.connector-heartbeat`, default OFF). See `docs/connector-host-capability.md` "Heartbeat scheduling".
+Tests: `cargo test --locked --test connector_heartbeat`.
+
 ## Connector egress (SSRF guard)
 
 Poll/WebSocket connector transports resolve and pin their endpoint through `connector::egress_guard`, a thin

@@ -8,12 +8,13 @@
 //! `bundle_reputation_adjustments`; the full legacy baseline needs the whole
 //! docker stack, see `alembic/tests/pg_docker.py`).
 //!
-//! Requires Docker via `testcontainers`. Run with
+//! Requires Docker (the `docker` CLI, `core/test_support`). Run with
 //! `cargo test -p bundle-host-reputation --test postgres_integration`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bundle_capability_gate::{
     HostInvokeScopeBuilder, MembershipCheck, ScopeKind, SnapshotMembership, TenantTier,
@@ -24,15 +25,13 @@ use bundle_host_reputation::{
     MAX_LEADERBOARD_LIMIT, MAX_SCORE, MIN_SCORE,
 };
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
-use testcontainers::core::logs::LogSource;
-use testcontainers::core::wait::LogWaitStrategy;
-use testcontainers::core::{ContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, ContainerRequest, GenericImage, ImageExt};
 use uuid::Uuid;
+#[allow(dead_code)]
+#[path = "../../test_support/tests/docker_container.rs"]
+mod docker_container;
+use docker_container::{start_container_blocking, DockerContainer};
 
-const POSTGRES_IMAGE: &str = "postgres";
-const POSTGRES_TAG: &str = "17.6-bookworm";
+const POSTGRES_IMAGE: &str = "postgres:17.6-bookworm";
 const SUPERUSER_PASSWORD: &str = "postgres_test_superuser_pw";
 const REP_PASSWORD: &str = "waddles_bundle_reputation_test_pw";
 const APP_ID: &str = "waddles.core.test-reputation";
@@ -46,7 +45,7 @@ const OTHER_TENANT: i32 = 2;
 const OTHER_COMMUNITY: i32 = 20;
 
 struct Fixture {
-    _container: ContainerAsync<GenericImage>,
+    _container: DockerContainer,
     su: DatabaseConnection,
     store: PostgresReputationStore,
     rep_conn: DatabaseConnection,
@@ -119,38 +118,41 @@ const PULL_ATTEMPTS: u32 = 3;
 /// pull; the rest queue behind it, then start in parallel off the cached image.
 static IMAGE_PULL: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
 
-/// One Postgres container request with the exact readiness wait the suite
-/// relies on; rebuilt per attempt because `start()` consumes it.
-fn postgres_request() -> ContainerRequest<GenericImage> {
-    GenericImage::new(POSTGRES_IMAGE, POSTGRES_TAG)
-        .with_exposed_port(ContainerPort::Tcp(5432))
-        .with_wait_for(WaitFor::log(
-            LogWaitStrategy::new(
-                LogSource::BothStd,
-                "database system is ready to accept connections",
-            )
-            .with_times(2),
-        ))
-        .with_env_var("POSTGRES_PASSWORD", SUPERUSER_PASSWORD)
-        .with_env_var("POSTGRES_DB", "waddles_test")
+/// Starts one Postgres container with the readiness probe the suite relies
+/// on (`pg_isready` over TCP, which only the real server answers -- never the
+/// initdb-time throwaway server).
+async fn start_once() -> Result<DockerContainer, String> {
+    tokio::task::spawn_blocking(|| {
+        start_container_blocking(
+            POSTGRES_IMAGE,
+            5432,
+            &[
+                ("POSTGRES_PASSWORD", SUPERUSER_PASSWORD),
+                ("POSTGRES_DB", "waddles_test"),
+            ],
+            &["pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
+            Duration::from_secs(240),
+        )
+    })
+    .await
+    .expect("container start task joins")
 }
 
 /// Starts a Postgres container, serializing the first start (the one that
 /// pulls the image if it is not cached) so concurrent tests never race the
 /// same pull. Panics with the last error once the pull-owning start has
 /// exhausted its attempts, or immediately for any later start.
-async fn start_postgres() -> ContainerAsync<GenericImage> {
+async fn start_postgres() -> DockerContainer {
     let mut pulled = IMAGE_PULL.lock().await;
     if *pulled {
         drop(pulled);
-        return postgres_request()
-            .start()
+        return start_once()
             .await
-            .expect("postgres test container starts");
+            .unwrap_or_else(|e| panic!("postgres test container starts: {e}"));
     }
     let mut last_err = None;
     for _ in 0..PULL_ATTEMPTS {
-        match postgres_request().start().await {
+        match start_once().await {
             Ok(container) => {
                 *pulled = true;
                 drop(pulled);
@@ -164,8 +166,8 @@ async fn start_postgres() -> ContainerAsync<GenericImage> {
 
 async fn fixture() -> Fixture {
     let container = start_postgres().await;
-    let host = container.get_host().await.unwrap().to_string();
-    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let host = container.host().to_string();
+    let port = container.port();
     let su_url = format!("postgres://postgres:{SUPERUSER_PASSWORD}@{host}:{port}/waddles_test");
     let su = Database::connect(&su_url)
         .await
