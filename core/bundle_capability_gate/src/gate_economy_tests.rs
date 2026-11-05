@@ -441,7 +441,7 @@ fn resource_shape_must_match_the_family() {
             &scope(),
             PermissionId::EconomyWager,
             ResourceRef::ReputationScoped(ReputationTarget {
-                target_user: user,
+                target_user: Some(user),
                 scope_kind: ScopeKind::Community,
                 delta: None,
             })

@@ -79,6 +79,88 @@ impl reputation::Host for ExecState {
             Err(e) => Err(reputation_error_from(e)),
         }
     }
+
+    async fn override_score(
+        &mut self,
+        user: String,
+        absolute_score: i64,
+        reason: String,
+    ) -> Result<i64, reputation::Error> {
+        let args = serde_json::json!({
+            "user": user, "absolute_score": absolute_score, "reason": reason,
+        });
+        match call(self, CapabilityKind::Db, "reputation.override", args).await {
+            Ok(value) => decode_balance(value),
+            Err(e) => Err(reputation_error_from(e)),
+        }
+    }
+
+    async fn adjust_many(
+        &mut self,
+        adjustments: Vec<reputation::Adjustment>,
+        reason: String,
+    ) -> Result<(), reputation::Error> {
+        let items: Vec<serde_json::Value> = adjustments
+            .into_iter()
+            .map(|a| serde_json::json!({ "user": a.user, "delta": a.delta }))
+            .collect();
+        let args = serde_json::json!({ "adjustments": items, "reason": reason });
+        match call(self, CapabilityKind::Db, "reputation.adjust_many", args).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(reputation_error_from(e)),
+        }
+    }
+
+    async fn get_many(
+        &mut self,
+        users: Vec<String>,
+    ) -> Result<Vec<reputation::ScoreEntry>, reputation::Error> {
+        let args = serde_json::json!({ "users": users });
+        match call(self, CapabilityKind::Db, "reputation.get_many", args).await {
+            Ok(value) => decode_entries(value),
+            Err(e) => Err(reputation_error_from(e)),
+        }
+    }
+
+    async fn leaderboard(
+        &mut self,
+        limit: u32,
+    ) -> Result<Vec<reputation::ScoreEntry>, reputation::Error> {
+        let args = serde_json::json!({ "limit": limit });
+        match call(self, CapabilityKind::Db, "reputation.leaderboard", args).await {
+            Ok(value) => decode_entries(value),
+            Err(e) => Err(reputation_error_from(e)),
+        }
+    }
+}
+
+/// One score row on the wire (`reputation.get_many` / `reputation.leaderboard`).
+#[derive(Debug, serde::Deserialize)]
+struct EntryWire {
+    user: String,
+    score: i64,
+}
+
+/// Wire shape of a successful `reputation.get_many` / `leaderboard` result.
+#[derive(Debug, serde::Deserialize)]
+struct EntriesWire {
+    entries: Vec<EntryWire>,
+}
+
+fn decode_entries(
+    value: serde_json::Value,
+) -> Result<Vec<reputation::ScoreEntry>, reputation::Error> {
+    serde_json::from_value::<EntriesWire>(value)
+        .map(|w| {
+            w.entries
+                .into_iter()
+                .map(|e| reputation::ScoreEntry {
+                    user: e.user,
+                    score: e.score,
+                })
+                .collect()
+        })
+        .map_err(|e| reputation::Error::Backend(format!("malformed host-result: {e}")))
 }
 
 fn overlay_not_implemented() -> types::TransportError {

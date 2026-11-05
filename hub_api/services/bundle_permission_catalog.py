@@ -118,6 +118,11 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "reputation.read": "normal",
     "reputation.community.write": "dangerous",
     "reputation.tenant.write": "dangerous",
+    #: ADMIN-only absolute score override (bundle-MCP-tools P5): sets a
+    #: member's community score outright, outside the capped-delta quota
+    #: (`core/bundle_capability_gate`'s `reputation.community.admin`).
+    #: `dangerous` -- an admin must explicitly approve the grant.
+    "reputation.community.admin": "dangerous",
     #: Shared community currency (issue #714), `core/bundle_capability_gate`'s
     #: `economy.*` families. `read` = balance/leaderboard; `wager` = atomic
     #: stake-debit/payout-credit (+ `max-bet`); `transfer` = member-to-member.

@@ -26,22 +26,55 @@ type RecordedCall = (
     Option<(i32, String, ReputationCaps)>,
 );
 
+/// One recorded call of the P5 extension ops.
+#[derive(Debug, PartialEq)]
+enum ExtCall {
+    Override {
+        scope: ReputationScope,
+        user: Uuid,
+        absolute: i64,
+        reason: String,
+        key: String,
+    },
+    AdjustMany {
+        scope: ReputationScope,
+        items: Vec<(Uuid, i32)>,
+        reason: String,
+        caps: ReputationCaps,
+        key: String,
+    },
+    GetMany(ReputationScope, Vec<Uuid>),
+    Leaderboard(ReputationScope, u32),
+}
+
 /// Records every store call; answers with a canned result.
 #[derive(Default)]
 struct RecordingStore {
     calls: Mutex<Vec<RecordedCall>>,
     next: Mutex<Option<Result<i64, ReputationError>>>,
+    ext: Mutex<Vec<ExtCall>>,
+    next_unit: Mutex<Option<Result<(), ReputationError>>>,
+    next_entries: Mutex<Option<Result<Vec<bundle_host_reputation::ScoreEntry>, ReputationError>>>,
 }
 
 impl RecordingStore {
     fn answer(&self, r: Result<i64, ReputationError>) {
         *self.next.lock().unwrap() = Some(r);
     }
+    fn answer_unit(&self, r: Result<(), ReputationError>) {
+        *self.next_unit.lock().unwrap() = Some(r);
+    }
     fn call_count(&self) -> usize {
         self.calls.lock().unwrap().len()
     }
     fn take(&self) -> Result<i64, ReputationError> {
         self.next.lock().unwrap().take().unwrap_or(Ok(0))
+    }
+    fn ext_calls(&self) -> Vec<ExtCall> {
+        std::mem::take(&mut *self.ext.lock().unwrap())
+    }
+    fn ext_count(&self) -> usize {
+        self.ext.lock().unwrap().len()
     }
 }
 
@@ -77,12 +110,92 @@ impl ReputationStore for RecordingStore {
             self.take()
         })
     }
+    fn override_score<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        user: Uuid,
+        absolute_score: i64,
+        reason: &'a str,
+        key: &'a bundle_host_reputation::IdempotencyKey,
+    ) -> bundle_host_reputation::BoxFuture<'a, Result<i64, ReputationError>> {
+        Box::pin(async move {
+            self.ext.lock().unwrap().push(ExtCall::Override {
+                scope: scope.clone(),
+                user,
+                absolute: absolute_score,
+                reason: reason.to_string(),
+                key: key.as_str().to_string(),
+            });
+            self.take()
+        })
+    }
+    fn adjust_many<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        items: &'a [(Uuid, i32)],
+        reason: &'a str,
+        caps: ReputationCaps,
+        key: &'a bundle_host_reputation::IdempotencyKey,
+    ) -> bundle_host_reputation::BoxFuture<'a, Result<(), ReputationError>> {
+        Box::pin(async move {
+            self.ext.lock().unwrap().push(ExtCall::AdjustMany {
+                scope: scope.clone(),
+                items: items.to_vec(),
+                reason: reason.to_string(),
+                caps,
+                key: key.as_str().to_string(),
+            });
+            self.next_unit.lock().unwrap().take().unwrap_or(Ok(()))
+        })
+    }
+    fn get_many<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        users: &'a [Uuid],
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<Vec<bundle_host_reputation::ScoreEntry>, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::GetMany(scope.clone(), users.to_vec()));
+            self.next_entries
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Ok(vec![]))
+        })
+    }
+    fn leaderboard<'a>(
+        &'a self,
+        scope: &'a ReputationScope,
+        limit: u32,
+    ) -> bundle_host_reputation::BoxFuture<
+        'a,
+        Result<Vec<bundle_host_reputation::ScoreEntry>, ReputationError>,
+    > {
+        Box::pin(async move {
+            self.ext
+                .lock()
+                .unwrap()
+                .push(ExtCall::Leaderboard(scope.clone(), limit));
+            self.next_entries
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Ok(vec![]))
+        })
+    }
 }
 
 struct Fixture {
     caps: StageCapabilities,
     store: Arc<RecordingStore>,
     member: Uuid,
+    /// A second active member of the same community.
+    other: Uuid,
 }
 
 fn grants(ids: &[(&str, serde_json::Value)]) -> GrantSet {
@@ -122,6 +235,8 @@ fn fixture_with(
     let member = Uuid::new_v4();
     let membership = InMemoryMembership::new();
     membership.add_community_member(TENANT_ID, COMMUNITY_ID, member);
+    let other = Uuid::new_v4();
+    membership.add_community_member(TENANT_ID, COMMUNITY_ID, other);
     let gate = Arc::new(CapabilityGate::new(
         Arc::new(snapshot),
         Arc::new(membership),
@@ -169,6 +284,7 @@ fn fixture_with(
         caps,
         store,
         member,
+        other,
     }
 }
 
@@ -492,5 +608,754 @@ fn daily_caps_match_the_catalog_per_user_and_per_scope_ceilings() {
             per_user_daily_abs_max,
             per_scope_daily_abs_max
         }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P5 Task 1: override / adjust_many / get_many / leaderboard
+// ---------------------------------------------------------------------------
+
+const EVENT_ID: &str = "evt-1";
+
+fn admin_grants() -> GrantSet {
+    grants(&[
+        ("reputation.read", serde_json::json!({})),
+        (
+            "reputation.community.write",
+            serde_json::json!({"delta_min": -5, "delta_max": 5}),
+        ),
+        ("reputation.community.admin", serde_json::json!({})),
+    ])
+}
+
+const ACTOR_UUID: &str = "11111111-1111-4111-8111-111111111111";
+
+/// Membership directory double: one platform account holding `role`
+/// (`None` = no role on record -> `NotLinked`, never defaulted).
+struct RoleDirectory {
+    role: Option<&'static str>,
+}
+
+impl crate::identity::MemberDirectory for RoleDirectory {
+    fn member_by_platform_id<'a>(
+        &'a self,
+        _scope: crate::identity::IdentityScope,
+        _platform: &'a str,
+        _platform_user_id: &'a str,
+    ) -> crate::identity::BoxFuture<'a, Result<Uuid, crate::identity::IdentityError>> {
+        Box::pin(async move { Ok(Uuid::parse_str(ACTOR_UUID).unwrap()) })
+    }
+    fn role_for<'a>(
+        &'a self,
+        _scope: crate::identity::IdentityScope,
+        _platform: &'a str,
+        _platform_user_id: &'a str,
+    ) -> crate::identity::BoxFuture<'a, Result<String, crate::identity::IdentityError>> {
+        Box::pin(async move {
+            self.role
+                .map(str::to_string)
+                .ok_or(crate::identity::IdentityError::NotLinked)
+        })
+    }
+    fn confirm_member<'a>(
+        &'a self,
+        _scope: crate::identity::IdentityScope,
+        user: Uuid,
+    ) -> crate::identity::BoxFuture<'a, Result<Uuid, crate::identity::IdentityError>> {
+        Box::pin(async move { Ok(user) })
+    }
+}
+
+/// A fixture whose invocation carries a replay-stable event id (the mutating
+/// ops derive their idempotency key from it) and a host-verified actor holding
+/// the community role `role` (`None` = actor with no role on record).
+fn ext_fixture_as(grant_set: GrantSet, role: Option<&'static str>) -> Fixture {
+    let Fixture {
+        caps,
+        store,
+        member,
+        other,
+    } = fixture_with(grant_set, true, true, Some(("main", COMMUNITY_ID)));
+    let caps = caps.with_identity(
+        crate::identity::IdentityWiring {
+            directory: Arc::new(RoleDirectory { role }),
+            handles: None,
+            flag: Arc::new(FixedGate(true)),
+        },
+        Arc::new(
+            InvocationIdentity::new("twitch", Some("1001".to_string()), vec![])
+                .with_event_id(EVENT_ID),
+        ),
+    );
+    Fixture {
+        caps,
+        store,
+        member,
+        other,
+    }
+}
+
+/// [`ext_fixture_as`] with a community admin (the legitimate `override` caller).
+fn ext_fixture(grant_set: GrantSet) -> Fixture {
+    ext_fixture_as(grant_set, Some("community-admin"))
+}
+
+fn rep_scope() -> ReputationScope {
+    ReputationScope {
+        tenant_id: TENANT_ID,
+        community_id: COMMUNITY_ID,
+        app_id: APP_ID.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn override_needs_the_admin_grant_not_just_write() {
+    let f = ext_fixture(full_grants()); // read + community.write, NO admin
+    let args = serde_json::json!({
+        "user": f.member.to_string(), "absolute_score": 100, "reason": "admin.fix",
+    });
+    assert_eq!(
+        code_of(&f, "reputation.override", args).await,
+        "not_granted"
+    );
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn override_reaches_the_store_with_host_scope_and_an_event_derived_key() {
+    let f = ext_fixture(admin_grants());
+    f.store.answer(Ok(100));
+    let args = serde_json::json!({
+        "user": f.member.to_string(), "absolute_score": 100, "reason": "admin.fix",
+        "tenant_id": 999, "community_id": 999,
+    });
+    let out = f
+        .caps
+        .handle(rep_call("reputation.override", args.clone()))
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!({ "balance": 100 }));
+    // A second distinct override in the same invocation gets the next ordinal.
+    f.caps
+        .handle(rep_call("reputation.override", args))
+        .await
+        .unwrap();
+    let calls = f.store.ext_calls();
+    let key = |n: u32| format!("{EVENT_ID}:reputation_override:{n}");
+    assert_eq!(
+        calls,
+        vec![
+            ExtCall::Override {
+                scope: rep_scope(),
+                user: f.member,
+                absolute: 100,
+                reason: "admin.fix".into(),
+                key: key(0),
+            },
+            ExtCall::Override {
+                scope: rep_scope(),
+                user: f.member,
+                absolute: 100,
+                reason: "admin.fix".into(),
+                key: key(1),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn override_is_gated_on_membership_and_validates_arguments() {
+    let f = ext_fixture(admin_grants());
+    assert_eq!(
+        code_of(
+            &f,
+            "reputation.override",
+            serde_json::json!({"user": Uuid::new_v4().to_string(), "absolute_score": 1, "reason": "r"})
+        )
+        .await,
+        "user_not_in_scope"
+    );
+    for args in [
+        serde_json::json!({"user": "nope", "absolute_score": 1, "reason": "r"}),
+        serde_json::json!({"user": f.member.to_string(), "absolute_score": "x", "reason": "r"}),
+        serde_json::json!({"user": f.member.to_string(), "absolute_score": 1, "reason": "Bad Reason"}),
+        serde_json::json!({"user": f.member.to_string(), "absolute_score": 1}),
+    ] {
+        assert_eq!(
+            code_of(&f, "reputation.override", args).await,
+            "invalid_args"
+        );
+    }
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn a_mutation_without_a_replay_stable_event_id_is_refused_not_unkeyed() {
+    // A verified admin actor, but an invocation with NO event id.
+    let Fixture {
+        caps,
+        store,
+        member,
+        other,
+    } = fixture_with(admin_grants(), true, true, Some(("main", COMMUNITY_ID)));
+    let f = Fixture {
+        caps: caps.with_identity(
+            crate::identity::IdentityWiring {
+                directory: Arc::new(RoleDirectory {
+                    role: Some("community-admin"),
+                }),
+                handles: None,
+                flag: Arc::new(FixedGate(true)),
+            },
+            Arc::new(InvocationIdentity::new(
+                "twitch",
+                Some("1001".to_string()),
+                vec![],
+            )),
+        ),
+        store,
+        member,
+        other,
+    };
+    let args = serde_json::json!({
+        "user": f.member.to_string(), "absolute_score": 1, "reason": "r",
+    });
+    assert_eq!(
+        code_of(&f, "reputation.override", args).await,
+        "not_implemented"
+    );
+    let args = serde_json::json!({
+        "adjustments": [{"user": f.member.to_string(), "delta": 1}], "reason": "r",
+    });
+    assert_eq!(
+        code_of(&f, "reputation.adjust_many", args).await,
+        "not_implemented"
+    );
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn a_backend_failure_gives_the_ordinal_back_so_a_retry_reuses_the_key() {
+    let f = ext_fixture(admin_grants());
+    let args = serde_json::json!({
+        "user": f.member.to_string(), "absolute_score": 5, "reason": "r",
+    });
+    f.store.answer(Err(ReputationError::Backend("boom".into())));
+    assert_eq!(
+        code_of(&f, "reputation.override", args.clone()).await,
+        "backend"
+    );
+    f.caps
+        .handle(rep_call("reputation.override", args))
+        .await
+        .unwrap();
+    let keys: Vec<String> = f
+        .store
+        .ext_calls()
+        .into_iter()
+        .map(|c| match c {
+            ExtCall::Override { key, .. } => key,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        keys[0], keys[1],
+        "the retry presents the same idempotency key"
+    );
+}
+
+#[tokio::test]
+async fn adjust_many_gates_every_item_and_reaches_the_store_with_catalog_caps() {
+    let f = ext_fixture(admin_grants());
+    let b = f.other;
+    let args = serde_json::json!({
+        "adjustments": [
+            {"user": f.member.to_string(), "delta": 3},
+            {"user": b.to_string(), "delta": -2},
+        ],
+        "reason": "game.round",
+    });
+    let out = f
+        .caps
+        .handle(rep_call("reputation.adjust_many", args))
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!({}));
+    assert_eq!(
+        f.store.ext_calls(),
+        vec![ExtCall::AdjustMany {
+            scope: rep_scope(),
+            items: vec![(f.member, 3), (b, -2)],
+            reason: "game.round".into(),
+            caps: reputation_caps(),
+            key: format!("{EVENT_ID}:reputation_adjust_many:0"),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn adjust_many_refuses_the_whole_batch_when_any_item_is_denied() {
+    let f = ext_fixture(admin_grants()); // declared bounds [-5, 5]
+    let items = |second: serde_json::Value| {
+        serde_json::json!({
+            "adjustments": [{"user": f.member.to_string(), "delta": 1}, second],
+            "reason": "r",
+        })
+    };
+    // out-of-bounds delta on item 2
+    assert_eq!(
+        code_of(
+            &f,
+            "reputation.adjust_many",
+            items(serde_json::json!({"user": f.member.to_string(), "delta": 6}))
+        )
+        .await,
+        "invalid_args", // duplicate user is rejected at parse, before the gate
+    );
+    let other = f.other;
+    assert_eq!(
+        code_of(
+            &f,
+            "reputation.adjust_many",
+            items(serde_json::json!({"user": other.to_string(), "delta": 6}))
+        )
+        .await,
+        "delta_out_of_bounds"
+    );
+    // non-member on item 2
+    assert_eq!(
+        code_of(
+            &f,
+            "reputation.adjust_many",
+            items(serde_json::json!({"user": Uuid::new_v4().to_string(), "delta": 1}))
+        )
+        .await,
+        "user_not_in_scope"
+    );
+    assert_eq!(f.store.ext_count(), 0, "nothing reached the store");
+}
+
+/// regression: #983 review -- a batch refused at a LATER item must hand back the
+/// gate quota already consumed by its earlier (authorized) items, or a caller
+/// can burn a member's daily budget with batches that never apply.
+#[tokio::test]
+async fn a_refused_batch_refunds_the_quota_its_earlier_items_consumed() {
+    let f = ext_fixture(admin_grants()); // per-user daily cap 5, per-call bound 5
+    for _ in 0..20 {
+        assert_eq!(
+            code_of(
+                &f,
+                "reputation.adjust_many",
+                serde_json::json!({
+                    "adjustments": [
+                        {"user": f.member.to_string(), "delta": 5},
+                        {"user": f.other.to_string(), "delta": 6}, // out of bounds
+                    ],
+                    "reason": "r",
+                })
+            )
+            .await,
+            "delta_out_of_bounds"
+        );
+    }
+    // The member's full daily budget is still intact.
+    f.caps
+        .handle(rep_call(
+            "reputation.adjust_many",
+            serde_json::json!({
+                "adjustments": [{"user": f.member.to_string(), "delta": 5}],
+                "reason": "r",
+            }),
+        ))
+        .await
+        .expect("budget must not have been burned by refused batches");
+    assert_eq!(f.store.ext_count(), 1);
+}
+
+/// MAGNITUDE quota: a batch the store definitively refuses (all-or-nothing,
+/// nothing applied) hands its points back, so refused batches cannot drain the
+/// shared scope/per-user budget.
+#[tokio::test]
+async fn a_batch_the_store_refuses_outright_refunds_its_magnitude_quota() {
+    let f = ext_fixture(admin_grants()); // per-user daily cap 5
+    let body = |u: Uuid| {
+        serde_json::json!({
+            "adjustments": [{"user": u.to_string(), "delta": 5}], "reason": "r",
+        })
+    };
+    for _ in 0..20 {
+        f.store.answer_unit(Err(ReputationError::NotAMember));
+        assert_eq!(
+            code_of(&f, "reputation.adjust_many", body(f.member)).await,
+            "not_a_member"
+        );
+    }
+    f.store.answer_unit(Ok(()));
+    f.caps
+        .handle(rep_call("reputation.adjust_many", body(f.member)))
+        .await
+        .expect("magnitude budget intact after store refusals");
+}
+
+/// An indeterminate backend failure MAY have committed, so its magnitude stays
+/// charged (never refunded).
+#[tokio::test]
+async fn a_backend_failure_keeps_its_magnitude_charged() {
+    let f = ext_fixture(admin_grants());
+    let body = serde_json::json!({
+        "adjustments": [{"user": f.member.to_string(), "delta": 5}], "reason": "r",
+    });
+    f.store
+        .answer_unit(Err(ReputationError::Backend("boom".into())));
+    assert_eq!(
+        code_of(&f, "reputation.adjust_many", body.clone()).await,
+        "backend"
+    );
+    assert_eq!(
+        code_of(&f, "reputation.adjust_many", body).await,
+        "quota_exceeded"
+    );
+}
+
+/// CALL-RATE limit on the serialized per-community lane: charged on EVERY
+/// `adjust_many` call and NEVER refunded, so a loop of refused batches is cut
+/// off after N calls even though each refund keeps the magnitude budget whole.
+#[tokio::test]
+async fn looping_refused_batches_is_stopped_by_the_never_refunded_call_rate_limit() {
+    const N: usize = 30; // the gate's adjust_many calls/min
+                         // (1) gate-side refusals (one bad target per batch).
+    let f = ext_fixture(admin_grants());
+    let bad = serde_json::json!({
+        "adjustments": [
+            {"user": f.member.to_string(), "delta": 5},
+            {"user": f.other.to_string(), "delta": 6},
+        ],
+        "reason": "r",
+    });
+    for n in 0..N {
+        assert_eq!(
+            code_of(&f, "reputation.adjust_many", bad.clone()).await,
+            "delta_out_of_bounds",
+            "call {n}"
+        );
+    }
+    for _ in 0..20 {
+        assert_eq!(
+            code_of(&f, "reputation.adjust_many", bad.clone()).await,
+            "rate_limited"
+        );
+    }
+    // (2) store-side refusals: the store is reached at most N times.
+    let g = ext_fixture(admin_grants());
+    let one = serde_json::json!({
+        "adjustments": [{"user": g.member.to_string(), "delta": 1}], "reason": "r",
+    });
+    for _ in 0..(N + 20) {
+        g.store.answer_unit(Err(ReputationError::NotAMember));
+        let _ = g
+            .caps
+            .handle(rep_call("reputation.adjust_many", one.clone()))
+            .await;
+    }
+    assert_eq!(g.store.ext_count(), N, "the lane saw at most N calls");
+}
+
+#[tokio::test]
+async fn adjust_many_validates_batch_shape() {
+    let f = ext_fixture(admin_grants());
+    let one = serde_json::json!({"user": f.member.to_string(), "delta": 1});
+    let oversize: Vec<serde_json::Value> = (0..=bundle_host_reputation::MAX_BATCH)
+        .map(|_| serde_json::json!({"user": Uuid::new_v4().to_string(), "delta": 1}))
+        .collect();
+    for args in [
+        serde_json::json!({"adjustments": [], "reason": "r"}),
+        serde_json::json!({"adjustments": oversize, "reason": "r"}),
+        serde_json::json!({"adjustments": [{"user": f.member.to_string(), "delta": 0}], "reason": "r"}),
+        serde_json::json!({"adjustments": [one.clone(), one.clone()], "reason": "r"}),
+        serde_json::json!({"adjustments": [one.clone()], "reason": ""}),
+        serde_json::json!({"reason": "r"}),
+    ] {
+        assert_eq!(
+            code_of(&f, "reputation.adjust_many", args).await,
+            "invalid_args"
+        );
+    }
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn get_many_returns_entries_and_gates_every_user() {
+    let f = ext_fixture(admin_grants());
+    f.store
+        .next_entries
+        .lock()
+        .unwrap()
+        .replace(Ok(vec![bundle_host_reputation::ScoreEntry {
+            user: f.member,
+            score: 9,
+        }]));
+    let out = f
+        .caps
+        .handle(rep_call(
+            "reputation.get_many",
+            serde_json::json!({"users": [f.member.to_string()]}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        serde_json::json!({"entries": [{"user": f.member.to_string(), "score": 9}]})
+    );
+    assert_eq!(
+        f.store.ext_calls(),
+        vec![ExtCall::GetMany(rep_scope(), vec![f.member])]
+    );
+    assert_eq!(
+        code_of(
+            &f,
+            "reputation.get_many",
+            serde_json::json!({"users": [f.member.to_string(), Uuid::new_v4().to_string()]})
+        )
+        .await,
+        "user_not_in_scope"
+    );
+    for bad in [
+        serde_json::json!({"users": []}),
+        serde_json::json!({"users": ["nope"]}),
+        serde_json::json!({}),
+    ] {
+        assert_eq!(
+            code_of(&f, "reputation.get_many", bad).await,
+            "invalid_args"
+        );
+    }
+    let oversize: Vec<String> = (0..=bundle_host_reputation::MAX_BATCH)
+        .map(|_| Uuid::new_v4().to_string())
+        .collect();
+    assert_eq!(
+        code_of(
+            &f,
+            "reputation.get_many",
+            serde_json::json!({"users": oversize})
+        )
+        .await,
+        "invalid_args"
+    );
+}
+
+#[tokio::test]
+async fn leaderboard_needs_read_and_bounds_its_limit() {
+    let f = ext_fixture(admin_grants());
+    f.store
+        .next_entries
+        .lock()
+        .unwrap()
+        .replace(Ok(vec![bundle_host_reputation::ScoreEntry {
+            user: f.member,
+            score: 4,
+        }]));
+    let out = f
+        .caps
+        .handle(rep_call(
+            "reputation.leaderboard",
+            serde_json::json!({"limit": 10}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        serde_json::json!({"entries": [{"user": f.member.to_string(), "score": 4}]})
+    );
+    assert_eq!(
+        f.store.ext_calls(),
+        vec![ExtCall::Leaderboard(rep_scope(), 10)]
+    );
+    for bad in [0, 101] {
+        assert_eq!(
+            code_of(
+                &f,
+                "reputation.leaderboard",
+                serde_json::json!({"limit": bad})
+            )
+            .await,
+            "invalid_args"
+        );
+    }
+    let none = ext_fixture(grants(&[]));
+    assert_eq!(
+        code_of(
+            &none,
+            "reputation.leaderboard",
+            serde_json::json!({"limit": 5})
+        )
+        .await,
+        "not_granted"
+    );
+    assert_eq!(none.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn extension_ops_fail_loud_on_flag_off_unwired_and_tenant_wide_activation() {
+    let off = fixture_with(admin_grants(), false, true, Some(("main", COMMUNITY_ID)));
+    assert_eq!(
+        code_of(
+            &off,
+            "reputation.leaderboard",
+            serde_json::json!({"limit": 5})
+        )
+        .await,
+        "feature_disabled"
+    );
+    let unwired = fixture_with(admin_grants(), true, false, Some(("main", COMMUNITY_ID)));
+    assert_eq!(
+        code_of(
+            &unwired,
+            "reputation.leaderboard",
+            serde_json::json!({"limit": 5})
+        )
+        .await,
+        "not_implemented"
+    );
+    let tenant_wide = fixture_with(admin_grants(), true, true, None);
+    assert_eq!(
+        code_of(
+            &tenant_wide,
+            "reputation.leaderboard",
+            serde_json::json!({"limit": 5})
+        )
+        .await,
+        "invalid_args"
+    );
+}
+
+/// A store failure code maps onto the stable wire code (idempotency conflict
+/// reaches the guest as `denied(idempotency_conflict)`).
+#[tokio::test]
+async fn an_idempotency_conflict_surfaces_with_its_stable_code() {
+    let f = ext_fixture(admin_grants());
+    f.store.answer(Err(ReputationError::IdempotencyConflict));
+    let args = serde_json::json!({
+        "user": f.member.to_string(), "absolute_score": 1, "reason": "r",
+    });
+    assert_eq!(
+        code_of(&f, "reputation.override", args).await,
+        "idempotency_conflict"
+    );
+}
+
+// ---- review #983: caller scope enforced host-side on override ----
+
+fn override_args_for(user: Uuid) -> serde_json::Value {
+    serde_json::json!({
+        "user": user.to_string(), "absolute_score": 100, "reason": "admin.fix",
+    })
+}
+
+fn override_args(f: &Fixture) -> serde_json::Value {
+    override_args_for(f.member)
+}
+
+/// regression: #983 review -- the bundle holds `reputation.community.admin`, but
+/// a non-admin caller reaching `override-score` (any other tool, or the WIT
+/// import called directly) must be refused by the HOST, never reaching the store.
+#[tokio::test]
+async fn override_by_a_non_admin_caller_is_forbidden_even_with_the_admin_grant() {
+    for role in [
+        Some("member"),
+        Some("moderator"),
+        Some("vip"),
+        Some("bogus"),
+        None,
+    ] {
+        let f = ext_fixture_as(admin_grants(), role);
+        assert_eq!(
+            code_of(&f, "reputation.override", override_args(&f)).await,
+            "forbidden",
+            "role {role:?}"
+        );
+        assert_eq!(f.store.ext_count(), 0, "role {role:?}");
+    }
+}
+
+#[tokio::test]
+async fn override_with_no_verified_actor_at_all_is_forbidden() {
+    // No identity wiring and no actor account: fail closed.
+    let mut f = fixture_with(admin_grants(), true, true, Some(("main", COMMUNITY_ID)));
+    f.caps.invocation_identity = Some(Arc::new(
+        InvocationIdentity::new("twitch", None, vec![]).with_event_id(EVENT_ID),
+    ));
+    assert_eq!(
+        code_of(&f, "reputation.override", override_args(&f)).await,
+        "forbidden"
+    );
+    assert_eq!(f.store.ext_count(), 0);
+}
+
+#[tokio::test]
+async fn override_by_admin_and_owner_callers_is_allowed() {
+    for role in ["community-admin", "community-owner", "owner"] {
+        let f = ext_fixture_as(admin_grants(), Some(role));
+        f.store.answer(Ok(100));
+        f.caps
+            .handle(rep_call("reputation.override", override_args(&f)))
+            .await
+            .expect("admin/owner caller must be allowed");
+        assert_eq!(f.store.ext_count(), 1);
+    }
+}
+
+/// A refused (non-admin) caller never burns the admin quota: after a flood of
+/// forbidden attempts a real admin still gets all 10 calls of the window.
+#[tokio::test]
+async fn forbidden_callers_do_not_consume_the_admin_quota() {
+    let f = ext_fixture_as(admin_grants(), Some("member"));
+    for _ in 0..25 {
+        assert_eq!(
+            code_of(&f, "reputation.override", override_args(&f)).await,
+            "forbidden"
+        );
+    }
+    // Same gate, same quota ledger: swap in an admin actor.
+    let caps = f.caps.with_identity(
+        crate::identity::IdentityWiring {
+            directory: Arc::new(RoleDirectory {
+                role: Some("community-admin"),
+            }),
+            handles: None,
+            flag: Arc::new(FixedGate(true)),
+        },
+        Arc::new(
+            InvocationIdentity::new("twitch", Some("1001".to_string()), vec![])
+                .with_event_id(EVENT_ID),
+        ),
+    );
+    f.store.answer(Ok(1));
+    for _ in 0..10 {
+        caps.handle(rep_call("reputation.override", override_args_for(f.member)))
+            .await
+            .expect("real admin keeps the full window");
+    }
+}
+
+/// regression: #983 review -- the catalog's 10 calls / 60 s quota on
+/// `reputation.community.admin` is enforced on the host cap path.
+#[tokio::test]
+async fn override_is_rate_limited_to_ten_calls_per_window_on_the_cap_path() {
+    let f = ext_fixture(admin_grants());
+    f.store.answer(Ok(1));
+    for _ in 0..10 {
+        f.caps
+            .handle(rep_call("reputation.override", override_args(&f)))
+            .await
+            .expect("within the 10-call window");
+    }
+    assert_eq!(
+        code_of(&f, "reputation.override", override_args(&f)).await,
+        "rate_limited"
+    );
+    assert_eq!(
+        f.store.ext_count(),
+        10,
+        "the 11th call never reached the store"
     );
 }

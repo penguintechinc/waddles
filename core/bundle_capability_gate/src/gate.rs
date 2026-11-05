@@ -30,6 +30,11 @@ use crate::resource::{
 use crate::scope::{GrantScopeKey, InvokeScope};
 
 const REPUTATION_AGGREGATE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+/// `reputation.adjust_many` call-rate ceiling per (scope, app): bounds how often
+/// the serialized per-community transaction can be taken, refused or not.
+pub const REPUTATION_BATCH_CALLS: u32 = 30;
+/// The window [`REPUTATION_BATCH_CALLS`] is counted over.
+pub const REPUTATION_BATCH_CALLS_WINDOW: Duration = Duration::from_secs(60);
 const ECONOMY_AGGREGATE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The gate's held state: a hot-path grant snapshot, a hot-path membership
@@ -135,11 +140,13 @@ impl CapabilityGate {
                 // Membership verified at call time, not just at grant time
                 // (spec SS5.2: "a user who left the community since the
                 // bundle was activated cannot be adjusted or profile-read").
-                if !self
-                    .membership
-                    .is_member(scope, target.target_user, target.scope_kind)
-                {
-                    return Err(self.deny(scope, &permission, Denied::UserNotInScope));
+                if let Some(user) = target.target_user {
+                    if !self.membership.is_member(scope, user, target.scope_kind) {
+                        return Err(self.deny(scope, &permission, Denied::UserNotInScope));
+                    }
+                } else if target.delta.is_some() {
+                    // A delta write must name who it moves.
+                    return Err(self.deny(scope, &permission, Denied::ResourceScopeMismatch));
                 }
                 ResolvedResource::ReputationTarget(target.clone())
             }
@@ -237,7 +244,11 @@ impl CapabilityGate {
             }
 
             let target_user = match &resource {
-                ResourceRef::ReputationScoped(t) => t.target_user,
+                // Cannot be `None`: a `delta: Some` target with no user was
+                // refused above (`ResourceScopeMismatch`).
+                ResourceRef::ReputationScoped(t) => t
+                    .target_user
+                    .ok_or_else(|| self.deny(scope, &permission, Denied::ResourceScopeMismatch))?,
                 ResourceRef::AppScoped(_)
                 | ResourceRef::EconomyScoped(_)
                 | ResourceRef::ToolScoped(_) => {
@@ -301,6 +312,56 @@ impl CapabilityGate {
 }
 
 impl CapabilityGate {
+    /// Charges ONE call against `permission`'s separate CALL-RATE limit
+    /// ([`REPUTATION_BATCH_CALLS`] per [`REPUTATION_BATCH_CALLS_WINDOW`], keyed
+    /// `<canonical_id>#calls`, the economy path's pattern). Charged on EVERY
+    /// batch call and never refunded -- the magnitude quota is refunded when a
+    /// batch applies nothing, so without this a loop of refused batches could
+    /// flood the serialized per-community transaction lane for free. Checked
+    /// AFTER the grant exists (an ungranted app is `NotGranted`, not charged).
+    pub fn charge_call_rate(
+        &self,
+        scope: &InvokeScope,
+        permission: PermissionId,
+    ) -> Result<(), Denied> {
+        let key = GrantScopeKey::from_scope(scope);
+        let canonical_id = permission.canonical_id();
+        let granted = self
+            .snapshot
+            .current(&key)
+            .is_some_and(|g| g.get(&canonical_id).is_some());
+        if !granted {
+            return Err(self.deny(scope, &permission, Denied::NotGranted));
+        }
+        let rate = Quota::CallsPerWindow {
+            max_calls: REPUTATION_BATCH_CALLS,
+            window: REPUTATION_BATCH_CALLS_WINDOW,
+        };
+        self.quota
+            .check_and_consume(&key, &format!("{canonical_id}#calls"), &rate, 1)
+            .map_err(|_| self.deny(scope, &permission, Denied::RateLimited))
+    }
+
+    /// Hands back the quota a previously AUTHORIZED reputation delta call
+    /// consumed -- for a multi-item caller (`adjust_many`) that must refuse the
+    /// whole batch after some items already passed [`Self::authorize`]. Only
+    /// `ReputationScoped` calls carrying a delta consumed per-user/aggregate
+    /// quota; any other `resource` is a no-op. `permission`/`resource` must be
+    /// exactly what was authorized.
+    pub fn refund(&self, scope: &InvokeScope, permission: PermissionId, resource: &ResourceRef) {
+        let ResourceRef::ReputationScoped(target) = resource else {
+            return;
+        };
+        let (Some(delta), Some(user)) = (target.delta, target.target_user) else {
+            return;
+        };
+        let key = GrantScopeKey::from_scope(scope);
+        let canonical_id = permission.canonical_id();
+        self.quota
+            .refund_per_user(&key, &canonical_id, user, i64::from(delta));
+        self.quota.refund(&key, &canonical_id, i64::from(delta));
+    }
+
     /// The `economy.*` quota step of [`Self::authorize`] (issue #714).
     ///
     /// A call with no metered amount (a read, or `economy.wager`'s `max-bet`)
@@ -723,7 +784,7 @@ mod tests {
                 &scope(),
                 PermissionId::StorageKv,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: Uuid::new_v4(),
+                    target_user: Some(Uuid::new_v4()),
                     scope_kind: ScopeKind::Community,
                     delta: None,
                 }),
@@ -754,7 +815,7 @@ mod tests {
                 &scope(),
                 PermissionId::ReputationRead,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: user,
+                    target_user: Some(user),
                     scope_kind: ScopeKind::Community,
                     delta: None,
                 }),
@@ -763,11 +824,116 @@ mod tests {
         assert_eq!(
             call.resource,
             ResolvedResource::ReputationTarget(ReputationTarget {
-                target_user: user,
+                target_user: Some(user),
                 scope_kind: ScopeKind::Community,
                 delta: None,
             })
         );
+    }
+
+    /// `reputation.leaderboard` names no user: a community-wide read with
+    /// `target_user: None` is authorized on the read grant alone.
+    #[test]
+    fn a_community_wide_reputation_read_needs_no_target_user() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[("reputation.read", serde_json::json!({}))]),
+        );
+        let gate = gate_with(Arc::new(snapshot));
+        let target = ReputationTarget {
+            target_user: None,
+            scope_kind: ScopeKind::Community,
+            delta: None,
+        };
+        assert!(gate
+            .authorize(
+                &scope(),
+                PermissionId::ReputationRead,
+                ResourceRef::ReputationScoped(target.clone()),
+            )
+            .is_ok());
+        // ...but never ungranted.
+        let none = gate_with(Arc::new(InMemoryGrantSnapshot::new()));
+        assert_eq!(
+            none.authorize(
+                &scope(),
+                PermissionId::ReputationRead,
+                ResourceRef::ReputationScoped(target),
+            )
+            .unwrap_err(),
+            Denied::NotGranted
+        );
+    }
+
+    /// A capped delta write must name its target: no user -> refused, never
+    /// a quota bypass.
+    #[test]
+    fn a_delta_write_without_a_target_user_is_a_scope_mismatch() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[(
+                "reputation.community.write",
+                serde_json::json!({"delta_min": -5, "delta_max": 5}),
+            )]),
+        );
+        let gate = gate_with(Arc::new(snapshot));
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::ReputationCommunityWrite,
+                ResourceRef::ReputationScoped(ReputationTarget {
+                    target_user: None,
+                    scope_kind: ScopeKind::Community,
+                    delta: Some(1),
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::ResourceScopeMismatch);
+    }
+
+    /// The admin override is its own grant: `reputation.community.write`
+    /// (and read) never authorize it.
+    #[test]
+    fn the_reputation_admin_permission_is_a_distinct_grant() {
+        let user = Uuid::new_v4();
+        let mk = |ids: &[(&str, serde_json::Value)]| {
+            let snapshot = InMemoryGrantSnapshot::new();
+            snapshot.set(GrantScopeKey::from_scope(&scope()), grants(ids));
+            let m = InMemoryMembership::new();
+            m.add_community_member(7, 3, user);
+            CapabilityGate::new(
+                Arc::new(snapshot),
+                Arc::new(m),
+                Arc::new(InMemoryQuotaLedger::new()),
+                Arc::new(InMemoryInstancePolicySnapshot::new()),
+            )
+        };
+        let res = || {
+            ResourceRef::ReputationScoped(ReputationTarget {
+                target_user: Some(user),
+                scope_kind: ScopeKind::Community,
+                delta: None,
+            })
+        };
+        let write_only = mk(&[
+            ("reputation.read", serde_json::json!({})),
+            (
+                "reputation.community.write",
+                serde_json::json!({"delta_min": -5, "delta_max": 5}),
+            ),
+        ]);
+        assert_eq!(
+            write_only
+                .authorize(&scope(), PermissionId::ReputationCommunityAdmin, res())
+                .unwrap_err(),
+            Denied::NotGranted
+        );
+        let admin = mk(&[("reputation.community.admin", serde_json::json!({}))]);
+        assert!(admin
+            .authorize(&scope(), PermissionId::ReputationCommunityAdmin, res())
+            .is_ok());
     }
 
     /// Reputation membership test: a target not in the invocation's
@@ -786,7 +952,7 @@ mod tests {
                 &scope(),
                 PermissionId::ReputationRead,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: Uuid::new_v4(),
+                    target_user: Some(Uuid::new_v4()),
                     scope_kind: ScopeKind::Community,
                     delta: None,
                 }),
@@ -820,7 +986,7 @@ mod tests {
                 &scope(),
                 PermissionId::ReputationCommunityWrite,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: user,
+                    target_user: Some(user),
                     scope_kind: ScopeKind::Community,
                     delta: Some(1),
                 }),
@@ -857,7 +1023,7 @@ mod tests {
                 &scope(),
                 PermissionId::ReputationCommunityWrite,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: user,
+                    target_user: Some(user),
                     scope_kind: ScopeKind::Community,
                     delta: Some(3), // outside the community's own [-1, 1] bound
                 }),
@@ -893,7 +1059,7 @@ mod tests {
                 &scope(),
                 PermissionId::ReputationCommunityWrite,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: user,
+                    target_user: Some(user),
                     scope_kind: ScopeKind::Community,
                     delta: Some(10),
                 }),
@@ -936,7 +1102,7 @@ mod tests {
                 &scope(),
                 PermissionId::ReputationCommunityWrite,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: *user,
+                    target_user: Some(*user),
                     scope_kind: ScopeKind::Community,
                     delta: Some(5),
                 }),
@@ -952,7 +1118,7 @@ mod tests {
                 &scope(),
                 PermissionId::ReputationCommunityWrite,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: members[10],
+                    target_user: Some(members[10]),
                     scope_kind: ScopeKind::Community,
                     delta: Some(1),
                 }),
@@ -988,7 +1154,7 @@ mod tests {
                 &scope(),
                 PermissionId::ReputationCommunityWrite,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: user,
+                    target_user: Some(user),
                     scope_kind: ScopeKind::Community,
                     delta: Some(5),
                 }),
@@ -1000,7 +1166,7 @@ mod tests {
                 &scope(),
                 PermissionId::ReputationCommunityWrite,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: user,
+                    target_user: Some(user),
                     scope_kind: ScopeKind::Community,
                     delta: Some(1),
                 }),
@@ -1074,7 +1240,7 @@ mod tests {
                 &scope(),
                 PermissionId::IdentityResolve,
                 ResourceRef::ReputationScoped(ReputationTarget {
-                    target_user: Uuid::new_v4(),
+                    target_user: Some(Uuid::new_v4()),
                     scope_kind: ScopeKind::Community,
                     delta: None,
                 }),

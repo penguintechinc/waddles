@@ -66,6 +66,38 @@ impl<K: KvBackend> StageCapabilities<K> {
         self.tool = Some(tool);
         self
     }
+
+    /// The host-VERIFIED actor of this invocation (see
+    /// [`identity::resolve_actor_scopes`]), or the fail-closed
+    /// [`bundle_tool_call::ActorContext::none`] when the invocation is not
+    /// user-originated or the actor/role cannot be resolved (no identity
+    /// wiring, unlinked, inactive, no role, directory down). Never guest input.
+    /// Shared by `tool.invoke` (scope-restricted targets) and the host-cap ops
+    /// that need the CALLER's scope (`reputation.override`).
+    pub(super) async fn resolve_verified_actor(&self) -> bundle_tool_call::ActorContext {
+        let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
+            tracing::info!(
+                app_id = %self.app_id, community_id = self.community_id,
+                "no identity wiring; scope-restricted operations are refused"
+            );
+            return bundle_tool_call::ActorContext::none();
+        };
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        match identity::resolve_actor_scopes(wiring, invocation, scope).await {
+            Ok(actor) => actor,
+            Err(e) => {
+                tracing::info!(
+                    app_id = %self.app_id, community_id = self.community_id,
+                    outcome = e.wire_code(),
+                    "actor/role unresolved; scope-restricted operations are refused"
+                );
+                bundle_tool_call::ActorContext::none()
+            }
+        }
+    }
 }
 
 impl<K: KvBackend + 'static> StageCapabilities<K> {
@@ -210,36 +242,6 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             ),
         }
         outcome.map_err(|r| denied(r.code(), r.message()))
-    }
-
-    /// The host-VERIFIED actor of this invocation (see
-    /// [`identity::resolve_actor_scopes`]), or the fail-closed
-    /// [`bundle_tool_call::ActorContext::none`] when the invocation is not
-    /// user-originated or the actor/role cannot be resolved (no identity
-    /// wiring, unlinked, inactive, no role, directory down). Never guest input.
-    async fn resolve_verified_actor(&self) -> bundle_tool_call::ActorContext {
-        let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
-            tracing::info!(
-                app_id = %self.app_id, community_id = self.community_id,
-                "tool.invoke: no identity wiring; scope-restricted tools are refused"
-            );
-            return bundle_tool_call::ActorContext::none();
-        };
-        let scope = IdentityScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-        };
-        match identity::resolve_actor_scopes(wiring, invocation, scope).await {
-            Ok(actor) => actor,
-            Err(e) => {
-                tracing::info!(
-                    app_id = %self.app_id, community_id = self.community_id,
-                    outcome = e.wire_code(),
-                    "tool.invoke: actor/role unresolved; scope-restricted tools are refused"
-                );
-                bundle_tool_call::ActorContext::none()
-            }
-        }
     }
 
     async fn run_tool_invoke(
