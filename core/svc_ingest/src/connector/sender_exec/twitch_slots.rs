@@ -127,7 +127,7 @@ fn login_of(channel: &str) -> String {
     channel.trim_start_matches('#').to_ascii_lowercase()
 }
 
-fn map_cred(e: CredError) -> SlotError {
+pub(crate) fn map_cred(e: CredError) -> SlotError {
     match e {
         CredError::Unavailable => SlotError::Unavailable(e.reason()),
         other => SlotError::Refused(other.reason()),

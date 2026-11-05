@@ -85,6 +85,19 @@ pub enum OutboundAction {
         text: String,
         origin_channel: String,
     },
+    /// `role.add` / `role.remove` (T6d-2, executor path only) -- grant or
+    /// revoke the managed role `role_key` for the (tokenized) user
+    /// `user_id`. The producer names a managed-role KEY, never a role
+    /// snowflake, and never a guild: the host maps the key through the
+    /// community's binding allowlist and pins the guild itself. The key
+    /// travels in the wire `text` field so the `pin_sig` MAC covers it.
+    RoleOp {
+        /// `true` = `role.add`, `false` = `role.remove`.
+        add: bool,
+        user_id: String,
+        role_key: String,
+        origin_channel: String,
+    },
 }
 
 impl OutboundAction {
@@ -95,6 +108,8 @@ impl OutboundAction {
             Self::ChatSend { .. } => "chat.send",
             Self::ChatDelete { .. } => "chat.delete",
             Self::DmSend { .. } => "dm.send",
+            Self::RoleOp { add: true, .. } => "role.add",
+            Self::RoleOp { add: false, .. } => "role.remove",
         }
     }
 }
@@ -177,6 +192,15 @@ fn is_valid_op_id(id: &str) -> bool {
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// The `&'static` spelling of a role op (error payloads are static).
+fn role_op_name(op: &str) -> &'static str {
+    if op == "role.add" {
+        "role.add"
+    } else {
+        "role.remove"
+    }
+}
+
 fn require(
     value: Option<String>,
     op: &'static str,
@@ -252,6 +276,15 @@ pub fn parse_outbound_entry(
             text: require(wire.text, "dm.send", "text")?,
             origin_channel: require(wire.origin_channel, "dm.send", "origin_channel")?,
         },
+        op @ ("role.add" | "role.remove") => {
+            let name = role_op_name(op);
+            OutboundAction::RoleOp {
+                add: op == "role.add",
+                user_id: require(wire.user_id, name, "user_id")?,
+                role_key: require(wire.text, name, "text")?,
+                origin_channel: require(wire.origin_channel, name, "origin_channel")?,
+            }
+        }
         other => return Err(OutboundParseError::UnknownOp(other.to_string())),
     };
     Ok(OutboundEntry {
@@ -374,6 +407,12 @@ pub async fn dispatch_to<S: PlatformSender>(
             text,
             origin_channel,
         } => sender.send_dm(user_id, text, origin_channel).await,
+        // Role ops exist only on the generic executor path; a per-platform
+        // sender has no such method -- fail loud, never a silent no-op.
+        OutboundAction::RoleOp { .. } => Err(SenderError::Unsupported {
+            platform: sender.platform().to_string(),
+            op: action.op(),
+        }),
     }
 }
 
@@ -475,7 +514,7 @@ where
             } => {
                 enforce_pin(platform, "chat.delete", channel, origin_channel)?;
             }
-            OutboundAction::DmSend { .. } => {}
+            OutboundAction::DmSend { .. } | OutboundAction::RoleOp { .. } => {}
         }
         self.execute(&ExecRequest {
             platform,

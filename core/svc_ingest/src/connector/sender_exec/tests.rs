@@ -1251,18 +1251,19 @@ async fn no_duties_claims_nothing_and_refuses_every_hook() {
     let d = NoDuties;
     assert!(!d.claims("discord", "dm.send"));
     let a = chat_send("1", Some("1"), "x");
+    let c = GuardedClient::new(GuardedLimits::default(), vec![]);
     let cx = DutyCx {
         platform: "discord",
         action: &a,
         community_id: None,
         pinned_channel: None,
+        client: &c,
     };
     assert_eq!(d.gate(&cx).await.unwrap_err(), ExecError::HostDutyMissing);
     assert_eq!(
         d.payload(&cx).await.unwrap_err(),
         ExecError::HostDutyMissing
     );
-    let c = GuardedClient::new(GuardedLimits::default(), vec![]);
     assert_eq!(
         d.dynamic_slot(&cx, "x", &c).await.unwrap_err(),
         ExecError::HostDutyMissing

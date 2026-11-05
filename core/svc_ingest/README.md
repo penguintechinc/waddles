@@ -204,9 +204,12 @@ queue entry --(drain: pin_sig HMAC + expiry, FIRST gate)--> ActionExecutor::exec
 | `subst.rs` | percent-encode URL positions, JSON-escape body (rebuilt via `serde_json`), header-safe ASCII; zeroizing `SlotValue` |
 | `mod.rs` | `SenderExecutor`, `FlagGate`/`LicenseFlagGate`, `TemplateBuilder`, `SlotSource`, `DutyHook`, `ExecError`, metrics |
 | `twitch_slots.rs` | `TwitchSlots`: `SlotSource` over `outbound_creds::TwitchCredentialSource` + one guarded `GET /helix/users` for numeric ids |
+| `discord_slots.rs` | `DiscordSlots`: `SlotSource` over `outbound_creds_discord::DiscordCredentialSource` (`discord-bot` token per community, per call) + one guarded `GET /channels/{pinned}` proving the channel is in the binding's guild |
+| `discord_duties.rs` | `DiscordDuties`: the Discord `DutyHook` (T6d-2) for `dm.send`, `role.add`, `role.remove` |
 
-**Supported kinds:** `chat.send`, `chat.delete` (Twitch, Discord), `chat.send` (YouTube). `dm.send` is declared but returns
-`ExecError::HostDutyMissing` (`SenderError::Unsupported`) until a `DutyHook` claims it (T6d-2); `role.*` -> `UnsupportedKind`.
+**Supported kinds:** `chat.send`, `chat.delete` (Twitch, Discord), `chat.send` (YouTube); Discord `dm.send`, `role.add`, `role.remove` once
+`DiscordDuties` is registered (`SenderExecutor::with_duties`). With no hook (`NoDuties`) a duty kind returns `ExecError::HostDutyMissing`
+(`SenderError::Unsupported`).
 
 **Slot table** (token = exact text between the braces; handle = the overlay's `secret-refs` handle):
 
@@ -217,7 +220,11 @@ queue entry --(drain: pin_sig HMAC + expiry, FIRST gate)--> ActionExecutor::exec
 | twitch | `TWITCH_BROADCASTER_ID` | `broadcaster_id` | resolver (Helix id of the stamp-pinned channel) | body `/broadcaster_id`, query `broadcaster_id` | id |
 | twitch | `TWITCH_SENDER_ID` | `sender_id` | resolver (Helix id of the connection's bot login) | body `/sender_id`, query `moderator_id` | id |
 | discord | `{target.channel_id}` | - | the signed origin stamp (`origin_channel`) | one path segment | id |
-| discord | `Authorization` (header-credential convention) | `discord-bot` | resolver; host composes `Bot <token>` | header | secret |
+| discord | `Authorization` (header-credential convention) | `discord-bot` | `DiscordSlots` (per community, per call); host composes `Bot <token>` | header | secret |
+| discord | `{dm.channel_id}` | - | duty: the `id` in Discord's reply to the host's own `POST /users/@me/channels` | path segment of `dm.send` | id |
+| discord | `{target.guild_id}` | - | duty: the community binding's guild (never payload/template) | path of `role.*` | id |
+| discord | `{target.user}` | - | duty: the entry's `{user:<uuid>}` detokenized, community-scoped | path of `role.*` | id |
+| discord | `{target.role}` | - | duty: managed-role key -> binding allowlist snowflake, privileged roles refused | path of `role.*` | id |
 | youtube | `YT_OAUTH_TOKEN` | `youtube.oauth` | resolver | `Authorization: Bearer <slot>` | secret |
 | youtube | `YT_LIVE_CHAT_ID` | `youtube.live_chat_id` | resolver | body `/snippet/liveChatId` | id |
 | youtube | `YT_CHANNEL_ID`, `YT_VIDEO_ID` | `youtube.channel_id`, `youtube.video_id` | resolver | declared for the read path; refused in every outbound kind | id |
@@ -254,13 +261,34 @@ pinned connector component (a template built by any other digest is `DigestMisma
   per-send Helix lookup for numeric ids. Discord's per-community bot credential and YouTube's OAuth/live-chat-id sources are not
   implemented (the credential model for them is the per-tenant bot credentials spec); until then those platforms stay on the legacy path.
 
-### Plugging in T6d-2 (Discord DM / managed roles)
+### Discord host duties (T6d-2)
 
-Implement `DutyHook` and extend `PlatformPolicy::discord()`: (1) `claims("discord", "dm.send")`; (2) `gate` = `send_dm_in_community`
-(recipient must be in the guild of the triggering channel) -> `ExecError::Slot(SlotError::Refused("not_in_community"))`; (3) `payload`
-= the overlay payload with the `{user:<uuid>}` recipient (community-scoped tokenization); (4) `dynamic_slot("dm.channel_id")` = the `id`
-of the reply to the host's own `POST /users/@me/channels` (use the `GuardedClient` passed in); (5) add the `dm.channel_id`
-`SlotOrigin::Duty` slot, the real `dm.send` path (`/api/v10/channels/{dm.channel_id}/messages`) and the pseudo-header
-`X-Waddle-Host-Dm-Recipient` handling (it is currently refused as forbidden); (6) managed roles: add `role.add`/`role.remove` kinds with
-a per-binding managed-role allowlist that refuses roles carrying `ADMINISTRATOR`/`MANAGE_ROLES`/`MANAGE_GUILD`. A registered hook with a test
-policy is exercised by `sender_exec::tests::a_registered_duty_hook_gates_shapes_the_payload_and_fills_its_slot`.
+`DiscordDuties<C: DiscordCredentialSource, U: PlatformUserResolver>` implements `DutyHook`; `PlatformPolicy::discord()` carries the
+real `dm.send` path (`/api/v10/channels/{dm.channel_id}/messages`) and `role.add` (`PUT`) / `role.remove` (`DELETE`)
+`/api/v10/guilds/{target.guild_id}/members/{target.user}/roles/{target.role}`. Order per op: gate -> payload -> build -> `bind_template`
+-> verify -> `DiscordSlots` (token + channel-in-guild proof) -> duty slots -> guarded send.
+
+| Duty | Behaviour | Refusal codes |
+|---|---|---|
+| `{user:<uuid>}` recipient | entry `user_id` must be a UUID (bare or `{user:..}`); `PlatformUserResolver` maps it to the raw Discord id inside the executor only, scoped to the stamp's community; raw id lives in zeroizing values, never logged/stored; a raw snowflake is refused | `user_not_tokenized`, `user_not_in_community`, `tokenization_bad_answer`, `tokenization_unavailable` (retryable) |
+| `send_dm_in_community` gate | before any template: pinned channel is in the binding's guild AND the recipient is a member (`discord_rest::classify_membership`, shared with the legacy client) | `not_in_community`; lookup failure `membership_lookup_failed` (nothing sent) |
+| `{dm.channel_id}` | host `POST /users/@me/channels {recipient_id}` per operation; slot filled only from that reply; no state kept, so another dm.send's channel is never reused; no `dm.post` kind | `dm_open_failed` |
+| Managed roles | overlay emits a KEY; host maps it through the binding's `managed_roles`, refuses roles whose permissions include ADMINISTRATOR / MANAGE_ROLES / MANAGE_GUILD (role list via guarded client, 30s TTL cache keyed by numeric guild id, <=256 guilds), pins the guild from the binding | `role_not_managed`, `role_privileged`, `role_not_found`, `role_lookup_failed` (fail closed) |
+| Credential | `DiscordSlots`: per community, per call, uncached `Authorization: Bot <token>`; the channel must be in the binding's guild | `channel_not_owned`, `connection_not_usable`, `ambiguous_binding`, `no_connection` |
+
+`X-Waddle-Host-Dm-Recipient`: the contract does not need it (the recipient is the entry's own, already host-known). The policy keeps
+`X-Waddle-Host-*` forbidden; `bind_template` strips the DM pseudo-header BEFORE verification after checking it equals the entry's
+own `{user:<uuid>}` (`recipient_mismatch` otherwise), and rewrites exactly the entry's `{user:<uuid>}` / `{target.role.<key>}` to the
+fixed duty slots -- any other user/role in the template is an undeclared slot. Role ops ride the queue as `op: role.add|role.remove`
+with `user_id` (UUID) and the managed-role KEY in `text` (so the `pin_sig` MAC covers it); a `guild_id`/`role_id` field is ignored.
+Metric `svc_ingest_discord_duty_refused_total{kind,reason}`.
+
+**Binding contract** (`outbound_creds_discord.rs`, `discord` binding metadata in hub-api): `guild_id` (snowflake) and optional
+`managed_roles` = `key:snowflake,key:snowflake`; secret scheme `Bearer` = the bot token. More than one binding per community is refused
+(`ambiguous_binding`).
+
+**Gaps (not silent):** (1) no production `PlatformUserResolver` -- hub-api's `IdentityService` has no UUID -> platform-user-id RPC
+(`ResolveDisplayNames` returns names, `ResolveHandle` goes the other way); the default `NoUserResolver` refuses every DM/role loudly
+(`tokenization_unavailable`) until a community-scoped RPC is added; (2) hub-api does not yet populate `guild_id`/`managed_roles` on
+discord bindings; (3) `svc_action` does not yet emit `role.*` queue entries; (4) YouTube has no slot source (needs the OAuth connection +
+live-chat-id sources); (5) the executor is still not wired at boot (T6d-1 status above).

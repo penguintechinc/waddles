@@ -112,6 +112,11 @@ pub enum CredError {
     /// lookup or the cap is raised -- never a silent truncation.
     #[error("twitch binding list exceeds the scan cap")]
     BindingListOverflow,
+    /// The community has more than one usable binding for the platform, so
+    /// which guild/credential a send belongs to is ambiguous (Discord). Never
+    /// guessed.
+    #[error("community has more than one usable binding")]
+    AmbiguousBinding,
 }
 
 impl CredError {
@@ -125,6 +130,7 @@ impl CredError {
             Self::NotUsable => "connection_not_usable",
             Self::Unavailable => "credential_unavailable",
             Self::BindingListOverflow => "binding_list_overflow",
+            Self::AmbiguousBinding => "ambiguous_binding",
         }
     }
 }
@@ -148,6 +154,11 @@ static CRED_RESOLVE: LazyLock<prometheus::IntCounterVec> = LazyLock::new(|| {
 /// Propagates a duplicate-registration error from `prometheus`.
 pub fn register_metrics(registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
     registry.register(Box::new(CRED_RESOLVE.clone()))
+}
+
+/// Counts one resolution outcome (shared by the per-platform sources).
+pub(crate) fn record_resolve(platform: &str, outcome: &str) {
+    CRED_RESOLVE.with_label_values(&[platform, outcome]).inc();
 }
 
 /// Count of one outcome (test/observability helper).
@@ -320,7 +331,7 @@ impl<R: ConnectionResolve> ResolverTwitchCredentials<R> {
 }
 
 /// Maps a resolver failure to a [`CredError`] without losing retryability.
-fn map_resolve_error(e: &ResolveError) -> CredError {
+pub(crate) fn map_resolve_error(e: &ResolveError) -> CredError {
     match e {
         ResolveError::NotFound => CredError::NoBinding,
         ResolveError::NotUsable(_) | ResolveError::Auth | ResolveError::Malformed(_) => {
