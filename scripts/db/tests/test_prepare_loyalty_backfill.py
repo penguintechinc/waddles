@@ -67,3 +67,18 @@ def test_unsafe_export_cannot_generate_migration(case: str) -> None:
         mapping = mapping * 2
     with pytest.raises(ValueError):
         module.prepare(rows, mapping)
+
+
+def test_max_supply_cannot_exceed_the_runtime_ceiling() -> None:
+    """regression: p981-claim-4 -- a plan cap above the host's supply ceiling is refused."""
+    rows, mapping = sample()
+    ceiling = module.RUNTIME_MAX_SUPPLY
+    with pytest.raises(ValueError, match="runtime supply ceiling"):
+        module.prepare(rows, mapping, ceiling + 1)
+    plan = module.prepare(rows, mapping, ceiling)
+    assert plan["max_supply"] == ceiling
+    # An imported (hand-edited / stale) plan is re-validated at SQL render time.
+    with pytest.raises(ValueError, match="runtime supply ceiling"):
+        module.migration_sql({**plan, "max_supply": ceiling + 1})
+    with pytest.raises(ValueError, match="runtime supply ceiling"):
+        module.migration_sql({**plan, "max_supply": "1; DROP TABLE economy_ledger"})

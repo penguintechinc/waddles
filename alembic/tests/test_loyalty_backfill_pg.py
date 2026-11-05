@@ -114,3 +114,27 @@ def test_backfill_refusals_roll_back_everything(clean_database: Any, case: str) 
         assert cur.fetchone()[0] == 0
         cur.execute("SELECT COALESCE(SUM(balance),0) FROM economy_balances")
         assert cur.fetchone()[0] == (0 if case == "cross_tenant" else 90)
+
+
+def test_revised_plan_cannot_recredit_an_already_migrated_account(
+    clean_database: Any,
+) -> None:
+    """regression: p981-claim-3 -- the replay guard keys on the ACCOUNT, not the plan hash.
+
+    A revised plan (different amount => different plan id) that includes an
+    account migrated by an earlier plan must abort even after the member spent
+    the balance back to zero, or legacy funds would be credited twice.
+    """
+    first = backfill.migration_sql(plan(amount=20))
+    revised = backfill.migration_sql(plan(amount=30))
+    assert first != revised
+    with clean_database.cursor() as cur:
+        cur.execute(first)
+        cur.execute("UPDATE economy_balances SET balance=0")
+        with pytest.raises(psycopg2.errors.RaiseException, match="already migrated"):
+            cur.execute(revised)
+        cur.execute("ROLLBACK")
+        cur.execute("SELECT balance FROM economy_balances")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT COUNT(*) FROM economy_ledger")
+        assert cur.fetchone()[0] == 1

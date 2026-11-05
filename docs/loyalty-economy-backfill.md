@@ -39,7 +39,9 @@ transaction, serializes balance writes, locks membership against concurrent
 changes, verifies exact tenant/community membership, refuses nonzero existing
 target funds, and checks each community's live supply ceiling. It records every
 movement as an `admin_adjust` ledger entry with a deterministic retry key. A
-repeated plan aborts visibly instead of crediting twice. Any refusal rolls the
+repeated plan, or a revised plan containing an account an earlier plan already
+migrated (even if its balance was since spent), aborts visibly instead of
+crediting twice; the supply cap may not exceed the runtime ceiling (1,000,000). Any refusal rolls the
 whole transaction back. Existing nonzero target balances require separate
 manual reconciliation; the migration never overwrites them.
 

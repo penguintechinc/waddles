@@ -15,6 +15,21 @@ from typing import Any
 from uuid import UUID
 
 SERVICE = "waddles.core.service.economy"
+# Mirrors `bundle_host_economy::DEFAULT_MAX_SUPPLY` (the ceiling svc_process
+# enforces at runtime). A backfill may never create a community total the live
+# host would refuse to mint into.
+RUNTIME_MAX_SUPPLY = 1_000_000
+
+
+def validated_cap(value: object) -> int:
+    """Require a supply cap within `[1, RUNTIME_MAX_SUPPLY]` before it is planned or rendered."""
+    try:
+        cap = integer(value, "max_supply")
+    except ValueError:
+        raise ValueError("max_supply exceeds the runtime supply ceiling") from None
+    if cap > RUNTIME_MAX_SUPPLY:
+        raise ValueError("max_supply exceeds the runtime supply ceiling")
+    return cap
 
 
 def integer(value: object, name: str, minimum: int = 1) -> int:
@@ -43,10 +58,10 @@ def scope_key(row: dict[str, Any]) -> tuple[int, int, str]:
 def prepare(
     rows: list[dict[str, Any]],
     mapping: list[dict[str, Any]],
-    max_supply: int = 1_000_000,
+    max_supply: int = RUNTIME_MAX_SUPPLY,
 ) -> dict[str, Any]:
     """Build one all-or-nothing scoped migration plan from frozen exports and verified mappings."""
-    integer(max_supply, "max_supply")
+    max_supply = validated_cap(max_supply)
     if not rows:
         raise ValueError("empty legacy export")
     identities: dict[tuple[int, int, str], str] = {}
@@ -119,7 +134,8 @@ def migration_sql(plan: dict[str, Any]) -> str:
         for row in plan["movements"]
     )
     plan_id = plan["plan_id"]
-    cap = plan["max_supply"]
+    # Re-validated here: a plan loaded from a report file is untrusted input.
+    cap = validated_cap(plan["max_supply"])
     return f"""-- REVIEW ONLY: explicit approval and a frozen legacy export are required.
 -- Plan {plan_id}; source rows are preserved. Run with ON_ERROR_STOP=1.
 BEGIN;
@@ -138,6 +154,13 @@ BEGIN
   IF EXISTS (SELECT 1 FROM economy_ledger WHERE app_id='{SERVICE}'
       AND idempotency_key LIKE 'loyalty-backfill:{plan_id}:%') THEN
     RAISE EXCEPTION 'backfill plan already applied';
+  END IF;
+  -- Account-identity drain marker: a legacy account is migrated at most once,
+  -- whichever plan (revision) carried it and whatever its balance is now.
+  IF EXISTS (SELECT 1 FROM loyalty_backfill_plan p JOIN economy_ledger l
+      ON l.tenant_id=p.tenant_id AND l.community_id=p.community_id AND l.user_uuid=p.user_uuid
+      WHERE l.app_id='{SERVICE}' AND l.idempotency_key LIKE 'loyalty-backfill:%') THEN
+    RAISE EXCEPTION 'backfill account already migrated by an earlier plan';
   END IF;
   IF EXISTS (SELECT 1 FROM loyalty_backfill_plan p JOIN economy_balances b USING(tenant_id,community_id,user_uuid)
       WHERE b.balance<>0) THEN
@@ -170,7 +193,7 @@ def main() -> None:
     parser.add_argument("--identity-map", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--sql", required=True, type=Path)
-    parser.add_argument("--max-supply", type=int, default=1_000_000)
+    parser.add_argument("--max-supply", type=int, default=RUNTIME_MAX_SUPPLY)
     args = parser.parse_args()
     rows = json.loads(args.legacy_export.read_text())
     mapping = json.loads(args.identity_map.read_text())
