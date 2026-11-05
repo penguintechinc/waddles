@@ -86,7 +86,9 @@ def spiffe_id(env: str, service: str) -> str:
     """Build the reserved `spiffe://penguintech.io/<env>/<service>` ID."""
     candidate = f"spiffe://{SPIFFE_TRUST_DOMAIN}/{env}/{service}"
     if not _SPIFFE_ID_RE.match(candidate):
-        raise ServiceJwtError(f"invalid SPIFFE id components: env={env!r} service={service!r}")
+        raise ServiceJwtError(
+            f"invalid SPIFFE id components: env={env!r} service={service!r}"
+        )
     return candidate
 
 
@@ -108,7 +110,9 @@ SCOPE_CONNECTIONS_LIST = "connections:list"
 #: Community-bound exactly like ``resolve``.
 SCOPE_CONNECTIONS_RESOLVE_STATIC = "connections:resolve:static"
 #: Scopes whose tokens are community-bound.
-COMMUNITY_BOUND_SCOPES = frozenset({SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC})
+COMMUNITY_BOUND_SCOPES = frozenset(
+    {SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC}
+)
 
 #: The ONLY extra claims an issuer call may stamp, and both are integers (numeric ids only --
 #: never a name/slug, never PII), so a JWS suffices and no JWE wrapping is needed.
@@ -197,7 +201,9 @@ class ServiceJwtVerifier:
                 )
             except JwtRejection as rejection:
                 alg, outcome = rejection.alg, rejection.reason
-                raise InvalidServiceToken(f"rejected token header ({outcome})") from rejection
+                raise InvalidServiceToken(
+                    f"rejected token header ({outcome})"
+                ) from rejection
             alg = header.alg
             kid = header.kid
             public_key = self.trust_bundle.get_public_key(kid) if kid else None
@@ -218,7 +224,16 @@ class ServiceJwtVerifier:
                     # token minted without one (an older issuer or a forged
                     # token that omits it), rather than silently accepting it.
                     options={
-                        "require": ["exp", "iat", "nbf", "iss", "aud", "sub", "scope", "jti"],
+                        "require": [
+                            "exp",
+                            "iat",
+                            "nbf",
+                            "iss",
+                            "aud",
+                            "sub",
+                            "scope",
+                            "jti",
+                        ],
                         "verify_iss": False,
                     },
                 )
@@ -237,7 +252,10 @@ class ServiceJwtVerifier:
             return payload
         finally:
             record_verification(
-                verifier=VERIFIER_SERVICE_EDDSA, alg=alg, outcome=outcome, started=started
+                verifier=VERIFIER_SERVICE_EDDSA,
+                alg=alg,
+                outcome=outcome,
+                started=started,
             )
             if outcome != OUTCOME_OK:
                 log_rejection(verifier=VERIFIER_SERVICE_EDDSA, reason=outcome, alg=alg)
@@ -264,7 +282,10 @@ class ServiceIdentity:
 
     def matches_service_account(self, namespace: str, service_account: str) -> bool:
         """Return True if a validated TokenReview identity is this service."""
-        return self.k8s_namespace == namespace and self.k8s_service_account == service_account
+        return (
+            self.k8s_namespace == namespace
+            and self.k8s_service_account == service_account
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,7 +299,9 @@ class SigningKey:
     """
 
     kid: str
-    private_key: Ed25519PrivateKey | None  # gitleaks:allow -- type annotation, not a secret value
+    private_key: (
+        Ed25519PrivateKey | None
+    )  # gitleaks:allow -- type annotation, not a secret value
     public_key: Ed25519PublicKey
 
 
@@ -298,7 +321,13 @@ class ServiceJwtIssuer:
     identities: dict[str, ServiceIdentity] = field(default_factory=dict)
     audience: str = "waddlebot-internal"
 
-    def issue(self, service_id: str, scope: str, *, ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS) -> str:
+    def issue(
+        self,
+        service_id: str,
+        scope: str,
+        *,
+        ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
+    ) -> str:
         """Mint a short-lived JWT for `service_id` scoped to `scope`.
 
         Raises `BootstrapRejected` if `service_id` isn't allow-listed or
@@ -328,13 +357,19 @@ class ServiceJwtIssuer:
         """
         extra = _validated_extra_claims(extra_claims)
         if ttl_seconds > MAX_TOKEN_TTL_SECONDS:
-            raise ServiceJwtError(f"ttl_seconds {ttl_seconds} exceeds {MAX_TOKEN_TTL_SECONDS}s ceiling")
+            raise ServiceJwtError(
+                f"ttl_seconds {ttl_seconds} exceeds {MAX_TOKEN_TTL_SECONDS}s ceiling"
+            )
         identity = self.identities.get(service_id)
         if identity is None or scope not in identity.allowed_scopes:
-            raise BootstrapRejected(f"{service_id!r} is not allow-listed for scope {scope!r}")
+            raise BootstrapRejected(
+                f"{service_id!r} is not allow-listed for scope {scope!r}"
+            )
         key = self.keys[self.active_kid]
         if key.private_key is None:
-            raise ServiceJwtError(f"active key {self.active_kid!r} has no private key loaded")
+            raise ServiceJwtError(
+                f"active key {self.active_kid!r} has no private key loaded"
+            )
         if extra:
             ttl_seconds = min(ttl_seconds, BOUND_TOKEN_TTL_SECONDS)
         now = int(time.time())
@@ -365,7 +400,10 @@ class ServiceJwtIssuer:
         # private key material in memory, widening its exposure window for
         # no benefit.
         token = jwt.encode(
-            payload, key.private_key, algorithm=SERVICE_JWT_ALGORITHM, headers={"kid": key.kid}
+            payload,
+            key.private_key,
+            algorithm=SERVICE_JWT_ALGORITHM,
+            headers={"kid": key.kid},
         )
         return token, dict(payload)
 
@@ -381,7 +419,11 @@ class ServiceJwtIssuer:
         `ServiceJwtVerifier` with a `SkauswatchTrustBundleSource` instead of
         `self` -- every `require_service_scope` call site is unaffected.
         """
-        return ServiceJwtVerifier(trust_bundle=self, audience=self.audience, trusted_issuers=frozenset({ISSUER}))
+        return ServiceJwtVerifier(
+            trust_bundle=self,
+            audience=self.audience,
+            trusted_issuers=frozenset({ISSUER}),
+        )
 
     def jwks(self) -> dict[str, Any]:
         """Public-key set in JWKS-shaped form for cross-service verifiers."""
@@ -442,7 +484,9 @@ def load_issuer_from_env(identities: list[ServiceIdentity]) -> ServiceJwtIssuer:
         private_key = serialization.load_pem_private_key(pem.encode(), password=None)
         if not isinstance(private_key, Ed25519PrivateKey):
             raise ServiceJwtError(f"key {kid!r} is not an Ed25519 key")
-        keys[kid] = SigningKey(kid=kid, private_key=private_key, public_key=private_key.public_key())
+        keys[kid] = SigningKey(
+            kid=kid, private_key=private_key, public_key=private_key.public_key()
+        )
     pub_prefix = "SERVICE_JWT_PUBLIC_KEY_"
     for env_name, pem in os.environ.items():
         if not env_name.startswith(pub_prefix):
@@ -487,11 +531,17 @@ def load_identities_from_env(*, env: str = "alpha") -> list[ServiceIdentity]:
     try:
         entries = json.loads(raw)
     except ValueError as exc:
-        raise ServiceJwtError(f"SERVICE_JWT_IDENTITIES is not valid JSON: {exc}") from exc
+        raise ServiceJwtError(
+            f"SERVICE_JWT_IDENTITIES is not valid JSON: {exc}"
+        ) from exc
     identities: list[ServiceIdentity] = []
     for entry in entries:
         raw_service_id = entry["service_id"]
-        service_id = raw_service_id if raw_service_id.startswith("spiffe://") else spiffe_id(env, raw_service_id)
+        service_id = (
+            raw_service_id
+            if raw_service_id.startswith("spiffe://")
+            else spiffe_id(env, raw_service_id)
+        )
         identities.append(
             ServiceIdentity(
                 service_id=service_id,
@@ -507,12 +557,17 @@ def load_identities_from_env(*, env: str = "alpha") -> list[ServiceIdentity]:
             # loudly at startup rather than at the first denied RPC.
             logger.warning(
                 "service identity has no tenant binding; tenant-aware RPCs will reject its tokens",
-                extra={"action": "service_jwt_identity_untenanted", "service_id": service_id},
+                extra={
+                    "action": "service_jwt_identity_untenanted",
+                    "service_id": service_id,
+                },
             )
     return identities
 
 
-def verify_service_account_token(*, sa_token: str, audience: str, k8s_api_server: str, ca_cert_path: str) -> tuple[str, str]:
+def verify_service_account_token(
+    *, sa_token: str, audience: str, k8s_api_server: str, ca_cert_path: str
+) -> tuple[str, str]:
     """Validate a projected ServiceAccount token via the k8s TokenReview API.
 
     Returns `(namespace, service_account_name)` on success. This is the
@@ -641,7 +696,9 @@ def load_verifier_from_env(
     the privilege separation this module exists for, so it is refused at startup
     rather than tolerated. No HS256/shared-secret fallback exists anywhere here.
     """
-    private_vars = sorted(name for name in os.environ if name.startswith(_PRIVATE_PREFIX))
+    private_vars = sorted(
+        name for name in os.environ if name.startswith(_PRIVATE_PREFIX)
+    )
     if private_vars:
         raise ServiceJwtError(
             "verify-only service must not hold a service-JWT private key "
@@ -657,16 +714,22 @@ def load_verifier_from_env(
         try:
             public_key = serialization.load_pem_public_key(pem.encode())
         except ValueError as exc:
-            raise ServiceJwtError(f"public key for kid {kid!r} is not valid PEM") from exc
+            raise ServiceJwtError(
+                f"public key for kid {kid!r} is not valid PEM"
+            ) from exc
         if not isinstance(public_key, Ed25519PublicKey):
             raise ServiceJwtError(f"key {kid!r} is not an Ed25519 key")
         keys[kid] = public_key
     if not keys:
-        raise ServiceJwtError(f"no {_PUBLIC_PREFIX}<kid> configured; refusing to run unauthenticated")
+        raise ServiceJwtError(
+            f"no {_PUBLIC_PREFIX}<kid> configured; refusing to run unauthenticated"
+        )
     return ServiceJwtVerifier(
         trust_bundle=StaticTrustBundle(keys=keys),
         audience=audience or os.getenv("SERVICE_JWT_AUDIENCE", "waddlebot-internal"),
-        trusted_issuers=trusted_issuers if trusted_issuers is not None else frozenset({ISSUER}),
+        trusted_issuers=trusted_issuers
+        if trusted_issuers is not None
+        else frozenset({ISSUER}),
     )
 
 
@@ -691,7 +754,10 @@ class ServiceTokenClient:
     def get_token(self) -> str:
         """Return a valid cached token, fetching a fresh one when near expiry."""
         with self._lock:
-            if self._token and time.time() < self._expires_at - self.refresh_margin_seconds:
+            if (
+                self._token
+                and time.time() < self._expires_at - self.refresh_margin_seconds
+            ):
                 return self._token
             self._token, self._expires_at = self._fetch()
             return self._token
@@ -705,7 +771,9 @@ class ServiceTokenClient:
             with open(self.sa_token_path, encoding="ascii") as fh:
                 sa_token = fh.read().strip()
         except OSError as exc:
-            raise BootstrapRejected("projected ServiceAccount token unreadable") from exc
+            raise BootstrapRejected(
+                "projected ServiceAccount token unreadable"
+            ) from exc
         if not sa_token:
             raise BootstrapRejected("projected ServiceAccount token is empty")
         try:
@@ -721,6 +789,10 @@ class ServiceTokenClient:
             expires_in = int(body["expires_in"])
         except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
             raise BootstrapRejected("service token request failed") from exc
-        if not isinstance(token, str) or not token or not 0 < expires_in <= MAX_TOKEN_TTL_SECONDS:
+        if (
+            not isinstance(token, str)
+            or not token
+            or not 0 < expires_in <= MAX_TOKEN_TTL_SECONDS
+        ):
             raise BootstrapRejected("service token response malformed")
         return token, time.time() + expires_in

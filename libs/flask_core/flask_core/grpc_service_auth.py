@@ -44,19 +44,27 @@ class ServiceJwtAuthInterceptor(grpc.aio.ServerInterceptor):
         if not required_scope:
             raise ServiceJwtError("required_scope must be non-empty")
         if not allowed_callers:
-            raise ServiceJwtError("allowed_callers must be non-empty (an empty allow-list denies all)")
+            raise ServiceJwtError(
+                "allowed_callers must be non-empty (an empty allow-list denies all)"
+            )
         self._verifier = verifier
         self._scope = required_scope
         self._allowed = allowed_callers
 
-    def _authenticate(self, metadata: dict[str, str | bytes]) -> tuple[grpc.StatusCode, str] | None:
+    def _authenticate(
+        self, metadata: dict[str, str | bytes]
+    ) -> tuple[grpc.StatusCode, str] | None:
         """Return a (status, message) denial, or None when the call is authorized."""
         raw = metadata.get("authorization", "")
-        header = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+        header = (
+            raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+        )
         if not header.startswith("Bearer ") or not header[7:].strip():
             return grpc.StatusCode.UNAUTHENTICATED, "missing bearer token"
         try:
-            claims = self._verifier.verify(header[7:].strip(), required_scope=self._scope)
+            claims = self._verifier.verify(
+                header[7:].strip(), required_scope=self._scope
+            )
         except (UnknownKeyId, InvalidServiceToken):
             # Never reveal which check failed (security.md Service-to-Service Auth).
             return grpc.StatusCode.UNAUTHENTICATED, "unauthorized"
@@ -67,16 +75,22 @@ class ServiceJwtAuthInterceptor(grpc.aio.ServerInterceptor):
 
     async def intercept_service(
         self,
-        continuation: Callable[[grpc.HandlerCallDetails], Awaitable[grpc.RpcMethodHandler[Any, Any] | None]],
+        continuation: Callable[
+            [grpc.HandlerCallDetails], Awaitable[grpc.RpcMethodHandler[Any, Any] | None]
+        ],
         handler_call_details: grpc.HandlerCallDetails,
     ) -> grpc.RpcMethodHandler[Any, Any] | None:
         """Authenticate the call, short-circuiting with an abort handler on denial."""
-        denial = self._authenticate(dict(handler_call_details.invocation_metadata or ()))
+        denial = self._authenticate(
+            dict(handler_call_details.invocation_metadata or ())
+        )
         if denial is None:
             return await continuation(handler_call_details)
         code, message = denial
 
-        async def _reject(request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> Any:
+        async def _reject(
+            request: Any, context: grpc.aio.ServicerContext[Any, Any]
+        ) -> Any:
             await context.abort(code, message)
 
         return grpc.unary_unary_rpc_method_handler(_reject)

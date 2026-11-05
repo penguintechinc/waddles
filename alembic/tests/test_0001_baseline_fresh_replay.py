@@ -98,7 +98,8 @@ def test_late_legacy_sql_and_ports_land_on_fresh_path(pg_db: PgTestDatabase) -> 
         assert any(v.startswith("103") for v in late), "103 SQL file missing from disk"
         assert late - applied == set()
         cur.execute(
-            "SELECT count(*) FROM information_schema.columns WHERE table_name = 'streaming_targets' "
+            "SELECT count(*) FROM information_schema.columns WHERE table_name = "
+            "'streaming_targets' "
             "AND column_name IN ('protocol', 'video_codec', 'audio_codec')"
         )
         row = cur.fetchone()

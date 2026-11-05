@@ -76,7 +76,8 @@ CALLABLE_SIGNATURES: tuple[str, ...] = (
     "pi_community_secret_get(integer, text, integer)",
     "pi_community_upsert(integer, text, text, text, timestamptz, text[], text, smallint, integer)",
     "pi_community_disconnect(integer, text, integer)",
-    "pi_community_set_sealed(integer, text, text, text, text, timestamptz, smallint, boolean, integer)",
+    "pi_community_set_sealed(integer, text, text, text, text, timestamptz, smallint, boolean, "
+    "integer)",
 )
 
 #: Internal helpers -- never granted to anyone (reachable only from inside the definer bodies).

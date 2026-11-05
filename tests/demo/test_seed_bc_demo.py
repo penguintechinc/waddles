@@ -135,11 +135,15 @@ def test_seed_creates_all_links(conn: psycopg2.extensions.connection) -> None:
     result = seed_mod.seed(conn, cfg)
     assert result.binding_count == 1
     with conn.cursor() as cur:
-        cur.execute("SELECT direction, sync_enabled, event_sync_enabled FROM guild_tenant_pairings")
+        cur.execute(
+            "SELECT direction, sync_enabled, event_sync_enabled FROM guild_tenant_pairings"
+        )
         assert cur.fetchall() == [("discord_to_twitch", True, True)]
         cur.execute("SELECT role, user_id, is_active FROM community_members")
         assert cur.fetchall() == [("member", str(result.hub_user_id), True)]
-        cur.execute("SELECT sync_scope, community_role FROM community_role_sync_bindings")
+        cur.execute(
+            "SELECT sync_scope, community_role FROM community_role_sync_bindings"
+        )
         assert cur.fetchall() == [("community_role", "moderator")]
     assert _count(conn, "hub_user_identities") == 1
 
@@ -154,13 +158,16 @@ def test_seeded_identity_resolvable_by_role_sync_path(
         # role-sync resolution: discord id -> hub_user_identities -> hub user -> member
         cur.execute(
             "SELECT hub_user_id FROM hub_user_identities WHERE platform='discord' "
-            "AND platform_user_id=%s", (cfg.discord_user_id,))
+            "AND platform_user_id=%s",
+            (cfg.discord_user_id,),
+        )
         hub_id = cur.fetchone()[0]
         assert hub_id == result.hub_user_id
         cur.execute(
             "SELECT user_id, user_uuid, user_uuid_unavailable_reason, platform_user_id "
             "FROM community_members WHERE community_id=%s AND user_id=%s AND is_active",
-            (cfg.community_id, str(hub_id)))
+            (cfg.community_id, str(hub_id)),
+        )
         user_id, user_uuid, reason, pid = cur.fetchone()
         assert user_id != cfg.discord_user_id and user_id == str(hub_id)
         cur.execute("SELECT uuid FROM hub_users WHERE id=%s", (hub_id,))
@@ -168,13 +175,17 @@ def test_seeded_identity_resolvable_by_role_sync_path(
     assert pid == cfg.discord_user_id
 
 
-def test_refuses_to_rebind_pseudonymous_member(conn: psycopg2.extensions.connection) -> None:
+def test_refuses_to_rebind_pseudonymous_member(
+    conn: psycopg2.extensions.connection,
+) -> None:
     """regression: a pre-existing pseudonym member (NULL user_id) must not be hijacked."""
     cfg = seed_mod.load_config({})
     with conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO community_members (community_id, platform, platform_user_id, role) "
-            "VALUES (1, 'discord', %s, 'member')", (cfg.discord_user_id,))
+            "VALUES (1, 'discord', %s, 'member')",
+            (cfg.discord_user_id,),
+        )
         cur.execute("SELECT user_uuid FROM community_members")
         before = cur.fetchone()[0]
     with pytest.raises(seed_mod.SeedError, match="refusing to re-bind"):
@@ -185,15 +196,21 @@ def test_refuses_to_rebind_pseudonymous_member(conn: psycopg2.extensions.connect
     assert _count(conn, "hub_users") == 0  # rolled back, no orphan link
 
 
-def test_refuses_to_rebind_member_of_other_hub_user(conn: psycopg2.extensions.connection) -> None:
+def test_refuses_to_rebind_member_of_other_hub_user(
+    conn: psycopg2.extensions.connection,
+) -> None:
     """regression: never re-point another hub user's member row at the demo user."""
     cfg = seed_mod.load_config({})
     with conn, conn.cursor() as cur:
-        cur.execute("INSERT INTO hub_users (username) VALUES ('real-user') RETURNING id")
+        cur.execute(
+            "INSERT INTO hub_users (username) VALUES ('real-user') RETURNING id"
+        )
         other = cur.fetchone()[0]
         cur.execute(
             "INSERT INTO community_members (community_id, user_id, platform, platform_user_id) "
-            "VALUES (1, %s, 'discord', %s)", (str(other), cfg.discord_user_id))
+            "VALUES (1, %s, 'discord', %s)",
+            (str(other), cfg.discord_user_id),
+        )
     with pytest.raises(seed_mod.SeedError, match="refusing to re-bind"):
         seed_mod.seed(conn, cfg)
     with conn.cursor() as cur:
@@ -201,7 +218,9 @@ def test_refuses_to_rebind_member_of_other_hub_user(conn: psycopg2.extensions.co
         assert cur.fetchall() == [(str(other),)]
 
 
-def test_verify_binding_fails_on_inconsistent_uuid(conn: psycopg2.extensions.connection) -> None:
+def test_verify_binding_fails_on_inconsistent_uuid(
+    conn: psycopg2.extensions.connection,
+) -> None:
     """The post-write check trips if user_uuid is not the hub user's uuid."""
     cfg = seed_mod.load_config({})
     result = seed_mod.seed(conn, cfg)
@@ -209,7 +228,10 @@ def test_verify_binding_fails_on_inconsistent_uuid(conn: psycopg2.extensions.con
         cur.execute("ALTER TABLE community_members DISABLE TRIGGER trg_cm_uuid")
         cur.execute("UPDATE community_members SET user_uuid = gen_random_uuid()")
         cur.execute("ALTER TABLE community_members ENABLE TRIGGER trg_cm_uuid")
-    with conn.cursor() as cur, pytest.raises(seed_mod.SeedError, match="not the hub user's uuid"):
+    with (
+        conn.cursor() as cur,
+        pytest.raises(seed_mod.SeedError, match="not the hub user's uuid"),
+    ):
         seed_mod.verify_binding(cur, cfg, result.hub_user_id)
     conn.rollback()
 
@@ -220,13 +242,18 @@ def test_seed_is_idempotent(conn: psycopg2.extensions.connection) -> None:
     second = seed_mod.seed(conn, cfg)
     assert first == second
     for table in (
-        "hub_users", "hub_user_identities", "community_members",
-        "guild_tenant_pairings", "community_role_sync_bindings",
+        "hub_users",
+        "hub_user_identities",
+        "community_members",
+        "guild_tenant_pairings",
+        "community_role_sync_bindings",
     ):
         assert _count(conn, table) == 1, table
 
 
-def test_reseed_resets_promoted_role_but_never_owner(conn: psycopg2.extensions.connection) -> None:
+def test_reseed_resets_promoted_role_but_never_owner(
+    conn: psycopg2.extensions.connection,
+) -> None:
     cfg = seed_mod.load_config({})
     seed_mod.seed(conn, cfg)
     with conn, conn.cursor() as cur:
@@ -268,16 +295,24 @@ def test_missing_table_fails_loud_and_writes_nothing(
 
 def test_missing_column_fails_loud(conn: psycopg2.extensions.connection) -> None:
     with conn, conn.cursor() as cur:
-        cur.execute("ALTER TABLE guild_tenant_pairings RENAME COLUMN event_sync_enabled TO x")
+        cur.execute(
+            "ALTER TABLE guild_tenant_pairings RENAME COLUMN event_sync_enabled TO x"
+        )
     try:
-        with pytest.raises(seed_mod.SeedError, match="guild_tenant_pairings.event_sync_enabled"):
+        with pytest.raises(
+            seed_mod.SeedError, match="guild_tenant_pairings.event_sync_enabled"
+        ):
             seed_mod.seed(conn, seed_mod.load_config({}))
     finally:
         with conn, conn.cursor() as cur:
-            cur.execute("ALTER TABLE guild_tenant_pairings RENAME COLUMN x TO event_sync_enabled")
+            cur.execute(
+                "ALTER TABLE guild_tenant_pairings RENAME COLUMN x TO event_sync_enabled"
+            )
 
 
-def test_missing_community_and_baseline_fail_loud(conn: psycopg2.extensions.connection) -> None:
+def test_missing_community_and_baseline_fail_loud(
+    conn: psycopg2.extensions.connection,
+) -> None:
     with pytest.raises(seed_mod.SeedError, match="does not exist"):
         seed_mod.seed(conn, seed_mod.load_config({"DEMO_COMMUNITY_ID": "99"}))
     with pytest.raises(seed_mod.SeedError, match="baseline role"):
@@ -299,7 +334,9 @@ def test_invalid_config_rejected(env: dict[str, str]) -> None:
         seed_mod.load_config(env)
 
 
-def test_logs_are_pii_free(conn: psycopg2.extensions.connection, caplog: pytest.LogCaptureFixture) -> None:
+def test_logs_are_pii_free(
+    conn: psycopg2.extensions.connection, caplog: pytest.LogCaptureFixture
+) -> None:
     cfg = seed_mod.load_config({})
     with caplog.at_level("DEBUG", logger="seed_bc_demo"):
         seed_mod.seed(conn, cfg)

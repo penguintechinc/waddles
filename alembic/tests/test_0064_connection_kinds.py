@@ -3,7 +3,8 @@
 Static checks pin the revision chain and that ``public_id`` is NOT re-added (0063 owns it). The
 real-Postgres tests prove the columns/CHECKs, that existing rows are backfilled to kind 1
 (``migration_backfills_kind_1_for_existing_rows``), that the DB itself rejects an out-of-range kind
-or a mis-shaped row, and that ``downgrade`` refuses while a static-kind row exists, then round-trips.
+or a mis-shaped row, and that ``downgrade`` refuses while a static-kind row exists, then
+round-trips.
 """
 
 from __future__ import annotations
@@ -96,7 +97,8 @@ def _static_row(
 ) -> int:
     cur.execute(
         "INSERT INTO platform_connections (tenant_id, platform, resource_type, resource_id, "
-        "connection_kind, sealed_secret) VALUES (%s, 'external_http', 'external_http', %s, %s, 'sealed') "
+        "connection_kind, sealed_secret) VALUES (%s, 'external_http', 'external_http', %s, %s, "
+        "'sealed') "
         "RETURNING id",
         (tenant, resource_id, kind),
     )
@@ -233,7 +235,8 @@ class TestRoundTrip:
                     cur.execute(
                         "INSERT INTO platform_connections (tenant_id, platform, resource_type, "
                         "resource_id, access_token) VALUES "
-                        "(%s,'twitch','twitch_channel','a','c'),(%s,'discord','discord_guild','b','c')",
+                        "(%s,'twitch','twitch_channel','a','c'),"
+                        "(%s,'discord','discord_guild','b','c')",
                         (tenant, tenant),
                     )
                 alembic_cli("upgrade", "head", dsn=db.dsn)

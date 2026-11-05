@@ -1,4 +1,5 @@
-"""Helm-template assertions for svc-ingest's per-community Twitch sessions (edge-reshape B2, Task 9).
+"""Helm-template assertions for svc-ingest's per-community Twitch sessions (edge-reshape B2, Task
+9).
 
 Complements (never duplicates) test_svc_ingest_connections_scope_render.py, which already pins the
 machine-JWT scope matrix. This file pins what B2 adds: INGEST_DYNAMIC_CONNECTIONS + the two Twitch
@@ -93,7 +94,8 @@ def test_alpha_renders_no_static_twitch_irc_pair(alpha: list[dict[str, Any]]) ->
 
 @pytest.mark.parametrize("values_file", ["values-beta.yaml", "values-production.yaml"])
 def test_beta_and_production_are_unchanged(values_file: str) -> None:
-    # deploymentTier=alpha only relaxes the secret-material guards of a bare render; the svc-ingest env is tier-independent.
+    # deploymentTier=alpha only relaxes the secret-material guards of a bare render; the svc-ingest
+    # env is tier-independent.
     env = _ingest_env(_render(values_file, "global.deploymentTier=alpha"))
     assert "INGEST_DYNAMIC_CONNECTIONS" not in env
     assert not (_TWITCH_ENVS & set(env))
@@ -154,9 +156,7 @@ def test_hub_api_http_egress_is_scoped_to_svc_ingest_only_on_alpha(
     assert len(cnps) == 1, f"expected one scoped svc-ingest egress CNP, got {len(cnps)}"
     selector = cnps[0]["spec"]["endpointSelector"]
     assert "matchExpressions" not in selector, "selector must not be a component set"
-    assert (
-        selector["matchLabels"]["app.kubernetes.io/component"] == "svc-ingest-rust"
-    )
+    assert selector["matchLabels"]["app.kubernetes.io/component"] == "svc-ingest-rust"
     assert len(_hub_http_rules(cnps[0], port)) == 1, (
         f"svc-ingest -> hub-api:{port} egress rule missing"
     )
@@ -165,7 +165,8 @@ def test_hub_api_http_egress_is_scoped_to_svc_ingest_only_on_alpha(
 def test_hub_api_http_egress_is_present_on_dataplane_wide_for_readiness(
     alpha: list[dict[str, Any]],
 ) -> None:
-    """The shared dataplane-egress-deny CNP carries the hub-api HTTP port for readiness probes (#879)."""
+    """The shared dataplane-egress-deny CNP carries the hub-api HTTP port for readiness probes
+    (#879)."""
     port = _hub_port()
     cnps = [
         d
