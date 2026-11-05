@@ -14,9 +14,9 @@
 //!   connection is made to the pinned address, the client never re-resolves
 //!   (closes DNS rebinding),
 //! - IPv4-mapped/NAT64/compatible IPv6 judged by the embedded v4 rules,
-//! - every redirect hop is re-validated and re-pinned; `Authorization`,
-//!   `Cookie`, `Proxy-Authorization` are dropped when a hop changes
-//!   scheme/host/port,
+//! - every redirect hop is re-validated and re-pinned; only an allowlist of safe headers
+//!   (Accept, Accept-Language, User-Agent, Content-Type) and no body are
+//!   forwarded when a hop changes scheme/host/port,
 //! - wall-clock and response-size bounds,
 //! - typed [`GuardError`]s whose `Display` carries the failure *class*
 //!   only -- never the host, address, URL or any header value.
@@ -32,8 +32,11 @@ use crate::egress::{embedded_ipv4, is_forbidden_address};
 /// DNS lookup ceiling.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Headers that must never follow a redirect to a different origin.
-const CROSS_ORIGIN_STRIPPED: [&str; 3] = ["authorization", "cookie", "proxy-authorization"];
+/// The ONLY request headers forwarded across an origin change (allowlist:
+/// any other header may carry a credential -- X-API-Key, Client-Id, custom
+/// overlay auth -- so unknown means dropped).
+const CROSS_ORIGIN_FORWARDED: [&str; 4] =
+    ["accept", "accept-language", "user-agent", "content-type"];
 
 /// Typed refusal/failure from the guarded egress path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,8 +408,11 @@ impl GuardedClient {
                     && next.port_or_known_default() == cur.port_or_known_default();
                 if !same_origin {
                     headers.retain(|(k, _)| {
-                        !CROSS_ORIGIN_STRIPPED.contains(&k.to_ascii_lowercase().as_str())
+                        CROSS_ORIGIN_FORWARDED.contains(&k.to_ascii_lowercase().as_str())
                     });
+                    // The body may itself be a secret; it never crosses origins
+                    // (307/308 included).
+                    body = None;
                 }
                 if matches!(status.as_u16(), 301..=303) && method != reqwest::Method::GET {
                     method = reqwest::Method::GET;
