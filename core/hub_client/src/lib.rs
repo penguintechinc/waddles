@@ -51,7 +51,8 @@ use pb::key_service_client::KeyServiceClient;
 use pb::{
     EphemeralPseudonym, GetStreamDekRequest, GetStreamDekResponse, MintEphemeralPseudonymRequest,
     MintEphemeralPseudonymsRequest, ResolveDisplayNamesRequest, ResolveDisplayNamesResponse,
-    ResolveHandleRequest, ResolveHandleResponse,
+    ResolveHandleRequest, ResolveHandleResponse, ResolvePlatformUserRequest,
+    ResolvePlatformUserResponse,
 };
 use service_auth::{MachineJwtClient, ServiceAuthError};
 use tonic::transport::{Channel, Endpoint};
@@ -195,6 +196,9 @@ pub struct Circuits {
     handle_lookup: Arc<CircuitBreaker>,
     /// `KeyService`: stream-DEK delivery, independent of every identity call.
     key: Arc<CircuitBreaker>,
+    /// `ResolvePlatformUser`: outbound DM / role operations; kept off the hot path's breaker
+    /// (a rate-limited detokenizer must not stall per-message tokenization).
+    platform_user: Arc<CircuitBreaker>,
 }
 
 impl Circuits {
@@ -204,6 +208,7 @@ impl Circuits {
             identity: breaker(),
             handle_lookup: breaker(),
             key: breaker(),
+            platform_user: breaker(),
         }
     }
 }
@@ -279,6 +284,22 @@ impl HubClient {
             deadline: DEFAULT_RPC_DEADLINE,
             max_retries: 2,
         })
+    }
+
+    /// Builds a client over an already-established [`Channel`] with an explicit machine-JWT
+    /// client. [`HubClient::connect`] is the production constructor (TLS, CA pinning); this
+    /// exists for callers that own the channel -- notably in-process fakes (a real tonic
+    /// server on loopback) in tests -- and applies the same breaker/deadline/retry policy.
+    #[must_use]
+    pub fn with_channel(channel: Channel, token_client: Arc<MachineJwtClient>) -> Self {
+        Self {
+            identity: IdentityServiceClient::new(channel.clone()),
+            key: KeyServiceClient::new(channel),
+            token_client,
+            circuits: Circuits::new(5, Duration::from_secs(30)),
+            deadline: DEFAULT_RPC_DEADLINE,
+            max_retries: 2,
+        }
     }
 
     async fn authed_request<T>(&self, message: T) -> Result<Request<T>, HubClientError> {
@@ -376,6 +397,45 @@ impl HubClient {
                 let mut client = self.identity.clone();
                 client
                     .resolve_handle(request)
+                    .await
+                    .map(|r| r.into_inner())
+                    .map_err(HubClientError::from)
+            }
+        })
+        .await
+    }
+
+    /// Detokenizes 1..=25 user UUIDs to RAW platform user ids, scoped to `community_id`
+    /// (`ResolvePlatformUser`; scope `identity:platform-user:resolve` on the machine JWT).
+    /// Hub-api answers ANY miss (unknown uuid, another community, non-member, platform
+    /// mismatch) with one `NOT_FOUND` for the whole batch -- callers must not probe per
+    /// uuid. The returned ids are PII: hold them transiently, never log or store them.
+    /// A read, so retried on `UNAVAILABLE`/`DEADLINE_EXCEEDED`; `NOT_FOUND`/
+    /// `RESOURCE_EXHAUSTED` are breaker-neutral caller errors. Runs behind its own breaker
+    /// (`Circuits::platform_user`).
+    pub async fn resolve_platform_user(
+        &self,
+        tenant_id: String,
+        community_id: i64,
+        platform: String,
+        uuids: Vec<String>,
+    ) -> Result<ResolvePlatformUserResponse, HubClientError> {
+        self.call_with_retry(&self.circuits.platform_user, self.max_retries, || {
+            let tenant_id = tenant_id.clone();
+            let platform = platform.clone();
+            let uuids = uuids.clone();
+            async move {
+                let request = self
+                    .authed_request(ResolvePlatformUserRequest {
+                        tenant_id,
+                        community_id,
+                        platform,
+                        uuids,
+                    })
+                    .await?;
+                let mut client = self.identity.clone();
+                client
+                    .resolve_platform_user(request)
                     .await
                     .map(|r| r.into_inner())
                     .map_err(HubClientError::from)
@@ -577,6 +637,7 @@ mod tests {
             &client.circuits.identity,
             &client.circuits.handle_lookup,
             &client.circuits.key,
+            &client.circuits.platform_user,
         ];
         for breaker in breakers {
             for _ in 0..25 {

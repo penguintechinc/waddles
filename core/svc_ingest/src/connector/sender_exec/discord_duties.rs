@@ -93,17 +93,30 @@ pub enum UserResolveError {
     /// The tokenization service could not answer; retryable.
     #[error("tokenization service unavailable")]
     Unavailable,
+    /// The tokenization service is rate limiting this caller; retry with backoff
+    /// (never a poison/refusal of the entry).
+    #[error("tokenization service rate limited")]
+    RateLimited,
+    /// This service's credential is not entitled to detokenize (bad/expired token,
+    /// missing scope, tenant not authorized): an operator problem, not retryable.
+    #[error("tokenization service denied the caller")]
+    Denied,
+    /// The request itself was malformed (a caller bug, never a membership answer).
+    #[error("tokenization request was invalid")]
+    Invalid,
 }
 
 /// Community-scoped detokenization of a user UUID to the raw Discord user id.
 /// The answer is a PII value: callers keep it only in a [`SlotValue`] for the
 /// span of one operation. An implementation MUST refuse a UUID that is not an
-/// identity of `community_id`.
+/// identity of `community_id` and MUST NOT probe per-uuid after a miss.
+/// `tenant_id` is the numeric tenant of the MAC-bound stamp.
 #[allow(async_fn_in_trait)] // service-binary-internal
 pub trait PlatformUserResolver: Send + Sync {
     /// The raw platform user id of `user_uuid` within `community_id`.
     async fn resolve(
         &self,
+        tenant_id: i64,
         community_id: i64,
         user_uuid: &str,
     ) -> Result<SlotValue, UserResolveError>;
@@ -115,7 +128,7 @@ pub trait PlatformUserResolver: Send + Sync {
 pub struct NoUserResolver;
 
 impl PlatformUserResolver for NoUserResolver {
-    async fn resolve(&self, _c: i64, _u: &str) -> Result<SlotValue, UserResolveError> {
+    async fn resolve(&self, _t: i64, _c: i64, _u: &str) -> Result<SlotValue, UserResolveError> {
         Err(UserResolveError::Unavailable)
     }
 }
@@ -225,7 +238,15 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
         action: &OutboundAction,
     ) -> Result<SlotValue, ExecError> {
         let uuid = user_uuid(action)?;
-        match self.users.resolve(community, &uuid).await {
+        // The stamp's tenant is MAC-bound; without it detokenization is refused.
+        let tenant = match action {
+            OutboundAction::DmSend { tenant_id, .. } | OutboundAction::RoleOp { tenant_id, .. } => {
+                tenant_id.filter(|t| *t > 0)
+            }
+            _ => None,
+        }
+        .ok_or_else(|| refused("no_tenant_scope"))?;
+        match self.users.resolve(tenant, community, &uuid).await {
             Ok(v) if is_snowflake(v.expose()) => Ok(v),
             // A resolver answer that is not a snowflake is never used.
             Ok(_) => Err(refused("tokenization_bad_answer")),
@@ -233,6 +254,11 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
             Err(UserResolveError::Unavailable) => Err(ExecError::Slot(SlotError::Unavailable(
                 "tokenization_unavailable",
             ))),
+            Err(UserResolveError::RateLimited) => Err(ExecError::Slot(SlotError::Unavailable(
+                "tokenization_rate_limited",
+            ))),
+            Err(UserResolveError::Denied) => Err(refused("tokenization_denied")),
+            Err(UserResolveError::Invalid) => Err(refused("tokenization_bad_request")),
         }
     }
 

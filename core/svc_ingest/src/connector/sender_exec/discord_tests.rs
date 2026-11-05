@@ -103,6 +103,9 @@ struct Users {
     map: Arc<HashMap<(i64, String), String>>,
     calls: Arc<AtomicUsize>,
     bad_answer: bool,
+    /// Tenants the hook passed, in call order.
+    tenants: Arc<Mutex<Vec<i64>>>,
+    fail: Option<UserResolveError>,
 }
 
 impl Users {
@@ -116,13 +119,24 @@ impl Users {
             map: Arc::new(m),
             calls: Arc::new(AtomicUsize::new(0)),
             bad_answer: false,
+            tenants: Arc::new(Mutex::new(Vec::new())),
+            fail: None,
         }
     }
 }
 
 impl PlatformUserResolver for Users {
-    async fn resolve(&self, community: i64, uuid: &str) -> Result<SlotValue, UserResolveError> {
+    async fn resolve(
+        &self,
+        tenant: i64,
+        community: i64,
+        uuid: &str,
+    ) -> Result<SlotValue, UserResolveError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.tenants.lock().unwrap().push(tenant);
+        if let Some(e) = self.fail {
+            return Err(e);
+        }
         if self.bad_answer {
             return Ok(SlotValue::new("not-a-snowflake".to_string()));
         }
@@ -327,6 +341,7 @@ fn dm(user: &str) -> OutboundAction {
         user_id: user.to_string(),
         text: "hello there".to_string(),
         origin_channel: CHANNEL.to_string(),
+        tenant_id: Some(9),
     }
 }
 
@@ -336,6 +351,7 @@ fn role(add: bool, user: &str, key: &str) -> OutboundAction {
         user_id: user.to_string(),
         role_key: key.to_string(),
         origin_channel: CHANNEL.to_string(),
+        tenant_id: Some(9),
     }
 }
 
@@ -812,7 +828,7 @@ async fn role_lookup_failures_fail_closed() {
 async fn the_guild_is_pinned_from_the_binding_never_the_payload_or_template() {
     // a queue entry that tries to smuggle a guild is parsed with the field ignored
     let raw = format!(
-        r#"{{"v":1,"op":"role.add","platform":"discord","user_id":"{UUID_A}","text":"vip","origin_channel":"{CHANNEL}","guild_id":"999","community_id":1}}"#
+        r#"{{"v":1,"op":"role.add","platform":"discord","user_id":"{UUID_A}","text":"vip","origin_channel":"{CHANNEL}","guild_id":"999","community_id":1,"tenant_id":9}}"#
     );
     let entry = parse_outbound_entry(&raw, "discord").unwrap();
     assert_eq!(entry.action, role(true, UUID_A, "vip"));
@@ -1265,5 +1281,78 @@ fn role_ops_parse_from_the_wire_and_never_reach_a_platform_sender() {
             parse_outbound_entry(missing, "discord").is_err(),
             "{missing}"
         );
+    }
+}
+
+#[tokio::test]
+async fn the_stamps_tenant_reaches_the_resolver_and_is_required() {
+    let r = rig(|b| dm_tpl(b, &format!("{{user:{UUID_A}}}"))).await;
+    mock_channel(&r.server, CHANNEL, Some(GUILD)).await;
+    mock_member(&r.server, RAW_A, 200, None).await;
+    mock_open_dm(&r.server, RAW_A, "555").await;
+    mock_message(&r.server, "555").await;
+    r.exec.execute(&rq(&dm(UUID_A), 1)).await.unwrap();
+    assert!(r.users.tenants.lock().unwrap().iter().all(|t| *t == 9));
+
+    // an entry whose stamp carries no tenant is refused before any lookup
+    let r = rig(|b| dm_tpl(b, &format!("{{user:{UUID_A}}}"))).await;
+    mock_channel(&r.server, CHANNEL, Some(GUILD)).await;
+    let a = OutboundAction::DmSend {
+        user_id: UUID_A.to_string(),
+        text: "x".to_string(),
+        origin_channel: CHANNEL.to_string(),
+        tenant_id: None,
+    };
+    let e = r.exec.execute(&rq(&a, 1)).await.unwrap_err();
+    assert_eq!(code(&e), "no_tenant_scope");
+    assert_eq!(r.users.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(writes(&r.server).await, 0);
+}
+
+#[tokio::test]
+async fn resolver_failures_map_to_distinct_typed_outcomes() {
+    for (fail, expect, retryable) in [
+        (UserResolveError::NotFound, "user_not_in_community", false),
+        (UserResolveError::Denied, "tokenization_denied", false),
+        (
+            UserResolveError::RateLimited,
+            "tokenization_rate_limited",
+            true,
+        ),
+        (
+            UserResolveError::Unavailable,
+            "tokenization_unavailable",
+            true,
+        ),
+    ] {
+        let mut r = rig(|b| dm_tpl(b, &format!("{{user:{UUID_A}}}"))).await;
+        mock_channel(&r.server, CHANNEL, Some(GUILD)).await;
+        let users = Users {
+            fail: Some(fail),
+            ..Users::new()
+        };
+        let api = format!("{}/api/v10", r.server.uri());
+        let mut policy = PlatformPolicy::discord();
+        policy.hosts = vec![r.server.address().to_string()];
+        policy.allow_http = true;
+        r.exec = SenderExecutor::with_duties(
+            r.tpl.clone(),
+            DiscordSlots::with_endpoint(r.creds.clone(), guard(), api.clone()),
+            Flag(true),
+            DiscordDuties::with_endpoint(r.creds.clone(), users, api, Duration::from_secs(30)),
+            ExecutorConfig::new(
+                vec![policy],
+                HashMap::from([("discord".to_string(), DIGEST.to_string())]),
+            )
+            .unwrap()
+            .with_client(
+                GuardedLimits::default(),
+                vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            ),
+        );
+        let e = r.exec.execute(&rq(&dm(UUID_A), 1)).await.unwrap_err();
+        assert_eq!(code(&e), expect);
+        assert_eq!(!e.is_policy_refusal(), retryable, "{expect}");
+        assert_eq!(writes(&r.server).await, 0);
     }
 }

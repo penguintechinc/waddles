@@ -78,6 +78,7 @@ pub mod outbound_creds_discord;
 pub mod outbound_ops;
 pub mod outbound_pin;
 pub mod pin_sig;
+pub mod platform_users;
 pub mod publish;
 pub mod scope_resolver;
 pub mod telemetry;

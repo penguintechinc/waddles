@@ -12,9 +12,11 @@
 //! | key | value |
 //! |---|---|
 //! | `guild_id` | the guild snowflake the community's bot serves |
-//! | `managed_roles` | optional `key:snowflake,key:snowflake` allowlist; keys `[a-z][a-z0-9_-]{0,31}` |
+//! | `managed_roles` | optional (omitted when empty) `key:snowflake,key:snowflake` string, <=32 entries from hub-api (host cap 64); keys `[a-z][a-z0-9_-]{0,31}`. A JSON-object string `{"key":"snowflake"}` is accepted defensively |
 //!
-//! The secret must be a `Bearer` scheme secret holding the bot token. A
+//! Hub-api serves the Discord BOT token as the kind-1 `accessToken`
+//! (`ConnectionSecret::OAuthAccessToken`); that is the only secret accepted
+//! (a `Bearer`/other scheme is refused). The host composes `Bot <token>`. A
 //! community with no binding is refused; one with several is refused as
 //! ambiguous (the host never guesses a guild). Logs and errors carry fixed
 //! reason codes and numeric community ids only.
@@ -23,7 +25,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use connection_resolver::{
-    BindingSummary, ConnectionRef, ConnectionResolve, ConnectionSecret, SecretString,
+    BindingSummary, ConnectionKind, ConnectionRef, ConnectionResolve, ConnectionSecret,
+    SecretString,
 };
 
 use crate::discord_rest::is_snowflake;
@@ -81,16 +84,28 @@ pub fn is_role_key(s: &str) -> bool {
 /// Parses `key:snowflake,key:snowflake`. Any malformed or duplicate entry
 /// rejects the WHOLE list (fail closed: a half-parsed allowlist is a guess).
 pub(crate) fn parse_managed_roles(raw: &str) -> Option<BTreeMap<String, String>> {
-    let mut out = BTreeMap::new();
-    if raw.trim().is_empty() {
-        return Some(out);
+    let raw = raw.trim();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    if raw.is_empty() {
+        return Some(BTreeMap::new());
     }
-    for pair in raw.split(',') {
-        let (k, v) = pair.trim().split_once(':')?;
-        if !is_role_key(k) || !is_snowflake(v) || out.len() >= MAX_MANAGED_ROLES {
+    if raw.starts_with('{') {
+        // Object form (defensive): `{"vip":"222"}`. Duplicate keys are a parse
+        // error for the whole list via the map-collision check below.
+        let obj: BTreeMap<String, String> = serde_json::from_str(raw).ok()?;
+        pairs.extend(obj);
+    } else {
+        for pair in raw.split(',') {
+            let (k, v) = pair.trim().split_once(':')?;
+            pairs.push((k.to_string(), v.to_string()));
+        }
+    }
+    let mut out = BTreeMap::new();
+    for (k, v) in pairs {
+        if !is_role_key(&k) || !is_snowflake(&v) || out.len() >= MAX_MANAGED_ROLES {
             return None;
         }
-        if out.insert(k.to_string(), v.to_string()).is_some() {
+        if out.insert(k, v).is_some() {
             return None;
         }
     }
@@ -177,11 +192,16 @@ impl<R: ConnectionResolve> ResolverDiscordCredentials<R> {
         if resolved.community_id != community_id
             || resolved.connection_id != connection_id
             || resolved.provider != PROVIDER
+            || resolved.kind != ConnectionKind::PlatformOauth
         {
             return Err(CredError::NotUsable);
         }
         let (guild_id, managed_roles) = spec_of(&resolved.metadata).ok_or(CredError::NotUsable)?;
-        let ConnectionSecret::Bearer { token } = resolved.secret else {
+        // Hub-api serves the bot token as the kind-1 access token.
+        let ConnectionSecret::OAuthAccessToken {
+            access_token: token,
+        } = resolved.secret
+        else {
             return Err(CredError::NotUsable);
         };
         Ok(DiscordBinding {
@@ -244,7 +264,7 @@ mod tests {
             community_id: community,
             connection_id: conn,
             provider: PROVIDER.to_string(),
-            kind: ConnectionKind::ExternalHttp,
+            kind: ConnectionKind::PlatformOauth,
             metadata: m,
         }
     }
@@ -257,6 +277,7 @@ mod tests {
         list_err: Option<ResolveError>,
         resolves: AtomicUsize,
         meta_override: Option<BTreeMap<String, String>>,
+        kind: ConnectionKind,
     }
 
     impl Fake {
@@ -268,6 +289,7 @@ mod tests {
                 list_err: None,
                 resolves: AtomicUsize::new(0),
                 meta_override: None,
+                kind: ConnectionKind::PlatformOauth,
             }
         }
     }
@@ -289,15 +311,15 @@ mod tests {
                 connection_id: k,
                 community_id: c,
                 provider: p.to_string(),
-                kind: ConnectionKind::ExternalHttp,
+                kind: self.kind,
                 endpoint: Endpoint::default(),
                 secret: if self.non_bearer {
-                    ConnectionSecret::OAuthAccessToken {
-                        access_token: SecretString::new(TOKEN.to_string()),
-                    }
-                } else {
                     ConnectionSecret::Bearer {
                         token: SecretString::new(TOKEN.to_string()),
+                    }
+                } else {
+                    ConnectionSecret::OAuthAccessToken {
+                        access_token: SecretString::new(TOKEN.to_string()),
                     }
                 },
                 expires_at: None,
@@ -407,6 +429,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_the_platform_oauth_kind_is_a_usable_discord_connection() {
+        let mut f = Fake::new(vec![summary(1, 10, meta("111", None))]);
+        f.kind = ConnectionKind::ExternalHttp;
+        assert_eq!(
+            src(f).binding(Some(1)).await.unwrap_err(),
+            CredError::NotUsable
+        );
+    }
+
+    #[tokio::test]
     async fn the_resolved_records_metadata_wins_over_the_list() {
         // Metadata rewritten between list and resolve: the resolved guild is used.
         let mut f = Fake::new(vec![summary(1, 10, meta("111", None))]);
@@ -446,5 +478,153 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         assert!(parse_managed_roles(&many).is_none());
+        // object form (defensive) and its hostile variants
+        assert_eq!(
+            parse_managed_roles(r#"{"vip":"1","b":"2"}"#).unwrap().len(),
+            2
+        );
+        for bad in [
+            r#"{"vip":1}"#,
+            r#"{"VIP":"1"}"#,
+            r#"{"vip":"role"}"#,
+            r#"{"vip":"1""#,
+            "{}x",
+        ] {
+            assert!(parse_managed_roles(bad).is_none(), "{bad}");
+        }
+        assert!(parse_managed_roles("{}").unwrap().is_empty());
+    }
+
+    /// The hub-api shapes served for a Discord binding (PR #1002): list
+    /// `items[].metadata` and resolve `accessToken` (kind 1), through the REAL
+    /// `ConnectionResolver` over a loopback hub.
+    mod real_resolver_shape {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use connection_resolver::{
+            ConnectionKind, ConnectionResolver, ResolverConfig, ResolverMetrics,
+        };
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use super::super::*;
+        use super::TOKEN;
+
+        struct NoMetrics;
+        impl ResolverMetrics for NoMetrics {
+            fn resolve(&self, _: ConnectionKind, _: &'static str, _: Duration) {}
+            fn list(&self, _: &'static str) {}
+        }
+
+        struct TestSa(std::path::PathBuf);
+        impl Drop for TestSa {
+            fn drop(&mut self) {
+                if let Err(e) = std::fs::remove_file(&self.0) {
+                    eprintln!("synthetic sa token cleanup failed: {e}");
+                }
+            }
+        }
+
+        async fn hub(
+            list_meta: serde_json::Value,
+            resolve_body: serde_json::Value,
+        ) -> (
+            MockServer,
+            ResolverDiscordCredentials<ConnectionResolver>,
+            TestSa,
+        ) {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/internal/service-token"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({"token": "machine-tok", "expires_in": 3600}),
+                    ),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/internal/provider-connections"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "success": true,
+                    "items": [{"communityId": 7, "connectionId": 12, "provider": "discord",
+                               "kind": 1, "metadata": list_meta}],
+                    "nextAfter": null
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(
+                    "/api/v1/internal/communities/7/provider-connections/12/resolve",
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(resolve_body))
+                .mount(&server)
+                .await;
+            let sa = std::env::temp_dir().join(format!("discord-sa-{}", uuid::Uuid::new_v4()));
+            std::fs::write(&sa, "synthetic-sa").unwrap();
+            let resolver = ConnectionResolver::new(
+                ResolverConfig::new(
+                    server.uri(),
+                    "alpha",
+                    format!("{}/internal/service-token", server.uri()),
+                    sa.to_string_lossy().to_string(),
+                ),
+                Arc::new(NoMetrics),
+            )
+            .unwrap();
+            (
+                server,
+                ResolverDiscordCredentials::new(resolver),
+                TestSa(sa),
+            )
+        }
+
+        fn served(meta: &serde_json::Value) -> serde_json::Value {
+            serde_json::json!({
+                "communityId": 7, "connectionId": 12, "provider": "discord",
+                "kind": 1, "accessToken": TOKEN, "expiresAt": null, "metadata": meta
+            })
+        }
+
+        #[tokio::test]
+        async fn a_hub_served_discord_binding_resolves_with_bot_token_guild_and_roles() {
+            let meta = serde_json::json!({
+                "guild_id": "123456789012345678",
+                "managed_roles": "mod:1111,vip_2:2222"
+            });
+            let (_s, creds, _sa) = hub(meta.clone(), served(&meta)).await;
+            let b = creds.binding(Some(7)).await.unwrap();
+            assert_eq!(b.bot_token.expose(), TOKEN);
+            assert_eq!(b.guild_id, "123456789012345678");
+            assert_eq!(b.managed_roles.get("vip_2").unwrap(), "2222");
+            assert_eq!(b.managed_roles.len(), 2);
+        }
+
+        #[tokio::test]
+        async fn managed_roles_is_optional_and_omitted_when_empty() {
+            let meta = serde_json::json!({"guild_id": "123456789012345678"});
+            let (_s, creds, _sa) = hub(meta.clone(), served(&meta)).await;
+            assert!(creds
+                .binding(Some(7))
+                .await
+                .unwrap()
+                .managed_roles
+                .is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_non_oauth_secret_scheme_is_still_refused() {
+            let meta = serde_json::json!({"guild_id": "123456789012345678"});
+            let body = serde_json::json!({
+                "communityId": 7, "connectionId": 12, "provider": "discord", "kind": 1,
+                "secret": {"scheme": 1, "fields": {"token": TOKEN}}, "metadata": meta
+            });
+            let (_s, creds, _sa) = hub(meta, body).await;
+            assert_eq!(
+                creds.binding(Some(7)).await.unwrap_err(),
+                CredError::NotUsable
+            );
+        }
     }
 }

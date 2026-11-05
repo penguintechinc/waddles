@@ -1020,6 +1020,7 @@ async fn unsupported_platform_kind_and_missing_host_duty_fail_loud() {
         user_id: "u".into(),
         text: "t".into(),
         origin_channel: "#chan".into(),
+        tenant_id: None,
     };
     assert_eq!(
         r.exec
@@ -1135,6 +1136,7 @@ async fn a_registered_duty_hook_gates_shapes_the_payload_and_fills_its_slot() {
             user_id: "u".into(),
             text: "ignored".into(),
             origin_channel: "123456789".into(),
+            tenant_id: None,
         };
         let res = exec.execute(&req("discord", &dm, Some(3))).await;
         let got = server.received_requests().await.unwrap();
@@ -1310,6 +1312,7 @@ fn a_dm_entry_cannot_become_a_plain_payload() {
         user_id: "u".into(),
         text: "t".into(),
         origin_channel: "#c".into(),
+        tenant_id: None,
     };
     assert_eq!(
         default_payload(kind, &dm).unwrap_err(),

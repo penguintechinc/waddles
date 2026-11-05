@@ -84,6 +84,9 @@ pub enum OutboundAction {
         user_id: String,
         text: String,
         origin_channel: String,
+        /// Numeric tenant id from the MAC-bound stamp (`None` = absent); the
+        /// executor's user detokenization needs it.
+        tenant_id: Option<i64>,
     },
     /// `role.add` / `role.remove` (T6d-2, executor path only) -- grant or
     /// revoke the managed role `role_key` for the (tokenized) user
@@ -97,6 +100,8 @@ pub enum OutboundAction {
         user_id: String,
         role_key: String,
         origin_channel: String,
+        /// Numeric tenant id from the MAC-bound stamp, as for [`Self::DmSend`].
+        tenant_id: Option<i64>,
     },
 }
 
@@ -163,6 +168,8 @@ struct WireEnvelope {
     exp_ms: Option<u64>,
     #[serde(default)]
     community_id: Option<i64>,
+    #[serde(default)]
+    tenant_id: Option<i64>,
 }
 
 /// Longest accepted `op_id` (it becomes part of a Valkey key).
@@ -275,6 +282,7 @@ pub fn parse_outbound_entry(
             user_id: require(wire.user_id, "dm.send", "user_id")?,
             text: require(wire.text, "dm.send", "text")?,
             origin_channel: require(wire.origin_channel, "dm.send", "origin_channel")?,
+            tenant_id: wire.tenant_id.filter(|t| *t > 0),
         },
         op @ ("role.add" | "role.remove") => {
             let name = role_op_name(op);
@@ -283,6 +291,7 @@ pub fn parse_outbound_entry(
                 user_id: require(wire.user_id, name, "user_id")?,
                 role_key: require(wire.text, name, "text")?,
                 origin_channel: require(wire.origin_channel, name, "origin_channel")?,
+                tenant_id: wire.tenant_id.filter(|t| *t > 0),
             }
         }
         other => return Err(OutboundParseError::UnknownOp(other.to_string())),
@@ -406,6 +415,7 @@ pub async fn dispatch_to<S: PlatformSender>(
             user_id,
             text,
             origin_channel,
+            ..
         } => sender.send_dm(user_id, text, origin_channel).await,
         // Role ops exist only on the generic executor path; a per-platform
         // sender has no such method -- fail loud, never a silent no-op.
@@ -787,7 +797,8 @@ mod tests {
             OutboundAction::DmSend {
                 user_id: "u1".into(),
                 text: "hi".into(),
-                origin_channel: "c1".into()
+                origin_channel: "c1".into(),
+                tenant_id: None,
             }
         );
     }
@@ -1027,6 +1038,7 @@ mod tests {
             user_id: "u".into(),
             text: "t".into(),
             origin_channel: "c".into(),
+            tenant_id: None,
         };
         for (platform, action, op) in [
             ("twitch", &del_tw, "chat.delete"),
@@ -1149,6 +1161,7 @@ mod tests {
                 user_id: "3".into(),
                 text: "hi".into(),
                 origin_channel: "1".into(),
+                tenant_id: None,
             },
         ] {
             route("discord", &action, &twitch, &discord).await.unwrap();

@@ -206,6 +206,7 @@ queue entry --(drain: pin_sig HMAC + expiry, FIRST gate)--> ActionExecutor::exec
 | `twitch_slots.rs` | `TwitchSlots`: `SlotSource` over `outbound_creds::TwitchCredentialSource` + one guarded `GET /helix/users` for numeric ids |
 | `discord_slots.rs` | `DiscordSlots`: `SlotSource` over `outbound_creds_discord::DiscordCredentialSource` (`discord-bot` token per community, per call) + one guarded `GET /channels/{pinned}` proving the channel is in the binding's guild |
 | `discord_duties.rs` | `DiscordDuties`: the Discord `DutyHook` (T6d-2) for `dm.send`, `role.add`, `role.remove` |
+| `../platform_users.rs` | `HubPlatformUserResolver`: production `PlatformUserResolver` over `hub_client` `IdentityService.ResolvePlatformUser` |
 
 **Supported kinds:** `chat.send`, `chat.delete` (Twitch, Discord), `chat.send` (YouTube); Discord `dm.send`, `role.add`, `role.remove` once
 `DiscordDuties` is registered (`SenderExecutor::with_duties`). With no hook (`NoDuties`) a duty kind returns `ExecError::HostDutyMissing`
@@ -270,7 +271,7 @@ real `dm.send` path (`/api/v10/channels/{dm.channel_id}/messages`) and `role.add
 
 | Duty | Behaviour | Refusal codes |
 |---|---|---|
-| `{user:<uuid>}` recipient | entry `user_id` must be a UUID (bare or `{user:..}`); `PlatformUserResolver` maps it to the raw Discord id inside the executor only, scoped to the stamp's community; raw id lives in zeroizing values, never logged/stored; a raw snowflake is refused | `user_not_tokenized`, `user_not_in_community`, `tokenization_bad_answer`, `tokenization_unavailable` (retryable) |
+| `{user:<uuid>}` recipient | entry `user_id` must be a UUID (bare or `{user:..}`); `PlatformUserResolver` maps it to the raw Discord id inside the executor only, scoped to the stamp's tenant + community (`tenant_id` rides in the MAC-bound stamp; absent -> refused); raw id lives in zeroizing values, never logged/stored; a raw snowflake is refused | `user_not_tokenized`, `no_tenant_scope`, `user_not_in_community`, `tokenization_denied`, `tokenization_bad_request`, `tokenization_bad_answer`; retryable: `tokenization_unavailable`, `tokenization_rate_limited` |
 | `send_dm_in_community` gate | before any template: pinned channel is in the binding's guild AND the recipient is a member (`discord_rest::classify_membership`, shared with the legacy client) | `not_in_community`; lookup failure `membership_lookup_failed` (nothing sent) |
 | `{dm.channel_id}` | host `POST /users/@me/channels {recipient_id}` per operation; slot filled only from that reply; no state kept, so another dm.send's channel is never reused; no `dm.post` kind | `dm_open_failed` |
 | Managed roles | overlay emits a KEY; host maps it through the binding's `managed_roles`, refuses roles whose permissions include ADMINISTRATOR / MANAGE_ROLES / MANAGE_GUILD (role list via guarded client, 30s TTL cache keyed by numeric guild id, <=256 guilds), pins the guild from the binding | `role_not_managed`, `role_privileged`, `role_not_found`, `role_lookup_failed` (fail closed) |
@@ -283,12 +284,19 @@ fixed duty slots -- any other user/role in the template is an undeclared slot. R
 with `user_id` (UUID) and the managed-role KEY in `text` (so the `pin_sig` MAC covers it); a `guild_id`/`role_id` field is ignored.
 Metric `svc_ingest_discord_duty_refused_total{kind,reason}`.
 
-**Binding contract** (`outbound_creds_discord.rs`, `discord` binding metadata in hub-api): `guild_id` (snowflake) and optional
-`managed_roles` = `key:snowflake,key:snowflake`; secret scheme `Bearer` = the bot token. More than one binding per community is refused
+**Binding contract** (`outbound_creds_discord.rs`; hub-api PR #1002): list `items[].metadata` / resolve `metadata` =
+`{"guild_id": "<snowflake>", "managed_roles": "key:snowflake,..."}` (`managed_roles` optional/omitted when empty, <=32 entries, keys
+`[a-z][a-z0-9_]{0,31}`; a JSON-object string is accepted defensively). The bot token is the kind-1 `accessToken`
+(`ConnectionSecret::OAuthAccessToken`); any other secret scheme/kind is refused. More than one binding per community is refused
 (`ambiguous_binding`).
 
-**Gaps (not silent):** (1) no production `PlatformUserResolver` -- hub-api's `IdentityService` has no UUID -> platform-user-id RPC
-(`ResolveDisplayNames` returns names, `ResolveHandle` goes the other way); the default `NoUserResolver` refuses every DM/role loudly
-(`tokenization_unavailable`) until a community-scoped RPC is added; (2) hub-api does not yet populate `guild_id`/`managed_roles` on
-discord bindings; (3) `svc_action` does not yet emit `role.*` queue entries; (4) YouTube has no slot source (needs the OAuth connection +
-live-chat-id sources); (5) the executor is still not wired at boot (T6d-1 status above).
+**Production user resolver** (`platform_users.rs`): `HubPlatformUserResolver::connect(endpoint, token_endpoint, sa_token_path, ca)`
+mints a machine JWT with scope `identity:platform-user:resolve` and calls `ResolvePlatformUser{tenant_id, community_id, platform:"discord",
+uuids}` (1..=25 canonical uuids, one RPC per call, never per-uuid probing: any miss is ONE `NOT_FOUND`). `PERMISSION_DENIED`/
+`UNAUTHENTICATED` -> `Denied`, `RESOURCE_EXHAUSTED` -> `RateLimited` (backoff, not a refusal), transport/circuit -> `Unavailable`.
+Build needs `protoc` + the repo-root `proto/` tree (Dockerfile.rust installs protoc and takes `proto` as a named build context, like svc_process).
+
+**Gaps (not silent):** (1) `svc_action` does not yet emit `role.*` queue entries (or `tenant_id` on `dm.send` -- the signer must put the
+numeric tenant in the stamp; entries without it are refused `no_tenant_scope`); (2) YouTube has no slot source (needs the OAuth
+connection + live-chat-id sources); (3) the executor and `HubPlatformUserResolver::connect` are not wired at boot (T6d-1 status above);
+the default `NoUserResolver` refuses every DM/role op loudly until it is.
