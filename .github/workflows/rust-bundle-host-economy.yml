@@ -5,6 +5,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_host_economy/**'
+      - 'core/test_support/**'
       - 'core/bundle_capability_gate/**'
       - 'scripts/db/bundle_economy_store.sql'
       - 'scripts/db/bundle_economy_idempotency.sql'
@@ -14,6 +15,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_host_economy/**'
+      - 'core/test_support/**'
       - 'core/bundle_capability_gate/**'
       - 'scripts/db/bundle_economy_store.sql'
       - 'scripts/db/bundle_economy_idempotency.sql'
@@ -34,4 +36,4 @@ jobs:
       crate_name: bundle-host-economy
       working_directory: core/bundle_host_economy
       # `tests/postgres_integration.rs` starts a real Postgres container via
-      # `testcontainers` -- needs Docker, which `ubuntu-latest` ships.
+      # the `docker` CLI helper (`core/test_support`) -- needs Docker, which `ubuntu-latest` ships.

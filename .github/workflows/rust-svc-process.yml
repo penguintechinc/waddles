@@ -5,6 +5,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/svc_process/**'
+      - 'core/test_support/**'
       - 'core/bundle_host_kv/**'
       - 'core/bundle_capability_gate/**'
       - 'core/bundle_tool_call/**'
@@ -21,6 +22,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/svc_process/**'
+      - 'core/test_support/**'
       - 'core/bundle_host_kv/**'
       - 'core/bundle_capability_gate/**'
       - 'core/bundle_tool_call/**'

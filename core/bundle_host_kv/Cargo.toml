@@ -36,15 +36,3 @@ opentelemetry = "=0.32.0"
 
 [dev-dependencies]
 tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }
-# Integration test against a real Valkey container (task requirement --
-# no existing testcontainers pattern in this repo to follow yet, so this
-# is the first landing of it; `rust-bundle-host-kv.yml` installs Docker
-# via the standard `ubuntu-latest` runner image, which already ships it).
-# `testcontainers::GenericImage` directly (`tests/valkey_integration.rs`)
-# rather than `testcontainers-modules`'s prebuilt "redis" module: that
-# crate's latest release (0.15.0) pins `testcontainers` to `^0.27.0`, which
-# in turn pins `astral-tokio-tar = "0.5.6"` -- four RustSec advisories
-# (RUSTSEC-2026-0066/0112/0113/0145) fixed only in `astral-tokio-tar`
-# >=0.6.2, which only `testcontainers` 0.28.0+ pulls in. A hand-rolled
-# image definition is a few lines and keeps this crate on the patched line.
-testcontainers = "=0.28.0"

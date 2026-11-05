@@ -5,12 +5,14 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_host_kv/**'
+      - 'core/test_support/**'
       - '.github/workflows/rust-bundle-host-kv.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_host_kv/**'
+      - 'core/test_support/**'
   workflow_dispatch:
 
 permissions:
@@ -28,4 +30,4 @@ jobs:
       crate_name: bundle-host-kv
       working_directory: core/bundle_host_kv
       # `tests/valkey_integration.rs` starts a real Valkey container via
-      # `testcontainers` -- needs Docker, which `ubuntu-latest` ships.
+      # the `docker` CLI helper (`core/test_support`) -- needs Docker, which `ubuntu-latest` ships.
