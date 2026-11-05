@@ -56,7 +56,7 @@ use tracing::{debug, warn};
 
 use crate::connector::{
     CallReply, ConnectionCtx, ConnectorCallError, ConnectorHost, FrameError, HandshakePayload,
-    NormalizedEvent, RawFrame, ToolError,
+    HttpRequestTpl, NormalizedEvent, RawFrame, SenderAction, ToolError,
 };
 use crate::error::ExecutorError;
 
@@ -295,6 +295,39 @@ struct ToolCallArgs {
     args: serde_json::Value,
 }
 
+/// `ExportKind::ConnectorBuildRequest` payload: the WIT `sender.action` record
+/// (`kind`, `target_source_id`, `payload_json`), snake_case like every other
+/// connector wire payload. Unknown fields are refused.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildRequestArgs {
+    kind: String,
+    target_source_id: String,
+    payload_json: String,
+}
+
+/// `ExportKind::ConnectorBuildRequest` result: the WIT `http-request-tpl`
+/// (`body` is base64, like every other byte string on this wire). Carries
+/// slots and opaque secret handles only -- never a resolved credential.
+#[derive(Debug, Serialize)]
+struct BuildRequestReply {
+    method: String,
+    url: String,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+    secret_refs: Vec<(String, String)>,
+}
+
+fn encode_template(t: HttpRequestTpl) -> Result<serde_json::Value, ErrorBody> {
+    encode_reply(&BuildRequestReply {
+        method: t.method,
+        url: t.url,
+        headers: t.headers.into_iter().map(|h| (h.name, h.value)).collect(),
+        body: t.body.map(|b| BASE64.encode(b)),
+        secret_refs: t.secret_refs,
+    })
+}
+
 /// Maps a sandbox/host containment onto the typed wire error a stage keys its
 /// circuit breaker and DLQ-kind off (never by message text).
 fn call_error_to_body(e: ConnectorCallError) -> ErrorBody {
@@ -398,6 +431,18 @@ async fn dispatch(
             settle(
                 host.on_disconnect(args.ctx.into(), args.reason).await,
                 |()| encode_reply(&serde_json::json!({})),
+            )
+        }
+        ExportKind::ConnectorBuildRequest => {
+            let args: BuildRequestArgs = decode(payload)?;
+            let action = SenderAction {
+                kind: args.kind,
+                target_source_id: args.target_source_id,
+                payload_json: args.payload_json,
+            };
+            settle(
+                host.build_request(action, Some(deadline_ms)).await,
+                encode_template,
             )
         }
         ExportKind::ToolCall => {
