@@ -615,6 +615,7 @@ impl World {
             chain: vec![app.to_string()],
             deadline: Some(Instant::now() + Duration::from_secs(20)),
             trace: None,
+            read_only: false,
         })
         .with_stage_metrics(Arc::clone(&self.metrics))
         .with_identity(
