@@ -2,7 +2,7 @@
 //! secret handles, resume token and limits all come from [`WsConfig`] (the
 //! overlay's config); nothing here names a platform. The connector-built
 //! handshake is sent on every (re)connect with secret slots substituted per
-//! call via the injected [`WebhookSecretSource`] (`connection_resolver` in
+//! call via the injected [`TransportSecretSource`] (`connection_resolver` in
 //! production): the resolved value lives only in a zeroizing buffer for the
 //! duration of the send and is never cached, logged or returned to a guest.
 //!
@@ -30,10 +30,10 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use super::egress_guard::resolve_pinned;
+use super::secrets::{Destination, TransportSecretSource};
 use super::transport::{Transport, TransportError};
 use super::transport_common::{opaque_id, substitute_slots, validate_endpoint};
 use super::types::{ConnectionCtx, Handshake};
-use super::webhook::WebhookSecretSource;
 
 /// Largest accepted `dedup_window`.
 pub const MAX_DEDUP_WINDOW: usize = 65_536;
@@ -77,10 +77,14 @@ pub struct WsConfig {
     /// Permit `ws://` to a loopback host (tests only; the address must
     /// still be in `egress_allow`).
     pub allow_loopback_insecure: bool,
+    /// Host-pinned byte prefixes a credential slot may directly follow in the
+    /// connector-authored handshake (e.g. `PASS oauth:`). Empty = the handshake
+    /// may not carry any secret slot (fail closed); never derived from guest data.
+    pub slot_prefixes: Vec<String>,
 }
 
 /// WebSocket transport over tokio-tungstenite.
-pub struct WsTransport<S: WebhookSecretSource> {
+pub struct WsTransport<S: TransportSecretSource> {
     cfg: WsConfig,
     url: reqwest::Url,
     source_id: String,
@@ -93,7 +97,7 @@ pub struct WsTransport<S: WebhookSecretSource> {
     order: VecDeque<[u8; 32]>,
 }
 
-impl<S: WebhookSecretSource> WsTransport<S> {
+impl<S: TransportSecretSource> WsTransport<S> {
     /// Validates the config; a bad endpoint or limit is refused up front.
     pub fn new(cfg: WsConfig, secrets: S) -> Result<Self, TransportError> {
         let url = validate_endpoint(&cfg.url, &["wss"], "ws", cfg.allow_loopback_insecure)
@@ -146,11 +150,21 @@ impl<S: WebhookSecretSource> WsTransport<S> {
         if handshake.bytes.is_empty() && handshake.secret_refs.is_empty() {
             return Ok(());
         }
+        let dest = Destination::from_url(&self.url)
+            .ok_or_else(|| TransportError::Handshake("not connected".into()))?;
+        let prefixes: Vec<Vec<u8>> = self
+            .cfg
+            .slot_prefixes
+            .iter()
+            .map(|p| p.as_bytes().to_vec())
+            .collect();
         let payload = substitute_slots(
             &self.secrets,
             &self.cfg.handles,
             &handshake.bytes,
             &handshake.secret_refs,
+            &prefixes,
+            &dest,
         )
         .await?;
         let stream = self
@@ -179,7 +193,7 @@ fn classify_connect(e: WsError) -> TransportError {
     }
 }
 
-impl<S: WebhookSecretSource + 'static> Transport for WsTransport<S> {
+impl<S: TransportSecretSource + 'static> Transport for WsTransport<S> {
     fn platform(&self) -> &str {
         &self.cfg.platform
     }
@@ -289,10 +303,19 @@ mod tests {
     /// Counts every resolve; never caches -- the count proves per-call.
     #[derive(Clone)]
     struct CountingSecrets(Arc<AtomicUsize>);
-    impl WebhookSecretSource for CountingSecrets {
-        fn resolve(&self, _r: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
+    impl TransportSecretSource for CountingSecrets {
+        fn resolve(
+            &self,
+            _r: ConnectionRef,
+            _d: Destination,
+        ) -> BoxFut<'_, Result<crate::connector::secrets::ResolvedAuth, SecretError>> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok(SecretString::new("tok123".into())) })
+            Box::pin(async {
+                Ok(crate::connector::secrets::ResolvedAuth {
+                    secret: SecretString::new("tok123".into()),
+                    header: None,
+                })
+            })
         }
     }
 
@@ -310,6 +333,7 @@ mod tests {
             max_frame_bytes: 1024,
             dedup_window: 0,
             allow_loopback_insecure: true,
+            slot_prefixes: vec![r#""token":""#.into()],
         }
     }
 
@@ -340,6 +364,25 @@ mod tests {
             bytes: br#"{"op":"auth","token":"{{TOKEN}}"}"#.to_vec(),
             secret_refs: vec![("{{TOKEN}}".into(), "h1".into())],
         }
+    }
+
+    /// regression: p982-A -- a hostile handshake template that places the
+    /// token in a message body is refused before any bytes are sent.
+    #[tokio::test]
+    async fn handshake_slot_outside_pinned_prefix_is_refused() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve(l, vec![(false, vec![])], tx));
+        let n = Arc::new(AtomicUsize::new(0));
+        let mut t = WsTransport::new(cfg(addr), CountingSecrets(n.clone())).unwrap();
+        t.connect().await.unwrap();
+        let evil = Handshake {
+            bytes: br#"{"op":"say","text":"{{TOKEN}}"}"#.to_vec(),
+            secret_refs: vec![("{{TOKEN}}".into(), "h1".into())],
+        };
+        assert!(t.send_handshake(evil).await.is_err());
+        assert_eq!(n.load(Ordering::SeqCst), 0, "secret never resolved");
     }
 
     #[tokio::test]
