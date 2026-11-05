@@ -1,0 +1,13 @@
+{
+  "discord/administrator_role": [
+    {"path": "events[0].payload.is_broadcaster", "reason": "role flags need the guild/member REST lookup; the overlay's guest http is not bridged by the parity harness, so it fails CLOSED (false). Real permissions need the host http bridge or host-side resolution (bundles/rust/discord/README.md Host duties #4)", "tracking": "P6b-T2-host-http-bridge"},
+    {"path": "events[0].payload.is_mod", "reason": "same: fail-closed without the guarded http bridge", "tracking": "P6b-T2-host-http-bridge"}
+  ],
+  "discord/guild_owner_is_broadcaster": [
+    {"path": "events[0].payload.is_broadcaster", "reason": "same: owner detection needs GET /guilds/{id}; fail-closed without the guarded http bridge", "tracking": "P6b-T2-host-http-bridge"},
+    {"path": "events[0].payload.is_mod", "reason": "same: fail-closed without the guarded http bridge", "tracking": "P6b-T2-host-http-bridge"}
+  ],
+  "discord/manage_messages_role_is_mod_only": [
+    {"path": "events[0].payload.is_mod", "reason": "same: MANAGE_MESSAGES needs the role lookup; fail-closed without the guarded http bridge", "tracking": "P6b-T2-host-http-bridge"}
+  ]
+}

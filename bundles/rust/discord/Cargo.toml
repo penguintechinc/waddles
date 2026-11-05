@@ -1,0 +1,30 @@
+[package]
+name = "waddle-bundle-discord-overlay"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Discord platform OVERLAY bundle (bundle-MCP-tools P6b T2): a core `kind: service` connector on the `connector-tools` world. The generic host WS transport carries the Gateway, the generic webhook route carries (host Ed25519-verified) interactions, and this component supplies only the Discord wire spec: identify/resume/heartbeat bodies, MESSAGE_CREATE + interaction normalization, and the outbound request templates."
+
+[lib]
+# `rlib` alongside `cdylib` so the integration/parity tests under tests/ can link
+# the host-testable core; the shipped artifact is the cdylib component.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-discord-overlay"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-connector"
+world = "connector-tools"
+
+[package.metadata.component.dependencies]
+
+[package.metadata.component.target.dependencies]
+"waddle:bundle" = { path = "../../../wit/waddle-connector/deps/waddle-bundle" }
