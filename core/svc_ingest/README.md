@@ -262,7 +262,7 @@ pinned connector component (a template built by any other digest is `DigestMisma
 
 * **Template source.** `build-request` is called through the `TemplateBuilder` seam. The production implementation,
   `WireTemplateBuilder` (`sender_exec/wire_builder.rs`), carries it over the executor wire (`penguin-bundle-host` 0.5.0
-  `ExportKind::ConnectorBuildRequest`; executor side `ConnectorHost::build_request` + `connector_wire`). It is BUILT BUT NOT WIRED INTO
+  `ExportKind::ConnectorBuildRequest`, penguin-libs#151; executor side `ConnectorHost::build_request` + `connector_wire`). It is BUILT BUT NOT WIRED INTO
   BOOT: `lib.rs` still starts the legacy drains. Follow-up (after the executor PR merges): construct
   `WireTemplateBuilder::new(link, registry)` where `lib.rs` already holds the `ExecutorLink`/`ConnectorRegistry`, build the
   `SenderExecutor`, and start `outbound::run_exec` / `run_discord_exec` instead of the legacy drains (seam documented in the
