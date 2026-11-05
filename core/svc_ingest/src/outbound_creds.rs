@@ -449,7 +449,7 @@ mod tests {
                 .iter()
                 .find(|b| b.connection_id == connection_id)
                 .map(|b| b.metadata.clone())
-                .unwrap_or_default();
+                .expect("resolve only called for listed connections");
             if let Some(c) = self.moved_to {
                 m.insert("channel".to_owned(), c.to_owned());
             }
@@ -892,7 +892,8 @@ mod tests {
         let before = resolve_count("twitch", "channel_not_owned");
         let src = ResolverTwitchCredentials::new(two_communities());
         let _ = src.credential(Some(1), "#chan_b").await;
-        assert_eq!(resolve_count("twitch", "channel_not_owned"), before + 1);
+        // Other tests bump the same process-wide counter in parallel.
+        assert!(resolve_count("twitch", "channel_not_owned") > before);
         let reg = prometheus::Registry::new();
         register_metrics(&reg).unwrap();
         assert!(register_metrics(&reg).is_err());
