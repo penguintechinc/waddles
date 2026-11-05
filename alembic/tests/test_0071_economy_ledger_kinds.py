@@ -137,3 +137,74 @@ class TestLedgerKinds:
                 ("rate_den", "bigint", "YES"),
                 ("rate_num", "bigint", "YES"),
             ]
+
+
+class TestCheckSwapDoesNotBlockWrites:
+    """regression: p981-claim-5 -- the CHECK swap must not scan the ledger under ACCESS EXCLUSIVE."""
+
+    def test_migration_splits_into_swap_then_validate(self) -> None:
+        swap, validate = _load_migration()._phases()
+        code = "\n".join(
+            line for line in swap.splitlines() if not line.lstrip().startswith("--")
+        )
+        assert "NOT VALID" in code and "VALIDATE CONSTRAINT" not in code
+        assert "ALTER TABLE economy_ledger VALIDATE CONSTRAINT" in validate
+        assert "DROP" not in validate
+
+    @requires_docker
+    def test_validate_does_not_block_concurrent_ledger_inserts(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        _, validate = _load_migration()._phases()
+        holder = psycopg2.connect(
+            host=pg_db.host,
+            port=pg_db.port,
+            user=pg_db.user,
+            password=pg_db.password,
+            dbname=pg_db.dbname,
+        )
+        try:
+            with _cursor(pg_db) as cur:
+                tid, cid = _scope(cur)
+                # Hold the VALIDATE's lock open (txn not committed) ...
+                holder.autocommit = False
+                holder.cursor().execute(validate)
+                # ... a writer must still get through promptly.
+                cur.execute("SET lock_timeout = '2s'")
+                _insert(cur, tid, cid, "credit")
+                holder.rollback()
+        finally:
+            holder.close()
+
+    @requires_docker
+    def test_swap_phase_leaves_constraint_not_valid_and_is_re_appliable(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        swap, validate = _load_migration()._phases()
+        with _cursor(pg_db) as cur:
+            cur.execute("TRUNCATE economy_ledger")  # rows of the new kinds predate this
+            cur.execute(
+                "ALTER TABLE economy_ledger DROP CONSTRAINT economy_ledger_kind_check"
+            )
+            cur.execute(
+                "ALTER TABLE economy_ledger ADD CONSTRAINT economy_ledger_kind_check "
+                "CHECK (kind IN ('wager','transfer_out','transfer_in'))"
+            )
+            cur.execute(swap)
+            cur.execute(
+                "SELECT convalidated FROM pg_constraint "
+                "WHERE conname = 'economy_ledger_kind_check'"
+            )
+            assert cur.fetchone() == (False,)
+            cur.execute(swap)  # re-applying the swap is a no-op
+            cur.execute(validate)
+            cur.execute(validate)  # and so is a second validate
+            cur.execute(
+                "SELECT convalidated FROM pg_constraint "
+                "WHERE conname = 'economy_ledger_kind_check'"
+            )
+            assert cur.fetchone() == (True,)
+            tid, cid = _scope(cur)
+            _insert(cur, tid, cid, "exchange")
+            with pytest.raises(psycopg2.errors.CheckViolation):
+                _insert(cur, tid, cid, "mint")

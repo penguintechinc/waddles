@@ -3,8 +3,8 @@
 -- `alembic/versions/0069_economy_ledger_kinds.py` (production schema) and the
 -- Rust integration tests (`include_str!`, applied after
 -- `bundle_economy_idempotency.sql`), so the store's SQL is always tested
--- against the exact DDL that ships. Idempotent: the CHECK is dropped and
--- re-added by name, so it reaches existing DBs and re-applies cleanly.
+-- against the exact DDL that ships. Idempotent: the CHECK is swapped by name only
+-- when not already current, so it reaches existing DBs and re-applies cleanly.
 --
 -- Prerequisite: `bundle_economy_store.sql` (the `economy_ledger` table; its
 -- inline `kind` CHECK is auto-named `economy_ledger_kind_check`).
@@ -20,12 +20,33 @@
 -- column-scoped UPDATE on `economy_balances` already cover every new op; the
 -- ledger stays append-only.
 
-ALTER TABLE economy_ledger DROP CONSTRAINT IF EXISTS economy_ledger_kind_check;
-ALTER TABLE economy_ledger
-    ADD CONSTRAINT economy_ledger_kind_check
-    CHECK (kind IN ('wager', 'transfer_out', 'transfer_in',
-                    'credit', 'debit', 'cond_debit', 'admin_adjust', 'pot_payout',
-                    'exchange'));
+-- Two phases, split at the phase-marker comment at the end of this file (the alembic
+-- migration runs them in SEPARATE transactions; a plain script run is fine too):
+--   1. swap the CHECK for the wider one as NOT VALID -- a catalog-only change,
+--      no ledger scan, so the ACCESS EXCLUSIVE lock is momentary. Skipped when
+--      the shipped definition is already in place (re-appliable). The old
+--      kinds are a subset of the new ones, so every existing row already
+--      satisfies it.
+--   2. VALIDATE CONSTRAINT scans the ledger under SHARE UPDATE EXCLUSIVE only,
+--      which does not block the ledger's INSERTs (ROW EXCLUSIVE). A no-op when
+--      the constraint is already validated.
+DO $kinds$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'economy_ledger'::regclass
+           AND conname = 'economy_ledger_kind_check'
+           AND position('exchange' IN pg_get_constraintdef(oid)) > 0
+    ) THEN
+        ALTER TABLE economy_ledger DROP CONSTRAINT IF EXISTS economy_ledger_kind_check;
+        ALTER TABLE economy_ledger
+            ADD CONSTRAINT economy_ledger_kind_check
+            CHECK (kind IN ('wager', 'transfer_out', 'transfer_in',
+                            'credit', 'debit', 'cond_debit', 'admin_adjust', 'pot_payout',
+                            'exchange')) NOT VALID;
+    END IF;
+END
+$kinds$;
 
 -- Replay-binding columns (nullable; only the ops below write them): an
 -- `exchange` records the rate it was claimed at, a `cond_debit` the floor it
@@ -39,3 +60,6 @@ ALTER TABLE economy_ledger ADD COLUMN IF NOT EXISTS min_balance BIGINT;
 -- COMMUNITY across all apps; `credit`, `batch_credit` and `exchange` share ONE
 -- mint window; `debit` and `cond_debit` share one spend window; `admin_adjust`
 -- has NO daily window by design (privileged, audited, supply-capped).
+
+-- @@PHASE: VALIDATE@@
+ALTER TABLE economy_ledger VALIDATE CONSTRAINT economy_ledger_kind_check;

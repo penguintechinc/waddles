@@ -31,9 +31,34 @@ _SQL_PATH = (
 )
 
 
+_PHASE_MARKER = "-- @@PHASE: VALIDATE@@"
+
+
+def _phases() -> tuple[str, str]:
+    """Split the DDL into the catalog-only CHECK swap and the ledger-scanning VALIDATE."""
+    swap, marker, validate = _SQL_PATH.read_text(encoding="utf-8").partition(
+        _PHASE_MARKER
+    )
+    if not marker or not validate.strip():
+        raise RuntimeError(f"{_SQL_PATH.name} is missing its {_PHASE_MARKER} phase")
+    return swap, validate
+
+
 def upgrade() -> None:
-    """Re-create the kind CHECK with the compound-op kinds."""
-    op.get_bind().exec_driver_sql(_SQL_PATH.read_text(encoding="utf-8"))
+    """Swap the kind CHECK in as NOT VALID, then VALIDATE it in its own transaction.
+
+    The swap is catalog-only (momentary ACCESS EXCLUSIVE); the ledger scan runs in a
+    separate transaction under SHARE UPDATE EXCLUSIVE, so writers are never blocked
+    for the duration of a full-table scan. env.py owns the outer connection
+    transaction, so (as `autocommit_block` cannot be used there) the swap is
+    committed explicitly before the VALIDATE starts. Both phases are idempotent, so
+    a crash between them is repaired by re-running this migration.
+    """
+    swap, validate = _phases()
+    bind = op.get_bind()
+    bind.exec_driver_sql(swap)
+    bind.commit()  # release the swap's ACCESS EXCLUSIVE lock before the scan
+    bind.exec_driver_sql(validate)
 
 
 def downgrade() -> None:
