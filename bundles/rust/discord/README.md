@@ -42,7 +42,7 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
 | MESSAGE_CREATE | drop if `author.id == self_user_id` (by id, other bots kept); required `author.id`, `channel_id`, lenient `username/id/content` (empty default); `guild_id` optional (DM) | `normalize::normalize_message_create`, same rules |
 | Permissions | per guild message: `GET /guilds/{g}` + `GET /guilds/{g}/members/{u}` -> `compute_discord_permissions` (owner / ADMINISTRATOR -> broadcaster; MANAGE_MESSAGES -> mod); DM: no lookup; any failure -> `false/false` (fail closed) | `perms.rs` (same math), lookups via guarded guest `http` w/ secret-ref; failure -> fail closed + PII-free WARN |
 | Permission cache / breaker | 60s TTL, 1h stale cap (stale never elevates), 10k entries, 5-failure breaker | **Not reproducible in a stateless component.** Cost: up to 2 REST calls per guild message. See Host duties |
-| Event shape | `event_type: message`, `actor = username`, payload `{text, guild_id, channel_id, message_id, author_id, is_mod, is_broadcaster}`, `source{account_id: guild_id or "dm", channel_id}` | identical event_type/actor/payload (parity 10/10). `source` is stamped by the host sink from `ctx.source_id` (see Known gaps) |
+| Event shape | `event_type: message`, `actor = username`, payload `{text, guild_id, channel_id, message_id, author_id, is_mod, is_broadcaster}`, `source{account_id: guild_id or "dm", channel_id}` | identical event_type/payload (parity 10/10); `actor` is the tokenized UUID (`identity.lookup`), not the raw handle. `source` is stamped by the host sink from `ctx.source_id` (see Known gaps) |
 | Close codes | 4004,4010-4014 Fatal (stop, mark unhealthy); 4000-4003,4005,4008 Resumable; 4007,4009 + undocumented ReconnectFresh | `classify_close_code` (tool + `gateway.rs`) identical; host acts |
 | Reconnect backoff | `Backoff` + `STABILITY_WINDOW` (reset only after a stable session) | host `ConnectorDriver` |
 | Identify budget / sharding | Valkey token bucket per `sha256(token)`, `max_concurrency` buckets (`shard_id % max_concurrency`), 5s window, rolling 24h `session_start_limit` + 20% low-headroom alert, fail-open on store outage | **HOST ONLY** — a stateless guest cannot and must not enforce a fleet-wide budget. Not reimplemented |
@@ -80,11 +80,30 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
    (`is_mod`/`is_broadcaster` = false, WARN, verified through the real engine) — safe but degraded.
    Consider host-side permission resolution + cache to restore the 60s TTL/breaker behavior.
 5. **Webhook route** for interactions with `Ed25519Spec` (above) and the 3 s answer path.
-6. **Outbound (T6d).** Substitute `{target.channel_id}` / `{target.guild_id}` in `http-request-tpl.url`
-   from the binding resolved via `target-source-id`, and **reject** any template whose URL still contains an
-   unresolved placeholder; inject `Authorization` from the `discord-bot` handle; execute `dm.send` then
-   `dm.post` (two-step); enforce the **DM community-membership gate** of `send_dm_in_community` (the
-   recipient must be a member of the guild of the triggering channel) — the overlay cannot; honour `429`.
+6. **Outbound (T6d) — exact placeholder set and host responsibilities.** The overlay emits ONLY these
+   host-filled placeholders; the host MUST substitute each from the source stated, and REJECT (fail the
+   action) any template that still contains an unresolved `{...}` placeholder or any value from another source:
+
+   | placeholder | filled by the host from | never from |
+   |---|---|---|
+   | `{target.channel_id}` | the binding resolved via `target-source-id` (`app_outbound_bindings`) | payload |
+   | `{target.guild_id}` | the same binding | payload |
+   | `{target.role.<key>}` | the binding's **managed-roles allowlist** entry for `<key>` | payload / a raw snowflake |
+   | `{user:<uuid>}` | the host's **community-scoped tokenization** (UUID -> platform user id) | a raw snowflake |
+   | `{dm.channel_id}` | the `id` in Discord's reply to the `POST /users/@me/channels` the HOST just ran for this very operation's recipient | any other channel; the host rejects a DM post to a channel it did not open itself |
+
+   Also required of the host: inject `Authorization` from the `discord-bot` handle; for `dm.send` read and
+   **strip** the pseudo-header `X-Waddle-Host-Dm-Recipient` (the `{user:<uuid>}` recipient; never sent to
+   Discord), open the DM channel (`POST /users/@me/channels {"recipient_id": <resolved>}`), then run the
+   message request against the channel from that reply; enforce the **`send_dm_in_community` gate** BEFORE
+   executing (the recipient must be a member of the guild of the triggering channel — the overlay cannot);
+   **refuse any managed role carrying `ADMINISTRATOR`, `MANAGE_ROLES` or `MANAGE_GUILD`** even if allowlisted;
+   honour `429` `Retry-After`.
+7. **Actor tokenization needs `connector.pii.read`.** `on-frame` calls
+   `identity.lookup(platform-identity("discord", author_id))` and emits the UUID as `actor` (never the raw
+   handle; no raw-handle fallback — a failed lookup fails the frame). `connector.pii.read` is not yet in
+   `hub_api/services/bundle_permission_catalog.py`, so the V2 validator rejects it: integrator adds it to the
+   catalog (dangerous, core-only) and then adds the permission to `hub-manifest.yaml` (see the comment there).
 
 ## Sender (`build-request`) — part B
 
@@ -92,15 +111,15 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
 |---|---|---|
 | `chat.send` | `POST /channels/{target.channel_id}/messages` | `{content}` (1..2000 chars) |
 | `chat.delete` | `DELETE /channels/{target.channel_id}/messages/{message_id}` | `{message_id}` (snowflake) — channel-scoped, never from the id alone |
-| `dm.send` | `POST /users/@me/channels` (open DM) | `{recipient_id}` snowflake or `{user:<uuid>}` placeholder |
-| `dm.post` | `POST /channels/{dm_channel_id}/messages` | `{dm_channel_id, content}` |
-| `role.add` / `role.remove` | `PUT` / `DELETE /guilds/{target.guild_id}/members/{user_id}/roles/{role_id}` | `{user_id, role_id}` |
+| `dm.send` | `POST /channels/{dm.channel_id}/messages` (host opens the DM first) | `{recipient_id, content}` — `recipient_id` ONLY a `{user:<uuid>}` placeholder (raw snowflake refused); recipient rides in pseudo-header `X-Waddle-Host-Dm-Recipient` |
+| `role.add` / `role.remove` | `PUT` / `DELETE /guilds/{target.guild_id}/members/{user:<uuid>}/roles/{target.role.<key>}` | `{user_id, role}` — `user_id` ONLY a `{user:<uuid>}` placeholder; `role` is a managed-role KEY `[a-z][a-z0-9_-]{0,31}`, never a snowflake |
 
 * The overlay never holds a token (`secret-refs: [("Authorization","discord-bot")]`) and never chooses the
   destination: a payload naming `channel_id`/`guild_id` is refused. Every message body carries
   `allowed_mentions {"parse":["users"]}` (`@everyone`/`@here`/role pings never notify).
-* `{user:<uuid>}` placeholders are passed through for the host to render: the overlay does not hold
-  `connector.pii.read` (not in the hub permission catalog), so it cannot call `identity.lookup`.
+* There is no `dm.post` kind and no payload field can name a DM channel, role snowflake, recipient snowflake,
+  channel or guild: the host pins/derives every destination and privilege (see the placeholder table above).
+* `{user:<uuid>}` placeholders are passed through for the host to resolve (community-scoped tokenization).
 * Status: executed by the host once T6d lands; the executor's `ConnectorHost` does not yet expose the
   sender export, so `build-request` is covered by native unit tests (and its presence is checked at load).
 

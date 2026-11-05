@@ -40,6 +40,13 @@ pub trait Host {
     /// # Errors
     /// As for [`Host::guild`].
     fn member_roles(&self, guild_id: &str, user_id: &str) -> Result<Vec<String>>;
+    /// `identity.lookup(platform-identity("discord", user_id))` -> canonical UUID or
+    /// ephemeral pseudonym. The raw handle must never become an event `actor`; a
+    /// failure here fails the frame loudly (never a raw-handle fallback).
+    ///
+    /// # Errors
+    /// Denied / not-found / rate-limited / backend failures of the identity lookup.
+    fn identity(&self, platform_user_id: &str) -> Result<String>;
     /// Emits a log line. Fields are PII-free by the callers' construction.
     fn log(&self, level: Level, message: &str, fields_json: &str);
 }
@@ -184,9 +191,11 @@ pub fn on_frame(
         return gateway_frame(host, ctx, bytes, received_at);
     }
     if v.get("type").is_some() {
-        return Ok(normalize::interaction_event(&v, received_at)?
-            .into_iter()
-            .collect());
+        return Ok(
+            normalize::interaction_event(&v, received_at, &|id| host.identity(id))?
+                .into_iter()
+                .collect(),
+        );
     }
     Err(OverlayError::Malformed(
         "frame is neither a gateway envelope nor an interaction".into(),
@@ -234,11 +243,21 @@ fn gateway_frame(
                 // DM: no guild, nothing to resolve -> fail closed without a lookup.
                 _ => DiscordPermissions::default(),
             };
-            Ok(vec![normalize::message_event(&msg, perms, received_at)])
+            let actor = host.identity(&msg.author_id)?;
+            Ok(vec![normalize::message_event(
+                &msg,
+                perms,
+                received_at,
+                actor,
+            )])
         }
-        Some("INTERACTION_CREATE") => Ok(normalize::interaction_event(&frame.d, received_at)?
-            .into_iter()
-            .collect()),
+        Some("INTERACTION_CREATE") => {
+            Ok(
+                normalize::interaction_event(&frame.d, received_at, &|id| host.identity(id))?
+                    .into_iter()
+                    .collect(),
+            )
+        }
         _ => Ok(Vec::new()),
     }
 }
@@ -253,6 +272,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeHost {
+        identity_down: bool,
         guild: Option<GuildInfo>,
         roles: Option<Vec<String>>,
         logs: RefCell<Vec<(Level, String, String)>>,
@@ -271,6 +291,12 @@ mod tests {
             self.roles
                 .clone()
                 .ok_or_else(|| OverlayError::Backend("denied".into()))
+        }
+        fn identity(&self, id: &str) -> Result<String> {
+            if self.identity_down {
+                return Err(OverlayError::Backend("identity denied".into()));
+            }
+            Ok(format!("uuid-of-{id}"))
         }
         fn log(&self, l: Level, m: &str, f: &str) {
             self.logs.borrow_mut().push((l, m.into(), f.into()));
@@ -428,6 +454,25 @@ mod tests {
         let logs = h.logs.borrow();
         let warn = logs.iter().find(|(l, ..)| *l == Level::Warn).unwrap();
         assert!(!warn.2.contains("901") && !warn.2.contains("someuser"));
+    }
+
+    #[test]
+    fn actor_is_the_tokenized_uuid_never_the_raw_handle_and_failure_is_loud() {
+        let h = FakeHost::default();
+        let evs = on_frame(&h, &ctx(None), &mc("901", None), "t").unwrap();
+        assert_eq!(evs[0].actor.as_deref(), Some("uuid-of-901"));
+        assert!(!evs[0].actor.as_deref().unwrap().contains("someuser"));
+        let down = FakeHost {
+            identity_down: true,
+            ..FakeHost::default()
+        };
+        // No raw-handle fallback: the frame fails (dropped + counted by the host).
+        assert!(matches!(
+            on_frame(&down, &ctx(None), &mc("901", None), "t"),
+            Err(OverlayError::Backend(_))
+        ));
+        let body = br#"{"id":"777","type":2,"member":{"user":{"id":"4","username":"u"}},"data":{"name":"x"}}"#;
+        assert!(on_frame(&down, &ctx(None), body, "t").is_err());
     }
 
     #[test]

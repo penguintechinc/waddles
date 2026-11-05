@@ -27,6 +27,13 @@ pub const API_BASE: &str = "https://discord.com/api/v10";
 pub const TARGET_CHANNEL: &str = "{target.channel_id}";
 /// Host-substituted placeholder: the bound guild.
 pub const TARGET_GUILD: &str = "{target.guild_id}";
+/// Host-substituted placeholder for a DM: the channel the HOST opened itself
+/// (`POST /users/@me/channels`) for this operation's recipient, filled ONLY from
+/// Discord's reply to that call. The host rejects any other source for it.
+pub const DM_CHANNEL: &str = "{dm.channel_id}";
+/// Host-only pseudo-header carrying the `{user:<uuid>}` recipient of a `dm.send`.
+/// The host MUST consume and strip it; it is never sent to Discord.
+pub const HOST_DM_RECIPIENT_HEADER: &str = "X-Waddle-Host-Dm-Recipient";
 /// Opaque secret handle for the bot credential.
 pub const AUTH_HANDLE: &str = "discord-bot";
 /// Discord's hard message-content limit (characters).
@@ -35,7 +42,7 @@ pub const MAX_CONTENT_CHARS: usize = 2000;
 /// Mirror of WIT `sender.action`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Action {
-    /// `chat.send`, `chat.delete`, `dm.send`, `dm.post`, `role.add`, `role.remove`.
+    /// `chat.send`, `chat.delete`, `dm.send`, `role.add`, `role.remove`.
     pub kind: String,
     /// Opaque binding id the host resolves.
     pub target_source_id: String,
@@ -91,8 +98,9 @@ fn snowflake(map: &Map<String, Value>, key: &str) -> Result<String> {
     }
 }
 
-/// A user reference: a snowflake, or the `{user:<uuid>}` placeholder the host
-/// renders (the overlay holds no `connector.pii.read`, so it cannot resolve it).
+/// A user reference: ONLY the `{user:<uuid>}` placeholder. The host resolves it
+/// through its community-scoped tokenization; a raw platform id never crosses
+/// this boundary (repo PII rule), so snowflakes are refused.
 fn user_ref(map: &Map<String, Value>, key: &str) -> Result<String> {
     let s = str_field(map, key)?;
     guard_text(key, s, false)?;
@@ -100,12 +108,30 @@ fn user_ref(map: &Map<String, Value>, key: &str) -> Result<String> {
         .strip_prefix("{user:")
         .and_then(|r| r.strip_suffix('}'))
         .is_some_and(|u| u.len() == 36 && u.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'));
-    if is_snowflake(s) || placeholder {
+    if placeholder {
         Ok(s.to_string())
     } else {
         Err(OverlayError::Malformed(format!(
-            "`{key}` must be a snowflake or a {{user:<uuid>}} placeholder"
+            "`{key}` must be a {{user:<uuid>}} placeholder"
         )))
+    }
+}
+
+/// A managed-role KEY (`[a-z][a-z0-9_-]{0,31}`), never a snowflake. The host maps
+/// the key through the binding's managed-roles allowlist.
+fn role_key(map: &Map<String, Value>) -> Result<String> {
+    let s = str_field(map, "role")?;
+    guard_text("role", s, false)?;
+    let mut bytes = s.bytes();
+    let ok = s.len() <= 32
+        && bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    if ok {
+        Ok(s.to_string())
+    } else {
+        Err(OverlayError::Malformed(
+            "`role` must be a managed-role key ([a-z][a-z0-9_-]{0,31})".into(),
+        ))
     }
 }
 
@@ -148,10 +174,11 @@ fn tpl(method: &str, path: String, body: Option<Vec<u8>>) -> HttpTpl {
 
 /// Builds the request template for `action`.
 ///
-/// `dm.send` is step one of Discord's two-call DM flow (open the DM channel);
-/// the host feeds the returned channel id into `dm.post`. The host MUST also
-/// enforce the community-membership gate of `send_dm_in_community` -- the
-/// overlay cannot (see README "Host duties").
+/// `dm.send` returns the MESSAGE request against `{dm.channel_id}`; the HOST opens
+/// the DM channel for the `{user:<uuid>}` recipient itself and fills the
+/// placeholder only from Discord's reply to that call. The host MUST also enforce
+/// the `send_dm_in_community` gate and managed-role allowlist -- the overlay
+/// cannot (see README "Host duties").
 ///
 /// # Errors
 /// [`OverlayError::Unsupported`] for an unknown kind; [`OverlayError::Malformed`]
@@ -183,22 +210,21 @@ pub fn build_request(action: &Action) -> Result<HttpTpl> {
             ))
         }
         "dm.send" => {
-            let m = object(p, &["recipient_id"])?;
+            let m = object(p, &["recipient_id", "content"])?;
             let rid = user_ref(&m, "recipient_id")?;
-            let body = serde_json::to_vec(&json!({ "recipient_id": rid }))
-                .map_err(|e| OverlayError::Backend(e.to_string()))?;
-            Ok(tpl("POST", "/users/@me/channels".to_string(), Some(body)))
-        }
-        "dm.post" => {
-            let m = object(p, &["dm_channel_id", "content"])?;
-            let ch = snowflake(&m, "dm_channel_id")?;
             let body = message_body(content(&m)?)?;
-            Ok(tpl("POST", format!("/channels/{ch}/messages"), Some(body)))
+            let mut t = tpl(
+                "POST",
+                format!("/channels/{DM_CHANNEL}/messages"),
+                Some(body),
+            );
+            t.headers.push((HOST_DM_RECIPIENT_HEADER.to_string(), rid));
+            Ok(t)
         }
         "role.add" | "role.remove" => {
-            let m = object(p, &["user_id", "role_id"])?;
+            let m = object(p, &["user_id", "role"])?;
             let user = user_ref(&m, "user_id")?;
-            let role = snowflake(&m, "role_id")?;
+            let role = format!("{{target.role.{}}}", role_key(&m)?);
             let method = if action.kind == "role.add" {
                 "PUT"
             } else {
@@ -248,26 +274,55 @@ mod tests {
         );
     }
 
+    const UUID_REF: &str = "{user:123e4567-e89b-12d3-a456-426614174000}";
+
     #[test]
-    fn a_payload_can_never_name_the_destination() {
-        for (k, p) in [
-            ("chat.send", r#"{"content":"x","channel_id":"123"}"#),
-            ("chat.send", r#"{"content":"x","guild_id":"1"}"#),
-            ("chat.delete", r#"{"message_id":"1","channel_id":"2"}"#),
+    fn a_payload_can_never_name_the_destination_recipient_or_privilege() {
+        let cases: Vec<(&str, String)> = vec![
+            ("chat.send", r#"{"content":"x","channel_id":"123"}"#.into()),
+            ("chat.send", r#"{"content":"x","guild_id":"1"}"#.into()),
+            (
+                "chat.delete",
+                r#"{"message_id":"1","channel_id":"2"}"#.into(),
+            ),
             (
                 "role.add",
-                r#"{"user_id":"1","role_id":"2","guild_id":"3"}"#,
+                format!(r#"{{"user_id":"{UUID_REF}","role":"vip","guild_id":"3"}}"#),
+            ),
+            // regression: raw role snowflake = privilege escalation
+            (
+                "role.add",
+                format!(r#"{{"user_id":"{UUID_REF}","role_id":"2"}}"#),
             ),
             (
-                "dm.post",
-                r#"{"dm_channel_id":"1","content":"x","channel_id":"2"}"#,
+                "role.remove",
+                format!(r#"{{"user_id":"{UUID_REF}","role_id":"2"}}"#),
             ),
-        ] {
+            (
+                "role.add",
+                format!(r#"{{"user_id":"{UUID_REF}","role":"vip","role_id":"2"}}"#),
+            ),
+            // regression: dm destination steering
+            (
+                "dm.send",
+                format!(r#"{{"recipient_id":"{UUID_REF}","content":"x","dm_channel_id":"9"}}"#),
+            ),
+            (
+                "dm.send",
+                format!(r#"{{"recipient_id":"{UUID_REF}","content":"x","channel_id":"9"}}"#),
+            ),
+        ];
+        for (k, p) in cases {
             assert!(
-                matches!(build_request(&act(k, p)), Err(OverlayError::Malformed(_))),
+                matches!(build_request(&act(k, &p)), Err(OverlayError::Malformed(_))),
                 "{k} {p}"
             );
         }
+        // dm.post no longer exists: the host runs the whole two-step from dm.send.
+        assert!(matches!(
+            build_request(&act("dm.post", r#"{"dm_channel_id":"88","content":"hi"}"#)),
+            Err(OverlayError::Unsupported(_))
+        ));
     }
 
     #[test]
@@ -284,38 +339,79 @@ mod tests {
     }
 
     #[test]
-    fn dm_is_two_steps() {
-        let open = build_request(&act("dm.send", r#"{"recipient_id":"444"}"#)).unwrap();
-        assert_eq!(open.url, "https://discord.com/api/v10/users/@me/channels");
+    fn dm_send_carries_content_and_a_host_filled_channel_placeholder() {
+        let t = build_request(&act(
+            "dm.send",
+            &format!(r#"{{"recipient_id":"{UUID_REF}","content":"hi"}}"#),
+        ))
+        .unwrap();
+        assert_eq!(t.method, "POST");
         assert_eq!(
-            serde_json::from_slice::<Value>(open.body.as_ref().unwrap()).unwrap(),
-            json!({"recipient_id":"444"})
+            t.url,
+            "https://discord.com/api/v10/channels/{dm.channel_id}/messages"
         );
-        let uuid = "{user:123e4567-e89b-12d3-a456-426614174000}";
-        assert!(build_request(&act("dm.send", &format!(r#"{{"recipient_id":"{uuid}"}}"#))).is_ok());
-        assert!(build_request(&act("dm.send", r#"{"recipient_id":"{user:zz}"}"#)).is_err());
-        let post =
-            build_request(&act("dm.post", r#"{"dm_channel_id":"88","content":"hi"}"#)).unwrap();
-        assert_eq!(post.url, "https://discord.com/api/v10/channels/88/messages");
-        assert_eq!(
-            serde_json::from_slice::<Value>(post.body.as_ref().unwrap()).unwrap()["allowed_mentions"],
-            json!({"parse":["users"]})
+        let b: Value = serde_json::from_slice(t.body.as_ref().unwrap()).unwrap();
+        assert_eq!(b["content"], "hi");
+        assert_eq!(b["allowed_mentions"], json!({"parse":["users"]}));
+        // The recipient travels in a host-only pseudo-header (stripped before sending).
+        assert!(
+            t.headers
+                .contains(&(HOST_DM_RECIPIENT_HEADER.to_string(), UUID_REF.to_string()))
+        );
+        // Only the {user:<uuid>} placeholder: raw snowflakes and malformed refs are refused.
+        for bad in [
+            "444",
+            "{user:zz}",
+            "{user:123e4567-e89b-12d3-a456-42661417400}",
+            "",
+        ] {
+            let p = format!(r#"{{"recipient_id":"{bad}","content":"hi"}}"#);
+            assert!(build_request(&act("dm.send", &p)).is_err(), "{bad}");
+        }
+        assert!(
+            build_request(&act(
+                "dm.send",
+                &format!(r#"{{"recipient_id":"{UUID_REF}"}}"#)
+            ))
+            .is_err()
         );
     }
 
     #[test]
-    fn role_ops_use_put_and_delete_on_the_pinned_guild() {
-        let add = build_request(&act("role.add", r#"{"user_id":"1","role_id":"2"}"#)).unwrap();
+    fn role_ops_use_a_managed_role_key_user_placeholder_and_the_pinned_guild() {
+        let add = build_request(&act(
+            "role.add",
+            &format!(r#"{{"user_id":"{UUID_REF}","role":"verified"}}"#),
+        ))
+        .unwrap();
+        assert_eq!(add.method, "PUT");
         assert_eq!(
-            (add.method.as_str(), add.url.as_str()),
-            (
-                "PUT",
-                "https://discord.com/api/v10/guilds/{target.guild_id}/members/1/roles/2"
+            add.url,
+            format!(
+                "https://discord.com/api/v10/guilds/{{target.guild_id}}/members/{UUID_REF}/roles/{{target.role.verified}}"
             )
         );
-        let rm = build_request(&act("role.remove", r#"{"user_id":"1","role_id":"2"}"#)).unwrap();
+        let rm = build_request(&act(
+            "role.remove",
+            &format!(r#"{{"user_id":"{UUID_REF}","role":"verified"}}"#),
+        ))
+        .unwrap();
         assert_eq!(rm.method, "DELETE");
-        assert!(build_request(&act("role.add", r#"{"user_id":"1","role_id":"x"}"#)).is_err());
+        let long = "a".repeat(33);
+        for bad_role in [
+            "",
+            "Verified",
+            "1",
+            "a b",
+            "../x",
+            "x}.{target.guild_id",
+            &long,
+        ] {
+            let p = format!(r#"{{"user_id":"{UUID_REF}","role":"{bad_role}"}}"#);
+            assert!(build_request(&act("role.add", &p)).is_err(), "{bad_role}");
+        }
+        // Raw snowflake user ids are refused too.
+        assert!(build_request(&act("role.add", r#"{"user_id":"1","role":"vip"}"#)).is_err());
     }
 
     #[test]
@@ -354,18 +450,20 @@ mod tests {
                 build_request(&act("chat.send", &p)).is_err(),
                 "content {evil}"
             );
-            let p = format!(r#"{{"dm_channel_id":"1","content":"{evil}"}}"#);
+            let p = format!(r#"{{"recipient_id":"{UUID_REF}","content":"{evil}"}}"#);
             assert!(
-                build_request(&act("dm.post", &p)).is_err(),
-                "dm.post {evil}"
+                build_request(&act("dm.send", &p)).is_err(),
+                "dm.send content {evil}"
             );
-            let p = format!(r#"{{"recipient_id":"{evil}"}}"#);
+            let p = format!(r#"{{"recipient_id":"{evil}","content":"x"}}"#);
             assert!(
                 build_request(&act("dm.send", &p)).is_err(),
                 "recipient {evil}"
             );
-            let p = format!(r#"{{"user_id":"{evil}","role_id":"2"}}"#);
+            let p = format!(r#"{{"user_id":"{evil}","role":"vip"}}"#);
             assert!(build_request(&act("role.add", &p)).is_err(), "user {evil}");
+            let p = format!(r#"{{"user_id":"{UUID_REF}","role":"{evil}"}}"#);
+            assert!(build_request(&act("role.add", &p)).is_err(), "role {evil}");
             let mut a = act("chat.send", r#"{"content":"x"}"#);
             a.target_source_id = serde_json::from_str::<String>(&format!("\"{evil}\"")).unwrap();
             assert!(build_request(&a).is_err(), "target {evil}");

@@ -23,6 +23,9 @@ impl Host for NoRest {
     fn member_roles(&self, _: &str, _: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
+    fn identity(&self, id: &str) -> Result<String> {
+        Ok(format!("uuid-of-{id}"))
+    }
     fn log(&self, _: Level, _: &str, _: &str) {}
 }
 

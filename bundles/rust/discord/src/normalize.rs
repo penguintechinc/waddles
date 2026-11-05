@@ -74,8 +74,15 @@ pub fn normalize_message_create(d: &Value, self_user_id: Option<&str>) -> Option
 }
 
 /// Builds the `message` event (payload keys identical to `normalize_discord`).
+/// `actor` is the ALREADY-tokenized canonical UUID/pseudonym for the author
+/// (`identity.lookup`), never the raw handle (WIT `normalized-event.actor`).
 #[must_use]
-pub fn message_event(msg: &ChatMessage, perms: DiscordPermissions, occurred_at: &str) -> Event {
+pub fn message_event(
+    msg: &ChatMessage,
+    perms: DiscordPermissions,
+    occurred_at: &str,
+    actor: String,
+) -> Event {
     let payload = json!({
         "text": msg.content,
         "guild_id": msg.guild_id,
@@ -88,7 +95,7 @@ pub fn message_event(msg: &ChatMessage, perms: DiscordPermissions, occurred_at: 
     Event {
         platform: PLATFORM.to_string(),
         event_type: "message".to_string(),
-        actor: Some(msg.author_username.clone()),
+        actor: Some(actor),
         payload_json: payload.to_string(),
         occurred_at: occurred_at.to_string(),
     }
@@ -116,7 +123,11 @@ fn interaction_kind(t: u64) -> Option<&'static str> {
 /// # Errors
 /// [`OverlayError::Malformed`] for a missing/invalid `id`/`type`,
 /// [`OverlayError::Unsupported`] for an interaction type this overlay does not know.
-pub fn interaction_event(body: &Value, occurred_at: &str) -> Result<Option<Event>> {
+pub fn interaction_event(
+    body: &Value,
+    occurred_at: &str,
+    tokenize: &dyn Fn(&str) -> Result<String>,
+) -> Result<Option<Event>> {
     let t = body
         .get("type")
         .and_then(Value::as_u64)
@@ -137,7 +148,6 @@ pub fn interaction_event(body: &Value, occurred_at: &str) -> Result<Option<Event
         .and_then(|m| m.get("user"))
         .or_else(|| body.get("user"));
     let author_id = user.and_then(|u| u.get("id")).and_then(Value::as_str);
-    let username = user.and_then(|u| u.get("username")).and_then(Value::as_str);
     let guild_id = body.get("guild_id").and_then(Value::as_str);
     let channel_id = body.get("channel_id").and_then(Value::as_str).or_else(|| {
         body.get("channel")
@@ -169,7 +179,7 @@ pub fn interaction_event(body: &Value, occurred_at: &str) -> Result<Option<Event
     Ok(Some(Event {
         platform: PLATFORM.to_string(),
         event_type: kind.to_string(),
-        actor: username.map(str::to_string),
+        actor: author_id.map(tokenize).transpose()?,
         payload_json: payload.to_string(),
         occurred_at: occurred_at.to_string(),
     }))
@@ -226,6 +236,7 @@ mod tests {
                 is_broadcaster: false,
             },
             "t",
+            "actor-uuid".to_string(),
         );
         let p: Value = serde_json::from_str(&e.payload_json).unwrap();
         let mut keys: Vec<_> = p.as_object().unwrap().keys().cloned().collect();
@@ -246,7 +257,11 @@ mod tests {
             (e.platform.as_str(), e.event_type.as_str()),
             ("discord", "message")
         );
-        assert_eq!(e.actor.as_deref(), Some("u"));
+        assert_eq!(e.actor.as_deref(), Some("actor-uuid"));
+    }
+
+    fn tok(id: &str) -> Result<String> {
+        Ok(format!("uuid-of-{id}"))
     }
 
     fn interaction(t: u64, data: Value) -> Value {
@@ -266,9 +281,13 @@ mod tests {
             (4, "interaction.autocomplete"),
             (5, "interaction.modal"),
         ] {
-            let e = interaction_event(&interaction(t, json!({"name":"ban","custom_id":"x"})), "ts")
-                .unwrap()
-                .unwrap();
+            let e = interaction_event(
+                &interaction(t, json!({"name":"ban","custom_id":"x"})),
+                "ts",
+                &tok,
+            )
+            .unwrap()
+            .unwrap();
             assert_eq!(e.event_type, kind);
             assert!(!e.payload_json.contains("SECRET-TOKEN"));
             let p: Value = serde_json::from_str(&e.payload_json).unwrap();
@@ -278,14 +297,14 @@ mod tests {
                 (p["is_mod"].as_bool(), p["is_broadcaster"].as_bool()),
                 (Some(true), Some(false))
             );
-            assert_eq!(e.actor.as_deref(), Some("someuser"));
+            assert_eq!(e.actor.as_deref(), Some("uuid-of-444"));
         }
     }
 
     #[test]
     fn dm_interaction_uses_top_level_user_and_channel_object() {
         let b = json!({"id":"9","type":2,"user":{"id":"5","username":"dmuser"},"channel":{"id":"77"},"data":{"name":"x"}});
-        let e = interaction_event(&b, "t").unwrap().unwrap();
+        let e = interaction_event(&b, "t", &tok).unwrap().unwrap();
         let p: Value = serde_json::from_str(&e.payload_json).unwrap();
         assert_eq!(
             (
@@ -301,19 +320,19 @@ mod tests {
     #[test]
     fn ping_is_not_an_event_and_bad_input_fails_loud() {
         assert_eq!(
-            interaction_event(&json!({"id":"1","type":1}), "t").unwrap(),
+            interaction_event(&json!({"id":"1","type":1}), "t", &tok).unwrap(),
             None
         );
         assert!(matches!(
-            interaction_event(&json!({"id":"1"}), "t"),
+            interaction_event(&json!({"id":"1"}), "t", &tok),
             Err(OverlayError::Malformed(_))
         ));
         assert!(matches!(
-            interaction_event(&json!({"id":"1","type":9}), "t"),
+            interaction_event(&json!({"id":"1","type":9}), "t", &tok),
             Err(OverlayError::Unsupported(_))
         ));
         assert!(matches!(
-            interaction_event(&json!({"id":"abc","type":2}), "t"),
+            interaction_event(&json!({"id":"abc","type":2}), "t", &tok),
             Err(OverlayError::Malformed(_))
         ));
     }

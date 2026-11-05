@@ -40,6 +40,10 @@ permissions:
     justification: "declares the Gateway WebSocket upgrade host the HOST transport connects to for this overlay; the guest never calls it"
     params:
       methods: ["GET"]
+  # BLOCKED ON CATALOG: `connector.pii.read` (dangerous, core-only; gates identity.lookup, used to
+  # tokenize the actor) is not yet a member of hub_api/services/bundle_permission_catalog.py, so the V2
+  # validator rejects it (`unknown_permission`). Integrator: add it to the catalog, then add the
+  # permission entry here. Until then identity.lookup is denied and on-frame fails LOUD (no raw handle).
   - id: platform.log
     justification: "bounded, PII-free lifecycle and fail-closed warnings (community/op/class only)"
 routes_to: []

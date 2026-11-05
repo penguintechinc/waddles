@@ -20,7 +20,7 @@ use bundle_executor::connector::{
     ToolError,
 };
 use bundle_executor::engine::{build_engine, spawn_epoch_ticker, LinkerCache};
-use bundle_executor::manifest::{VerifiedManifest, WitWorld};
+use bundle_executor::manifest::{VerifiedManifest, WitWorld, PERM_CONNECTOR_PII_READ};
 use sha2::{Digest, Sha256};
 
 const WASM: &[u8] = include_bytes!("fixtures/discord_overlay.wasm");
@@ -34,8 +34,12 @@ fn digest_of(bytes: &[u8]) -> String {
 
 async fn host() -> (ConnectorHost, tokio::task::JoinHandle<()>) {
     use clap::Parser;
-    let cfg = CliConfig::try_parse_from(["bundle-executor", "--stage-host-api-addr", "svc-ingest:8301"])
-        .unwrap();
+    let cfg = CliConfig::try_parse_from([
+        "bundle-executor",
+        "--stage-host-api-addr",
+        "svc-ingest:8301",
+    ])
+    .unwrap();
     let engine = build_engine(&cfg).unwrap();
     let ticker = spawn_epoch_ticker(&engine);
     let linkers = LinkerCache::new(engine.clone());
@@ -48,7 +52,12 @@ async fn host() -> (ConnectorHost, tokio::task::JoinHandle<()>) {
         max_tool_args_bytes: 900_000,
         max_tool_result_bytes: 900_000,
     };
-    let m = VerifiedManifest::new(APP, digest_of(WASM), WitWorld::ConnectorTools, HashSet::new());
+    let m = VerifiedManifest::new(
+        APP,
+        digest_of(WASM),
+        WitWorld::ConnectorTools,
+        HashSet::from([PERM_CONNECTOR_PII_READ.to_string()]),
+    );
     let host = ConnectorHost::load(&engine, &linkers, &m, WASM.to_vec(), limits, None)
         .await
         .expect("the real discord overlay must load on the production linker");
@@ -77,11 +86,17 @@ async fn on_connect_identifies_with_a_slot_and_an_opaque_handle_never_a_token() 
     let (host, _t) = host().await;
     let hs = host.on_connect(ctx(None)).await.unwrap().value;
     let text = String::from_utf8(hs.bytes).unwrap();
-    assert!(text.contains(r#""token":"{{DISCORD_BOT_TOKEN}}""#), "{text}");
+    assert!(
+        text.contains(r#""token":"{{DISCORD_BOT_TOKEN}}""#),
+        "{text}"
+    );
     assert!(text.contains(r#""op":2"#));
     assert_eq!(
         hs.secret_refs,
-        vec![("{{DISCORD_BOT_TOKEN}}".to_string(), "discord-bot".to_string())]
+        vec![(
+            "{{DISCORD_BOT_TOKEN}}".to_string(),
+            "discord-bot".to_string()
+        )]
     );
     // RESUME when the host supplies a session.
     let hs = host
@@ -90,35 +105,45 @@ async fn on_connect_identifies_with_a_slot_and_an_opaque_handle_never_a_token() 
         .unwrap()
         .value;
     let v: serde_json::Value = serde_json::from_slice(&hs.bytes).unwrap();
-    assert_eq!((v["op"].as_u64(), v["d"]["seq"].as_u64()), (Some(6), Some(9)));
+    assert_eq!(
+        (v["op"].as_u64(), v["d"]["seq"].as_u64()),
+        (Some(6), Some(9))
+    );
     // A bad token fails loud as a typed guest error, not a trap.
     let err = host.on_connect(ctx(Some("sess-1"))).await.unwrap_err();
-    assert!(matches!(err, ConnectorCallError::Guest(FrameError::Malformed(_))), "{err:?}");
+    assert!(
+        matches!(err, ConnectorCallError::Guest(FrameError::Malformed(_))),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
-async fn dm_message_create_matches_the_golden_through_the_real_engine() {
+async fn message_create_without_an_identity_bridge_fails_loud_never_a_raw_handle() {
+    // Pinned connectors have no identity/host-call bridge in this rig (the full
+    // success path with a scripted identity bridge is the shared parity harness,
+    // `make test-connector-parity PLATFORM=discord`). The overlay must refuse to
+    // emit the raw handle: the frame fails with a typed guest error, not a trap.
     let (host, _t) = host().await;
-    let ev = host
-        .on_frame(frame(
-            Some(r#"{"self_user_id":"999"}"#),
-            serde_json::json!({"op":0,"s":1,"t":"MESSAGE_CREATE","d":{
-                "author":{"bot":false,"id":"444","username":"someuser"},
-                "channel_id":"222","content":"hello chat","id":"333","type":0}}),
-        ))
-        .await
-        .unwrap()
-        .value;
-    assert_eq!(ev.len(), 1);
-    assert_eq!((ev[0].platform.as_str(), ev[0].event_type.as_str()), ("discord", "message"));
-    assert_eq!(ev[0].actor.as_deref(), Some("someuser"));
-    let p: serde_json::Value = serde_json::from_str(&ev[0].payload_json).unwrap();
-    assert_eq!(
-        p,
-        serde_json::json!({"text":"hello chat","guild_id":null,"channel_id":"222",
-            "message_id":"333","author_id":"444","is_mod":false,"is_broadcaster":false})
-    );
-    // Self-authored: dropped.
+    for guild in [None, Some("111")] {
+        let mut d = serde_json::json!({
+            "author":{"bot":false,"id":"444","username":"someuser"},
+            "channel_id":"222","content":"hello chat","id":"333","type":0});
+        if let Some(g) = guild {
+            d["guild_id"] = g.into();
+        }
+        let err = host
+            .on_frame(frame(
+                Some(r#"{"self_user_id":"999"}"#),
+                serde_json::json!({"op":0,"s":1,"t":"MESSAGE_CREATE","d":d}),
+            ))
+            .await
+            .expect_err("no identity bridge: the frame must fail, never emit a raw handle");
+        assert!(
+            matches!(err, ConnectorCallError::Guest(FrameError::Backend(_))),
+            "{err:?}"
+        );
+    }
+    // Self-authored is dropped BEFORE any identity/REST work.
     let none = host
         .on_frame(frame(
             Some(r#"{"self_user_id":"444"}"#),
@@ -132,35 +157,22 @@ async fn dm_message_create_matches_the_golden_through_the_real_engine() {
 }
 
 #[tokio::test]
-async fn guild_message_without_a_host_http_bridge_fails_closed_not_a_trap() {
-    let (host, _t) = host().await;
-    let ev = host
-        .on_frame(frame(
-            None,
-            serde_json::json!({"op":0,"s":1,"t":"MESSAGE_CREATE","d":{
-                "author":{"id":"901","username":"someuser"},"channel_id":"222",
-                "guild_id":"111","content":"hi","id":"333"}}),
-        ))
-        .await
-        .expect("a missing http bridge must fail closed, never trap the sandbox")
-        .value;
-    let p: serde_json::Value = serde_json::from_str(&ev[0].payload_json).unwrap();
-    assert_eq!((p["is_mod"].as_bool(), p["is_broadcaster"].as_bool()), (Some(false), Some(false)));
-}
-
-#[tokio::test]
 async fn interaction_ping_lifecycle_and_garbage_through_the_real_engine() {
     let (host, _t) = host().await;
     let cmd = host
         .on_frame(frame(
             None,
             serde_json::json!({"id":"777","type":2,"token":"SECRET","guild_id":"1","channel_id":"2",
-                "member":{"user":{"id":"4","username":"u"},"permissions":"8"},"data":{"name":"ping"}}),
+                "member":{"permissions":"8"},"data":{"name":"ping"}}),
         ))
         .await
         .unwrap()
         .value;
     assert_eq!(cmd[0].event_type, "interaction.command");
+    assert_eq!(
+        cmd[0].actor, None,
+        "no user object -> no actor, no identity lookup"
+    );
     assert!(!cmd[0].payload_json.contains("SECRET"));
     let ping = host
         .on_frame(frame(None, serde_json::json!({"id":"1","type":1})))
@@ -169,16 +181,26 @@ async fn interaction_ping_lifecycle_and_garbage_through_the_real_engine() {
         .value;
     assert!(ping.is_empty());
     let hello = host
-        .on_frame(frame(None, serde_json::json!({"op":10,"d":{"heartbeat_interval":41250}})))
+        .on_frame(frame(
+            None,
+            serde_json::json!({"op":10,"d":{"heartbeat_interval":41250}}),
+        ))
         .await
         .unwrap()
         .value;
     assert!(hello.is_empty());
     let err = host
-        .on_frame(RawFrame { ctx: ctx(None), bytes: b"nope".to_vec(), received_at: "t".into() })
+        .on_frame(RawFrame {
+            ctx: ctx(None),
+            bytes: b"nope".to_vec(),
+            received_at: "t".into(),
+        })
         .await
         .unwrap_err();
-    assert!(matches!(err, ConnectorCallError::Guest(FrameError::Malformed(_))), "{err:?}");
+    assert!(
+        matches!(err, ConnectorCallError::Guest(FrameError::Malformed(_))),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
@@ -191,8 +213,13 @@ async fn heartbeat_body_tracks_the_host_sequence_and_tools_classify() {
         .unwrap()
         .value
         .unwrap();
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&hb).unwrap()["d"], 7);
-    host.on_disconnect(ctx(None), "closed".into()).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&hb).unwrap()["d"],
+        7
+    );
+    host.on_disconnect(ctx(None), "closed".into())
+        .await
+        .unwrap();
 
     let reply = host
         .call_tool(
@@ -205,6 +232,12 @@ async fn heartbeat_body_tracks_the_host_sequence_and_tools_classify() {
         serde_json::from_slice::<serde_json::Value>(&reply.value).unwrap(),
         serde_json::json!({"action":"invalid_session","resumable":true})
     );
-    let err = host.call_tool("nope".into(), b"{}".to_vec()).await.unwrap_err();
-    assert!(matches!(err, ConnectorCallError::Tool(ToolError::InvalidArgs(_))), "{err:?}");
+    let err = host
+        .call_tool("nope".into(), b"{}".to_vec())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ConnectorCallError::Tool(ToolError::InvalidArgs(_))),
+        "{err:?}"
+    );
 }

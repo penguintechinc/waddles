@@ -31,6 +31,7 @@ mod component {
     use super::bindings::waddle::bundle::http;
     use super::bindings::waddle::bundle::log;
     use super::bindings::waddle::bundle::tool::ToolError as WitToolError;
+    use super::bindings::waddle::connector::identity::{self, IdentityKey};
     use super::bindings::waddle::connector::types::{
         ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
     };
@@ -88,6 +89,25 @@ mod component {
         fn member_roles(&self, guild_id: &str, user_id: &str) -> Result<Vec<String>> {
             let body = Self::get(format!("{API_BASE}/guilds/{guild_id}/members/{user_id}"))?;
             parse_member_roles(&body, guild_id)
+        }
+
+        fn identity(&self, platform_user_id: &str) -> Result<String> {
+            identity::lookup(&IdentityKey::PlatformIdentity((
+                "discord".to_string(),
+                platform_user_id.to_string(),
+            )))
+            .map(|r| r.uuid)
+            .map_err(|e| {
+                OverlayError::Backend(
+                    match e {
+                        identity::Error::Denied(_) => "identity denied",
+                        identity::Error::NotFound => "identity not found",
+                        identity::Error::RateLimited(_) => "identity rate limited",
+                        identity::Error::Backend(_) => "identity backend",
+                    }
+                    .to_string(),
+                )
+            })
         }
 
         fn log(&self, level: Level, message: &str, fields_json: &str) {

@@ -31,6 +31,9 @@ impl Host for VectorHost {
     fn member_roles(&self, _g: &str, _u: &str) -> Result<Vec<String>> {
         Ok(self.member_roles.clone())
     }
+    fn identity(&self, id: &str) -> Result<String> {
+        Ok(format!("uuid-of-{id}"))
+    }
     fn log(&self, _l: Level, m: &str, f: &str) {
         self.logs.borrow_mut().push(format!("{m} {f}"));
     }
@@ -112,7 +115,16 @@ fn every_discord_corpus_vector_matches_the_hardcoded_golden() {
                 let g = &v["golden"];
                 assert_eq!(e.platform, g["platform"], "{id} platform");
                 assert_eq!(e.event_type, g["event_type"], "{id} event_type");
-                assert_eq!(json!(e.actor), g["actor"], "{id} actor");
+                // The golden actor is the RAW handle (pre-tokenization); the overlay must emit the
+                // tokenized UUID instead and never leak the handle.
+                assert_eq!(
+                    e.actor.as_deref(),
+                    Some(
+                        format!("uuid-of-{}", g["payload"]["author_id"].as_str().unwrap()).as_str()
+                    ),
+                    "{id} actor"
+                );
+                assert_ne!(json!(e.actor), g["actor"], "{id} raw handle leaked");
                 let payload: Value = serde_json::from_str(&e.payload_json).unwrap();
                 assert_eq!(payload, g["payload"], "{id} payload");
                 assert_eq!(
@@ -154,6 +166,9 @@ fn a_lookup_failure_diverges_from_the_golden_only_by_failing_closed() {
         }
         fn member_roles(&self, _: &str, _: &str) -> Result<Vec<String>> {
             Err(OverlayError::Backend("http timeout".into()))
+        }
+        fn identity(&self, id: &str) -> Result<String> {
+            Ok(format!("uuid-of-{id}"))
         }
         fn log(&self, _: Level, _: &str, _: &str) {}
     }

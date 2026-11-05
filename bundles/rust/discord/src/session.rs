@@ -19,7 +19,6 @@ const MAX_URL_LEN: usize = 512;
 /// Host-maintained gateway session snapshot. Every field is optional: an absent
 /// token means "no session -> fresh IDENTIFY".
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionState {
     /// Discord's `READY.session_id`; present => the next connect is a RESUME.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,11 +132,21 @@ mod tests {
     }
 
     #[test]
+    fn unknown_fields_are_ignored_never_emitted() {
+        // The parity harness passes its whole vector context as the token.
+        let st = SessionState::from_token(Some(
+            r#"{"self_user_id":"999","guild_roles":[["a",8]],"member_role_ids":["a"]}"#,
+        ))
+        .unwrap();
+        assert_eq!(st.self_user_id.as_deref(), Some("999"));
+        assert!(!st.is_resumable());
+    }
+
+    #[test]
     fn rejects_non_json_unknown_fields_and_bad_grammar() {
         for bad in [
             "sess-1",
             "",
-            r#"{"nope":1}"#,
             r#"{"session_id":"{{DISCORD_BOT_TOKEN}}"}"#,
             r#"{"session_id":""}"#,
             r#"{"self_user_id":"abc"}"#,
