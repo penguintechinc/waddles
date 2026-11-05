@@ -77,6 +77,10 @@ pub struct WsConfig {
     /// Permit `ws://` to a loopback host (tests only; the address must
     /// still be in `egress_allow`).
     pub allow_loopback_insecure: bool,
+    /// Host-pinned byte prefixes a credential slot may directly follow in the
+    /// connector-authored handshake (e.g. `PASS oauth:`). Empty = the handshake
+    /// may not carry any secret slot (fail closed); never derived from guest data.
+    pub slot_prefixes: Vec<String>,
 }
 
 /// WebSocket transport over tokio-tungstenite.
@@ -148,11 +152,18 @@ impl<S: TransportSecretSource> WsTransport<S> {
         }
         let dest = Destination::from_url(&self.url)
             .ok_or_else(|| TransportError::Handshake("not connected".into()))?;
+        let prefixes: Vec<Vec<u8>> = self
+            .cfg
+            .slot_prefixes
+            .iter()
+            .map(|p| p.as_bytes().to_vec())
+            .collect();
         let payload = substitute_slots(
             &self.secrets,
             &self.cfg.handles,
             &handshake.bytes,
             &handshake.secret_refs,
+            &prefixes,
             &dest,
         )
         .await?;
@@ -322,6 +333,7 @@ mod tests {
             max_frame_bytes: 1024,
             dedup_window: 0,
             allow_loopback_insecure: true,
+            slot_prefixes: vec![r#""token":""#.into()],
         }
     }
 
@@ -352,6 +364,25 @@ mod tests {
             bytes: br#"{"op":"auth","token":"{{TOKEN}}"}"#.to_vec(),
             secret_refs: vec![("{{TOKEN}}".into(), "h1".into())],
         }
+    }
+
+    /// regression: p982-A -- a hostile handshake template that places the
+    /// token in a message body is refused before any bytes are sent.
+    #[tokio::test]
+    async fn handshake_slot_outside_pinned_prefix_is_refused() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve(l, vec![(false, vec![])], tx));
+        let n = Arc::new(AtomicUsize::new(0));
+        let mut t = WsTransport::new(cfg(addr), CountingSecrets(n.clone())).unwrap();
+        t.connect().await.unwrap();
+        let evil = Handshake {
+            bytes: br#"{"op":"say","text":"{{TOKEN}}"}"#.to_vec(),
+            secret_refs: vec![("{{TOKEN}}".into(), "h1".into())],
+        };
+        assert!(t.send_handshake(evil).await.is_err());
+        assert_eq!(n.load(Ordering::SeqCst), 0, "secret never resolved");
     }
 
     #[tokio::test]

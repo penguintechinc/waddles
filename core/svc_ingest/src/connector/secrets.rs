@@ -17,13 +17,19 @@ use super::webhook::{BoxFut, SecretError};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Destination {
     host: String,
+    port: u16,
+    secure: bool,
 }
 
 impl Destination {
-    /// Builds from a validated target URL; `None` when it has no host.
+    /// Builds from a validated target URL; `None` when it has no host or no
+    /// known port. Scheme security (`https`/`wss`) and the effective port are
+    /// part of the destination, not just the host.
     pub fn from_url(url: &reqwest::Url) -> Option<Self> {
-        url.host_str().map(|h| Self {
-            host: h.trim_end_matches('.').to_ascii_lowercase(),
+        Some(Self {
+            host: url.host_str()?.trim_end_matches('.').to_ascii_lowercase(),
+            port: url.port_or_known_default()?,
+            secure: matches!(url.scheme(), "https" | "wss"),
         })
     }
 }
@@ -127,12 +133,38 @@ fn destination_approved(
     if !approved_hosts(resolved_provider).contains(&dest.host.as_str()) {
         return false;
     }
+    let loopback_exception = insecure_loopback_allowed(resolved_provider);
+    // Credentials only travel over TLS to the provider's standard port; the
+    // sole exception is the explicit test-only loopback provider.
+    if !loopback_exception && !(dest.secure && dest.port == 443) {
+        return false;
+    }
     match endpoint_url {
         None => !is_static,
         Some(u) => reqwest::Url::parse(u)
             .ok()
             .and_then(|u| Destination::from_url(&u))
-            .is_some_and(|d| d == *dest),
+            .is_some_and(|d| {
+                if loopback_exception {
+                    d.host == dest.host
+                } else {
+                    d == *dest
+                }
+            }),
+    }
+}
+
+/// Test-only escape hatch: the loopback mock provider may use plain `http`/`ws`
+/// and arbitrary ports. Always false in non-test builds.
+fn insecure_loopback_allowed(provider: &str) -> bool {
+    #[cfg(test)]
+    {
+        provider.eq_ignore_ascii_case("testprov")
+    }
+    #[cfg(not(test))]
+    {
+        let _ = provider;
+        false
     }
 }
 
@@ -224,6 +256,45 @@ mod tests {
 
     fn dest_of(url: &str) -> Destination {
         Destination::from_url(&reqwest::Url::parse(url).unwrap()).unwrap()
+    }
+
+    /// regression: p982-B -- host-only matching let a plaintext or off-port URL on
+    /// an approved host receive the credential.
+    #[test]
+    fn destination_requires_tls_and_standard_port() {
+        for (url, ok) in [
+            ("https://api.twitch.tv/x", true),
+            ("wss://irc-ws.chat.twitch.tv/", true),
+            ("http://api.twitch.tv/x", false),
+            ("ws://irc-ws.chat.twitch.tv/", false),
+            ("https://api.twitch.tv:8443/x", false),
+            ("wss://irc-ws.chat.twitch.tv:9999/", false),
+        ] {
+            assert_eq!(
+                destination_approved("twitch", None, false, &dest_of(url)),
+                ok,
+                "{url}"
+            );
+        }
+        let d = dest_of("https://api.twitch.tv/x");
+        assert!(destination_approved(
+            "twitch",
+            Some("https://api.twitch.tv/h"),
+            true,
+            &d
+        ));
+        assert!(!destination_approved(
+            "twitch",
+            Some("http://api.twitch.tv/h"),
+            true,
+            &d
+        ));
+        assert!(!destination_approved(
+            "twitch",
+            Some("https://api.twitch.tv:444/h"),
+            true,
+            &d
+        ));
     }
 
     /// Mounts one resolve answer with an arbitrary body.
@@ -382,6 +453,7 @@ mod tests {
             &HashMap::from([("auth".into(), CONNECTION)]),
             template,
             &[("{{AUTH}}".into(), "auth".into())],
+            &[b"\"token\":\"".to_vec()],
             &dest(),
         )
         .await
