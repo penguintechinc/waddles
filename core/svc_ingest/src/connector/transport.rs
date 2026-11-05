@@ -8,6 +8,8 @@
 //! B0 ships the trait and the registration seam only: no real platform
 //! transport is implemented here (those are later phases).
 
+use std::time::Duration;
+
 use super::types::{ConnectionCtx, Handshake};
 
 /// A transport-level failure. Always a reason string for diagnostics, never
@@ -24,6 +26,10 @@ pub enum TransportError {
     /// Reading the next frame failed (reset, protocol error, timeout).
     #[error("read failed: {0}")]
     Read(String),
+    /// Sending a heartbeat body (or, for a transport that does not support
+    /// heartbeats, being asked to) failed.
+    #[error("send failed: {0}")]
+    Send(String),
     /// A TERMINAL failure that reconnecting cannot fix -- e.g. the upstream
     /// answered 401/403 and the credential is dead. The driver PARKS the
     /// source on this (stops, never backoff-retries) so a revoked token is
@@ -44,6 +50,7 @@ impl TransportError {
             Self::Connect(_) => "connect",
             Self::Handshake(_) => "handshake",
             Self::Read(_) => "read",
+            Self::Send(_) => "send",
             Self::Fatal(_) => "fatal",
         }
     }
@@ -108,6 +115,26 @@ pub trait Transport: Send {
     /// The next raw frame: `Ok(Some(bytes))`, `Ok(None)` on a clean remote
     /// close. Must be cancel-safe (the driver races it against shutdown).
     async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError>;
+
+    /// How often the driver should ask the connector for a heartbeat body
+    /// (`receiver.on-heartbeat-due`, spec S3.5). `None` (the default) means
+    /// this transport has no heartbeat -- a declared capability, not a
+    /// fallback. `Some(Duration::ZERO)` is a configuration fault the driver
+    /// refuses with `DriverError::ZeroHeartbeatInterval`.
+    fn heartbeat_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Sends a connector-built heartbeat body. Only called when
+    /// [`Self::heartbeat_interval`] is `Some`; the default FAILS LOUD so a
+    /// transport that declares an interval but forgets to implement the send
+    /// is a visible fault, never a silently dropped beat.
+    async fn send_heartbeat(&mut self, _bytes: Vec<u8>) -> Result<(), TransportError> {
+        Err(TransportError::Send(
+            "transport declares a heartbeat interval but does not implement send_heartbeat"
+                .to_string(),
+        ))
+    }
 
     /// Closes the connection; best effort, called on every teardown path.
     async fn close(&mut self, reason: &str);

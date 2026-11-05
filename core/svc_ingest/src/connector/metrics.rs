@@ -35,6 +35,13 @@ pub struct ConnectorMetrics {
     /// `svc_ingest_connector_parked_total{platform}` -- sources parked on a
     /// terminal `TransportError::Fatal` (needs re-auth) instead of retried.
     pub parked_total: IntCounterVec,
+    /// `svc_ingest_connector_heartbeats_total{platform,outcome}` -- one per
+    /// `on-heartbeat-due` round: `sent`, `empty` (connector had no body),
+    /// `guest_error`, `send_failed`, or a trap/unavailable kind.
+    pub heartbeats_total: IntCounterVec,
+    /// `svc_ingest_connector_heartbeat_duration_seconds{platform}` -- the
+    /// `on-heartbeat-due` invocation latency (histogram).
+    pub heartbeat_duration_seconds: HistogramVec,
 }
 
 /// Registers the connector metrics against `registry`. Call exactly once per
@@ -94,7 +101,26 @@ pub fn register_connector_metrics(
         ),
         &["platform"],
     )?;
+    let heartbeats_total = IntCounterVec::new(
+        Opts::new(
+            "svc_ingest_connector_heartbeats_total",
+            "Connector on-heartbeat-due rounds, by platform and outcome",
+        ),
+        &["platform", "outcome"],
+    )?;
+    let heartbeat_duration_seconds = HistogramVec::new(
+        HistogramOpts::new(
+            "svc_ingest_connector_heartbeat_duration_seconds",
+            "Connector on-heartbeat-due invocation latency in seconds",
+        )
+        .buckets(vec![
+            0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+        ]),
+        &["platform"],
+    )?;
     registry.register(Box::new(parked_total.clone()))?;
+    registry.register(Box::new(heartbeats_total.clone()))?;
+    registry.register(Box::new(heartbeat_duration_seconds.clone()))?;
     registry.register(Box::new(frames_total.clone()))?;
     registry.register(Box::new(events_total.clone()))?;
     registry.register(Box::new(trap_total.clone()))?;
@@ -109,6 +135,8 @@ pub fn register_connector_metrics(
         connection_up,
         connects_total,
         parked_total,
+        heartbeats_total,
+        heartbeat_duration_seconds,
     })
 }
 
@@ -123,6 +151,13 @@ impl ConnectorMetrics {
     /// Counts one event outcome.
     pub fn event(&self, platform: &str, outcome: &str) {
         self.events_total
+            .with_label_values(&[platform, outcome])
+            .inc();
+    }
+
+    /// Counts one heartbeat round outcome.
+    pub fn heartbeat(&self, platform: &str, outcome: &str) {
+        self.heartbeats_total
             .with_label_values(&[platform, outcome])
             .inc();
     }
@@ -150,12 +185,16 @@ mod tests {
         m.connection_up.with_label_values(&["echo"]).inc();
         m.connects_total.with_label_values(&["echo", "ok"]).inc();
         m.parked_total.with_label_values(&["echo"]).inc();
+        m.heartbeat("echo", "sent");
+        m.heartbeat_duration_seconds
+            .with_label_values(&["echo"])
+            .observe(0.001);
         assert!(register_connector_metrics(&registry).is_err());
         let families = registry.gather();
         assert_eq!(
             families.len(),
-            7,
-            "all seven connector series must be exported"
+            9,
+            "all nine connector series must be exported"
         );
     }
 }

@@ -104,6 +104,23 @@ executor withholds the wasmtime error chain, `SinkError::Invalid` is a `&'static
 spoofed platform, rejected/failed events, truncation) are sampled -- 5 per 30s per category per connection with a
 `suppressed_before` count -- while every occurrence is still counted. `tracing` span `connector.on_frame` wraps each call.
 
+## Heartbeat scheduling (P6a Task 5, spec S3.5)
+
+`ConnectorDriver` runs a per-connection heartbeat loop concurrently with the frame pump (same task, bounded
+`mpsc(1)` hand-off, so at most ONE `on-heartbeat-due` is in flight and a slow one never delays `on-frame`).
+
+| Piece | Behaviour |
+|---|---|
+| `Transport::heartbeat_interval()` | `None` (default) = no heartbeat; `Some(0)` = `DriverError::ZeroHeartbeatInterval` (before connect) |
+| `Transport::send_heartbeat(bytes)` | sends the connector body; the default FAILS LOUD (`TransportError::Send`) |
+| Schedule | first beat one period after establishment; missed ticks are delayed, never burst |
+| Flag | `ConnectorDriver::with_heartbeat_enabled(bool)`; caller resolves PostHog `ingest.connector-heartbeat` (default OFF). OFF + declared interval = WARN per connection, no beat |
+| Outcomes (`svc_ingest_connector_heartbeats_total{platform,outcome}`) | `sent`, `empty`, `guest_error` (connection stays up), `send_failed` (fatal parks, else reconnect), trap/`unavailable` kinds (teardown + backoff) |
+| Latency | `svc_ingest_connector_heartbeat_duration_seconds{platform}`; span `connector.on_heartbeat_due` |
+
+Shutdown cancels an in-flight heartbeat promptly. Tests: `core/svc_ingest/tests/connector_heartbeat.rs`
+(paused-clock + real-time).
+
 ## Not in B0 (explicit, typed, not silent)
 
 - **A production listener + pinned set.** The wire invoker takes any accepted duplex stream
@@ -111,7 +128,7 @@ spoofed platform, rejected/failed events, truncation) are sampled -- 5 per 30s p
   connectors arrive with the first real platform connector (neither exists in production yet, and svc_ingest
   still constructs no `ConnectorDriver`). Pinned connectors run with no host-call bridge: a connector import
   that needs one (`http`, ...) fails typed, and any `host-call` frame is answered `HOST_CALL_DENIED`.
-- Real platform transports, heartbeat scheduling (a dedicated per-connection task, spec S3.5), secret-handle
+- Real platform transports, secret-handle
   substitution in the outbound path (spec S2.1), `identity.lookup` backing (RO-replica reader, cache, audit,
   invalidation -- spec S3.3/S3.4), sender dispatch in `svc_action`, shadow-mode harness, flipping any
   `rustDataPlane` default, Ed25519 verification ahead of the connector `Linker` (`VerifiedManifest` is its output).

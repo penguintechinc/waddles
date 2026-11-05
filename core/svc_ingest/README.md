@@ -42,3 +42,10 @@ and counts.
 | `cargo test --locked` (needs `VALKEY_URL`, a real Valkey; unset = failure, never a skip) | unit + real-socket lifecycle/reconcile tests |
 | `make test-svc-ingest-twitch-live` | live e2e: real hub-api + Postgres + Valkey + IRC server; binding created/deleted through the admin API starts/stops a session; prints and gates on counts (docker + helm + cargo; `HUB_PYTHON` = python with `hub_api/requirements-dev.txt` + `libs/flask_core/requirements.txt`) |
 | `helm` render: `k8s/helm/waddlebot/tests/test_svc_ingest_twitch_sessions_render.py` | alpha renders the flag + timing envs and no static pair; beta/prod unchanged; egress to hub-api |
+
+## Connector heartbeat (P6a T5)
+
+The connector driver schedules `receiver.on-heartbeat-due` per connection when a transport declares
+`Transport::heartbeat_interval()` and the driver is opted in (`with_heartbeat_enabled`, PostHog
+`ingest.connector-heartbeat`, default OFF). See `docs/connector-host-capability.md` "Heartbeat scheduling".
+Tests: `cargo test --locked --test connector_heartbeat`.
