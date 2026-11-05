@@ -1,0 +1,34 @@
+[package]
+name = "waddle-bundle-twitch-overlay"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Twitch platform OVERLAY service bundle (bundle-MCP-tools P6b T1): a `kind: service` bundle on the `connector-tools` world. Supplies EventSub + IRC normalization, the IRC handshake template, sender request templates and read tools; holds no secret, no raw target and no transport code."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-twitch-overlay"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-connector"
+world = "connector-tools"
+
+[package.metadata.component.dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+[package.metadata.component.target.dependencies]
+"waddle:bundle" = { path = "../../../wit/waddle-connector/deps/waddle-bundle" }

@@ -129,7 +129,7 @@ fn login_of(channel: &str) -> String {
 
 pub(crate) fn map_cred(e: CredError) -> SlotError {
     match e {
-        CredError::Unavailable => SlotError::Unavailable(e.reason()),
+        CredError::Unavailable | CredError::TokenExpired => SlotError::Unavailable(e.reason()),
         other => SlotError::Refused(other.reason()),
     }
 }

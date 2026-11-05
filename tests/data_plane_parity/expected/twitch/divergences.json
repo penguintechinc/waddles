@@ -1,0 +1,16 @@
+{
+  "twitch/irc_self_message_dropped": [
+    {
+      "path": "events.len",
+      "reason": "the guest has no self identity (connection-ctx carries no self-nick), so the bot own echoed PRIVMSG is published; closes when the host self-filter (feature/p6b-host-transport-support) or a ctx self-nick lands. Pinned by irc::gap_tests; waddles.overlay-twitch stays OFF until then",
+      "tracking": "P6b-T1-host-self-filter"
+    }
+  ],
+  "twitch/eventsub_raid_documented_condition": [
+    {
+      "path": "events[0].payload.broadcaster_id",
+      "reason": "the hardcoded path published an EMPTY broadcaster id for a raid keyed only by to_broadcaster_user_id (fabricated empty id into payload/source: tenant-isolation hazard); the overlay fails closed and uses to_broadcaster_user_id (event, then condition), else a typed error",
+      "tracking": "P6b-T1-raid-broadcaster-id"
+    }
+  ]
+}
