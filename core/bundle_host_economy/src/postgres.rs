@@ -13,9 +13,12 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::{
-    metrics, validate_transfer, validate_wager, BoxFuture, EconomyCaps, EconomyError, EconomyScope,
-    EconomyStore, IdempotencyKey, LeaderboardEntry, MAX_LEADERBOARD_LIMIT,
+    metrics, validate_transfer, validate_wager, AdminAdjust, BoxFuture, EconomyCaps, EconomyError,
+    EconomyScope, EconomyStore, IdempotencyKey, LeaderboardEntry, MAX_LEADERBOARD_LIMIT,
 };
+
+#[path = "postgres_ops.rs"]
+mod ops;
 
 /// Per-transaction statement timeout, so a stuck row lock can never hold a
 /// bundle invocation (or a pool connection) past the host call deadline.
@@ -126,6 +129,11 @@ struct PriorMovement {
     delta: i64,
     stake: Option<i64>,
     payout: Option<i64>,
+    /// `exchange` only: the rate the claim was made at.
+    rate_num: Option<i64>,
+    rate_den: Option<i64>,
+    /// `cond_debit` only: the floor the spend was conditioned on.
+    min_balance: Option<i64>,
     balance_after: i64,
 }
 
@@ -159,9 +167,20 @@ async fn find_prior<C: ConnectionTrait>(
     scope: &EconomyScope,
     key: &IdempotencyKey,
 ) -> Result<Option<PriorMovement>, EconomyError> {
+    find_prior_raw(conn, scope, key.as_str()).await
+}
+
+/// [`find_prior`] for a raw key string (the derived per-row keys of the
+/// multi-row ops, which are not themselves caller-supplied [`IdempotencyKey`]s).
+async fn find_prior_raw<C: ConnectionTrait>(
+    conn: &C,
+    scope: &EconomyScope,
+    key: &str,
+) -> Result<Option<PriorMovement>, EconomyError> {
     let Some(row) = conn
         .query_one_raw(stmt(
-            "SELECT kind, user_uuid, counterparty_uuid, delta, stake, payout, balance_after \
+            "SELECT kind, user_uuid, counterparty_uuid, delta, stake, payout, \
+                    rate_num, rate_den, min_balance, balance_after \
              FROM economy_ledger \
              WHERE tenant_id = $1 AND community_id = $2 AND app_id = $3 \
                AND idempotency_key = $4",
@@ -169,7 +188,7 @@ async fn find_prior<C: ConnectionTrait>(
                 Value::Int(Some(scope.tenant_id)),
                 Value::Int(Some(scope.community_id)),
                 Value::String(Some(scope.app_id.clone())),
-                Value::String(Some(key.as_str().to_string())),
+                Value::String(Some(key.to_string())),
             ],
         ))
         .await
@@ -190,12 +209,25 @@ async fn find_prior<C: ConnectionTrait>(
         payout: row
             .try_get::<Option<i64>>("", "payout")
             .map_err(backend_err)?,
+        rate_num: row
+            .try_get::<Option<i64>>("", "rate_num")
+            .map_err(backend_err)?,
+        rate_den: row
+            .try_get::<Option<i64>>("", "rate_den")
+            .map_err(backend_err)?,
+        min_balance: row
+            .try_get::<Option<i64>>("", "min_balance")
+            .map_err(backend_err)?,
         balance_after: row.try_get("", "balance_after").map_err(backend_err)?,
     }))
 }
 
 /// Takes the transaction-scoped advisory lock serializing every money-moving
-/// call of `kind` (`wager` | `transfer`) for one `(tenant, community, app)`.
+/// call of `kind` for one `(tenant, community)` -- COMMUNITY-wide, not per app:
+/// the daily windows are per community (all of a community's app bundles share
+/// one budget), so the lock that makes their SUMs race-free must span apps.
+/// `kind` is the WINDOW name (`wager`, `transfer`, `mint` for credit /
+/// batch_credit / exchange, `debit`, ...), so ops sharing a window share a lock.
 /// Always the FIRST lock a transaction takes (one per transaction), so the lock
 /// order is uniform and cannot cycle with the row locks that follow. A hash
 /// collision only over-serializes two unrelated scopes.
@@ -207,8 +239,8 @@ async fn lock_scope<C: ConnectionTrait>(
     conn.execute_raw(stmt(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
         vec![Value::String(Some(format!(
-            "waddles.bundle_economy.scope:{}:{}:{}:{kind}",
-            scope.tenant_id, scope.community_id, scope.app_id
+            "waddles.bundle_economy.scope:{}:{}:{kind}",
+            scope.tenant_id, scope.community_id
         )))],
     ))
     .await
@@ -220,57 +252,94 @@ async fn lock_scope<C: ConnectionTrait>(
 /// applied by `user`, derived from the append-only ledger of APPLIED movements
 /// (a refused call wrote no row and so consumed no budget). MUST run under
 /// [`lock_scope`] for the same `kind`, which is what makes the SUMs race-free.
-/// `ledger_kind`/`amount_expr` are internal constants (`wager`/`stake`,
-/// `transfer_out`/`-delta`), never caller input.
+/// `ledger_kinds` (a SQL list such as `'wager'` or `'credit','exchange'`) and
+/// `amount_expr` are internal constants, never caller input. The windows are
+/// per COMMUNITY (`tenant`, `community`), NOT per app: every app bundle of one
+/// community draws on the same budget (a community with N apps does not get Nx
+/// the cap). Ops that share a budget list all their ledger kinds here.
 async fn enforce_daily_caps<C: ConnectionTrait>(
     conn: &C,
     scope: &EconomyScope,
     user: Uuid,
-    ledger_kind: &'static str,
+    ledger_kinds: &'static str,
     amount_expr: &'static str,
     amount: i64,
     caps: EconomyCaps,
 ) -> Result<(), EconomyError> {
-    let base = |per_user: bool| {
-        format!(
-            "SELECT COALESCE(SUM({amount_expr}), 0)::BIGINT AS used FROM economy_ledger \
-             WHERE tenant_id = $1 AND community_id = $2 AND app_id = $3 \
-               AND kind = '{ledger_kind}' AND occurred_at > NOW() - INTERVAL '24 hours'{}",
-            if per_user { " AND user_uuid = $4" } else { "" }
-        )
-    };
-    let scope_values = |per_user: bool| {
-        let mut v = vec![
-            Value::Int(Some(scope.tenant_id)),
-            Value::Int(Some(scope.community_id)),
-            Value::String(Some(scope.app_id.clone())),
-        ];
-        if per_user {
-            v.push(Value::Uuid(Some(user)));
-        }
-        v
-    };
+    enforce_user_cap(conn, scope, user, ledger_kinds, amount_expr, amount, caps).await?;
+    enforce_scope_cap(conn, scope, ledger_kinds, amount_expr, amount, caps).await
+}
 
-    let user_used: i64 = conn
-        .query_one_raw(stmt(&base(true), scope_values(true)))
+/// The per-user half of [`enforce_daily_caps`]: `user`'s rolling-24h total of
+/// `ledger_kinds` (across every app of the community) plus `amount` must fit
+/// `caps.per_user_daily_max`.
+async fn enforce_user_cap<C: ConnectionTrait>(
+    conn: &C,
+    scope: &EconomyScope,
+    user: Uuid,
+    ledger_kinds: &'static str,
+    amount_expr: &'static str,
+    amount: i64,
+    caps: EconomyCaps,
+) -> Result<(), EconomyError> {
+    let sql = format!(
+        "SELECT COALESCE(SUM({amount_expr}), 0)::BIGINT AS used FROM economy_ledger \
+         WHERE tenant_id = $1 AND community_id = $2 \
+           AND kind IN ({ledger_kinds}) AND occurred_at > NOW() - INTERVAL '24 hours' \
+           AND user_uuid = $3"
+    );
+    let used: i64 = conn
+        .query_one_raw(stmt(
+            &sql,
+            vec![
+                Value::Int(Some(scope.tenant_id)),
+                Value::Int(Some(scope.community_id)),
+                Value::Uuid(Some(user)),
+            ],
+        ))
         .await
         .map_err(backend_err)?
         .ok_or_else(|| backend_err("per-user window SUM returned no row"))?
         .try_get("", "used")
         .map_err(backend_err)?;
-    if user_used.saturating_add(amount) > caps.per_user_daily_max {
+    if used.saturating_add(amount) > caps.per_user_daily_max {
         return Err(EconomyError::UserQuotaExceeded {
             cap: caps.per_user_daily_max,
         });
     }
-    let scope_used: i64 = conn
-        .query_one_raw(stmt(&base(false), scope_values(false)))
+    Ok(())
+}
+
+/// The per-scope half of [`enforce_daily_caps`]: the community's rolling-24h
+/// total of `ledger_kinds` (across every app) plus `amount` must fit
+/// `caps.per_scope_daily_max`.
+async fn enforce_scope_cap<C: ConnectionTrait>(
+    conn: &C,
+    scope: &EconomyScope,
+    ledger_kinds: &'static str,
+    amount_expr: &'static str,
+    amount: i64,
+    caps: EconomyCaps,
+) -> Result<(), EconomyError> {
+    let sql = format!(
+        "SELECT COALESCE(SUM({amount_expr}), 0)::BIGINT AS used FROM economy_ledger \
+         WHERE tenant_id = $1 AND community_id = $2 \
+           AND kind IN ({ledger_kinds}) AND occurred_at > NOW() - INTERVAL '24 hours'"
+    );
+    let used: i64 = conn
+        .query_one_raw(stmt(
+            &sql,
+            vec![
+                Value::Int(Some(scope.tenant_id)),
+                Value::Int(Some(scope.community_id)),
+            ],
+        ))
         .await
         .map_err(backend_err)?
         .ok_or_else(|| backend_err("per-scope window SUM returned no row"))?
         .try_get("", "used")
         .map_err(backend_err)?;
-    if scope_used.saturating_add(amount) > caps.per_scope_daily_max {
+    if used.saturating_add(amount) > caps.per_scope_daily_max {
         return Err(EconomyError::ScopeQuotaExceeded {
             cap: caps.per_scope_daily_max,
         });
@@ -358,6 +427,7 @@ impl PostgresEconomyStore {
         stake: i64,
         payout: i64,
         max_bet: i64,
+        max_supply: i64,
         caps: EconomyCaps,
         key: &IdempotencyKey,
     ) -> Result<i64, EconomyError> {
@@ -429,9 +499,15 @@ impl PostgresEconomyStore {
         // Durable daily aggregates: the STAKE (throughput) and, separately,
         // the PAYOUT -- the currency this call mints, the cap that bounds a
         // bundle choosing its own payouts. A zero payout mints nothing.
-        enforce_daily_caps(&txn, scope, user, "wager", "stake", stake, caps).await?;
+        enforce_daily_caps(&txn, scope, user, "'wager'", "stake", stake, caps).await?;
         if payout > 0 {
-            enforce_daily_caps(&txn, scope, user, "wager", "payout", payout, caps).await?;
+            enforce_daily_caps(&txn, scope, user, "'wager'", "payout", payout, caps).await?;
+        }
+        // The supply ceiling holds for EVERY mint path: a wager that pays out
+        // more than it staked CREATES `payout - stake` (the supply lock is taken
+        // after the wager window lock, the same order every mint uses).
+        if payout > stake {
+            Self::check_supply(&txn, scope, payout - stake, max_supply).await?;
         }
 
         let Some(row) = txn
@@ -491,7 +567,7 @@ impl PostgresEconomyStore {
                 Err(conflict("transfer", scope, key))
             };
         }
-        enforce_daily_caps(&txn, scope, from, "transfer_out", "-delta", amount, caps).await?;
+        enforce_daily_caps(&txn, scope, from, "'transfer_out'", "-delta", amount, caps).await?;
 
         // 1. Live membership of BOTH sides, inside the write transaction.
         let member_sql = format!(
@@ -674,13 +750,14 @@ impl EconomyStore for PostgresEconomyStore {
         stake: i64,
         payout: i64,
         max_bet: i64,
+        max_supply: i64,
         caps: EconomyCaps,
         key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<i64, EconomyError>> {
         Box::pin(async move {
             let start = Instant::now();
             let result = self
-                .wager_impl(scope, user, stake, payout, max_bet, caps, key)
+                .wager_impl(scope, user, stake, payout, max_bet, max_supply, caps, key)
                 .await;
             metrics::record_call("wager", outcome_of(&result), start.elapsed().as_secs_f64());
             result
@@ -721,6 +798,170 @@ impl EconomyStore for PostgresEconomyStore {
             let result = self.leaderboard_impl(scope, limit).await;
             metrics::record_call(
                 "leaderboard",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn credit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: Uuid,
+        amount: i64,
+        max_amount: i64,
+        max_supply: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self
+                .credit_impl(scope, user, amount, max_amount, max_supply, caps, key)
+                .await;
+            metrics::record_call("credit", outcome_of(&result), start.elapsed().as_secs_f64());
+            result
+        })
+    }
+
+    fn batch_credit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        entries: &'a [(Uuid, i64)],
+        max_amount: i64,
+        max_supply: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<(), EconomyError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self
+                .batch_credit_impl(scope, entries, max_amount, max_supply, caps, key)
+                .await;
+            metrics::record_call(
+                "batch_credit",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn debit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: Uuid,
+        amount: i64,
+        max_amount: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self
+                .debit_impl(scope, user, amount, max_amount, caps, key)
+                .await;
+            metrics::record_call("debit", outcome_of(&result), start.elapsed().as_secs_f64());
+            result
+        })
+    }
+
+    fn conditional_debit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: Uuid,
+        amount: i64,
+        min_balance: i64,
+        max_amount: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self
+                .conditional_debit_impl(scope, user, amount, min_balance, max_amount, caps, key)
+                .await;
+            metrics::record_call(
+                "conditional_debit",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn admin_adjust<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: Uuid,
+        adjust: AdminAdjust,
+        max_supply: i64,
+        is_admin_authorized: bool,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self
+                .admin_adjust_impl(scope, user, adjust, max_supply, is_admin_authorized, key)
+                .await;
+            metrics::record_call(
+                "admin_adjust",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn pay_pot<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        pot_source: Uuid,
+        winners: &'a [(Uuid, i64)],
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<(), EconomyError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.pay_pot_impl(scope, pot_source, winners, key).await;
+            metrics::record_call(
+                "pay_pot",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn exchange<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: Uuid,
+        from_amount: i64,
+        rate_num: i64,
+        rate_den: i64,
+        max_amount: i64,
+        max_supply: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self
+                .exchange_impl(
+                    scope,
+                    user,
+                    from_amount,
+                    rate_num,
+                    rate_den,
+                    max_amount,
+                    max_supply,
+                    caps,
+                    key,
+                )
+                .await;
+            metrics::record_call(
+                "exchange",
                 outcome_of(&result),
                 start.elapsed().as_secs_f64(),
             );

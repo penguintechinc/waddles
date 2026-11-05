@@ -78,3 +78,14 @@ The connector driver schedules `receiver.on-heartbeat-due` per connection when a
 `Transport::heartbeat_interval()` and the driver is opted in (`with_heartbeat_enabled`, PostHog
 `ingest.connector-heartbeat`, default OFF). See `docs/connector-host-capability.md` "Heartbeat scheduling".
 Tests: `cargo test --locked --test connector_heartbeat`.
+
+## Connector egress (SSRF guard)
+
+Poll/WebSocket connector transports resolve and pin their endpoint through `connector::egress_guard`, a thin
+adapter over `bundle_host_http::guarded` -- the one shared implementation (denylist incl. IPv4-mapped/NAT64 v6,
+resolve-then-connect pinning, https/wss only, no userinfo, class-only errors, `guarded_egress_total{outcome}`
+metric + tracing span). The former mirrored denylist was removed; do not re-add range logic here. Real-path
+redirect/rebind tests live in `core/bundle_host_http/tests/guarded_real_path.rs` (`cargo test --locked`).
+Follow-up: `poll.rs::pinned_client` should call `egress_guard::pinned_client` once PR #982 lands (kept out of this
+change to avoid conflicting with it); the Discord REST/outbound client (`outbound.rs`, PR #987 area) is not yet routed
+through the guard.

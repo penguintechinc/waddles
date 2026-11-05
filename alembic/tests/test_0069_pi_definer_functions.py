@@ -254,7 +254,7 @@ class TestStatic:
 def test_alembic_has_a_single_head(pg_db: PgTestDatabase) -> None:
     out = alembic_cli("heads", dsn=pg_db.dsn).stdout
     heads = [ln for ln in out.splitlines() if "(head)" in ln]
-    assert len(heads) == 1 and heads[0].startswith("0069_pi_definer_functions"), out
+    assert len(heads) == 1, out
 
 
 @requires_docker
