@@ -27,7 +27,7 @@ use connection_resolver::ConnectionResolve;
 /// the session manager and connector (`SessionMetrics`), which already record
 /// the same events under fixed label sets -- counting here too would double
 /// every series.
-struct ResolverTelemetry;
+pub(crate) struct ResolverTelemetry;
 
 impl ConnResolverMetrics for ResolverTelemetry {
     fn resolve(&self, _kind: ConnectionKind, outcome: &'static str, latency: Duration) {

@@ -428,6 +428,10 @@ struct EnvelopeFields<'a> {
     /// The triggering event's channel -- `dm.send` only: lets the sender bind
     /// the DM target to that channel's community.
     origin_channel: Option<&'a str>,
+    /// Numeric `communities.id` of the invoke scope (binding-verified, never
+    /// guest input): the drain resolves THIS community's own bot credential
+    /// for the send. Omitted for a tenant-wide scope (`0`).
+    community_id: Option<i64>,
 }
 
 /// Producer-side builder for the versioned outbound queue envelope
@@ -455,6 +459,9 @@ fn build_outbound_envelope(
             if let Some(v) = value {
                 obj.insert(key.to_string(), serde_json::Value::String(v.to_string()));
             }
+        }
+        if let Some(c) = fields.community_id {
+            obj.insert("community_id".to_string(), serde_json::Value::from(c));
         }
     }
     env
@@ -1384,6 +1391,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 text: Some(&text),
                 // Host-pin stamp: the drain refuses unless channel == this.
                 origin_channel: Some(&channel),
+                community_id: (scope.community_id > 0).then_some(i64::from(scope.community_id)),
                 ..EnvelopeFields::default()
             },
         );
@@ -4019,6 +4027,34 @@ mod tests {
     #[test]
     fn sanitize_bundle_log_message_passes_clean_short_messages_through() {
         assert_eq!(sanitize_bundle_log_message("all good"), "all good");
+    }
+
+    /// regression: p6a-t6b -- the queued twitch envelope carries the invoke
+    /// scope's NUMERIC community id (host-stamped, never from the bundle) so
+    /// the drain resolves that community's own bot credential; a bundle-supplied
+    /// `community_id` in message_json is ignored.
+    #[tokio::test]
+    async fn relay_send_stamps_numeric_community_id_from_scope() {
+        for (community_id, want) in [(3, Some(3))] {
+            let caps = caps(FakeRelayQueue::default());
+            let scope = InvokeScope {
+                community_id,
+                ..twitch_scope()
+            };
+            caps.handle(
+                &scope,
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": "{\"text\":\"hi\",\"community_id\":99}"}),
+                ),
+            )
+            .await
+            .expect("relay send succeeds");
+            let pushed = caps.relay_queue.pushed.lock().unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+            assert_eq!(parsed.get("community_id").and_then(|v| v.as_i64()), want);
+        }
     }
 
     #[tokio::test]

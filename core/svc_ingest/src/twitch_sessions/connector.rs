@@ -286,6 +286,7 @@ mod tests {
                 endpoint: Endpoint::default(),
                 secret,
                 expires_at: self.expires_at,
+                metadata: Default::default(),
             })
         }
 
