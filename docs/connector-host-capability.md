@@ -104,6 +104,38 @@ executor withholds the wasmtime error chain, `SinkError::Invalid` is a `&'static
 spoofed platform, rejected/failed events, truncation) are sampled -- 5 per 30s per category per connection with a
 `suppressed_before` count -- while every occurrence is still counted. `tracing` span `connector.on_frame` wraps each call.
 
+## Connector tools (`world connector-tools`, P6a Task 4)
+
+A connector overlay can EXPOSE normalized platform tools (`get_chatters`, `send_chat`, ...) and optionally CALL other
+bundles' tools, reusing the P3b tool mechanism (`docs/bundle-tool-invoke.md`) -- so app bundles reach platform data
+through `tool.invoke`, never a platform-specific host path.
+
+- **New world, frozen old one.** `wit/waddle-connector/connector.wit` gains `world connector-tools` = `connector` +
+  `import waddle:bundle/tool@1.0.0` + `export waddle:bundle/tool-provider@1.0.0`. `world connector` is untouched, so
+  every compiled connector keeps linking. `deps/waddle-bundle/tool.wit` carries byte-identical `tool`/`tool-provider`
+  interface bodies (checked by `wit/waddle-connector/connector_wit_test.sh`).
+- **Host.** `WitWorld::ConnectorTools` (manifest) selects `engine::connector_tools_world`; the same core-namespace +
+  `connector.pii.read` gates apply (`WitWorld::is_connector`). `ConnectorHost::call_tool(name, args)` runs
+  `tool-provider.call` under the same pool slot / fuel / deadline / memory bounds as every other export; a guest
+  refusal is `ConnectorCallError::Tool(ToolError)` (typed, not a sandbox trip), a plain-`connector` host answers
+  `NoToolProvider` (fail loud, never an empty result).
+- **Wire.** `ExportKind::ToolCall` for a digest pinned in the connector registry is served by the overlay
+  (`{"ok": <json>}` / `{"tool_error": ...}`, the stage-tools result shape); a plain connector answers
+  `EXPORT_MISSING`; an unpinned digest still falls through to the stage registry.
+- **Resource isolation (security review).** Tool calls run on a DEDICATED semaphore (`tool_pool_size` = half the
+  receiver pool, min 1), never the receiver pool, so saturating `tool-provider` traffic cannot starve `on-frame` /
+  heartbeat (excess tool calls get typed `PoolExhausted`). The wire `deadline_ms` is clamped to
+  `min(body.deadline_ms, limits.deadline_ms)` (`clamp_deadline_ms`) -- a caller can tighten, never extend. Regression
+  tests: `saturated_tool_pool_cannot_starve_on_frame_or_heartbeat`, `a_requested_deadline_above_the_limit_is_clamped_*`.
+- **`tool` import.** Linked via the shared `HasExecState` host impl; authority stays with the stage (grants, kind
+  matrix, depth). With no stage bridge it answers a typed `target-unavailable`.
+- **Gating / flag.** The executor only exposes the mechanism; nothing in production pins a `connector-tools`
+  component yet (the first one is a P6b overlay). The pin/routing site gates on PostHog flag
+  `waddles.connector-tools`, default OFF, when P6b wires it. Telemetry: `waddles_executor_connector_calls_total` /
+  `_call_seconds` with `export="tool-call"`; logs carry `app_id` only (never args or results).
+- **Tests.** `core/bundle_executor/tests/connector_tools.rs` (real compiled fixtures through the production
+  engine/linker/wire path), `src/connector_wire.rs` and `src/manifest.rs` unit tests.
+
 ## Not in B0 (explicit, typed, not silent)
 
 - **A production listener + pinned set.** The wire invoker takes any accepted duplex stream

@@ -42,9 +42,10 @@
 //! outcome, so the host bounds how much a single call can mint.
 //!
 //! Both rolling-24h daily aggregates ([`EconomyCaps`]: per user, per
-//! (tenant, community, app)) are ALSO enforced durably here, derived from the
+//! (tenant, community) -- ONE budget shared by every app bundle of the
+//! community, never per app) are ALSO enforced durably here, derived from the
 //! append-only ledger inside the write transaction under a transaction-scoped
-//! advisory lock keyed on `(tenant, community, app, wager|transfer)`: the
+//! advisory lock keyed on `(tenant, community, window)`: the
 //! gate's in-memory copy resets on restart and multiplies across replicas, the
 //! ledger does not. The lock is always the FIRST lock a transaction takes (one
 //! per transaction), so the lock order is uniform and cannot cycle with the
@@ -122,14 +123,33 @@ pub const MAX_PAYOUT_MULTIPLE: i64 = 100;
 /// `i64`s so they can never be transposed at a call site.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct EconomyCaps {
-    /// Max rolling-24h sum for one acting user within one app and community:
+    /// Max rolling-24h sum for one acting user within one community (across
+    /// ALL of its apps -- the budget is per community, never per app):
     /// of stakes AND (separately) of payouts credited for a wager, of amounts
     /// sent for a transfer.
     pub per_user_daily_max: i64,
-    /// Max rolling-24h sum by one app across the whole (tenant, community),
-    /// measured the same way as [`Self::per_user_daily_max`].
+    /// Max rolling-24h sum across the whole (tenant, community) -- every app
+    /// bundle of the community shares it -- measured the same way as
+    /// [`Self::per_user_daily_max`].
     pub per_scope_daily_max: i64,
 }
+
+/// Default per-community money-supply ceiling (spec SS5.1): the total of every
+/// balance in one `(tenant, community)` a mint may bring the economy to. The
+/// STAGE passes the effective value (`max_supply`) -- never a guest.
+pub const DEFAULT_MAX_SUPPLY: i64 = 1_000_000;
+
+/// Most entries one `batch_credit` / `pay_pot` call may carry (bounds the
+/// statement size, the lock-hold time and the per-call ledger growth).
+pub const MAX_BATCH_ENTRIES: usize = 100;
+
+/// Largest numerator or denominator an `exchange` rate may carry.
+pub const MAX_EXCHANGE_RATE_PART: i64 = 1_000_000;
+
+/// An `exchange` may credit at most this many units of currency per external
+/// point (`rate_num / rate_den <= MAX_EXCHANGE_MULTIPLE`): the host-side bound
+/// on a bundle-chosen rate, so a buggy or hostile rate cannot mint absurdly.
+pub const MAX_EXCHANGE_MULTIPLE: i64 = 1_000;
 
 /// Largest accepted leaderboard page.
 pub const MAX_LEADERBOARD_LIMIT: u32 = 100;
@@ -218,12 +238,12 @@ pub enum EconomyError {
     /// The stake/amount (or a payout) exceeds the enforced cap `cap`.
     #[error("amount exceeds the enforced cap ({cap})")]
     OverCap { cap: i64 },
-    /// The acting user's rolling-24h total for this app/community would pass
+    /// The acting user's rolling-24h total for this community would pass
     /// `cap`. Surfaces under the same stable `quota_exceeded` code the gate's
     /// in-memory per-user check uses.
     #[error("rolling-24h per-user economy cap ({cap}) would be exceeded")]
     UserQuotaExceeded { cap: i64 },
-    /// This app's rolling-24h total across the whole (tenant, community) would
+    /// The community's rolling-24h total (all apps) would
     /// pass `cap`. Same `quota_exceeded` code as the gate's per-scope check.
     #[error("rolling-24h per-scope economy cap ({cap}) would be exceeded")]
     ScopeQuotaExceeded { cap: i64 },
@@ -232,6 +252,15 @@ pub enum EconomyError {
     /// must present the same parameters it had the first time.
     #[error("idempotency key was already used by a different economy operation")]
     IdempotencyConflict,
+    /// A mint would take the community's total currency past the money-supply
+    /// ceiling `cap` (`SUM(balance) + amount > max_supply`). Surfaces on the
+    /// wire as `over_cap` carrying the ceiling.
+    #[error("community money supply cap ({cap}) would be exceeded")]
+    SupplyCapReached { cap: i64 },
+    /// A privileged op (`admin_adjust`) was called without the stage's
+    /// admin-authorization guarantee. Never applied.
+    #[error("operation requires admin authorization")]
+    NotAuthorized,
     /// Malformed argument (non-positive amount, self-transfer, bad limit, ...).
     #[error("invalid argument: {0}")]
     Invalid(String),
@@ -246,7 +275,8 @@ impl EconomyError {
         match self {
             Self::NotAMember => "not_a_member",
             Self::InsufficientFunds { .. } => "insufficient_funds",
-            Self::OverCap { .. } => "over_cap",
+            Self::OverCap { .. } | Self::SupplyCapReached { .. } => "over_cap",
+            Self::NotAuthorized => "admin_required",
             Self::UserQuotaExceeded { .. } | Self::ScopeQuotaExceeded { .. } => "quota_exceeded",
             Self::IdempotencyConflict => "idempotency_conflict",
             Self::Invalid(_) => "invalid_args",
@@ -260,10 +290,36 @@ impl EconomyError {
     pub fn wire_message(&self) -> String {
         match self {
             Self::InsufficientFunds { balance } => balance.to_string(),
-            Self::OverCap { cap } => cap.to_string(),
+            Self::OverCap { cap } | Self::SupplyCapReached { cap } => cap.to_string(),
             other => other.to_string(),
         }
     }
+}
+
+/// How an `admin_adjust` changes a balance.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AdminAdjust {
+    /// Add (`> 0`) or subtract (`< 0`) a non-zero amount.
+    Delta(i64),
+    /// Set the balance to this absolute value (`>= 0`).
+    Set(i64),
+}
+
+/// The reserved per-community POT account (spec SS5.1): the UUID `pay_pot`
+/// debits. Deterministic from `(tenant, community)`, and in a reserved UUID
+/// space (version nibble 0xB, never produced by the v4 user identities) so it
+/// can never collide with a real member. It is the ONLY account exempt from
+/// the active-membership predicate, and only `pay_pot` may debit it.
+pub fn pot_account(scope: &EconomyScope) -> uuid::Uuid {
+    let mut b = [0u8; 16];
+    b[0..4].copy_from_slice(&scope.tenant_id.to_be_bytes());
+    b[4..6].copy_from_slice(b"PO");
+    b[6] = 0xb0; // reserved version nibble (never v4), fixed
+    b[7] = 0x00;
+    b[8] = 0x80; // RFC 4122 variant, fixed
+    b[9..12].copy_from_slice(b"POT");
+    b[12..16].copy_from_slice(&scope.community_id.to_be_bytes());
+    uuid::Uuid::from_bytes(b)
 }
 
 /// The durable, community-scoped currency store.
@@ -289,7 +345,9 @@ pub trait EconomyStore: Send + Sync {
     /// `caps` the durable daily aggregates. Requires `1 <= stake <= max_bet`,
     /// `0 <= payout <= stake * `[`MAX_PAYOUT_MULTIPLE`], `balance >= stake`,
     /// the stake to fit both rolling-24h STAKE caps and the payout to fit both
-    /// rolling-24h PAYOUT (mint) caps. `key` makes the call idempotent: a
+    /// rolling-24h PAYOUT (mint) caps, and `payout - stake` (what the wager
+    /// CREATES) to fit the community money-supply ceiling `max_supply`
+    /// ([`EconomyError::SupplyCapReached`]). `key` makes the call idempotent: a
     /// replay with identical parameters returns the original balance and moves
     /// nothing; the same key with different parameters is
     /// [`EconomyError::IdempotencyConflict`].
@@ -301,6 +359,7 @@ pub trait EconomyStore: Send + Sync {
         stake: i64,
         payout: i64,
         max_bet: i64,
+        max_supply: i64,
         caps: EconomyCaps,
         key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<i64, EconomyError>>;
@@ -328,6 +387,122 @@ pub trait EconomyStore: Send + Sync {
         scope: &'a EconomyScope,
         limit: u32,
     ) -> BoxFuture<'a, Result<Vec<LeaderboardEntry>, EconomyError>>;
+
+    /// MINT: atomically adds `amount` to `user` (an active member) and returns
+    /// the NEW balance. Bounded by the host-computed per-call `max_amount`, the
+    /// rolling-24h mint `caps` (ONE window shared with `batch_credit` and
+    /// `exchange`: ledger kinds `credit` + `exchange`) and the community
+    /// money-supply ceiling `max_supply` (`SUM(balance) + amount <=
+    /// max_supply`, checked inside the supply-locked transaction). Idempotent
+    /// by `key` exactly as for [`Self::wager`].
+    #[allow(clippy::too_many_arguments)]
+    fn credit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: uuid::Uuid,
+        amount: i64,
+        max_amount: i64,
+        max_supply: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>>;
+
+    /// MINT for many users in ONE transaction (all-or-nothing): every entry
+    /// must be a distinct active member with `1 <= amount`, and the batch TOTAL
+    /// must be `<= max_amount` (the per-call ceiling covers the whole call); the
+    /// per-user and the per-scope rolling-24h mint windows and the supply
+    /// ceiling are checked against the batch TOTAL. At most
+    /// [`MAX_BATCH_ENTRIES`] entries. Idempotent by `key` for the whole batch.
+    #[allow(clippy::too_many_arguments)]
+    fn batch_credit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        entries: &'a [(uuid::Uuid, i64)],
+        max_amount: i64,
+        max_supply: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<(), EconomyError>>;
+
+    /// SPEND/BURN: atomically subtracts `amount` from `user` (guarded
+    /// `balance >= amount`; [`EconomyError::InsufficientFunds`] otherwise, no
+    /// row changes) and returns the NEW balance. Bounded by `max_amount` and
+    /// the rolling-24h spend `caps` (ledger kinds `debit` + `cond_debit`, one window).
+    fn debit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: uuid::Uuid,
+        amount: i64,
+        max_amount: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>>;
+
+    /// Like [`Self::debit`] but refuses (never partially applies) unless the
+    /// balance would stay `>= min_balance` (`balance - amount >= min_balance`,
+    /// evaluated against the committed row under its lock).
+    #[allow(clippy::too_many_arguments)]
+    fn conditional_debit<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: uuid::Uuid,
+        amount: i64,
+        min_balance: i64,
+        max_amount: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>>;
+
+    /// PRIVILEGED absolute-set or delta of `user`'s balance (ledger kind
+    /// `admin_adjust`; bypasses the 24h earn windows, still bounded by the
+    /// community money-supply ceiling `max_supply`). `is_admin_authorized` is
+    /// the STAGE's guarantee (gate decision), never a guest value: `false` is
+    /// [`EconomyError::NotAuthorized`] before anything is touched.
+    #[allow(clippy::too_many_arguments)]
+    fn admin_adjust<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: uuid::Uuid,
+        adjust: AdminAdjust,
+        max_supply: i64,
+        is_admin_authorized: bool,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>>;
+
+    /// Atomic multi-winner payout from the community POT: `pot_source` MUST be
+    /// [`pot_account`]`(scope)`; each winner is a distinct active member with an
+    /// explicit amount `>= 1`; requires `pot balance >= SUM(amounts)`. The host
+    /// does no rounding: any remainder stays in the pot. One transaction, fully
+    /// commits or fully rolls back; idempotent by `key`. Moves existing
+    /// currency (no mint, no supply effect).
+    fn pay_pot<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        pot_source: uuid::Uuid,
+        winners: &'a [(uuid::Uuid, i64)],
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<(), EconomyError>>;
+
+    /// One-call cross-currency exchange: ledgers an idempotent CLAIM of
+    /// `from_amount` external points (no external balance is kept or checked)
+    /// and credits `floor(from_amount * rate_num / rate_den)` to `user`.
+    /// The rate is bounded host-side ([`MAX_EXCHANGE_RATE_PART`],
+    /// [`MAX_EXCHANGE_MULTIPLE`]); the credited amount is bounded by
+    /// `max_amount`, the rolling-24h mint `caps` (the SAME window as `credit`/`batch_credit`) and
+    /// `max_supply`. Returns the NEW balance.
+    #[allow(clippy::too_many_arguments)]
+    fn exchange<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        user: uuid::Uuid,
+        from_amount: i64,
+        rate_num: i64,
+        rate_den: i64,
+        max_amount: i64,
+        max_supply: i64,
+        caps: EconomyCaps,
+        key: &'a IdempotencyKey,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>>;
 }
 
 /// Validates the arithmetic preconditions of a wager (pure, no I/O) so the
@@ -370,9 +545,97 @@ pub fn validate_transfer(
     Ok(())
 }
 
+/// Validates a single-user mint/spend amount (pure, no I/O).
+pub fn validate_amount(amount: i64, max_amount: i64) -> Result<(), EconomyError> {
+    if amount < 1 {
+        return Err(EconomyError::Invalid("amount must be >= 1".to_string()));
+    }
+    if amount > max_amount {
+        return Err(EconomyError::OverCap { cap: max_amount });
+    }
+    Ok(())
+}
+
+/// Validates a multi-user entry list (`batch_credit` / `pay_pot`): non-empty,
+/// at most [`MAX_BATCH_ENTRIES`], distinct users, each amount `>= 1` and (when
+/// `max_amount` is `Some`) within it. Returns the entries sorted by user (the
+/// canonical order every row-lock and replay comparison uses) and their
+/// overflow-checked total.
+pub fn validate_entries(
+    entries: &[(uuid::Uuid, i64)],
+    max_amount: Option<i64>,
+) -> Result<(Vec<(uuid::Uuid, i64)>, i64), EconomyError> {
+    if entries.is_empty() || entries.len() > MAX_BATCH_ENTRIES {
+        return Err(EconomyError::Invalid(format!(
+            "entries must be 1..={MAX_BATCH_ENTRIES}"
+        )));
+    }
+    let mut sorted = entries.to_vec();
+    sorted.sort_by_key(|(u, _)| *u);
+    if sorted.windows(2).any(|w| w[0].0 == w[1].0) {
+        return Err(EconomyError::Invalid(
+            "duplicate user in entries".to_string(),
+        ));
+    }
+    let mut total: i64 = 0;
+    for (_, amount) in &sorted {
+        validate_amount(*amount, max_amount.unwrap_or(i64::MAX))?;
+        total = total
+            .checked_add(*amount)
+            .ok_or_else(|| EconomyError::Invalid("entries total overflows".to_string()))?;
+    }
+    Ok((sorted, total))
+}
+
+/// Validates an `exchange` and returns the currency it credits
+/// (`floor(from_amount * rate_num / rate_den)`, computed in `i128`, so it
+/// cannot overflow). Rejects a rate outside the host bound and an exchange
+/// that would credit nothing (claiming external points for no currency).
+pub fn validate_exchange(
+    from_amount: i64,
+    rate_num: i64,
+    rate_den: i64,
+    max_amount: i64,
+) -> Result<i64, EconomyError> {
+    if from_amount < 1 {
+        return Err(EconomyError::Invalid(
+            "from_amount must be >= 1".to_string(),
+        ));
+    }
+    if !(1..=MAX_EXCHANGE_RATE_PART).contains(&rate_num)
+        || !(1..=MAX_EXCHANGE_RATE_PART).contains(&rate_den)
+    {
+        return Err(EconomyError::Invalid(format!(
+            "rate parts must be 1..={MAX_EXCHANGE_RATE_PART}"
+        )));
+    }
+    if i128::from(rate_num) > i128::from(rate_den) * i128::from(MAX_EXCHANGE_MULTIPLE) {
+        return Err(EconomyError::Invalid(format!(
+            "rate exceeds the host bound ({MAX_EXCHANGE_MULTIPLE}x)"
+        )));
+    }
+    let credited = i128::from(from_amount) * i128::from(rate_num) / i128::from(rate_den);
+    let credited = i64::try_from(credited)
+        .map_err(|_| EconomyError::Invalid("credited amount overflows".to_string()))?;
+    if credited < 1 {
+        return Err(EconomyError::Invalid(
+            "exchange would credit nothing".to_string(),
+        ));
+    }
+    if credited > max_amount {
+        return Err(EconomyError::OverCap { cap: max_amount });
+    }
+    Ok(credited)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spec_default_rate_500_points_credits_1000_waddlebucks() {
+        assert_eq!(validate_exchange(500, 1000, 500, 10_000).unwrap(), 1000);
+    }
 
     #[test]
     fn wager_validation_accepts_the_boundaries() {
@@ -524,5 +787,77 @@ mod tests {
         // An over-long event id is refused rather than truncated (truncation
         // could make two events collide).
         assert!(IdempotencyKey::for_event(&"e".repeat(200), "wager", 0).is_err());
+    }
+
+    #[test]
+    fn amount_entries_and_exchange_validation() {
+        assert!(validate_amount(1, 5).is_ok());
+        assert!(matches!(
+            validate_amount(0, 5),
+            Err(EconomyError::Invalid(_))
+        ));
+        assert_eq!(validate_amount(6, 5), Err(EconomyError::OverCap { cap: 5 }));
+
+        let (a, b) = (uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2));
+        let (sorted, total) = validate_entries(&[(b, 3), (a, 4)], Some(5)).unwrap();
+        assert_eq!((sorted, total), (vec![(a, 4), (b, 3)], 7));
+        assert!(validate_entries(&[], None).is_err());
+        assert!(validate_entries(&[(a, 1), (a, 2)], None).is_err());
+        assert!(validate_entries(&[(a, 0)], None).is_err());
+        assert!(validate_entries(&[(a, i64::MAX), (b, 1)], None).is_err());
+        assert_eq!(
+            validate_entries(&[(a, 6)], Some(5)),
+            Err(EconomyError::OverCap { cap: 5 })
+        );
+        let many: Vec<_> = (0..=MAX_BATCH_ENTRIES as u128)
+            .map(|i| (uuid::Uuid::from_u128(i), 1))
+            .collect();
+        assert!(validate_entries(&many, None).is_err());
+
+        // 1000 points : 500 -> floor(7 * 1000 / 500) = 14
+        assert_eq!(validate_exchange(7, 1000, 500, 100), Ok(14));
+        assert!(validate_exchange(1, 1, 2, 100).is_err(), "rounds to 0");
+        assert_eq!(validate_exchange(3, 1, 2, 100), Ok(1), "floors");
+        assert!(validate_exchange(1, 1001, 1, 10_000).is_err(), "rate bound");
+        assert!(validate_exchange(1, 1000, 1, 10_000).is_ok());
+        assert!(validate_exchange(1, 0, 1, 100).is_err());
+        assert!(validate_exchange(1, 1, 0, 100).is_err());
+        assert!(
+            validate_exchange(1, MAX_EXCHANGE_RATE_PART + 1, MAX_EXCHANGE_RATE_PART, 100).is_err()
+        );
+        assert_eq!(
+            validate_exchange(100, 10, 1, 500),
+            Err(EconomyError::OverCap { cap: 500 })
+        );
+        assert!(
+            validate_exchange(i64::MAX, 1000, 1, i64::MAX).is_err(),
+            "overflow"
+        );
+    }
+
+    #[test]
+    fn pot_account_is_deterministic_per_community_and_never_a_v4_user() {
+        let s = |t, c| EconomyScope {
+            tenant_id: t,
+            community_id: c,
+            app_id: "x".into(),
+        };
+        assert_eq!(pot_account(&s(1, 10)), pot_account(&s(1, 10)));
+        assert_ne!(pot_account(&s(1, 10)), pot_account(&s(1, 11)));
+        assert_ne!(pot_account(&s(1, 10)), pot_account(&s(2, 10)));
+        assert_ne!(pot_account(&s(1, 10)).get_version_num(), 4);
+    }
+
+    #[test]
+    fn new_error_wire_codes() {
+        assert_eq!(
+            EconomyError::SupplyCapReached { cap: 9 }.wire_code(),
+            "over_cap"
+        );
+        assert_eq!(
+            EconomyError::SupplyCapReached { cap: 9 }.wire_message(),
+            "9"
+        );
+        assert_eq!(EconomyError::NotAuthorized.wire_code(), "admin_required");
     }
 }

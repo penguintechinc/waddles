@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import NoReturn
 
 #: The fixed verb vocabulary every bundle command grammar shares. `enable`/
 #: `disable` take exactly one sub-module-name argument (see `parse_command`
@@ -172,3 +173,130 @@ def substitute_placeholders(template: str, values: dict[str, str]) -> str:
         return values[name]
 
     return _PLACEHOLDER_RE.sub(_replace, template)
+
+
+@dataclass(slots=True, frozen=True)
+class CliArgument:
+    """One declarative CLI argument: positional or short/long flag with a typed value.
+
+    Specs live with the command, so tokenization, quoting and generated help stay
+    shared across bundles rather than becoming separate handwritten parsers.
+    """
+
+    name: str
+    flags: tuple[str, ...] = ()
+    required: bool = True
+    kind: str = "string"
+    default: str | int | None = None
+    help: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class CliCommandSpec:
+    """A command's argument schema, optional subcommands and default subcommand."""
+
+    name: str
+    arguments: tuple[CliArgument, ...] = ()
+    subcommands: tuple[CliCommandSpec, ...] = ()
+    default_subcommand: str | None = None
+    description: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class ParsedCliCommand:
+    """Typed CLI values and generated help; help requests never execute handlers."""
+
+    command: str
+    subcommand: str | None
+    values: dict[str, str | int | None]
+    help: str | None = None
+
+
+def parse_cli_command(text: str, spec: CliCommandSpec) -> ParsedCliCommand:
+    """Parse Unix-style flags and quoted positionals using the shared command schema.
+
+    Errors raise CommandUsageError instead of exiting or writing to process stdout.
+    Legacy parse_command callers retain their existing grammar unchanged.
+    """
+    import argparse
+    import shlex
+
+    class Parser(argparse.ArgumentParser):
+        """Convert argparse process exits into the SDK's typed usage exception."""
+
+        def error(self, message: str) -> NoReturn:
+            """Reject invalid input with generated usage and no process side effects."""
+            raise CommandUsageError(self.format_usage().strip() + " " + message)
+
+    try:
+        tokens = shlex.split(text)
+    except ValueError as exc:
+        raise CommandUsageError("unclosed command quote") from exc
+    if not tokens or tokens[0].lower() != "!" + spec.name.lower():
+        raise CommandUsageError("unrecognized command")
+    rest = tokens[1:]
+    selected = spec
+    subcommand: str | None = None
+    subcommands = {child.name: child for child in spec.subcommands}
+    if len(subcommands) != len(spec.subcommands):
+        raise ValueError("duplicate CLI subcommand in schema")
+    if subcommands:
+        first = rest[0].lower() if rest else None
+        subcommand = first if first in subcommands else spec.default_subcommand
+        if first in subcommands:
+            rest = rest[1:]
+        if subcommand is not None:
+            if subcommand not in subcommands:
+                raise ValueError("unknown default CLI subcommand in schema")
+            selected = subcommands[subcommand]
+        elif rest and rest != ["--help"]:
+            raise CommandUsageError("unknown subcommand")
+    program = "!" + spec.name + (" " + subcommand if subcommand else "")
+
+    def integer(raw: str) -> int:
+        """Accept canonical bounded decimal syntax without Python-only underscores or plus signs."""
+        if len(raw) > 20 or not re.fullmatch(r"-?[0-9]+", raw):
+            raise argparse.ArgumentTypeError("expected a decimal integer")
+        return int(raw)
+
+    parser = Parser(
+        prog=program, description=selected.description or spec.description, add_help=False
+    )
+    parser.add_argument("--help", action="store_true", dest="_cli_help", help="show command help")
+    names: set[str] = set()
+    for argument in selected.arguments:
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", argument.name) or argument.name in names:
+            raise ValueError("invalid or duplicate CLI argument name")
+        names.add(argument.name)
+        if argument.kind not in {"string", "integer"}:
+            raise ValueError("unknown CLI argument kind")
+        if argument.flags:
+            if any(
+                not re.fullmatch(r"-[a-zA-Z]|--[a-z][a-z0-9-]*", flag) for flag in argument.flags
+            ):
+                raise ValueError("invalid CLI argument flag")
+            parser.add_argument(
+                *argument.flags,
+                dest=argument.name,
+                required=argument.required,
+                help=argument.help,
+                default=argument.default,
+                type=integer if argument.kind == "integer" else str,
+            )
+        else:
+            parser.add_argument(
+                argument.name,
+                nargs=None if argument.required else "?",
+                help=argument.help,
+                default=argument.default,
+                type=integer if argument.kind == "integer" else str,
+            )
+    # Help is inspected before parsing required arguments, as standard CLI users expect.
+    if "--help" in rest:
+        help_text = parser.format_help()
+        if subcommands:
+            help_text += "\nSubcommands: " + ", ".join(subcommands) + "\n"
+        return ParsedCliCommand(spec.name, subcommand, {}, help_text.strip())
+    parsed = vars(parser.parse_args(rest))
+    parsed.pop("_cli_help")
+    return ParsedCliCommand(spec.name, subcommand, parsed)

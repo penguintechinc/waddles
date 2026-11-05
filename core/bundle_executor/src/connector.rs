@@ -56,6 +56,7 @@ use wasmtime::component::Component;
 use wasmtime::{Engine, Store};
 
 use crate::config::CliConfig;
+use crate::engine::connector_tools_world::{ConnectorTools, ConnectorToolsPre};
 use crate::engine::connector_world::{Connector, ConnectorPre};
 use crate::engine::LinkerCache;
 use crate::error::ExecutorError;
@@ -69,6 +70,40 @@ use crate::metrics::{executor_metrics, ExecutorMetrics};
 pub use crate::engine::connector_world::waddle::connector::types::{
     ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
 };
+/// The `tool-provider.call` error a `connector-tools` guest returns (P6a T4).
+pub use crate::engine::stage_tools_world::waddle::bundle::tool::ToolError;
+
+/// A pre-linked connector component: the frozen `connector` world, or the
+/// additive `connector-tools` world (P6a T4: `connector` + `tool` import +
+/// `tool-provider` export). Chosen once at load from the manifest's world.
+#[derive(Clone)]
+enum ConnectorPreKind {
+    Plain(ConnectorPre<ExecState>),
+    Tools(ConnectorToolsPre<ExecState>),
+}
+
+/// One instantiated connector component of either world.
+enum ConnectorInstance {
+    Plain(Connector),
+    Tools(ConnectorTools),
+}
+
+/// Awaits one `receiver` export call on whichever world's generated accessor
+/// the instance carries. Each world generates its own `Guest` struct (the
+/// `with` remap shares the data types, not the export accessor), so the call
+/// is spelled out per arm; argument and return types are the shared ones.
+macro_rules! receiver_call {
+    ($inst:expr, $method:ident, $store:expr $(, $arg:expr)*) => {
+        match $inst {
+            ConnectorInstance::Plain(c) => {
+                c.waddle_connector_receiver().$method($store $(, $arg)*).await
+            }
+            ConnectorInstance::Tools(c) => {
+                c.waddle_connector_receiver().$method($store $(, $arg)*).await
+            }
+        }
+    };
+}
 
 /// Per-call resource bounds for one connector (spec S3.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +118,23 @@ pub struct ConnectorLimits {
     pub pool_size: usize,
     /// How long a call waits for a free slot before `pool_exhausted`.
     pub pool_wait: Duration,
+    /// Largest accepted `tool-provider.call` args, canonical-JSON bytes.
+    pub max_tool_args_bytes: usize,
+    /// Largest accepted `tool-provider.call` result, canonical-JSON bytes.
+    pub max_tool_result_bytes: usize,
 }
+
+/// Default cap on tool args / results: just under the host-API
+/// `MAX_FRAME_BYTES` (1 MiB), since a larger value could not ride a wire frame
+/// anyway. Checked BEFORE the result is parsed into a `serde_json::Value`, so a
+/// guest cannot amplify a huge byte blob into a larger host-heap tree.
+pub const MAX_TOOL_PAYLOAD_BYTES: usize = 900_000;
+
+/// Extra wall-clock a call may run past its epoch deadline before the host
+/// abandons it. The epoch trap normally ends a guest at `deadline_ms`; this
+/// grace only matters when the guest is parked on a HOST await (a stage that
+/// never answers a host call), where no epoch trap can fire.
+const HOST_AWAIT_GRACE: Duration = Duration::from_millis(250);
 
 impl ConnectorLimits {
     /// Derives the limits from the executor's validated [`CliConfig`].
@@ -95,6 +146,8 @@ impl ConnectorLimits {
             memory_limit_mb: cfg.executor_memory_limit_mb,
             pool_size: cfg.executor_connector_pool_size as usize,
             pool_wait: Duration::from_millis(cfg.executor_pool_wait_ms),
+            max_tool_args_bytes: MAX_TOOL_PAYLOAD_BYTES,
+            max_tool_result_bytes: MAX_TOOL_PAYLOAD_BYTES,
         }
     }
 }
@@ -109,6 +162,26 @@ pub enum ConnectorCallError {
     /// The guest returned `result::err(frame-error)`.
     #[error("connector returned a frame-error: {0:?}")]
     Guest(FrameError),
+    /// The guest's `tool-provider.call` returned `result::err(tool-error)`
+    /// (P6a T4). A typed tool refusal, not a sandbox fault.
+    #[error("connector tool call returned a tool-error: {0:?}")]
+    Tool(ToolError),
+    /// `tool-provider.call` on a component that was loaded under the plain
+    /// `connector` world and therefore exports no tools. Fail loud, never a
+    /// silent empty result.
+    #[error("connector exports no tool-provider (loaded under the `connector` world)")]
+    NoToolProvider,
+    /// A tool's args (caller) or result (guest) exceeded the configured byte
+    /// cap. Refused loudly; the oversized value is never parsed or forwarded.
+    #[error("tool {what} is {len} bytes, over the {max}-byte cap")]
+    PayloadTooLarge {
+        /// `"args"` or `"result"`.
+        what: &'static str,
+        /// The offending size.
+        len: usize,
+        /// The cap it exceeded.
+        max: usize,
+    },
     /// The guest's fuel budget was exhausted (spec S3.5 / Gemini cond. 4).
     #[error("connector call exhausted its fuel budget: {0}")]
     FuelExhausted(String),
@@ -143,6 +216,9 @@ impl ConnectorCallError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Guest(_) => "guest_error",
+            Self::Tool(_) => "tool_error",
+            Self::NoToolProvider => "no_tool_provider",
+            Self::PayloadTooLarge { .. } => "payload_too_large",
             Self::FuelExhausted(_) => "fuel_exhausted",
             Self::DeadlineExceeded(_) => "deadline",
             Self::MemoryLimit(_) => "memory_limit",
@@ -177,29 +253,80 @@ pub struct CallReply<T> {
     pub fuel_used: u64,
 }
 
+/// The slots one call holds: always one of the combined `pool_size` pool, plus
+/// (for a tool call) one of the tool share. Released together on drop.
+struct CallPermits {
+    _total: OwnedSemaphorePermit,
+    _tool_share: Option<OwnedSemaphorePermit>,
+}
+
 /// Runs one connector export on a blocking-pool thread under a pool slot, a
 /// fresh bounded `Store` and an armed fuel budget, then classifies and records
 /// the outcome. A macro (not a closure-taking fn) because the guest call
 /// borrows the freshly built `Store` and component instance, which a plain
 /// `FnOnce` signature cannot express without boxing the future.
 macro_rules! run_export {
-    ($host:expr, $export:literal, |$conn:ident, $store:ident| $call:expr) => {{
+    ($host:expr, $export:literal, $guest_err:expr, |$conn:ident, $store:ident| $call:expr) => {{
+        run_export!(
+            $host,
+            $export,
+            $guest_err,
+            pool = receiver,
+            deadline = $host.inner.limits.deadline_ms,
+            |$conn, $store| $call
+        )
+    }};
+    ($host:expr, $export:literal, $guest_err:expr, pool = $pool:ident, deadline = $deadline:expr,
+     |$conn:ident, $store:ident| $call:expr) => {{
         let inner = Arc::clone(&$host.inner);
-        let permit = inner.acquire_slot($export).await?;
+        let deadline_ms: u64 = $deadline;
+        let permit = inner
+            .acquire_slot($export, stringify!($pool) == "tool")
+            .await?;
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
             let _slot = permit;
             handle.block_on(async move {
                 let started = Instant::now();
-                let (mut store, $conn) = inner.fresh_instance($export, started).await?;
+                let (mut store, $conn) =
+                    inner.fresh_instance($export, started, deadline_ms).await?;
                 let $store = &mut store;
-                let outcome = $call.await;
-                inner.finish($export, started, &store, outcome)
+                // The epoch trap cannot interrupt a guest parked on a HOST await
+                // (an import the stage never answers). Bound the whole call by
+                // the deadline plus a grace so the permit is always returned.
+                let budget = Duration::from_millis(deadline_ms) + HOST_AWAIT_GRACE;
+                let outcome = match tokio::time::timeout(budget, $call).await {
+                    Ok(outcome) => outcome,
+                    Err(_elapsed) => {
+                        let err = ConnectorCallError::DeadlineExceeded(
+                            "host await exceeded the call deadline".to_string(),
+                        );
+                        inner.record($export, &err, started);
+                        return Err(err);
+                    }
+                };
+                inner.finish($export, started, &store, outcome, $guest_err)
             })
         })
         .await
         .map_err(|e| ConnectorCallError::Internal(format!("guest task failed: {e}")))?
     }};
+}
+
+/// Size of the tool-provider SHARE of the combined pool: half of it, at least
+/// one. Tool calls draw from this share AND the combined pool, so total
+/// in-flight instances never exceed `pool_size` and saturating tools can never
+/// consume more than the share -- `on-frame`/heartbeat always keep the rest.
+#[must_use]
+pub fn tool_pool_size(receiver_pool_size: usize) -> usize {
+    (receiver_pool_size / 2).max(1)
+}
+
+/// The effective per-call deadline: a caller-supplied (wire) deadline may only
+/// tighten the connector's own limit, never extend it.
+#[must_use]
+pub fn clamp_deadline_ms(requested_ms: Option<u64>, limit_ms: u64) -> u64 {
+    requested_ms.map_or(limit_ms, |r| r.min(limit_ms)).max(1)
 }
 
 /// An always-pinned connector component, pre-linked once, callable many times
@@ -211,11 +338,17 @@ pub struct ConnectorHost {
 
 struct Inner {
     engine: Engine,
-    pre: ConnectorPre<ExecState>,
+    pre: ConnectorPreKind,
     app_id: String,
     digest: String,
     limits: ConnectorLimits,
+    /// The combined cap on concurrent instances (`pool_size`), shared by every
+    /// export kind.
     slots: Arc<Semaphore>,
+    /// The reserved tool share ([`tool_pool_size`]) of `slots`: a tool call
+    /// holds one of these AND one of `slots`, so tool traffic can never occupy
+    /// more than its share and starve `receiver` calls (`on-frame`, heartbeat).
+    tool_slots: Arc<Semaphore>,
     bridge: Option<Arc<HostBridge>>,
     metrics: Arc<ExecutorMetrics>,
 }
@@ -237,9 +370,9 @@ impl ConnectorHost {
         limits: ConnectorLimits,
         bridge: Option<Arc<HostBridge>>,
     ) -> Result<Self, ExecutorError> {
-        if manifest.world != WitWorld::Connector {
+        if !manifest.world.is_connector() {
             return Err(ExecutorError::ConnectorLoad(format!(
-                "{} declares world {:?}, not `connector`",
+                "{} declares world {:?}, not `connector`/`connector-tools`",
                 manifest.app_id, manifest.world
             )));
         }
@@ -270,9 +403,22 @@ impl ConnectorHost {
                 "component does not link against the connector world: {e}"
             ))
         })?;
-        let pre = ConnectorPre::new(instance_pre).map_err(|e| {
-            ExecutorError::ConnectorLoad(format!("component lacks the connector exports: {e}"))
-        })?;
+        let pre = match manifest.world {
+            WitWorld::ConnectorTools => ConnectorToolsPre::new(instance_pre)
+                .map(ConnectorPreKind::Tools)
+                .map_err(|e| {
+                    ExecutorError::ConnectorLoad(format!(
+                        "component lacks the connector-tools exports (receiver/sender/tool-provider): {e}"
+                    ))
+                })?,
+            _ => ConnectorPre::new(instance_pre)
+                .map(ConnectorPreKind::Plain)
+                .map_err(|e| {
+                    ExecutorError::ConnectorLoad(format!(
+                        "component lacks the connector exports: {e}"
+                    ))
+                })?,
+        };
 
         debug!(app_id = %manifest.app_id, pool_size = limits.pool_size, "connector pinned");
         Ok(Self {
@@ -282,6 +428,7 @@ impl ConnectorHost {
                 app_id: manifest.app_id.clone(),
                 digest: manifest.digest.clone(),
                 slots: Arc::new(Semaphore::new(limits.pool_size)),
+                tool_slots: Arc::new(Semaphore::new(tool_pool_size(limits.pool_size))),
                 limits,
                 bridge,
                 metrics: executor_metrics(),
@@ -301,6 +448,7 @@ impl ConnectorHost {
                 digest: i.digest.clone(),
                 limits: i.limits,
                 slots: Arc::clone(&i.slots),
+                tool_slots: Arc::clone(&i.tool_slots),
                 bridge: i.bridge.clone(),
                 metrics,
             }),
@@ -319,7 +467,13 @@ impl ConnectorHost {
         &self.inner.digest
     }
 
-    /// Free slots right now (test/diagnostic introspection).
+    /// Free tool-share slots right now (test/diagnostic introspection).
+    #[must_use]
+    pub fn available_tool_slots(&self) -> usize {
+        self.inner.tool_slots.available_permits()
+    }
+
+    /// Free slots of the combined pool right now (test/diagnostic introspection).
     #[must_use]
     pub fn available_slots(&self) -> usize {
         self.inner.slots.available_permits()
@@ -332,10 +486,12 @@ impl ConnectorHost {
         &self,
         ctx: ConnectionCtx,
     ) -> Result<CallReply<HandshakePayload>, ConnectorCallError> {
-        run_export!(self, "on-connect", |conn, store| {
-            conn.waddle_connector_receiver()
-                .call_on_connect(store, &ctx)
-        })
+        run_export!(
+            self,
+            "on-connect",
+            ConnectorCallError::Guest,
+            |conn, store| { async { receiver_call!(&conn, call_on_connect, store, &ctx) } }
+        )
     }
 
     /// `receiver.on-frame`: normalize one raw frame into zero or more events.
@@ -343,10 +499,12 @@ impl ConnectorHost {
         &self,
         frame: RawFrame,
     ) -> Result<CallReply<Vec<NormalizedEvent>>, ConnectorCallError> {
-        run_export!(self, "on-frame", |conn, store| {
-            conn.waddle_connector_receiver()
-                .call_on_frame(store, &frame)
-        })
+        run_export!(
+            self,
+            "on-frame",
+            ConnectorCallError::Guest,
+            |conn, store| { async { receiver_call!(&conn, call_on_frame, store, &frame) } }
+        )
     }
 
     /// `receiver.on-heartbeat-due`: an optional bundle-supplied heartbeat body.
@@ -354,10 +512,96 @@ impl ConnectorHost {
         &self,
         ctx: ConnectionCtx,
     ) -> Result<CallReply<Option<Vec<u8>>>, ConnectorCallError> {
-        run_export!(self, "on-heartbeat-due", |conn, store| {
-            conn.waddle_connector_receiver()
-                .call_on_heartbeat_due(store, &ctx)
-        })
+        run_export!(
+            self,
+            "on-heartbeat-due",
+            ConnectorCallError::Guest,
+            |conn, store| { async { receiver_call!(&conn, call_on_heartbeat_due, store, &ctx) } }
+        )
+    }
+
+    /// `tool-provider.call` (P6a T4): run one of the connector overlay's own
+    /// exported tools (`get_chatters`, `send_chat`, ...). `args` and the
+    /// result are canonical JSON bytes. Fails loud with
+    /// [`ConnectorCallError::NoToolProvider`] on a plain-`connector` component
+    /// (no silent empty result); a guest `tool-error` is
+    /// [`ConnectorCallError::Tool`]. Runs under the same pool slot, fuel
+    /// budget and deadline as every other connector export.
+    pub async fn call_tool(
+        &self,
+        name: String,
+        args: Vec<u8>,
+    ) -> Result<CallReply<Vec<u8>>, ConnectorCallError> {
+        self.call_tool_with_deadline(name, args, None).await
+    }
+
+    /// [`Self::call_tool`] with a caller-supplied deadline (the wire
+    /// `InvokeBody.deadline_ms`), clamped to `min(requested, limits.deadline_ms)`
+    /// -- a caller can tighten but never extend the connector's own bound. Runs
+    /// on the dedicated tool pool ([`tool_pool_size`]), never the receiver pool.
+    pub async fn call_tool_with_deadline(
+        &self,
+        name: String,
+        args: Vec<u8>,
+        requested_deadline_ms: Option<u64>,
+    ) -> Result<CallReply<Vec<u8>>, ConnectorCallError> {
+        let deadline = clamp_deadline_ms(requested_deadline_ms, self.inner.limits.deadline_ms);
+        // Size gate BEFORE admission: an oversized request never takes a slot.
+        if args.len() > self.inner.limits.max_tool_args_bytes {
+            let err = ConnectorCallError::PayloadTooLarge {
+                what: "args",
+                len: args.len(),
+                max: self.inner.limits.max_tool_args_bytes,
+            };
+            self.inner.record("tool-call", &err, Instant::now());
+            return Err(err);
+        }
+        if matches!(self.inner.pre, ConnectorPreKind::Plain(_)) {
+            let err = ConnectorCallError::NoToolProvider;
+            self.inner.metrics.record_connector_call(
+                &self.inner.app_id,
+                "tool-call",
+                err.kind(),
+                Duration::ZERO,
+            );
+            warn!(app_id = %self.inner.app_id, "tool call on a connector with no tool-provider");
+            return Err(err);
+        }
+        let reply = run_export!(
+            self,
+            "tool-call",
+            ConnectorCallError::Tool,
+            pool = tool,
+            deadline = deadline,
+            |conn, store| {
+                async {
+                    match &conn {
+                        ConnectorInstance::Tools(c) => {
+                            c.waddle_bundle_tool_provider()
+                                .call_call(store, &name, &args)
+                                .await
+                        }
+                        // Unreachable: guarded above. Surfaces as a trap-shaped
+                        // host error rather than a panic if it ever is not.
+                        ConnectorInstance::Plain(_) => Err(wasmtime::Error::msg(
+                            "tool-call routed to a plain connector instance",
+                        )),
+                    }
+                }
+            }
+        )?;
+        // The guest result is already lifted into a host `Vec`; refuse an
+        // oversized one HERE, before anything parses it into a larger tree.
+        if reply.value.len() > self.inner.limits.max_tool_result_bytes {
+            let err = ConnectorCallError::PayloadTooLarge {
+                what: "result",
+                len: reply.value.len(),
+                max: self.inner.limits.max_tool_result_bytes,
+            };
+            self.inner.record("tool-call", &err, Instant::now());
+            return Err(err);
+        }
+        Ok(reply)
     }
 
     /// `receiver.on-disconnect`: tell the connector the connection ended. Has
@@ -367,31 +611,41 @@ impl ConnectorHost {
         ctx: ConnectionCtx,
         reason: String,
     ) -> Result<CallReply<()>, ConnectorCallError> {
-        run_export!(self, "on-disconnect", |conn, store| {
-            async {
-                conn.waddle_connector_receiver()
-                    .call_on_disconnect(store, &ctx, &reason)
-                    .await
-                    .map(Ok)
+        run_export!(
+            self,
+            "on-disconnect",
+            ConnectorCallError::Guest,
+            |conn, store| {
+                async { receiver_call!(&conn, call_on_disconnect, store, &ctx, &reason).map(Ok) }
             }
-        })
+        )
     }
 }
 
 impl Inner {
     /// Waits up to `pool_wait` for a slot; a full pool is typed back-pressure,
-    /// recorded, never an unbounded queue.
+    /// recorded, never an unbounded queue. A tool call takes its reserved share
+    /// FIRST and then a combined-pool slot (a receiver call never waits on the
+    /// share, so the order cannot deadlock); one timeout bounds both waits.
     async fn acquire_slot(
         &self,
         export: &'static str,
-    ) -> Result<OwnedSemaphorePermit, ConnectorCallError> {
-        let acquired = tokio::time::timeout(
-            self.limits.pool_wait,
-            Arc::clone(&self.slots).acquire_owned(),
-        )
-        .await;
-        match acquired {
-            Ok(Ok(permit)) => Ok(permit),
+        tool: bool,
+    ) -> Result<CallPermits, ConnectorCallError> {
+        let acquire = async {
+            let tool_share = if tool {
+                Some(Arc::clone(&self.tool_slots).acquire_owned().await?)
+            } else {
+                None
+            };
+            let total = Arc::clone(&self.slots).acquire_owned().await?;
+            Ok::<_, tokio::sync::AcquireError>(CallPermits {
+                _total: total,
+                _tool_share: tool_share,
+            })
+        };
+        match tokio::time::timeout(self.limits.pool_wait, acquire).await {
+            Ok(Ok(permits)) => Ok(permits),
             Ok(Err(_closed)) => Err(ConnectorCallError::Internal(
                 "connector pool semaphore closed".to_string(),
             )),
@@ -417,10 +671,11 @@ impl Inner {
         &self,
         export: &'static str,
         started: Instant,
-    ) -> Result<(Store<ExecState>, Connector), ConnectorCallError> {
+        deadline_ms: u64,
+    ) -> Result<(Store<ExecState>, ConnectorInstance), ConnectorCallError> {
         let exec_state = ExecState::new(self.bridge.clone(), self.app_id.clone(), 0)
             .with_memory_limit_mb(self.limits.memory_limit_mb);
-        let mut store = new_bounded_store(&self.engine, exec_state, self.limits.deadline_ms);
+        let mut store = new_bounded_store(&self.engine, exec_state, deadline_ms);
         if let Err(e) = store.set_fuel(self.limits.fuel) {
             // Fuel accounting off on an engine `build_engine` always enables it
             // for is a host invariant breach -- never blamed on the guest.
@@ -430,7 +685,17 @@ impl Inner {
             self.record(export, &err, started);
             return Err(err);
         }
-        match self.pre.instantiate_async(&mut store).await {
+        let instantiated = match &self.pre {
+            ConnectorPreKind::Plain(pre) => pre
+                .instantiate_async(&mut store)
+                .await
+                .map(ConnectorInstance::Plain),
+            ConnectorPreKind::Tools(pre) => pre
+                .instantiate_async(&mut store)
+                .await
+                .map(ConnectorInstance::Tools),
+        };
+        match instantiated {
             Ok(conn) => Ok((store, conn)),
             Err(e) => {
                 let err = self.classify(e, &store, true);
@@ -442,12 +707,13 @@ impl Inner {
 
     /// Maps the raw wasmtime outcome of an export call to a typed result,
     /// records it, and reads back the fuel spent.
-    fn finish<T>(
+    fn finish<T, E>(
         &self,
         export: &'static str,
         started: Instant,
         store: &Store<ExecState>,
-        outcome: wasmtime::Result<Result<T, FrameError>>,
+        outcome: wasmtime::Result<Result<T, E>>,
+        guest_err: fn(E) -> ConnectorCallError,
     ) -> Result<CallReply<T>, ConnectorCallError> {
         let result = match outcome {
             Ok(Ok(value)) => {
@@ -459,7 +725,7 @@ impl Inner {
                     fuel_used: self.limits.fuel.saturating_sub(r),
                 })
             }
-            Ok(Err(frame_error)) => Err(ConnectorCallError::Guest(frame_error)),
+            Ok(Err(guest_error)) => Err(guest_err(guest_error)),
             Err(trap) => Err(self.classify(trap, store, false)),
         };
         match &result {
@@ -560,6 +826,14 @@ mod tests {
             ConnectorCallError::PoolExhausted { in_flight: 1 }.kind(),
             ConnectorCallError::InstantiateFailed(String::new()).kind(),
             ConnectorCallError::Internal(String::new()).kind(),
+            ConnectorCallError::PayloadTooLarge {
+                what: "args",
+                len: 2,
+                max: 1,
+            }
+            .kind(),
+            ConnectorCallError::NoToolProvider.kind(),
+            ConnectorCallError::Tool(ToolError::TargetUnavailable).kind(),
         ];
         let distinct: std::collections::BTreeSet<_> = kinds.iter().collect();
         assert_eq!(
@@ -666,5 +940,84 @@ mod tests {
             ) >= 1.0,
             "the latency histogram must have a sample"
         );
+    }
+
+    /// regression (PR #984 review claim 2): the epoch deadline cannot interrupt a
+    /// guest parked on a HOST await (a stage that never answers a `tool.invoke`
+    /// host call). The call must still end near its deadline with a typed
+    /// `DeadlineExceeded`, and the tool permit must come back -- never be held
+    /// by a hung blocking task.
+    #[tokio::test]
+    async fn a_tool_call_hung_on_a_host_await_is_bounded_by_its_deadline() {
+        use crate::engine::{build_engine, LinkerCache};
+        use crate::wire::Connection;
+        use clap::Parser;
+        use sha2::{Digest, Sha256};
+
+        const TOOLS: &[u8] = include_bytes!("../tests/fixtures/connector_tools_fixture.wasm");
+        let app_id = "waddles.core.test.connector-hang";
+        let cfg = CliConfig::try_parse_from([
+            "bundle-executor",
+            "--stage-host-api-addr",
+            "svc-process:8301",
+        ])
+        .expect("static test args always parse");
+        let engine = build_engine(&cfg).expect("engine");
+        let _ticker = crate::engine::spawn_epoch_ticker(&engine);
+        let mut h = Sha256::new();
+        h.update(TOOLS);
+        let manifest = VerifiedManifest::new(
+            app_id,
+            format!("sha256:{:x}", h.finalize()),
+            WitWorld::ConnectorTools,
+            std::collections::HashSet::new(),
+        );
+        // A stage that reads the host call and NEVER answers it.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let connection = Connection::new(tx);
+        let silent_stage = tokio::spawn(async move {
+            let _held_open = rx.recv().await;
+            std::future::pending::<()>().await;
+        });
+        let host = ConnectorHost::load(
+            &engine,
+            &LinkerCache::new(engine.clone()),
+            &manifest,
+            TOOLS.to_vec(),
+            ConnectorLimits::from_config(&cfg),
+            Some(HostBridge::new(connection)),
+        )
+        .await
+        .expect("tools overlay loads");
+        let before = host.available_tool_slots();
+
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            host.call_tool_with_deadline(
+                "relay".into(),
+                br#"{"target":"waddles.core.other","tool":"x","args":{}}"#.to_vec(),
+                Some(300),
+            ),
+        )
+        .await
+        .expect("a hung host await must not outlive the deadline by seconds");
+        let err = outcome.expect_err("the hung call must fail, not fabricate a result");
+        assert!(
+            matches!(err, ConnectorCallError::DeadlineExceeded(_)),
+            "{err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "took {:?}",
+            started.elapsed()
+        );
+        // The permit is released once the bounded task unwinds.
+        let give_up = Instant::now() + Duration::from_secs(3);
+        while host.available_tool_slots() != before {
+            assert!(Instant::now() < give_up, "tool permit never came back");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        silent_stage.abort();
     }
 }

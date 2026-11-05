@@ -35,4 +35,20 @@ for exp in receiver sender; do
   grep -q "export $exp;" "$FILE"
 done
 
+# P6a T4: `connector-tools` world = connector + tool import + tool-provider export.
+grep -q "^world connector-tools {" "$FILE"
+grep -q "  import waddle:bundle/tool@1.0.0;" "$FILE"
+grep -q "  export waddle:bundle/tool-provider@1.0.0;" "$FILE"
+# The `connector` world itself stays frozen: no tool surface in it.
+CONNECTOR_BODY="$(awk '/^world connector \{/{f=1} f{print} f&&/^\}/{exit}' "$FILE")"
+! grep -q "tool" <<<"$CONNECTOR_BODY"
+
+# deps/tool.wit carries byte-identical `tool` + `tool-provider` interface bodies.
+TOOL_DEP="wit/waddle-connector/deps/waddle-bundle/tool.wit"
+TOOL_SRC="wit/waddle-bundle/tool.wit"
+test -f "$TOOL_DEP"
+iface_bodies() { awk '/^interface (tool|tool-provider) \{/{f=1} f{print} f&&/^\}/{f=0}' "$1"; }
+test -n "$(iface_bodies "$TOOL_SRC")"
+diff <(iface_bodies "$TOOL_SRC") <(iface_bodies "$TOOL_DEP")
+
 echo "PASS: connector.wit declares identity + 4 receiver exports + 1 sender export + 4 imports + 2 exports"

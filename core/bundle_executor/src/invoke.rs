@@ -515,6 +515,37 @@ impl<S: ComponentSource> Executor<S> {
         }
     }
 
+    /// Takes one process-wide call slot (`EXECUTOR_MAX_CONCURRENT_CALLS`),
+    /// waiting at most `EXECUTOR_POOL_WAIT_MS`; the connector `tool-call` path
+    /// has no per-bundle semaphore, so this is its stage-equivalent admission.
+    async fn acquire_global_slot(&self, app_id: &str) -> Result<OwnedSemaphorePermit, ErrorBody> {
+        match tokio::time::timeout(
+            self.pool_wait,
+            Arc::clone(&self.call_limiter).acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(_closed)) => Err(error_body(
+                ErrorCode::ShuttingDown,
+                "executor is shutting down",
+            )),
+            Err(_elapsed) => {
+                warn!(
+                    app_id,
+                    pool_wait_ms = self.pool_wait.as_millis() as u64,
+                    "no free global call slot within the pool wait; failing pool_exhausted"
+                );
+                let mut body = error_body(
+                    ErrorCode::ExecutorDeadline,
+                    "pool_exhausted: no free instance slot within EXECUTOR_POOL_WAIT_MS",
+                );
+                body.detail = Some("pool_exhausted".to_string());
+                Err(body)
+            }
+        }
+    }
+
     /// The `hello` frame this executor opens every connection with (spec
     /// SS6.6/SS7.2): reports the pinned wasmtime version, ABI and
     /// collector so the stage can refuse a mismatched connection instead
@@ -1089,6 +1120,19 @@ impl<S: ComponentSource> Executor<S> {
         if body.export.is_connector() {
             return self.connectors.invoke(body).await;
         }
+        // A `tool-call` for a pinned `connector-tools` overlay (P6a T4) rides
+        // the connector registry too: connectors are never in `bundles`.
+        //
+        // Authorization is upstream, not here: only the mTLS-pinned stage
+        // (`HOST_API_STAGE_IDENTITY`) can send an `invoke`, and the stage
+        // authorizes every tool call (`bundle_tool_call::authorize_tool_call`:
+        // P1 matrix + P2 `tool.call` grant, tenant/community host-asserted)
+        // before it sends one. What this process owns is ADMISSION, so the call
+        // takes the same global slot as every stage export (PR #984 review).
+        if body.export == ExportKind::ToolCall && self.connectors.contains(&body.digest).await {
+            let _global = self.acquire_global_slot(&body.app_id).await?;
+            return self.connectors.invoke(body).await;
+        }
         let (pre, slots, memory_limit_mb, allowed_scopes) = {
             let bundles = self.bundles.read().await;
             let loaded = bundles
@@ -1403,6 +1447,18 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
                 .await;
             metrics.record_guest(&body.app_id, "tool_call", guest_started.elapsed());
             match outcome {
+                Ok(Ok(bytes)) if bytes.len() > crate::connector::MAX_TOOL_PAYLOAD_BYTES => {
+                    // Size-check before parsing: a huge guest blob must not be
+                    // amplified into a larger host-heap `Value` tree.
+                    return Err(error_body(
+                        ErrorCode::MalformedFrame,
+                        format!(
+                            "tool result is {} bytes, over the {}-byte cap",
+                            bytes.len(),
+                            crate::connector::MAX_TOOL_PAYLOAD_BYTES
+                        ),
+                    ));
+                }
                 Ok(Ok(bytes)) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
                     Ok(v) => Ok(serde_json::json!({ "ok": v })),
                     Err(e) => {

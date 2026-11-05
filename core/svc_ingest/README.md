@@ -3,6 +3,35 @@
 Owns inbound platform connections and HTTP intake; normalizes events and appends them once to the
 Valkey stream spine. No database.
 
+## Generic transport credentials
+
+`WsTransport` and `PollTransport` use `TransportSecrets::new(resolver, community_id)`
+with a real `connection_resolver::ConnectionResolver`. The host binds the community
+and the handle-to-connection map; a guest can name a registered handle but cannot
+select a different community. Each handshake or poll resolves its credential anew,
+so rotation is visible on the next use. OAuth access tokens, bearer credentials and
+API-key values are supported; empty values and multi-field credentials fail closed.
+
+A credential is released only to an approved destination: the target URL host must be in
+the host-owned per-provider allowlist (`connector::secrets::approved_hosts`, keyed by the
+RESOLVED connection's provider, exact hosts, unknown provider = none), and a static row's
+`endpoint.url` host must also match. An optional expected provider
+(`with_expected_provider`) must equal the resolved one. API-key rows use the stored header
+name. Follow-up: a mandatory approved endpoint on OAuth records would tighten this floor
+from per-provider to per-connection (hub-api + connection_resolver change).
+
+Webhook verification uses `ConnectionResolverSecrets` instead. Its
+`WebhookSecretSource` trait is separate from `TransportSecretSource`, and it rejects
+OAuth access tokens as signing keys. Resolved secrets stay in host-owned zeroizing
+buffers. HTTP and WebSocket libraries may retain their own non-zeroizing send-buffer
+copies, as documented in the transport modules.
+
+These transport primitives do not activate generic runtime intake. Production
+activation also requires the authenticated executor link and a trusted registry of
+connector bindings; the generic webhook route continues to return 503 until those
+dependencies are wired. The legacy EventSub environment-secret implementation is
+still present and must be retired when that runtime path is ready.
+
 ## Per-community Twitch sessions (`INGEST_DYNAMIC_CONNECTIONS`)
 
 With the flag ON, svc-ingest runs one Twitch IRC session **per connected bot/channel binding**
@@ -102,3 +131,14 @@ with a WARN and counted `svc_ingest_outbound_pin_refused_total{reason="no_origin
 intermediate build: `no_pin_sig`; stamped but without `exp_ms`: `pin_exp_invalid`). A Discord entry whose stamp fails verification is dropped and counted but NEVER acked (an unauthenticated
 writer must not settle another producer's `op_id`); the real producer times out. `op_id` is MAC-bound. On alpha, accept the loss of in-flight chat ops. (The metric label is `no_origin_pin`, not
 `missing_origin`.) A refused entry is already popped (`BRPOP`) so it is never retried; there is no poison loop.
+
+## Connector egress (SSRF guard)
+
+Poll/WebSocket connector transports resolve and pin their endpoint through `connector::egress_guard`, a thin
+adapter over `bundle_host_http::guarded` -- the one shared implementation (denylist incl. IPv4-mapped/NAT64 v6,
+resolve-then-connect pinning, https/wss only, no userinfo, class-only errors, `guarded_egress_total{outcome}`
+metric + tracing span). The former mirrored denylist was removed; do not re-add range logic here. Real-path
+redirect/rebind tests live in `core/bundle_host_http/tests/guarded_real_path.rs` (`cargo test --locked`).
+Follow-up: `poll.rs::pinned_client` should call `egress_guard::pinned_client` once PR #982 lands (kept out of this
+change to avoid conflicting with it); the Discord REST/outbound client (`outbound.rs`, PR #987 area) is not yet routed
+through the guard.

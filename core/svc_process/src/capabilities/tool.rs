@@ -52,6 +52,11 @@ pub struct ToolContext {
     pub deadline: Option<Instant>,
     /// The caller's trace context, forwarded onto the nested invoke.
     pub trace: Option<TraceContext>,
+    /// `true` once any hop of the chain was invoked as a READ tool: the whole
+    /// downstream subtree is then read-only and may not invoke a write tool
+    /// (a read-labelled call must never mutate, and has no retry token of its
+    /// own to make a nested write replay-safe).
+    pub read_only: bool,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -70,19 +75,38 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
     /// the grown call chain / shortened deadline. The caller's identity facts
     /// ride along unchanged as host-derived context (the target decides whether
     /// to use them; they are never app-suppliable).
-    fn for_tool_target(
-        &self,
-        target_app_id: String,
-        target_version: i64,
-        ctx: ToolContext,
-    ) -> Self {
+    fn for_tool_target(&self, plan: &bundle_tool_call::ToolPlan, ctx: ToolContext) -> Self {
+        // A guest retry token is first scoped by its authenticated caller, then
+        // domain-separated by target/tool. It becomes the host mutation event
+        // namespace; each nested attempt starts ordinal zero. Read calls get
+        // no mutation namespace and cannot consume the parent's ordinals.
+        let mutation_event_id = if plan.write {
+            plan.idempotency_key.as_deref().map(|raw| {
+                use sha2::{Digest, Sha256};
+                let scoped = bundle_tool_call::scoped_idempotency_key(
+                    self.tenant_id,
+                    self.community_id,
+                    &plan.caller_app_id,
+                    plan.actor.actor.as_deref(),
+                    raw,
+                );
+                let mut hash = Sha256::new();
+                for part in ["tool-mutation-v1", &scoped, &plan.target_app_id, &plan.tool] {
+                    hash.update(part.as_bytes());
+                    hash.update([0x1f]);
+                }
+                format!("tool:{:x}", hash.finalize())
+            })
+        } else {
+            None
+        };
         Self {
             tenant: self.tenant.clone(),
             community: self.community.clone(),
-            app_id: target_app_id,
+            app_id: plan.target_app_id.clone(),
             tenant_id: self.tenant_id,
             community_id: self.community_id,
-            app_version: target_version,
+            app_version: plan.target_version,
             kv: self.kv.clone(),
             egress: Arc::clone(&self.egress),
             gate: Arc::clone(&self.gate),
@@ -92,10 +116,55 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             identity: self.identity.clone(),
             ai: self.ai.clone(),
             ai_deadline: ctx.deadline.or(self.ai_deadline),
-            invocation_identity: self.invocation_identity.clone(),
+            invocation_identity: self
+                .invocation_identity
+                .as_ref()
+                .map(|identity| Arc::new(identity.for_tool_call(mutation_event_id))),
             verified_scope: self.verified_scope,
             stage_metrics: Arc::clone(&self.stage_metrics),
-            tool: Some(ctx),
+            tool: Some(ToolContext {
+                // Sticky: once any hop ran as a READ, the whole subtree is read-only.
+                read_only: ctx.read_only || !plan.write,
+                ..ctx
+            }),
+        }
+    }
+
+    /// Resolve identity without fetching a role for an already-authorized write.
+    /// The verified UUID binds retry keys across users without granting any scope.
+    ///
+    /// Only the genuinely actor-less outcomes (no linked/active member behind the
+    /// event) bind the empty actor. A resolver outage or backend failure fails
+    /// CLOSED: an unattributed write must never run because a lookup broke.
+    async fn resolve_write_actor(&self) -> Result<bundle_tool_call::ActorContext, ToolRefusal> {
+        let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
+            return Ok(bundle_tool_call::ActorContext::none());
+        };
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        match identity::resolve_actor(wiring, invocation, scope).await {
+            Ok(user) => Ok(bundle_tool_call::ActorContext {
+                actor: Some(user.to_string()),
+                scopes: Vec::new(),
+            }),
+            Err(
+                error @ (identity::IdentityError::NotLinked | identity::IdentityError::NotAMember),
+            ) => {
+                tracing::debug!(code = error.wire_code(), "tool write actor unresolved");
+                Ok(bundle_tool_call::ActorContext::none())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    app_id = %self.app_id, community_id = self.community_id,
+                    code = error.wire_code(),
+                    "tool write refused: actor identity could not be resolved"
+                );
+                Err(ToolRefusal::TargetUnavailable(
+                    "actor identity could not be resolved; retry".to_string(),
+                ))
+            }
         }
     }
 
@@ -209,8 +278,22 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             &self.gate,
             &gate_scope,
         )?;
+        // A read-invoked chain may never reach a write tool: a read-labelled
+        // call must not mutate, and it has no retry token of its own to make a
+        // nested write replay-safe. Refused before any directory lookup.
+        if ctx.read_only && authorized.is_write() {
+            tracing::info!(
+                app_id = %self.app_id, community_id = self.community_id,
+                "tool.invoke refused: a read tool may not invoke a write tool"
+            );
+            return Err(ToolRefusal::Forbidden(
+                "a tool invoked as read may not invoke a write tool".to_string(),
+            ));
+        }
         let actor = if authorized.required_scope().is_some() {
             self.resolve_verified_actor().await
+        } else if authorized.is_write() {
+            self.resolve_write_actor().await?
         } else {
             bundle_tool_call::ActorContext::none()
         };
@@ -232,11 +315,8 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             deadline: Some(Instant::now() + deadline),
             ..ctx.clone()
         };
-        let target_caps: Arc<dyn CapabilityHandler> = Arc::new(self.for_tool_target(
-            plan.target_app_id.clone(),
-            plan.target_version,
-            nested_ctx,
-        ));
+        let target_caps: Arc<dyn CapabilityHandler> =
+            Arc::new(self.for_tool_target(&plan, nested_ctx));
         let result =
             crate::spine::invoke_tool_call(&conn, &plan, deadline, ctx.trace.clone(), target_caps)
                 .await;
