@@ -1687,15 +1687,18 @@ mod tests {
                 self.0.lpush(key, value)
             }
         }
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
-            _,
-            redis::aio::MultiplexedConnection,
-        >::new(
-            SharedQueue(Arc::clone(&relay_queue)),
-            egress,
-            Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
-            test_gate(),
-        ));
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(
+            StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+                SharedQueue(Arc::clone(&relay_queue)),
+                egress,
+                Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+                test_gate(),
+            )
+            .with_outbound_pin_keys(
+                crate::pin_sig::PinKeys::parse("k1:000102030405060708090a0b0c0d0e0f", Some("k1"))
+                    .expect("test keys"),
+            ),
+        );
 
         let executor = tokio::spawn(async move {
             let mut io = executor_io;
