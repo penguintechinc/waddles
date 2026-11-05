@@ -18,8 +18,11 @@ Community/app-scoped KV key `policy` may contain JSON
 `{"alias":"waddlebucks","rate_num":1000,"rate_den":500}`. An absent key uses
 these defaults. Invalid or unavailable configuration fails closed. Exchange is
 an idempotent claim on externally verified points: it does not debit a remote
-Twitch account. Only a trusted caller that verified the external redemption may
-hold the exchange tool grant. Rates cannot be supplied by callers.
+Twitch account. **`exchange` is admin-only** (`required_scope: community:admin`,
+enforced host-side and again in the handler): `from_amount` is caller-asserted,
+and it stays admin-only until a host-verified redemption source exists (a
+platform redemption event id tied to the idempotency key, with the amount
+supplied by the host). Rates cannot be supplied by callers.
 
 Build: `cargo component build --release --target wasm32-wasip2 --locked`.
 Unit tests: `cargo test --locked`; host-store integration tests:

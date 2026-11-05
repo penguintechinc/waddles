@@ -177,6 +177,7 @@ exported_tools:
     additionalProperties: false
   output_schema:
     type: object
+  required_scope: community:admin
 - name: points_leaders
   access: read
   risk: normal

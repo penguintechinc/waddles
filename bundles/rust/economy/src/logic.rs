@@ -242,6 +242,9 @@ fn run(
         "exchange" => {
             fields(&args, &["user", "from_amount"])?;
             write(ctx)?;
+            // Admin-only: `from_amount` is a caller-asserted external-points claim and
+            // no host-verified redemption source exists yet (follow-up).
+            admin(ctx)?;
             let user = user(&args, "user")?;
             let value = amount(&args, "from_amount", 1)?;
             Ok(
@@ -377,7 +380,12 @@ mod tests {
             ),
             ("exchange", json!({"user":ALICE,"from_amount":1000})),
         ] {
-            call(&r, name, keyed(args)).unwrap();
+            let args = if name == "exchange" {
+                admin_keyed(args)
+            } else {
+                keyed(args)
+            };
+            call(&r, name, args).unwrap();
         }
         let c = h.calls.lock().unwrap();
         assert_eq!(c.len(), 6);
@@ -393,7 +401,7 @@ mod tests {
         call(
             &r,
             "exchange",
-            keyed(json!({"user":ALICE,"from_amount":500})),
+            admin_keyed(json!({"user":ALICE,"from_amount":500})),
         )
         .unwrap();
         let c = h.calls.lock().unwrap();
@@ -418,6 +426,32 @@ mod tests {
             call(&r, "points_set", no_actor).unwrap_err(),
             ToolError::Forbidden
         );
+        assert_eq!(h.calls.lock().unwrap().len(), 1);
+    }
+    /// Admin-scoped, keyed args (host-verified `__ctx`, as the host stamps it).
+    fn admin_keyed(mut args: Value) -> Value {
+        args = keyed(args);
+        args["__ctx"] = json!({"actor":BOB,"scopes":["community:admin"]});
+        args
+    }
+    /// regression: p981 security finding 3 -- `exchange` credits for CALLER-ASSERTED external
+    /// points; no host-verified redemption source exists yet, so it is admin-only.
+    #[test]
+    fn exchange_is_admin_only_until_a_host_verified_redemption_source_exists() {
+        let (r, h) = setup(None);
+        let args = json!({"user":ALICE,"from_amount":500});
+        assert_eq!(
+            call(&r, "exchange", keyed(args.clone())).unwrap_err(),
+            ToolError::Forbidden
+        );
+        let mut no_actor = keyed(args.clone());
+        no_actor["__ctx"] = json!({"scopes":["community:admin"]});
+        assert_eq!(
+            call(&r, "exchange", no_actor).unwrap_err(),
+            ToolError::Forbidden
+        );
+        assert!(h.calls.lock().unwrap().is_empty(), "no mint was attempted");
+        call(&r, "exchange", admin_keyed(args)).unwrap();
         assert_eq!(h.calls.lock().unwrap().len(), 1);
     }
     #[test]
@@ -457,7 +491,7 @@ mod tests {
     fn policy_is_community_local_and_cannot_be_supplied_by_caller() {
         let (a, ha) = setup(Some(json!({"alias":"stars","rate_num":1,"rate_den":2})));
         let (b, hb) = setup(Some(json!({"alias":"coins","rate_num":2,"rate_den":1})));
-        let args = keyed(json!({"user":ALICE,"from_amount":10}));
+        let args = admin_keyed(json!({"user":ALICE,"from_amount":10}));
         assert_eq!(
             call(&a, "exchange", args.clone()).unwrap()["alias"],
             "stars"

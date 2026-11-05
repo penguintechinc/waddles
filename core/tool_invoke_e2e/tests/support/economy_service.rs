@@ -190,6 +190,12 @@ struct EconomyWorld {
 impl EconomyWorld {
     /// Load the real compiled service and grant exactly the caller tools and service host imports.
     async fn new() -> Self {
+        Self::new_with(&[]).await
+    }
+
+    /// Like [`Self::new`], but the caller REQUESTS every tool while the platform never
+    /// grants `tool.call` for those in `ungranted` (an unapproved caller).
+    async fn new_with(ungranted: &[&str]) -> Self {
         let wasm = component();
         let db = database().await;
         let names = [
@@ -205,12 +211,15 @@ impl EconomyWorld {
             .map(|(n, w)| (SERVICE, *n, *w))
             .collect::<Vec<_>>();
         let mut service = tools(true, &names, &[]);
-        service
-            .exported
-            .iter_mut()
-            .find(|t| t.name == "points_set")
-            .unwrap()
-            .required_scope = Some("community:admin".into());
+        // Mirrors the shipped manifests: these tools carry `required_scope: community:admin`.
+        for admin_tool in ["points_set", "exchange"] {
+            service
+                .exported
+                .iter_mut()
+                .find(|t| t.name == admin_tool)
+                .unwrap()
+                .required_scope = Some("community:admin".into());
+        }
         let snapshot = ActiveVersionSnapshot::new();
         snapshot.update_scoped_all(
             &[
@@ -229,6 +238,7 @@ impl EconomyWorld {
         let grants = InMemoryGrantSnapshot::new();
         let caller = names
             .iter()
+            .filter(|(n, _)| !ungranted.contains(n))
             .map(|(n, _)| {
                 let id = format!("tool.call:{SERVICE}:{n}");
                 (
@@ -291,7 +301,11 @@ impl EconomyWorld {
             Arc::new(InMemoryInstancePolicySnapshot::new()),
         ));
         let telemetry = Telemetry::new();
-        opentelemetry::global::set_meter_provider(telemetry.provider.clone());
+        // The OTel meter provider is process-global: only the world that asserts telemetry
+        // (the fully-granted one) may install it, or a parallel test would steal its points.
+        if ungranted.is_empty() {
+            opentelemetry::global::set_meter_provider(telemetry.provider.clone());
+        }
         let metrics = Arc::new(StageMetrics::new(
             &telemetry.provider.meter("economy-service-e2e"),
         ));
@@ -411,6 +425,18 @@ async fn real_economy_service_preserves_atomicity_idempotency_caps_and_admin_sco
     );
     w.call("exchange", exchange, "exchange-once", "1001").await;
     assert_eq!(w.balance(ACTOR_UUID).await, 80);
+    // regression: p981 finding 3 -- `exchange` is admin-only: a plain member (1002) is refused
+    // and nothing is minted.
+    let member_exchange = w
+        .call(
+            "exchange",
+            json!({"user":BOB,"from_amount":5}),
+            "exchange-member",
+            "1002",
+        )
+        .await;
+    assert!(member_exchange.get("ok").is_none(), "{member_exchange:?}");
+    assert_eq!(w.balance(BOB).await, 30);
     let payout = json!({"winners":[{"user":ACTOR_UUID,"amount":20},{"user":BOB,"amount":30}]});
     w.call("pay_pot", payout.clone(), "pot-once", "1001").await;
     w.call("pay_pot", payout, "pot-once", "1001").await;
@@ -441,6 +467,18 @@ async fn real_economy_service_preserves_atomicity_idempotency_caps_and_admin_sco
         .await;
     assert!(over.get("tool_error").is_some());
     assert_eq!(w.balance(ACTOR_UUID).await, 100);
+    // regression: p981 finding 1 -- a debit is bound to the invocation's ACTOR: a granted caller
+    // cannot burn ANOTHER member's funds through `adjust_balance` (BOB is not actor 1001).
+    let burn_other = w
+        .call(
+            "adjust_balance",
+            json!({"user":BOB,"delta":-5}),
+            "burn-other",
+            "1001",
+        )
+        .await;
+    assert!(burn_other.get("ok").is_none(), "{burn_other:?}");
+    assert_eq!(w.balance(BOB).await, 60);
     let denied = w
         .call(
             "points_set",
@@ -464,4 +502,24 @@ async fn real_economy_service_preserves_atomicity_idempotency_caps_and_admin_sco
     assert!(w.telemetry.count("waddles_tool_call", &[]) > 0.0);
     assert!(w.telemetry.count("waddles_bundle_economy_calls_total", &[]) > 0.0);
     assert!(!w.wasm.is_empty());
+}
+
+/// regression: p981 findings 1-2 -- a caller the platform never granted `tool.call` for the
+/// money tools is refused before any money moves (the grant, not the tool body, is the gate).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unapproved_caller_cannot_reach_the_money_tools() {
+    let w = EconomyWorld::new_with(&["adjust_balance", "pay_pot", "exchange"]).await;
+    for (name, args) in [
+        ("adjust_balance", json!({"user":ACTOR_UUID,"delta":10})),
+        (
+            "pay_pot",
+            json!({"winners":[{"user":ACTOR_UUID,"amount":1}]}),
+        ),
+        ("exchange", json!({"user":ACTOR_UUID,"from_amount":5})),
+    ] {
+        let reply = w.call(name, args, "ungranted", "1001").await;
+        assert!(reply.get("ok").is_none(), "{name}: {reply:?}");
+        assert!(reply["tool_error"] == "NotGranted", "{name}: {reply:?}");
+    }
+    assert_eq!(w.balance(ACTOR_UUID).await, 0, "nothing was minted");
 }
