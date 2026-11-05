@@ -74,6 +74,8 @@ pub mod license;
 pub mod normalize;
 pub mod outbound;
 pub mod outbound_ops;
+pub mod outbound_pin;
+pub mod pin_sig;
 pub mod publish;
 pub mod scope_resolver;
 pub mod telemetry;
@@ -686,13 +688,14 @@ fn try_start_twitch_outbound(config: &config::Config) {
         use_tls: config.cli.twitch_irc_use_tls,
     };
 
+    let pin = resolve_outbound_pin_keys("twitch");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         shutdown_signal().await;
         let _ = shutdown_tx.send(());
     });
     tokio::spawn(async move {
-        if let Err(err) = outbound::run(&spine_cfg, identity, shutdown_rx).await {
+        if let Err(err) = outbound::run(&spine_cfg, identity, pin, shutdown_rx).await {
             tracing::error!(error = %err, "twitch outbound relay drain exited");
         }
     });
@@ -729,13 +732,14 @@ fn try_start_discord_outbound(config: &config::Config) {
             return;
         }
     };
+    let pin = resolve_outbound_pin_keys("discord");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         shutdown_signal().await;
         let _ = shutdown_tx.send(());
     });
     tokio::spawn(async move {
-        if let Err(err) = outbound::run_discord(&spine_cfg, &rest, shutdown_rx).await {
+        if let Err(err) = outbound::run_discord(&spine_cfg, &rest, pin, shutdown_rx).await {
             tracing::error!(error = %err, "discord outbound drain exited; bundle chat.delete/dm.send ops will be refused once its readiness key expires");
         }
     });
@@ -916,6 +920,28 @@ fn resolve_binding_keyring(
                 receiver,
                 "ENVELOPE_BINDING_KEYS not set; receiver not started"
             );
+            None
+        }
+    }
+}
+
+/// Loads the outbound `pin_sig` verification keys from the DEDICATED
+/// `OUTBOUND_PIN_KEYS` (never the shared `ENVELOPE_BINDING_KEYS` ring).
+/// Missing/invalid keys are logged at ERROR and yield `None`: the drain still
+/// runs but then refuses EVERY op (`pin_key_unconfigured`) -- fail closed and
+/// loud, never accept unverified.
+fn resolve_outbound_pin_keys(platform: &str) -> Option<outbound_pin::PinKeys> {
+    let Ok(raw) = std::env::var("OUTBOUND_PIN_KEYS") else {
+        tracing::error!(
+            platform,
+            "OUTBOUND_PIN_KEYS not set; outbound drain will REFUSE every op (pin_key_unconfigured)"
+        );
+        return None;
+    };
+    match outbound_pin::PinKeys::parse(&raw, None) {
+        Ok(keys) => Some(keys),
+        Err(err) => {
+            tracing::error!(platform, error = %err, "OUTBOUND_PIN_KEYS unusable; drain will REFUSE every op");
             None
         }
     }

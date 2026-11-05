@@ -907,5 +907,8 @@ async fn k_admin_tool_is_refused_host_side_when_the_actor_is_under_scoped_or_abs
     }
 }
 
+#[allow(dead_code)]
+#[path = "../../test_support/tests/docker_container.rs"]
+mod docker_container;
 #[path = "support/economy_service.rs"]
 mod economy_service;

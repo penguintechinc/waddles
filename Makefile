@@ -124,6 +124,17 @@ test-data-plane-parity:
 
 test:
 	@$(MAKE) test-unit
+	@$(MAKE) test-scripts
+
+# Self-tests for repo helper scripts (gh stubbed via PATH shim; no network).
+.PHONY: test-scripts release-merge
+test-scripts:
+	@bash scripts/tests/test_release_merge.sh
+
+# Verify + merge a PR into release/*: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]
+release-merge:
+	@test -n "$(PR)" || { echo "usage: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]" >&2; exit 2; }
+	@bash scripts/release-merge.sh "$(PR)" $(if $(HEAD),--expect-head "$(HEAD)") $(if $(DRY),--dry-run)
 
 test-unit:
 	@echo "Running unit tests..."
