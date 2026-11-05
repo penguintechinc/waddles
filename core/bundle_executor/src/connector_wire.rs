@@ -56,7 +56,7 @@ use tracing::{debug, warn};
 
 use crate::connector::{
     CallReply, ConnectionCtx, ConnectorCallError, ConnectorHost, FrameError, HandshakePayload,
-    NormalizedEvent, RawFrame,
+    NormalizedEvent, RawFrame, ToolError,
 };
 use crate::error::ExecutorError;
 
@@ -104,13 +104,22 @@ impl ConnectorRouter {
         self.hosts.read().await.is_empty()
     }
 
+    /// True when `digest` is a pinned connector. `Executor::invoke_inner` uses
+    /// this to route `ExportKind::ToolCall` frames (which carry no connector
+    /// export kind) to a `connector-tools` overlay instead of the stage registry.
+    pub async fn contains(&self, digest: &str) -> bool {
+        self.hosts.read().await.contains_key(digest)
+    }
+
     /// Runs one connector export for an `invoke` frame, translating the
     /// canonical-JSON payload to the typed WIT call and the outcome back to a
     /// `result` body or a typed `error` body. Fails closed: an unpinned
     /// digest, an `app_id` that does not match the pinned one, or a
     /// non-connector export are all refused before any guest runs.
     pub async fn invoke(&self, body: InvokeBody) -> Result<ResultBody, ErrorBody> {
-        if !body.export.is_connector() {
+        // `ToolCall` reaches a `connector-tools` overlay's `tool-provider.call`
+        // (P6a T4); a plain `connector` host answers it `EXPORT_MISSING`.
+        if !body.export.is_connector() && body.export != ExportKind::ToolCall {
             return Err(error_body(
                 ErrorCode::ExportMissing,
                 format!("{} is not a connector export", body.export.as_str()),
@@ -133,7 +142,7 @@ impl ConnectorRouter {
         let export = body.export;
         let app_id = body.app_id.clone();
         let started = Instant::now();
-        let outcome = dispatch(&host, export, body.payload).await;
+        let outcome = dispatch(&host, export, body.payload, body.deadline_ms).await;
         match &outcome {
             Ok(_) => debug!(app_id = %app_id, export = export.as_str(), "connector invoke ok"),
             Err(e) => warn!(
@@ -265,6 +274,27 @@ fn frame_error_payload(e: FrameError) -> Result<serde_json::Value, ErrorBody> {
     }))
 }
 
+/// A guest `tool-error` as a normal `result` payload (`{"tool_error": ...}`,
+/// the same shape the stage path returns for a stage-tools provider).
+fn tool_error_payload(e: ToolError) -> Result<serde_json::Value, ErrorBody> {
+    let value = serde_json::to_value(e).map_err(|e| {
+        error_body(
+            ErrorCode::LoadFailed,
+            format!("tool-error encode failed: {e}"),
+        )
+    })?;
+    Ok(serde_json::json!({ "tool_error": value }))
+}
+
+/// `ExportKind::ToolCall` payload: the provider tool name and its JSON args
+/// (re-encoded to canonical JSON bytes for `tool-provider.call`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolCallArgs {
+    tool: String,
+    args: serde_json::Value,
+}
+
 /// Maps a sandbox/host containment onto the typed wire error a stage keys its
 /// circuit breaker and DLQ-kind off (never by message text).
 fn call_error_to_body(e: ConnectorCallError) -> ErrorBody {
@@ -272,8 +302,13 @@ fn call_error_to_body(e: ConnectorCallError) -> ErrorBody {
     match e {
         // Handled before this is reached; kept total so a future caller
         // cannot silently lose it.
-        ConnectorCallError::Guest(_) | ConnectorCallError::Internal(_) => {
-            error_body(ErrorCode::LoadFailed, message)
+        ConnectorCallError::Guest(_)
+        | ConnectorCallError::Tool(_)
+        | ConnectorCallError::Internal(_) => error_body(ErrorCode::LoadFailed, message),
+        ConnectorCallError::NoToolProvider => error_body(ErrorCode::ExportMissing, message),
+        // Oversized tool args/result: a typed refusal, never a silent truncation.
+        ConnectorCallError::PayloadTooLarge { .. } => {
+            error_body(ErrorCode::MalformedFrame, message)
         }
         ConnectorCallError::FuelExhausted(_) => ErrorBody {
             code: ErrorCode::ExecutorDeadline,
@@ -301,6 +336,7 @@ fn settle<T>(
     match outcome {
         Ok(reply) => Ok((encode(reply.value)?, reply.fuel_used)),
         Err(ConnectorCallError::Guest(fe)) => Ok((frame_error_payload(fe)?, 0)),
+        Err(ConnectorCallError::Tool(te)) => Ok((tool_error_payload(te)?, 0)),
         Err(other) => Err(call_error_to_body(other)),
     }
 }
@@ -333,6 +369,7 @@ async fn dispatch(
     host: &ConnectorHost,
     export: ExportKind,
     payload: serde_json::Value,
+    deadline_ms: u64,
 ) -> Result<(serde_json::Value, u64), ErrorBody> {
     match export {
         ExportKind::ConnectorOnConnect => {
@@ -363,9 +400,27 @@ async fn dispatch(
                 |()| encode_reply(&serde_json::json!({})),
             )
         }
+        ExportKind::ToolCall => {
+            let call: ToolCallArgs = decode(payload)?;
+            // `args` crosses the WIT boundary as canonical JSON bytes.
+            let args = serde_json::to_vec(&call.args).map_err(malformed)?;
+            settle(
+                host.call_tool_with_deadline(call.tool, args, Some(deadline_ms))
+                    .await,
+                |bytes| {
+                    let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+                        error_body(
+                            ErrorCode::MalformedFrame,
+                            format!("tool result is not canonical JSON: {e}"),
+                        )
+                    })?;
+                    Ok(serde_json::json!({ "ok": v }))
+                },
+            )
+        }
         // Rejected by `invoke` before dispatch; kept total so adding an
         // export is a compile error here, never a silent drop.
-        ExportKind::Transform | ExportKind::Dispatch | ExportKind::ToolCall => Err(error_body(
+        ExportKind::Transform | ExportKind::Dispatch => Err(error_body(
             ErrorCode::ExportMissing,
             format!("{} is not a connector export", export.as_str()),
         )),
@@ -404,17 +459,39 @@ mod tests {
     #[tokio::test]
     async fn a_stage_export_is_refused_by_the_connector_router() {
         let router = ConnectorRouter::new();
-        for export in [
-            ExportKind::Transform,
-            ExportKind::Dispatch,
-            ExportKind::ToolCall,
-        ] {
+        for export in [ExportKind::Transform, ExportKind::Dispatch] {
             let err = router
                 .invoke(body(export, serde_json::json!({})))
                 .await
                 .unwrap_err();
             assert_eq!(err.code, ErrorCode::ExportMissing);
         }
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_for_an_unpinned_digest_is_unknown_bundle() {
+        // `ToolCall` is routable to a pinned `connector-tools` overlay (P6a T4),
+        // so on an empty router it reaches the digest lookup and fails closed.
+        let router = ConnectorRouter::new();
+        let err = router
+            .invoke(body(ExportKind::ToolCall, serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnknownBundle);
+        assert!(!router.contains("sha256:none").await);
+    }
+
+    #[test]
+    fn tool_errors_settle_as_result_payloads_and_no_provider_is_export_missing() {
+        let (payload, fuel) =
+            settle::<()>(Err(ConnectorCallError::Tool(ToolError::Forbidden)), |()| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        assert_eq!(fuel, 0);
+        assert!(payload.get("tool_error").is_some(), "{payload:?}");
+        let body = call_error_to_body(ConnectorCallError::NoToolProvider);
+        assert_eq!(body.code, ErrorCode::ExportMissing);
     }
 
     #[test]

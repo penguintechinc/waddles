@@ -268,3 +268,18 @@ rm -f src/bindings.rs   # generated, not committed
 ```
 
 Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against `wit-bindgen-rt 0.44.0`.
+
+## `connector_tools_fixture.wasm`
+
+A real `waddle:connector@1.0.0` `connector-tools` component (P6a T4): `receiver` still normalizes frames, and
+`tool-provider.call` serves `get_chatters` / `echo` / `denied` / `relay` through the real `waddle-sdk-rs` registry; the
+`tool` import is adapted to the SDK's `ToolTransport`. Source: `connector-tools-fixture-src/` (`wit/connector.wit` is a
+trimmed copy of the normative file, `bundle-wit/tool.wit` the dependency package). Used by
+`tests/connector_tools.rs`.
+
+```bash
+cd connector-tools-fixture-src
+cargo component build --release          # online: resolves the bundle-wit dependency
+cp "${CARGO_TARGET_DIR:-target}/wasm32-wasip1/release/connector_tools_fixture.wasm" ../connector_tools_fixture.wasm
+rm -f src/bindings.rs   # generated, not committed
+```
