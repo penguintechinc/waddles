@@ -251,6 +251,11 @@ pub fn poll_plan(body: &Value) -> Result<PollPlan, LogicError> {
     let token = match body.get("nextPageToken") {
         Some(Value::String(t)) if !t.is_empty() => {
             check_template_safe("nextPageToken", t)?;
+            if !is_valid_page_token(t) {
+                return Err(LogicError::Malformed(
+                    "nextPageToken is not a valid token".into(),
+                ));
+            }
             Some(t.clone())
         }
         _ => None,
@@ -422,6 +427,67 @@ fn require<'a>(v: &'a Value, key: &str) -> Result<&'a str, LogicError> {
     }
 }
 
+/// Longest accepted YouTube id (channel/video/live-chat ids are far shorter).
+pub const MAX_ID_LEN: usize = 128;
+/// Longest accepted `nextPageToken` (the host's own cap is 512 bytes).
+pub const MAX_TOKEN_LEN: usize = 512;
+/// Highest `maxResults` the `liveChat/messages` API accepts.
+pub const MAX_POLL_RESULTS: u32 = 2000;
+
+/// Anchored allowlist for YouTube channel/video/live-chat ids: `^[A-Za-z0-9_-]{1,128}$`
+/// (real ids: `UC` + 22 base64url chars; 11-char video ids; `Cg0KC...`/`KicKGFVD...` chat ids).
+pub fn is_valid_id(s: &str) -> bool {
+    (1..=MAX_ID_LEN).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Anchored allowlist for `nextPageToken`: `^[A-Za-z0-9_=.-]{1,512}$`.
+pub fn is_valid_page_token(s: &str) -> bool {
+    (1..=MAX_TOKEN_LEN).contains(&s.len())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'=' | b'.' | b'-'))
+}
+
+/// RFC 3986 percent-encoding of a query value (defense in depth for every
+/// non-slot value the bundle itself puts in a URL).
+pub fn pct(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// One query value: a literal (percent-encoded here), a host-pinned slot
+/// (emitted verbatim; the host MUST percent-encode on substitution), or an
+/// integer (built from a bounded `u32`, never from a string).
+enum Q<'a> {
+    Lit(&'a str),
+    Slot(&'a str),
+    Int(u32),
+}
+
+/// Builds `API_BASE/path?k=v&...`, encoding every literal value and key.
+fn build_url(path: &str, params: &[(&str, Q)]) -> String {
+    let q: Vec<String> = params
+        .iter()
+        .map(|(k, v)| {
+            let v = match v {
+                Q::Lit(l) => pct(l),
+                Q::Slot(s) => (*s).to_string(),
+                Q::Int(n) => n.to_string(),
+            };
+            format!("{}={v}", pct(k))
+        })
+        .collect();
+    format!("{API_BASE}/{path}?{}", q.join("&"))
+}
+
 /// Authenticated GET carrying the bearer slot plus any host-pinned id slots.
 fn bearer_get(url: String, pinned: &[(&str, &str)]) -> RequestTpl {
     let mut secret_refs = vec![(TOKEN_SLOT.to_string(), TOKEN_HANDLE.to_string())];
@@ -439,8 +505,15 @@ fn bearer_get(url: String, pinned: &[(&str, &str)]) -> RequestTpl {
 /// The channel is a HOST-pinned slot (`youtube.channel_id`), never caller-chosen.
 pub fn discovery_search_request() -> RequestTpl {
     bearer_get(
-        format!(
-            "{API_BASE}/search?part=id%2Csnippet&channelId={CHANNEL_ID_SLOT}&eventType=live&type=video&maxResults={LIVE_SEARCH_MAX_RESULTS}"
+        build_url(
+            "search",
+            &[
+                ("part", Q::Lit("id,snippet")),
+                ("channelId", Q::Slot(CHANNEL_ID_SLOT)),
+                ("eventType", Q::Lit("live")),
+                ("type", Q::Lit("video")),
+                ("maxResults", Q::Int(LIVE_SEARCH_MAX_RESULTS)),
+            ],
         ),
         &[(CHANNEL_ID_SLOT, CHANNEL_ID_HANDLE)],
     )
@@ -450,7 +523,13 @@ pub fn discovery_search_request() -> RequestTpl {
 /// is a HOST-pinned slot (`youtube.video_id`, the search result the host holds).
 pub fn discovery_videos_request() -> RequestTpl {
     bearer_get(
-        format!("{API_BASE}/videos?part=liveStreamingDetails&id={VIDEO_ID_SLOT}"),
+        build_url(
+            "videos",
+            &[
+                ("part", Q::Lit("liveStreamingDetails")),
+                ("id", Q::Slot(VIDEO_ID_SLOT)),
+            ],
+        ),
         &[(VIDEO_ID_SLOT, VIDEO_ID_HANDLE)],
     )
 }
@@ -459,8 +538,13 @@ pub fn discovery_videos_request() -> RequestTpl {
 /// chat id is a HOST-pinned slot (`youtube.live_chat_id`).
 pub fn poll_request(max_results: u32) -> RequestTpl {
     bearer_get(
-        format!(
-            "{API_BASE}/liveChat/messages?part=id%2Csnippet%2CauthorDetails&liveChatId={CHAT_ID_SLOT}&maxResults={max_results}"
+        build_url(
+            "liveChat/messages",
+            &[
+                ("part", Q::Lit("id,snippet,authorDetails")),
+                ("liveChatId", Q::Slot(CHAT_ID_SLOT)),
+                ("maxResults", Q::Int(max_results)),
+            ],
         ),
         &[(CHAT_ID_SLOT, CHAT_ID_HANDLE)],
     )
@@ -471,6 +555,9 @@ fn safe_id(field: &str, v: &Value) -> Result<Option<String>, LogicError> {
     match v {
         Value::String(s) if !s.is_empty() => {
             check_template_safe(field, s)?;
+            if !is_valid_id(s) {
+                return Err(LogicError::Malformed(format!("{field} is not a valid id")));
+            }
             Ok(Some(s.clone()))
         }
         _ => Ok(None),
@@ -602,7 +689,7 @@ pub fn run_tool(name: &str, args: &Value) -> Result<Value, LogicError> {
                 .get("max_results")
                 .and_then(Value::as_u64)
                 .unwrap_or(200);
-            if !(1..=2000).contains(&max) {
+            if !(1..=u64::from(MAX_POLL_RESULTS)).contains(&max) {
                 return Err(LogicError::Malformed(
                     "max_results out of range 1..=2000".into(),
                 ));

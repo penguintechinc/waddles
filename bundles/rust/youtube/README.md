@@ -56,6 +56,22 @@ pairs each slot with a handle. The host substitutes at send time (URL-encode in 
 | `{{YT_CHANNEL_ID}}` | `youtube.channel_id` | the monitored source's config |
 | `{{YT_VIDEO_ID}}` | `youtube.video_id` | the live video the host discovered |
 
+**Host substitution contract (MUST):** `{{YT_CHANNEL_ID}}`, `{{YT_VIDEO_ID}}`, `{{YT_LIVE_CHAT_ID}}` sit in QUERY-value
+position (`channelId=`, `id=`, `liveChatId=`) -- the host MUST percent-encode (RFC 3986, everything outside
+`A-Za-z0-9-._~`) the substituted value, and JSON-escape it in the `chat.send` body. The bundle does not trust that:
+every id/token it emits or returns is an anchored allowlist, and every literal query value it builds itself is
+percent-encoded (`pct`), so a missing host encode still cannot inject a parameter from bundle-produced values.
+
+| Value | Allowlist (anchored) |
+|---|---|
+| channel / video / live-chat id | `^[A-Za-z0-9_-]{1,128}$` (real: `UC`+22 base64url, 11-char video ids, `Cg0KC...`/`KicKGFVD...` chat ids) |
+| `nextPageToken` | `^[A-Za-z0-9_=.-]{1,512}$` |
+| `maxResults` | integer `1..=2000` built from a `u32`, never a string |
+
+Anything else (`& = # % / ? + space`, unicode, quotes, over-length) is a typed `Malformed` error. If a legitimate
+live-chat id ever contains a character outside this set, widen `is_valid_id` deliberately and add a fixture -- do not
+loosen it silently.
+
 Input hardening: every string that reaches a template (chat text, target-source-id, API-returned ids, page
 tokens) is REJECTED with a typed error if it holds a control character, a zero-width/format/bidi character,
 or lookalike braces, and then if it holds `{{` or `}}` -- rejected, never stripped (stripping first let
@@ -88,7 +104,7 @@ core `connector.pii.read` grant, which the hub permission catalog does not know 
   unicode text, super-chat text, explicit occurred_at; goldens blessed from the real Python path).
 - `core/bundle_executor/tests/youtube_overlay.rs`: the REAL compiled component through production
   `ConnectorHost::load` (`scripts/test-overlay-youtube.sh`).
-- Security regressions (`tests/tools_sender.rs`, `tests/forbidden_chars.rs`): slot smuggling, control/zero-width/
+- Security regressions (`tests/tools_sender.rs`, `tests/forbidden_chars.rs`, `tests/url_safety*.rs` -- 12/12 URL mutants killed): slot smuggling, control/zero-width/
   bidi/lookalike chars, mutation-checked (9/10 mutants killed; the 10th is the redundant raw-vs-cleaned guard).
 
 ## Build / test
