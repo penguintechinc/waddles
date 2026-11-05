@@ -41,7 +41,7 @@ async fn capture(State(s): State<Seen>, h: HeaderMap, body: axum::body::Bytes) -
 // regression: cross-origin redirect leaked custom credential headers + body
 #[tokio::test]
 async fn cross_origin_redirect_forwards_only_safe_headers_and_no_body() {
-    for code in [302u16, 307, 308] {
+    for code in [302u16, 303] {
         let seen: Seen = Arc::default();
         let b = serve(
             Router::new()
@@ -110,4 +110,43 @@ async fn same_origin_307_keeps_body_and_credential_headers() {
     let got = seen.lock().unwrap();
     assert_eq!(got[0].1, b"b");
     assert!(got[0].0.contains(&"x-api-key".to_string()));
+}
+
+// regression: gh-989 cross-origin 307/308 silently dropped the body -> now an
+// explicit typed refusal, and the target origin sees no request at all.
+#[tokio::test]
+async fn cross_origin_307_308_with_body_is_refused_not_silently_stripped() {
+    use bundle_host_http::guarded::GuardError;
+    for code in [307u16, 308] {
+        let seen: Seen = Arc::default();
+        let b = serve(
+            Router::new()
+                .route("/t", axum::routing::any(capture))
+                .with_state(seen.clone()),
+        )
+        .await;
+        let x = serve(Router::new().route(
+            "/x",
+            axum::routing::any(move || async move {
+                (
+                    StatusCode::from_u16(code).unwrap(),
+                    [("location", format!("http://{b}/t"))],
+                )
+            }),
+        ))
+        .await;
+        let r = client()
+            .fetch(
+                reqwest::Method::POST,
+                &format!("http://{x}/x"),
+                vec![],
+                Some(b"body-secret".to_vec()),
+            )
+            .await;
+        assert_eq!(r.unwrap_err(), GuardError::BodyCrossOrigin, "{code}");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "{code}: request reached target"
+        );
+    }
 }

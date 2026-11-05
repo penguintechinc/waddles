@@ -12,7 +12,6 @@
 //! may re-implement range logic.
 
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
 
 /// Resolves the URL's host, requires EVERY address to be permitted (or
 /// exactly allowlisted), and returns the address to pin the connection to.
@@ -22,20 +21,6 @@ pub(crate) async fn resolve_pinned(
     allow: &[IpAddr],
 ) -> Result<SocketAddr, String> {
     bundle_host_http::guarded::resolve_pinned(url, allow)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// One-shot client pinned to the validated address (redirects and ambient
-/// proxies off), built by the shared guard. Poll's `pinned_client` is the
-/// intended caller once the in-flight connector work lands.
-#[allow(dead_code)]
-pub(crate) async fn pinned_client(
-    url: &reqwest::Url,
-    allow: &[IpAddr],
-    timeout: Duration,
-) -> Result<reqwest::Client, String> {
-    bundle_host_http::guarded::pinned_client(url, allow, timeout)
         .await
         .map_err(|e| e.to_string())
 }
@@ -66,15 +51,5 @@ mod tests {
             9
         );
         assert!(resolve_pinned(&u("https://8.8.8.8/x"), &[]).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn pinned_client_refuses_forbidden_and_builds_for_public() {
-        let u = |s: &str| reqwest::Url::parse(s).unwrap();
-        let t = Duration::from_secs(1);
-        assert!(pinned_client(&u("https://169.254.169.254/"), &[], t)
-            .await
-            .is_err());
-        assert!(pinned_client(&u("https://8.8.8.8/"), &[], t).await.is_ok());
     }
 }

@@ -21,8 +21,10 @@
 //! - typed [`GuardError`]s whose `Display` carries the failure *class*
 //!   only -- never the host, address, URL or any header value.
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::LazyLock;
+use std::pin::Pin;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use tracing::Instrument;
@@ -31,6 +33,20 @@ use crate::egress::{embedded_ipv4, is_forbidden_address};
 
 /// DNS lookup ceiling.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Hard ceiling on followed redirects regardless of the configured limit, so
+/// a hostile or mistaken `max_redirects` can never make the hop counter
+/// overflow or the chain effectively unbounded.
+pub const MAX_REDIRECTS_CEILING: usize = 10;
+
+/// Body-framing headers that describe a body and must not survive its removal
+/// (a stale `Content-Length` with no body desyncs the wire framing).
+const BODY_HEADERS: [&str; 4] = [
+    "content-length",
+    "content-type",
+    "transfer-encoding",
+    "content-encoding",
+];
 
 /// The ONLY request headers forwarded across an origin change (allowlist:
 /// any other header may carry a credential -- X-API-Key, Client-Id, custom
@@ -55,8 +71,11 @@ pub enum GuardError {
     NoAddress,
     /// An address is in a forbidden range; the payload is the range class.
     ForbiddenAddress(&'static str),
-    /// A redirect had no usable `Location`.
+    /// A redirect's `Location` could not be used.
     BadRedirect,
+    /// A redirect that must keep the request body crosses origin; the body is
+    /// never forwarded to another origin, so the request is refused instead.
+    BodyCrossOrigin,
     /// The redirect chain exceeded the configured limit.
     TooManyRedirects,
     /// The overall deadline elapsed.
@@ -81,6 +100,9 @@ impl std::fmt::Display for GuardError {
                 f.write_str("endpoint resolves to a forbidden address range")
             }
             Self::BadRedirect => f.write_str("invalid redirect"),
+            Self::BodyCrossOrigin => {
+                f.write_str("redirect would carry the request body to another origin")
+            }
             Self::TooManyRedirects => f.write_str("too many redirects"),
             Self::Timeout => f.write_str("egress deadline exceeded"),
             Self::ResponseTooLarge => f.write_str("response over size ceiling"),
@@ -104,6 +126,7 @@ impl GuardError {
             Self::NoAddress => "no_address",
             Self::ForbiddenAddress(_) => "forbidden_address",
             Self::BadRedirect => "bad_redirect",
+            Self::BodyCrossOrigin => "body_cross_origin",
             Self::TooManyRedirects => "too_many_redirects",
             Self::Timeout => "timeout",
             Self::ResponseTooLarge => "too_large",
@@ -164,6 +187,10 @@ fn forbidden_v6_extra(v: Ipv6Addr) -> Option<&'static str> {
         Some("documentation")
     } else if s0 == 0x5f00 {
         Some("special_use")
+    } else if (s0 & 0xE000) != 0x2000 {
+        // Only 2000::/3 is global unicast; everything else is reserved or
+        // unassigned (4000::/3, 6000::/3 ... e000::/3, ::/3 remnants).
+        Some("reserved")
     } else {
         None
     }
@@ -201,6 +228,58 @@ fn check_scheme(url: &reqwest::Url, plain_ok: bool) -> Result<(), GuardError> {
     }
 }
 
+/// Boxed future returned by [`HostResolver::lookup`].
+pub type ResolveFuture<'a> =
+    Pin<Box<dyn Future<Output = std::io::Result<Vec<IpAddr>>> + Send + 'a>>;
+
+/// Name-resolution seam. Whatever it returns is still run through the full
+/// address policy and pinned, so a resolver can never widen what is reachable;
+/// it exists so tests can record lookups and simulate DNS rebinding.
+pub trait HostResolver: Send + Sync + std::fmt::Debug {
+    /// Resolves `host` (canonical, no brackets) for `port`.
+    fn lookup<'a>(&'a self, host: &'a str, port: u16) -> ResolveFuture<'a>;
+}
+
+/// Default resolver: the system resolver via tokio.
+#[derive(Debug)]
+struct SystemResolver;
+
+impl HostResolver for SystemResolver {
+    fn lookup<'a>(&'a self, host: &'a str, port: u16) -> ResolveFuture<'a> {
+        Box::pin(async move {
+            let it = tokio::net::lookup_host((host, port)).await?;
+            Ok(it.map(|sa| sa.ip()).collect())
+        })
+    }
+}
+
+/// The URL host with exactly one pair of IPv6 brackets removed (never more).
+fn unbracket(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+/// Parses the host as an IP literal, if it is one.
+fn literal_ip(host: &str) -> Option<IpAddr> {
+    unbracket(host).parse::<IpAddr>().ok()
+}
+
+/// Rewrites the URL's host to its canonical form (one trailing dot removed;
+/// the URL parser has already lowercased and IDNA-to-ASCII'd it) so the
+/// guard, the pin and the request all see the byte-identical host.
+fn canonicalize(url: &mut reqwest::Url) -> Result<(), GuardError> {
+    let Some(stripped) = url
+        .host_str()
+        .and_then(|h| h.strip_suffix('.'))
+        .map(str::to_owned)
+    else {
+        return Ok(());
+    };
+    url.set_host(Some(&stripped))
+        .map_err(|_| GuardError::MalformedUrl)
+}
+
 /// Resolves the URL's host, requires EVERY address to be permitted (or
 /// exactly allowlisted) and returns the address to pin the connection to.
 ///
@@ -211,20 +290,26 @@ pub async fn resolve_pinned(
     url: &reqwest::Url,
     allow: &[IpAddr],
 ) -> Result<SocketAddr, GuardError> {
+    resolve_pinned_with(&SystemResolver, url, allow).await
+}
+
+async fn resolve_pinned_with(
+    resolver: &dyn HostResolver,
+    url: &reqwest::Url,
+    allow: &[IpAddr],
+) -> Result<SocketAddr, GuardError> {
     let port = url
         .port_or_known_default()
         .ok_or(GuardError::MalformedUrl)?;
     let host = url.host_str().ok_or(GuardError::MalformedUrl)?;
-    let literal = host.trim_start_matches('[').trim_end_matches(']');
-    let addrs: Vec<IpAddr> = if let Ok(ip) = literal.parse::<IpAddr>() {
+    let addrs: Vec<IpAddr> = if let Some(ip) = literal_ip(host) {
         vec![ip]
     } else {
-        tokio::time::timeout(RESOLVE_TIMEOUT, tokio::net::lookup_host((host, port)))
+        let name = host.strip_suffix('.').unwrap_or(host);
+        tokio::time::timeout(RESOLVE_TIMEOUT, resolver.lookup(name, port))
             .await
             .map_err(|_| GuardError::DnsTimeout)?
             .map_err(|_| GuardError::DnsFailed)?
-            .map(|sa| sa.ip())
-            .collect()
     };
     let first = *addrs.first().ok_or(GuardError::NoAddress)?;
     for ip in &addrs {
@@ -238,11 +323,19 @@ pub async fn resolve_pinned(
 }
 
 /// Scheme + resolve + pin for one URL; returns the pinned address. Plain
-/// http/ws is accepted only when the pinned ip is exactly allowlisted.
-async fn validate_target(url: &reqwest::Url, allow: &[IpAddr]) -> Result<SocketAddr, GuardError> {
+/// http/ws is accepted only when the pinned ip is exactly allowlisted. Every
+/// check that needs no DNS (userinfo, scheme, empty allowlist for plain
+/// http/ws to a name) runs BEFORE the lookup, so a refused URL never makes
+/// the resolver an oracle.
+async fn validate_target(
+    resolver: &dyn HostResolver,
+    url: &reqwest::Url,
+    allow: &[IpAddr],
+) -> Result<SocketAddr, GuardError> {
     let plain = matches!(url.scheme(), "http" | "ws");
-    check_scheme(url, plain)?;
-    let pinned = resolve_pinned(url, allow).await?;
+    let named = url.host_str().is_some_and(|h| literal_ip(h).is_none());
+    check_scheme(url, plain && !(allow.is_empty() && named))?;
+    let pinned = resolve_pinned_with(resolver, url, allow).await?;
     if plain && !allow.contains(&pinned.ip()) {
         return Err(GuardError::SchemeNotAllowed);
     }
@@ -250,23 +343,10 @@ async fn validate_target(url: &reqwest::Url, allow: &[IpAddr]) -> Result<SocketA
 }
 
 /// Builds a one-shot `reqwest` client pinned to the validated address:
-/// redirects off, ambient proxies off (they would resolve/connect the
-/// host themselves and bypass the pin), explicit timeout. For callers that
-/// drive a single non-redirecting request themselves.
-///
-/// # Errors
-/// [`GuardError`] if validation fails or the client cannot be built.
-pub async fn pinned_client(
-    url: &reqwest::Url,
-    allow: &[IpAddr],
-    timeout: Duration,
-) -> Result<reqwest::Client, GuardError> {
-    let addr = validate_target(url, allow)
-        .await
-        .inspect_err(|e| record(e.class()))?;
-    build_pinned(url, addr, timeout)
-}
-
+/// redirects off, ambient proxies off (they would resolve/connect the host
+/// themselves and bypass the pin), explicit timeout. Crate-private on
+/// purpose: a raw client is usable against ANY host, so it never leaves this
+/// module; callers get [`GuardedClient`] instead.
 fn build_pinned(
     url: &reqwest::Url,
     addr: SocketAddr,
@@ -277,7 +357,7 @@ fn build_pinned(
         .no_proxy()
         .timeout(timeout);
     if let Some(host) = url.host_str() {
-        b = b.resolve(host.trim_start_matches('[').trim_end_matches(']'), addr);
+        b = b.resolve(unbracket(host), addr);
     }
     b.build().map_err(|_| GuardError::Transport("client build"))
 }
@@ -285,8 +365,9 @@ fn build_pinned(
 /// Bounds for [`GuardedClient`].
 #[derive(Debug, Clone)]
 pub struct GuardedLimits {
-    /// Max redirects followed (0 = a 3xx is returned as-is, never followed).
-    pub max_redirects: u8,
+    /// Max redirects followed (0 = a 3xx is returned as-is, never followed);
+    /// clamped to [`MAX_REDIRECTS_CEILING`].
+    pub max_redirects: usize,
     /// Overall wall-clock deadline across all hops.
     pub timeout: Duration,
     /// Response body ceiling in bytes.
@@ -319,6 +400,7 @@ pub struct GuardedResponse {
 pub struct GuardedClient {
     limits: GuardedLimits,
     allow: Vec<IpAddr>,
+    resolver: Arc<dyn HostResolver>,
 }
 
 impl GuardedClient {
@@ -326,7 +408,19 @@ impl GuardedClient {
     /// plain http); empty in production.
     #[must_use]
     pub fn new(limits: GuardedLimits, allow: Vec<IpAddr>) -> Self {
-        Self { limits, allow }
+        Self {
+            limits,
+            allow,
+            resolver: Arc::new(SystemResolver),
+        }
+    }
+
+    /// Replaces the name resolver (tests: record lookups, simulate rebinding).
+    /// The policy still applies to every address the resolver returns.
+    #[must_use]
+    pub fn with_resolver(mut self, resolver: Arc<dyn HostResolver>) -> Self {
+        self.resolver = resolver;
+        self
     }
 
     /// Performs `method url` with `headers`/`body`, following redirects
@@ -368,9 +462,11 @@ impl GuardedClient {
     ) -> Result<GuardedResponse, GuardError> {
         let mut method = method;
         let mut cur = reqwest::Url::parse(url).map_err(|_| GuardError::MalformedUrl)?;
-        let mut hops = 0u8;
+        canonicalize(&mut cur)?;
+        let max_hops = self.limits.max_redirects.min(MAX_REDIRECTS_CEILING);
+        let mut hops = 0usize;
         loop {
-            let pinned = validate_target(&cur, &self.allow).await?;
+            let pinned = validate_target(self.resolver.as_ref(), &cur, &self.allow).await?;
             let client = build_pinned(&cur, pinned, self.limits.timeout)?;
             let mut req = client.request(method.clone(), cur.clone());
             for (k, v) in &headers {
@@ -392,31 +488,49 @@ impl GuardedClient {
                 })
             })?;
             let status = resp.status();
-            if status.is_redirection() && self.limits.max_redirects > 0 {
-                hops += 1;
-                if hops > self.limits.max_redirects {
+            let code = status.as_u16();
+            // Only 301/302/303/307/308 carrying a Location are redirects;
+            // 300/304/305/306 and a Location-less 3xx are final responses.
+            let location = if max_hops > 0 && matches!(code, 301 | 302 | 303 | 307 | 308) {
+                match resp.headers().get(reqwest::header::LOCATION) {
+                    Some(v) => Some(v.to_str().map_err(|_| GuardError::BadRedirect)?),
+                    None => None,
+                }
+            } else {
+                None
+            };
+            if let Some(loc) = location {
+                hops = hops.checked_add(1).ok_or(GuardError::TooManyRedirects)?;
+                if hops > max_hops {
                     return Err(GuardError::TooManyRedirects);
                 }
-                let loc = resp
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|v| v.to_str().ok())
-                    .ok_or(GuardError::BadRedirect)?;
-                let next = cur.join(loc).map_err(|_| GuardError::BadRedirect)?;
+                let mut next = cur.join(loc).map_err(|_| GuardError::BadRedirect)?;
+                canonicalize(&mut next)?;
                 let same_origin = next.scheme() == cur.scheme()
                     && next.host_str() == cur.host_str()
                     && next.port_or_known_default() == cur.port_or_known_default();
+                // RFC 9110 15.4: 301/302 turn POST into GET, 303 turns every
+                // method but HEAD into GET, 307/308 never change the method.
+                let to_get = match code {
+                    301 | 302 => method == reqwest::Method::POST,
+                    303 => method != reqwest::Method::GET && method != reqwest::Method::HEAD,
+                    _ => false,
+                };
+                if to_get {
+                    method = reqwest::Method::GET;
+                    body = None;
+                    headers
+                        .retain(|(k, _)| !BODY_HEADERS.contains(&k.to_ascii_lowercase().as_str()));
+                }
                 if !same_origin {
+                    // The body may itself be a secret: never forwarded to
+                    // another origin, so a hop that must keep it is refused.
+                    if body.is_some() {
+                        return Err(GuardError::BodyCrossOrigin);
+                    }
                     headers.retain(|(k, _)| {
                         CROSS_ORIGIN_FORWARDED.contains(&k.to_ascii_lowercase().as_str())
                     });
-                    // The body may itself be a secret; it never crosses origins
-                    // (307/308 included).
-                    body = None;
-                }
-                if matches!(status.as_u16(), 301..=303) && method != reqwest::Method::GET {
-                    method = reqwest::Method::GET;
-                    body = None;
                 }
                 cur = next;
                 continue;
@@ -449,6 +563,51 @@ impl GuardedClient {
                 headers: out_headers,
                 body: out,
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // regression: gh-989 -- strip exactly one bracket pair, never over-strip.
+    #[test]
+    fn unbracket_strips_one_pair_only() {
+        assert_eq!(unbracket("[::1]"), "::1");
+        assert_eq!(unbracket("[[::1]]"), "[::1]");
+        assert_eq!(unbracket("[::1"), "[::1");
+        assert_eq!(unbracket("::1]"), "::1]");
+        assert!(literal_ip("[[::1]]").is_none());
+        assert_eq!(literal_ip("[::1]"), Some("::1".parse().unwrap()));
+        assert_eq!(literal_ip("1.2.3.4"), Some("1.2.3.4".parse().unwrap()));
+        assert!(literal_ip("example.com").is_none());
+    }
+
+    #[test]
+    fn canonicalize_strips_one_trailing_dot_and_lowercases() {
+        let mut u = reqwest::Url::parse("https://EXAMPLE.com./x").unwrap();
+        canonicalize(&mut u).unwrap();
+        assert_eq!(u.host_str(), Some("example.com"));
+        let mut u = reqwest::Url::parse("https://[::1]/x").unwrap();
+        canonicalize(&mut u).unwrap();
+        assert_eq!(u.host_str(), Some("[::1]"));
+        let mut u = reqwest::Url::parse("https://a../x").unwrap();
+        canonicalize(&mut u).unwrap();
+        assert_eq!(u.host_str(), Some("a."));
+        let mut u = reqwest::Url::parse("https://./x").unwrap();
+        assert_eq!(canonicalize(&mut u), Err(GuardError::MalformedUrl));
+    }
+
+    #[test]
+    fn display_and_class_cover_every_variant() {
+        for e in [
+            GuardError::BodyCrossOrigin,
+            GuardError::BadRedirect,
+            GuardError::Transport("k"),
+        ] {
+            assert!(!e.to_string().is_empty());
+            assert!(!e.class().is_empty());
         }
     }
 }

@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Redirect};
 use axum::routing::get;
 use axum::Router;
 use bundle_host_http::guarded::{
-    forbidden_reason, pinned_client, resolve_pinned, GuardError, GuardedClient, GuardedLimits,
+    forbidden_reason, resolve_pinned, GuardError, GuardedClient, GuardedLimits,
 };
 
 type Seen = Arc<Mutex<Vec<Option<String>>>>;
@@ -27,7 +27,7 @@ fn lo() -> Vec<IpAddr> {
     vec!["127.0.0.1".parse().unwrap()]
 }
 
-fn client(max_redirects: u8, max_bytes: usize) -> GuardedClient {
+fn client(max_redirects: usize, max_bytes: usize) -> GuardedClient {
     GuardedClient::new(
         GuardedLimits {
             max_redirects,
@@ -244,6 +244,7 @@ fn error_display_never_carries_address_or_host() {
         GuardError::DnsFailed,
         GuardError::NoAddress,
         GuardError::BadRedirect,
+        GuardError::BodyCrossOrigin,
         GuardError::TooManyRedirects,
         GuardError::Timeout,
         GuardError::ResponseTooLarge,
@@ -296,15 +297,5 @@ async fn strict_ranges_and_pinning() {
             .unwrap()
             .port(),
         9
-    );
-    assert!(
-        pinned_client(&u("https://10.0.0.5/"), &[], Duration::from_secs(1))
-            .await
-            .is_err()
-    );
-    assert!(
-        pinned_client(&u("https://8.8.8.8/"), &[], Duration::from_secs(1))
-            .await
-            .is_ok()
     );
 }
