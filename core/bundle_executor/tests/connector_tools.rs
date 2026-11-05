@@ -1361,3 +1361,54 @@ async fn build_request_takes_global_admission_like_other_exports() {
     );
     assert!(seen.remove(&slow).expect("slow reply").is_err());
 }
+
+// regression (security review of #1001): `build-request` is stage-initiated
+// guest compute, so it must run under the reserved SENDER/TOOL share, never the
+// receiver pool -- a flood of spinning build-requests must not take every slot
+// and starve `on-frame` / heartbeat.
+#[tokio::test]
+async fn saturated_build_request_cannot_starve_on_frame_or_heartbeat() {
+    let rig = rig();
+    let l = ConnectorLimits {
+        pool_size: 2,
+        deadline_ms: 1_500,
+        // Huge fuel so the spin is ended by the DEADLINE, holding its slot.
+        fuel: u64::MAX / 2,
+        ..limits()
+    };
+    let host = tools_host_with(&rig, l).await;
+    assert_eq!(host.available_slots(), 2);
+
+    // Flood: more spinning build-requests than the combined pool could hold.
+    let floods: Vec<_> = (0..4)
+        .map(|_| {
+            let h = host.clone();
+            tokio::spawn(async move { h.build_request(action("chat.spin", "s", "{}"), None).await })
+        })
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while host.available_tool_slots() > 0 {
+        assert!(Instant::now() < deadline, "flood never took its share");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // The receiver side is intact: at least one combined slot stays free for
+    // on-frame and heartbeat while the flood is in flight.
+    assert!(host.available_slots() >= 1, "flood took every slot");
+    host.on_frame(RawFrame {
+        ctx: ctx(),
+        bytes: br#"{"text":"still alive"}"#.to_vec(),
+        received_at: "2026-11-04T00:00:00.000Z".into(),
+    })
+    .await
+    .unwrap();
+    host.on_heartbeat_due(ctx()).await.unwrap();
+
+    for f in floods {
+        let r = f.await.unwrap();
+        // Each is either contained by the deadline or back-pressured -- never Ok.
+        assert!(r.is_err(), "{r:?}");
+    }
+    assert_eq!(host.available_slots(), 2);
+    assert_eq!(host.available_tool_slots(), tool_pool_size(2));
+}

@@ -664,7 +664,9 @@ impl ConnectorHost {
     /// request never takes a slot), the template's total size against
     /// `max_tool_result_bytes` BEFORE it is encoded anywhere, and a
     /// caller-supplied deadline can only tighten `limits.deadline_ms`. Runs on
-    /// the combined pool under the connector's own fuel budget. A guest
+    /// the reserved tool/sender share ([`tool_pool_size`]) of the combined pool
+    /// (never the receiver capacity, so a flood of build-requests cannot starve
+    /// `on-frame`/heartbeat) under the connector's own fuel budget. A guest
     /// `frame-error` is [`ConnectorCallError::Guest`].
     pub async fn build_request(
         &self,
@@ -690,7 +692,7 @@ impl ConnectorHost {
             self,
             "build-request",
             ConnectorCallError::Guest,
-            pool = receiver,
+            pool = tool,
             deadline = deadline,
             |conn, store| call_sender(&conn, store, &action)
         )?;
