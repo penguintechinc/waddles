@@ -40,6 +40,7 @@ pub mod host;
 pub mod invoke;
 pub mod manifest;
 pub mod metrics;
+pub mod parity_support;
 pub mod probe;
 pub mod signing;
 pub mod telemetry;

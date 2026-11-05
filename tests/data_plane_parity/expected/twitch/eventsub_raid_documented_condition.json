@@ -1,0 +1,34 @@
+{
+  "context": {
+    "message_type": "notification"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "222",
+        "raw_handle": "raider",
+        "uuid": "858f0990-f75e-5482-ab55-99ec584c85a8"
+      },
+      "event_type": "channel.raid",
+      "payload": {
+        "broadcaster_id": "",
+        "broadcaster_login": null,
+        "metadata": {
+          "viewers": 42
+        },
+        "user_display_name": "Raider",
+        "user_id": "222",
+        "user_login": "raider"
+      },
+      "platform": "twitch"
+    }
+  ],
+  "id": "twitch/eventsub_raid_documented_condition",
+  "input": {
+    "encoding": "json",
+    "text": "{\"event\":{\"from_broadcaster_user_id\":\"222\",\"from_broadcaster_user_login\":\"raider\",\"from_broadcaster_user_name\":\"Raider\",\"to_broadcaster_user_id\":\"111\",\"to_broadcaster_user_login\":\"somechannel\",\"viewers\":42},\"subscription\":{\"condition\":{\"to_broadcaster_user_id\":\"111\"},\"id\":\"sub-1\",\"type\":\"channel.raid\",\"version\":\"1\"}}"
+  },
+  "outcome": "event",
+  "path": "twitch_eventsub",
+  "platform": "twitch"
+}

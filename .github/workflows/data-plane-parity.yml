@@ -25,6 +25,8 @@ on:
       - 'libs/flask_core/**'
       - 'libs/waddle_transports/**'
       - 'scripts/ci/data-plane-parity.sh'
+      - 'scripts/ci/gen-connector-parity-expected.py'
+      - 'scripts/ci/tests/test_gen_connector_parity_expected.py'
       - '.github/workflows/data-plane-parity.yml'
   pull_request:
     branches: [main, 'release/**']
@@ -37,6 +39,8 @@ on:
       - 'libs/flask_core/**'
       - 'libs/waddle_transports/**'
       - 'scripts/ci/data-plane-parity.sh'
+      - 'scripts/ci/gen-connector-parity-expected.py'
+      - 'scripts/ci/tests/test_gen_connector_parity_expected.py'
       - '.github/workflows/data-plane-parity.yml'
   workflow_dispatch:
 

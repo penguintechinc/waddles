@@ -1,0 +1,8 @@
+{
+  "id": "fixture/unicode",
+  "platform": "fixture",
+  "context": {"self_nick": "bot"},
+  "input": {"encoding": "json", "text": "{\"text\":\"h\\u00e9llo \\u2603\",\"ignored\":1}"},
+  "outcome": "event",
+  "events": [{"platform": "fixture", "event_type": "message", "actor": null, "payload": {"text": "h\u00e9llo \u2603"}}]
+}

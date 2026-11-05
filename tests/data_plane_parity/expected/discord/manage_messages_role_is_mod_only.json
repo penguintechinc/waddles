@@ -1,0 +1,48 @@
+{
+  "context": {
+    "guild_owner_id": "900",
+    "guild_roles": [
+      [
+        "role-mod",
+        8192
+      ],
+      [
+        "111",
+        0
+      ]
+    ],
+    "member_role_ids": [
+      "role-mod",
+      "111"
+    ],
+    "self_user_id": "999"
+  },
+  "events": [
+    {
+      "actor": {
+        "platform_user_id": "902",
+        "raw_handle": "someuser",
+        "uuid": "ac78e2e0-6a1d-5ae8-85af-ca16b1cd1833"
+      },
+      "event_type": "message",
+      "payload": {
+        "author_id": "902",
+        "channel_id": "222",
+        "guild_id": "111",
+        "is_broadcaster": false,
+        "is_mod": true,
+        "message_id": "333",
+        "text": "hello chat"
+      },
+      "platform": "discord"
+    }
+  ],
+  "id": "discord/manage_messages_role_is_mod_only",
+  "input": {
+    "encoding": "json",
+    "text": "{\"op\":0,\"t\":\"MESSAGE_CREATE\",\"s\":1,\"d\":{\"author\":{\"bot\":false,\"id\":\"902\",\"username\":\"someuser\"},\"channel_id\":\"222\",\"content\":\"hello chat\",\"guild_id\":\"111\",\"id\":\"333\",\"type\":0}}"
+  },
+  "outcome": "event",
+  "path": "discord_gateway",
+  "platform": "discord"
+}
