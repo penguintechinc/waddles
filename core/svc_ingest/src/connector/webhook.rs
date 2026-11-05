@@ -1192,6 +1192,7 @@ mod tests {
                 endpoint: connection_resolver::Endpoint::default(),
                 secret,
                 expires_at: None,
+                metadata: Default::default(),
             };
             let _ = r;
             async move { Ok(out) }

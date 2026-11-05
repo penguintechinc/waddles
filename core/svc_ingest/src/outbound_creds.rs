@@ -18,7 +18,20 @@
 //!    same rule as inbound discovery);
 //! 3. resolves exactly that connection through `connection_resolver`
 //!    (community-bound machine JWT, `connections:resolve`) and asserts the
-//!    answer is the same community/connection/provider/OAuth kind.
+//!    answer is the same community/connection/provider/OAuth kind AND that the
+//!    resolved record's own metadata still names the pinned channel (metadata
+//!    can be rewritten on an existing connection id between 1 and 3). The
+//!    nick is taken from the resolved record, never the list.
+//!
+//! Known tradeoff: hub-api has no community/channel-filtered binding lookup,
+//! so step 1 scans the global list every send (no cache: a cached claim view
+//! would weaken the double-claim guarantee). A list over `MAX_PAGES` pages
+//! fails every send with the typed, counted [`CredError::BindingListOverflow`]
+//! rather than scanning a truncated view. Follow-up: add a filtered lookup.
+//!
+//! The plaintext token must reach the IRC library as a `String`
+//! (`IrcConfig.password`, outbound.rs), a copy this crate cannot zeroize;
+//! its lifetime is one send. Everything this module owns is zeroizing.
 //!
 //! The secret is returned as a [`connection_resolver::SecretString`]
 //! (zeroizing, `Debug` redacted) and is **never cached**: the next send
@@ -43,7 +56,7 @@ use connection_resolver::{
 };
 
 use crate::twitch_sessions::spec::{
-    SessionSpec, CAPABILITY, MAX_PAGES, META_BOT_LOGIN, PAGE_LIMIT,
+    SessionSpec, CAPABILITY, MAX_PAGES, META_BOT_LOGIN, META_CHANNEL, PAGE_LIMIT,
 };
 
 /// Provider name as hub-api's binding list knows it.
@@ -93,6 +106,12 @@ pub enum CredError {
     /// hub-api could not be reached / answered in time; retryable.
     #[error("credential resolution temporarily unavailable")]
     Unavailable,
+    /// The global twitch binding list is larger than `MAX_PAGES` pages, so
+    /// channel ownership cannot be proven (a truncated scan could hide a
+    /// competing claimant). Fails every send until hub-api offers a filtered
+    /// lookup or the cap is raised -- never a silent truncation.
+    #[error("twitch binding list exceeds the scan cap")]
+    BindingListOverflow,
 }
 
 impl CredError {
@@ -105,6 +124,7 @@ impl CredError {
             Self::ChannelNotOwned => "channel_not_owned",
             Self::NotUsable => "connection_not_usable",
             Self::Unavailable => "credential_unavailable",
+            Self::BindingListOverflow => "binding_list_overflow",
         }
     }
 }
@@ -156,6 +176,19 @@ fn canonical_login(raw: &str) -> String {
     raw.trim().trim_start_matches('#').to_ascii_lowercase()
 }
 
+/// Whether a binding of ANOTHER community could own `want`: a twitch OAuth
+/// binding whose `channel` metadata canonicalizes to it. Deliberately ignores
+/// every other field's validity -- a binding that cannot be fully parsed but
+/// names the channel still contests it (fail closed). A binding with no/other
+/// channel provably cannot claim `want`.
+fn claims_channel(b: &BindingSummary, want: &str) -> bool {
+    b.provider == PROVIDER
+        && b.kind == ConnectionKind::PlatformOauth
+        && b.metadata
+            .get(META_CHANNEL)
+            .is_some_and(|c| canonical_login(c) == want)
+}
+
 /// Production [`TwitchCredentialSource`] over `connection_resolver`; see the
 /// module doc for the per-call sequence and the no-cache guarantee.
 pub struct ResolverTwitchCredentials<R: ConnectionResolve> {
@@ -192,7 +225,7 @@ impl<R: ConnectionResolve> ResolverTwitchCredentials<R> {
                 None => return Ok(out),
             }
         }
-        Err(CredError::Unavailable)
+        Err(CredError::BindingListOverflow)
     }
 
     async fn resolve_inner(
@@ -205,20 +238,24 @@ impl<R: ConnectionResolve> ResolverTwitchCredentials<R> {
             .ok_or(CredError::NoCommunityScope)?;
         let want = canonical_login(channel);
 
-        // (community, connection, nick) of bindings claiming `want`.
-        let mut mine: Vec<(i64, String)> = Vec::new();
+        // Connection ids of this community's bindings claiming `want`.
+        let mut mine: Vec<i64> = Vec::new();
         let mut community_has_binding = false;
         let mut other_claimant = false;
         for b in self.list_all().await? {
-            let Ok(spec) = SessionSpec::from_summary(&b) else {
-                continue; // malformed binding: never a candidate
-            };
             if b.community_id == community_id {
+                // Our own malformed binding is never a send candidate.
+                let Ok(spec) = SessionSpec::from_summary(&b) else {
+                    continue;
+                };
                 community_has_binding = true;
                 if spec.channel == want {
-                    mine.push((b.connection_id, spec.bot_login));
+                    mine.push(b.connection_id);
                 }
-            } else if spec.channel == want {
+            } else if claims_channel(&b, &want) {
+                // Another community's binding -- even one whose OTHER metadata
+                // is malformed -- that names this channel makes it contested.
+                // Skipping it would silently defeat the double-claim guard.
                 other_claimant = true;
             }
         }
@@ -229,8 +266,8 @@ impl<R: ConnectionResolve> ResolverTwitchCredentials<R> {
             return Err(CredError::ChannelNotOwned);
         }
         // Deterministic when several connections of the community own it.
-        mine.sort_by_key(|(id, _)| *id);
-        let (connection_id, nick) = mine.swap_remove(0);
+        mine.sort_unstable();
+        let connection_id = mine.swap_remove(0);
 
         let resolved = tokio::time::timeout(
             CALL_TIMEOUT,
@@ -244,6 +281,9 @@ impl<R: ConnectionResolve> ResolverTwitchCredentials<R> {
         .map_err(|e| map_resolve_error(&e))?;
 
         // Defense in depth: the answer must be exactly what was asked for.
+        // Ownership is re-asserted against the RESOLVED record's own metadata:
+        // metadata can be rewritten on an existing connection id between the
+        // list and this resolve, so the list's view alone is not authority.
         if resolved.community_id != community_id
             || resolved.connection_id != connection_id
             || resolved.provider != PROVIDER
@@ -251,10 +291,23 @@ impl<R: ConnectionResolve> ResolverTwitchCredentials<R> {
         {
             return Err(CredError::NotUsable);
         }
+        let resolved_spec = SessionSpec::from_summary(&BindingSummary {
+            community_id: resolved.community_id,
+            connection_id: resolved.connection_id,
+            provider: resolved.provider.clone(),
+            kind: resolved.kind,
+            metadata: resolved.metadata.clone(),
+        })
+        .map_err(|_| CredError::NotUsable)?;
+        if resolved_spec.channel != want {
+            return Err(CredError::ChannelNotOwned);
+        }
+        // The token belongs to the resolved record, so the nick is too.
+        let nick = resolved_spec.bot_login;
         let ConnectionSecret::OAuthAccessToken { access_token } = resolved.secret else {
             return Err(CredError::NotUsable);
         };
-        // The nick came from the binding metadata, validated as a login.
+        // The nick came from the resolved record, validated as a login.
         debug_assert!(
             !nick.is_empty(),
             "{META_BOT_LOGIN} validated by SessionSpec"
@@ -314,14 +367,18 @@ impl<R: ConnectionResolve> TwitchCredentialSource for ResolverTwitchCredentials<
 /// static-dev deployment only and is removed once the flag is retired.
 pub struct StaticCredentialSource {
     nick: String,
-    token: String,
+    /// Zeroized on drop; the only plaintext copy this struct owns.
+    token: SecretString,
 }
 
 impl StaticCredentialSource {
     /// Builds the legacy source from the configured identity.
     #[must_use]
     pub fn new(nick: String, token: String) -> Self {
-        Self { nick, token }
+        Self {
+            nick,
+            token: SecretString::new(token),
+        }
     }
 }
 
@@ -333,7 +390,8 @@ impl TwitchCredentialSource for StaticCredentialSource {
     ) -> Result<TwitchCredential, CredError> {
         Ok(TwitchCredential {
             nick: self.nick.clone(),
-            oauth_token: SecretString::new(self.token.clone()),
+            // Per-call copy lives in the returned (zeroizing) credential.
+            oauth_token: SecretString::new(self.token.expose().to_owned()),
         })
     }
 }
@@ -377,9 +435,27 @@ mod tests {
         /// Answers with this (community, connection) instead of the asked one.
         lie: Option<(i64, i64)>,
         kind: ConnectionKind,
+        /// Simulates a metadata rewrite between list and resolve: the
+        /// resolved record reports this channel instead of the listed one.
+        moved_to: Option<&'static str>,
     }
 
     impl Fake {
+        /// Metadata the resolve answer carries: the listed binding's, with
+        /// `channel` rewritten when `moved_to` is set.
+        fn resolve_metadata(&self, connection_id: i64) -> BTreeMap<String, String> {
+            let mut m = self
+                .bindings
+                .iter()
+                .find(|b| b.connection_id == connection_id)
+                .map(|b| b.metadata.clone())
+                .unwrap_or_default();
+            if let Some(c) = self.moved_to {
+                m.insert("channel".to_owned(), c.to_owned());
+            }
+            m
+        }
+
         fn new(bindings: Vec<BindingSummary>, tokens: &[(i64, &'static str)]) -> Self {
             Self {
                 bindings,
@@ -390,6 +466,7 @@ mod tests {
                 asked: Mutex::new(vec![]),
                 lie: None,
                 kind: ConnectionKind::PlatformOauth,
+                moved_to: None,
             }
         }
     }
@@ -420,6 +497,7 @@ mod tests {
                     access_token: SecretString::new((*token).to_owned()),
                 },
                 expires_at: None,
+                metadata: self.resolve_metadata(r.connection_id),
             })
         }
         async fn list_bindings(
@@ -533,6 +611,113 @@ mod tests {
         );
     }
 
+    /// regression: p6a-t6b codex-1 -- a competing community's binding with
+    /// malformed OTHER metadata that still names the channel contests it.
+    #[tokio::test]
+    async fn malformed_competing_binding_naming_the_channel_fails_closed() {
+        let mut bad = test_binding(2, 20, "chan_a", "bot_b");
+        bad.metadata.remove(META_BOT_LOGIN);
+        let f = Fake::new(
+            vec![test_binding(1, 10, "chan_a", "bot_a"), bad],
+            &[(10, "tok_a")],
+        );
+        let src = ResolverTwitchCredentials::new(f);
+        assert_eq!(
+            src.credential(Some(1), "#chan_a").await.unwrap_err(),
+            CredError::ChannelNotOwned
+        );
+        assert_eq!(src.resolver.resolves.load(Ordering::SeqCst), 0);
+    }
+
+    /// A malformed competing binding that does NOT name the channel (or has
+    /// no channel at all) provably cannot claim it, so it must not block.
+    #[tokio::test]
+    async fn malformed_competing_binding_for_other_channel_does_not_block() {
+        let mut no_channel = test_binding(2, 20, "x", "bot_b");
+        no_channel.metadata.remove(META_CHANNEL);
+        let mut other = test_binding(3, 30, "chan_z", "bot_c");
+        other.metadata.remove(META_BOT_LOGIN);
+        let f = Fake::new(
+            vec![test_binding(1, 10, "chan_a", "bot_a"), no_channel, other],
+            &[(10, "tok_a")],
+        );
+        let src = ResolverTwitchCredentials::new(f);
+        assert_eq!(
+            src.credential(Some(1), "#chan_a").await.unwrap().nick,
+            "bot_a"
+        );
+    }
+
+    /// regression: p6a-t6b codex-2 -- channel metadata rewritten on the same
+    /// connection id between list and resolve must not authorize the send.
+    #[tokio::test]
+    async fn channel_moved_between_list_and_resolve_is_refused() {
+        let mut f = two_communities();
+        f.moved_to = Some("chan_other");
+        let src = ResolverTwitchCredentials::new(f);
+        assert_eq!(
+            src.credential(Some(1), "#chan_a").await.unwrap_err(),
+            CredError::ChannelNotOwned
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_record_without_metadata_is_not_usable() {
+        struct NoMeta(Fake);
+        impl ConnectionResolve for NoMeta {
+            async fn resolve(&self, r: ConnectionRef) -> Result<ResolvedConnection, ResolveError> {
+                let mut rc = self.0.resolve(r).await?;
+                rc.metadata.clear();
+                Ok(rc)
+            }
+            async fn list_bindings(
+                &self,
+                p: &str,
+                c: Option<&str>,
+                a: i64,
+                l: u32,
+            ) -> Result<BindingPage, ResolveError> {
+                self.0.list_bindings(p, c, a, l).await
+            }
+        }
+        let src = ResolverTwitchCredentials::new(NoMeta(two_communities()));
+        assert_eq!(
+            src.credential(Some(1), "#chan_a").await.unwrap_err(),
+            CredError::NotUsable
+        );
+    }
+
+    /// regression: p6a-t6b codex-3 -- hitting the page cap is a typed,
+    /// counted failure, never a truncated (hence unsafe) ownership scan.
+    #[tokio::test]
+    async fn page_cap_is_a_typed_overflow_error() {
+        struct Endless;
+        impl ConnectionResolve for Endless {
+            async fn resolve(&self, _r: ConnectionRef) -> Result<ResolvedConnection, ResolveError> {
+                Err(ResolveError::NotFound)
+            }
+            async fn list_bindings(
+                &self,
+                _p: &str,
+                _c: Option<&str>,
+                after: i64,
+                _l: u32,
+            ) -> Result<BindingPage, ResolveError> {
+                Ok(BindingPage {
+                    items: vec![],
+                    next_after: Some(after + 1),
+                })
+            }
+        }
+        let before = resolve_count("twitch", "binding_list_overflow");
+        let src = ResolverTwitchCredentials::new(Endless);
+        assert_eq!(
+            src.credential(Some(1), "#x").await.unwrap_err(),
+            CredError::BindingListOverflow
+        );
+        assert_eq!(resolve_count("twitch", "binding_list_overflow"), before + 1);
+    }
+
     #[tokio::test]
     async fn resolver_failures_map_to_typed_errors_without_fallback() {
         let cases = [
@@ -637,6 +822,8 @@ mod tests {
                         access_token: SecretString::new("t".to_owned()),
                     },
                     expires_at: None,
+                    metadata: test_binding(r.community_id, r.connection_id, "chan_a", "bot_a")
+                        .metadata,
                 })
             }
             async fn list_bindings(
@@ -685,6 +872,7 @@ mod tests {
             CredError::ChannelNotOwned,
             CredError::NotUsable,
             CredError::Unavailable,
+            CredError::BindingListOverflow,
         ];
         let mut reasons: Vec<_> = all.iter().map(|e| e.reason()).collect();
         reasons.sort_unstable();
