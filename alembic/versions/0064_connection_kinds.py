@@ -5,7 +5,8 @@ https endpoint, an AWS Lambda function and a GCP Cloud Function -- whose credent
 JSON document rather than an OAuth token pair.
 
 - ``connection_kind SMALLINT NOT NULL DEFAULT 1`` -- the int type authority: 1 = platform OAuth
-  (every pre-existing row, backfilled by the default), 2 = external_http, 3 = aws_lambda, 4 = gcp_function.
+  (every pre-existing row, backfilled by the default), 2 = external_http, 3 = aws_lambda, 4 =
+  gcp_function.
   ``CHECK (connection_kind BETWEEN 1 AND 4)``. The codes are mirrored by the Rust enum in the data
   plane; never renumber.
 - ``sealed_secret TEXT NULL`` -- AES-256-GCM of the secret JSON document, AAD bound to
@@ -37,7 +38,8 @@ _SECRET_SHAPE_CHECK = "platform_connections_secret_shape_check"
 
 
 def upgrade() -> None:
-    """Add the kind + sealed-secret columns (kind backfilled to 1), tighten, extend the allow-list."""
+    """Add the kind + sealed-secret columns (kind backfilled to 1), tighten, extend the
+    allow-list."""
     # NOT NULL DEFAULT 1 backfills every existing row to 1 (metadata-only on PG 11+) and keeps any
     # pre-0064 writer (which only ever wrote OAuth rows) valid without naming the column.
     op.execute(

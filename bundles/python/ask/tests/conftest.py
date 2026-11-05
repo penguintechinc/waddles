@@ -13,13 +13,15 @@ for _path in (_BUNDLE_SRC, _SDK_SRC):
         sys.path.insert(0, str(_path))
 
 
-import json as _json
-import types
-from dataclasses import dataclass, field
-from typing import Any
+# E402 is intentional below: imports must follow the sys.path wiring above
+# (waddle_sdk and the bundle `src` are not installed packages).
+import json as _json  # noqa: E402
+import types  # noqa: E402
+from dataclasses import dataclass, field  # noqa: E402
+from typing import Any  # noqa: E402
 
-import pytest
-from waddle_sdk.testing import FakeAiHost, install_fake_ai_host
+import pytest  # noqa: E402
+from waddle_sdk.testing import FakeAiHost, install_fake_ai_host  # noqa: E402
 
 
 @dataclass(slots=True)

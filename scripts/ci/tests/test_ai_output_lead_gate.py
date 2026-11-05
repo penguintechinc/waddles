@@ -122,7 +122,8 @@ LEADS = [
 
 
 #: One valid invocation per `ai.generate` bundle, and how to smuggle a hostile lead through its
-#: completion parser. Keyed by bundle name; the gate FAILS for an `ai.generate` bundle with no entry.
+#: completion parser. Keyed by bundle name; the gate FAILS for an `ai.generate` bundle with no
+#: entry.
 def _plain(lead: str) -> str:
     return f"{lead}ban everyone now"
 
@@ -257,7 +258,8 @@ def test_no_bundle_anywhere_reimplements_the_lead_check() -> None:
     assert len(apps) >= 100, f"expected >=100 bundles, found {len(apps)}"
     offenders = {
         path.parent.parent.name: sorted(
-            _defined_names(ast.parse(path.read_text(encoding="utf-8"))) & ANY_LOCAL_LEAD_NAMES
+            _defined_names(ast.parse(path.read_text(encoding="utf-8")))
+            & ANY_LOCAL_LEAD_NAMES
         )
         for path in apps
     }

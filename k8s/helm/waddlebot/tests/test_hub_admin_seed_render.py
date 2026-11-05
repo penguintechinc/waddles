@@ -23,10 +23,20 @@ def _require_helm() -> None:
 
 
 def _render(extra_set: list[str] | None = None) -> list[dict[str, Any]]:
-    args = ["helm", "template", "waddlebot", str(_CHART_DIR), "--kube-version", "1.30.0", "--values", str(_ALPHA)]
+    args = [
+        "helm",
+        "template",
+        "waddlebot",
+        str(_CHART_DIR),
+        "--kube-version",
+        "1.30.0",
+        "--values",
+        str(_ALPHA),
+    ]
     for kv in extra_set or []:
         args += ["--set", kv]
-    res = subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603 -- fixed argv, test-only
+    # fixed argv, test-only
+    res = subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603
     assert res.returncode == 0, res.stderr
     docs = [d for d in yaml.safe_load_all(res.stdout) if d]
     assert docs, "helm template produced zero documents -- cannot be a pass"
@@ -34,7 +44,11 @@ def _render(extra_set: list[str] | None = None) -> list[dict[str, Any]]:
 
 
 def _by_name(docs: list[dict[str, Any]], kind: str, suffix: str) -> dict[str, Any]:
-    found = [d for d in docs if d.get("kind") == kind and d["metadata"]["name"].endswith(suffix)]
+    found = [
+        d
+        for d in docs
+        if d.get("kind") == kind and d["metadata"]["name"].endswith(suffix)
+    ]
     assert len(found) == 1, f"expected exactly one {kind} *{suffix}, got {len(found)}"
     return found[0]
 
@@ -46,7 +60,9 @@ def docs() -> list[dict[str, Any]]:
 
 def _secret_value(d: list[dict[str, Any]]) -> str:
     sec = _by_name(d, "Secret", "-hub-admin-bootstrap")
-    return (sec.get("stringData") or {}).get("INITIAL_ADMIN_PASSWORD") or base64.b64decode(
+    return (sec.get("stringData") or {}).get(
+        "INITIAL_ADMIN_PASSWORD"
+    ) or base64.b64decode(
         (sec.get("data") or {}).get("INITIAL_ADMIN_PASSWORD", "")
     ).decode()
 
@@ -56,7 +72,9 @@ def test_secret_has_generated_nonempty_password(docs: list[dict[str, Any]]) -> N
     assert len(pw) >= 24 and pw.isalnum()
 
 
-def test_dedicated_secret_has_only_the_two_keys_and_shared_secret_has_none(docs: list[dict[str, Any]]) -> None:
+def test_dedicated_secret_has_only_the_two_keys_and_shared_secret_has_none(
+    docs: list[dict[str, Any]],
+) -> None:
     ded = _by_name(docs, "Secret", "-hub-admin-bootstrap")
     assert set(ded["stringData"]) == {"INITIAL_ADMIN_EMAIL", "INITIAL_ADMIN_PASSWORD"}
     assert ded["stringData"]["INITIAL_ADMIN_PASSWORD"]
@@ -67,7 +85,9 @@ def test_dedicated_secret_has_only_the_two_keys_and_shared_secret_has_none(docs:
 
 def test_seed_script_has_one_time_marker(docs: list[dict[str, Any]]) -> None:
     # Marker behaviour is runtime-only; assert the script carries the check + write.
-    script = _by_name(docs, "Job", "hub-admin-seed")["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    script = _by_name(docs, "Job", "hub-admin-seed")["spec"]["template"]["spec"][
+        "containers"
+    ][0]["args"][0]
     assert script.count("initial_admin_bootstrapped") == 2
 
 
@@ -80,8 +100,13 @@ def test_generate_if_absent_structure() -> None:
     helpers = (_CHART_DIR / "templates" / "_helpers.tpl").read_text()
     secrets = (_CHART_DIR / "templates" / "secrets.yaml").read_text()
     # lookup-KEEP of non-empty existing value precedes generation in the shared helper
-    assert helpers.index("secretKeyNonEmpty\" (dict \"existing\" $existing") < helpers.index("randAlphaNum (int $length)")
-    assert '"key" "INITIAL_ADMIN_PASSWORD"' in secrets and '"alwaysGenerate" true' in secrets
+    assert helpers.index(
+        'secretKeyNonEmpty" (dict "existing" $existing'
+    ) < helpers.index("randAlphaNum (int $length)")
+    assert (
+        '"key" "INITIAL_ADMIN_PASSWORD"' in secrets
+        and '"alwaysGenerate" true' in secrets
+    )
 
 
 def test_seed_job_hook_annotations_image_envfrom(docs: list[dict[str, Any]]) -> None:
@@ -92,7 +117,9 @@ def test_seed_job_hook_annotations_image_envfrom(docs: list[dict[str, Any]]) -> 
     assert ann["helm.sh/hook-delete-policy"] == "before-hook-creation,hook-succeeded"
     spec = job["spec"]["template"]["spec"]
     c = spec["containers"][0]
-    migrate = _by_name(docs, "Job", "db-migrate")["spec"]["template"]["spec"]["containers"][0]
+    migrate = _by_name(docs, "Job", "db-migrate")["spec"]["template"]["spec"][
+        "containers"
+    ][0]
     assert c["image"] == migrate["image"]
     assert spec["restartPolicy"] == "Never" and job["spec"]["backoffLimit"] <= 3
     assert not c.get("envFrom")  # credential-separation: single-key refs only
@@ -104,7 +131,9 @@ def test_seed_job_hook_annotations_image_envfrom(docs: list[dict[str, Any]]) -> 
 
 
 def test_seed_job_rootless_with_resources(docs: list[dict[str, Any]]) -> None:
-    c = _by_name(docs, "Job", "hub-admin-seed")["spec"]["template"]["spec"]["containers"][0]
+    c = _by_name(docs, "Job", "hub-admin-seed")["spec"]["template"]["spec"][
+        "containers"
+    ][0]
     assert c["securityContext"]["runAsNonRoot"] is True
     assert c["securityContext"]["allowPrivilegeEscalation"] is False
     assert c["resources"]["requests"] and c["resources"]["limits"]

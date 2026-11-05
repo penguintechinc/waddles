@@ -1,4 +1,5 @@
-"""Host-native tests for the `truthordare` bundle -- fake `wit_world` stands in for the WIT imports."""
+"""Host-native tests for the `truthordare` bundle -- fake `wit_world` stands in for the WIT
+imports."""
 
 from __future__ import annotations
 
@@ -168,7 +169,8 @@ def test_prompt_lists_are_sfw_and_unique() -> None:
 
 # hardening: activation-only
 def test_runs_on_activation_alone_when_flag_backend_says_off(host) -> None:
-    """Activation-gated only: an OFF `waddles.command-truthordare` flag must not drop the command."""
+    """Activation-gated only: an OFF `waddles.command-truthordare` flag must not drop the
+    command."""
     host.flag = False
     out = _run(transform(_event("!truthordare")))
     assert out is not None

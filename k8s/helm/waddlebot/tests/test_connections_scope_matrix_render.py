@@ -2,7 +2,8 @@
 
 Matrix (rendered into hub-api's ``SERVICE_JWT_IDENTITIES``):
 
-* svc-action: ``connections:resolve`` + ``connections:resolve:static`` (static Lambda/GCP/HTTP kinds),
+* svc-action: ``connections:resolve`` + ``connections:resolve:static`` (static Lambda/GCP/HTTP
+kinds),
   never ``connections:list``.
 * svc-ingest: ``connections:resolve`` + ``connections:list`` (twitch OAuth + binding discovery),
   never ``connections:resolve:static``.

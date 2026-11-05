@@ -37,6 +37,9 @@ from services.bundle_approval_service import (
 )
 from tests.test_bundle_activation_commands import _manifest
 from tests.test_bundle_activation_service import _install_and_make_available
+
+# F811 below is intentional: pytest resolves fixtures by name, so the imported
+# `pg_dal` fixture is re-bound as a test parameter.
 from tests.test_seed_core_bundles_pg_integration import (  # noqa: F401  # fixtures
     pg_dal,
     pg_db,
@@ -51,7 +54,7 @@ def run_id() -> Iterator[int]:
     yield next(_SEQ)
 
 
-async def _tenant(pg_dal: Any, run_id: int) -> int:
+async def _tenant(pg_dal: Any, run_id: int) -> int:  # noqa: F811
     """Insert a fresh tenant row and return its numeric id."""
     async with pg_dal.engine.begin() as conn:
         return int(
@@ -64,7 +67,7 @@ async def _tenant(pg_dal: Any, run_id: int) -> int:
         )
 
 
-async def _community(pg_dal: Any, tenant_id: int, name: str) -> int:
+async def _community(pg_dal: Any, tenant_id: int, name: str) -> int:  # noqa: F811
     """Insert a community under `tenant_id` and return its id."""
     async with pg_dal.engine.begin() as conn:
         return int(
@@ -77,7 +80,7 @@ async def _community(pg_dal: Any, tenant_id: int, name: str) -> int:
         )
 
 
-async def _publish(pg_dal: Any, tenant_id: int, app_id: str, **kwargs: Any) -> None:
+async def _publish(pg_dal: Any, tenant_id: int, app_id: str, **kwargs: Any) -> None:  # noqa: F811
     """Catalog row (the real FK target) + actor + install + tenant availability for `app_id`."""
     async with pg_dal.engine.begin() as conn:
         # the install/availability helpers record `installed_by=1`/`updated_by=1`, real FKs here
@@ -93,7 +96,7 @@ async def _publish(pg_dal: Any, tenant_id: int, app_id: str, **kwargs: Any) -> N
     )
 
 
-async def _rows(pg_dal: Any, tenant_id: int, app_id: str | None = None) -> list[Any]:
+async def _rows(pg_dal: Any, tenant_id: int, app_id: str | None = None) -> list[Any]:  # noqa: F811
     """`app_commands` rows for a tenant (optionally one app), ordered by command then id."""
     table = pg_dal.metadata.tables["app_commands"]
     stmt = select(table).where(table.c.tenant_id == tenant_id).order_by(table.c.command, table.c.id)
@@ -103,7 +106,12 @@ async def _rows(pg_dal: Any, tenant_id: int, app_id: str | None = None) -> list[
         return list((await conn.execute(stmt)).all())
 
 
-async def _activate(pg_dal: Any, tenant_id: int, community_id: int, app_id: str) -> Any:
+async def _activate(
+    pg_dal: Any,  # noqa: F811
+    tenant_id: int,
+    community_id: int,
+    app_id: str,
+) -> Any:
     return await activate_for_community_with_warnings(
         pg_dal,
         tenant_id=tenant_id,
@@ -115,7 +123,8 @@ async def _activate(pg_dal: Any, tenant_id: int, community_id: int, app_id: str)
 
 
 async def test_seed_then_activate_registers_inferred_rows_with_fk_enforced(
-    pg_dal: Any, run_id: int
+    pg_dal: Any,  # noqa: F811
+    run_id: int,
 ) -> None:
     """Activation writes inferred rows; the real FK rejects a row for an unknown app_id."""
     tenant_id = await _tenant(pg_dal, run_id)
@@ -147,7 +156,8 @@ async def test_seed_then_activate_registers_inferred_rows_with_fk_enforced(
 
 
 async def test_two_bundles_same_verb_first_registered_wins_on_real_pg(
-    pg_dal: Any, run_id: int
+    pg_dal: Any,
+    run_id: int,  # noqa: F811
 ) -> None:
     """Warning names the first app; deactivate + reactivate the first re-queues it behind."""
     tenant_id = await _tenant(pg_dal, run_id)
@@ -198,7 +208,7 @@ async def test_two_bundles_same_verb_first_registered_wins_on_real_pg(
         "on real Postgres (sqlite has no such index). Flips to XPASS-fail once fixed."
     ),
 )
-async def test_same_version_reactivation_on_real_pg(pg_dal: Any, run_id: int) -> None:
+async def test_same_version_reactivation_on_real_pg(pg_dal: Any, run_id: int) -> None:  # noqa: F811
     """Deactivate then re-activate the SAME version -- must work, currently IntegrityError."""
     tenant_id = await _tenant(pg_dal, run_id)
     community_id = await _community(pg_dal, tenant_id, f"c-{run_id}")
@@ -212,7 +222,10 @@ async def test_same_version_reactivation_on_real_pg(pg_dal: Any, run_id: int) ->
     await _activate(pg_dal, tenant_id, community_id, app_id)
 
 
-async def test_tenant_wide_and_community_rows_coexist(pg_dal: Any, run_id: int) -> None:
+async def test_tenant_wide_and_community_rows_coexist(
+    pg_dal: Any,  # noqa: F811
+    run_id: int,
+) -> None:
     """A tenant-wide (scope 0) owner and a community activation conflict across scope."""
     tenant_id = await _tenant(pg_dal, run_id)
     community_id = await _community(pg_dal, tenant_id, f"c-{run_id}")
@@ -238,7 +251,10 @@ async def test_tenant_wide_and_community_rows_coexist(pg_dal: Any, run_id: int) 
     )
 
 
-async def test_concurrent_activations_never_produce_two_owners(pg_dal: Any, run_id: int) -> None:
+async def test_concurrent_activations_never_produce_two_owners(
+    pg_dal: Any,  # noqa: F811
+    run_id: int,
+) -> None:
     """Racing activations of two apps on one verb: both succeed, exactly one deterministic owner.
 
     READ COMMITTED means each racer may miss the other's uncommitted row, so a conflict warning
@@ -279,7 +295,7 @@ async def test_concurrent_activations_never_produce_two_owners(pg_dal: Any, run_
             assert warning.owner_app_id in {app_a, app_b}
 
 
-async def test_backfill_on_real_pg_is_idempotent(pg_dal: Any, run_id: int) -> None:
+async def test_backfill_on_real_pg_is_idempotent(pg_dal: Any, run_id: int) -> None:  # noqa: F811
     """Active rows with no registry rows -> backfill twice -> same rows, same registered_at."""
     tenant_id = await _tenant(pg_dal, run_id)
     community_id = await _community(pg_dal, tenant_id, f"c-{run_id}")

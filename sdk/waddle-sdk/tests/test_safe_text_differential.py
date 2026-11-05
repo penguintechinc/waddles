@@ -17,7 +17,8 @@ the property it must hold is stated against the HOST, not against itself:
   `\t` and `\n` included -- `capabilities.rs::sanitize_irc_component`) no mention is left that
   the author's text helped form. A mention lying wholly inside a substituted display name is
   the sink escaper's job, not the sanitizer's, and is excluded. The ONE sanctioned exemption is a
-  Twitch-style ``@name`` that sits inside a URL-shaped span of the FINAL text (``https://host/@name``
+  Twitch-style ``@name`` that sits inside a URL-shaped span of the FINAL text
+  (``https://host/@name``
   is a link, not a ping); mass mentions and ``<@id>`` / ``<#id>`` / ``<!here>`` are never exempt.
   A live placeholder resolves to a display name that can hold whitespace, ``<`` and ``>``, so a URL
   span never extends across one: the oracle decides URL membership on the text AFTER substitution.

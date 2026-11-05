@@ -4,7 +4,8 @@ Stateless relay: no `kv`, no db, no egress. `transform()` holds all logic; `disp
 relay of the text `transform()` built.
 
 Command grammar: `waddle_sdk.command.CommandSpec` names the command head (a
-bare `!dance` is the action). The optional argument is a single @mention -- the host replaces it with
+bare `!dance` is the action). The optional argument is a single @mention -- the host replaces it
+with
 a `{user:<token>}` placeholder, which `waddle_sdk.identity.mention_tokens` extracts.
 
 **Users are referenced by TOKEN, never by username.** Replies emit `{user:<token>}` placeholders

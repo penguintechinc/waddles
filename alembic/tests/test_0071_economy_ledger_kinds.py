@@ -140,7 +140,8 @@ class TestLedgerKinds:
 
 
 class TestCheckSwapDoesNotBlockWrites:
-    """regression: p981-claim-5 -- the CHECK swap must not scan the ledger under ACCESS EXCLUSIVE."""
+    """regression: p981-claim-5 -- the CHECK swap must not scan the ledger under ACCESS
+    EXCLUSIVE."""
 
     def test_migration_splits_into_swap_then_validate(self) -> None:
         swap, validate = _load_migration()._phases()
@@ -192,16 +193,14 @@ class TestCheckSwapDoesNotBlockWrites:
             )
             cur.execute(swap)
             cur.execute(
-                "SELECT convalidated FROM pg_constraint "
-                "WHERE conname = 'economy_ledger_kind_check'"
+                "SELECT convalidated FROM pg_constraint WHERE conname = 'economy_ledger_kind_check'"
             )
             assert cur.fetchone() == (False,)
             cur.execute(swap)  # re-applying the swap is a no-op
             cur.execute(validate)
             cur.execute(validate)  # and so is a second validate
             cur.execute(
-                "SELECT convalidated FROM pg_constraint "
-                "WHERE conname = 'economy_ledger_kind_check'"
+                "SELECT convalidated FROM pg_constraint WHERE conname = 'economy_ledger_kind_check'"
             )
             assert cur.fetchone() == (True,)
             tid, cid = _scope(cur)

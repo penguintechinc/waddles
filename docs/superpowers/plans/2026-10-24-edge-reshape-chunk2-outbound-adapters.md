@@ -4,7 +4,7 @@
 
 **Goal:** Let svc-action route a bundle's output op to EXTERNAL destinations (external HTTP, AWS Lambda, GCP Cloud Function) and FAN OUT one op to several destinations at once (e.g. gateway reply + Lambda + HTTP), each destination succeeding/failing independently, with every external adapter PII-scope NONE **by construction** (no detokenize code path exists in them, enforced by the Cargo dependency graph, not by review).
 
-**Architecture:** A new leaf crate `core/outbound_adapters` holds one adapter per `ConnectionKind` (transport + envelope-wrap + per-destination auth + declared policy + declared `PiiScope`); it depends on `connection_resolver` (Phase A, frozen contract) and **never** on `egress_detokenizer`/`hub_client`/`svc_action`, so a detokenize call is un-compilable inside it. svc-action gains `outbound/` (policy executor: per-attempt `resolve()`, timeout, retry w/ backoff+jitter via the existing `retry.rs`, per-destination circuit breaker via `core/circuit_breaker`, deterministic idempotency key, OTel; plus the fan-out engine), extends `Destination` with `External`, and wires `handle_relay` behind two default-OFF flags. The platform/gateway leg is unchanged (Chunk 1a) and is just one fan-out leg that keeps the existing detokenize-at-drain path.
+**Architecture:** A new leaf crate `outbound_adapters` (planned path core/outbound_adapters, created by Task 1 -- not yet on disk, so deliberately not backticked for the doc-refs gate) holds one adapter per `ConnectionKind` (transport + envelope-wrap + per-destination auth + declared policy + declared `PiiScope`); it depends on `connection_resolver` (Phase A, frozen contract) and **never** on `egress_detokenizer`/`hub_client`/`svc_action`, so a detokenize call is un-compilable inside it. svc-action gains `outbound/` (policy executor: per-attempt `resolve()`, timeout, retry w/ backoff+jitter via the existing `retry.rs`, per-destination circuit breaker via `core/circuit_breaker`, deterministic idempotency key, OTel; plus the fan-out engine), extends `Destination` with `External`, and wires `handle_relay` behind two default-OFF flags. The platform/gateway leg is unchanged (Chunk 1a) and is just one fan-out leg that keeps the existing detokenize-at-drain path.
 
 **Tech Stack:** Rust (Tokio, reqwest =0.12.28 rustls, `aws-sigv4`, `jsonwebtoken` ring backend, `sha2`), `core/connection_resolver` (Phase A), `core/circuit_breaker`, `penguin-logging`/`tracing`, Helm (`k8s/helm/waddlebot`).
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **svc-action is in-line/data-plane + security-sensitive → Rust only. No Go. No new Python on this path.**
-- **PII invariant (A1, spec §6.4): external HTTP / Lambda / GCP adapters are PII scope NONE by construction.** svc-action NEVER detokenizes for them; `core/outbound_adapters` has NO dependency (direct or transitive) on `egress_detokenizer`, `hub_client`, or `svc_action`, and no detokenize symbol. Tokens/UUIDs only on the wire. Detokenization stays solely on the platform/gateway egress path, unchanged from Chunk 1a (`capabilities.rs` `detokenize_text` callers are NOT touched).
+- **PII invariant (A1, spec §6.4): external HTTP / Lambda / GCP adapters are PII scope NONE by construction.** svc-action NEVER detokenizes for them; `outbound_adapters` has NO dependency (direct or transitive) on `egress_detokenizer`, `hub_client`, or `svc_action`, and no detokenize symbol. Tokens/UUIDs only on the wire. Detokenization stays solely on the platform/gateway egress path, unchanged from Chunk 1a (`capabilities.rs` `detokenize_text` callers are NOT touched).
 - **Adapter inputs are a `TokenizedOp` newtype** — constructible only through a validator that rejects forbidden PII-bearing keys; adapters cannot receive a raw `serde_json::Value`.
 - **Frozen contract consumed, not redefined:** `ConnectionResolver::resolve(ConnectionRef{community_id, connection_id}) -> Result<ResolvedConnection, ResolveError>`; `ResolvedConnection` is NOT `Clone`; `ConnectionKind{PlatformOauth=1,ExternalHttp=2,AwsLambda=3,GcpFunction=4}`; `ConnectionSecret` variants and `ResolveError::is_transient()` exactly as Phase A ships them. B1 imports only that crate's public interface.
 - **No static secrets; creds only via `resolve()`, fetched per attempt, NEVER cached** (not in a map, not in an adapter field, not in a signed-URL cache). `ResolvedConnection` dropped at end of the attempt. Secret types redact in `Debug`.
@@ -39,7 +39,7 @@
 
 ---
 
-### Task 1: `core/outbound_adapters` crate skeleton — trait, `TokenizedOp`, errors, PII-by-construction guard
+### Task 1: `outbound_adapters` crate skeleton — trait, `TokenizedOp`, errors, PII-by-construction guard
 
 **Files:**
 - Create: `core/outbound_adapters/Cargo.toml`, `core/outbound_adapters/src/lib.rs`, `src/adapter.rs`, `src/tokenized_op.rs`, `src/error.rs`, `src/registry.rs`, `tests/pii_graph.rs`, `core/outbound_adapters/deny.toml`

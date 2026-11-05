@@ -9,7 +9,7 @@ cargo test --locked
 cargo component build --release --target wasm32-wasip2 --locked
 
 TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
-WASM="$(ls "$TARGET_DIR"/wasm32-wasip*/release/waddle_bundle_youtube_service.wasm | head -n1)"
+WASM="$(find "$TARGET_DIR" -maxdepth 3 -path "$TARGET_DIR/wasm32-wasip*/release/waddle_bundle_youtube_service.wasm" | sort | head -n1)"
 [ -s "$WASM" ] || { echo "FAIL: youtube wasm not built" >&2; exit 1; }
 
 cd "$ROOT/core/bundle_executor"

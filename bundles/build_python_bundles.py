@@ -64,7 +64,9 @@ WIT_WORLD_STAGE_NEXT = "stage-next"
 WIT_WORLD_STAGE_NEXT_TOOLS = "stage-next-tools"
 #: The only worlds a catalog row may name (`wit_world`); `stage-v2` is deliberately absent --
 #: no Python bundle is built against the numeric-scope world yet.
-VALID_WIT_WORLDS = frozenset({WIT_WORLD_STAGE, WIT_WORLD_STAGE_NEXT, WIT_WORLD_STAGE_NEXT_TOOLS})
+VALID_WIT_WORLDS = frozenset(
+    {WIT_WORLD_STAGE, WIT_WORLD_STAGE_NEXT, WIT_WORLD_STAGE_NEXT_TOOLS}
+)
 #: Permission-id prefixes whose host import exists ONLY in `world stage-next`
 #: (`wit/waddle-bundle/stage.wit`: `economy`, `ai`, `identity`, `reputation`, `overlay`,
 #: `streaming-lifecycle`). A manifest declaring any of them needs a stage-next build.
@@ -103,7 +105,8 @@ def _load_python_bundles() -> list[dict[str, Any]]:
 
 
 def _permission_ids(manifest: dict[str, Any]) -> list[str]:
-    """Return the permission ids a parsed `hub-manifest.yaml` declares (V2 dicts or bare strings)."""
+    """Return the permission ids a parsed `hub-manifest.yaml` declares (V2 dicts or bare
+    strings)."""
     ids: list[str] = []
     for item in manifest.get("permissions") or []:
         raw = item.get("id") if isinstance(item, dict) else item
@@ -136,10 +139,17 @@ def resolve_wit_world(app_id: str, declared: object, permission_ids: list[str]) 
         )
     needed = required_wit_world(permission_ids)
     if needed == WIT_WORLD_STAGE_NEXT_TOOLS and world != WIT_WORLD_STAGE_NEXT_TOOLS:
-        raise BuildError(f"{app_id}: tool.call permissions require wit_world={WIT_WORLD_STAGE_NEXT_TOOLS!r}")
-    if needed == WIT_WORLD_STAGE_NEXT and world not in {WIT_WORLD_STAGE_NEXT, WIT_WORLD_STAGE_NEXT_TOOLS}:
+        raise BuildError(
+            f"{app_id}: tool.call permissions require wit_world={WIT_WORLD_STAGE_NEXT_TOOLS!r}"
+        )
+    if needed == WIT_WORLD_STAGE_NEXT and world not in {
+        WIT_WORLD_STAGE_NEXT,
+        WIT_WORLD_STAGE_NEXT_TOOLS,
+    }:
         offending = sorted(
-            pid for pid in permission_ids if pid.startswith(STAGE_NEXT_PERMISSION_PREFIXES)
+            pid
+            for pid in permission_ids
+            if pid.startswith(STAGE_NEXT_PERMISSION_PREFIXES)
         )
         raise BuildError(
             f"{app_id}: hub-manifest.yaml declares stage-next-only permission(s) {offending} "
@@ -195,7 +205,9 @@ def _build_one(entry: dict[str, Any]) -> str:
         raise BuildError(f"{app_id}: missing manifest file {bundle_manifest}")
 
     manifest = yaml.safe_load(bundle_manifest.read_text(encoding="utf-8")) or {}
-    wit_world = resolve_wit_world(app_id, entry.get("wit_world"), _permission_ids(manifest))
+    wit_world = resolve_wit_world(
+        app_id, entry.get("wit_world"), _permission_ids(manifest)
+    )
 
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     out_wasm = DIST_DIR / artifact_path

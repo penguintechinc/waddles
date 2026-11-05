@@ -1,4 +1,5 @@
-"""`!vibecheck` -- `!vibecheck [@user]` -> a random fun 'vibe: X%' mood readout, optionally for a mentioned user.
+"""`!vibecheck` -- `!vibecheck [@user]` -> a random fun 'vibe: X%' mood readout, optionally for a
+mentioned user.
 
 Static, SFW, stateless: no kv/db, no AI, no external API. Relay only. Never logs `event.actor`
 or any mention token (logs carry only the platform); a mention is echoed back only as the host's

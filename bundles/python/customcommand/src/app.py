@@ -79,7 +79,12 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from waddle_sdk import identity, kv, log, relay
-from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
+from waddle_sdk.command import (
+    CommandSpec,
+    CommandUsageError,
+    ParsedCommand,
+    parse_command,
+)
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.safe_text import (
     escape_egress_tokens,
@@ -122,7 +127,8 @@ _NAME_FIRST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
 _VERB_ALIASES = {"edit": "set", "del": "delete"}
 
 #: Every command an existing bundle answers to (bundle directory names plus their
-#: `command_prefix` filters, including bundles still on unmerged feature branches) and this bundle's own
+#: `command_prefix` filters, including bundles still on unmerged feature branches) and this
+#: bundle's own
 #: words. A custom command named like one of them would reply on top of the real command.
 RESERVED_NAMES: frozenset[str] = frozenset(
     """
@@ -251,11 +257,15 @@ async def _save_names(names: list[str]) -> None:
 
 def _is_privileged(event: PlatformEvent) -> bool:
     """Broadcaster/moderator check -- strict `is True`, fails CLOSED when no badge is present."""
-    return event.payload.get("is_mod") is True or event.payload.get("is_broadcaster") is True
+    return (
+        event.payload.get("is_mod") is True
+        or event.payload.get("is_broadcaster") is True
+    )
 
 
 def _normalize_name(raw: str) -> str:
-    """Strip an optional leading `!` and lowercase -- `!Welcome` and `welcome` both yield `welcome`."""
+    """Strip an optional leading `!` and lowercase -- `!Welcome` and `welcome` both yield
+    `welcome`."""
     return raw.strip().lstrip("!").strip().lower()
 
 
@@ -272,7 +282,9 @@ def _name_error(name: str) -> str | None:
         return "A command name is required, e.g. `!cc add welcome Hi $(user)!`"
     if len(name) > MAX_NAME_LEN:
         return f"Command names must be {MAX_NAME_LEN} characters or fewer."
-    if name[0] not in _NAME_FIRST_CHARS or any(ch not in _NAME_ALLOWED_CHARS for ch in name):
+    if name[0] not in _NAME_FIRST_CHARS or any(
+        ch not in _NAME_ALLOWED_CHARS for ch in name
+    ):
         return (
             "Command names may only contain lowercase letters, digits, '_' and '-', "
             "and must start with a letter or digit."
@@ -290,7 +302,11 @@ def _parse_variable(inner: str) -> _Variable:
         return _Variable(kind)
     if len(words) == 1 and kind in ("target", "touser"):
         return _Variable("target")
-    if kind == "random" and len(words) == 3 and all(_INT_RE.match(w) for w in words[1:]):
+    if (
+        kind == "random"
+        and len(words) == 3
+        and all(_INT_RE.match(w) for w in words[1:])
+    ):
         low, high = int(words[1]), int(words[2])
         if abs(low) <= MAX_RANDOM_ABS and abs(high) <= MAX_RANDOM_ABS and low <= high:
             return _Variable("random", low, high)
@@ -312,7 +328,9 @@ def _parse_template(template: str) -> list[str | _Variable]:
             pieces.append(template[pos : match.start()])
         variables += 1
         if variables > MAX_VARIABLES:
-            raise _TemplateError(f"A response can use at most {MAX_VARIABLES} variables.")
+            raise _TemplateError(
+                f"A response can use at most {MAX_VARIABLES} variables."
+            )
         pieces.append(_parse_variable(match.group(1)))
         pos = match.end()
     if pos < len(template):
@@ -329,9 +347,13 @@ def _response_error(response: str) -> str | None:
     if any(unicodedata.category(ch) == "Cc" for ch in response):
         return "Responses may not contain control characters."
     if identity.mention_tokens(response):
-        return "Responses can't contain user mentions - use $(user) or $(target) instead."
+        return (
+            "Responses can't contain user mentions - use $(user) or $(target) instead."
+        )
     if leads_with_command(response):
-        return "Responses can't start with /, . or ! (the bot would run it as a command)."
+        return (
+            "Responses can't start with /, . or ! (the bot would run it as a command)."
+        )
     try:
         _parse_template(response)
     except _TemplateError as exc:
@@ -423,7 +445,9 @@ async def _handle_add(args: str | None) -> str:
     async def work() -> str:
         names = await _load_names()
         if name in names or await _kv_get(_cmd_key(name)) is not None:
-            return f"!{name} already exists - use !cc edit {name} <response> to change it."
+            return (
+                f"!{name} already exists - use !cc edit {name} <response> to change it."
+            )
         if len(names) >= MAX_COMMANDS:
             return f"This community already has the maximum of {MAX_COMMANDS} custom commands."
         await _kv_set(_cmd_key(name), response.encode("utf-8"))
@@ -445,7 +469,9 @@ async def _handle_edit(args: str | None) -> str:
     async def work() -> str:
         names = await _load_names()
         if name not in names and await _kv_get(_cmd_key(name)) is None:
-            return f"!{name} doesn't exist - use !cc add {name} <response> to create it."
+            return (
+                f"!{name} doesn't exist - use !cc add {name} <response> to create it."
+            )
         await _kv_set(_cmd_key(name), response.encode("utf-8"))
         if name not in names:  # self-heal an index entry lost to a partial failure
             names.append(name)
@@ -628,7 +654,9 @@ async def dispatch(
     channel_id = payload.get("channel_id")
     text = payload.get("text")
     if not channel_id:
-        raise ValueError("customcommand reply requires a channel_id from the inbound chat.message")
+        raise ValueError(
+            "customcommand reply requires a channel_id from the inbound chat.message"
+        )
     if not isinstance(text, str) or not text:
         raise ValueError("customcommand reply requires text produced by transform")
 

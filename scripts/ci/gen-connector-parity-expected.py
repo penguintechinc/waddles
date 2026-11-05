@@ -65,7 +65,10 @@ def encode_input(vector: dict) -> dict:
         frame = {"op": 0, "t": "MESSAGE_CREATE", "s": 1, "d": frame}
     if isinstance(frame, str):
         return {"encoding": "utf8", "text": frame}
-    return {"encoding": "json", "text": json.dumps(frame, separators=(",", ":"), ensure_ascii=False)}
+    return {
+        "encoding": "json",
+        "text": json.dumps(frame, separators=(",", ":"), ensure_ascii=False),
+    }
 
 
 def build(vector: dict) -> dict:
@@ -84,10 +87,20 @@ def build(vector: dict) -> dict:
         actor = None
         if g.get("actor") is not None:
             fields = ACTOR_ID_FIELD[vector["path"]]
-            uid = next((p[f] for f in fields if p.get(f) is not None), None) if (p := g.get("payload") or {}) is not None else None
+            uid = (
+                next((p[f] for f in fields if p.get(f) is not None), None)
+                if (p := g.get("payload") or {}) is not None
+                else None
+            )
             if uid is None:
-                uid = g["actor"]  # no id on the wire (e.g. untagged IRC): the login is the identity key
-            actor = {"platform_user_id": str(uid), "uuid": pseudonym_uuid(g["platform"], str(uid)), "raw_handle": g["actor"]}
+                uid = g[
+                    "actor"
+                ]  # no id on the wire (e.g. untagged IRC): the login is the identity key
+            actor = {
+                "platform_user_id": str(uid),
+                "uuid": pseudonym_uuid(g["platform"], str(uid)),
+                "raw_handle": g["actor"],
+            }
         out["events"].append(
             {
                 "platform": g["platform"],
@@ -114,7 +127,9 @@ def expected_set(corpus: Path) -> dict[str, str]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--corpus", type=Path, default=CORPUS)
     ap.add_argument("--out", type=Path, default=OUT)
@@ -122,7 +137,9 @@ def main() -> int:
 
     want = expected_set(a.corpus)
     if not want:
-        print("[connector-parity-gen] FAIL: zero corpus vectors examined", file=sys.stderr)
+        print(
+            "[connector-parity-gen] FAIL: zero corpus vectors examined", file=sys.stderr
+        )
         return 1
     if not a.check:
         for rel, text in want.items():
@@ -139,10 +156,19 @@ def main() -> int:
             bad.append(f"missing  {rel}")
         elif p.read_text() != text:
             bad.append(f"stale    {rel}")
-    have = {f"{p.parent.name}/{p.name}" for plat in PLATFORMS for p in (a.out / plat).glob("*.json") if p.name != "divergences.json"}
+    have = {
+        f"{p.parent.name}/{p.name}"
+        for plat in PLATFORMS
+        for p in (a.out / plat).glob("*.json")
+        if p.name != "divergences.json"
+    }
     bad += [f"orphaned {rel}" for rel in sorted(have - set(want))]
     if bad:
-        print("[connector-parity-gen] FAIL: expected files out of date (run `make gen-connector-parity-expected`):", file=sys.stderr)
+        print(
+            "[connector-parity-gen] FAIL: expected files out of date (run `make "
+            "gen-connector-parity-expected`):",
+            file=sys.stderr,
+        )
         print("\n".join("  " + b for b in bad), file=sys.stderr)
         return 1
     print(f"[connector-parity-gen] OK examined={len(want)} current={len(want)}")
