@@ -379,5 +379,13 @@ mod tests {
             1,
             "secret appears exactly once"
         );
+        // CRLF-injected second line that tries to echo the secret into a body.
+        let hostile = b"PASS oauth:{{AUTH}}\r\nPRIVMSG #a :{{AUTH}}";
+        assert!(
+            substitute_slots(&s, &handles(), hostile, &r, &pins, &dest())
+                .await
+                .is_err(),
+            "CRLF-injected body slot must be refused"
+        );
     }
 }
