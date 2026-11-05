@@ -113,7 +113,7 @@ fn rows(
 }
 
 fn reply(key: &str, resp: &Value, rows: Vec<Value>, cursor: Option<String>) -> Value {
-    json!({ key: rows, "total": resp.get("total").cloned().unwrap_or(Value::Null), "cursor": cursor })
+    json!({ key: rows, "total": resp.get("total"), "cursor": cursor })
 }
 
 /// Builds the tool table over the given hosts.

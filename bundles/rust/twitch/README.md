@@ -54,6 +54,13 @@ templates. Until T6d lands a read tool sends the literal slot and Twitch answers
 `moderator_id`, `channel`, `room_id`, `sender_id`, `target`, ... are rejected). Header refs for the
 read tools stay `Authorization` -> `twitch_bearer`, `Client-Id` -> `twitch_client_id`.
 
+## Fail-loud parsing
+
+A missing/non-object `event`, a missing/empty broadcaster id, or a present field of the wrong type is a
+typed `frame-error::malformed` (never a defaulted/fabricated event). Only documented optional metadata
+(`tier`=1000, `total`=1, `viewers`/`bits`=0, ...) defaults, and only when ABSENT. Declared divergence: a raid
+keyed only by `to_broadcaster_user_id` yields that id (the hardcoded path published an empty one).
+
 ## Security properties (each has a test)
 
 - Overlay-supplied channel/broadcaster/sender/moderator fields in an action payload are never read; the template is identical with or without them.

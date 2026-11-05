@@ -78,6 +78,28 @@ fn expected_actor_key(v: &Value) -> Value {
         .unwrap_or_else(|| g["actor"].clone())
 }
 
+/// Declared divergences applied to the golden payload: `(vector id, payload
+/// field, expected overlay value)`. Mirrors tests/data_plane_parity/expected/
+/// twitch/divergences.json; each must actually differ from the golden (a stale
+/// declaration fails). The hardcoded path published an EMPTY broadcaster id for
+/// a raid whose channel is only in `to_broadcaster_user_id`.
+const DIVERGENCES: &[(&str, &str, &str)] = &[(
+    "twitch/eventsub_raid_documented_condition",
+    "broadcaster_id",
+    "111",
+)];
+
+fn golden_payload(v: &Value) -> Value {
+    let mut g = v["golden"]["payload"].clone();
+    for (id, field, expected) in DIVERGENCES {
+        if v["id"] == *id {
+            assert_ne!(g[*field], *expected, "stale divergence {id}/{field}");
+            g[*field] = Value::String((*expected).to_string());
+        }
+    }
+    g
+}
+
 fn check(v: &Value, self_nick_known: bool) -> Result<(), String> {
     let id = v["id"].as_str().unwrap();
     let got = run(v, self_nick_known);
@@ -98,11 +120,14 @@ fn check(v: &Value, self_nick_known: bool) -> Result<(), String> {
             if g["platform"] != "twitch"
                 || Value::String(e.event_type.clone()) != g["event_type"]
                 || serde_json::to_value(&e.actor_key).unwrap() != expected_actor_key(v)
-                || Value::Object(e.payload.clone()) != g["payload"]
+                || Value::Object(e.payload.clone()) != golden_payload(v)
                 || e.occurred_at != TS
             {
                 return Err(format!(
-                    "{id}: mismatch\n golden {g}\n actual {:?}",
+                    "{id}: mismatch\n golden {g}\n want {} {}\n actual {:?} {:?}",
+                    golden_payload(v),
+                    expected_actor_key(v),
+                    e.actor_key,
                     e.payload
                 ));
             }

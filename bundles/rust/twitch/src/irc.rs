@@ -76,7 +76,7 @@ pub fn parse_privmsg_line(line: &str) -> Option<ChatMessage> {
     let (prefix, remainder) = rest.split_once(' ')?;
     let remainder = remainder.strip_prefix("PRIVMSG ")?;
     let (channel, text) = remainder.split_once(" :")?;
-    let sender = prefix.split('!').next().unwrap_or(prefix);
+    let sender = prefix.split_once('!').map_or(prefix, |(nick, _)| nick);
     Some(ChatMessage {
         channel: channel.to_string(),
         sender: sender.to_string(),
@@ -129,7 +129,7 @@ fn parse_tags(raw: Option<&str>) -> HashMap<String, String> {
 fn parse_badges(raw: &str) -> Vec<String> {
     raw.split(',')
         .filter_map(|e| {
-            let n = e.split('/').next().unwrap_or("");
+            let n = e.split_once('/').map_or(e, |(name, _)| name);
             (!n.is_empty()).then(|| n.to_string())
         })
         .collect()
@@ -139,7 +139,7 @@ fn parse_badges(raw: &str) -> Vec<String> {
 pub fn normalize_privmsg(msg: &ChatMessage, received_at: &str) -> NormEvent {
     let channel = msg.channel.trim_start_matches('#').to_string();
     let tags = parse_tags(msg.tags.as_deref());
-    let badges = parse_badges(tags.get("badges").map(String::as_str).unwrap_or(""));
+    let badges = parse_badges(tags.get("badges").map_or("", String::as_str));
     let user_id = tags.get("user-id").filter(|s| !s.is_empty()).cloned();
     let non_empty = |k: &str| tags.get(k).filter(|s| !s.is_empty()).cloned();
     let payload: Map<String, Value> = match json!({
@@ -162,7 +162,10 @@ pub fn normalize_privmsg(msg: &ChatMessage, received_at: &str) -> NormEvent {
     };
     NormEvent {
         event_type: "message".to_string(),
-        actor_key: Some(user_id.clone().unwrap_or_else(|| msg.sender.clone())),
+        actor_key: Some(match &user_id {
+            Some(id) => id.clone(),
+            None => msg.sender.clone(),
+        }),
         payload,
         occurred_at: received_at.to_string(),
     }
