@@ -31,6 +31,7 @@
 
 pub mod policy;
 pub mod subst;
+pub mod twitch_slots;
 pub mod verify;
 
 use std::collections::{BTreeMap, HashMap};
