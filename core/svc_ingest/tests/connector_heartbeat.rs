@@ -772,3 +772,146 @@ async fn the_interval_bounds_are_inclusive() {
         );
     }
 }
+
+/// A transport whose heartbeat interval is learned from the wire: each frame
+/// may carry a new interval (the host `heartbeat` capture, e.g. a HELLO).
+struct DynTransport {
+    interval: Option<Duration>,
+    /// `(arrival offset from creation, interval it announces)`; arrival is an
+    /// absolute deadline so the read is cancel-safe (the pump drops and
+    /// re-creates `next_frame` whenever a beat is due).
+    frames: VecDeque<(Duration, Option<Duration>)>,
+    base: tokio::time::Instant,
+    sent: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl DynTransport {
+    fn new(frames: Vec<(Duration, Option<Duration>)>) -> Self {
+        Self {
+            interval: None,
+            frames: frames.into(),
+            base: tokio::time::Instant::now(),
+            sent: Arc::default(),
+        }
+    }
+}
+
+impl Transport for DynTransport {
+    fn platform(&self) -> &str {
+        PLATFORM
+    }
+    async fn connect(&mut self) -> Result<ConnectionCtx, TransportError> {
+        Ok(ctx())
+    }
+    async fn send_handshake(&mut self, _h: Handshake) -> Result<(), TransportError> {
+        Ok(())
+    }
+    async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+        match self.frames.front() {
+            Some((at, _)) => {
+                tokio::time::sleep_until(self.base + *at).await;
+                let (_, announced) = self.frames.pop_front().unwrap();
+                if announced.is_some() {
+                    self.interval = announced;
+                }
+                Ok(Some(b"f".to_vec()))
+            }
+            None => std::future::pending().await,
+        }
+    }
+    fn heartbeat_interval(&self) -> Option<Duration> {
+        self.interval
+    }
+    async fn send_heartbeat(&mut self, bytes: Vec<u8>) -> Result<(), TransportError> {
+        self.sent.lock().unwrap().push(bytes);
+        Ok(())
+    }
+    async fn close(&mut self, _reason: &str) {}
+}
+
+/// A frame-announced interval starts the schedule one period after the
+/// announcement (no heartbeat before it), and a later announcement
+/// re-schedules it.
+#[tokio::test(start_paused = true)]
+async fn a_frame_announced_interval_starts_and_reschedules_the_heartbeat() {
+    let inv = Arc::new(HbInvoker::new(BeatScript::Body(b"PING".to_vec())));
+    let (d, _m) = driver(&inv, true);
+    let mut t = DynTransport::new(vec![
+        (Duration::from_secs(1), Some(Duration::from_secs(10))),
+        (Duration::from_secs(36), Some(Duration::from_secs(2))),
+    ]);
+    let sent = Arc::clone(&t.sent);
+    let (stop, mut rx) = oneshot::channel::<()>();
+    let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
+    settle().await;
+    tokio::time::advance(Duration::from_secs(1)).await; // t=1: HELLO-like frame
+    settle().await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    settle().await;
+    assert_eq!(
+        sent.lock().unwrap().len(),
+        0,
+        "interval known at t=1, beat at t=11"
+    );
+    tokio::time::advance(Duration::from_secs(6)).await; // t=11
+    settle().await;
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    for _ in 0..2 {
+        tokio::time::advance(Duration::from_secs(10)).await; // t=21, 31
+        settle().await;
+    }
+    assert_eq!(sent.lock().unwrap().len(), 3);
+    // t=36: the second frame re-announces 2 s -> beats every 2 s from t=36.
+    tokio::time::advance(Duration::from_secs(5)).await;
+    settle().await;
+    let before = sent.lock().unwrap().len();
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settle().await;
+    }
+    assert_eq!(
+        sent.lock().unwrap().len(),
+        before + 3,
+        "2 s cadence after the change"
+    );
+    stop.send(()).unwrap();
+    assert_eq!(h.await.unwrap().unwrap().end, ConnectionEnd::Shutdown);
+}
+
+/// An interval announced outside the driver bounds ends the connection
+/// (loud) instead of busy-looping or never beating.
+#[tokio::test(start_paused = true)]
+async fn an_out_of_range_announced_interval_tears_the_connection_down() {
+    for bad in [
+        Duration::from_millis(10),
+        MAX_HEARTBEAT_INTERVAL + Duration::from_secs(1),
+    ] {
+        let inv = Arc::new(HbInvoker::new(BeatScript::Body(b"PING".to_vec())));
+        let (d, _m) = driver(&inv, true);
+        let mut t = DynTransport::new(vec![(Duration::from_secs(1), Some(bad))]);
+        let (_stop, mut rx) = oneshot::channel::<()>();
+        let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settle().await;
+        assert_eq!(h.await.unwrap().unwrap().end, ConnectionEnd::TransportError);
+        assert_eq!(inv.beats.load(Ordering::SeqCst), 0);
+    }
+}
+
+/// Flag OFF: an announced interval is ignored like a static one.
+#[tokio::test(start_paused = true)]
+async fn flag_off_ignores_an_announced_interval() {
+    let inv = Arc::new(HbInvoker::new(BeatScript::Body(b"PING".to_vec())));
+    let (d, _m) = driver(&inv, false);
+    let mut t = DynTransport::new(vec![(Duration::from_secs(1), Some(Duration::from_secs(1)))]);
+    let sent = Arc::clone(&t.sent);
+    let (stop, mut rx) = oneshot::channel::<()>();
+    let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
+    for _ in 0..5 {
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settle().await;
+    }
+    assert!(sent.lock().unwrap().is_empty());
+    stop.send(()).unwrap();
+    h.await.unwrap().unwrap();
+}

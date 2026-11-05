@@ -38,6 +38,9 @@
 pub mod driver;
 pub(crate) mod egress_guard;
 pub mod invoker;
+pub mod lifecycle;
+#[cfg(test)]
+mod lifecycle_tests;
 pub mod metrics;
 pub mod poll;
 pub(crate) mod ratelimit;
@@ -58,6 +61,11 @@ pub use driver::{
     DEFAULT_HEARTBEAT_SEND_TIMEOUT, MAX_HEARTBEAT_INTERVAL, MIN_HEARTBEAT_INTERVAL,
 };
 pub use invoker::{ConnectorInvokeError, ConnectorInvoker};
+pub use lifecycle::{
+    CaptureRule, CloseCodeRule, FrameDirective, FrameMatch, HeartbeatCapture, HttpAction,
+    HttpErrorRule, IntervalHint, LifecycleAction, LifecycleError, PollLifecycle, QuerySecret,
+    Scalar, SessionEngine, SessionRules,
+};
 pub use metrics::{register_connector_metrics, ConnectorMetrics};
 pub use poll::{PollAuth, PollConfig, PollTransport};
 pub use registry::{
