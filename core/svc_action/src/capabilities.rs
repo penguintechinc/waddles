@@ -1307,6 +1307,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             &EnvelopeFields {
                 channel: Some(&channel),
                 text: Some(&text),
+                // Host-pin stamp: the drain refuses unless channel == this.
+                origin_channel: Some(&channel),
                 ..EnvelopeFields::default()
             },
         )
@@ -1709,6 +1711,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 &EnvelopeFields {
                     channel: Some(channel_id),
                     message_id: Some(message_id),
+                    origin_channel: Some(channel_id),
                     ..EnvelopeFields::default()
                 },
             ),
@@ -1722,6 +1725,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                     &EnvelopeFields {
                         channel: Some(channel_id),
                         text: Some(&text),
+                        origin_channel: Some(channel_id),
                         ..EnvelopeFields::default()
                     },
                 )
@@ -3844,6 +3848,10 @@ mod tests {
         assert_eq!(pushed[0].0, "waddles:transport:irc:twitch:outbound");
         let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
         assert_eq!(parsed["channel"], "#somechannel");
+        assert_eq!(
+            parsed["origin_channel"], "#somechannel",
+            "host-pin stamp the drain verifies"
+        );
         assert_eq!(parsed["text"], "hi");
         // Versioned op envelope (provider-framework Step 0) alongside the
         // legacy top-level fields.
@@ -4006,6 +4014,7 @@ mod tests {
             "origin channel, not the bundle's"
         );
         assert_eq!(d["message_id"], "222");
+        assert_eq!(d["origin_channel"], "123456789012345678");
         assert_eq!(m["op"], "dm.send");
         assert_eq!(m["user_id"], "333");
         assert_eq!(m["text"], "hello");

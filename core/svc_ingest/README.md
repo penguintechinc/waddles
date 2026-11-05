@@ -42,3 +42,25 @@ and counts.
 | `cargo test --locked` (needs `VALKEY_URL`, a real Valkey; unset = failure, never a skip) | unit + real-socket lifecycle/reconcile tests |
 | `make test-svc-ingest-twitch-live` | live e2e: real hub-api + Postgres + Valkey + IRC server; binding created/deleted through the admin API starts/stops a session; prints and gates on counts (docker + helm + cargo; `HUB_PYTHON` = python with `hub_api/requirements-dev.txt` + `libs/flask_core/requirements.txt`) |
 | `helm` render: `k8s/helm/waddlebot/tests/test_svc_ingest_twitch_sessions_render.py` | alpha renders the flag + timing envs and no static pair; beta/prod unchanged; egress to hub-api |
+
+## Outbound relay host-pin (`src/outbound_pin.rs`)
+
+The outbound drain never trusts a destination it was handed. `svc_action` pins every
+channel-targeted relay op (Twitch `chat.send`; Discord `chat.send`/`chat.delete`) to the
+triggering event's own channel and stamps it as `origin_channel`; the drain then refuses any
+entry whose `channel` is not exactly that stamp, is not a well-formed id (Twitch login
+`^[a-z0-9_]{1,25}$`, non-numeric; Discord snowflake), or has no stamp at all (pre-upgrade
+entries are refused loudly, never guessed at).
+
+| Refusal reason | Meaning |
+|---|---|
+| `channel_not_pinned` | `channel` differs from `origin_channel` |
+| `no_origin_pin` | entry has no `origin_channel` |
+| `invalid_channel` | malformed id (incl. IRC multi-target `#a,#b`) |
+| `unsupported_platform` | no pin policy -> fail closed |
+
+Refusals surface as `SenderError::Rejected`, bump `svc_ingest_outbound_pin_refused_total{platform,op,reason}`
+and log a PII-free WARN (platform/op/reason only -- never a channel, id or message text).
+Bundles only ever supply message content. Tests: `cargo test --lib outbound` (regression tests named
+`*unpinned*`/`*regression_p0*`). Follow-up (not in this change): per-community credential resolution via
+`connection_resolver` replacing the single process-wide Twitch bot identity.

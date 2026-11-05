@@ -636,13 +636,29 @@ mod tests {
         }
     }
 
-    /// Backward compat: a legacy text-only entry (queued by a pre-upgrade
-    /// svc_action) and the new versioned envelope both still send chat.
+    /// regression: P0 host-pin -- a legacy / un-stamped entry (no
+    /// `origin_channel`) is refused by the drain, never sent.
+    #[tokio::test]
+    async fn unpinned_legacy_payload_is_refused_not_sent() {
+        let queue = FakeQueue {
+            payloads: vec![Ok(Some("{\"channel\":\"#c\",\"text\":\"hi\"}".to_string()))],
+            idx: AtomicUsize::new(0),
+        };
+        let sender = RecordingSender::default();
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+        )
+        .await;
+        assert!(sender.calls.lock().unwrap().is_empty());
+    }
+
+    /// A pinned versioned envelope (stamped `origin_channel`) sends chat.
     #[tokio::test]
     async fn legacy_and_versioned_chat_send_payloads_both_send() {
         for raw in [
-            "{\"channel\":\"#c\",\"text\":\"hi\"}",
-            "{\"v\":1,\"op\":\"chat.send\",\"platform\":\"twitch\",\"channel\":\"#c\",\"text\":\"hi\"}",
+            "{\"v\":1,\"op\":\"chat.send\",\"platform\":\"twitch\",\"channel\":\"#c\",\"text\":\"hi\",\"origin_channel\":\"#c\"}",
         ] {
             let queue = FakeQueue {
                 payloads: vec![Ok(Some(raw.to_string()))],
@@ -707,7 +723,9 @@ mod tests {
         // `tokio::time::sleep` -- `tokio::time::timeout` bounds the
         // resulting backoff loop from the outside.
         let queue = FakeQueue {
-            payloads: vec![Ok(Some("{\"channel\":\"#c\",\"text\":\"hi\"}".to_string()))],
+            payloads: vec![Ok(Some(
+                "{\"channel\":\"#c\",\"text\":\"hi\",\"origin_channel\":\"#c\"}".to_string(),
+            ))],
             idx: AtomicUsize::new(0),
         };
         let sender = RecordingSender::default();
@@ -744,7 +762,9 @@ mod tests {
     #[tokio::test]
     async fn send_failure_is_logged_and_does_not_stop_the_loop() {
         let queue = FakeQueue {
-            payloads: vec![Ok(Some("{\"channel\":\"#c\",\"text\":\"hi\"}".to_string()))],
+            payloads: vec![Ok(Some(
+                "{\"channel\":\"#c\",\"text\":\"hi\",\"origin_channel\":\"#c\"}".to_string(),
+            ))],
             idx: AtomicUsize::new(0),
         };
         let sender = RecordingSender {
@@ -988,16 +1008,16 @@ mod tests {
             vec![
                 Ok(Some("not json".to_string())),
                 Ok(Some(
-                    r#"{"v":1,"op":"chat.send","platform":"twitch","channel":"1","text":"x"}"#
+                    r#"{"v":1,"op":"chat.send","platform":"twitch","channel":"1","origin_channel":"1","text":"x"}"#
                         .to_string(),
                 )),
                 Ok(Some(
-                    r#"{"v":1,"op":"chat.send","platform":"discord","channel":"1","text":"x","op_id":"send-1"}"#
+                    r#"{"v":1,"op":"chat.send","platform":"discord","channel":"1","origin_channel":"1","text":"x","op_id":"send-1"}"#
                         .to_string(),
                 )),
                 Ok(None),
                 Ok(Some(
-                    r#"{"v":1,"op":"chat.delete","platform":"discord","channel":"1","message_id":"2","op_id":"del-1"}"#
+                    r#"{"v":1,"op":"chat.delete","platform":"discord","channel":"1","origin_channel":"1","message_id":"2","op_id":"del-1"}"#
                         .to_string(),
                 )),
             ],
@@ -1028,7 +1048,7 @@ mod tests {
             None,
             &ctl,
             vec![Ok(Some(
-                r#"{"op":"chat.delete","channel":"1","message_id":"2","op_id":"u-1"}"#.to_string(),
+                r#"{"op":"chat.delete","channel":"1","origin_channel":"1","message_id":"2","op_id":"u-1"}"#.to_string(),
             ))],
         )
         .await;
@@ -1060,7 +1080,8 @@ mod tests {
             Some(&rest),
             &ctl,
             vec![Ok(Some(
-                r#"{"op":"chat.delete","channel":"1","message_id":"2"}"#.to_string(),
+                r#"{"op":"chat.delete","channel":"1","origin_channel":"1","message_id":"2"}"#
+                    .to_string(),
             ))],
         )
         .await;
@@ -1086,7 +1107,7 @@ mod tests {
             Some(&rest),
             &ctl,
             vec![Ok(Some(
-                r#"{"op":"chat.delete","channel":"1","message_id":"2","op_id":"old-1","exp_ms":1}"#
+                r#"{"op":"chat.delete","channel":"1","origin_channel":"1","message_id":"2","op_id":"old-1","exp_ms":1}"#
                     .to_string(),
             ))],
         )
@@ -1161,7 +1182,7 @@ mod tests {
             ..Default::default()
         };
         let entry =
-            r#"{"op":"chat.delete","channel":"1","message_id":"2","op_id":"x-1"}"#.to_string();
+            r#"{"op":"chat.delete","channel":"1","origin_channel":"1","message_id":"2","op_id":"x-1"}"#.to_string();
         drive_discord_drain(
             Some(&rest),
             &ctl,
