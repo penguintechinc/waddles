@@ -102,6 +102,15 @@ fn is_snowflake(id: &str) -> bool {
     id.bytes().all(|b| b.is_ascii_digit()) && id.parse::<u64>().is_ok_and(|n| n != 0)
 }
 
+/// A YouTube live-chat id: `^[A-Za-z0-9_-]{1,128}$` (the overlay's id
+/// allowlist). Case-sensitive; no normalization.
+fn is_youtube_chat_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 /// Verifies `channel` is exactly the host-pinned `origin` for `platform`
 /// and returns the canonical destination to send to (`#login` for Twitch,
 /// the snowflake for Discord).
@@ -126,6 +135,15 @@ pub fn pin_target(platform: &str, channel: &str, origin: Option<&str>) -> Result
         }
         "discord" => {
             if !is_snowflake(channel) || !is_snowflake(origin) {
+                return Err(PinError::InvalidChannel);
+            }
+            if channel != origin {
+                return Err(PinError::ChannelMismatch);
+            }
+            Ok(origin.to_string())
+        }
+        "youtube" => {
+            if !is_youtube_chat_id(channel) || !is_youtube_chat_id(origin) {
                 return Err(PinError::InvalidChannel);
             }
             if channel != origin {
@@ -653,6 +671,34 @@ mod tests {
         assert_eq!(
             verify_stamp_at(&missing, "discord", Some(&keys), NOW),
             Err(PinError::ExpiryInvalid)
+        );
+    }
+
+    #[test]
+    fn youtube_pin_requires_equal_valid_chat_ids() {
+        assert_eq!(
+            pin_target("youtube", "Cg0KC-a_1", Some("Cg0KC-a_1")).unwrap(),
+            "Cg0KC-a_1"
+        );
+        assert_eq!(
+            pin_target("youtube", "Cg0KC-a_1", Some("cg0kc-a_1")),
+            Err(PinError::ChannelMismatch)
+        );
+        assert_eq!(
+            pin_target("youtube", "Cg0KC-a_1", None),
+            Err(PinError::MissingOrigin)
+        );
+        for bad in ["a&b", "a b", "a=b", "a/b", "é"] {
+            assert_eq!(
+                pin_target("youtube", bad, Some(bad)),
+                Err(PinError::InvalidChannel),
+                "{bad}"
+            );
+        }
+        let long = "a".repeat(129);
+        assert_eq!(
+            pin_target("youtube", &long, Some(&long)),
+            Err(PinError::InvalidChannel)
         );
     }
 

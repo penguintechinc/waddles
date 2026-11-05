@@ -314,5 +314,7 @@ from the signed origin stamp / per-community connection and credential slots per
 URL positions and JSON-escapes body positions, and sends ONLY through `GuardedClient`. `dm.send` and `role.*` host duties
 (DM channel open, `send_dm_in_community`, community-scoped `{user:<uuid>}`, managed-role allowlist refusing ADMINISTRATOR /
 MANAGE_ROLES / MANAGE_GUILD, per-community bot credential) are the Discord `DutyHook` (`sender_exec/discord_duties.rs`,
-`discord_slots.rs`; table + gaps: `core/svc_ingest/README.md` "Discord host duties (T6d-2)"). The wire does not yet carry
+`discord_slots.rs`; table + gaps: `core/svc_ingest/README.md` "Discord host duties (T6d-2)"). YouTube `chat.send` is stamp-pinned to the live chat
+and its OAuth token + chat id come from the community's own connection (`youtube_slots.rs`; `core/svc_ingest/README.md` "YouTube slot
+source"; expired token -> retryable `token_expired`; hub-api has no YouTube provider adapter yet). The wire does not yet carry
 `build-request` (no `ExportKind::ConnectorBuildRequest` in `penguin-bundle-host` 0.4.0): see "T6d-1 status".

@@ -214,6 +214,7 @@ queue entry --(drain: pin_sig HMAC + expiry, FIRST gate)--> ActionExecutor::exec
 | `mod.rs` | `SenderExecutor`, `FlagGate`/`LicenseFlagGate`, `TemplateBuilder`, `SlotSource`, `DutyHook`, `ExecError`, metrics |
 | `twitch_slots.rs` | `TwitchSlots`: `SlotSource` over `outbound_creds::TwitchCredentialSource` + one guarded `GET /helix/users` for numeric ids |
 | `discord_slots.rs` | `DiscordSlots`: `SlotSource` over `outbound_creds_discord::DiscordCredentialSource` (`discord-bot` token per community, per call) + one guarded `GET /channels/{pinned}` proving the channel is in the binding's guild |
+| `youtube_slots.rs` | `YoutubeSlots`: `SlotSource` over `outbound_creds_youtube::YoutubeCredentialSource`: `youtube.oauth` (per-community OAuth token) + `youtube.live_chat_id` (the connection's pinned chat), per call, uncached; refuses every other handle |
 | `discord_duties.rs` | `DiscordDuties`: the Discord `DutyHook` (T6d-2) for `dm.send`, `role.add`, `role.remove` |
 | `../platform_users.rs` | `HubPlatformUserResolver`: production `PlatformUserResolver` over `hub_client` `IdentityService.ResolvePlatformUser` |
 
@@ -269,9 +270,32 @@ pinned connector component (a template built by any other digest is `DigestMisma
   `wire_builder` module doc). The drains are already executor-ready (readiness key, acks, stamp gate unchanged).
 * **Legacy egress still present** (removed once the above lands): `outbound.rs` `RealIrcOutbound` (IRC), `discord_rest.rs` (Discord REST).
   `connector/poll.rs` is the INBOUND poll path (its own pinned client) and is unchanged.
-* **Slot sources.** Only Twitch has one (`TwitchSlots`); it needs the connection record to expose a usable bot login (it does) and uses a
-  per-send Helix lookup for numeric ids. Discord's per-community bot credential and YouTube's OAuth/live-chat-id sources are not
-  implemented (the credential model for them is the per-tenant bot credentials spec); until then those platforms stay on the legacy path.
+* **Slot sources.** Twitch (`TwitchSlots`, per-send Helix lookup for numeric ids), Discord (`DiscordSlots`) and YouTube (`YoutubeSlots`,
+  below) each have one. There is no composite router yet: the executor takes one `SlotSource`, so production wiring picks per platform.
+
+### YouTube slot source
+
+`YoutubeSlots` (`sender_exec/youtube_slots.rs`) over `ResolverYoutubeCredentials` (`outbound_creds_youtube.rs`). Per send, uncached:
+list the community's `youtube` bindings, require one whose `live_chat_id` metadata equals the **stamp-pinned** chat and that no OTHER
+community also claims, `resolve` it, re-assert provider/kind/community/connection and the RESOLVED record's own `live_chat_id`, then
+hand out only the requested handles. `pin_target("youtube")` verifies `channel == origin_channel` and `^[A-Za-z0-9_-]{1,128}$`, so a
+live chat from the queue payload or guest is never used; an unstamped YouTube `chat.send` is refused `no_origin_pin`.
+
+| Slot | Handle | Source |
+|---|---|---|
+| `{{YT_OAUTH_TOKEN}}` | `youtube.oauth` | resolved connection's kind-1 `accessToken` (zeroizing; only the `Authorization: Bearer` header position) |
+| `{{YT_LIVE_CHAT_ID}}` | `youtube.live_chat_id` | the resolved record's `live_chat_id` metadata (== the stamp pin) |
+| `YT_CHANNEL_ID` / `YT_VIDEO_ID` | `youtube.channel_id` / `youtube.video_id` | refused `unknown_handle` (read-path only) |
+
+**Expiry:** the executor never refreshes. hub-api resolves/refreshes; a resolved token whose `expiresAt` is past (or within 30 s) is
+`token_expired` (`CredError::TokenExpired`, a retryable `SlotError::Unavailable`). Reason codes: `no_origin_pin`, `no_connection`,
+`channel_not_owned`, `connection_not_usable`, `token_expired`, `credential_unavailable` (several of the community's connections owning
+the same chat resolve to the lowest connection id).
+
+**Gap (hub-api):** there is NO `youtube` provider adapter in `hub_api/services/provider_connections` (only Twitch, Discord and the
+static-secret providers). A YouTube connection therefore cannot be created with `live_chat_id` metadata or an OAuth refresh yet; until
+the adapter lands (OAuth install + `refreshable=True`, `BindingKey("live_chat_id", "live_chat_id", required=True)`, admin-only writes,
+`^[A-Za-z0-9_-]{1,128}$`) every YouTube send refuses `no_connection`. The executor side is complete and tested against the wire shapes.
 
 ### Discord host duties (T6d-2)
 
@@ -308,6 +332,6 @@ uuids}` (1..=25 canonical uuids, one RPC per call, never per-uuid probing: any m
 Build needs `protoc` + the repo-root `proto/` tree (Dockerfile.rust installs protoc and takes `proto` as a named build context, like svc_process).
 
 **Gaps (not silent):** (1) `svc_action` does not yet emit `role.*` queue entries (or `tenant_id` on `dm.send` -- the signer must put the
-numeric tenant in the stamp; entries without it are refused `no_tenant_scope`); (2) YouTube has no slot source (needs the OAuth
-connection + live-chat-id sources); (3) the executor and `HubPlatformUserResolver::connect` are not wired at boot (T6d-1 status above);
+numeric tenant in the stamp; entries without it are refused `no_tenant_scope`); (2) YouTube has a slot source now but no hub-api
+provider adapter (see "YouTube slot source"); (3) the executor and `HubPlatformUserResolver::connect` are not wired at boot (T6d-1 status above);
 the default `NoUserResolver` refuses every DM/role op loudly until it is.
