@@ -5,6 +5,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_host_reputation/**'
+      - 'core/test_support/**'
       - 'core/bundle_capability_gate/**'
       - 'scripts/db/bundle_reputation_store.sql'
       - '.github/workflows/rust-bundle-host-reputation.yml'
@@ -13,6 +14,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_host_reputation/**'
+      - 'core/test_support/**'
       - 'core/bundle_capability_gate/**'
       - 'scripts/db/bundle_reputation_store.sql'
   workflow_dispatch:
@@ -32,4 +34,4 @@ jobs:
       crate_name: bundle-host-reputation
       working_directory: core/bundle_host_reputation
       # `tests/postgres_integration.rs` starts a real Postgres container via
-      # `testcontainers` -- needs Docker, which `ubuntu-latest` ships.
+      # the `docker` CLI helper (`core/test_support`) -- needs Docker, which `ubuntu-latest` ships.

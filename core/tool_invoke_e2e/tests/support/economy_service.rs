@@ -1,6 +1,7 @@
 //! Real caller WASM -> economy WASM -> host gates -> least-privilege Postgres.
 //! Redis supplies the actual scoped policy KV import; no money boundary is mocked.
 use super::*;
+use crate::docker_container::{start_container, DockerContainer};
 use bundle_capability_gate::{MembershipCheck, SnapshotMembership};
 use bundle_host_economy::{
     connect, load_membership, pot_account, ConnectConfig, EconomyStore, PostgresEconomyStore,
@@ -8,11 +9,6 @@ use bundle_host_economy::{
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use svc_process::capabilities::EconomyWiring;
 use svc_process::identity::PgMemberDirectory;
-use testcontainers::core::logs::LogSource;
-use testcontainers::core::wait::LogWaitStrategy;
-use testcontainers::core::{ContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 const SERVICE: &str = "waddles.core.service.economy";
 const BOB: &str = "22222222-2222-4222-8222-222222222222";
@@ -82,8 +78,8 @@ fn component() -> &'static [u8] {
 }
 
 struct DatabaseFixture {
-    _postgres: ContainerAsync<GenericImage>,
-    _redis: ContainerAsync<GenericImage>,
+    _postgres: DockerContainer,
+    _redis: DockerContainer,
     admin: DatabaseConnection,
     runtime: DatabaseConnection,
     kv: redis::aio::MultiplexedConnection,
@@ -92,22 +88,19 @@ struct DatabaseFixture {
 
 /// Create actual schema, least-privilege role, membership view and Redis policy store.
 async fn database() -> DatabaseFixture {
-    let postgres = GenericImage::new("postgres", "17.6-bookworm")
-        .with_exposed_port(ContainerPort::Tcp(5432))
-        .with_wait_for(WaitFor::log(
-            LogWaitStrategy::new(
-                LogSource::BothStd,
-                "database system is ready to accept connections",
-            )
-            .with_times(2),
-        ))
-        .with_env_var("POSTGRES_PASSWORD", PASSWORD)
-        .with_env_var("POSTGRES_DB", "economy_e2e")
-        .start()
-        .await
-        .expect("real Postgres starts");
-    let host = postgres.get_host().await.unwrap().to_string();
-    let port = postgres.get_host_port_ipv4(5432).await.unwrap();
+    let postgres = start_container(
+        "postgres:17.6-bookworm",
+        5432,
+        &[
+            ("POSTGRES_PASSWORD", PASSWORD),
+            ("POSTGRES_DB", "economy_e2e"),
+        ],
+        &["pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
+        Duration::from_secs(240),
+    )
+    .await;
+    let host = postgres.host().to_string();
+    let port = postgres.port();
     let admin = Database::connect(format!(
         "postgres://postgres:{PASSWORD}@{host}:{port}/economy_e2e"
     ))
@@ -152,21 +145,19 @@ async fn database() -> DatabaseFixture {
     .unwrap();
     let membership = Arc::new(SnapshotMembership::new());
     assert!(membership.replace_all(load_membership(&runtime, None).await.unwrap()));
-    let redis = GenericImage::new("redis", "7.4.2-alpine")
-        .with_exposed_port(ContainerPort::Tcp(6379))
-        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-        .start()
+    let redis = start_container(
+        "redis:7.4.2-alpine",
+        6379,
+        &[],
+        &["redis-cli", "ping"],
+        Duration::from_secs(120),
+    )
+    .await;
+    let kv = redis::Client::open(format!("redis://{}:{}/", redis.host(), redis.port()))
+        .unwrap()
+        .get_multiplexed_async_connection()
         .await
-        .expect("real Redis starts");
-    let kv = redis::Client::open(format!(
-        "redis://{}:{}/",
-        redis.get_host().await.unwrap(),
-        redis.get_host_port_ipv4(6379).await.unwrap()
-    ))
-    .unwrap()
-    .get_multiplexed_async_connection()
-    .await
-    .unwrap();
+        .unwrap();
     DatabaseFixture {
         _postgres: postgres,
         _redis: redis,

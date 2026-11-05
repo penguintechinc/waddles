@@ -9,11 +9,12 @@
 //! this exact wire shape -- is `core/bundle_executor/tests/
 //! stage_next_reputation.rs`.)
 //!
-//! Requires Docker via `testcontainers`.
+//! Requires Docker (the `docker` CLI, `core/test_support`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bundle_capability_gate::{
     CapabilityGate, GrantScopeKey, GrantSet, GrantedPermission, InMemoryGrantSnapshot,
@@ -29,12 +30,11 @@ use svc_process::capabilities::{
     CapabilityHandler, HttpEgressCatalog, ReputationWiring, StageCapabilities,
 };
 use svc_process::license::StaticGate;
-use testcontainers::core::logs::LogSource;
-use testcontainers::core::wait::LogWaitStrategy;
-use testcontainers::core::{ContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use uuid::Uuid;
+#[allow(dead_code)]
+#[path = "../../test_support/tests/docker_container.rs"]
+mod docker_container;
+use docker_container::{start_container, DockerContainer};
 
 const SU_PW: &str = "postgres_test_superuser_pw";
 const REP_PW: &str = "waddles_bundle_reputation_test_pw";
@@ -44,7 +44,7 @@ const COMMUNITY: i32 = 10;
 const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_store.sql");
 
 struct World {
-    _container: ContainerAsync<GenericImage>,
+    _container: DockerContainer,
     su: DatabaseConnection,
     /// Reputation-role connection settings, to build a restarted/second stack.
     cfg: ConnectConfig,
@@ -86,22 +86,19 @@ async fn world() -> World {
 
 /// `1 + extra_members` active members, all loaded into the gate's snapshot.
 async fn world_with_members(extra_members: usize) -> World {
-    let container = GenericImage::new("postgres", "17.6-bookworm")
-        .with_exposed_port(ContainerPort::Tcp(5432))
-        .with_wait_for(WaitFor::log(
-            LogWaitStrategy::new(
-                LogSource::BothStd,
-                "database system is ready to accept connections",
-            )
-            .with_times(2),
-        ))
-        .with_env_var("POSTGRES_PASSWORD", SU_PW)
-        .with_env_var("POSTGRES_DB", "waddles_test")
-        .start()
-        .await
-        .expect("postgres container starts");
-    let host = container.get_host().await.unwrap().to_string();
-    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let container = start_container(
+        "postgres:17.6-bookworm",
+        5432,
+        &[
+            ("POSTGRES_PASSWORD", SU_PW),
+            ("POSTGRES_DB", "waddles_test"),
+        ],
+        &["pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
+        Duration::from_secs(240),
+    )
+    .await;
+    let host = container.host().to_string();
+    let port = container.port();
     let su = Database::connect(format!(
         "postgres://postgres:{SU_PW}@{host}:{port}/waddles_test"
     ))
