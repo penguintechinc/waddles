@@ -51,7 +51,10 @@ pub mod webhook_verify;
 pub mod wire_invoker;
 pub mod ws;
 
-pub use driver::{ConnectionEnd, ConnectionReport, ConnectorDriver, DriverError, RunEnd};
+pub use driver::{
+    ConnectionEnd, ConnectionReport, ConnectorDriver, DriverError, RunEnd,
+    DEFAULT_HEARTBEAT_SEND_TIMEOUT, MAX_HEARTBEAT_INTERVAL, MIN_HEARTBEAT_INTERVAL,
+};
 pub use invoker::{ConnectorInvokeError, ConnectorInvoker};
 pub use metrics::{register_connector_metrics, ConnectorMetrics};
 pub use poll::{PollAuth, PollConfig, PollTransport};

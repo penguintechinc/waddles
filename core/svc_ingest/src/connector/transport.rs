@@ -120,7 +120,9 @@ pub trait Transport: Send {
     /// (`receiver.on-heartbeat-due`, spec S3.5). `None` (the default) means
     /// this transport has no heartbeat -- a declared capability, not a
     /// fallback. `Some(Duration::ZERO)` is a configuration fault the driver
-    /// refuses with `DriverError::ZeroHeartbeatInterval`.
+    /// refuses with `DriverError::HeartbeatIntervalOutOfRange`, as does
+    /// anything outside `MIN_HEARTBEAT_INTERVAL..=MAX_HEARTBEAT_INTERVAL`
+    /// (checked only when the driver has heartbeats enabled).
     fn heartbeat_interval(&self) -> Option<Duration> {
         None
     }
@@ -128,10 +130,24 @@ pub trait Transport: Send {
     /// Sends a connector-built heartbeat body. Only called when
     /// [`Self::heartbeat_interval`] is `Some`; the default FAILS LOUD so a
     /// transport that declares an interval but forgets to implement the send
-    /// is a visible fault, never a silently dropped beat.
+    /// is a visible fault, never a silently dropped beat. The driver bounds
+    /// this call with a deadline and cancels it on expiry, so it must be
+    /// cancel-safe.
     async fn send_heartbeat(&mut self, _bytes: Vec<u8>) -> Result<(), TransportError> {
         Err(TransportError::Send(
             "transport declares a heartbeat interval but does not implement send_heartbeat"
+                .to_string(),
+        ))
+    }
+
+    /// Sends the platform-default heartbeat. Called when the connector's
+    /// `on-heartbeat-due` returned `none`, which the WIT contract defines as
+    /// "the host sends its platform-default heartbeat unchanged". The default
+    /// FAILS LOUD (same reasoning as [`Self::send_heartbeat`]); same deadline
+    /// and cancel-safety requirements.
+    async fn send_default_heartbeat(&mut self) -> Result<(), TransportError> {
+        Err(TransportError::Send(
+            "connector asked for the platform-default heartbeat but the transport does not implement send_default_heartbeat"
                 .to_string(),
         ))
     }

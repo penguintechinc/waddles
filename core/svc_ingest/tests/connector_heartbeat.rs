@@ -11,7 +11,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use svc_ingest::connector::{
     register_connector_metrics, ConnectionCtx, ConnectionEnd, ConnectorDriver, ConnectorEvent,
     ConnectorFrameError, ConnectorInvokeError, ConnectorInvoker, ConnectorMetrics,
     ConnectorRegistry, DriverError, EventSink, Handshake, PinnedConnector, RawFrame, RunEnd,
-    SinkError, Transport, TransportError,
+    SinkError, Transport, TransportError, MAX_HEARTBEAT_INTERVAL, MIN_HEARTBEAT_INTERVAL,
 };
 use tokio::sync::oneshot;
 
@@ -41,6 +41,8 @@ enum SendMode {
     Fatal,
     /// Do not override `send_heartbeat`: exercises the trait's loud default.
     Default,
+    /// The write never completes (a stalled socket).
+    Hang,
 }
 
 struct HbTransport {
@@ -49,9 +51,10 @@ struct HbTransport {
     frames: VecDeque<Vec<u8>>,
     frame_gap: Duration,
     sent: Arc<Mutex<Vec<Vec<u8>>>>,
+    defaults_sent: Arc<AtomicU32>,
     send_mode: SendMode,
     closes: Arc<Mutex<Vec<String>>>,
-    connected: bool,
+    connected: Arc<AtomicBool>,
 }
 
 impl HbTransport {
@@ -61,9 +64,10 @@ impl HbTransport {
             frames: VecDeque::new(),
             frame_gap: Duration::ZERO,
             sent: Arc::default(),
+            defaults_sent: Arc::default(),
             send_mode: SendMode::Ok,
             closes: Arc::default(),
-            connected: false,
+            connected: Arc::default(),
         }
     }
 }
@@ -74,7 +78,7 @@ impl Transport for HbTransport {
     }
 
     async fn connect(&mut self) -> Result<ConnectionCtx, TransportError> {
-        self.connected = true;
+        self.connected.store(true, Ordering::SeqCst);
         Ok(ctx())
     }
 
@@ -106,11 +110,17 @@ impl Transport for HbTransport {
             }
             SendMode::Fail => Err(TransportError::Send("boom".to_string())),
             SendMode::Fatal => Err(TransportError::Fatal("401".to_string())),
+            SendMode::Hang => std::future::pending().await,
             SendMode::Default => Err(TransportError::Send(
                 "transport declares a heartbeat interval but does not implement send_heartbeat"
                     .to_string(),
             )),
         }
+    }
+
+    async fn send_default_heartbeat(&mut self) -> Result<(), TransportError> {
+        self.defaults_sent.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn close(&mut self, reason: &str) {
@@ -152,13 +162,28 @@ enum BeatScript {
     Trip,
     /// Take this long before answering.
     Slow(Duration),
+    /// Hang forever while holding a guard whose drop is recorded.
+    HangHolding(Arc<AtomicBool>),
+}
+
+/// Sets its flag when dropped: proves a future was cancelled/dropped.
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 struct HbInvoker {
     script: BeatScript,
     beats: AtomicU32,
     frames: AtomicU32,
+    /// How long `on_frame` takes (a slow guest / sink).
+    frame_delay: Duration,
     disconnects: Mutex<Vec<String>>,
+    /// Set when `on_disconnect` runs: was the heartbeat guard already dropped?
+    beat_guard_dropped_at_disconnect: Mutex<Option<bool>>,
 }
 
 impl HbInvoker {
@@ -167,7 +192,9 @@ impl HbInvoker {
             script,
             beats: AtomicU32::new(0),
             frames: AtomicU32::new(0),
+            frame_delay: Duration::ZERO,
             disconnects: Mutex::default(),
+            beat_guard_dropped_at_disconnect: Mutex::default(),
         }
     }
 }
@@ -189,6 +216,9 @@ impl ConnectorInvoker for HbInvoker {
         _p: &str,
         _f: RawFrame,
     ) -> Result<Vec<ConnectorEvent>, ConnectorInvokeError> {
+        if !self.frame_delay.is_zero() {
+            tokio::time::sleep(self.frame_delay).await;
+        }
         self.frames.fetch_add(1, Ordering::SeqCst);
         Ok(Vec::new())
     }
@@ -210,6 +240,10 @@ impl ConnectorInvoker for HbInvoker {
                 tokio::time::sleep(*d).await;
                 Ok(Some(b"late".to_vec()))
             }
+            BeatScript::HangHolding(flag) => {
+                let _guard = DropFlag(Arc::clone(flag));
+                std::future::pending().await
+            }
         }
     }
 
@@ -220,6 +254,10 @@ impl ConnectorInvoker for HbInvoker {
         reason: &str,
     ) -> Result<(), ConnectorInvokeError> {
         self.disconnects.lock().unwrap().push(reason.to_string());
+        if let BeatScript::HangHolding(flag) = &self.script {
+            *self.beat_guard_dropped_at_disconnect.lock().unwrap() =
+                Some(flag.load(Ordering::SeqCst));
+        }
         Ok(())
     }
 }
@@ -321,14 +359,42 @@ async fn flag_off_runs_no_heartbeat() {
     let inv = Arc::new(HbInvoker::new(BeatScript::Body(b"PING".to_vec())));
     let (d, m) = driver(&inv, false);
     let mut t = HbTransport::new(Some(Duration::from_secs(1)));
+    t.frames = (0..3).map(|_| b"f".to_vec()).collect();
+    t.frame_gap = Duration::from_secs(10);
+    let connected = Arc::clone(&t.connected);
+    let sent = Arc::clone(&t.sent);
     let (stop, mut rx) = oneshot::channel::<()>();
     let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
-    tokio::time::advance(Duration::from_secs(30)).await;
-    settle().await;
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        settle().await;
+    }
+    // The connection really ran past every would-be tick (40 of them).
+    assert!(connected.load(Ordering::SeqCst), "connection established");
+    assert_eq!(inv.frames.load(Ordering::SeqCst), 3, "frames flowed");
     assert_eq!(inv.beats.load(Ordering::SeqCst), 0);
+    assert!(sent.lock().unwrap().is_empty());
     assert_eq!(beats(&m, "sent"), 0);
     stop.send(()).unwrap();
     h.await.unwrap().unwrap();
+}
+
+/// regression: the zero-interval refusal ran before the flag check, so a
+/// flag-OFF driver refused a connection over a heartbeat it would never run.
+#[tokio::test(start_paused = true)]
+async fn flag_off_has_no_effect_even_with_a_zero_interval() {
+    let inv = Arc::new(HbInvoker::new(BeatScript::Empty));
+    let (d, _m) = driver(&inv, false);
+    let mut t = HbTransport::new(Some(Duration::ZERO));
+    let connected = Arc::clone(&t.connected);
+    let (stop, mut rx) = oneshot::channel::<()>();
+    let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
+    tokio::time::advance(Duration::from_secs(5)).await;
+    settle().await;
+    assert!(connected.load(Ordering::SeqCst), "flag OFF must not refuse");
+    assert_eq!(inv.beats.load(Ordering::SeqCst), 0);
+    stop.send(()).unwrap();
+    assert_eq!(h.await.unwrap().unwrap().end, ConnectionEnd::Shutdown);
 }
 
 #[tokio::test]
@@ -338,8 +404,14 @@ async fn a_zero_interval_is_a_loud_driver_error() {
     let mut t = HbTransport::new(Some(Duration::ZERO));
     let (_keep, mut rx) = oneshot::channel::<()>();
     let err = d.serve_connection(&mut t, &mut rx).await.unwrap_err();
-    assert!(matches!(err, DriverError::ZeroHeartbeatInterval { .. }));
-    assert!(!t.connected, "refused before connecting");
+    assert!(matches!(
+        err,
+        DriverError::HeartbeatIntervalOutOfRange { .. }
+    ));
+    assert!(
+        !t.connected.load(Ordering::SeqCst),
+        "refused before connecting"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -394,10 +466,7 @@ async fn shutdown_during_an_in_flight_heartbeat_is_prompt() {
 
 #[tokio::test(start_paused = true)]
 async fn empty_and_guest_declined_beats_keep_the_connection_up() {
-    for (script, outcome) in [
-        (BeatScript::Empty, "empty"),
-        (BeatScript::Guest, "guest_error"),
-    ] {
+    for (script, outcome) in [(BeatScript::Guest, "guest_error")] {
         let inv = Arc::new(HbInvoker::new(script));
         let (d, m) = driver(&inv, true);
         let mut t = HbTransport::new(Some(Duration::from_secs(5)));
@@ -500,13 +569,13 @@ fn transport_error_send_kind_is_stable() {
 async fn real_time_heartbeats_interleave_with_frames() {
     let inv = Arc::new(HbInvoker::new(BeatScript::Body(b"PING".to_vec())));
     let (d, m) = driver(&inv, true);
-    let mut t = HbTransport::new(Some(Duration::from_millis(25)));
+    let mut t = HbTransport::new(Some(MIN_HEARTBEAT_INTERVAL));
     t.frames = (0..10).map(|_| b"f".to_vec()).collect();
     t.frame_gap = Duration::from_millis(10);
     let sent = Arc::clone(&t.sent);
     let (stop, mut rx) = oneshot::channel::<()>();
     let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
     stop.send(()).unwrap();
     let report = h.await.unwrap().unwrap();
     assert_eq!(report.end, ConnectionEnd::Shutdown);
@@ -514,4 +583,192 @@ async fn real_time_heartbeats_interleave_with_frames() {
     assert!(n >= 3, "expected >=3 real-time heartbeats, got {n}");
     assert_eq!(report.frames_ok, 10, "all frames processed alongside beats");
     assert_eq!(beats(&m, "sent"), n as u64);
+}
+
+/// regression: a `send_heartbeat` that never completes froze the pump (and so
+/// every inbound frame) forever. The send now has a deadline; on expiry the
+/// connection is torn down loudly so the backoff loop reconnects.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_heartbeat_send_hits_a_deadline_and_tears_the_connection_down() {
+    let inv = Arc::new(HbInvoker::new(BeatScript::Body(b"PING".to_vec())));
+    let (d, m) = driver(&inv, true);
+    let mut t = HbTransport::new(Some(Duration::from_secs(1)));
+    t.send_mode = SendMode::Hang;
+    let closes = Arc::clone(&t.closes);
+    let (_keep, mut rx) = oneshot::channel::<()>();
+    let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
+    for _ in 0..60 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+    }
+    assert!(
+        h.is_finished(),
+        "a stalled send must not hang the pump forever"
+    );
+    let report = h.await.unwrap().unwrap();
+    assert_eq!(report.end, ConnectionEnd::TransportError);
+    assert_eq!(beats(&m, "send_timeout"), 1);
+    assert_eq!(closes.lock().unwrap().as_slice(), ["transport_error"]);
+}
+
+/// A frame already in flight keeps making progress while a heartbeat send is
+/// stalled (the send and the frame work are polled together).
+#[tokio::test(start_paused = true)]
+async fn an_in_flight_frame_completes_while_a_heartbeat_send_is_stalled() {
+    let mut inv = HbInvoker::new(BeatScript::Body(b"PING".to_vec()));
+    inv.frame_delay = Duration::from_secs(3);
+    let inv = Arc::new(inv);
+    let (d, _m) = driver(&inv, true);
+    let mut t = HbTransport::new(Some(Duration::from_secs(1)));
+    t.send_mode = SendMode::Hang;
+    t.frames = VecDeque::from([b"f".to_vec()]);
+    let (_keep, mut rx) = oneshot::channel::<()>();
+    let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
+    settle().await;
+    // Frame work starts at t=0 and takes 3s; the beat at t=1 stalls its send
+    // (5s deadline, not yet hit at t=4).
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+    }
+    assert_eq!(
+        inv.frames.load(Ordering::SeqCst),
+        1,
+        "the in-flight frame finished while the send was stalled"
+    );
+    h.abort();
+}
+
+/// regression: a slow `on-frame`/publish used to delay a due heartbeat (the
+/// send only ran between frames), so upstream could drop a healthy
+/// connection. The beat is now sent while frame work is still in flight.
+#[tokio::test(start_paused = true)]
+async fn a_slow_frame_does_not_delay_a_due_heartbeat() {
+    let mut inv = HbInvoker::new(BeatScript::Body(b"PING".to_vec()));
+    inv.frame_delay = Duration::from_secs(3600);
+    let inv = Arc::new(inv);
+    let (d, _m) = driver(&inv, true);
+    let mut t = HbTransport::new(Some(Duration::from_secs(10)));
+    t.frames = VecDeque::from([b"f".to_vec()]);
+    let sent = Arc::clone(&t.sent);
+    let (stop, mut rx) = oneshot::channel::<()>();
+    let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
+    settle().await;
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        settle().await;
+    }
+    assert_eq!(
+        sent.lock().unwrap().len(),
+        3,
+        "heartbeats went out on schedule while on_frame was stuck"
+    );
+    stop.send(()).unwrap();
+    assert_eq!(h.await.unwrap().unwrap().end, ConnectionEnd::Shutdown);
+}
+
+/// regression: the pinned heartbeat future outlived the select and was only
+/// dropped at the end of `serve_connection`, i.e. AFTER `on-disconnect` ran,
+/// so an in-flight `on-heartbeat-due` still held its resources then.
+#[tokio::test(start_paused = true)]
+async fn an_in_flight_heartbeat_is_cancelled_before_on_disconnect() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let inv = Arc::new(HbInvoker::new(BeatScript::HangHolding(Arc::clone(
+        &dropped,
+    ))));
+    let (d, _m) = driver(&inv, true);
+    let mut t = HbTransport::new(Some(Duration::from_secs(1)));
+    let (stop, mut rx) = oneshot::channel::<()>();
+    let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
+    settle().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    settle().await;
+    assert_eq!(inv.beats.load(Ordering::SeqCst), 1);
+    stop.send(()).unwrap();
+    assert_eq!(h.await.unwrap().unwrap().end, ConnectionEnd::Shutdown);
+    assert_eq!(
+        *inv.beat_guard_dropped_at_disconnect.lock().unwrap(),
+        Some(true),
+        "in-flight on-heartbeat-due must be dropped before on-disconnect"
+    );
+}
+
+/// regression: `Ok(None)` from `on-heartbeat-due` was treated as "no
+/// heartbeat", but the WIT contract says `none` = the host sends its
+/// platform-default heartbeat unchanged.
+#[tokio::test(start_paused = true)]
+async fn a_none_body_sends_the_platform_default_heartbeat() {
+    let inv = Arc::new(HbInvoker::new(BeatScript::Empty));
+    let (d, m) = driver(&inv, true);
+    let mut t = HbTransport::new(Some(Duration::from_secs(5)));
+    let sent = Arc::clone(&t.sent);
+    let defaults = Arc::clone(&t.defaults_sent);
+    let (stop, mut rx) = oneshot::channel::<()>();
+    let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
+    settle().await;
+    for _ in 0..2 {
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle().await;
+    }
+    assert_eq!(defaults.load(Ordering::SeqCst), 2);
+    assert!(sent.lock().unwrap().is_empty(), "no connector body to send");
+    assert_eq!(beats(&m, "default_sent"), 2);
+    stop.send(()).unwrap();
+    assert_eq!(h.await.unwrap().unwrap().end, ConnectionEnd::Shutdown);
+}
+
+/// A transport that declares an interval but has no platform-default
+/// heartbeat fails loud on a `none` body (never a silent no-op).
+#[tokio::test(start_paused = true)]
+async fn a_none_body_on_a_transport_without_a_default_heartbeat_fails_loud() {
+    let inv = Arc::new(HbInvoker::new(BeatScript::Empty));
+    let (d, m) = driver(&inv, true);
+    let mut t = DefaultSendTransport(Duration::from_secs(5));
+    let (_keep, mut rx) = oneshot::channel::<()>();
+    let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let report = h.await.unwrap().unwrap();
+    assert_eq!(report.end, ConnectionEnd::TransportError);
+    assert_eq!(beats(&m, "send_failed"), 1);
+}
+
+/// regression: no floor/ceiling let a 1ns interval busy-loop the connector.
+#[tokio::test]
+async fn out_of_range_intervals_are_refused_before_connecting() {
+    for bad in [
+        Duration::from_nanos(1),
+        MIN_HEARTBEAT_INTERVAL - Duration::from_nanos(1),
+        MAX_HEARTBEAT_INTERVAL + Duration::from_nanos(1),
+        Duration::MAX,
+    ] {
+        let inv = Arc::new(HbInvoker::new(BeatScript::Empty));
+        let (d, _m) = driver(&inv, true);
+        let mut t = HbTransport::new(Some(bad));
+        let (_keep, mut rx) = oneshot::channel::<()>();
+        let err = d.serve_connection(&mut t, &mut rx).await.unwrap_err();
+        assert!(
+            matches!(err, DriverError::HeartbeatIntervalOutOfRange { interval, .. } if interval == bad),
+            "{bad:?}"
+        );
+        assert!(!t.connected.load(Ordering::SeqCst), "{bad:?}");
+    }
+}
+
+/// The inclusive bounds themselves are accepted.
+#[tokio::test(start_paused = true)]
+async fn the_interval_bounds_are_inclusive() {
+    for ok in [MIN_HEARTBEAT_INTERVAL, MAX_HEARTBEAT_INTERVAL] {
+        let inv = Arc::new(HbInvoker::new(BeatScript::Empty));
+        let (d, _m) = driver(&inv, true);
+        let mut t = HbTransport::new(Some(ok));
+        let (stop, mut rx) = oneshot::channel::<()>();
+        let h = tokio::spawn(async move { d.serve_connection(&mut t, &mut rx).await });
+        settle().await;
+        stop.send(()).unwrap();
+        assert_eq!(
+            h.await.unwrap().unwrap().end,
+            ConnectionEnd::Shutdown,
+            "{ok:?}"
+        );
+    }
 }

@@ -22,7 +22,8 @@
 //! (oversize, spoofed platform, rejected/failed events) are sampled by
 //! [`super::ratelimit`] -- every occurrence is still counted.
 
-use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -56,18 +57,70 @@ pub enum DriverError {
         /// What `Transport::connect`'s context carried.
         actual: String,
     },
-    /// The transport declared a zero heartbeat interval: a busy-loop, never
-    /// a valid schedule.
-    #[error("transport for platform {platform:?} declared a zero heartbeat interval")]
-    ZeroHeartbeatInterval {
+    /// The transport declared a heartbeat interval outside
+    /// [`MIN_HEARTBEAT_INTERVAL`]..=[`MAX_HEARTBEAT_INTERVAL`]: a too-small
+    /// one is a busy-loop (zero included), a too-large one is no heartbeat at
+    /// all. A host/config fault, refused before connecting -- only checked
+    /// when heartbeats are enabled.
+    #[error(
+        "transport for platform {platform:?} declared heartbeat interval {interval:?}, \
+         outside the allowed {min:?}..={max:?}"
+    )]
+    HeartbeatIntervalOutOfRange {
         /// The offending transport's platform.
         platform: String,
+        /// What the transport declared.
+        interval: Duration,
+        /// The inclusive lower bound.
+        min: Duration,
+        /// The inclusive upper bound.
+        max: Duration,
     },
 }
+
+/// Smallest accepted `Transport::heartbeat_interval`. Below this the schedule
+/// is a busy loop that floods the connector with `on-heartbeat-due` calls.
+pub const MIN_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Largest accepted `Transport::heartbeat_interval` (one hour): beyond it a
+/// "heartbeat" cannot keep any real upstream connection alive.
+pub const MAX_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// Default deadline for one heartbeat write. A write that has not completed by
+/// then means the socket is stalled; the connection is torn down (and
+/// reconnected) rather than letting it freeze the pump.
+pub const DEFAULT_HEARTBEAT_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One `on-heartbeat-due` round's result, handed from the heartbeat loop to
 /// the pump (which owns the transport and so is the only one that can send).
 type HeartbeatResult = Result<Option<Vec<u8>>, ConnectorInvokeError>;
+
+/// What to do with one classified heartbeat round.
+enum BeatAction {
+    /// Write this body (`None` = the platform-default heartbeat).
+    Send(Option<Vec<u8>>),
+    /// Nothing to write; the connection stays up.
+    Skip,
+    /// End the connection.
+    End(ConnectionEnd),
+}
+
+/// How one heartbeat write ended.
+enum BeatSend {
+    Sent,
+    Failed(super::transport::TransportError),
+    TimedOut,
+}
+
+/// The verdict of processing one frame, applied by the pump once the
+/// transport is free again.
+struct FrameVerdict {
+    outcome: FrameOutcome,
+    /// `Some(kind)` = the connector was contained; the connection ends.
+    fault: Option<&'static str>,
+    /// The connector processed the frame successfully.
+    ok: bool,
+}
 
 /// Why one connection's lifecycle ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +203,7 @@ pub struct ConnectorDriver<I: ConnectorInvoker, S: EventSink> {
     metrics: ConnectorMetrics,
     backoff_cap: Duration,
     heartbeat_enabled: bool,
+    heartbeat_send_timeout: Duration,
 }
 
 impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
@@ -168,17 +222,26 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
             metrics,
             backoff_cap: Duration::from_secs(30),
             heartbeat_enabled: false,
+            heartbeat_send_timeout: DEFAULT_HEARTBEAT_SEND_TIMEOUT,
         }
     }
 
     /// Opts the driver in to heartbeat scheduling. The caller resolves the
     /// PostHog flag `ingest.connector-heartbeat` (default OFF) and passes the
-    /// result; with it OFF a transport that declares a heartbeat interval is
-    /// logged at WARN per connection (never silently ignored) and no
-    /// heartbeat runs.
+    /// result; with it OFF the driver behaves exactly as if heartbeats did not
+    /// exist (no validation, no timer, no refusal; one DEBUG line per
+    /// connection that a declared interval is being ignored).
     #[must_use]
     pub fn with_heartbeat_enabled(mut self, enabled: bool) -> Self {
         self.heartbeat_enabled = enabled;
+        self
+    }
+
+    /// Overrides the per-heartbeat write deadline
+    /// ([`DEFAULT_HEARTBEAT_SEND_TIMEOUT`]).
+    #[must_use]
+    pub fn with_heartbeat_send_timeout(mut self, timeout: Duration) -> Self {
+        self.heartbeat_send_timeout = timeout;
         self
     }
 
@@ -232,15 +295,22 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         let platform = transport.platform().to_string();
         let pinned = self.registry.resolve(&platform)?.clone();
         let heartbeat_every = match transport.heartbeat_interval() {
-            Some(d) if d.is_zero() => {
-                return Err(DriverError::ZeroHeartbeatInterval { platform });
-            }
-            Some(d) if self.heartbeat_enabled => Some(d),
-            Some(_) => {
-                warn!(platform = %platform,
-                    "transport declares a heartbeat but the heartbeat flag is OFF; no heartbeat will be sent");
+            // Flag OFF: heartbeats do not exist. Nothing is validated or
+            // refused -- a bad interval cannot matter to a schedule that
+            // never runs.
+            Some(_) if !self.heartbeat_enabled => {
+                debug!(platform = %platform, "heartbeat flag is OFF; ignoring the transport's heartbeat interval");
                 None
             }
+            Some(d) if !(MIN_HEARTBEAT_INTERVAL..=MAX_HEARTBEAT_INTERVAL).contains(&d) => {
+                return Err(DriverError::HeartbeatIntervalOutOfRange {
+                    platform,
+                    interval: d,
+                    min: MIN_HEARTBEAT_INTERVAL,
+                    max: MAX_HEARTBEAT_INTERVAL,
+                });
+            }
+            Some(d) => Some(d),
             None => None,
         };
 
@@ -302,12 +372,30 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         // heartbeat is in flight per connection. Dropping either side on
         // return cancels the other (shutdown/teardown safe).
         let (beat_tx, mut beat_rx) = mpsc::channel::<HeartbeatResult>(1);
-        let beats = self.heartbeat_loop(&platform, &ctx, heartbeat_every, beat_tx);
-        tokio::pin!(beats);
-        let pump = self.pump(transport, shutdown, &platform, &pinned, &ctx, &mut beat_rx);
-        let (end, frames_ok) = tokio::select! {
-            out = pump => out,
-            never = &mut beats => match never {},
+        // Scoped so the heartbeat future (and any `on-heartbeat-due` still in
+        // flight inside it) is DROPPED here, before `on-disconnect` runs --
+        // never left suspended across teardown holding invoker resources.
+        let (end, frames_ok) = {
+            let beats = self.heartbeat_loop(&platform, &ctx, heartbeat_every, beat_tx);
+            tokio::pin!(beats);
+            let pump = self.pump(
+                transport,
+                shutdown,
+                &platform,
+                &pinned,
+                &ctx,
+                &mut beat_rx,
+                heartbeat_every.is_some(),
+            );
+            tokio::select! {
+                out = pump => out,
+                () = &mut beats, if heartbeat_every.is_some() => {
+                    // Unreachable while the pump (which owns the receiver)
+                    // lives; surfaced loudly rather than ignored.
+                    warn!(platform = %platform, "heartbeat loop exited unexpectedly");
+                    (ConnectionEnd::ConnectorFault("heartbeat_loop_exited"), 0)
+                }
+            }
         };
         drop(up);
         if end == ConnectionEnd::Parked {
@@ -327,19 +415,18 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
 
     /// The per-connection heartbeat loop: every `every` (first beat one
     /// period after establishment, missed ticks delayed not burst) it calls
-    /// `on-heartbeat-due` and hands the result to the pump. `None` pends
-    /// forever (no heartbeat). Never returns.
+    /// `on-heartbeat-due` and hands the result to the pump. With `None` it
+    /// does nothing and resolves immediately (the caller does not poll it).
+    /// Returns only when the pump's receiver is gone.
     async fn heartbeat_loop(
         &self,
         platform: &str,
         ctx: &ConnectionCtx,
         every: Option<Duration>,
         tx: mpsc::Sender<HeartbeatResult>,
-    ) -> Infallible {
+    ) {
         let Some(every) = every else {
-            // Keep `tx` alive so the pump's receiver pends instead of closing.
-            let _tx = tx;
-            return std::future::pending::<Infallible>().await;
+            return;
         };
         let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -357,69 +444,125 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                 .observe(started.elapsed().as_secs_f64());
             // Bounded hand-off: waits (and so skips ticks) while the pump has
             // not yet consumed the previous result. A closed receiver means
-            // the pump returned; the outer select drops this future next.
+            // the pump returned.
             if tx.send(result).await.is_err() {
-                return std::future::pending::<Infallible>().await;
+                return;
             }
         }
     }
 
-    /// Acts on one heartbeat round's result inside the pump. `Some(end)`
-    /// ends the connection.
-    async fn handle_heartbeat<T: Transport>(
-        &self,
-        transport: &mut T,
-        shutdown: &mut oneshot::Receiver<()>,
-        platform: &str,
-        beat: Option<HeartbeatResult>,
-    ) -> Option<ConnectionEnd> {
+    /// Classifies one heartbeat round's result. Non-send outcomes are counted
+    /// and logged here; `Send(body)` is for the caller to write, where
+    /// `None` means the connector asked for the platform-default heartbeat
+    /// (WIT `on-heartbeat-due`: `none` = "host sends its platform-default
+    /// heartbeat unchanged").
+    fn classify_beat(&self, platform: &str, beat: Option<HeartbeatResult>) -> BeatAction {
         match beat {
-            Some(Ok(Some(bytes))) => {
-                let sent = tokio::select! {
-                    _ = &mut *shutdown => return Some(ConnectionEnd::Shutdown),
-                    sent = transport.send_heartbeat(bytes) => sent,
-                };
-                match sent {
-                    Ok(()) => {
-                        self.metrics.heartbeat(platform, "sent");
-                        None
-                    }
-                    Err(e) => {
-                        self.metrics.heartbeat(platform, "send_failed");
-                        warn!(platform = %platform, kind = e.kind(), "connector heartbeat send failed");
-                        debug!(platform = %platform, reason = %e, "connector heartbeat send failure reason");
-                        Some(if e.is_fatal() {
-                            ConnectionEnd::Parked
-                        } else {
-                            ConnectionEnd::TransportError
-                        })
-                    }
-                }
-            }
-            Some(Ok(None)) => {
-                self.metrics.heartbeat(platform, "empty");
-                None
-            }
+            Some(Ok(body)) => BeatAction::Send(body),
             Some(Err(ConnectorInvokeError::Guest(e))) => {
                 self.metrics.heartbeat(platform, "guest_error");
                 debug!(platform = %platform, kind = e.kind(), "connector declined a heartbeat, skipped");
-                None
+                BeatAction::Skip
             }
             Some(Err(other)) => {
                 self.metrics.heartbeat(platform, other.kind());
                 self.metrics.trap(platform, other.kind());
                 warn!(platform = %platform, kind = other.kind(),
                     "connector contained or unavailable during heartbeat, tearing the connection down");
-                Some(ConnectionEnd::ConnectorFault(other.kind()))
+                BeatAction::End(ConnectionEnd::ConnectorFault(other.kind()))
             }
             None => {
-                // The loop owns the sender for the whole connection; a closed
-                // channel is a driver bug, surfaced loudly.
+                // The pump owns the receiver and the loop owns the sender for
+                // the whole connection; a closed channel is a driver bug,
+                // surfaced loudly.
                 warn!(platform = %platform, "heartbeat channel closed unexpectedly");
                 self.metrics.heartbeat(platform, "channel_closed");
-                Some(ConnectionEnd::ConnectorFault("heartbeat_channel_closed"))
+                BeatAction::End(ConnectionEnd::ConnectorFault("heartbeat_channel_closed"))
             }
         }
+    }
+
+    /// Writes one heartbeat under the send deadline. Dropping the write on
+    /// expiry cancels it; the caller then tears the connection down, so a
+    /// half-written frame never reaches a reused stream.
+    async fn send_beat<T: Transport>(&self, transport: &mut T, body: Option<Vec<u8>>) -> BeatSend {
+        let write = async {
+            match body {
+                Some(bytes) => transport.send_heartbeat(bytes).await,
+                None => transport.send_default_heartbeat().await,
+            }
+        };
+        match tokio::time::timeout(self.heartbeat_send_timeout, write).await {
+            Ok(Ok(())) => BeatSend::Sent,
+            Ok(Err(e)) => BeatSend::Failed(e),
+            Err(_) => BeatSend::TimedOut,
+        }
+    }
+
+    /// Counts/logs one finished heartbeat write; `Some(end)` ends the
+    /// connection.
+    fn finish_beat(
+        &self,
+        platform: &str,
+        defaulted: bool,
+        sent: BeatSend,
+    ) -> Option<ConnectionEnd> {
+        match sent {
+            BeatSend::Sent => {
+                self.metrics
+                    .heartbeat(platform, if defaulted { "default_sent" } else { "sent" });
+                None
+            }
+            BeatSend::TimedOut => {
+                self.metrics.heartbeat(platform, "send_timeout");
+                warn!(platform = %platform, timeout_ms = self.heartbeat_send_timeout.as_millis() as u64,
+                    "connector heartbeat send timed out, tearing the connection down");
+                Some(ConnectionEnd::TransportError)
+            }
+            BeatSend::Failed(e) => {
+                self.metrics.heartbeat(platform, "send_failed");
+                warn!(platform = %platform, kind = e.kind(), "connector heartbeat send failed");
+                debug!(platform = %platform, reason = %e, "connector heartbeat send failure reason");
+                Some(if e.is_fatal() {
+                    ConnectionEnd::Parked
+                } else {
+                    ConnectionEnd::TransportError
+                })
+            }
+        }
+    }
+
+    /// Handles one due heartbeat while `work` (the in-flight frame processing,
+    /// or a never-ready future when idle) keeps being polled: the send needs
+    /// the transport, `work` does not, so a stalled write cannot freeze frame
+    /// work already in flight. `work`'s output lands in `done`. Returns
+    /// `Some(end)` when the connection must end (shutdown, send failure, a
+    /// connector fault).
+    async fn run_beat<T: Transport, W: Future>(
+        &self,
+        transport: &mut T,
+        shutdown: &mut oneshot::Receiver<()>,
+        platform: &str,
+        beat: Option<HeartbeatResult>,
+        mut work: Pin<&mut W>,
+        done: &mut Option<W::Output>,
+    ) -> Option<ConnectionEnd> {
+        let body = match self.classify_beat(platform, beat) {
+            BeatAction::Send(body) => body,
+            BeatAction::Skip => return None,
+            BeatAction::End(end) => return Some(end),
+        };
+        let defaulted = body.is_none();
+        let send = self.send_beat(transport, body);
+        tokio::pin!(send);
+        let sent = loop {
+            tokio::select! {
+                _ = &mut *shutdown => return Some(ConnectionEnd::Shutdown),
+                out = work.as_mut(), if done.is_none() => *done = Some(out),
+                sent = &mut send => break sent,
+            }
+        };
+        self.finish_beat(platform, defaulted, sent)
     }
 
     /// Counts and logs one source being parked on a terminal failure.
@@ -450,6 +593,15 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
     /// The frame pump: returns why it ended and how many frames succeeded.
     /// Every yielded frame is reported back to the transport exactly once via
     /// [`Transport::on_frame_outcome`] before the next read.
+    ///
+    /// Heartbeats are serviced in both phases: while waiting for a frame, and
+    /// while a frame is being processed (`on-frame` + publish only borrow the
+    /// invoker/sink, not the transport, so a due heartbeat is written without
+    /// waiting for a slow guest or sink). The one structural limit: the
+    /// transport is a single `&mut`, so reading the NEXT frame pauses while a
+    /// heartbeat write is in progress -- bounded by the send deadline, after
+    /// which the connection is torn down.
+    #[allow(clippy::too_many_arguments)]
     async fn pump<T: Transport>(
         &self,
         transport: &mut T,
@@ -458,6 +610,7 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         pinned: &PinnedConnector,
         ctx: &ConnectionCtx,
         beat_rx: &mut mpsc::Receiver<HeartbeatResult>,
+        heartbeat_on: bool,
     ) -> (ConnectionEnd, u64) {
         let mut frames_ok = 0u64;
         let mut logs = PumpLogs::new();
@@ -466,8 +619,14 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
             // neither starves the other.
             let next = tokio::select! {
                 _ = &mut *shutdown => return (ConnectionEnd::Shutdown, frames_ok),
-                beat = beat_rx.recv() => {
-                    if let Some(end) = self.handle_heartbeat(transport, shutdown, platform, beat).await {
+                beat = beat_rx.recv(), if heartbeat_on => {
+                    let idle = std::future::pending::<()>();
+                    tokio::pin!(idle);
+                    let mut never = None;
+                    if let Some(end) = self
+                        .run_beat(transport, shutdown, platform, beat, idle, &mut never)
+                        .await
+                    {
                         return (end, frames_ok);
                     }
                     continue;
@@ -503,54 +662,118 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                 continue;
             }
 
-            let frame = RawFrame {
-                ctx: ctx.clone(),
-                bytes,
-                received_at: now_rfc3339_millis(),
+            let work = self.process_frame(platform, pinned, ctx, bytes, &mut logs);
+            tokio::pin!(work);
+            let mut done: Option<FrameVerdict> = None;
+            let mut early_end: Option<ConnectionEnd> = None;
+            let verdict = loop {
+                if let Some(v) = done.take() {
+                    break Some(v);
+                }
+                tokio::select! {
+                    _ = &mut *shutdown => {
+                        early_end = Some(ConnectionEnd::Shutdown);
+                        break None;
+                    }
+                    v = work.as_mut() => break Some(v),
+                    beat = beat_rx.recv(), if heartbeat_on => {
+                        if let Some(end) = self
+                            .run_beat(transport, shutdown, platform, beat, work.as_mut(), &mut done)
+                            .await
+                        {
+                            early_end = Some(end);
+                            // A frame that finished during the beat keeps its
+                            // real verdict; one still in flight is dropped
+                            // with the connection.
+                            break done.take();
+                        }
+                    }
+                }
             };
-            let started = Instant::now();
-            let result = self
-                .invoker
-                .on_frame(platform, frame)
-                .instrument(tracing::info_span!("connector.on_frame", platform = %platform))
-                .await;
-            self.metrics
-                .on_frame_duration_seconds
-                .with_label_values(&[platform])
-                .observe(started.elapsed().as_secs_f64());
+            // Report the frame exactly once. In flight at teardown = not
+            // delivered: a stateful transport holds its cursor and re-yields.
+            let verdict = verdict.unwrap_or(FrameVerdict {
+                outcome: FrameOutcome::Dropped(FrameDropReason::ConnectorFault),
+                fault: None,
+                ok: false,
+            });
+            if verdict.ok {
+                frames_ok += 1;
+            }
+            transport.on_frame_outcome(verdict.outcome).await;
+            if let Some(end) = early_end {
+                return (end, frames_ok);
+            }
+            if let Some(kind) = verdict.fault {
+                return (ConnectionEnd::ConnectorFault(kind), frames_ok);
+            }
+        }
+    }
 
-            match result {
-                Ok(events) => {
-                    frames_ok += 1;
-                    self.metrics.frame(platform, "ok");
-                    let all_published = self
-                        .publish_events(platform, pinned, ctx, events, &mut logs)
-                        .await;
-                    let outcome = if all_published {
+    /// Runs one frame through the connector and publishes its events. Touches
+    /// only the invoker/sink (never the transport), so the pump can write a
+    /// heartbeat while this is in flight; the transport is told the verdict
+    /// afterwards.
+    async fn process_frame(
+        &self,
+        platform: &str,
+        pinned: &PinnedConnector,
+        ctx: &ConnectionCtx,
+        bytes: Vec<u8>,
+        logs: &mut PumpLogs,
+    ) -> FrameVerdict {
+        let frame = RawFrame {
+            ctx: ctx.clone(),
+            bytes,
+            received_at: now_rfc3339_millis(),
+        };
+        let started = Instant::now();
+        let result = self
+            .invoker
+            .on_frame(platform, frame)
+            .instrument(tracing::info_span!("connector.on_frame", platform = %platform))
+            .await;
+        self.metrics
+            .on_frame_duration_seconds
+            .with_label_values(&[platform])
+            .observe(started.elapsed().as_secs_f64());
+
+        match result {
+            Ok(events) => {
+                self.metrics.frame(platform, "ok");
+                let all_published = self
+                    .publish_events(platform, pinned, ctx, events, logs)
+                    .await;
+                FrameVerdict {
+                    outcome: if all_published {
                         FrameOutcome::Published
                     } else {
                         FrameOutcome::Dropped(FrameDropReason::PublishIncomplete)
-                    };
-                    transport.on_frame_outcome(outcome).await;
+                    },
+                    fault: None,
+                    ok: true,
                 }
-                Err(ConnectorInvokeError::Guest(frame_error)) => {
-                    self.metrics.frame(platform, "guest_error");
-                    debug!(platform = %platform, kind = frame_error.kind(),
-                        "connector reported a bad frame, dropped");
-                    transport
-                        .on_frame_outcome(FrameOutcome::Dropped(FrameDropReason::GuestError))
-                        .await;
+            }
+            Err(ConnectorInvokeError::Guest(frame_error)) => {
+                self.metrics.frame(platform, "guest_error");
+                debug!(platform = %platform, kind = frame_error.kind(),
+                    "connector reported a bad frame, dropped");
+                FrameVerdict {
+                    outcome: FrameOutcome::Dropped(FrameDropReason::GuestError),
+                    fault: None,
+                    ok: false,
                 }
-                Err(other) => {
-                    self.metrics.frame(platform, other.kind());
-                    self.metrics.trap(platform, other.kind());
-                    // Class only -- never the error payload (guest-derived).
-                    warn!(platform = %platform, kind = other.kind(),
-                        "connector contained or unavailable, tearing the connection down");
-                    transport
-                        .on_frame_outcome(FrameOutcome::Dropped(FrameDropReason::ConnectorFault))
-                        .await;
-                    return (ConnectionEnd::ConnectorFault(other.kind()), frames_ok);
+            }
+            Err(other) => {
+                self.metrics.frame(platform, other.kind());
+                self.metrics.trap(platform, other.kind());
+                // Class only -- never the error payload (guest-derived).
+                warn!(platform = %platform, kind = other.kind(),
+                    "connector contained or unavailable, tearing the connection down");
+                FrameVerdict {
+                    outcome: FrameOutcome::Dropped(FrameDropReason::ConnectorFault),
+                    fault: Some(other.kind()),
+                    ok: false,
                 }
             }
         }
