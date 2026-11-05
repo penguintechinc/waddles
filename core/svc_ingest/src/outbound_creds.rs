@@ -117,6 +117,11 @@ pub enum CredError {
     /// guessed.
     #[error("community has more than one usable binding")]
     AmbiguousBinding,
+    /// The resolver answered with a time-limited credential that is already
+    /// (or about to be) expired (YouTube). Retryable: hub-api refreshes it,
+    /// so a later send resolves a fresh one; the executor never refreshes.
+    #[error("community connection credential is expired")]
+    TokenExpired,
 }
 
 impl CredError {
@@ -131,6 +136,7 @@ impl CredError {
             Self::Unavailable => "credential_unavailable",
             Self::BindingListOverflow => "binding_list_overflow",
             Self::AmbiguousBinding => "ambiguous_binding",
+            Self::TokenExpired => "token_expired",
         }
     }
 }
