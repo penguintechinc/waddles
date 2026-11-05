@@ -76,5 +76,14 @@
 //! uniformly the "private range" bucket the three-category model gates
 //! (superseding CGNAT's prior always-forbidden treatment).
 
+//! **`guarded` (rule-free host egress).** [`guarded`] is the single SSRF-guarded
+//! client for host-initiated egress whose destination is operator/overlay
+//! config rather than a bundle manifest (svc_ingest's poll/WebSocket
+//! connector transports): https/wss only, no userinfo, resolve-then-pin,
+//! per-hop redirect re-validation with cross-origin credential stripping,
+//! size/time bounds, class-only typed errors. Services delegate to it and
+//! must never re-mirror its denylist.
+
 pub mod egress;
+pub mod guarded;
 pub mod redact;

@@ -42,3 +42,14 @@ and counts.
 | `cargo test --locked` (needs `VALKEY_URL`, a real Valkey; unset = failure, never a skip) | unit + real-socket lifecycle/reconcile tests |
 | `make test-svc-ingest-twitch-live` | live e2e: real hub-api + Postgres + Valkey + IRC server; binding created/deleted through the admin API starts/stops a session; prints and gates on counts (docker + helm + cargo; `HUB_PYTHON` = python with `hub_api/requirements-dev.txt` + `libs/flask_core/requirements.txt`) |
 | `helm` render: `k8s/helm/waddlebot/tests/test_svc_ingest_twitch_sessions_render.py` | alpha renders the flag + timing envs and no static pair; beta/prod unchanged; egress to hub-api |
+
+## Connector egress (SSRF guard)
+
+Poll/WebSocket connector transports resolve and pin their endpoint through `connector::egress_guard`, a thin
+adapter over `bundle_host_http::guarded` -- the one shared implementation (denylist incl. IPv4-mapped/NAT64 v6,
+resolve-then-connect pinning, https/wss only, no userinfo, class-only errors, `guarded_egress_total{outcome}`
+metric + tracing span). The former mirrored denylist was removed; do not re-add range logic here. Real-path
+redirect/rebind tests live in `core/bundle_host_http/tests/guarded_real_path.rs` (`cargo test --locked`).
+Follow-up: `poll.rs::pinned_client` should call `egress_guard::pinned_client` once PR #982 lands (kept out of this
+change to avoid conflicting with it); the Discord REST/outbound client (`outbound.rs`, PR #987 area) is not yet routed
+through the guard.
