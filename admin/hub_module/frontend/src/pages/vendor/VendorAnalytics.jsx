@@ -23,7 +23,7 @@ import {
   XCircleIcon,
   ClockIcon,
 } from '@heroicons/react/24/outline';
-import api from '../../services/api';
+import { vendorApi } from '../../services/api';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -218,10 +218,7 @@ function ExportDropdown({ period }) {
   const triggerExport = async (type) => {
     setOpen(false);
     try {
-      const response = await api.get('/vendor/analytics/export', {
-        params: { type, period },
-        responseType: 'blob',
-      });
+      const response = await vendorApi.exportAnalytics({ type, period });
       const url = URL.createObjectURL(new Blob([response.data]));
       const a = document.createElement('a');
       a.href = url;
@@ -316,7 +313,7 @@ function VendorAnalytics() {
     setSalesLoading(true);
     setSalesError(null);
     try {
-      const res = await api.get('/vendor/analytics/sales', { params: { period: p } });
+      const res = await vendorApi.getAnalyticsSales({ period: p });
       setSales(res.data?.data ?? res.data);
     } catch (err) {
       setSalesError(err.response?.data?.error?.message || 'Failed to load sales data');
@@ -329,9 +326,7 @@ function VendorAnalytics() {
     setInstallsLoading(true);
     setInstallsError(null);
     try {
-      const res = await api.get('/vendor/analytics/installs', {
-        params: { period: p, granularity: 'daily' },
-      });
+      const res = await vendorApi.getAnalyticsInstalls({ period: p, granularity: 'daily' });
       setInstalls(res.data?.data ?? res.data);
     } catch (err) {
       setInstallsError(err.response?.data?.error?.message || 'Failed to load install data');
@@ -344,7 +339,7 @@ function VendorAnalytics() {
     setDiscountLoading(true);
     setDiscountError(null);
     try {
-      const res = await api.get('/vendor/analytics/discount-codes');
+      const res = await vendorApi.getAnalyticsDiscountCodes();
       setDiscountSummary(res.data?.data ?? res.data);
     } catch (err) {
       setDiscountError(err.response?.data?.error?.message || 'Failed to load discount data');
@@ -357,13 +352,11 @@ function VendorAnalytics() {
     setCommLoading(true);
     setCommError(null);
     try {
-      const res = await api.get('/vendor/analytics/communities', {
-        params: {
-          page,
-          limit: COMMUNITIES_PAGE_SIZE,
-          sortBy: sort.field,
-          sortDir: sort.dir,
-        },
+      const res = await vendorApi.getAnalyticsCommunities({
+        page,
+        limit: COMMUNITIES_PAGE_SIZE,
+        sortBy: sort.field,
+        sortDir: sort.dir,
       });
       setCommunities(res.data?.data ?? res.data);
     } catch (err) {

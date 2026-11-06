@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
-import api, { communityApi, userApi } from '../../services/api';
+import api, { communityApi, oauthApi, userApi } from '../../services/api';
+import { ServedFeature } from '../../components/ui';
+import { isFeatureServed } from '../../lib/unservedFeatures';
 import {
   LinkIcon,
   XMarkIcon,
@@ -63,6 +65,16 @@ const STATUS_BADGE = {
   rejected: 'bg-red-500/20 text-red-300 border-red-500/30',
 };
 
+/** Providers hub-api can start an account-link flow for (`GET /api/v1/auth/oauth/<platform>/link`). */
+const LINKABLE_PLATFORMS = ['discord', 'twitch', 'slack', 'google'];
+
+/** Member server-link requests have no hub-api route yet; see unservedFeatures.json. */
+const LINK_REQUESTS_FEATURE = 'member-server-link-requests';
+
+/**
+ * Lists the signed-in user's linked platforms and lets them connect more. Account linking
+ * asks hub-api for the provider authorize URL (no provider URLs or client ids live here).
+ */
 function MyChannels() {
   const { user } = useAuth();
   const [linkedPlatforms, setLinkedPlatforms] = useState([]);
@@ -70,6 +82,7 @@ function MyChannels() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const [connecting, setConnecting] = useState(null);
 
   // Join request modal
   const [joinModal, setJoinModal] = useState(null); // platform key
@@ -87,10 +100,10 @@ function MyChannels() {
       setError(null);
       const [platformsRes, requestsRes] = await Promise.all([
         userApi.getLinkedPlatforms(),
-        communityApi.getMyServerLinkRequests(),
+        isFeatureServed(LINK_REQUESTS_FEATURE) ? communityApi.getMyServerLinkRequests() : null,
       ]);
       setLinkedPlatforms(platformsRes.data.platforms || []);
-      setMyRequests(requestsRes.data.requests || []);
+      setMyRequests(requestsRes?.data.requests || []);
     } catch (err) {
       setError('Failed to load channel data');
     } finally {
@@ -98,8 +111,27 @@ function MyChannels() {
     }
   };
 
-  const handleConnectPlatform = (platformKey) => {
-    window.location.href = `/api/v1/auth/${platformKey}`;
+  const handleConnectPlatform = async (platformKey) => {
+    const name = PLATFORMS[platformKey]?.name ?? platformKey;
+    setError(null);
+    if (!LINKABLE_PLATFORMS.includes(platformKey)) {
+      setError(`Connecting ${name} isn't supported yet.`);
+      return;
+    }
+    setConnecting(platformKey);
+    try {
+      const response = await oauthApi.startLink(platformKey);
+      const authorizeUrl = response.data?.authorizeUrl;
+      if (typeof authorizeUrl !== 'string' || authorizeUrl === '') {
+        throw new Error('hub-api returned no authorize URL');
+      }
+      window.location.href = authorizeUrl;
+    } catch (err) {
+      setError(
+        err.response?.data?.error?.message || err.response?.data?.message || `Could not start the ${name} connection. Please try again.`,
+      );
+      setConnecting(null);
+    }
   };
 
   const openJoinModal = (platformKey) => {
@@ -220,6 +252,7 @@ function MyChannels() {
                 </div>
 
                 {isLinked ? (
+                  isFeatureServed(LINK_REQUESTS_FEATURE) && (
                   <button
                     onClick={() => openJoinModal(key)}
                     className="w-full px-3 py-2 bg-navy-700 hover:bg-navy-600 text-sky-100 rounded-lg text-sm transition-colors flex items-center justify-center space-x-2"
@@ -227,9 +260,11 @@ function MyChannels() {
                     <LinkIcon className="w-4 h-4" />
                     <span>Request to Join a Community</span>
                   </button>
+                  )
                 ) : (
                   <button
                     onClick={() => handleConnectPlatform(key)}
+                    disabled={connecting !== null}
                     className="w-full px-3 py-2 bg-gold-500 hover:bg-gold-600 text-navy-900 font-medium rounded-lg text-sm transition-colors"
                   >
                     Connect {platform.name}
@@ -244,6 +279,7 @@ function MyChannels() {
       {/* Pending requests */}
       <section>
         <h2 className="text-lg font-semibold text-sky-100 mb-4">My Community Link Requests</h2>
+        <ServedFeature feature={LINK_REQUESTS_FEATURE}>
         {myRequests.length === 0 ? (
           <div className="bg-navy-800 border border-navy-700 rounded-lg p-8 text-center">
             <LinkIcon className="w-10 h-10 text-navy-500 mx-auto mb-3" />
@@ -306,6 +342,7 @@ function MyChannels() {
             </table>
           </div>
         )}
+        </ServedFeature>
       </section>
 
       {/* Join Request Modal */}

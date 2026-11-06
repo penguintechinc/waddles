@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import api, { passkeyApi, userOAuthApi } from '../../services/api';
+import { ServedFeature } from '../../components/ui';
+import { isFeatureServed } from '../../lib/unservedFeatures';
 import {
   UserCircleIcon,
   LinkIcon,
@@ -105,7 +107,7 @@ function AccountSettings() {
     }
 
     loadUserData();
-    loadOAuthCredentials();
+    if (isFeatureServed('user-oauth-credentials')) loadOAuthCredentials();
   }, [searchParams]);
 
   const loadOAuthCredentials = async () => {
@@ -579,7 +581,8 @@ function AccountSettings() {
           </div>
         )}
       </div>
-      {/* OAuth Credentials */}
+      {/* OAuth Credentials (hub-api serves no /user/oauth/credentials route yet) */}
+      <ServedFeature feature="user-oauth-credentials">
       <div className="card p-6 mt-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
@@ -696,6 +699,7 @@ function AccountSettings() {
           </div>
         )}
       </div>
+      </ServedFeature>
     </div>
   );
 }

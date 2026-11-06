@@ -6,7 +6,7 @@ import { bundleApi } from '../../services/api';
 /**
  * Vendor bundle-version onboarding form -- `POST /api/v1/apps/{app_id}/versions`
  * (hub_api/blueprints/v1/bundle_versions.py). Replaces the old marketplace
- * intake form (webhook/pricing/payment fields, `/api/v1/vendor/submit`) --
+ * intake form (webhook/pricing/payment fields, `/api/v1/marketplace/public/vendor/submit`) --
  * that pipeline is a separate, legacy system; this page is the bundle-
  * onboarding entrypoint for the WASI-component pipeline.
  *

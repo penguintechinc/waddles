@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { marketplaceAdminApi } from '../../services/api';
 import './AdminVendorReview.css';
 
 const RISK_COLORS = {
@@ -28,20 +29,12 @@ export default function AdminVendorReview() {
   const fetchSubmission = async () => {
     try {
       setLoading(true);
-      // SECURITY (security.md C4): the session JWT lives only in the
-      // HttpOnly `wb_session` cookie now, never localStorage -- `fetch()`'s
-      // default `credentials: 'same-origin'` already sends it on this
-      // same-origin request, nothing to attach by hand.
-      const response = await fetch(`/api/v1/admin/vendor/submissions/${submissionId}`);
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch submission');
-      }
-
-      const data = await response.json();
-      setSubmission(data.submission);
+      // SECURITY (security.md C4): the session JWT lives only in the HttpOnly
+      // `wb_session` cookie; the shared api client sends it (withCredentials).
+      const response = await marketplaceAdminApi.getVendorSubmission(submissionId);
+      setSubmission(response.data.submission);
     } catch (err) {
-      setError(err.message);
+      setError(err.response?.data?.message || 'Failed to fetch submission');
     } finally {
       setLoading(false);
     }
@@ -59,36 +52,17 @@ export default function AdminVendorReview() {
 
     setSubmitting(true);
     try {
-      let endpoint, body;
-
       if (action === 'approve') {
-        endpoint = `/api/v1/admin/vendor/submissions/${submissionId}/approve`;
-        body = {
+        await marketplaceAdminApi.approveVendorSubmission(submissionId, {
           adminNotes: message,
           publishImmediately: publishImmediate,
-        };
+        });
       } else if (action === 'reject') {
-        endpoint = `/api/v1/admin/vendor/submissions/${submissionId}/reject`;
-        body = {
-          rejectionReason: message,
-        };
+        await marketplaceAdminApi.rejectVendorSubmission(submissionId, { rejectionReason: message });
       } else if (action === 'request_info') {
-        endpoint = `/api/v1/admin/vendor/submissions/${submissionId}/request-info`;
-        body = {
-          message,
-        };
-      }
-
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
-
-      if (!response.ok) {
-        throw new Error('Action failed');
+        await marketplaceAdminApi.requestVendorSubmissionInfo(submissionId, { message });
+      } else {
+        throw new Error('Unknown action');
       }
 
       setAction(null);
@@ -97,7 +71,7 @@ export default function AdminVendorReview() {
       await fetchSubmission();
       alert('Action completed successfully');
     } catch (err) {
-      alert(`Error: ${err.message}`);
+      alert(`Error: ${err.response?.data?.message || err.message}`);
     } finally {
       setSubmitting(false);
     }

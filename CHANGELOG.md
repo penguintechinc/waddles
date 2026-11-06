@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - svc-ingest connector host-call bridge (connector runtime PR-A2): `connector/host_calls.rs` `HostCallHandler`/`OverlayHostCalls`/`CallScope`/`ActiveConnections`/`HubIdentityTokenizer`, plugged in via `ExecutorLink::with_host_calls`. Scope-validated (unscoped calls denied, fail closed), per-overlay grants subset of `hub-manifest.yaml`, PII-free identity tokenization, `connector_host_call_total` metrics. Not yet wired into boot.
+- hub-api binding feed for the connector runtime: `chat_ingest` is now a Discord capability (a `chat_ingest` list returns Discord rows, including rows connected before it existed); list items carry a server-derived `tenantId` (the community's own tenant, never metadata; a grant whose community tenant differs from the link's, or whose community is gone, is withheld) and `secretVersion` (new `platform_connections.secret_version` counter, migration `0074_connection_secret_version`, bumped only when an admin replaces the credential -- never on an OAuth refresh). Consumer contract: `docs/PROVIDER_CONNECTIONS.md` "Binding-feed fields".
 - `sender.build-request` over the executor wire (P6a T6d wire follow-up; needs penguin-libs#151, `penguin-bundle-host` 0.5.0
   `ExportKind::ConnectorBuildRequest`): `bundle_executor` `ConnectorHost::build_request` + `connector_wire` dispatch (digest-pinned
   connectors only, global admission slot, action/template size caps, deadline clamp, typed errors) and svc_ingest

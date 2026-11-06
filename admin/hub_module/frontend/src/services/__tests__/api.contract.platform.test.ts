@@ -3,7 +3,7 @@
  */
 import { afterAll, describe, it } from 'vitest';
 
-import api, { publicApi, communityApi, supportApi, platformApi, superAdminApi, marketplaceApi, unifiedMarketplaceApi, vendorApi, marketplaceAdminApi } from '../api';
+import api, { publicApi, communityApi, supportApi, platformApi, superAdminApi, marketplaceApi, unifiedMarketplaceApi, vendorApi, vendorPublicApi, oauthApi, marketplaceAdminApi } from '../api';
 import { assertContractRow, recordRequests, type ContractRow } from '../../test/apiContract';
 
 const rec = recordRequests(api);
@@ -56,10 +56,6 @@ const PLATFORMAPI_ROWS: readonly ContractRow[] = [
 
 const SUPERADMINAPI_ROWS: readonly ContractRow[] = [
   ['getDashboard()', 'GET /api/v1/superadmin/dashboard'],
-  ['getAnalytics()', 'GET /api/v1/superadmin/analytics'],
-  ['getReputationDistribution()', 'GET /api/v1/superadmin/analytics/reputation'],
-  ['getGrowthTrends(params)', 'GET /api/v1/superadmin/analytics/growth'],
-  ['getActivityBreakdown()', 'GET /api/v1/superadmin/analytics/activity'],
   ['getCommunities(params)', 'GET /api/v1/superadmin/communities'],
   ['getCommunity(id)', 'GET /api/v1/superadmin/communities/{id}'],
   ['createCommunity(data)', 'POST /api/v1/superadmin/communities', { body: '@data' }],
@@ -136,6 +132,33 @@ const VENDORAPI_ROWS: readonly ContractRow[] = [
   ['submitForReview(id, data)', 'POST /api/v1/marketplace/vendor/modules/{id}/submit', { body: '@data' }],
   ['getRequest()', 'GET /api/v1/marketplace/vendor/request'],
   ['createRequest(data)', 'POST /api/v1/marketplace/vendor/request', { body: '@data' }],
+  ['updateProfile(data)', 'PUT /api/v1/marketplace/vendor/profile', { body: '@data' }],
+  ['getDashboard()', 'GET /api/v1/marketplace/vendor/dashboard'],
+  ['getAnalyticsSales(params)', 'GET /api/v1/marketplace/vendor/analytics/sales', { params: '@params' }],
+  ['getAnalyticsInstalls(params)', 'GET /api/v1/marketplace/vendor/analytics/installs', { params: '@params' }],
+  ['getAnalyticsDiscountCodes()', 'GET /api/v1/marketplace/vendor/analytics/discount-codes'],
+  ['getAnalyticsCommunities(params)', 'GET /api/v1/marketplace/vendor/analytics/communities', { params: '@params' }],
+  ['exportAnalytics(params)', 'GET /api/v1/marketplace/vendor/analytics/export', { params: '@params' }],
+  ['getDiscountCodes(params)', 'GET /api/v1/marketplace/vendor/discount-codes', { params: '@params' }],
+  ['createDiscountCode(data)', 'POST /api/v1/marketplace/vendor/discount-codes', { body: '@data' }],
+  ['updateDiscountCode(id, data)', 'PUT /api/v1/marketplace/vendor/discount-codes/{id}', { body: '@data' }],
+  ['deleteDiscountCode(id)', 'DELETE /api/v1/marketplace/vendor/discount-codes/{id}'],
+  ['getSubmissions(params)', 'GET /api/v1/marketplace/vendor/submissions', { params: '@params' }],
+  ['getGithubConnections()', 'GET /api/v1/marketplace/vendor/github-sync/connections'],
+  ['createGithubConnection(data)', 'POST /api/v1/marketplace/vendor/github-sync/connections', { body: '@data' }],
+  ['updateGithubConnection(id, data)', 'PUT /api/v1/marketplace/vendor/github-sync/connections/{id}', { body: '@data' }],
+  ['deleteGithubConnection(id)', 'DELETE /api/v1/marketplace/vendor/github-sync/connections/{id}'],
+  ['testGithubConnection(id)', 'POST /api/v1/marketplace/vendor/github-sync/connections/{id}/test'],
+];
+
+const VENDORPUBLICAPI_ROWS: readonly ContractRow[] = [
+  ['submit(data)', 'POST /api/v1/marketplace/public/vendor/submit', { body: '@data' }],
+  ['getSubmissionStatus(submissionId, email)', 'GET /api/v1/marketplace/public/vendor/submissions/{submissionId|enc}', { params: { email: '@email' } }],
+];
+
+const OAUTHAPI_ROWS: readonly ContractRow[] = [
+  ['start(platform)', 'GET /api/v1/auth/oauth/{platform}'],
+  ['startLink(platform)', 'GET /api/v1/auth/oauth/{platform}/link'],
 ];
 
 const MARKETPLACEADMINAPI_ROWS: readonly ContractRow[] = [
@@ -145,6 +168,10 @@ const MARKETPLACEADMINAPI_ROWS: readonly ContractRow[] = [
   ['getSubmissions(params)', 'GET /api/v1/marketplace/admin/marketplace/submissions'],
   ['approveSubmission(id, data)', 'POST /api/v1/marketplace/admin/marketplace/submissions/{id}/approve', { body: '@data' }],
   ['rejectSubmission(id, data)', 'POST /api/v1/marketplace/admin/marketplace/submissions/{id}/reject', { body: '@data' }],
+  ['getVendorSubmission(id)', 'GET /api/v1/marketplace/admin/marketplace/vendor-submissions/{id}'],
+  ['approveVendorSubmission(id, data)', 'POST /api/v1/marketplace/admin/marketplace/vendor-submissions/{id}/approve', { body: '@data' }],
+  ['rejectVendorSubmission(id, data)', 'POST /api/v1/marketplace/admin/marketplace/vendor-submissions/{id}/reject', { body: '@data' }],
+  ['requestVendorSubmissionInfo(id, data)', 'POST /api/v1/marketplace/admin/marketplace/vendor-submissions/{id}/request-info', { body: '@data' }],
   ['getSettings()', 'GET /api/v1/marketplace/admin/marketplace/settings'],
   ['updateSettings(data)', 'PUT /api/v1/marketplace/admin/marketplace/settings', { body: '@data' }],
 ];
@@ -194,6 +221,18 @@ describe('unifiedMarketplaceApi request contract', () => {
 describe('vendorApi request contract', () => {
   for (const row of VENDORAPI_ROWS) {
     it(row[0], () => assertContractRow(vendorApi, row, rec.calls));
+  }
+});
+
+describe('vendorPublicApi request contract', () => {
+  for (const row of VENDORPUBLICAPI_ROWS) {
+    it(row[0], () => assertContractRow(vendorPublicApi, row, rec.calls));
+  }
+});
+
+describe('oauthApi request contract', () => {
+  for (const row of OAUTHAPI_ROWS) {
+    it(row[0], () => assertContractRow(oauthApi, row, rec.calls));
   }
 });
 
