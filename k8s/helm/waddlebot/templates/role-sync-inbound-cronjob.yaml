@@ -1,0 +1,115 @@
+# Inbound (Discord gateway push) role-sync drain (hub_api/services/role_sync_inbound_service.py):
+# consumes guild.member.update / guild.role.* events the Discord service bundle (>=1.0.3)
+# publishes and applies them under the SAME direction rules as role_sync_service. Same hub-api
+# image + standalone-entrypoint shape as templates/role-sync-cronjob.yaml (which remains the
+# periodic correctness backstop). Needs the Discord bot's privileged "Server Members Intent"
+# enabled in the Discord developer portal. Disabled by default (pipeline.roleSync.inbound.enabled);
+# the per-tenant FEATURE_BAR_CITIZEN_ROLE_SYNC PostHog flag remains the runtime gate.
+{{- if and .Values.pipeline.roleSync.enabled .Values.pipeline.roleSync.inbound.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-role-sync-inbound
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: role-sync-inbound
+spec:
+  schedule: {{ .Values.pipeline.roleSync.inbound.schedule | quote }}
+  # Never run two reconcile passes over the same pairing set concurrently -- each pass is
+  # already idempotent (desired-vs-current diff), but overlapping passes would double the
+  # Twitch/Discord API call volume for no benefit.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.pipeline.roleSync.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.pipeline.roleSync.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: role-sync-inbound
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+          {{- include "waddlebot.imagePullSecrets" . | nindent 10 }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          # Waits on hub-api's own /ready (same signal core-bundle-seeder-job.yaml/
+          # migrations-job.yaml wait on) -- this worker reads/writes the same hub-api-owned
+          # control-plane tables (guild_tenant_pairings, community_role_sync_bindings,
+          # community_members, ...), so it never races hub-api's own startup schema
+          # bootstrap on a fresh install.
+          initContainers:
+          {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 10 }}
+          containers:
+          - name: role-sync-inbound
+            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
+            imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+            # Overrides hub-api's own `ENTRYPOINT`/`CMD` (hypercorn) -- same services/ tree,
+            # a different standalone entrypoint (role_sync_service.py's own `main()`).
+            command: ["python3", "-m", "services.role_sync_inbound_service"]
+            securityContext:
+              {{- toYaml .Values.securityContext | nindent 14 }}
+            envFrom:
+            - configMapRef:
+                name: {{ include "waddlebot.fullname" . }}-config
+            - secretRef:
+                name: {{ include "waddlebot.fullname" . }}-secrets
+            # feature/alpha-localized-posthog -- POSTHOG_API_KEY/POSTHOG_KEY auto-provisioned
+            # once posthog.enabled=true (alpha); this worker's own `_flag_enabled()` resolves
+            # FEATURE_BAR_CITIZEN_ROLE_SYNC through the same entitlement client hub-api uses.
+            # `optional: true`: safe before the bootstrap Job has run, or when disabled.
+            - secretRef:
+                name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
+                optional: true
+            # fix/helm-platform-credentials -- Discord/Twitch SaaS (tenant-0) app
+            # credentials (DISCORD_CLIENT_ID/_SECRET/_BOT_TOKEN, TWITCH_CLIENT_ID/_SECRET)
+            # come from the operator-managed platform-credentials Secret, never the
+            # chart-rendered `-secrets` Secret -- see this file's own header comment.
+            # `optional: true`: this worker starts fine with zero SaaS platforms configured
+            # (every pairing still resolvable via per-tenant DB-stored credentials).
+            - secretRef:
+                name: {{ include "waddlebot.platformCredentialsSecretName" . }}
+                optional: true
+            env:
+            # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
+            # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
+            # owner/superuser credential is NOT in waddlebot-secrets any more.
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 12 }}
+            # services/platform_integrations_crypto.py::_get_key() -- decrypts per-tenant
+            # tenant_platform_apps/platform_connections rows this worker's credential
+            # resolver reads for every non-global-tenant pairing. Explicit secretKeyRef
+            # (not relying on the envFrom.secretRef block above) mirrors hub-api.yaml's own
+            # identical override -- belt-and-suspenders if that key is ever renamed out of
+            # the shared Secret. `optional: true`: a deploy with zero non-global-tenant
+            # pairings never needs it.
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "waddlebot.fullname" . }}-secrets
+                  key: CREDENTIAL_ENCRYPTION_KEY
+                  optional: true
+            {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+            - name: VALKEY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "waddlebot.fullname" . }}-secrets
+                  key: VALKEY_DURABLE_URL_TLS_AUTH
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "waddlebot.fullname" . }}-secrets
+                  key: VALKEY_DURABLE_PASSWORD
+            {{- end }}
+            resources:
+              {{- toYaml .Values.pipeline.roleSync.resources | nindent 14 }}
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: tmp
+            emptyDir: {}
+{{- end }}

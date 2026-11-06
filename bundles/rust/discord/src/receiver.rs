@@ -170,7 +170,9 @@ fn resolve_permissions(host: &dyn Host, guild_id: &str, author_id: &str) -> Disc
 ///
 /// * Gateway frame (`op` present): lifecycle frames yield no events;
 ///   `MESSAGE_CREATE` yields one `message`; `INTERACTION_CREATE` yields one
-///   `interaction.*`; every other dispatch yields none.
+///   `interaction.*`; `GUILD_MEMBER_UPDATE` one `guild.member.update` (actor
+///   tokenized); `GUILD_ROLE_CREATE|UPDATE|DELETE` one `guild.role.*`; every
+///   other dispatch yields none.
 /// * Interaction webhook body (no `op`, has `type`): one `interaction.*`
 ///   (PING yields none -- the host answers it). The host has ALREADY verified
 ///   the Ed25519 signature; this code never sees an unverified body.
@@ -257,6 +259,33 @@ fn gateway_frame(
                     .into_iter()
                     .collect(),
             )
+        }
+        Some("GUILD_MEMBER_UPDATE") => {
+            let session = SessionState::from_token(ctx.session_token.as_deref())?;
+            let Some(update) =
+                normalize::normalize_member_update(&frame.d, session.self_user_id.as_deref())?
+            else {
+                host.log(
+                    Level::Debug,
+                    "GUILD_MEMBER_UPDATE dropped (self)",
+                    r#"{"op":"on_frame"}"#,
+                );
+                return Ok(Vec::new());
+            };
+            let actor = host.identity(&update.user_id)?;
+            Ok(vec![normalize::member_update_event(
+                &update,
+                received_at,
+                actor,
+            )])
+        }
+        Some(t @ ("GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE")) => {
+            let change = match t {
+                "GUILD_ROLE_CREATE" => normalize::RoleChange::Create,
+                "GUILD_ROLE_UPDATE" => normalize::RoleChange::Update,
+                _ => normalize::RoleChange::Delete,
+            };
+            Ok(vec![normalize::role_event(change, &frame.d, received_at)?])
         }
         _ => Ok(Vec::new()),
     }
@@ -540,5 +569,73 @@ mod tests {
         let logs = h.logs.borrow();
         let f: Value = serde_json::from_str(&logs[0].2).unwrap();
         assert_eq!(f["reason"].as_str().unwrap().len(), 64);
+    }
+
+    fn dispatch(t: &str, d: Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"op":0,"s":5,"t":t,"d":d})).unwrap()
+    }
+
+    #[test]
+    fn member_update_yields_a_tokenized_event_and_drops_self() {
+        let h = FakeHost::default();
+        let c = ctx(Some(r#"{"self_user_id":"999"}"#));
+        let d = |id: &str| serde_json::json!({"guild_id":"111","user":{"id":id,"username":"rawname"},"roles":["7","8"]});
+        let evs = on_frame(&h, &c, &dispatch("GUILD_MEMBER_UPDATE", d("444")), "ts").unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].event_type, "guild.member.update");
+        assert_eq!(evs[0].actor.as_deref(), Some("uuid-of-444"));
+        assert!(!evs[0].payload_json.contains("rawname"));
+        assert!(
+            on_frame(&h, &c, &dispatch("GUILD_MEMBER_UPDATE", d("999")), "ts")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(*h.lookups.borrow(), 0, "no REST for a member update");
+    }
+
+    #[test]
+    fn member_update_fails_loud_on_identity_denied_or_bad_frame() {
+        let h = FakeHost {
+            identity_down: true,
+            ..FakeHost::default()
+        };
+        let ok = dispatch(
+            "GUILD_MEMBER_UPDATE",
+            serde_json::json!({"guild_id":"1","user":{"id":"4"},"roles":[]}),
+        );
+        assert!(on_frame(&h, &ctx(None), &ok, "t").is_err());
+        let bad = dispatch("GUILD_MEMBER_UPDATE", serde_json::json!({"guild_id":"1"}));
+        assert!(on_frame(&FakeHost::default(), &ctx(None), &bad, "t").is_err());
+    }
+
+    #[test]
+    fn role_dispatches_map_to_guild_role_events() {
+        let h = FakeHost::default();
+        for (t, d, want) in [
+            (
+                "GUILD_ROLE_CREATE",
+                serde_json::json!({"guild_id":"1","role":{"id":"5"}}),
+                "guild.role.create",
+            ),
+            (
+                "GUILD_ROLE_UPDATE",
+                serde_json::json!({"guild_id":"1","role":{"id":"5"}}),
+                "guild.role.update",
+            ),
+            (
+                "GUILD_ROLE_DELETE",
+                serde_json::json!({"guild_id":"1","role_id":"5"}),
+                "guild.role.delete",
+            ),
+        ] {
+            let evs = on_frame(&h, &ctx(None), &dispatch(t, d), "ts").unwrap();
+            assert_eq!(evs.len(), 1, "{t}");
+            assert_eq!(
+                (evs[0].event_type.as_str(), evs[0].actor.clone()),
+                (want, None)
+            );
+        }
+        let bad = dispatch("GUILD_ROLE_DELETE", serde_json::json!({"guild_id":"1"}));
+        assert!(on_frame(&h, &ctx(None), &bad, "t").is_err());
     }
 }

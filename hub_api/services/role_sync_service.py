@@ -80,8 +80,10 @@ run as a Kubernetes CronJob -- same "standalone process, own
 `penguin-dal` connection" shape `usage_aggregator_service.py` already
 uses, chosen over an in-process hub-api loop since Twitch's own rate
 limits make a sub-minute cadence pointless here (unlike that module's
-`e2s` cadence). **Follow-up (not in this PR):** an EventSub/gateway-pushed
-fast path once the Rust dispatch work lands; this worker's periodic pass
+`e2s` cadence). **Discord gateway push (inbound) is now wired** in
+`services/role_sync_inbound_service.py` (Discord service bundle >=1.0.3 forwards
+GUILD_MEMBER_UPDATE / GUILD_ROLE_*; origin-marker echo suppression via `sync_scope`).
+**Follow-up:** an EventSub-pushed Twitch fast path; this worker's periodic pass
 remains the correctness backstop (drift reconciliation) even after that
 lands -- reconciliation-by-polling is never fully replaced by push.
 

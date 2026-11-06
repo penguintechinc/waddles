@@ -134,6 +134,125 @@ pub fn message_event(
     }
 }
 
+/// One `GUILD_MEMBER_UPDATE`: the member's CURRENT full role set (Discord sends
+/// no add/remove diff, only the resulting `roles`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberUpdate {
+    /// Guild id (a member update is always guild-scoped).
+    pub guild_id: String,
+    /// The member's user id (resolved to the event `actor`, never emitted as a handle).
+    pub user_id: String,
+    /// Role snowflakes the member holds now (sorted + deduplicated: deterministic payload).
+    pub role_ids: Vec<String>,
+}
+
+/// Normalizes a `GUILD_MEMBER_UPDATE` `d`. `Ok(None)` = the bot's own member
+/// record (by id): our own role changes are never reconciled back.
+///
+/// # Errors
+/// [`ConnectorError::Malformed`] when `guild_id` / `user.id` is missing or not a
+/// snowflake, or `roles` is missing / not an array of snowflake strings. Fails
+/// loudly rather than reconciling a guess (roles are authz).
+pub fn normalize_member_update(
+    d: &Value,
+    self_user_id: Option<&str>,
+) -> Result<Option<MemberUpdate>> {
+    let user_id = req_snowflake(d.get("user").and_then(|u| u.get("id")), "user.id")?;
+    if self_user_id.is_some_and(|me| me == user_id) {
+        return Ok(None);
+    }
+    Ok(Some(MemberUpdate {
+        guild_id: req_snowflake(d.get("guild_id"), "guild_id")?,
+        user_id,
+        role_ids: role_id_list(d.get("roles"), "roles")?,
+    }))
+}
+
+/// A REQUIRED array of snowflake strings, returned sorted + deduplicated.
+fn role_id_list(v: Option<&Value>, field: &str) -> Result<Vec<String>> {
+    let Some(Value::Array(items)) = v else {
+        return Err(ConnectorError::Malformed(format!(
+            "`{field}` missing or not an array"
+        )));
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(req_snowflake(Some(item), field)?);
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Builds the `guild.member.update` event. `actor` is the ALREADY-tokenized
+/// canonical UUID/pseudonym of the member (`identity.lookup`). The payload
+/// carries the guild id, the member snowflake (same convention as `author_id`
+/// on `message`; the hub links it to a hub user) and role ids -- never a
+/// username / nickname / avatar.
+#[must_use]
+pub fn member_update_event(update: &MemberUpdate, occurred_at: &str, actor: String) -> Event {
+    let payload = json!({
+        "guild_id": update.guild_id,
+        "user_id": update.user_id,
+        "role_ids": update.role_ids,
+    });
+    Event {
+        platform: PLATFORM.to_string(),
+        event_type: "guild.member.update".to_string(),
+        actor: Some(actor),
+        payload_json: payload.to_string(),
+        occurred_at: occurred_at.to_string(),
+    }
+}
+
+/// Which `GUILD_ROLE_*` dispatch a role event came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleChange {
+    /// `GUILD_ROLE_CREATE`.
+    Create,
+    /// `GUILD_ROLE_UPDATE`.
+    Update,
+    /// `GUILD_ROLE_DELETE`.
+    Delete,
+}
+
+impl RoleChange {
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+/// Normalizes a `GUILD_ROLE_CREATE|UPDATE|DELETE` `d` into a `guild.role.*` event.
+/// CREATE/UPDATE nest the role under `role`; DELETE carries a bare `role_id`.
+/// No actor (the dispatch names none) and no role name is emitted -- only ids.
+///
+/// # Errors
+/// [`ConnectorError::Malformed`] when `guild_id` or the role id is missing / not
+/// a snowflake.
+pub fn role_event(change: RoleChange, d: &Value, occurred_at: &str) -> Result<Event> {
+    let role_id = match change {
+        RoleChange::Delete => req_snowflake(d.get("role_id"), "role_id")?,
+        RoleChange::Create | RoleChange::Update => {
+            req_snowflake(d.get("role").and_then(|r| r.get("id")), "role.id")?
+        }
+    };
+    let payload = json!({
+        "guild_id": req_snowflake(d.get("guild_id"), "guild_id")?,
+        "role_id": role_id,
+    });
+    Ok(Event {
+        platform: PLATFORM.to_string(),
+        event_type: format!("guild.role.{}", change.suffix()),
+        actor: None,
+        payload_json: payload.to_string(),
+        occurred_at: occurred_at.to_string(),
+    })
+}
+
 /// Maps an interaction `type` to its event-type suffix. PING (1) is handled by
 /// the host (3-second PONG deadline) and is NOT an event.
 fn interaction_kind(t: u64) -> Option<&'static str> {
@@ -437,5 +556,78 @@ mod tests {
             interaction_event(&json!({"id":"abc","type":2}), "t", &tok),
             Err(ConnectorError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn member_update_carries_sorted_roles_and_never_a_handle() {
+        let d = json!({"guild_id":"111","user":{"id":"444","username":"secretname"},
+            "nick":"nicky","roles":["30","20","20"]});
+        let u = normalize_member_update(&d, None).unwrap().unwrap();
+        assert_eq!(u.role_ids, ["20", "30"]);
+        let e = member_update_event(&u, "ts", "uuid-of-444".to_string());
+        assert_eq!(e.event_type, "guild.member.update");
+        assert_eq!(e.actor.as_deref(), Some("uuid-of-444"));
+        assert!(!e.payload_json.contains("secretname") && !e.payload_json.contains("nicky"));
+        let p: Value = serde_json::from_str(&e.payload_json).unwrap();
+        assert_eq!(
+            p,
+            json!({"guild_id":"111","user_id":"444","role_ids":["20","30"]})
+        );
+    }
+
+    #[test]
+    fn member_update_for_the_bot_is_dropped_and_bad_input_fails_loud() {
+        let d = json!({"guild_id":"111","user":{"id":"999"},"roles":["1"]});
+        assert_eq!(normalize_member_update(&d, Some("999")).unwrap(), None);
+        assert!(normalize_member_update(&d, Some("1")).unwrap().is_some());
+        for bad in [
+            json!({"user":{"id":"4"},"roles":[]}),
+            json!({"guild_id":"1","roles":[]}),
+            json!({"guild_id":"1","user":{"id":"4"}}),
+            json!({"guild_id":"1","user":{"id":"4"},"roles":"x"}),
+            json!({"guild_id":"1","user":{"id":"4"},"roles":["abc"]}),
+            json!({"guild_id":"1","user":{"id":"4"},"roles":[5]}),
+        ] {
+            assert!(
+                matches!(
+                    normalize_member_update(&bad, None),
+                    Err(ConnectorError::Malformed(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn role_events_map_create_update_delete_with_ids_only() {
+        let nested = json!({"guild_id":"111","role":{"id":"55","name":"Secret Mods"}});
+        for (c, t) in [
+            (RoleChange::Create, "guild.role.create"),
+            (RoleChange::Update, "guild.role.update"),
+        ] {
+            let e = role_event(c, &nested, "ts").unwrap();
+            assert_eq!((e.event_type.as_str(), e.actor.clone()), (t, None));
+            assert!(!e.payload_json.contains("Secret Mods"));
+            let p: Value = serde_json::from_str(&e.payload_json).unwrap();
+            assert_eq!(p, json!({"guild_id":"111","role_id":"55"}));
+        }
+        let del = role_event(
+            RoleChange::Delete,
+            &json!({"guild_id":"111","role_id":"55"}),
+            "ts",
+        )
+        .unwrap();
+        assert_eq!(del.event_type, "guild.role.delete");
+        for (c, bad) in [
+            (RoleChange::Create, json!({"guild_id":"1"})),
+            (RoleChange::Update, json!({"guild_id":"1","role":{}})),
+            (RoleChange::Delete, json!({"guild_id":"1"})),
+            (RoleChange::Delete, json!({"role_id":"5"})),
+        ] {
+            assert!(matches!(
+                role_event(c, &bad, "ts"),
+                Err(ConnectorError::Malformed(_))
+            ));
+        }
     }
 }
