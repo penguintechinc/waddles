@@ -1149,6 +1149,10 @@ pipeline:
     # Empty = grant-only (default). Baseline role = what a demoted member falls back to.
     demotePairingIds: ""
     demoteBaselineRole: "community-member"
+    # Event-driven fast path (Discord gateway GUILD_MEMBER_UPDATE push); the pass above stays the backstop.
+    inbound:
+      enabled: false
+      schedule: "*/1 * * * *"
     backoffLimit: 2
     activeDeadlineSeconds: 600
     resources:
