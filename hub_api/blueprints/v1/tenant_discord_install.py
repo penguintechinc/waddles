@@ -31,6 +31,7 @@ callback's contract doesn't carry a resource identifier today).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -50,6 +51,8 @@ from services.discord_install_service import (
 )
 from services.errors import ApiError, bad_request, unauthorized
 from services.tenant_discord_install_state import DEFAULT_TTL_SECONDS
+
+logger = logging.getLogger(__name__)
 
 tenant_discord_install_bp = Blueprint("v1_tenant_discord_install", __name__, url_prefix="/api/v1")
 
@@ -148,6 +151,7 @@ async def start_install() -> AuthorizeUrlResponse | tuple[dict[str, object], int
             binding_nonce=nonce,
         )
     except ApiError as exc:
+        logger.warning("discord install authorize failed: %s", type(exc).__name__)
         return _err(exc)
 
     @after_this_request
@@ -185,8 +189,10 @@ async def install_callback() -> InstallCallbackResponse | tuple[dict[str, object
             _dal(), code=code, state=state, binding_nonce=request.cookies.get(BINDING_COOKIE)
         )
     except DiscordInstallError as exc:
+        logger.warning("discord install callback failed: %s", type(exc).__name__)
         return _err(exc)
     except ApiError as exc:
+        logger.warning("discord install callback failed: %s", type(exc).__name__)
         return _err(exc)
 
     return InstallCallbackResponse(
