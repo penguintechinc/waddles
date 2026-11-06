@@ -2,15 +2,16 @@
 
 Architecture: platform SERVICE bundles own the Discord tool definitions and this APP bundle only
 calls them through `waddle_sdk.tool.invoke` under manifest `tool.call:` grants -- never direct
-Discord HTTP. The tools this module will call: `discord.scheduled_event.create`.
-The trigger is the Wix webhook connector (separate work). Until the runtime provides the `tool` import (a `stage-*-tools` build with the
-grants approved) enabling is REFUSED loudly, never a silent no-op flag.
+Discord HTTP. Tools this module will call: `discord.scheduled_event.create`.
+The trigger is the Wix webhook connector (separate work). Until the runtime provides the `tool`
+import (a `stage-*-tools` build with the grants approved), enabling is REFUSED loudly, never a
+silent no-op flag.
 """
 
 from __future__ import annotations
 
 TARGET_TOOLS = (
-    "discord.scheduled_event.create",,
+    "discord.scheduled_event.create",
 )
 #: The WIT import the tool-invocation path needs; absent in the current `stage-next` build.
 REQUIRED_IMPORT = "tool"

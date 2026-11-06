@@ -2,10 +2,10 @@
 
 Architecture: platform SERVICE bundles own the Discord tool definitions and this APP bundle only
 calls them through `waddle_sdk.tool.invoke` under manifest `tool.call:` grants -- never direct
-Discord HTTP. The tools this module will call:
-`discord.member.roles.add` / `discord.member.roles.remove`.
-The trigger is the Wix webhook connector (separate work). Until the runtime provides the `tool` import (a `stage-*-tools` build with the
-grants approved) enabling is REFUSED loudly, never a silent no-op flag.
+Discord HTTP. Tools this module will call: `discord.member.roles.add` / `discord.member.roles.remove`.
+The trigger is the Wix webhook connector (separate work). Until the runtime provides the `tool`
+import (a `stage-*-tools` build with the grants approved), enabling is REFUSED loudly, never a
+silent no-op flag.
 """
 
 from __future__ import annotations
