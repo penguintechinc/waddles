@@ -423,6 +423,20 @@ components:
       - occurred_at
       title: AuditHeadDTO
       type: object
+    AuthProviderDTO:
+      description: One enabled login/link provider.
+      properties:
+        displayName:
+          title: Displayname
+          type: string
+        platform:
+          title: Platform
+          type: string
+      required:
+      - platform
+      - displayName
+      title: AuthProviderDTO
+      type: object
     AvailabilityDTO:
       description: 'Response DTO: one `app_tenant_availability` row, joined to its
         `app_catalog` metadata.'
@@ -13980,6 +13994,34 @@ paths:
                 type: object
           description: Response DTO for simple success endpoints.
       summary: Set password.
+  /api/v1/auth/providers:
+    get:
+      description: ''
+      operationId: get_list_auth_providers
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the enabled-providers endpoint.
+                properties:
+                  providers:
+                    items:
+                      $ref: '#/components/schemas/AuthProviderDTO'
+                    title: Providers
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - providers
+                title: AuthProvidersResponse
+                type: object
+          description: Response DTO for the enabled-providers endpoint.
+      summary: Public list of enabled login/link providers -- the only list the webui
+        renders from.
   /api/v1/auth/refresh:
     post:
       description: '

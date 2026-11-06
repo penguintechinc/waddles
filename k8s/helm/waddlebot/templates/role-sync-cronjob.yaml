@@ -1,4 +1,4 @@
-# Bar Citizen role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
+# Role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
 # deployed as a Kubernetes CronJob per that module's own docstring ("periodic reconcile ...
 # run as a Kubernetes CronJob ... own penguin-dal connection", same standalone-process shape
 # templates/core-bundle-seeder-job.yaml's Job already uses). No image of its own -- reuses the
@@ -9,7 +9,7 @@
 # ENTRYPOINT" pattern.
 #
 # Disabled by default (`pipeline.roleSync.enabled: false`) -- the engine's own
-# FEATURE_BAR_CITIZEN_ROLE_SYNC PostHog flag (per-tenant, defaulted OFF) is the RUNTIME gate;
+# FEATURE_ROLE_SYNC PostHog flag (per-tenant, defaulted OFF) is the RUNTIME gate;
 # this is the DEPLOY-TIME kill switch, matching critical-rules.md's "every feature flagged OFF
 # until validated" -- no CronJob at all means no Helix/Discord polling, ever, regardless of
 # flag state.
@@ -77,7 +77,7 @@ spec:
                 name: {{ include "waddlebot.fullname" . }}-secrets
             # feature/alpha-localized-posthog -- POSTHOG_API_KEY/POSTHOG_KEY auto-provisioned
             # once posthog.enabled=true (alpha); this worker's own `_flag_enabled()` resolves
-            # FEATURE_BAR_CITIZEN_ROLE_SYNC through the same entitlement client hub-api uses.
+            # FEATURE_ROLE_SYNC through the same entitlement client hub-api uses.
             # `optional: true`: safe before the bootstrap Job has run, or when disabled.
             - secretRef:
                 name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}

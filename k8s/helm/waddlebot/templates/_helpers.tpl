@@ -1098,6 +1098,73 @@ rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
       path: valkey-ca.crt
 {{- end }}
 
+{{/*
+Bundle object storage mode guard + host-stage env (spec 2026-11-06-bundle-object-storage).
+bundled -> chart SeaweedFS + chart Secret identity; external -> operator endpoint/bucket +
+existingSecret (SSE assertion mandatory). Fails the render on any inconsistency.
+*/}}
+{{- define "waddlebot.bundleStorage.validate" -}}
+{{- $m := .Values.bundleStorage.mode -}}
+{{- if eq $m "bundled" -}}
+{{- if not .Values.infrastructure.seaweedfs.enabled -}}
+{{- fail "bundleStorage.mode=bundled requires infrastructure.seaweedfs.enabled=true (the bundled SeaweedFS holds the bundle bucket); to use your own S3 set bundleStorage.mode=external" -}}
+{{- end -}}
+{{- else if eq $m "external" -}}
+{{- $e := .Values.bundleStorage.external -}}
+{{- if not (and $e.endpoint $e.bucket $e.existingSecret) -}}
+{{- fail "bundleStorage.mode=external requires bundleStorage.external.endpoint, .bucket and .existingSecret" -}}
+{{- end -}}
+{{- if not (hasPrefix "https://" $e.endpoint) -}}
+{{- fail "bundleStorage.external.endpoint must be https:// (TLS 1.2+ for external object storage)" -}}
+{{- end -}}
+{{- if not $e.serverSideEncryptionConfirmed -}}
+{{- fail "bundleStorage.external.serverSideEncryptionConfirmed must be true: the external bucket MUST have server-side encryption enabled (security.md Encryption)" -}}
+{{- end -}}
+{{- else -}}
+{{- fail (printf "bundleStorage.mode must be bundled or external, got %q" $m) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "waddlebot.bundleStorage.env" -}}
+{{- include "waddlebot.bundleStorage.validate" . -}}
+{{- if eq .Values.bundleStorage.mode "bundled" }}
+- name: BUNDLE_STORAGE_ENDPOINT
+  value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+- name: BUNDLE_STORAGE_BUCKET
+  value: {{ .Values.bundleStorage.bucketName | quote }}
+- name: BUNDLE_STORAGE_REGION
+  value: {{ .Values.bundleStorage.region | quote }}
+- name: BUNDLE_STORAGE_ACCESS_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "waddlebot.fullname" . }}-secrets
+      key: BUNDLE_STORAGE_S3_ACCESS_KEY_ID
+- name: BUNDLE_STORAGE_SECRET_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "waddlebot.fullname" . }}-secrets
+      key: BUNDLE_STORAGE_S3_SECRET_ACCESS_KEY
+{{- else }}
+{{- $e := .Values.bundleStorage.external }}
+- name: BUNDLE_STORAGE_ENDPOINT
+  value: {{ $e.endpoint | quote }}
+- name: BUNDLE_STORAGE_BUCKET
+  value: {{ $e.bucket | quote }}
+- name: BUNDLE_STORAGE_REGION
+  value: {{ $e.region | quote }}
+- name: BUNDLE_STORAGE_ACCESS_KEY_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ $e.existingSecret | quote }}
+      key: {{ $e.accessKeyKey | quote }}
+- name: BUNDLE_STORAGE_SECRET_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ $e.existingSecret | quote }}
+      key: {{ $e.secretKeyKey | quote }}
+{{- end }}
+{{- end -}}
+
 {{- define "waddlebot.valkeyTlsCaVolumeMount" -}}
 - name: valkey-ca
   mountPath: /etc/waddles/ca

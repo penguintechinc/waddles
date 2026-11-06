@@ -19,8 +19,14 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from services import ban_suppression
-from services.errors import bad_request, not_found
+from services import ban_suppression, login_providers
+from services.errors import ApiError, bad_request, not_found
+from services.install_state_binding import (
+    ERR_STATE,
+    InstallStateError,
+    bound_state,
+    verify_state_binding,
+)
 
 VALID_LINK_PLATFORMS = ("discord", "twitch", "slack")
 _LINK_STATE_TTL = timedelta(minutes=10)
@@ -123,15 +129,23 @@ async def unlink_identity(async_dal: Any, dal: Any, *, user_id: int, platform: s
 
 
 async def start_identity_link(
-    async_dal: Any, dal: Any, *, user_id: int, platform: str, callback_base_url: str
+    async_dal: Any,
+    dal: Any,
+    *,
+    user_id: int,
+    platform: str,
+    callback_base_url: str,
+    binding_nonce: str,
 ) -> tuple[str, str]:
     """Start an identity-link OAuth flow. Returns `(authorize_url, state)`.
 
-    `state` is an opaque, unguessable token (`secrets.token_hex(16)`) --
-    the actual `user_id` binding lives server-side in `hub_oauth_states`,
-    never in the token itself.
+    `state` is an opaque, unguessable token (`secrets.token_hex(16)`) plus the SHA-256 of
+    `binding_nonce` (the initiating browser's cookie) -- the actual `user_id` binding lives
+    server-side in `hub_oauth_states`, never in the token itself.
     """
     from services import oauth_service  # local import: avoids a module-load cycle
+
+    await login_providers.require_enabled(platform)
 
     exists = await async_dal.select_async(
         dal(
@@ -142,7 +156,7 @@ async def start_identity_link(
     if exists:
         raise bad_request(f"{platform} account already linked")
 
-    state = secrets.token_hex(16)
+    state = bound_state(secrets.token_hex(16), binding_nonce)
     await async_dal.insert_async(
         dal.hub_oauth_states,
         state=state,
@@ -161,9 +175,19 @@ async def start_identity_link(
 
 
 async def identity_link_callback(
-    async_dal: Any, dal: Any, *, platform: str, code: str, state: str, callback_base_url: str
+    async_dal: Any,
+    dal: Any,
+    *,
+    platform: str,
+    code: str,
+    state: str,
+    callback_base_url: str,
+    binding_nonce: str | None,
 ) -> None:
     """Complete an identity-link callback: resolve state server-side, exchange the code, link.
+
+    A browser that cannot present the nonce the state was bound to is refused (typed `ApiError`
+    code `state_binding_mismatch`) BEFORE the state is consumed.
 
     `state` is looked up in `hub_oauth_states` (never decoded/trusted from
     the caller) and consumed (deleted) immediately -- single-use, and a
@@ -172,6 +196,12 @@ async def identity_link_callback(
     """
     from services import oauth_service  # local import: avoids a module-load cycle
 
+    await login_providers.require_enabled(platform)
+
+    try:
+        verify_state_binding(state, binding_nonce)
+    except InstallStateError as exc:
+        raise ApiError("link state is not bound to this browser", 400, exc.code) from exc
     state_rows = await async_dal.select_async(
         dal(
             (dal.hub_oauth_states.state == state)
@@ -181,7 +211,7 @@ async def identity_link_callback(
         )
     )
     if not state_rows:
-        raise bad_request("Invalid or expired state")
+        raise ApiError("Invalid or expired state", 400, ERR_STATE)
     hub_user_id = state_rows.first().user_id
     await async_dal.delete_async(dal.hub_oauth_states.state == state)
 

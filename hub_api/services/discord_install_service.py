@@ -1,4 +1,4 @@
-"""Per-tenant Discord OAuth2 bot-install flow (Bar Citizen Units C/D), built on `#563`'s seam.
+"""Per-tenant Discord OAuth2 bot-install flow (Units C/D), built on `#563`'s seam.
 
 Every tenant beyond the global/SaaS tenant brings its OWN Discord
 application (client id/secret/bot token) -- the server owner invites that
@@ -47,6 +47,7 @@ import httpx
 from services.credential_resolver import store_tenant_credentials
 from services.discord_bot_install import DISCORD_BOT_INSTALL_PERMISSIONS
 from services.errors import ApiError, bad_request
+from services.install_state_binding import InstallStateError
 from services.tenant_discord_install_state import consume_state, create_state
 from services.url_guard import validate_outbound_url
 
@@ -94,6 +95,7 @@ async def build_authorize_url(
     client_secret: str,
     bot_token: str | None,
     redirect_uri: str,
+    binding_nonce: str,
     permissions: int = DEFAULT_BOT_PERMISSIONS,
 ) -> str:
     """Build the tenant's own Discord bot-install authorize URL.
@@ -102,7 +104,8 @@ async def build_authorize_url(
     shared SaaS Discord application, never its own, same fail-fast
     precedent `store_tenant_credentials()` applies at persist time
     (`services.credential_resolver`'s own docstring); raises 400 for a
-    blank `application_id`/`client_secret`.
+    blank `application_id`/`client_secret`. `binding_nonce` is the initiating
+    browser's cookie nonce; the caller MUST set it as the binding cookie.
     """
     if is_global_tenant:
         raise bad_request("the global tenant cannot install its own Discord app")
@@ -116,6 +119,7 @@ async def build_authorize_url(
         client_secret=client_secret,
         bot_token=bot_token,
         redirect_uri=redirect_uri,
+        binding_nonce=binding_nonce,
     )
     params = {
         "client_id": application_id,
@@ -177,7 +181,9 @@ async def _exchange_code(
     return payload
 
 
-async def complete_install(dal: Any, *, code: str, state: str) -> InstallResult:
+async def complete_install(
+    dal: Any, *, code: str, state: str, binding_nonce: str | None
+) -> InstallResult:
     """Verify `state`, exchange `code`, then persist the now-verified tenant Discord app.
 
     Raises `DiscordInstallError` (400) for a missing authorization code or
@@ -190,9 +196,12 @@ async def complete_install(dal: Any, *, code: str, state: str) -> InstallResult:
     if not code:
         raise bad_request("missing authorization code")
 
-    pending = await consume_state(state)
-    if pending is None:
-        raise DiscordInstallError("invalid, expired, or already-used install state", 400)
+    try:
+        pending = await consume_state(state, binding_nonce)
+    except InstallStateError as exc:
+        raise DiscordInstallError(
+            "invalid, expired, already-used, or foreign-browser install state", 400, exc.code
+        ) from exc
 
     await _exchange_code(
         application_id=pending.application_id,

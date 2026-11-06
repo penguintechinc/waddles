@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { oauthApi } from '../../services/api';
+import useAuthProviders from '../../hooks/useAuthProviders';
 
 /**
  * Server-side OAuth social login buttons. hub-api owns the real client_id and
  * redirect URI: a click asks `GET /api/v1/auth/oauth/<platform>` for the
  * provider authorize URL and navigates the browser there. The frontend never
- * builds a provider URL or sends a client_id. Only platforms hub-api supports
- * (`oauth_service.VALID_PLATFORMS`) are listed -- no dead buttons.
+ * builds a provider URL or sends a client_id. Only providers hub-api reports as
+ * enabled (`GET /api/v1/auth/providers`) are rendered -- no dead buttons, no hardcoded list.
  */
 const GOOGLE_ICON = (
     <svg className="w-5 h-5" viewBox="0 0 24 24">
@@ -35,18 +36,20 @@ const TWITCH_ICON = (
   </svg>
 );
 
-const SOCIAL_PROVIDERS = [
-  { platform: 'discord', label: 'Continue with Discord', icon: DISCORD_ICON },
-  { platform: 'twitch', label: 'Continue with Twitch', icon: TWITCH_ICON },
-  { platform: 'google', label: 'Sign in with Google', icon: GOOGLE_ICON },
-  { platform: 'slack', label: 'Continue with Slack', icon: SLACK_ICON },
-];
+/** Presentation only: icon per platform. Which providers appear comes from hub-api. */
+const PROVIDER_ICONS = {
+  discord: DISCORD_ICON,
+  twitch: TWITCH_ICON,
+  google: GOOGLE_ICON,
+  slack: SLACK_ICON,
+};
 
 /**
  * Renders one button per supported OAuth platform; on click redirects the
  * browser to the authorize URL returned by hub-api.
  */
 function SocialLoginButtons() {
+  const { providers } = useAuthProviders();
   const [pending, setPending] = useState(null);
   const [error, setError] = useState('');
 
@@ -66,6 +69,8 @@ function SocialLoginButtons() {
     }
   };
 
+  if (providers.length === 0) return null;
+
   return (
     <div className="mb-4 space-y-2" data-testid="social-logins">
       {error && (
@@ -73,7 +78,7 @@ function SocialLoginButtons() {
           {error}
         </div>
       )}
-      {SOCIAL_PROVIDERS.map(({ platform, label, icon }) => (
+      {providers.map(({ platform, displayName }) => (
         <button
           key={platform}
           type="button"
@@ -82,8 +87,8 @@ function SocialLoginButtons() {
           disabled={pending !== null}
           className="w-full flex items-center justify-center space-x-3 px-4 py-3 bg-slate-800 border border-navy-600 rounded-lg hover:bg-navy-700 hover:border-gold-500 transition-all disabled:opacity-50 focus:ring-2 focus:ring-sky-500"
         >
-          {icon}
-          <span className="font-medium text-sky-50">{pending === platform ? 'Redirecting...' : label}</span>
+          {PROVIDER_ICONS[platform] ?? null}
+          <span className="font-medium text-sky-50">{pending === platform ? 'Redirecting...' : `Continue with ${displayName}`}</span>
         </button>
       ))}
     </div>

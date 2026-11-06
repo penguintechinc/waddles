@@ -43,7 +43,7 @@ const STATS = {
   },
 };
 
-const ME = { success: true, user: { id: 1, communities: [{ id: 7, name: 'bc', displayName: 'Bar Citizen', role: 'member' }] } };
+const ME = { success: true, user: { id: 1, communities: [{ id: 7, name: 'acme', displayName: 'Acme', role: 'member' }] } };
 
 type Handler = (url: string, params: unknown) => unknown;
 
@@ -78,7 +78,7 @@ describe('CommunityLeaderboard', () => {
       params: { period: 'weekly', limit: 25, offset: 0 },
     });
     expect(get.mock.calls.map(([url]) => url).filter((url) => url.includes('/communities/'))).toEqual([]);
-    expect(screen.getByRole('link', { name: 'Bar Citizen' })).toHaveAttribute('href', '/dashboard/community/7');
+    expect(screen.getByRole('link', { name: 'Acme' })).toHaveAttribute('href', '/dashboard/community/7');
   });
 
   it('shows my weekly stats and ranks, with a dash for an unranked board', async () => {

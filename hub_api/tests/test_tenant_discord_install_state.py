@@ -15,9 +15,13 @@ from quart import Quart
 
 from config import HubAPIConfig
 from services import tenant_discord_install_state as state_module
+from services.install_state_binding import ERR_STATE, InstallStateError, nonce_hash
 from services.rate_limiting import RATE_LIMITER_CONFIG_KEY
 
 _KEY = "d4f9317783becee1a4415c1a1229b9258e7a90b768d72a9e2c7dc891af661df6"  # gitleaks:allow
+
+
+NONCE = "browser-nonce-0123456789"
 
 
 class FakeRedis:
@@ -30,6 +34,15 @@ class FakeRedis:
     async def set(self, key: str, value: str, ex: int | None = None) -> None:
         expires_at = time.monotonic() + ex if ex is not None else None
         self.store[key] = (value, expires_at)
+
+    async def get(self, key: str) -> str | None:
+        entry = self.store.get(key)
+        if entry is None:
+            return None
+        value, expires_at = entry
+        if expires_at is not None and time.monotonic() > expires_at:
+            return None
+        return value
 
     async def getdel(self, key: str) -> str | None:
         entry = self.store.pop(key, None)
@@ -94,6 +107,7 @@ class TestCreateAndConsumeState:
     ) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 tenant_id=5,
                 admin_user_id=42,
                 application_id="app-123",
@@ -101,7 +115,7 @@ class TestCreateAndConsumeState:
                 bot_token="bot-token-xyz",
                 redirect_uri="http://localhost/cb/discord",
             )
-            pending = await state_module.consume_state(token)
+            pending = await state_module.consume_state(token, NONCE)
 
         assert pending == state_module.PendingInstall(
             tenant_id=5,
@@ -117,6 +131,7 @@ class TestCreateAndConsumeState:
     ) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 tenant_id=1,
                 admin_user_id=1,
                 application_id="app-1",
@@ -124,7 +139,7 @@ class TestCreateAndConsumeState:
                 bot_token=None,
                 redirect_uri="http://localhost/cb",
             )
-            pending = await state_module.consume_state(token)
+            pending = await state_module.consume_state(token, NONCE)
 
         assert pending is not None
         assert pending.bot_token is None
@@ -135,6 +150,7 @@ class TestCreateAndConsumeState:
         """security.md Token & Secret Hygiene -- a Redis dump must never reveal the raw secret."""
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 tenant_id=1,
                 admin_user_id=1,
                 application_id="app-1",
@@ -150,6 +166,7 @@ class TestCreateAndConsumeState:
     async def test_state_is_single_use(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 tenant_id=1,
                 admin_user_id=1,
                 application_id="app-1",
@@ -157,28 +174,32 @@ class TestCreateAndConsumeState:
                 bot_token=None,
                 redirect_uri="http://localhost/cb",
             )
-            first = await state_module.consume_state(token)
-            second = await state_module.consume_state(token)
+            first = await state_module.consume_state(token, NONCE)
+            with pytest.raises(InstallStateError) as replay:
+                await state_module.consume_state(token, NONCE)
 
         assert first is not None
-        assert second is None
+        assert replay.value.code == ERR_STATE
 
     async def test_unknown_token_returns_none(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
-            result = await state_module.consume_state("never-issued-token")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("never-issued-token", NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_empty_state_returns_none_without_touching_redis(
         self, app: Quart, fake_redis: FakeRedis
     ) -> None:
         async with app.app_context():
-            result = await state_module.consume_state("")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("", NONCE)
+            assert refused.value.code == ERR_STATE
         assert fake_redis.store == {}
 
     async def test_expired_state_returns_none(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 tenant_id=1,
                 admin_user_id=1,
                 application_id="app-1",
@@ -187,29 +208,34 @@ class TestCreateAndConsumeState:
                 redirect_uri="http://localhost/cb",
             )
             fake_redis.force_expire(f"oauth:tenant_discord_install:state:{token}")
-            result = await state_module.consume_state(token)
-
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state(token, NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_redis_error_on_consume_returns_none(
         self, app: Quart, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         class _ExplodingRedis:
+            async def get(self, _key: str) -> str:
+                raise ConnectionError("redis unreachable")
+
             async def getdel(self, _key: str) -> str:
                 raise ConnectionError("redis unreachable")
 
         monkeypatch.setattr(state_module, "_redis_client", lambda: _ExplodingRedis())
         async with app.app_context():
-            result = await state_module.consume_state("some-token")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("some-token", NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_malformed_payload_returns_none(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
             await fake_redis.set(
                 "oauth:tenant_discord_install:state:bogus", "not-valid-json", ex=600
             )
-            result = await state_module.consume_state("bogus")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("bogus", NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_payload_missing_required_field_returns_none(
         self, app: Quart, fake_redis: FakeRedis
@@ -217,11 +243,12 @@ class TestCreateAndConsumeState:
         async with app.app_context():
             await fake_redis.set(
                 "oauth:tenant_discord_install:state:bogus2",
-                '{"tenant_id": 1, "admin_user_id": 1}',
+                f'{{"tenant_id": 1, "admin_user_id": 1, "binding": "{nonce_hash(NONCE)}"}}',
                 ex=600,
             )
-            result = await state_module.consume_state("bogus2")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("bogus2", NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_corrupt_ciphertext_returns_none(self, app: Quart, fake_redis: FakeRedis) -> None:
         """A tampered/corrupt ciphertext fails closed -- never leaks a decrypt exception."""
@@ -231,12 +258,13 @@ class TestCreateAndConsumeState:
                 (
                     '{"tenant_id": 1, "admin_user_id": 1, "application_id": "a",'
                     ' "client_secret": "not-valid-base64!!", "bot_token": null,'
-                    ' "redirect_uri": "http://localhost/cb"}'
+                    f' "redirect_uri": "http://localhost/cb", "binding": "{nonce_hash(NONCE)}"}}'
                 ),
                 ex=600,
             )
-            result = await state_module.consume_state("bogus3")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("bogus3", NONCE)
+            assert refused.value.code == ERR_STATE
 
 
 class TestRedisClientResolution:

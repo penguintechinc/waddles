@@ -144,7 +144,7 @@ class _World:
             self.community_id,
             discord_guild_id=GUILD_ID,
             direction="discord_to_twitch",
-            role_name_prefix="[BC]",
+            role_name_prefix="[AC]",
             actor_user_id=None,
         )
         update_pairing(self.dal, self.community_id, created.id, sync_enabled=True)

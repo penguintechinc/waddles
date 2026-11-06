@@ -16,6 +16,7 @@ vi.mock('@penguintechinc/react-libs', () => ({
 }));
 
 vi.mock('../../../services/api', () => ({
+  oauthApi: { providers: vi.fn().mockResolvedValue({ data: { providers: [] } }) },
   passkeyApi: { startLogin: vi.fn(), finishLogin: vi.fn() },
   publicApi: { getSignupSettings: vi.fn().mockResolvedValue({ data: { signupEnabled: false } }) },
   tenantApi: { getLoginInfo: vi.fn() },

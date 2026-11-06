@@ -24,7 +24,6 @@ from app import (
     NOT_LURKING_REPLY,
     _ai_key,
     _format_duration,
-    _license_tier,
     _message_key,
     _render_template,
     _state_key,
@@ -458,30 +457,18 @@ def test_reset_restores_defaults(fake_host: _FakeHost) -> None:
     assert _ai_key("comm-1") not in fake_host.store
 
 
-# -- AI toggle: Enterprise license gate ----------------------------------------
+# -- AI toggle: no bundle-side license gate (host enforces) --------------------
 
 
-def test_enable_ai_allowed_on_enterprise_tier(monkeypatch: pytest.MonkeyPatch) -> None:
-    host = _FakeHost(tier="enterprise")
-    _install(monkeypatch, host)
-    envelope = _sample_envelope("twitch", "config_enable_ai", is_mod=True)
-    result = _run(dispatch(envelope, {}, http_client=None))
-
-    assert result.detail == "config_enable_ai"
-    assert host.store[_ai_key("comm-1")] == b"1"
-
-
-@pytest.mark.parametrize("tier", ["free", "professional"])
-def test_enable_ai_rejected_below_enterprise(tier: str, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("tier", ["free", "professional", "enterprise"])
+def test_enable_ai_never_checks_the_tier(tier: str, monkeypatch: pytest.MonkeyPatch) -> None:
     host = _FakeHost(tier=tier)
     _install(monkeypatch, host)
     envelope = _sample_envelope("twitch", "config_enable_ai", is_mod=True)
     result = _run(dispatch(envelope, {}, http_client=None))
 
     assert result.detail == "config_enable_ai"
-    assert _ai_key("comm-1") not in host.store
-    provider, message_json = host.relay_calls[-1]
-    assert "Enterprise" in json.loads(message_json)["text"]
+    assert host.store[_ai_key("comm-1")] == b"1"
 
 
 def test_enable_ai_rejected_for_non_mod_even_on_enterprise_tier(
@@ -614,39 +601,6 @@ def test_set_message_with_no_argument_replies_usage(fake_host: _FakeHost) -> Non
     assert "Usage" in json.loads(message_json)["text"]
 
 
-# -- _license_tier(): fails closed, never implicitly enterprise ----------------
-
-
-def test_license_tier_fails_closed_when_wit_world_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delitem(sys.modules, "wit_world", raising=False)
-    assert _license_tier() == "free"
-
-
-def test_license_tier_fails_closed_when_flags_import_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace()  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-    assert _license_tier() == "free"
-
-
-def test_license_tier_fails_closed_when_tier_fn_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-        flags=types.SimpleNamespace(enabled=lambda k, d: True)
-    )
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-    assert _license_tier() == "free"
-
-
-def test_license_tier_reads_the_real_binding(fake_host: _FakeHost) -> None:
-    fake_host.tier = "enterprise"
-    assert _license_tier() == "enterprise"
-
-
 # -- misc ----------------------------------------------------------------------
 
 
@@ -777,7 +731,6 @@ _ALLOWED_LOG_FIELDS: dict[str, frozenset[str]] = {
     "lurk.dispatch relayed": frozenset({"platform", "command"}),
     "lurk.dispatch config applied": frozenset({"command"}),
     "lurk.config_denied": frozenset({"command", "role_signal"}),
-    "lurk.enable_ai_denied": frozenset({"tier"}),
     "lurk.ai_requested_but_pending": frozenset({"community"}),
     "lurk.template_corrupt": frozenset({"community"}),
     "lurk.state_corrupt": frozenset({"community"}),
@@ -843,8 +796,6 @@ def test_dispatch_logs_never_carry_user_input_on_any_command(
     go("config_reset", role=True)
     go("config_reset")  # denied, no role signal
     go("usage")
-    host.tier = "free"
-    go("config_enable_ai", role=True)  # license-denied
     host.store[_message_key("comm-1")] = b"\xff\xfe"
     go("lurk")  # corrupt template
     host.store[_expected_state_key("comm-1", _SENTINEL)] = b"garbage"
@@ -855,7 +806,6 @@ def test_dispatch_logs_never_carry_user_input_on_any_command(
         "lurk.dispatch relayed",
         "lurk.dispatch config applied",
         "lurk.config_denied",
-        "lurk.enable_ai_denied",
         "lurk.ai_requested_but_pending",
         "lurk.template_corrupt",
         "lurk.state_corrupt",

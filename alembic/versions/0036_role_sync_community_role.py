@@ -1,4 +1,4 @@
-"""Bar Citizen role-sync (Unit F): adds the `community_role` binding scope for the
+"""Role-sync (Unit F): adds the `community_role` binding scope for the
 deferred Discord -> platform direction (owner ask, 2026-10-05: "advance ROLE SYNC
 toward beta ... add the deferred Discord->platform direction").
 

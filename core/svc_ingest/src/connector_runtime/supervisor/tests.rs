@@ -1214,6 +1214,7 @@ fn core_rig(cfg: RuntimeConfig) -> (TestCore, Arc<LeaseStore>, RuntimeMetrics) {
         make,
         tasks: FuturesUnordered::new(),
         slots: HashMap::new(),
+        wait_streaks: HashMap::new(),
         sh: rt.sh.clone(),
         status: rt.status.clone(),
         config: cfg,
@@ -1810,4 +1811,182 @@ async fn the_connection_ctx_carries_the_hub_connection_id() {
         .iter()
         .any(|id| id == "4242"));
     r.stop().await;
+}
+
+// ---- target rediscovery ends ---------------------------------------------
+
+/// A hook whose recorded outcome is fixed.
+#[derive(Debug)]
+struct FixedHook(Mutex<Option<crate::connector::RediscoverOutcome>>);
+
+impl crate::connector::Rediscover for FixedHook {
+    fn apply(
+        &self,
+        _body: &[u8],
+    ) -> Result<crate::connector::RediscoverOutcome, crate::connector::RediscoverError> {
+        Err(crate::connector::RediscoverError::Malformed)
+    }
+
+    fn take_outcome(&self) -> Option<crate::connector::RediscoverOutcome> {
+        self.0.lock().expect("lock").take()
+    }
+}
+
+fn hook_cfg(o: Option<crate::connector::RediscoverOutcome>) -> crate::connector::RediscoverConfig {
+    crate::connector::RediscoverConfig {
+        url: "https://example.invalid/x".into(),
+        hook: Arc::new(FixedHook(Mutex::new(o))),
+    }
+}
+
+#[test]
+fn rediscovery_end_refines_only_a_fatal_park_with_a_recorded_outcome() {
+    use crate::connector::RediscoverOutcome::{Rediscovered, WaitingForLive};
+    let fatal = TaskEnd::Parked(ParkReason::Fatal);
+    assert_eq!(
+        rediscovery_end(fatal, Some(&hook_cfg(Some(Rediscovered)))),
+        TaskEnd::Rediscovered
+    );
+    assert_eq!(
+        rediscovery_end(fatal, Some(&hook_cfg(Some(WaitingForLive)))),
+        TaskEnd::WaitingForLive
+    );
+    // No recorded outcome (a real credential failure) and no hook stay fatal.
+    assert_eq!(rediscovery_end(fatal, Some(&hook_cfg(None))), fatal);
+    assert_eq!(rediscovery_end(fatal, None), fatal);
+    // Other ends are never reinterpreted, and the hook is not consumed.
+    let c = hook_cfg(Some(Rediscovered));
+    for other in [
+        TaskEnd::Stopped,
+        TaskEnd::Parked(ParkReason::TransportBuild),
+        TaskEnd::LeaseLost,
+    ] {
+        assert_eq!(rediscovery_end(other, Some(&c)), other);
+    }
+    assert_eq!(c.hook.take_outcome(), Some(Rediscovered));
+}
+
+#[test]
+fn waiting_delay_doubles_from_the_reconcile_interval_to_a_fifteen_minute_cap() {
+    let base = Duration::from_secs(60);
+    let got: Vec<u64> = (1..=7).map(|n| waiting_delay(base, n).as_secs()).collect();
+    assert_eq!(
+        got,
+        [60, 120, 240, 480, 900, 900, 900],
+        "1m doubling to 15m"
+    );
+    assert_eq!(waiting_delay(base, u32::MAX), base * 15, "never overflows");
+    assert_eq!(
+        waiting_delay(Duration::from_millis(40), 1),
+        Duration::from_millis(40)
+    );
+}
+
+fn put_active(core: &mut TestCore, c: i64) {
+    core.slots.insert(
+        key(c, c * 10),
+        Slot {
+            desired: Arc::new(d(c, c * 10, 1)),
+            state: SlotState::Active,
+            stopping: false,
+            pending: None,
+            stop: None,
+        },
+    );
+}
+
+/// Seconds until the slot's cooldown ends.
+fn cooldown_secs(core: &TestCore, k: &ConnKey) -> f64 {
+    match core.slots[k].state {
+        SlotState::Cooldown { until, .. } => until
+            .saturating_duration_since(Instant::now())
+            .as_secs_f64(),
+        _ => panic!("expected a cooldown slot"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn core_waiting_for_live_backs_off_jittered_and_resets_when_found_or_changed() {
+    let mut cfg = fast_config();
+    cfg.reconcile_interval = Duration::from_secs(60);
+    let (mut core, _store, m) = core_rig(cfg);
+    let k = key(1, 10);
+    // Un-jittered schedule 60,120,240,480,900,900 with 0-20% jitter on top.
+    for want in [60.0, 120.0, 240.0, 480.0, 900.0, 900.0] {
+        put_active(&mut core, 1);
+        core.on_end(k.clone(), TaskEnd::WaitingForLive).await;
+        let got = cooldown_secs(&core, &k);
+        assert!(
+            got >= want && got <= want * 1.2 + 0.001,
+            "want {want}..{}, got {got}",
+            want * 1.2
+        );
+        // Not due yet at the next reconcile, due once the gap has elapsed.
+        core.apply(PLATFORM, vec![d(1, 10, 1)]);
+        assert_eq!(core.state_of(&k), Some("cooldown"), "still backing off");
+        tokio::time::advance(Duration::from_secs_f64(got + 0.01)).await;
+        core.apply(PLATFORM, vec![d(1, 10, 1)]);
+        assert!(is_active(&core, &k), "re-checked once due");
+        assert!(
+            core.wait_streaks.contains_key(&k),
+            "plain re-check keeps the streak"
+        );
+    }
+    assert_eq!(
+        m.parked_total
+            .with_label_values(&[PLATFORM, "waiting_for_live"])
+            .get(),
+        6
+    );
+    assert_eq!(
+        m.restarts_total
+            .with_label_values(&[PLATFORM, "waiting_for_live"])
+            .get(),
+        6
+    );
+
+    // A found broadcast resets the schedule to the base gap.
+    core.on_end(k.clone(), TaskEnd::Rediscovered).await;
+    assert!(core.wait_streaks.is_empty());
+    core.apply(PLATFORM, vec![d(1, 10, 2)]);
+    assert!(is_active(&core, &k));
+    core.on_end(k.clone(), TaskEnd::WaitingForLive).await;
+    assert!(
+        cooldown_secs(&core, &k) <= 72.001,
+        "back to the 1 minute base"
+    );
+
+    // A fingerprint change resets it too, as does the connection going away.
+    core.apply(PLATFORM, vec![d(1, 10, 3)]);
+    assert!(is_active(&core, &k));
+    assert!(
+        core.wait_streaks.is_empty(),
+        "restart on a new fingerprint resets"
+    );
+    core.on_end(k.clone(), TaskEnd::WaitingForLive).await;
+    assert_eq!(core.wait_streaks.len(), 1);
+    core.apply(PLATFORM, vec![]);
+    assert!(core.wait_streaks.is_empty(), "no longer desired: dropped");
+}
+
+#[tokio::test]
+async fn core_rediscovery_ends_restart_at_the_next_reconcile_not_terminally() {
+    let (mut core, _store, m) = core_rig(fast_config());
+    put_active(&mut core, 1);
+    put_active(&mut core, 2);
+    core.on_end(key(1, 10), TaskEnd::Rediscovered).await;
+    assert_eq!(core.state_of(&key(1, 10)), Some("cooldown"));
+    assert_eq!(
+        m.parked_total.with_label_values(&[PLATFORM, "fatal"]).get(),
+        0,
+        "never terminal"
+    );
+    core.apply(PLATFORM, vec![d(1, 10, 2)]);
+    assert!(is_active(&core, &key(1, 10)));
+    assert_eq!(
+        m.restarts_total
+            .with_label_values(&[PLATFORM, "fingerprint"])
+            .get(),
+        1
+    );
 }

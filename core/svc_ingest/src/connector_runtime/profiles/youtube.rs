@@ -22,9 +22,17 @@
 //! on this path, so `query_secret` is omitted. A `liveChatEnded` 403 parks the
 //! transport; the next reconcile restarts it when the binding carries a new
 //! `live_chat_id` (the id is part of the fingerprint).
+//!
+//! **Rediscovery:** `liveChatEnded` is not terminal. The transport asks
+//! `liveBroadcasts` for the credential's current active broadcast
+//! ([`rediscover`]), the hook records the new chat in [`LiveChatOverrides`]
+//! and `plan` applies it on the next reconcile (new URL/source key = new
+//! fingerprint = clean restart). No live broadcast parks the connection as
+//! `waiting_for_live` and it is re-checked every reconcile.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use connection_resolver::{BindingSummary, ConnectionKind, ConnectionRef};
@@ -32,6 +40,7 @@ use sha2::{Digest, Sha256};
 
 use crate::connector::lifecycle::{HttpAction, HttpErrorRule, IntervalHint, PollLifecycle};
 use crate::connector::poll::{PollAuth, PollConfig};
+use crate::connector::RediscoverConfig;
 use crate::connector_runtime::feed::{ConnKey, DesiredConnection, TransportPlan};
 use crate::connector_runtime::plan::{ConnectorProfile, PlanError, RuntimeEnv};
 use crate::outbound_creds_youtube::{is_live_chat_id, META_LIVE_CHAT_ID};
@@ -82,15 +91,21 @@ pub const QUOTA_REASONS: [&str; 4] = [
     "dailyLimitExceeded",
     "userRateLimitExceeded",
 ];
-/// 403 reasons that mean "stop" (credential/permission/chat gone).
-pub const PARK_REASONS: [&str; 3] = ["forbidden", "insufficientPermissions", "liveChatEnded"];
+/// 403 reasons that mean "stop" (credential/permission).
+pub const PARK_REASONS: [&str; 2] = ["forbidden", "insufficientPermissions"];
+/// 403 reasons that mean "the chat ended": rediscover the current live chat.
+pub const REDISCOVER_REASONS: [&str; 1] = ["liveChatEnded"];
 /// Bumped when the derivation changes so every connection restarts once.
 const DERIVATION_VERSION: u8 = 1;
+
+mod rediscover;
+pub use rediscover::{LiveChatOverrides, YoutubeRediscover};
 
 /// The YouTube live-chat poll profile.
 #[derive(Debug, Default)]
 pub struct YoutubeProfile {
     skipped_incomplete: AtomicU64,
+    overrides: Arc<LiveChatOverrides>,
 }
 
 impl YoutubeProfile {
@@ -98,6 +113,12 @@ impl YoutubeProfile {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The rediscovered-chat table this profile plans against.
+    #[must_use]
+    pub fn overrides(&self) -> &Arc<LiveChatOverrides> {
+        &self.overrides
     }
 
     /// Bindings skipped because they carry no `live_chat_id` yet.
@@ -127,6 +148,12 @@ pub fn lifecycle() -> PollLifecycle {
                     max: BACKOFF_MAX,
                     honor_retry_after: true,
                 },
+            },
+            HttpErrorRule {
+                status: 403,
+                reason_pointer: REASON_POINTER.to_owned(),
+                reasons: REDISCOVER_REASONS.iter().map(|s| (*s).to_owned()).collect(),
+                action: HttpAction::Rediscover,
             },
             HttpErrorRule {
                 status: 403,
@@ -224,7 +251,7 @@ impl ConnectorProfile for YoutubeProfile {
         if b.kind != ConnectionKind::PlatformOauth {
             return Err(PlanError::WrongKind);
         }
-        let Some(chat) = b.metadata.get(META_LIVE_CHAT_ID) else {
+        let Some(base_chat) = b.metadata.get(META_LIVE_CHAT_ID) else {
             // Mirrors hub-api's 409 metadata_incomplete: not ready yet, not a
             // fault, and it must not stop the rest of the feed.
             self.skipped_incomplete.fetch_add(1, Ordering::Relaxed);
@@ -235,11 +262,21 @@ impl ConnectorProfile for YoutubeProfile {
             );
             return Ok(Vec::new());
         };
-        if !is_live_chat_id(chat) {
+        if !is_live_chat_id(base_chat) {
             return Err(PlanError::InvalidValue(META_LIVE_CHAT_ID));
         }
         let tenant = feed_tenant(b)?;
         let version = feed_secret_version(b)?;
+        let channel = rediscover::channel_of(b.metadata.get(rediscover::META_CHANNEL_ID))?;
+        let key = ConnKey {
+            platform: PLATFORM,
+            community_id: b.community_id,
+            connection_id: b.connection_id,
+        };
+        // A rediscovered chat replaces the binding's own only while the
+        // binding still pins the id it was found against.
+        let chat = self.overrides.effective(&key, base_chat);
+        let chat = chat.as_str();
 
         let conn = ConnectionRef {
             community_id: b.community_id,
@@ -266,6 +303,16 @@ impl ConnectorProfile for YoutubeProfile {
             allow_loopback_insecure: false,
             lifecycle: lifecycle(),
             request: Default::default(),
+            rediscover: Some(RediscoverConfig {
+                url: rediscover::discovery_url()?,
+                hook: Arc::new(YoutubeRediscover::new(
+                    key.clone(),
+                    base_chat.to_owned(),
+                    chat.to_owned(),
+                    channel.clone(),
+                    Arc::clone(&self.overrides),
+                )),
+            }),
         };
         let url = reqwest::Url::parse(&cfg.url)
             .map_err(|_| PlanError::Config("derived poll url is invalid"))?;
@@ -274,11 +321,7 @@ impl ConnectorProfile for YoutubeProfile {
             .map_err(|_| PlanError::Config("derived poll lifecycle rejected"))?;
         let fingerprint = fingerprint(&cfg, tenant, version);
         Ok(vec![DesiredConnection {
-            key: ConnKey {
-                platform: PLATFORM,
-                community_id: b.community_id,
-                connection_id: b.connection_id,
-            },
+            key,
             tenant_id: tenant,
             plan: TransportPlan::Poll(Box::new(cfg)),
             fingerprint,

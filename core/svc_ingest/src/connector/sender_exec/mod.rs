@@ -27,8 +27,9 @@
 //! Supported kinds (see [`PlatformPolicy`]): `chat.send` and `chat.delete`
 //! on Twitch and Discord, `chat.send` on YouTube. `dm.send` is declared but
 //! refused with [`ExecError::HostDutyMissing`] until a [`DutyHook`] claims it
-//! (T6d-2). With `discord_duties::DiscordDuties` registered, Discord `dm.send`
-//! and `role.add`/`role.remove` run as host duties.
+//! (T6d-2). With `discord_duties::DiscordDuties` registered, Discord `dm.send`,
+//! `role.add`/`role.remove` and the guild scheduled-event ops
+//! (`event.create|update|cancel|delete`) run as host duties.
 
 pub mod discord_duties;
 pub mod discord_slots;
@@ -168,6 +169,12 @@ pub struct SlotRequest<'a> {
     /// The connector `secret-refs` handles to resolve (`token`, `client_id`,
     /// `broadcaster_id`, `sender_id`, `youtube.oauth`, ...).
     pub handles: &'a [&'static str],
+    /// `true` for an op that names NO channel (Discord guild scheduled events):
+    /// there is no channel for the resolver to prove ownership of, so the
+    /// credential is resolved for the community alone and the HOST pins the
+    /// guild from that same binding (the duty gate). Never set for a kind that
+    /// uses a stamp channel.
+    pub guild_scoped: bool,
 }
 
 /// Why slot resolution failed. Reasons are stable codes, never content.
@@ -191,6 +198,15 @@ pub trait SlotSource: Send + Sync {
     /// answer or the call is an error.
     async fn resolve(&self, req: &SlotRequest<'_>)
         -> Result<HashMap<String, SlotValue>, SlotError>;
+}
+
+/// What a [`DutyHook::role_bulk`] decided.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RoleBulkPlan {
+    /// `role.set`: the minimal `(add?, role_key)` ops to apply, in order.
+    Apply(Vec<(bool, String)>),
+    /// `role.list`: the JSON result handed back to the producer.
+    Data(String),
 }
 
 /// Context a [`DutyHook`] works from.
@@ -240,6 +256,13 @@ pub trait DutyHook: Send + Sync {
     /// The `payload-json` handed to `build-request` for a claimed kind
     /// (e.g. a `{user:<uuid>}` recipient placeholder).
     async fn payload(&self, cx: &DutyCx<'_>) -> Result<String, ExecError>;
+
+    /// Plans a composite [`OutboundAction::RoleBulk`] (`role.set` / `role.list`): runs the same
+    /// binding / origin / managed-role gates as the single-role ops and does the host-side reads.
+    /// The default claims nothing.
+    async fn role_bulk(&self, _cx: &DutyCx<'_>) -> Result<RoleBulkPlan, ExecError> {
+        Err(ExecError::HostDutyMissing)
+    }
 
     /// Value for a [`SlotOrigin::Duty`] slot (e.g. the DM channel id from
     /// the reply to the host's own `POST /users/@me/channels`).
@@ -398,10 +421,13 @@ impl ExecError {
 }
 
 /// A successful send.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecOutcome {
     /// Final 2xx status.
     pub status: u16,
+    /// The platform id a create-style op produced (the new Discord scheduled
+    /// event's snowflake, parsed from the reply), else `None`.
+    pub result_id: Option<String>,
 }
 
 /// What to execute.
@@ -554,6 +580,12 @@ fn kind_label(k: &str) -> &'static str {
         "dm.send" => "dm.send",
         "role.add" => "role.add",
         "role.remove" => "role.remove",
+        "role.set" => "role.set",
+        "role.list" => "role.list",
+        "event.create" => "event.create",
+        "event.update" => "event.update",
+        "event.cancel" => "event.cancel",
+        "event.delete" => "event.delete",
         _ => "other",
     }
 }
@@ -637,6 +669,67 @@ where
         res
     }
 
+    /// Executes a composite [`OutboundAction::RoleBulk`]: the duty hook plans it (host-side
+    /// reads + every gate), then each add/remove runs through the NORMAL [`Self::execute`] path
+    /// as a `role.add|remove`, so the per-op pin, allowlist, privilege and tokenization gates
+    /// all apply again. The first failing op aborts (the op is idempotent: a re-run converges).
+    pub(crate) async fn execute_role_bulk(
+        &self,
+        platform: &'static str,
+        community_id: Option<i64>,
+        action: &OutboundAction,
+    ) -> Result<Option<String>, ExecError> {
+        let OutboundAction::RoleBulk {
+            user_id,
+            origin_channel,
+            tenant_id,
+            ..
+        } = action
+        else {
+            return Err(ExecError::BadAction);
+        };
+        if !self.flags.enabled(CONNECTOR_TOOLS_FLAG).await {
+            return Err(ExecError::FlagOff);
+        }
+        self.policies
+            .iter()
+            .find(|p| p.platform == platform)
+            .ok_or(ExecError::UnsupportedPlatform)?;
+        let pinned = pin_channel(platform, action, false)?;
+        if !self.duties.claims(platform, action.op()) {
+            return Err(ExecError::HostDutyMissing);
+        }
+        let cx = DutyCx {
+            platform,
+            action,
+            community_id,
+            pinned_channel: pinned.as_deref(),
+            client: &self.client,
+        };
+        match self.duties.role_bulk(&cx).await? {
+            RoleBulkPlan::Data(json) => Ok(Some(json)),
+            RoleBulkPlan::Apply(ops) => {
+                let user = user_id.clone().ok_or(ExecError::BadAction)?;
+                for (add, key) in ops {
+                    let sub = OutboundAction::RoleOp {
+                        add,
+                        user_id: user.clone(),
+                        role_key: key,
+                        origin_channel: origin_channel.clone(),
+                        tenant_id: *tenant_id,
+                    };
+                    self.execute(&ExecRequest {
+                        platform,
+                        action: &sub,
+                        community_id,
+                    })
+                    .await?;
+                }
+                Ok(None)
+            }
+        }
+    }
+
     async fn execute_inner(&self, req: &ExecRequest<'_>) -> Result<ExecOutcome, ExecError> {
         // Gate 1: the flag. OFF => the executor does not run at all.
         if !self.flags.enabled(CONNECTOR_TOOLS_FLAG).await {
@@ -713,6 +806,7 @@ where
         } else {
             self.slots
                 .resolve(&SlotRequest {
+                    guild_scoped: !uses_stamp && pinned.is_none() && kind.needs_duty,
                     platform: req.platform,
                     community_id: req.community_id,
                     pinned_channel: pinned.as_deref(),
@@ -752,11 +846,15 @@ where
         let prepared =
             subst::render(policy, &verified, &values, &creds).map_err(ExecError::Subst)?;
         drop((values, creds));
-        self.send(prepared).await
+        self.send(prepared, kind_name == "event.create").await
     }
 
     /// The ONLY egress call in the executor: the SSRF-guarded client.
-    async fn send(&self, p: PreparedRequest) -> Result<ExecOutcome, ExecError> {
+    /// `wants_id` (create-style kinds) requires the 2xx reply to carry the new
+    /// resource's snowflake `id`; a reply without one is a failed op (the
+    /// producer could never address the resource again) and is surfaced, not
+    /// defaulted.
+    async fn send(&self, p: PreparedRequest, wants_id: bool) -> Result<ExecOutcome, ExecError> {
         let method = reqwest::Method::from_bytes(p.method.as_bytes())
             .map_err(|_| ExecError::Egress("method"))?;
         let headers: Vec<(String, String)> = p
@@ -770,15 +868,33 @@ where
             .await
             .map_err(|e| ExecError::Egress(e.class()))?;
         match resp.status {
-            200..=299 => Ok(ExecOutcome {
-                status: resp.status,
-            }),
+            200..=299 => {
+                let result_id = if wants_id {
+                    Some(created_id(&resp.body)?)
+                } else {
+                    None
+                };
+                Ok(ExecOutcome {
+                    status: resp.status,
+                    result_id,
+                })
+            }
             300..=399 => Err(ExecError::Redirect),
             429 => Err(ExecError::RateLimited {
                 retry_after_ms: retry_after_ms(&resp.headers),
             }),
             s => Err(ExecError::Upstream(s)),
         }
+    }
+}
+
+/// The snowflake `id` of a create reply, or a loud `bad_response` failure.
+fn created_id(body: &[u8]) -> Result<String, ExecError> {
+    let v: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| ExecError::Egress("bad_response"))?;
+    match v.get("id").and_then(serde_json::Value::as_str) {
+        Some(id) if crate::discord_rest::is_snowflake(id) => Ok(id.to_string()),
+        _ => Err(ExecError::Egress("bad_response")),
     }
 }
 
@@ -812,10 +928,28 @@ fn pin_channel(
             origin_channel,
             ..
         } => (channel.as_str(), origin_channel.as_deref()),
+        // A role op carrying a GUILD scope (`guild:<snowflake>` / `guild:-`) names no channel
+        // (a gateway / external event has none): the guild is pinned from the community's
+        // binding by the duty hook, which also compares the assertion to it.
+        OutboundAction::RoleOp { origin_channel, .. }
+            if role_guild_scope(origin_channel).is_some() =>
+        {
+            return Ok(None);
+        }
+        OutboundAction::RoleBulk { origin_channel, .. }
+            if role_guild_scope(origin_channel).is_some() =>
+        {
+            return Ok(None);
+        }
         OutboundAction::DmSend { origin_channel, .. }
-        | OutboundAction::RoleOp { origin_channel, .. } => {
+        | OutboundAction::RoleOp { origin_channel, .. }
+        | OutboundAction::RoleBulk { origin_channel, .. } => {
             (origin_channel.as_str(), Some(origin_channel.as_str()))
         }
+        // Event ops name no channel: the guild is pinned from the binding by
+        // the duty hook, and no kind of theirs uses a stamp slot.
+        OutboundAction::EventOp { .. } if !uses_stamp => return Ok(None),
+        OutboundAction::EventOp { .. } => return Err(ExecError::BadAction),
     };
     if !matches!(platform, "twitch" | "discord" | "youtube") {
         return if uses_stamp {
@@ -829,6 +963,18 @@ fn pin_channel(
         .map_err(ExecError::Pin)
 }
 
+/// Parses a role op's guild-scope wire form: `guild:-` -> `Some(None)` (no assertion, pin from
+/// the binding alone), `guild:<snowflake>` -> `Some(Some(guild))` (assertion compared to the
+/// binding), anything else -> `None` (a channel-pinned op, or a malformed scope).
+pub(crate) fn role_guild_scope(origin: &str) -> Option<Option<&str>> {
+    let rest = origin.strip_prefix("guild:")?;
+    if rest == "-" {
+        return Some(None);
+    }
+    (!rest.is_empty() && rest.len() <= 20 && rest.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(Some(rest))
+}
+
 /// The connector payload for a plain (non-duty) kind: ONLY the text / message
 /// id from the verified queue entry -- never a channel, guild, user or
 /// credential field (connectors reject those outright).
@@ -840,9 +986,10 @@ fn default_payload(kind: &KindPolicy, action: &OutboundAction) -> Result<String,
         OutboundAction::ChatDelete { message_id, .. } => {
             serde_json::json!({ "message_id": message_id })
         }
-        OutboundAction::DmSend { .. } | OutboundAction::RoleOp { .. } => {
-            return Err(ExecError::BadAction)
-        }
+        OutboundAction::DmSend { .. }
+        | OutboundAction::RoleOp { .. }
+        | OutboundAction::RoleBulk { .. }
+        | OutboundAction::EventOp { .. } => return Err(ExecError::BadAction),
     };
     serde_json::to_string(&v).map_err(|_| ExecError::BadAction)
 }

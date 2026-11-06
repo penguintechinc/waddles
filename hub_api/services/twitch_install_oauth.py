@@ -1,4 +1,4 @@
-"""Twitch OAuth2 HTTP primitives for the per-tenant bot-install flow (Bar Citizen, migration 0034).
+"""Twitch OAuth2 HTTP primitives for the per-tenant bot-install flow (migration 0034).
 
 Each tenant N brings its OWN Twitch application (`client_id`/`client_secret`,
 registered by the tenant admin in the Twitch developer console) -- unlike
@@ -9,7 +9,7 @@ explicit arguments and never reads an env var for them. Tenant 0 keeps
 using the SaaS Twitch app via `services.credential_resolver`; this module
 is the tenant-N lane, driven by `blueprints/v1/tenant_twitch_install.py`.
 
-Scopes requested are exactly what the Bar Citizen role-sync worker's Helix
+Scopes requested are exactly what the role-sync worker's Helix
 calls need, no more:
 
 - `channel:read:subscriptions` -- Get Broadcaster Subscriptions (subscriber tiers)

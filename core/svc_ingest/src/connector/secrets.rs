@@ -338,12 +338,6 @@ mod tests {
             .await;
     }
 
-    /// Resolver clients read ambient `HTTP(S)_PROXY` at build time; poll's proxy
-    /// test mutates it process-wide, so every resolver test holds the read side.
-    async fn env_read() -> tokio::sync::RwLockReadGuard<'static, ()> {
-        crate::connector::transport_common::PROXY_ENV.read().await
-    }
-
     /// Resolver telemetry is outside this authentication contract test.
     struct NoMetrics;
     impl ResolverMetrics for NoMetrics {
@@ -407,7 +401,6 @@ mod tests {
     /// request and send each one only to the host-configured upstream.
     #[tokio::test]
     async fn poll_resolves_rotated_oauth_credentials_per_request() {
-        let _env = env_read().await;
         let server = MockServer::start().await;
         let (resolver, _sa) = resolver(&server).await;
         let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
@@ -433,6 +426,7 @@ mod tests {
                 allow_loopback_insecure: true,
                 lifecycle: Default::default(),
                 request: Default::default(),
+                rediscover: None,
             },
             source,
         )
@@ -474,7 +468,6 @@ mod tests {
     /// webhook verification continues to reject OAuth credentials.
     #[tokio::test]
     async fn handshake_substitution_keeps_oauth_out_of_verifier() {
-        let _env = env_read().await;
         let server = MockServer::start().await;
         let (resolver, _sa) = resolver(&server).await;
         let resolver = Arc::new(resolver);
@@ -509,7 +502,6 @@ mod tests {
     /// pairing never reaches the hub (no credential resolve happens).
     #[tokio::test]
     async fn secret_handle_only_substitutes_after_its_own_prefix() {
-        let _env = env_read().await;
         let server = MockServer::start().await;
         let (resolver, _sa) = resolver(&server).await;
         let resolver = Arc::new(resolver);
@@ -557,7 +549,6 @@ mod tests {
     /// not merely after a foreign credential has already entered the process.
     #[tokio::test]
     async fn foreign_community_and_invalid_connection_never_reach_hub() {
-        let _env = env_read().await;
         let server = MockServer::start().await;
         let (resolver, _sa) = resolver(&server).await;
         let resolver = Arc::new(resolver);
@@ -585,7 +576,6 @@ mod tests {
     /// retaining the transient/unusable distinction used by transport retries.
     #[tokio::test]
     async fn resolve_failures_and_wrong_identity_are_rejected() {
-        let _env = env_read().await;
         for (status, body, expected) in [
             (503, serde_json::json!({}), SecretError::Unavailable),
             (404, serde_json::json!({}), SecretError::Missing),
@@ -622,7 +612,6 @@ mod tests {
     /// an empty credential never causes an unauthenticated upstream request.
     #[tokio::test]
     async fn static_variants_and_empty_credentials() {
-        let _env = env_read().await;
         for (secret, expected) in [
             (
                 serde_json::json!({"scheme": 1, "fields": {"token": "bearer-key"}}),
@@ -656,7 +645,6 @@ mod tests {
     /// follows the RESOLVED provider, and an unknown provider has no hosts.
     #[tokio::test]
     async fn destination_outside_resolved_provider_allowlist_is_refused() {
-        let _env = env_read().await;
         for (provider, body_extra, host) in [
             (
                 "testprov",
@@ -714,7 +702,6 @@ mod tests {
     /// endpoint to harvest the credential: zero requests reach that host.
     #[tokio::test]
     async fn poll_to_unapproved_host_sends_nothing_and_cannot_echo() {
-        let _env = env_read().await;
         let hub = MockServer::start().await;
         let (resolver, _sa) = resolver(&hub).await;
         // Provider approves only 127.0.0.1 hosts for "twitch"? No: "twitch" hosts
@@ -748,6 +735,7 @@ mod tests {
                 allow_loopback_insecure: true,
                 lifecycle: Default::default(),
                 request: Default::default(),
+                rediscover: None,
             },
             source,
         )
@@ -761,7 +749,6 @@ mod tests {
     /// RESOLVED provider, whatever the connector platform string claims.
     #[tokio::test]
     async fn expected_provider_mismatch_is_rejected() {
-        let _env = env_read().await;
         for (expected, ok) in [("twitch", true), ("discord", false)] {
             let server = MockServer::start().await;
             let (resolver, _sa) = resolver(&server).await;
@@ -780,7 +767,6 @@ mod tests {
     /// `endpoint.url` host must also match the destination.
     #[tokio::test]
     async fn api_key_uses_stored_header_and_static_endpoint_is_enforced() {
-        let _env = env_read().await;
         let server = MockServer::start().await;
         let (resolver, _sa) = resolver(&server).await;
         mount_resolve(&server, serde_json::json!({
@@ -808,7 +794,6 @@ mod tests {
     /// raw value, ignoring the connector's header/prefix.
     #[tokio::test]
     async fn poll_sends_api_key_under_stored_header() {
-        let _env = env_read().await;
         let server = MockServer::start().await;
         let (resolver, _sa) = resolver(&server).await;
         mount_resolve(&server, serde_json::json!({
@@ -846,6 +831,7 @@ mod tests {
                 allow_loopback_insecure: true,
                 lifecycle: Default::default(),
                 request: Default::default(),
+                rediscover: None,
             },
             source,
         )
@@ -858,7 +844,6 @@ mod tests {
     /// endpoint refuses (secret not released) while OAuth may omit it.
     #[tokio::test]
     async fn static_rows_require_endpoint_but_oauth_does_not() {
-        let _env = env_read().await;
         let twitch = dest_of("https://api.twitch.tv/");
         for (secret, endpoint, ok) in [
             (

@@ -423,7 +423,7 @@ async fn drain_platform_loop<Q, S, X, G>(
                                     }),
                                     None => {
                                         let twitch = TwitchSender::new(sender, community_id);
-                                        route("twitch", &action, &twitch, &DiscordSender::unconfigured()).await
+                                        route("twitch", &action, &twitch, &DiscordSender::unconfigured()).await.map(|()| None)
                                     }
                                 },
                             };
@@ -694,9 +694,19 @@ impl RelaySource for ListQueue {
 /// The JSON a waiting producer reads back: `{"ok":true}` on success, else
 /// `{"ok":false,"code":"<stable code>"}` ([`SenderError::ack_code`]). Never
 /// carries message content, user ids or error text.
-fn ack_payload(result: &Result<(), SenderError>) -> String {
+fn ack_payload(result: &Result<Option<String>, SenderError>) -> String {
     match result {
-        Ok(()) => serde_json::json!({"ok": true}),
+        Ok(None) => serde_json::json!({"ok": true}),
+        // A create-style op's platform id (a snowflake the executor parsed out
+        // of Discord's reply): the producer needs it to address later updates.
+        // A bulk read's JSON object result (`role.list`): returned to the producer as `data`.
+        Ok(Some(json)) if json.starts_with('{') => {
+            match serde_json::from_str::<serde_json::Value>(json) {
+                Ok(data) => serde_json::json!({"ok": true, "data": data}),
+                Err(_) => serde_json::json!({"ok": false, "code": "bad_result"}),
+            }
+        }
+        Ok(Some(id)) => serde_json::json!({"ok": true, "id": id}),
         Err(err) => serde_json::json!({"ok": false, "code": err.ack_code()}),
     }
     .to_string()
@@ -768,11 +778,11 @@ async fn handle_discord_entry<C: DrainControl, X: ActionExecutor, G: ReplayGuard
                 x.execute_action("discord", entry.community_id, &entry.action)
                     .await
             }
-            None => dispatch_to(sender, &entry.action).await,
+            None => dispatch_to(sender, &entry.action).await.map(|()| None),
         },
     };
     match &result {
-        Ok(()) => {}
+        Ok(_) => {}
         Err(err @ SenderError::Unsupported { .. }) => {
             tracing::error!(platform = "discord", op, error = %err, "outbound op unsupported, dropping");
         }
@@ -2118,7 +2128,19 @@ mod tests {
 
     #[test]
     fn ack_payload_is_content_free_and_stable() {
-        assert_eq!(ack_payload(&Ok(())), r#"{"ok":true}"#);
+        assert_eq!(ack_payload(&Ok(None)), r#"{"ok":true}"#);
+        assert_eq!(
+            ack_payload(&Ok(Some("123".to_string()))),
+            r#"{"ok":true,"id":"123"}"#
+        );
+        assert_eq!(
+            ack_payload(&Ok(Some(r#"{"roles":[]}"#.to_string()))),
+            r#"{"ok":true,"data":{"roles":[]}}"#
+        );
+        assert_eq!(
+            ack_payload(&Ok(Some("{bad".to_string()))),
+            r#"{"ok":false,"code":"bad_result"}"#
+        );
         let rejected = ack_payload(&Err(SenderError::Rejected {
             platform: "discord",
             op: "dm.send",
@@ -2548,12 +2570,12 @@ mod tests {
             platform: &'static str,
             community_id: Option<i64>,
             action: &OutboundAction,
-        ) -> Result<(), SenderError> {
+        ) -> Result<Option<String>, SenderError> {
             self.calls
                 .lock()
                 .unwrap()
                 .push((platform, community_id, action.op()));
-            (self.script)(platform, action.op())
+            (self.script)(platform, action.op()).map(|()| None)
         }
     }
 
