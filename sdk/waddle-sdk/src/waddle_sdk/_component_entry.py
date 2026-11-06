@@ -137,6 +137,7 @@ for _wit_capability in (
     "economy",  # stage-next only (issue #714); same guard
     "identity",  # stage-next only (actor/mention -> community user_uuid); same guard
     "ai",  # stage-next only (ai.generate, host-mediated model call); same guard
+    "platform_table",  # stage-next only (allowlisted platform-table access); same guard
     "tool",  # stage-tools only (bundle-to-bundle tool invoke); same guard
 ):
     try:

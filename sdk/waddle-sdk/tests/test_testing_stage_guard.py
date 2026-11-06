@@ -25,7 +25,13 @@ def _run(coro: Any) -> Any:
 
 
 def test_capability_sets_match_the_host() -> None:
-    assert PROCESS_ONLY_CAPABILITIES == {"economy", "identity", "reputation", "ai"}
+    assert PROCESS_ONLY_CAPABILITIES == {
+        "economy",
+        "identity",
+        "reputation",
+        "ai",
+        "platform_table",
+    }
     assert ACTION_ONLY_CAPABILITIES == {"relay"}
 
 

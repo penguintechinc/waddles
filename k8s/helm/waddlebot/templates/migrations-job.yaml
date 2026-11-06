@@ -118,6 +118,18 @@ spec:
         envFrom:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-db-migrate-secret
+        {{- /* alembic 0079 provisions waddles_platform_table LOGIN only when this is set;
+        unset -> NOLOGIN (inert, capability unwired). Operator-supplied Secret, never rendered here. */}}
+        {{- with .Values.infrastructure.postgresql.platformTable }}
+        {{- if .existingSecret }}
+        env:
+        - name: DB_PLATFORM_TABLE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .existingSecret | quote }}
+              key: {{ .secretKey | default "password" | quote }}
+        {{- end }}
+        {{- end }}
         resources:
           {{- toYaml .Values.pipeline.migrationsJob.resources | nindent 10 }}
         volumeMounts:

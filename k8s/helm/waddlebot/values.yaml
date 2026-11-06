@@ -324,6 +324,15 @@ infrastructure:
     # real traffic.
     bundleMigratorPassword: ""
     bundleRuntimePassword: ""
+    # Bundle platform-table capability role (waddles_platform_table, alembic 0079): column-scoped
+    # to the allowlisted community_members columns + the audit ledger INSERT. existingSecret =
+    # name of an operator-created Secret (ExternalSecret/SealedSecret) holding the role password
+    # under `secretKey`; used by the migrations Job (to give the role LOGIN) and svc-process-rust
+    # (pipeline.rustDataPlane.svcProcess.platformTable.existingSecret, same Secret). Empty (default)
+    # = role stays NOLOGIN and the capability is unwired (fail-closed).
+    platformTable:
+      existingSecret: ""
+      secretKey: "password"
     # ---- Per-service database accounts (security findings H-1 / H-3) -----------------
     # `username`/`password` above are the database OWNER (superuser) credential. It is
     # rendered into <release>-db-admin (consumed ONLY by the Postgres Deployment's
@@ -1647,6 +1656,11 @@ pipeline:
 
     svcProcess:
       enabled: true
+      # Bundle platform-table capability DB role (see infrastructure.postgresql.platformTable);
+      # set existingSecret to wire BUNDLE_PLATFORM_TABLE_* on this pod. Empty = unwired.
+      platformTable:
+        existingSecret: ""
+        secretKey: "password"
       # fix/helm-alpha-self-provisioning -- see svcIngest.imageRepository's comment above.
       imageRepository: "svc-process-rust"
       port: 8201

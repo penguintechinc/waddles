@@ -311,6 +311,29 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_READER_PASSWORD
+        {{- /* Bundle platform-table capability (spec 2026-11-06-bundle-table-access-grants):
+        its OWN least-privilege Postgres role (waddles_platform_table, alembic 0079 --
+        column-scoped to the allowlisted community_members columns + audit INSERT), never
+        the reader/runtime/owner credential. Wired ONLY when the operator supplies an
+        existingSecret (ExternalSecret/SealedSecret): an unset secret leaves
+        BUNDLE_PLATFORM_TABLE_PASSWORD absent, so the capability denies not_implemented
+        (fail-closed) and the flag stays OFF. The password is never rendered by this chart. */}}
+        {{- $pt := .Values.pipeline.rustDataPlane.svcProcess.platformTable | default dict }}
+        {{- if $pt.existingSecret }}
+        - name: BUNDLE_PLATFORM_TABLE_HOST
+          value: {{ $pt.host | default .Values.infrastructure.postgresql.service.name | quote }}
+        - name: BUNDLE_PLATFORM_TABLE_PORT
+          value: {{ $pt.port | default .Values.infrastructure.postgresql.service.port | quote }}
+        - name: BUNDLE_PLATFORM_TABLE_NAME
+          value: {{ $pt.name | default .Values.infrastructure.postgresql.database | quote }}
+        - name: BUNDLE_PLATFORM_TABLE_USER
+          value: "waddles_platform_table"
+        - name: BUNDLE_PLATFORM_TABLE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $pt.existingSecret | quote }}
+              key: {{ $pt.secretKey | default "password" | quote }}
+        {{- end }}
         {{- /* BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED (dataplane
         scale design, multi-tenant change-log consumer -- user requirement: "every
         svc_process/svc_action pod serves ALL tenants"). This loader now discovers

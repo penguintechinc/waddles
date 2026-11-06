@@ -2872,6 +2872,14 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             CapabilityKind::Db if call.op.starts_with("tool.") => {
                 self.handle_tool(scope, &call).await
             }
+            // `platform_table.*` is hosted by the PROCESS stage only (like
+            // `reputation`/`economy`/`identity`/`ai`: community-scoped, stage-next
+            // process-world capabilities). The action stage fails LOUD rather than
+            // letting the op fall into `handle_db`'s unrelated `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("platform_table.") => Err(denied(
+                "not_implemented",
+                "platform-table is hosted by the process stage only (not the action stage)",
+            )),
             CapabilityKind::Db => self.handle_db(scope, &call).await,
             // `enabled` is wired to a real `penguin_licensing::
             // LicenseClient` (`crate::flags::resolve_flag`) -- see
@@ -4207,6 +4215,21 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "no_table");
+    }
+
+    #[tokio::test]
+    async fn platform_table_is_refused_loudly_on_the_action_stage() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        for op in ["platform_table.read", "platform_table.write"] {
+            let err = capabilities
+                .handle(
+                    &scope(),
+                    call(CapabilityKind::Db, op, serde_json::json!({})),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_implemented", "{op}");
+        }
     }
 
     #[tokio::test]
