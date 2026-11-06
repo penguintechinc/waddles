@@ -45,12 +45,12 @@ permissions:
 - id: moderation.twitch
   justification: Chat deletion is a moderation action; admin-approved dangerous grant,
     host-pinned channel and moderator
-# BLOCKED ON CATALOG: `connector.pii.read` (dangerous, core-only; gates identity.lookup, used to
-# resolve the actor to its canonical UUID and the read-tool users) is not yet a member of
-# hub_api/services/bundle_permission_catalog.py, so the V2 validator rejects it
-# (`unknown_permission`). Integrator: add it to the catalog, then add the permission entry
-# (id: connector.pii.read, justification: ...) to `permissions:` above. Until then identity.lookup is
-# denied and on-frame fails LOUD (event dropped, no raw handle).
+- id: connector.pii.read
+  justification: Gates identity.lookup, used to resolve the actor to its canonical UUID
+    and the read-tool users; first-party core only, dangerous, global-admin-approved
+- id: flags.read
+  justification: Reads the waddles.overlay-twitch cutover flag (default OFF) as the
+    overlay's defence-in-depth gate; without it the gate always reads OFF
 routes_to: []
 exported_tools:
 - name: get_chatters

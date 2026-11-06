@@ -141,10 +141,12 @@ async def force_refresh() -> tuple:
         return jsonify({"error": "Service not initialized"}), 503
 
     count = await refresh_service.run_refresh_cycle()
-    return jsonify({
-        "success": True,
-        "message": f"Refreshed {count} credentials",
-    }), 200
+    return jsonify(
+        {
+            "success": True,
+            "message": f"Refreshed {count} credentials",
+        }
+    ), 200
 
 
 _TESTABLE_PLATFORMS = frozenset({"twitch", "discord", "youtube", "slack", "kick", "spotify"})
@@ -165,9 +167,13 @@ async def credential_connection_check(platform: str) -> tuple:
         return jsonify({"error": "Service not initialized"}), 503
     result = await refresh_service.test_bot_connection(platform)
     if result is None:
-        return jsonify({"success": False, "error": f"No credentials found for platform: {platform}"}), 404
+        return jsonify(
+            {"success": False, "error": f"No credentials found for platform: {platform}"}
+        ), 404
     valid, error = result
-    return jsonify({"success": True, "data": {"platform": platform, "valid": valid, "error": error}}), 200
+    return jsonify(
+        {"success": True, "data": {"platform": platform, "valid": valid, "error": error}}
+    ), 200
 
 
 if __name__ == "__main__":

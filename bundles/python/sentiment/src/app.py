@@ -2,10 +2,12 @@
 
 The model is called through `waddle_sdk.ai.generate` (the DANGEROUS `ai.generate` permission,
 `stage-next` world, **process stage only** -- so the call happens in `transform()` and
-`dispatch()` is a pure relay). Structured output (`json=True`), so the HOST picks its structured model
+`dispatch()` is a pure relay). Structured output (`json=True`), so the HOST picks its structured
+model
 (`gemma4:e4b`); a bundle can't name or override it. The model returns
 `{sentiment, confidence, emoji}`, parsed DEFENSIVELY (untrusted text): malformed JSON, an unknown
-label or a bad confidence fails loud with an error reply, never a guessed result. One AI call per invocation.
+label or a bad confidence fails loud with an error reply, never a guessed result. One AI call per
+invocation.
 
 Activation-gated only -- NO feature flag (model: `eightball`); the platform's installed ->
 enabled -> activated check decides whether this bundle runs.
@@ -14,8 +16,10 @@ Fail loud: every `waddle_sdk.ai` refusal (`contains_pii`, `rate_limited`, `not_g
 unavailable model, ...) becomes a clear chat reply AND a raise in `dispatch()` -- never a canned
 or empty/guessed analysis. Missing text is a usage reply (`CommandUsageError`).
 
-PII-free logs: only platform, op/command, the sentiment LABEL, and input LENGTH are logged -- never the typed
-text, the model output, `event.actor`, or an exception message. The host additionally REJECTS prompts
+PII-free logs: only platform, op/command, the sentiment LABEL, and input LENGTH are logged -- never
+the typed
+text, the model output, `event.actor`, or an exception message. The host additionally REJECTS
+prompts
 carrying emails/phones/@handles/tokens (`contains_pii`), surfaced as a "remove personal info"
 reply.
 

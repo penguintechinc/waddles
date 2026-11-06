@@ -1,4 +1,5 @@
-"""`!mock <text>` -> mOcKs the text in aLtErNaTiNg case (letters alternate lower/UPPER, starting lower).
+"""`!mock <text>` -> mOcKs the text in aLtErNaTiNg case (letters alternate lower/UPPER, starting
+lower).
 
 Pure, deterministic text transform: relay only, no kv/db, no egress, no AI. `transform()` matches
 the command and builds the reply, `dispatch()` is a pure relay (same split as `echo`).

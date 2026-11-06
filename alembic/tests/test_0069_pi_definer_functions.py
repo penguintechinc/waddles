@@ -616,7 +616,8 @@ def test_null_or_omitted_tenant_is_refused_by_every_group_b_function(
 
 @requires_docker
 def test_definer_role_memberships_are_revoked_on_migrate(pg_db: PgTestDatabase) -> None:
-    """# regression: gh-969 -- a pre-existing definer role's members could SET ROLE into BYPASSRLS."""
+    """# regression: gh-969 -- a pre-existing definer role's members could SET ROLE into
+    BYPASSRLS."""
     env = {PASSWORDS_ENV: json.dumps(pg_db.service_role_passwords)}
     alembic_cli("downgrade", "0068_app_catalog_kind", dsn=pg_db.dsn, env_overrides=env)
     with _cur(pg_db) as cur:
@@ -790,8 +791,7 @@ def test_reconcile_grants_by_exact_signature_not_bare_name(
         cur.execute(f"REVOKE EXECUTE ON FUNCTION public.{sig0} FROM {HUB}")
         # a same-named overload created later must NOT inherit hub-api's grant on reconcile
         cur.execute(
-            "CREATE FUNCTION public.pi_list_metadata(bigint) RETURNS int "
-            "LANGUAGE sql AS 'SELECT 1'"
+            "CREATE FUNCTION public.pi_list_metadata(bigint) RETURNS int LANGUAGE sql AS 'SELECT 1'"
         )
         cur.execute(
             "REVOKE EXECUTE ON FUNCTION public.pi_list_metadata(bigint) FROM PUBLIC"

@@ -273,7 +273,9 @@ Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against `wit-bindgen-
 
 A real `waddle:connector@1.0.0` `connector-tools` component (P6a T4): `receiver` still normalizes frames, and
 `tool-provider.call` serves `get_chatters` / `echo` / `denied` / `relay` through the real `waddle-sdk-rs` registry; the
-`tool` import is adapted to the SDK's `ToolTransport`. Source: `connector-tools-fixture-src/` (`wit/connector.wit` is a
+`tool` import is adapted to the SDK's `ToolTransport`. Its `sender.build-request` is a deterministic function of `action.kind` (P6a T6d):
+`chat.send` -> a template, `chat.bad`/`chat.backend` -> `malformed`/`backend` frame-errors, `chat.huge` -> a 950 KB template (over the result cap),
+`chat.spin` -> an unbounded loop (fuel/deadline), anything else -> `unsupported`. Source: `connector-tools-fixture-src/` (`wit/connector.wit` is a
 trimmed copy of the normative file, `bundle-wit/tool.wit` the dependency package). Used by
 `tests/connector_tools.rs`.
 

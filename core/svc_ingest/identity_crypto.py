@@ -284,7 +284,8 @@ class HubApiDekProvider:
             body = resp.json()
             dek = base64.b64decode(body["dek"])
             resolved_version = int(body["dek_version"])
-        except Exception as exc:  # noqa: BLE001 - any failure here must fail closed, never leak plaintext
+        # any failure here must fail closed, never leak plaintext
+        except Exception as exc:  # noqa: BLE001
             raise DekUnavailableError(
                 f"tenant DEK unavailable for tenant={tenant_id!r} "
                 f"dek_version={dek_version!r}: {exc}"

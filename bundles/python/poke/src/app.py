@@ -1,4 +1,5 @@
-"""`!poke [@user]` -> a lighthearted flavor-text reply (pokes someone to get their attention), relayed back.
+"""`!poke [@user]` -> a lighthearted flavor-text reply (pokes someone to get their attention),
+relayed back.
 
 Stateless relay: no `kv`, no db, no egress. `transform()` holds all logic; `dispatch()` is a pure
 relay of the text `transform()` built.

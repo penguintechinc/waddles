@@ -74,6 +74,8 @@ pub struct RigConnector {
     pub app_id: String,
     /// The compiled component.
     pub wasm: &'static [u8],
+    /// The WIT world it was built for (`Connector` or `ConnectorTools`).
+    pub world: WitWorld,
 }
 
 /// A live executor + svc_ingest wire link with the connectors pinned.
@@ -112,12 +114,8 @@ impl WireRig {
         let mut registry = ConnectorRegistry::new();
         for c in connectors {
             let digest = digest_of(c.wasm);
-            let manifest = VerifiedManifest::new(
-                c.app_id.clone(),
-                digest.clone(),
-                WitWorld::Connector,
-                HashSet::new(),
-            );
+            let manifest =
+                VerifiedManifest::new(c.app_id.clone(), digest.clone(), c.world, HashSet::new());
             let mut limits = ConnectorLimits::from_config(&cfg);
             tune(&mut limits);
             executor

@@ -19,7 +19,12 @@ _spec.loader.exec_module(gen)
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([sys.executable, "-I", str(SCRIPT), *args], capture_output=True, text=True, check=False)
+    return subprocess.run(
+        [sys.executable, "-I", str(SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _corpus_copy(tmp_path: Path) -> Path:

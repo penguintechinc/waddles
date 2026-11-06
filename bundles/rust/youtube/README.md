@@ -90,8 +90,8 @@ core `connector.pii.read` grant, which the hub permission catalog does not know 
 - No host-side discovery loop (search -> videos -> set `liveChatId` in the URL).
 - `hub_api/services/bundle_manifest_v2.py` has no connector `receiver`/`sender` stage; this manifest uses the
   `action` stage with `tool-provider#call` like economy.
-- `connector.pii.read` is not in `hub_api/services/bundle_permission_catalog.py` (manifest parse rejects it), so it
-  cannot be declared in `hub-manifest.yaml`; the executor-side grant must come from the seeder/connector path.
+- `connector.pii.read` is declared in `hub-manifest.yaml` (catalog id exists; dangerous, core-only) and is
+  pre-granted by the core seeder (P6b integration).
 - `.ci/builtin-handler-map.yaml` still lists `youtube_live_ingest` as pending; flip it once this lands + T4.
 
 ## Parity evidence

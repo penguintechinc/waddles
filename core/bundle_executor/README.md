@@ -55,9 +55,19 @@ and a real `SIGTERM` delivered to the test process (`lib::tests::a_real_sigterm_
 `ConnectorHost` invokes a core `waddle:connector@1.0.0` component's `receiver` exports (`on-connect`, `on-frame`,
 `on-heartbeat-due`, `on-disconnect`) under a fresh, fuel-/epoch-/memory-bounded `Store` per call, with typed
 `ConnectorCallError`s for guest errors, traps, fuel exhaustion, deadline, memory cap and pool exhaustion. Knobs:
-`EXECUTOR_CONNECTOR_FUEL_LIMIT`, `EXECUTOR_CONNECTOR_POOL_SIZE`. It is an in-process API for now: the host-API wire
-(`penguin-libs` `ExportKind`) has no connector kinds yet. Design note: `docs/connector-host-capability.md`.
+`EXECUTOR_CONNECTOR_FUEL_LIMIT`, `EXECUTOR_CONNECTOR_POOL_SIZE`. The same exports ride the host-API wire
+(`penguin-libs` `ExportKind::Connector*`). Design note: `docs/connector-host-capability.md`.
 
 A connector loaded under `WitWorld::ConnectorTools` (`world connector-tools`, P6a T4) additionally exports
 `tool-provider`: `ConnectorHost::call_tool` / `ExportKind::ToolCall` run its tools, and its `tool` import is linked.
 `world connector` is frozen. See "Connector tools" in `docs/connector-host-capability.md`.
+
+**`sender.build-request` (P6a T6d, `penguin-bundle-host` 0.5.0 `ExportKind::ConnectorBuildRequest`).** Both connector worlds export
+`sender`; `ConnectorHost::build_request(action, deadline)` runs it and the wire kind `connector_build_request` carries it.
+Wire payload `{"kind","target_source_id","payload_json"}` (unknown fields refused); reply `{"method","url","headers":[[n,v]],
+"body":<base64|null>,"secret_refs":[[slot,handle]]}` -- slots and opaque secret handles only -- or `{"frame_error":{kind,message}}`
+(same shape as the receiver exports). Digest-pinned connectors only (an unpinned digest or mismatched `app_id` is `UNKNOWN_BUNDLE`,
+never the stage registry); takes the same global admission slot as a tool call (`pool_exhausted` when saturated); the action is
+capped at `max_tool_args_bytes` BEFORE admission and the template at `max_tool_result_bytes` BEFORE it is encoded
+(`MALFORMED_FRAME`); a caller deadline can only tighten `limits.deadline_ms`; fuel/deadline/memory trips map to the usual typed
+codes. The host half is `svc_ingest::connector::sender_exec::WireTemplateBuilder`.

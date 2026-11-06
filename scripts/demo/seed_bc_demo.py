@@ -41,21 +41,45 @@ DISCORD = "discord"
 #: table -> columns this script reads/writes; verified against information_schema.
 REQUIRED_SCHEMA: Mapping[str, tuple[str, ...]] = {
     "hub_users": ("id", "username", "display_name", "is_active", "uuid"),
-    "hub_user_identities": ("hub_user_id", "platform", "platform_user_id", "is_primary"),
+    "hub_user_identities": (
+        "hub_user_id",
+        "platform",
+        "platform_user_id",
+        "is_primary",
+    ),
     "communities": ("id",),
     "community_roles": ("id", "community_id", "name"),
     "community_members": (
-        "community_id", "user_id", "platform", "platform_user_id", "role",
-        "community_role_id", "claims_cache", "is_active", "left_at", "updated_at",
-        "user_uuid", "user_uuid_unavailable_reason",
+        "community_id",
+        "user_id",
+        "platform",
+        "platform_user_id",
+        "role",
+        "community_role_id",
+        "claims_cache",
+        "is_active",
+        "left_at",
+        "updated_at",
+        "user_uuid",
+        "user_uuid_unavailable_reason",
     ),
     "guild_tenant_pairings": (
-        "id", "community_id", "discord_guild_id", "direction", "sync_enabled",
-        "event_sync_enabled", "role_name_prefix", "updated_at",
+        "id",
+        "community_id",
+        "discord_guild_id",
+        "direction",
+        "sync_enabled",
+        "event_sync_enabled",
+        "role_name_prefix",
+        "updated_at",
     ),
     "community_role_sync_bindings": (
-        "pairing_id", "sync_scope", "subscriber_tier", "discord_role_id",
-        "community_role", "updated_at",
+        "pairing_id",
+        "sync_scope",
+        "subscriber_tier",
+        "discord_role_id",
+        "community_role",
+        "updated_at",
     ),
 }
 
@@ -91,12 +115,16 @@ def load_config(env: Mapping[str, str]) -> DemoConfig:
     """Build a `DemoConfig` from `env`, failing loud on any invalid value."""
     cfg = DemoConfig(
         community_id=_int(env.get("DEMO_COMMUNITY_ID", "1"), "DEMO_COMMUNITY_ID"),
-        guild_id=_snowflake(env.get("DEMO_GUILD_ID", "474965105759748096"), "DEMO_GUILD_ID"),
+        guild_id=_snowflake(
+            env.get("DEMO_GUILD_ID", "474965105759748096"), "DEMO_GUILD_ID"
+        ),
         discord_user_id=_snowflake(
-            env.get("DEMO_DISCORD_USER_ID", "900000000000000001"), "DEMO_DISCORD_USER_ID"
+            env.get("DEMO_DISCORD_USER_ID", "900000000000000001"),
+            "DEMO_DISCORD_USER_ID",
         ),
         discord_role_id=_snowflake(
-            env.get("DEMO_DISCORD_ROLE_ID", "900000000000000002"), "DEMO_DISCORD_ROLE_ID"
+            env.get("DEMO_DISCORD_ROLE_ID", "900000000000000002"),
+            "DEMO_DISCORD_ROLE_ID",
         ),
         community_role=env.get("DEMO_COMMUNITY_ROLE", "moderator"),
         baseline_role=env.get("DEMO_BASELINE_ROLE", "member"),
@@ -108,7 +136,9 @@ def load_config(env: Mapping[str, str]) -> DemoConfig:
     if cfg.baseline_role not in (*VALID_COMMUNITY_ROLES, "communicator", "speaker"):
         raise SeedError("DEMO_BASELINE_ROLE is not a known community role")
     if cfg.baseline_role == cfg.community_role:
-        raise SeedError("DEMO_BASELINE_ROLE and DEMO_COMMUNITY_ROLE must differ (no visible change)")
+        raise SeedError(
+            "DEMO_BASELINE_ROLE and DEMO_COMMUNITY_ROLE must differ (no visible change)"
+        )
     if cfg.direction not in VALID_DIRECTIONS:
         raise SeedError(f"DEMO_DIRECTION must be one of {VALID_DIRECTIONS}")
     if not cfg.role_name_prefix or len(cfg.role_name_prefix) > 50:
@@ -169,7 +199,9 @@ def verify_community(cur: Any, cfg: DemoConfig) -> None:
         if role not in found:
             # Demote aborts without a baseline row; a missing target row only loses scopes.
             logger.warning(
-                "seed_bc_demo.role_row_missing community_id=%s role=%s", cfg.community_id, role
+                "seed_bc_demo.role_row_missing community_id=%s role=%s",
+                cfg.community_id,
+                role,
             )
     if cfg.baseline_role not in found:
         raise SeedError(
@@ -232,12 +264,18 @@ def upsert_membership(cur: Any, cfg: DemoConfig, hub_user_id: int) -> None:
         "is_active = TRUE, left_at = NULL, updated_at = NOW() "
         "WHERE community_members.role <> 'community-owner'",
         (
-            cfg.community_id, str(hub_user_id), DISCORD, cfg.discord_user_id,
-            cfg.baseline_role, cfg.community_id, cfg.baseline_role,
+            cfg.community_id,
+            str(hub_user_id),
+            DISCORD,
+            cfg.discord_user_id,
+            cfg.baseline_role,
+            cfg.community_id,
+            cfg.baseline_role,
         ),
     )
     logger.info(
-        "seed_bc_demo.membership_ok op=upsert_membership community_id=%s", cfg.community_id
+        "seed_bc_demo.membership_ok op=upsert_membership community_id=%s",
+        cfg.community_id,
     )
 
 
@@ -259,9 +297,13 @@ def verify_binding(cur: Any, cfg: DemoConfig, hub_user_id: int) -> None:
     )
     row = cur.fetchone()
     if row is None:
-        raise SeedError("seeded identity is not resolvable by role sync (no active member join)")
+        raise SeedError(
+            "seeded identity is not resolvable by role sync (no active member join)"
+        )
     if row[1] is not None or row[0] is None or row[0] != row[2]:
-        raise SeedError("seeded member user_uuid is not the hub user's uuid (binding inconsistent)")
+        raise SeedError(
+            "seeded member user_uuid is not the hub user's uuid (binding inconsistent)"
+        )
     logger.info("seed_bc_demo.binding_resolvable community_id=%s", cfg.community_id)
 
 
@@ -276,7 +318,9 @@ def upsert_pairing(cur: Any, cfg: DemoConfig) -> int:
         (cfg.community_id, cfg.guild_id, cfg.direction, cfg.role_name_prefix),
     )
     pairing_id = int(cur.fetchone()[0])
-    logger.info("seed_bc_demo.pairing_ok op=upsert_pairing community_id=%s", cfg.community_id)
+    logger.info(
+        "seed_bc_demo.pairing_ok op=upsert_pairing community_id=%s", cfg.community_id
+    )
     return pairing_id
 
 
@@ -290,7 +334,8 @@ def upsert_binding(cur: Any, cfg: DemoConfig, pairing_id: int) -> int:
         (pairing_id, cfg.discord_role_id, cfg.community_role),
     )
     cur.execute(
-        "SELECT count(*) FROM community_role_sync_bindings WHERE pairing_id = %s", (pairing_id,)
+        "SELECT count(*) FROM community_role_sync_bindings WHERE pairing_id = %s",
+        (pairing_id,),
     )
     count = int(cur.fetchone()[0])
     logger.info("seed_bc_demo.binding_ok op=upsert_binding bindings=%d", count)
@@ -312,7 +357,9 @@ def seed(conn: Any, cfg: DemoConfig) -> SeedResult:
     except Exception:
         conn.rollback()
         raise
-    return SeedResult(hub_user_id=hub_user_id, pairing_id=pairing_id, binding_count=bindings)
+    return SeedResult(
+        hub_user_id=hub_user_id, pairing_id=pairing_id, binding_count=bindings
+    )
 
 
 def main() -> int:
@@ -339,7 +386,10 @@ def main() -> int:
     logger.info(
         "seed_bc_demo.done community_id=%s pairing_id=%s bindings=%d "
         "(set pipeline.roleSync.demotePairingIds=%s)",
-        cfg.community_id, result.pairing_id, result.binding_count, result.pairing_id,
+        cfg.community_id,
+        result.pairing_id,
+        result.binding_count,
+        result.pairing_id,
     )
     return 0
 

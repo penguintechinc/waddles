@@ -30,8 +30,11 @@ def connection() -> Iterator[Any]:
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE tenants(id INTEGER PRIMARY KEY);
-                CREATE TABLE communities(id INTEGER PRIMARY KEY,tenant_id INTEGER REFERENCES tenants(id));
-                CREATE TABLE community_members(id SERIAL PRIMARY KEY,community_id INTEGER REFERENCES communities(id),is_active BOOLEAN,left_at TIMESTAMP,removed_at TIMESTAMP);
+                CREATE TABLE communities(id INTEGER PRIMARY KEY,tenant_id INTEGER REFERENCES
+                tenants(id));
+                CREATE TABLE community_members(id SERIAL PRIMARY KEY,community_id INTEGER
+                REFERENCES communities(id),is_active BOOLEAN,left_at TIMESTAMP,
+                removed_at TIMESTAMP);
                 INSERT INTO tenants VALUES(1),(2); INSERT INTO communities VALUES(10,1);
             """)
             for name in [
@@ -41,7 +44,8 @@ def connection() -> Iterator[Any]:
             ]:
                 cur.execute((ROOT / "scripts/db" / name).read_text())
             cur.execute(
-                "INSERT INTO community_members(community_id,user_uuid,is_active) VALUES(10,%s,TRUE)",
+                "INSERT INTO community_members(community_id,user_uuid,is_active) "
+                "VALUES(10,%s,TRUE)",
                 (USER,),
             )
         try:

@@ -40,6 +40,8 @@ permissions:
     justification: "declares the Gateway WebSocket upgrade host the HOST transport connects to for this overlay; the guest never calls it"
     params:
       methods: ["GET"]
+  - id: connector.pii.read
+    justification: "gates identity.lookup, used to tokenize the actor to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw-handle fallback: a failed lookup fails the frame)"
   - id: platform.log
     justification: "bounded, PII-free lifecycle and fail-closed warnings (community/op/class only)"
 routes_to: []

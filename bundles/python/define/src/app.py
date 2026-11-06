@@ -1,4 +1,5 @@
-"""`!define <term>` -> a concise, family-friendly definition of the term, relayed to the caller's own origin platform.
+"""`!define <term>` -> a concise, family-friendly definition of the term, relayed to the caller's
+own origin platform.
 
 AI-backed (`ai.generate` permission, `stage-next` world): `transform()` makes exactly ONE
 `waddle_sdk.ai.generate` call per invocation (PROCESS stage only; `dispatch` just relays the
@@ -38,7 +39,8 @@ from waddle_sdk.safe_text import guard_leading_command, sanitize_user_text
 
 SPEC = CommandSpec(name="define")
 
-#: Matches `!define` alone or `!define <anything>` (case-insensitive); `!define` + letters does not match.
+#: Matches `!define` alone or `!define <anything>` (case-insensitive); `!define` + letters does not
+#: match.
 COMMAND_PATTERN = re.compile(r"^!define(?:\s+.*)?$", re.IGNORECASE | re.DOTALL)
 
 #: Input cap (characters) -- bounds the prompt and abuse; over it -> a friendly "too long" reply.

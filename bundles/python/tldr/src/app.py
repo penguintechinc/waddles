@@ -1,4 +1,5 @@
-"""`!tldr <text>` -> a one-line AI TL;DR of the supplied text (AI-backed, stateless, activation-gated).
+"""`!tldr <text>` -> a one-line AI TL;DR of the supplied text (AI-backed, stateless,
+activation-gated).
 
 The model is called through `waddle_sdk.ai.generate` (the `ai.generate` permission, `stage-next`
 world, **process stage only** -- so the call happens in `transform()`, and `dispatch()` is a pure

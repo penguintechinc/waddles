@@ -20,6 +20,7 @@ asserted: a loader that found zero bundles/gates would otherwise pass vacuously.
 
 Run: python3 -m pytest scripts/ci/tests/test_bundle_badge_gate.py
 """
+
 from __future__ import annotations
 
 import ast
@@ -28,7 +29,7 @@ import importlib.util
 import inspect
 import sys
 import types
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +45,14 @@ HOSTILE = {
     "string_false_mod": {"is_mod": "false"},
     "string_false_broadcaster": {"is_broadcaster": "false"},
     "string_false_both": {"is_mod": "false", "is_broadcaster": "false"},
-    "string_false_mod_real_false_broadcaster": {"is_mod": "false", "is_broadcaster": False},
-    "real_false_mod_string_false_broadcaster": {"is_mod": False, "is_broadcaster": "false"},
+    "string_false_mod_real_false_broadcaster": {
+        "is_mod": "false",
+        "is_broadcaster": False,
+    },
+    "real_false_mod_string_false_broadcaster": {
+        "is_mod": False,
+        "is_broadcaster": "false",
+    },
     "string_zero": {"is_mod": "0", "is_broadcaster": "0"},
     "string_zero_beside_real_false": {"is_mod": "0", "is_broadcaster": False},
     "string_no": {"is_mod": "no", "is_broadcaster": False},
@@ -64,7 +71,9 @@ ADMITTED = {
 def _badge_bundles() -> list[Path]:
     """Every `bundles/python/<name>/src/app.py` that reads `is_mod`."""
     return sorted(
-        p for p in BUNDLES_DIR.glob("*/src/app.py") if "is_mod" in p.read_text(encoding="utf-8")
+        p
+        for p in BUNDLES_DIR.glob("*/src/app.py")
+        if "is_mod" in p.read_text(encoding="utf-8")
     )
 
 
@@ -83,7 +92,8 @@ FLAG_GUARD_ALLOWLIST = {
 
 
 def _flag_identifiers_used(app_path: Path) -> set[str]:
-    """Flag-gate identifiers a bundle's code (AST, so docstrings/comments don't count) references."""
+    """Flag-gate identifiers a bundle's code (AST, so docstrings/comments don't count)
+    references."""
     tree = ast.parse(app_path.read_text(encoding="utf-8"))
     found: set[str] = set()
     for node in ast.walk(tree):
@@ -108,7 +118,8 @@ def _gate_functions(app_path: Path) -> list[tuple[str, bool]]:
         if not isinstance(node, ast.FunctionDef) or len(node.args.args) != 1:
             continue
         if node.returns is not None and "dict" in ast.unparse(node.returns):
-            continue  # an intent router (`_recognize`) forwards badges; it is not a gate -- see below
+            # an intent router (`_recognize`) forwards badges; it is not a gate -- see below
+            continue
         keys = {
             n.value
             for n in ast.walk(node)
@@ -116,7 +127,13 @@ def _gate_functions(app_path: Path) -> list[tuple[str, bool]]:
         }
         if {"is_mod", "is_broadcaster"} <= keys:
             annotation = node.args.args[0].annotation
-            found.append((node.name, annotation is not None and "PlatformEvent" in ast.unparse(annotation)))
+            found.append(
+                (
+                    node.name,
+                    annotation is not None
+                    and "PlatformEvent" in ast.unparse(annotation),
+                )
+            )
     return found
 
 
@@ -124,7 +141,9 @@ def _fake_wit_world(monkeypatch: pytest.MonkeyPatch) -> None:
     """Install the minimum `wit_world` the SDK's lazy imports need (log sink + flags)."""
     world = types.ModuleType("wit_world")
     world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-        log=types.SimpleNamespace(Level={"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3}, write=lambda *a: None),
+        log=types.SimpleNamespace(
+            Level={"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3}, write=lambda *a: None
+        ),
         flags=types.SimpleNamespace(enabled=lambda key, default_value: True),
     )
     monkeypatch.setitem(sys.modules, "wit_world", world)
@@ -161,7 +180,9 @@ def _ids(paths: list[Path]) -> list[str]:
 
 def test_denominator_the_scan_found_the_badge_reading_bundles() -> None:
     """A mis-pointed glob must fail loudly, not pass vacuously."""
-    assert len(BADGE_APPS) >= 30, f"expected >=30 badge-reading bundles, found {len(BADGE_APPS)}"
+    assert len(BADGE_APPS) >= 30, (
+        f"expected >=30 badge-reading bundles, found {len(BADGE_APPS)}"
+    )
 
 
 def test_app_bundles_are_flag_free_activation_gated_only() -> None:
@@ -171,14 +192,20 @@ def test_app_bundles_are_flag_free_activation_gated_only() -> None:
     """
     apps = sorted(BUNDLES_DIR.glob("*/src/app.py"))
     assert len(apps) >= 20, f"expected >=20 app bundles scanned, found {len(apps)}"
-    flagged = {p.parent.parent.name: sorted(ids) for p in apps if (ids := _flag_identifiers_used(p))}
+    flagged = {
+        p.parent.parent.name: sorted(ids)
+        for p in apps
+        if (ids := _flag_identifiers_used(p))
+    }
     unexpected = {n: ids for n, ids in flagged.items() if n not in FLAG_GUARD_ALLOWLIST}
     assert not unexpected, (
         f"app bundles must be activation-gated only (no feature flags); flag guards found in "
         f"{unexpected} (scanned {len(apps)} bundles)"
     )
     stale = sorted(set(FLAG_GUARD_ALLOWLIST) - set(flagged))
-    assert not stale, f"FLAG_GUARD_ALLOWLIST entries no longer flagged -- remove them: {stale}"
+    assert not stale, (
+        f"FLAG_GUARD_ALLOWLIST entries no longer flagged -- remove them: {stale}"
+    )
 
 
 @pytest.mark.parametrize("app_path", BADGE_APPS, ids=_ids(BADGE_APPS))
@@ -189,19 +216,27 @@ def test_every_gate_helper_denies_hostile_badges_and_admits_real_ones(
     module = _load(app_path, monkeypatch)
     gates = _gate_functions(app_path)
     if not gates:
-        pytest.skip(f"{app_path.parent.parent.name}: reads badges inline (covered by transform test)")
+        pytest.skip(
+            f"{app_path.parent.parent.name}: reads badges inline (covered by transform test)"
+        )
     for name, takes_event in gates:
         gate: Callable[[Any], Any] = getattr(module, name)
         for label, payload in HOSTILE.items():
             arg = _platform_event(module, payload) if takes_event else dict(payload)
-            assert not gate(arg), f"{app_path.parent.parent.name}.{name} admitted hostile {label}"
+            assert not gate(arg), (
+                f"{app_path.parent.parent.name}.{name} admitted hostile {label}"
+            )
         for label, payload in ADMITTED.items():
             arg = _platform_event(module, payload) if takes_event else dict(payload)
-            assert gate(arg) is True, f"{app_path.parent.parent.name}.{name} denied genuine {label}"
+            assert gate(arg) is True, (
+                f"{app_path.parent.parent.name}.{name} denied genuine {label}"
+            )
 
 
 def _command_text(app_path: Path) -> str:
-    manifest = yaml.safe_load((app_path.parent.parent / "bundle.yaml").read_text(encoding="utf-8"))
+    manifest = yaml.safe_load(
+        (app_path.parent.parent / "bundle.yaml").read_text(encoding="utf-8")
+    )
     consumes = manifest["stages"]["process"]["consumes"]
     # A bundle that deliberately consumes ALL chat (e.g. `greeter`) declares no `filters` /
     # `command_prefix` (an absent filter key is "not a constraint"); probe it with its own command.
@@ -209,50 +244,80 @@ def _command_text(app_path: Path) -> str:
     return str(prefixes[0]) if prefixes else f"!{app_path.parent.parent.name}"
 
 
-def test_transform_never_launders_a_string_badge_into_true(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_transform_never_launders_a_string_badge_into_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Across all bundles that forward badges, `transform()` emits a real `False` for `"false"`."""
     _fake_wit_world(monkeypatch)
     exercised: list[str] = []
     for app_path in BADGE_APPS:
         module = _load(app_path, monkeypatch)
-        if hasattr(module, "feature_enabled"):  # allowlisted flag-guarded bundle: switch the guard on
+        if hasattr(
+            module, "feature_enabled"
+        ):  # allowlisted flag-guarded bundle: switch the guard on
 
             async def _on(*_a: Any, **_k: Any) -> bool:
                 return True
 
             monkeypatch.setattr(module, "feature_enabled", _on)
         event = _platform_event(
-            module, {"text": _command_text(app_path), "channel_id": "1", "is_mod": "false", "is_broadcaster": "false"}
+            module,
+            {
+                "text": _command_text(app_path),
+                "channel_id": "1",
+                "is_mod": "false",
+                "is_broadcaster": "false",
+            },
         )
         try:
             result = asyncio.run(module.transform(event))
-        except Exception:  # noqa: BLE001 -- a bundle that needs a bound context is skipped, not hidden
+        # a bundle that needs a bound context is skipped, not hidden
+        except Exception:  # noqa: BLE001
             continue
         if result is None or "is_mod" not in result.payload:
             continue
         exercised.append(app_path.parent.parent.name)
-        assert result.payload["is_mod"] is False, f"{exercised[-1]} laundered a string is_mod"
-        assert result.payload.get("is_broadcaster") is False, f"{exercised[-1]} laundered is_broadcaster"
+        assert result.payload["is_mod"] is False, (
+            f"{exercised[-1]} laundered a string is_mod"
+        )
+        assert result.payload.get("is_broadcaster") is False, (
+            f"{exercised[-1]} laundered is_broadcaster"
+        )
     assert len(exercised) >= 20, f"only {len(exercised)} bundles exercised: {exercised}"
 
 
-def test_transform_forwards_a_real_true_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_transform_forwards_a_real_true_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Positive control: strictness must not break genuine moderators."""
     _fake_wit_world(monkeypatch)
     app_path = BUNDLES_DIR / "quote" / "src" / "app.py"
     module = _load(app_path, monkeypatch)
-    event = _platform_event(module, {"text": "!quote add hi", "channel_id": "1", "is_mod": True, "is_broadcaster": False})
+    event = _platform_event(
+        module,
+        {
+            "text": "!quote add hi",
+            "channel_id": "1",
+            "is_mod": True,
+            "is_broadcaster": False,
+        },
+    )
     result = asyncio.run(module.transform(event))
     assert result is not None
-    assert result.payload["is_mod"] is True and result.payload["is_broadcaster"] is False
+    assert (
+        result.payload["is_mod"] is True and result.payload["is_broadcaster"] is False
+    )
     assert inspect.iscoroutinefunction(module.transform)
 
 
-def test_intent_routers_never_launder_a_string_badge_into_true(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_intent_routers_never_launder_a_string_badge_into_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Bundles whose `transform()` runs the whole command route through a pure `_recognize()`.
 
     Their `transform()` returns the reply, not the forwarded badges, so the laundering check above
-    cannot see them; the router still turns `"false"` into a real `False` before `_settle` gates on it.
+    cannot see them; the router still turns `"false"` into a real `False` before `_settle` gates on
+    it.
     """
     _fake_wit_world(monkeypatch)
     exercised: list[str] = []
@@ -262,17 +327,35 @@ def test_intent_routers_never_launder_a_string_badge_into_true(monkeypatch: pyte
         if router is None:
             continue
         event = _platform_event(
-            module, {"text": _command_text(app_path), "channel_id": "1", "is_mod": "false", "is_broadcaster": "false"}
+            module,
+            {
+                "text": _command_text(app_path),
+                "channel_id": "1",
+                "is_mod": "false",
+                "is_broadcaster": "false",
+            },
         )
         intent = router(event)
-        assert intent is not None and "is_mod" in intent, f"{app_path.parent.parent.name}: router dropped the badge"
+        assert intent is not None and "is_mod" in intent, (
+            f"{app_path.parent.parent.name}: router dropped the badge"
+        )
         exercised.append(app_path.parent.parent.name)
         assert intent["is_mod"] is False, f"{exercised[-1]} laundered a string is_mod"
-        assert intent.get("is_broadcaster") is False, f"{exercised[-1]} laundered is_broadcaster"
+        assert intent.get("is_broadcaster") is False, (
+            f"{exercised[-1]} laundered is_broadcaster"
+        )
         genuine = router(
             _platform_event(
-                module, {"text": _command_text(app_path), "channel_id": "1", "is_mod": True, "is_broadcaster": False}
+                module,
+                {
+                    "text": _command_text(app_path),
+                    "channel_id": "1",
+                    "is_mod": True,
+                    "is_broadcaster": False,
+                },
             )
         )
-        assert genuine is not None and genuine["is_mod"] is True, f"{exercised[-1]} denied a genuine moderator"
+        assert genuine is not None and genuine["is_mod"] is True, (
+            f"{exercised[-1]} denied a genuine moderator"
+        )
     assert {"steal", "defuse", "prediction", "lottery"} <= set(exercised), exercised

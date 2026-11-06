@@ -48,7 +48,10 @@ def _connect(db: PgTestDatabase) -> psycopg2.extensions.connection:
 
 
 def _tenant(cur: psycopg2.extensions.cursor) -> int:
-    cur.execute("INSERT INTO tenants (slug) VALUES (%s) RETURNING id", (f"t-{uuid.uuid4().hex[:8]}",))
+    cur.execute(
+        "INSERT INTO tenants (slug) VALUES (%s) RETURNING id",
+        (f"t-{uuid.uuid4().hex[:8]}",),
+    )
     return int(cur.fetchone()[0])
 
 
@@ -114,7 +117,9 @@ def test_unique_tenant_community_app_command(db: PgTestDatabase) -> None:
         with conn.cursor() as cur:
             tid, app = _tenant(cur), _app(cur)
             _insert(cur, tid, app)
-            _insert(cur, tid, app, community_id=5)  # different community: a different row
+            _insert(
+                cur, tid, app, community_id=5
+            )  # different community: a different row
         with pytest.raises(psycopg2.errors.UniqueViolation), conn.cursor() as cur:
             _insert(cur, tid, app)
     finally:
@@ -143,7 +148,12 @@ def test_command_check_rejects(db: PgTestDatabase, bad: str) -> None:
         # A 33-char token cannot even be stored (VARCHAR(32) truncation fires before the CHECK);
         # every other bad token trips the CHECK. Either way it never lands in the table.
         with (
-            pytest.raises((psycopg2.errors.CheckViolation, psycopg2.errors.StringDataRightTruncation)),
+            pytest.raises(
+                (
+                    psycopg2.errors.CheckViolation,
+                    psycopg2.errors.StringDataRightTruncation,
+                )
+            ),
             conn.cursor() as cur,
         ):
             _insert(cur, tid, app, command=bad)
@@ -197,7 +207,9 @@ def test_grants_hub_api_only(db: PgTestDatabase) -> None:
     try:
         with conn.cursor() as cur:
             for priv in ("SELECT", "INSERT", "UPDATE", "DELETE"):
-                cur.execute("SELECT has_table_privilege('hub_api', 'app_commands', %s)", (priv,))
+                cur.execute(
+                    "SELECT has_table_privilege('hub_api', 'app_commands', %s)", (priv,)
+                )
                 assert cur.fetchone() == (True,), f"hub_api lacks {priv}"
             for role in (
                 "svc_ingest",
@@ -207,9 +219,13 @@ def test_grants_hub_api_only(db: PgTestDatabase) -> None:
                 "webui",
                 "waddles_publisher",
             ):
-                cur.execute("SELECT has_table_privilege(%s, 'app_commands', 'SELECT')", (role,))
+                cur.execute(
+                    "SELECT has_table_privilege(%s, 'app_commands', 'SELECT')", (role,)
+                )
                 assert cur.fetchone() == (False,), f"{role} can read app_commands"
-            cur.execute("SELECT has_sequence_privilege('hub_api', 'app_commands_id_seq', 'USAGE')")
+            cur.execute(
+                "SELECT has_sequence_privilege('hub_api', 'app_commands_id_seq', 'USAGE')"
+            )
             assert cur.fetchone() == (True,)
     finally:
         conn.close()
