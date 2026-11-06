@@ -168,6 +168,9 @@ roles:
     description: svc-presentation overlays, captions, images
     workloads: [svc-presentation-rust, svc-presentation]
     tables:
+      # overlay-code -> community lookup on every overlay route + community -> tenant
+      # (core/svc_presentation/src/overlay/code.rs, community context); missing = every request 500s.
+      communities: [SELECT]
       overlay_surfaces: [SELECT]
       presentation_config: [SELECT]
       overlay_view_credentials: [SELECT]

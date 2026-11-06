@@ -13,6 +13,7 @@
 //! | [`ready`] | [`RuntimeReady`] / [`Readiness`] and the `/readyz` status |
 //! | [`metrics`] | bounded-label Prometheus series (no community/connection ids) |
 
+pub mod boot;
 pub mod feed;
 pub mod lease;
 pub mod metrics;
@@ -20,6 +21,7 @@ pub mod observed;
 pub mod plan;
 pub mod profiles;
 pub mod ready;
+pub mod scoped;
 pub mod selector;
 pub mod supervisor;
 pub mod tenant;
@@ -35,7 +37,7 @@ pub use lease::ConnectorValkeyLease;
 pub use plan::{OverlayProfile, PlanError, RuntimeEnv};
 pub use ready::{Readiness, RuntimeReady};
 pub use supervisor::{
-    ConnectorRuntime, ResolverSecrets, RuntimeConfig, RuntimeDeps, RuntimeError, SecretsFactory,
-    SinkBuildError, SinkFactory, WebhookAttach,
+    ConnectionActivator, ConnectorRuntime, ResolverSecrets, RuntimeConfig, RuntimeDeps,
+    RuntimeError, SecretsFactory, SinkBuildError, SinkFactory, WebhookAttach,
 };
 pub use tenant::{TenantError, TenantResolve, TENANT_UNRESOLVED};

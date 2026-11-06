@@ -174,6 +174,36 @@ fn required(
         .ok_or(BootError::Missing(name))
 }
 
+/// The host-API listener's mTLS material and bind address from `lookup`
+/// (shared by the outbound executor and the inbound connector runtime: ONE
+/// listener serves the single executor session).
+///
+/// # Errors
+/// The first missing/malformed item, named without values.
+pub fn host_api_from_lookup(
+    cli: &CliConfig,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<(HostApiTls, SocketAddr), BootError> {
+    let tls = HostApiTls {
+        server_cert: PathBuf::from(required(lookup, "HOST_API_SERVER_CERT_FILE")?),
+        server_key: PathBuf::from(required(lookup, "HOST_API_SERVER_KEY_FILE")?),
+        client_ca: PathBuf::from(required(lookup, "HOST_API_CLIENT_CA_FILE")?),
+        client_identity: required(lookup, "HOST_API_CLIENT_IDENTITY")?,
+    };
+    let port = match lookup("SENDER_EXEC_HOST_API_PORT")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        None => DEFAULT_HOST_API_PORT,
+        Some(v) => v
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p != 0)
+            .ok_or(BootError::Malformed("SENDER_EXEC_HOST_API_PORT"))?,
+    };
+    Ok((tls, SocketAddr::new(cli.bind_addr, port)))
+}
+
 impl ExecBootConfig {
     /// Validates the executor prerequisites from `cli` and `lookup` (env in
     /// production).
@@ -215,23 +245,7 @@ impl ExecBootConfig {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
-        let tls = HostApiTls {
-            server_cert: PathBuf::from(required(lookup, "HOST_API_SERVER_CERT_FILE")?),
-            server_key: PathBuf::from(required(lookup, "HOST_API_SERVER_KEY_FILE")?),
-            client_ca: PathBuf::from(required(lookup, "HOST_API_CLIENT_CA_FILE")?),
-            client_identity: required(lookup, "HOST_API_CLIENT_IDENTITY")?,
-        };
-        let port = match lookup("SENDER_EXEC_HOST_API_PORT")
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-        {
-            None => DEFAULT_HOST_API_PORT,
-            Some(v) => v
-                .parse::<u16>()
-                .ok()
-                .filter(|p| *p != 0)
-                .ok_or(BootError::Malformed("SENDER_EXEC_HOST_API_PORT"))?,
-        };
+        let (tls, host_api_addr) = host_api_from_lookup(cli, lookup)?;
         Ok(Self {
             pin,
             digests,
@@ -239,7 +253,7 @@ impl ExecBootConfig {
             hub_grpc_endpoint,
             hub_grpc_ca,
             tls,
-            host_api_addr: SocketAddr::new(cli.bind_addr, port),
+            host_api_addr,
         })
     }
 
@@ -326,6 +340,21 @@ pub struct ExecParts {
 /// # Errors
 /// Any construction failure, named without values.
 pub async fn build(cli: &CliConfig, cfg: &ExecBootConfig) -> anyhow::Result<ExecParts> {
+    build_shared(cli, cfg, None).await
+}
+
+/// [`build`] over an already-built executor link (`Some`): the inbound
+/// connector runtime owns the single executor session and its listener, and the
+/// outbound path rides the same link (its build-request flag reads are served by
+/// the link's host-call handler, see `CallOrigin::BuildRequest`).
+///
+/// # Errors
+/// Any construction failure, named without values.
+pub async fn build_shared(
+    cli: &CliConfig,
+    cfg: &ExecBootConfig,
+    shared_link: Option<Arc<ExecutorLink>>,
+) -> anyhow::Result<ExecParts> {
     let users = HubPlatformUserResolver::connect(
         cfg.hub_grpc_endpoint.clone(),
         cli.service_jwt_token_endpoint.clone(),
@@ -334,7 +363,7 @@ pub async fn build(cli: &CliConfig, cfg: &ExecBootConfig) -> anyhow::Result<Exec
     )
     .await
     .map_err(|e| anyhow::anyhow!("hub-api platform-user resolver unavailable: {e}"))?;
-    build_with(cli, cfg, users)
+    build_with_link(cli, cfg, users, shared_link)
 }
 
 /// [`build`] with the tokenization resolver supplied (the seam tests use).
@@ -346,7 +375,21 @@ pub fn build_with(
     cfg: &ExecBootConfig,
     users: HubPlatformUserResolver,
 ) -> anyhow::Result<ExecParts> {
-    let link = Arc::new(ExecutorLink::new().with_enabled_flags(OVERLAY_FLAGS));
+    build_with_link(cli, cfg, users, None)
+}
+
+/// [`build_with`] with an optional shared link (see [`build_shared`]).
+///
+/// # Errors
+/// Any construction failure, named without values.
+pub fn build_with_link(
+    cli: &CliConfig,
+    cfg: &ExecBootConfig,
+    users: HubPlatformUserResolver,
+    shared_link: Option<Arc<ExecutorLink>>,
+) -> anyhow::Result<ExecParts> {
+    let link = shared_link
+        .unwrap_or_else(|| Arc::new(ExecutorLink::new().with_enabled_flags(OVERLAY_FLAGS)));
     let builder = WireTemplateBuilder::new(Arc::clone(&link), Arc::new(registry(cfg)?));
     let slots = PlatformSlotRouter::new(
         TwitchSlots::new(
@@ -376,6 +419,20 @@ pub async fn start(
     cli: &CliConfig,
     shutdown: impl Fn() -> tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
+    start_shared(cli, shutdown, None).await
+}
+
+/// [`start`] riding an executor link (and listener) the inbound connector
+/// runtime already owns: no second listener is bound.
+///
+/// # Errors
+/// Any prerequisite failure -- fatal to the process by design.
+pub async fn start_shared(
+    cli: &CliConfig,
+    shutdown: impl Fn() -> tokio::sync::oneshot::Receiver<()>,
+    shared_link: Option<Arc<ExecutorLink>>,
+) -> anyhow::Result<()> {
+    let serve_listener = shared_link.is_none();
     let cfg = ExecBootConfig::from_lookup(cli, &|k| std::env::var(k).ok())?;
     crate::twitch_sessions::boot::validate_dynamic_prereqs(
         cli,
@@ -383,8 +440,8 @@ pub async fn start(
     )?;
     let spine_cfg = penguin_spine::SpineConfig::from_env()
         .map_err(|e| anyhow::anyhow!("spine config unavailable for the outbound executor: {e}"))?;
-    let parts = build(cli, &cfg).await?;
-    launch(cfg, parts, spine_cfg, shutdown).await
+    let parts = build_shared(cli, &cfg, shared_link).await?;
+    launch_with(cfg, parts, spine_cfg, shutdown, serve_listener).await
 }
 
 /// Binds the mTLS listener and spawns it plus the three drains, recording the
@@ -399,17 +456,34 @@ pub async fn launch(
     spine_cfg: penguin_spine::SpineConfig,
     shutdown: impl Fn() -> tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
-    let acceptor = host_api_listener::build_acceptor(&cfg.tls)?;
-    let listener = tokio::net::TcpListener::bind(cfg.host_api_addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("host-api listener bind failed: {e}"))?;
-    tokio::spawn(host_api_listener::serve(
-        listener,
-        acceptor,
-        Arc::clone(&parts.link),
-        shutdown(),
-    ));
-    tracing::info!(addr = %cfg.host_api_addr, "outbound executor host-api listener started");
+    launch_with(cfg, parts, spine_cfg, shutdown, true).await
+}
+
+/// [`launch`] with the listener optional: `serve_listener = false` when the
+/// inbound runtime already serves the (single) executor session.
+///
+/// # Errors
+/// TLS material unusable or the listener address cannot be bound.
+pub async fn launch_with(
+    cfg: ExecBootConfig,
+    parts: ExecParts,
+    spine_cfg: penguin_spine::SpineConfig,
+    shutdown: impl Fn() -> tokio::sync::oneshot::Receiver<()>,
+    serve_listener: bool,
+) -> anyhow::Result<()> {
+    if serve_listener {
+        let acceptor = host_api_listener::build_acceptor(&cfg.tls)?;
+        let listener = tokio::net::TcpListener::bind(cfg.host_api_addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("host-api listener bind failed: {e}"))?;
+        tokio::spawn(host_api_listener::serve(
+            listener,
+            acceptor,
+            Arc::clone(&parts.link),
+            shutdown(),
+        ));
+        tracing::info!(addr = %cfg.host_api_addr, "outbound executor host-api listener started");
+    }
 
     let pin = Arc::new(cfg.pin);
     for platform in PLATFORMS {

@@ -3,7 +3,9 @@
 //! Derives one [`WsConfig`] per hub-api Twitch binding. EVERY security-relevant
 //! value (URL, slot prefixes, auto-replies, limits) is a host constant defined
 //! here; binding metadata contributes only the bot login, the channel login,
-//! the numeric tenant and an optional secret version, each validated strictly.
+//! and an optional tenant claim that is only ever cross-checked. The tenant and
+//! the credential-rotation counter come from the hub-api binding feed
+//! (`BindingSummary::{tenant_id, secret_version}`), never from metadata.
 //! Twitch EventSub is out of scope (svc-gateway owns it): this profile never
 //! yields a webhook plan.
 //!
@@ -51,8 +53,6 @@ pub const META_CHANNEL: &str = "channel";
 pub const META_BOT_LOGIN: &str = "bot_login";
 /// Binding metadata key: an OPTIONAL tenant claim, cross-checked only.
 pub const META_TENANT_ID: &str = "tenant_id";
-/// Binding metadata key: opaque credential version (rotation marker).
-pub const META_SECRET_VERSION: &str = "secret_version";
 /// Handle names the overlay's handshake slots refer to.
 pub const HANDLE_PASS: &str = "pass";
 /// See [`HANDLE_PASS`].
@@ -72,12 +72,10 @@ pub const MAX_LIFETIME: Duration = Duration::from_secs(12 * 3600);
 const MAX_PING_TOKEN: usize = 64;
 /// Twitch login length ceiling.
 const MAX_LOGIN_LEN: usize = 25;
-/// Longest accepted secret-version marker.
-const MAX_VERSION_LEN: usize = 64;
 
-/// Host-side, server-derived community -> tenant mapping. The tenant is NEVER
-/// taken from editable binding metadata: the supervisor supplies the same
-/// resolver it uses for the per-connection sink scope.
+/// Optional host-side community -> tenant cross-check. The tenant itself is the
+/// feed's server-derived `tenantId`; it is NEVER taken from editable binding
+/// metadata. When a source is configured it must AGREE with the feed.
 pub trait TenantSource: Send + Sync {
     /// The tenant owning `community_id`, or `None` when not (yet) known.
     fn tenant_of(&self, community_id: i64) -> Option<i64>;
@@ -95,14 +93,24 @@ where
 /// The Twitch IRC chat-ingest profile.
 #[derive(Clone)]
 pub struct TwitchProfile {
-    tenants: Arc<dyn TenantSource>,
+    tenants: Option<Arc<dyn TenantSource>>,
 }
 
 impl TwitchProfile {
-    /// Builds the profile over the host's community -> tenant source.
+    /// Builds the profile with a host community -> tenant cross-check: a feed
+    /// tenant that disagrees (or an unknown community) refuses the binding.
     #[must_use]
     pub fn new(tenants: Arc<dyn TenantSource>) -> Self {
-        Self { tenants }
+        Self {
+            tenants: Some(tenants),
+        }
+    }
+
+    /// Builds the profile trusting only the feed's server-derived tenant. The
+    /// runtime's `TenantResolve` still cross-checks it before a connection starts.
+    #[must_use]
+    pub fn from_feed() -> Self {
+        Self { tenants: None }
     }
 }
 
@@ -141,19 +149,23 @@ fn required<'a>(m: &'a BTreeMap<String, String>, key: &'static str) -> Result<&'
         .ok_or(PlanError::MissingKey(key))
 }
 
-/// Resolves the tenant from the host's community mapping. Binding metadata is
-/// editable, so it is never authoritative: a `tenant_id` key, when present, must
-/// AGREE with the host's answer or the binding is refused.
+/// The tenant of a binding: the feed's server-derived `tenantId` (must be a
+/// positive id), cross-checked against the host's mapping when one is
+/// configured. Binding metadata is editable, so it is never authoritative: a
+/// `tenant_id` key, when present, must AGREE or the binding is refused.
 fn resolve_tenant(
-    tenants: &dyn TenantSource,
-    community_id: i64,
-    m: &BTreeMap<String, String>,
+    tenants: Option<&dyn TenantSource>,
+    b: &BindingSummary,
 ) -> Result<i64, PlanError> {
-    let tenant = tenants
-        .tenant_of(community_id)
+    let tenant = Some(b.tenant_id)
         .filter(|t| *t > 0)
         .ok_or(PlanError::Config("tenant for community is unresolved"))?;
-    if let Some(raw) = m.get(META_TENANT_ID) {
+    if let Some(source) = tenants {
+        if source.tenant_of(b.community_id) != Some(tenant) {
+            return Err(PlanError::Config("tenant disagrees with the host mapping"));
+        }
+    }
+    if let Some(raw) = b.metadata.get(META_TENANT_ID) {
         let claimed = if raw.bytes().all(|b| b.is_ascii_digit()) {
             raw.parse::<i64>().ok()
         } else {
@@ -166,21 +178,11 @@ fn resolve_tenant(
     Ok(tenant)
 }
 
-/// The optional credential version marker (`[A-Za-z0-9._-]{1,64}`); absent is
-/// represented explicitly (and hashed distinctly), never defaulted.
-fn secret_version(m: &BTreeMap<String, String>) -> Result<Option<&str>, PlanError> {
-    let Some(v) = m.get(META_SECRET_VERSION) else {
-        return Ok(None);
-    };
-    let ok = !v.is_empty()
-        && v.len() <= MAX_VERSION_LEN
-        && v.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-    if ok {
-        Ok(Some(v.as_str()))
-    } else {
-        Err(PlanError::InvalidValue(META_SECRET_VERSION))
-    }
+/// The credential-rotation counter from the feed (`>= 1`).
+fn secret_version(b: &BindingSummary) -> Result<i64, PlanError> {
+    Some(b.secret_version)
+        .filter(|v| *v >= 1)
+        .ok_or(PlanError::Config("secret version must be at least 1"))
 }
 
 /// Short SHA-256 fingerprint of a channel login, safe to log (the login is PII).
@@ -215,9 +217,9 @@ fn feed(h: &mut Sha256, field: &[u8]) {
 /// Hash of the derived config plus the secret VERSION (never a secret). Stable
 /// across processes (SHA-256, not `DefaultHasher`) so a restart decision never
 /// depends on the build.
-fn fingerprint(cfg: &WsConfig, tenant: i64, version: Option<&str>) -> u64 {
+fn fingerprint(cfg: &WsConfig, tenant: i64, version: i64) -> u64 {
     let mut h = Sha256::new();
-    feed(&mut h, b"twitch-profile-v1");
+    feed(&mut h, b"twitch-profile-v2");
     for s in [&cfg.platform, &cfg.url, &cfg.source_key] {
         feed(&mut h, s.as_bytes());
     }
@@ -262,13 +264,7 @@ fn fingerprint(cfg: &WsConfig, tenant: i64, version: Option<&str>) -> u64 {
         feed(&mut h, ip.to_string().as_bytes());
     }
     feed(&mut h, &tenant.to_be_bytes());
-    match version {
-        Some(v) => {
-            feed(&mut h, b"v");
-            feed(&mut h, v.as_bytes());
-        }
-        None => feed(&mut h, b"-"),
-    }
+    feed(&mut h, &version.to_be_bytes());
     let d = h.finalize();
     let mut b = [0u8; 8];
     b.copy_from_slice(&d[..8]);
@@ -401,8 +397,8 @@ impl OverlayProfile for TwitchProfile {
         }
         let channel = normalize_login(required(&b.metadata, META_CHANNEL)?, META_CHANNEL)?;
         let bot_login = normalize_login(required(&b.metadata, META_BOT_LOGIN)?, META_BOT_LOGIN)?;
-        let tenant = resolve_tenant(self.tenants.as_ref(), b.community_id, &b.metadata)?;
-        let version = secret_version(&b.metadata)?;
+        let tenant = resolve_tenant(self.tenants.as_deref(), b)?;
+        let version = secret_version(b)?;
 
         let conn = ConnectionRef {
             community_id: b.community_id,
@@ -507,6 +503,8 @@ mod tests {
         metadata.insert(META_BOT_LOGIN.to_owned(), bot.to_owned());
         metadata.insert(META_TENANT_ID.to_owned(), "42".to_owned());
         BindingSummary {
+            tenant_id: 42,
+            secret_version: 1,
             community_id: community,
             connection_id: conn,
             provider: "twitch".to_owned(),
@@ -795,20 +793,23 @@ mod tests {
     }
 
     #[test]
-    fn secret_version_is_validated() {
-        for bad in ["", "a b", "a\r\n", "v\u{e9}", &"v".repeat(65)] {
+    fn secret_version_is_the_feed_counter_and_must_be_positive() {
+        for bad in [0_i64, -1, i64::MIN] {
             let mut b = binding(1, 2, "c", "b");
-            b.metadata.insert(META_SECRET_VERSION.into(), bad.into());
+            b.secret_version = bad;
             assert_eq!(
                 profile().plan(&b, &env()).err(),
-                Some(PlanError::InvalidValue(META_SECRET_VERSION)),
-                "{bad:?}"
+                Some(PlanError::Config("secret version must be at least 1")),
+                "{bad}"
             );
         }
         let mut b = binding(1, 2, "c", "b");
-        b.metadata
-            .insert(META_SECRET_VERSION.into(), "v1.2-3_x".into());
+        b.secret_version = 7;
         assert!(profile().plan(&b, &env()).is_ok());
+        // A metadata marker (the old convention) is inert: it cannot move the fingerprint.
+        let base = one(&b, &env()).0.fingerprint;
+        b.metadata.insert("secret_version".into(), "99".into());
+        assert_eq!(one(&b, &env()).0.fingerprint, base);
     }
 
     #[test]
@@ -855,20 +856,18 @@ mod tests {
 
         let mut versions = std::collections::HashSet::new();
         versions.insert(f0);
-        let mut v1 = base.clone();
-        v1.metadata.insert(META_SECRET_VERSION.into(), "1".into());
         let mut v2 = base.clone();
-        v2.metadata.insert(META_SECRET_VERSION.into(), "2".into());
-        assert!(
-            versions.insert(fp(&v1, &env())),
-            "version present changes it"
-        );
+        v2.secret_version = 2;
+        let mut v3 = base.clone();
+        v3.secret_version = 3;
         assert!(versions.insert(fp(&v2, &env())), "version bump changes it");
-        assert_eq!(fp(&v1, &env()), fp(&v1.clone(), &env()));
+        assert!(versions.insert(fp(&v3, &env())), "each rotation restarts");
+        assert_eq!(fp(&v2, &env()), fp(&v2.clone(), &env()));
 
         let mut other_tenant = base.clone();
         other_tenant.metadata.remove(META_TENANT_ID);
-        let moved = TwitchProfile::new(Arc::new(|_c: i64| Some(43)));
+        other_tenant.tenant_id = 43;
+        let moved = TwitchProfile::from_feed();
         let moved_fp = moved.plan(&other_tenant, &env()).unwrap()[0].fingerprint;
         assert!(versions.insert(moved_fp));
         assert!(versions.insert(fp(&binding(1, 2, "other", "bot"), &env())));
@@ -885,16 +884,6 @@ mod tests {
         e.egress_allow = vec![IpAddr::V4(Ipv4Addr::LOCALHOST)];
         assert!(versions.insert(fp(&base, &e)));
         assert_eq!(versions.len(), 11);
-    }
-
-    #[test]
-    fn fingerprint_never_contains_the_secret_version_text() {
-        // The version influences the hash only; it is not recoverable as text.
-        let mut b = binding(1, 2, "c", "b");
-        b.metadata
-            .insert(META_SECRET_VERSION.into(), "hunter2".into());
-        let fp = one(&b, &env()).0.fingerprint;
-        assert!(!format!("{fp:x}").contains("hunter2"));
     }
 
     #[test]
@@ -946,10 +935,10 @@ mod tests {
     }
 
     #[test]
-    fn tenant_comes_from_the_host_and_metadata_may_only_agree() {
+    fn tenant_comes_from_the_feed_and_metadata_may_only_agree() {
         // regression: security review MEDIUM.
         let mut b = binding(1, 2, "c", "b");
-        // Absent claim: the host's answer is used.
+        // Absent claim: the feed's server-derived tenant is used.
         b.metadata.remove(META_TENANT_ID);
         assert_eq!(one(&b, &env()).0.tenant_id, 42);
         // Agreeing claim: accepted.
@@ -961,18 +950,28 @@ mod tests {
             profile().plan(&b, &env()).err(),
             Some(PlanError::InvalidValue(META_TENANT_ID))
         );
-        // Host cannot resolve (or resolves nonsense): refused, never defaulted.
-        for host in [None, Some(0), Some(-4)] {
+        // A feed row without a positive tenant is refused, never defaulted.
+        for bad in [0_i64, -4] {
+            let mut nb = binding(1, 2, "c", "b");
+            nb.tenant_id = bad;
+            assert_eq!(
+                TwitchProfile::from_feed().plan(&nb, &env()).err(),
+                Some(PlanError::Config("tenant for community is unresolved")),
+                "{bad}"
+            );
+        }
+        // A configured host mapping must AGREE with the feed (or know the community).
+        for host in [None, Some(7), Some(0)] {
             let p = TwitchProfile::new(Arc::new(move |_c: i64| host));
             assert_eq!(
                 p.plan(&binding(1, 2, "c", "b"), &env()).err(),
-                Some(PlanError::Config("tenant for community is unresolved")),
+                Some(PlanError::Config("tenant disagrees with the host mapping")),
                 "{host:?}"
             );
         }
-        // Per-community mapping is honored.
         let p = TwitchProfile::new(Arc::new(|c: i64| (c == 5).then_some(500)));
         let mut b5 = binding(5, 2, "c", "b");
+        b5.tenant_id = 500;
         b5.metadata.remove(META_TENANT_ID);
         assert_eq!(p.plan(&b5, &env()).unwrap()[0].tenant_id, 500);
     }

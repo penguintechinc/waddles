@@ -12,14 +12,18 @@
 //! | Metadata key | Role |
 //! |---|---|
 //! | `live_chat_id` | required; absent = connection not ready (no plan, counted) |
-//! | `secret_version` | optional; folded into the fingerprint so a rotated credential restarts the connection |
+//!
+//! The tenant and the credential-rotation counter are NOT metadata: they are the
+//! hub-api feed's server-derived `BindingSummary::{tenant_id, secret_version}`.
+//! `secret_version` is folded into the fingerprint so a rotated credential
+//! restarts the connection; metadata `tenant_id`/`secret_version` keys are inert.
 //!
 //! Auth is an OAuth bearer (`youtube.oauth`); no API-key query secret is used
 //! on this path, so `query_secret` is omitted. A `liveChatEnded` 403 parks the
 //! transport; the next reconcile restarts it when the binding carries a new
 //! `live_chat_id` (the id is part of the fingerprint).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -40,15 +44,6 @@ pub const APP_ID: &str = "waddles.core.service.youtube";
 pub const PROVIDER: &str = "youtube";
 /// Capability the binding list is scoped to.
 pub const CAPABILITY: &str = "chat_ingest";
-/// `DesiredConnection::tenant_id` as this profile emits it: UNRESOLVED. The
-/// binding list carries no server-derived tenant and editable metadata must
-/// never supply one, so the runtime MUST resolve the tenant from the numeric
-/// `community_id` (scope resolver) and refuse on mismatch. `0` is rejected by
-/// `ResolvedScope::validated` (`tenant_id >= 1`), so an unresolved value can
-/// never publish.
-pub const TENANT_UNRESOLVED: i64 = 0;
-/// Metadata key: opaque credential version (optional).
-pub const META_SECRET_VERSION: &str = "secret_version";
 
 /// The poll endpoint (a host constant).
 pub const POLL_URL: &str = "https://www.googleapis.com/youtube/v3/liveChat/messages";
@@ -91,8 +86,6 @@ pub const QUOTA_REASONS: [&str; 4] = [
 pub const PARK_REASONS: [&str; 3] = ["forbidden", "insufficientPermissions", "liveChatEnded"];
 /// Bumped when the derivation changes so every connection restarts once.
 const DERIVATION_VERSION: u8 = 1;
-/// Longest accepted `secret_version`.
-const MAX_SECRET_VERSION_LEN: usize = 64;
 
 /// The YouTube live-chat poll profile.
 #[derive(Debug, Default)]
@@ -158,20 +151,18 @@ fn poll_url(live_chat_id: &str) -> Result<String, PlanError> {
     Ok(url.into())
 }
 
-/// Optional credential version: bounded charset, never echoed on failure.
-fn secret_version(meta: &BTreeMap<String, String>) -> Result<Option<&str>, PlanError> {
-    let Some(v) = meta.get(META_SECRET_VERSION) else {
-        return Ok(None);
-    };
-    let ok = !v.is_empty()
-        && v.len() <= MAX_SECRET_VERSION_LEN
-        && v.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b));
-    if ok {
-        Ok(Some(v.as_str()))
-    } else {
-        Err(PlanError::InvalidValue(META_SECRET_VERSION))
-    }
+/// The feed's server-derived tenant (`>= 1`); editable metadata never supplies one.
+fn feed_tenant(b: &BindingSummary) -> Result<i64, PlanError> {
+    Some(b.tenant_id)
+        .filter(|t| *t >= 1)
+        .ok_or(PlanError::Config("binding tenant is not positive"))
+}
+
+/// The credential-rotation counter from the feed (`>= 1`).
+fn feed_secret_version(b: &BindingSummary) -> Result<i64, PlanError> {
+    Some(b.secret_version)
+        .filter(|v| *v >= 1)
+        .ok_or(PlanError::Config("binding secret version is not positive"))
 }
 
 /// Folds one length-prefixed field into the digest (no ambiguity between
@@ -181,9 +172,9 @@ fn fold(h: &mut Sha256, field: &[u8]) {
     h.update(field);
 }
 
-/// Fingerprint over the derived config plus the credential version. Secrets
-/// are never an input; only the opaque version string is.
-fn fingerprint(cfg: &PollConfig, secret_version: Option<&str>) -> u64 {
+/// Fingerprint over the derived config, the tenant and the credential-rotation
+/// counter. Secrets are never an input; only the counter is.
+fn fingerprint(cfg: &PollConfig, tenant: i64, secret_version: i64) -> u64 {
     let mut h = Sha256::new();
     fold(&mut h, &[DERIVATION_VERSION]);
     fold(&mut h, cfg.url.as_bytes());
@@ -197,13 +188,8 @@ fn fingerprint(cfg: &PollConfig, secret_version: Option<&str>) -> u64 {
         fold(&mut h, &r.community_id.to_be_bytes());
         fold(&mut h, &r.connection_id.to_be_bytes());
     }
-    match secret_version {
-        Some(v) => {
-            fold(&mut h, &[1]);
-            fold(&mut h, v.as_bytes());
-        }
-        None => fold(&mut h, &[0]),
-    }
+    fold(&mut h, &tenant.to_be_bytes());
+    fold(&mut h, &secret_version.to_be_bytes());
     let d = h.finalize();
     let mut b = [0u8; 8];
     b.copy_from_slice(&d[..8]);
@@ -252,7 +238,8 @@ impl OverlayProfile for YoutubeProfile {
         if !is_live_chat_id(chat) {
             return Err(PlanError::InvalidValue(META_LIVE_CHAT_ID));
         }
-        let version = secret_version(&b.metadata)?;
+        let tenant = feed_tenant(b)?;
+        let version = feed_secret_version(b)?;
 
         let conn = ConnectionRef {
             community_id: b.community_id,
@@ -284,14 +271,14 @@ impl OverlayProfile for YoutubeProfile {
         cfg.lifecycle
             .validate(&cfg.handles, cfg.cursor_param.as_deref(), &url)
             .map_err(|_| PlanError::Config("derived poll lifecycle rejected"))?;
-        let fingerprint = fingerprint(&cfg, version);
+        let fingerprint = fingerprint(&cfg, tenant, version);
         Ok(vec![DesiredConnection {
             key: ConnKey {
                 platform: PLATFORM,
                 community_id: b.community_id,
                 connection_id: b.connection_id,
             },
-            tenant_id: TENANT_UNRESOLVED,
+            tenant_id: tenant,
             plan: TransportPlan::Poll(Box::new(cfg)),
             fingerprint,
         }])

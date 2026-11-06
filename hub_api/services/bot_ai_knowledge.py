@@ -626,6 +626,12 @@ def update_knowledge_source(dal: Any, source_id: int, updates: dict[str, Any]) -
     row = dal.ai_knowledge_sources[source_id]
     if row is None:
         raise KnowledgeServiceError("Knowledge source not found", status=404)
+    redirected = any(
+        k in fields and fields[k] != row[k] for k in ("source_url", "branch", "docs_path")
+    )
+    if redirected and "encrypted_token" not in fields:
+        # A stored credential must never be replayed against a new target.
+        fields["encrypted_token"] = None
     dal(dal.ai_knowledge_sources.id == source_id).update(**fields)
     dal.commit()
     return _to_source(dal.ai_knowledge_sources[source_id])

@@ -91,6 +91,34 @@ def _truthy_active(row: Any) -> bool:
     return getattr(row, "is_active", True) is not False
 
 
+#: Reserved pseudo-platform: ``source_id`` is a NUMERIC community id, resolved to that community's
+#: own tenant. For connections whose upstream resource has no ``community_servers`` link (a YouTube
+#: live chat) the connector runtime already knows the community from the server-derived binding
+#: feed and needs only the authoritative tenant plus the display slugs. Same active/tenant checks
+#: as a source lookup; it never reads editable metadata.
+COMMUNITY_PLATFORM = "community"
+
+
+async def _resolve_community(async_dal: Any, dal: Any, source_id: str) -> ResolvedScope:
+    """Resolve a numeric community id to its (active) tenant scope, fail-closed."""
+    if not source_id.isascii() or not source_id.isdigit() or not 0 < int(source_id) < 2**31:
+        raise InvalidSourceError("community id is not a positive integer")
+    bind_admin_tables(dal)
+    rows = await async_dal.select_async(dal(dal.communities.id == int(source_id)))
+    if not rows or rows[0].tenant_id is None or not _truthy_active(rows[0]):
+        raise ScopeNotFoundError("no active community with a tenant")
+    community = rows[0]
+    tenant_rows = await async_dal.select_async(dal(dal.tenants.id == int(community.tenant_id)))
+    if not tenant_rows or not _truthy_active(tenant_rows[0]):
+        raise ScopeNotFoundError("community has no valid active tenant")
+    return ResolvedScope(
+        tenant_id=int(community.tenant_id),
+        community_id=int(community.id),
+        tenant_slug=str(tenant_rows[0].slug),
+        community_name=str(community.name),
+    )
+
+
 async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str) -> ResolvedScope:
     """Resolve one platform source to its numeric ``(tenant_id, community_id)``.
 
@@ -100,6 +128,8 @@ async def resolve_scope(async_dal: Any, dal: Any, platform: str, source_id: str)
     across tenants is ambiguous (fail closed).
     """
     plat, src = normalize(platform, source_id)
+    if plat == COMMUNITY_PLATFORM:
+        return await _resolve_community(async_dal, dal, src)
     bind_admin_tables(dal)  # idempotent lazy bind of community_servers (see schema.py)
 
     # ``verified`` = communities with an APPROVED community_servers link (a reviewed claim);

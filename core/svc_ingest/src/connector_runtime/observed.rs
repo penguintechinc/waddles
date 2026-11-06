@@ -120,6 +120,7 @@ pub struct ObservedTransport<T: Transport> {
     pacer: Option<Arc<Pacer>>,
     permit: Option<OwnedSemaphorePermit>,
     live: bool,
+    connection_id: Option<String>,
 }
 
 impl<T: Transport> ObservedTransport<T> {
@@ -141,7 +142,20 @@ impl<T: Transport> ObservedTransport<T> {
             pacer,
             permit,
             live: false,
+            connection_id: None,
         }
+    }
+
+    /// Pins every `ConnectionCtx::connection_id` this transport reports to the
+    /// hub connection row id. Transports mint a random per-session id; the
+    /// executor stamps THIS id into every host-call (`_scope`), and the
+    /// host-call bridge resolves it through the active-connection table, so it
+    /// must be the host-owned, stable numeric id -- never a guest- or
+    /// transport-minted one.
+    #[must_use]
+    pub fn with_connection_id(mut self, id: String) -> Self {
+        self.connection_id = Some(id);
+        self
     }
 
     fn set_live(&mut self, live: bool) {
@@ -179,7 +193,12 @@ impl<T: Transport> Transport for ObservedTransport<T> {
         if r.is_err() {
             self.permit = None;
         }
-        r
+        r.map(|mut ctx| {
+            if let Some(id) = &self.connection_id {
+                ctx.connection_id.clone_from(id);
+            }
+            ctx
+        })
     }
 
     async fn send_handshake(&mut self, handshake: Handshake) -> Result<(), TransportError> {

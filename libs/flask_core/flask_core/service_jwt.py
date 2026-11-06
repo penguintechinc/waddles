@@ -109,9 +109,21 @@ SCOPE_CONNECTIONS_LIST = "connections:list"
 #: static-secret kinds (external HTTP / AWS Lambda / GCP function) additionally need this scope.
 #: Community-bound exactly like ``resolve``.
 SCOPE_CONNECTIONS_RESOLVE_STATIC = "connections:resolve:static"
+#: Overlay PUSH grant (svc-presentation's `overlay_auth::push_scope`). The identity allow-list
+#: holds this BASE scope; the token endpoint mints the per-community form
+#: ``presentation.overlay:push:<community_id>`` -- the exact string the Rust verifier requires --
+#: so a credential minted for community 42 can never push to community 91.
+SCOPE_OVERLAY_PUSH = "presentation.overlay:push"
+
+
+def overlay_push_scope(community_id: int) -> str:
+    """The exact per-community `scope` claim an overlay PUSH credential must carry."""
+    return f"{SCOPE_OVERLAY_PUSH}:{community_id}"
+
+
 #: Scopes whose tokens are community-bound.
 COMMUNITY_BOUND_SCOPES = frozenset(
-    {SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC}
+    {SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC, SCOPE_OVERLAY_PUSH}
 )
 
 #: The ONLY extra claims an issuer call may stamp, and both are integers (numeric ids only --
@@ -361,7 +373,8 @@ class ServiceJwtIssuer:
                 f"ttl_seconds {ttl_seconds} exceeds {MAX_TOKEN_TTL_SECONDS}s ceiling"
             )
         identity = self.identities.get(service_id)
-        if identity is None or scope not in identity.allowed_scopes:
+        grant = _allow_list_entry(scope, extra)
+        if identity is None or grant not in identity.allowed_scopes:
             raise BootstrapRejected(
                 f"{service_id!r} is not allow-listed for scope {scope!r}"
             )
@@ -444,6 +457,23 @@ class ServiceJwtIssuer:
                 }
             )
         return {"keys": keys}
+
+
+def _allow_list_entry(scope: str, extra: Mapping[str, int]) -> str:
+    """Identity allow-list key a requested `scope` is checked against.
+
+    Almost always `scope` itself. A per-community overlay PUSH scope
+    (``presentation.overlay:push:<id>``) is granted by the base `SCOPE_OVERLAY_PUSH` entry, and
+    only when the token is bound to that very community -- a mismatched or unbound suffix gets
+    no entry and so is refused, never silently widened.
+    """
+    prefix = f"{SCOPE_OVERLAY_PUSH}:"
+    if not scope.startswith(prefix):
+        return scope
+    suffix = scope[len(prefix) :]
+    if suffix.isascii() and suffix.isdigit() and extra.get("community") == int(suffix):
+        return SCOPE_OVERLAY_PUSH
+    return scope
 
 
 def _validated_extra_claims(extra_claims: Mapping[str, int] | None) -> dict[str, int]:

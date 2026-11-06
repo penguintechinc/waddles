@@ -205,12 +205,19 @@ impl SinkFactory<RecSink> for RecFactory {
 
 struct FakeInvoker;
 
+/// Every `ConnectionCtx::connection_id` an `on_connect` was invoked with.
+static CONNECT_CTX_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 impl ConnectorInvoker for FakeInvoker {
     async fn on_connect(
         &self,
         _p: &str,
-        _c: &ConnectionCtx,
+        c: &ConnectionCtx,
     ) -> Result<Handshake, ConnectorInvokeError> {
+        CONNECT_CTX_IDS
+            .lock()
+            .expect("lock")
+            .push(c.connection_id.clone());
         Ok(Handshake {
             bytes: b"hi".to_vec(),
             secret_refs: vec![],
@@ -452,6 +459,7 @@ struct Opts {
     executor_attached: bool,
     secrets_fail: bool,
     tenants: Arc<FakeTenants>,
+    activator: Option<Arc<dyn ConnectionActivator>>,
 }
 
 impl Default for Opts {
@@ -462,6 +470,7 @@ impl Default for Opts {
             executor_attached: true,
             secrets_fail: false,
             tenants: FakeTenants::ok(1),
+            activator: None,
         }
     }
 }
@@ -535,6 +544,7 @@ fn start(sh: &Shared3, cfg: RuntimeConfig, owner: &str, opts: Opts) -> Running {
     let executor = Arc::new(Attached(AtomicBool::new(opts.executor_attached)));
     let rt = ConnectorRuntime::new(
         RuntimeDeps {
+            activator: opts.activator.clone(),
             feed: FakeFeed(sh.feed.clone()),
             invoker: Arc::new(FakeInvoker),
             registry: Arc::new(registry),
@@ -1111,6 +1121,7 @@ async fn construction_rejects_an_invalid_config() {
     let metrics = RuntimeMetrics::register(&reg).expect("m");
     let res = ConnectorRuntime::new(
         RuntimeDeps {
+            activator: None,
             feed: FakeFeed(sh.feed.clone()),
             invoker: Arc::new(FakeInvoker),
             registry: Arc::new(ConnectorRegistry::new()),
@@ -1160,6 +1171,7 @@ fn core_rig(cfg: RuntimeConfig) -> (TestCore, Arc<LeaseStore>, RuntimeMetrics) {
     let metrics = RuntimeMetrics::register(&reg).expect("m");
     let rt = ConnectorRuntime::new(
         RuntimeDeps {
+            activator: None,
             feed: FakeFeed(sh3.feed.clone()),
             invoker: Arc::new(FakeInvoker),
             registry: Arc::new(ConnectorRegistry::new()),
@@ -1648,5 +1660,146 @@ async fn a_resolver_mismatch_error_parks_and_a_transient_one_retries() {
     eventually("retried", || r.counter("restart", "tenant_lookup") >= 1).await;
     *tenants.mode.lock().expect("lock") = Ok(1);
     eventually("flows after recovery", || sh.ev.count(1) > 2).await;
+    r.stop().await;
+}
+
+// ---- host-call activation -------------------------------------------------
+
+/// Records the active-connection table's life: `(connection_id, tenant)` while
+/// active, every activate/deactivate in order, and an optional refusal.
+#[derive(Default)]
+struct RecActivator {
+    active: Mutex<HashMap<i64, i64>>,
+    log: Mutex<Vec<String>>,
+    refuse: AtomicBool,
+}
+
+impl ConnectionActivator for RecActivator {
+    fn activate(&self, key: &ConnKey, tenant_id: i64) -> Result<(), &'static str> {
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err("refused");
+        }
+        self.active
+            .lock()
+            .expect("lock")
+            .insert(key.connection_id, tenant_id);
+        self.log
+            .lock()
+            .expect("lock")
+            .push(format!("on:{}:{tenant_id}", key.connection_id));
+        Ok(())
+    }
+    fn deactivate(&self, key: &ConnKey, _tenant_id: i64) {
+        self.active.lock().expect("lock").remove(&key.connection_id);
+        self.log
+            .lock()
+            .expect("lock")
+            .push(format!("off:{}", key.connection_id));
+    }
+}
+
+impl RecActivator {
+    fn active(&self) -> HashMap<i64, i64> {
+        self.active.lock().expect("lock").clone()
+    }
+    fn log(&self) -> Vec<String> {
+        self.log.lock().expect("lock").clone()
+    }
+}
+
+#[tokio::test]
+async fn a_running_connection_is_active_with_the_resolved_tenant_until_it_stops() {
+    let srv = WsServer::start().await;
+    let sh = Shared3::new(vec![Spec::ws(1, 10, srv.port), Spec::ws(2, 20, srv.port)]);
+    let act = Arc::new(RecActivator::default());
+    let opts = Opts {
+        activator: Some(act.clone()),
+        ..Opts::default()
+    };
+    let mut r = start(&sh, fast_config(), "a", opts);
+    eventually("both publish", || sh.ev.count(1) > 2 && sh.ev.count(2) > 2).await;
+    assert_eq!(
+        act.active(),
+        HashMap::from([(10, 1), (20, 1)]),
+        "activated with the RESOLVED tenant, before frames flowed"
+    );
+    // Activation precedes the first published event of the connection.
+    assert!(act.log()[0].starts_with("on:"));
+    r.stop().await;
+    assert!(
+        act.active().is_empty(),
+        "shutdown deactivates every connection"
+    );
+    assert_eq!(
+        act.log().iter().filter(|l| l.starts_with("off:")).count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn a_refused_activation_parks_the_connection_and_it_never_runs() {
+    let srv = WsServer::start().await;
+    let sh = Shared3::new(vec![Spec::ws(1, 10, srv.port)]);
+    let act = Arc::new(RecActivator::default());
+    act.refuse.store(true, Ordering::SeqCst);
+    let opts = Opts {
+        activator: Some(act.clone()),
+        ..Opts::default()
+    };
+    let mut r = start(&sh, fast_config(), "a", opts);
+    eventually("parked as activation_failed", || {
+        r.counter("parked", "activation_failed") >= 1
+    })
+    .await;
+    settle(200).await;
+    assert_eq!(
+        sh.ev.count(1),
+        0,
+        "an unscoped connection publishes nothing"
+    );
+    assert_eq!(srv.accepted(), 0, "and never even dials upstream");
+    assert!(act.active().is_empty());
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn a_panicking_connection_is_deactivated_and_reactivated_on_restart() {
+    let srv = WsServer::start().await;
+    let sh = Shared3::new(vec![Spec::ws(2, 20, srv.port)]);
+    let act = Arc::new(RecActivator::default());
+    let opts = Opts {
+        activator: Some(act.clone()),
+        ..Opts::default()
+    };
+    let mut r = start(&sh, fast_config(), "a", opts);
+    eventually("flows", || sh.ev.count(2) > 2).await;
+    assert!(act.active().contains_key(&20));
+    sh.ev.panic_for.lock().expect("lock").insert(2);
+    eventually("deactivated after the panic", || {
+        !act.active().contains_key(&20)
+    })
+    .await;
+    sh.ev.panic_for.lock().expect("lock").clear();
+    eventually("reactivated by the restart", || {
+        act.active().contains_key(&20)
+    })
+    .await;
+    r.stop().await;
+}
+
+/// The ctx id the executor stamps into host-calls must be the hub connection
+/// row id (what the active-connection table is keyed by), not a transport-minted
+/// per-session UUID -- otherwise every scoped host-call is denied.
+#[tokio::test]
+async fn the_connection_ctx_carries_the_hub_connection_id() {
+    let srv = WsServer::start().await;
+    let sh = Shared3::new(vec![Spec::ws(3, 4242, srv.port)]);
+    let mut r = start(&sh, fast_config(), "a", Opts::default());
+    eventually("connected", || sh.ev.count(3) > 0).await;
+    assert!(CONNECT_CTX_IDS
+        .lock()
+        .expect("lock")
+        .iter()
+        .any(|id| id == "4242"));
     r.stop().await;
 }

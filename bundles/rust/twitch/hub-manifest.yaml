@@ -51,6 +51,9 @@ permissions:
 - id: flags.read
   justification: Reads the waddles.overlay-twitch cutover flag (default OFF) as the
     overlay's defence-in-depth gate; without it the gate always reads OFF
+- id: platform.log
+  justification: Bounded, PII-free lifecycle diagnostics (op and count only, debug
+    level); the host drops guest text and keeps only level and size
 routes_to: []
 exported_tools:
 - name: get_chatters

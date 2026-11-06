@@ -745,6 +745,8 @@ mod tests {
         metadata.insert("channel".to_owned(), channel.to_owned());
         metadata.insert("bot_login".to_owned(), "botnick".to_owned());
         BindingSummary {
+            tenant_id: 1,
+            secret_version: 1,
             community_id: community,
             connection_id: conn,
             provider: "twitch".to_owned(),

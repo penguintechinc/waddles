@@ -241,6 +241,8 @@ mod tests {
             metadata.insert(META_BOT_LOGIN.to_owned(), b.to_owned());
         }
         BindingSummary {
+            tenant_id: 1,
+            secret_version: 1,
             community_id: community,
             connection_id: conn,
             provider: "twitch".to_owned(),
@@ -503,6 +505,8 @@ mod tests {
             );
         }
         let s = BindingSummary {
+            tenant_id: 1,
+            secret_version: 1,
             community_id: v["communityId"].as_i64().unwrap(),
             connection_id: v["connectionId"].as_i64().unwrap(),
             provider: v["provider"].as_str().unwrap().to_owned(),

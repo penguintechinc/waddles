@@ -109,7 +109,7 @@ pub const OVERLAYS: &[Overlay] = &[
     Overlay {
         platform: "twitch",
         app_id: "waddles.core.service.twitch",
-        grants: &[Grant::PiiRead, Grant::FlagsRead],
+        grants: &[Grant::PiiRead, Grant::FlagsRead, Grant::PlatformLog],
     },
     Overlay {
         platform: "discord",
@@ -270,6 +270,10 @@ pub enum ActivateError {
     /// The table's lock was poisoned; nothing can be trusted.
     #[error("active-connection table is unusable")]
     Poisoned,
+    /// A DIFFERENT scope (other platform/community/tenant) is already active for
+    /// this connection id; it is never overwritten.
+    #[error("a different scope is already active for this connection id")]
+    Conflict,
 }
 
 /// The host-owned table of ACTIVE connections: `connection_id -> scope`. The
@@ -277,7 +281,8 @@ pub enum ActivateError {
 /// `deactivate`s it when it ends, so a stale id is refused.
 #[derive(Default)]
 pub struct ActiveConnections {
-    table: RwLock<HashMap<i64, CallScope>>,
+    /// `connection_id -> (scope, live registrations of exactly that scope)`.
+    table: RwLock<HashMap<i64, (CallScope, usize)>>,
 }
 
 impl ActiveConnections {
@@ -287,11 +292,15 @@ impl ActiveConnections {
         Self::default()
     }
 
-    /// Registers (or replaces) the scope of a live connection.
+    /// Registers the scope of a live connection. Re-registering the SAME scope
+    /// (a restart overlapping its predecessor) counts one more registration; a
+    /// DIFFERENT scope for an id that is already active is refused, never
+    /// overwritten -- one connection id can never be re-pointed at another
+    /// community's scope while a registration is live.
     ///
     /// # Errors
     /// [`ActivateError`] when an id is not positive, the platform has no
-    /// overlay, or the table is poisoned.
+    /// overlay, the table is poisoned, or the id is active under another scope.
     pub fn activate(&self, scope: CallScope) -> Result<(), ActivateError> {
         if scope.community_id < 1 || scope.tenant_id < 1 || scope.connection_id < 1 {
             return Err(ActivateError::InvalidId);
@@ -300,15 +309,32 @@ impl ActiveConnections {
             return Err(ActivateError::UnknownPlatform);
         }
         let mut table = self.table.write().map_err(|_| ActivateError::Poisoned)?;
-        table.insert(scope.connection_id, scope);
+        match table.get_mut(&scope.connection_id) {
+            Some((existing, n)) if *existing == scope => *n += 1,
+            Some(_) => return Err(ActivateError::Conflict),
+            None => {
+                table.insert(scope.connection_id, (scope, 1));
+            }
+        }
         Ok(())
     }
 
-    /// Removes a connection; later host-calls naming it are denied.
-    pub fn deactivate(&self, connection_id: i64) {
+    /// Drops ONE registration of exactly `scope` (compare-and-remove): the
+    /// entry goes away only when its last registration of that same scope is
+    /// released, and a guard holding a different (stale) scope removes nothing.
+    pub fn deactivate(&self, scope: &CallScope) {
         match self.table.write() {
             Ok(mut table) => {
-                table.remove(&connection_id);
+                let last = match table.get_mut(&scope.connection_id) {
+                    Some((existing, n)) if existing == scope => {
+                        *n = n.saturating_sub(1);
+                        *n == 0
+                    }
+                    _ => false,
+                };
+                if last {
+                    table.remove(&scope.connection_id);
+                }
             }
             Err(_) => error!("active-connection table poisoned; deactivate dropped"),
         }
@@ -333,7 +359,7 @@ impl ActiveConnections {
 impl ScopeSource for ActiveConnections {
     fn scope_of(&self, connection_id: i64) -> Option<CallScope> {
         match self.table.read() {
-            Ok(t) => t.get(&connection_id).cloned(),
+            Ok(t) => t.get(&connection_id).map(|(sc, _)| sc.clone()),
             Err(_) => {
                 // A poisoned table can no longer be trusted: fail closed.
                 error!("active-connection table poisoned; refusing every scope lookup");
@@ -469,6 +495,24 @@ impl IdentityTokenizer for HubIdentityTokenizer {
     }
 }
 
+/// Where a host-call came from, as recorded by the HOST link from its own
+/// pending-invocation table (keyed by the call's `call_id`, the `invoke` frame
+/// id the call happened during) -- never from guest-supplied data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallOrigin {
+    /// Not known to be anything special: a call with no `_scope` stamp is
+    /// UNSCOPED and denied.
+    Other,
+    /// During a `sender.build-request` invocation this host sent for the
+    /// pinned overlay `app_id`. `build-request` carries no `ConnectionCtx`, so
+    /// its calls have no connection scope; the ONLY thing this origin unlocks is
+    /// the overlay's own cutover-flag read (see [`OverlayHostCalls`]).
+    BuildRequest {
+        /// The `app_id` the host invoked (host constant, from the registry).
+        app_id: String,
+    },
+}
+
 /// The host-call servicing seam [`super::wire_invoker::ExecutorLink`] plugs in.
 ///
 /// Takes the raw call (not a pre-resolved scope): resolving the scope, and
@@ -479,6 +523,17 @@ pub trait HostCallHandler: Send + Sync {
         &'a self,
         call: &'a HostCallBody,
     ) -> BoxFut<'a, Result<serde_json::Value, HostCallError>>;
+
+    /// [`Self::handle`] with the host-recorded [`CallOrigin`]. The default
+    /// ignores the origin (a handler with no origin-specific rules); the link
+    /// always calls this form.
+    fn handle_from<'a>(
+        &'a self,
+        call: &'a HostCallBody,
+        _origin: &'a CallOrigin,
+    ) -> BoxFut<'a, Result<serde_json::Value, HostCallError>> {
+        self.handle(call)
+    }
 }
 
 static CALLS: LazyLock<IntCounterVec> = LazyLock::new(|| {
@@ -902,9 +957,88 @@ impl OverlayHostCalls {
         Ok(serde_json::json!({}))
     }
 
+    /// A `build-request` flag read: the one UNSCOPED call shape that is served.
+    ///
+    /// `sender.build-request` has no `ConnectionCtx`, so the executor stamps no
+    /// `_scope`. The scope here is the HOST's own bookkeeping instead: the link
+    /// matched the call's `call_id` to a build-request invocation it sent for
+    /// `invoked_app_id`. Unscoped calls with any other origin stay denied, and
+    /// even from this origin only the overlay's own cutover flag
+    /// (`waddles.overlay-<platform>`, answered from the env baseline) is served:
+    /// no identity, context, log or any other capability.
+    fn build_request_flag(
+        &self,
+        call: &HostCallBody,
+        invoked_app_id: &str,
+    ) -> Result<serde_json::Value, HostCallError> {
+        let unscoped = HostCallError::Denied(DenyReason::UnscopedCall);
+        if call.app_id != invoked_app_id {
+            return Err(HostCallError::Denied(DenyReason::UnknownOverlay));
+        }
+        let overlay =
+            overlay_for(&call.app_id).ok_or(HostCallError::Denied(DenyReason::UnknownOverlay))?;
+        if call.capability != CapabilityKind::Flags {
+            return Err(unscoped);
+        }
+        Self::require(overlay, Grant::FlagsRead)?;
+        let _permit = self.admit_overlay(overlay)?;
+        match call.op.as_str() {
+            "enabled" => {
+                let key = call
+                    .args
+                    .get("key")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(HostCallError::Invalid("flags.enabled requires a key"))?;
+                let own_flag = format!("waddles.overlay-{}", overlay.platform);
+                let on = key == own_flag && self.config.overlay_enabled.contains(overlay.platform);
+                Ok(serde_json::json!({ "enabled": on }))
+            }
+            "tier" => Ok(serde_json::json!({ "tier": "free" })),
+            _ => Err(unscoped),
+        }
+    }
+
+    /// Per-overlay admission only (a build-request call has no connection).
+    fn admit_overlay(&self, overlay: &'static Overlay) -> Result<Permit, HostCallError> {
+        let mut state = self
+            .inflight
+            .lock()
+            .map_err(|_| HostCallError::Unavailable)?;
+        let over = state
+            .overlay
+            .get(overlay.app_id)
+            .copied()
+            .is_some_and(|n| n >= self.config.max_per_overlay);
+        if over {
+            return Err(HostCallError::QuotaExceeded);
+        }
+        *state.overlay.entry(overlay.app_id).or_insert(0) += 1;
+        Ok(Permit {
+            inflight: Arc::clone(&self.inflight),
+            app_id: overlay.app_id,
+            // Never a real id (those are >= 1): `release` is then a no-op.
+            connection_id: 0,
+        })
+    }
+
     /// The full pipeline for one call, without metrics.
-    async fn run(&self, call: &HostCallBody) -> Result<serde_json::Value, HostCallError> {
-        let (scope, overlay) = self.authorize(call)?;
+    async fn run(
+        &self,
+        call: &HostCallBody,
+        origin: &CallOrigin,
+    ) -> Result<serde_json::Value, HostCallError> {
+        let (scope, overlay) = match self.authorize(call) {
+            Ok(ok) => ok,
+            // Unscoped: only a host-recorded build-request origin may proceed,
+            // and only to the flag read. Everything else keeps the denial.
+            Err(HostCallError::Denied(DenyReason::UnscopedCall)) => {
+                return match origin {
+                    CallOrigin::BuildRequest { app_id } => self.build_request_flag(call, app_id),
+                    CallOrigin::Other => Err(HostCallError::Denied(DenyReason::UnscopedCall)),
+                };
+            }
+            Err(e) => return Err(e),
+        };
         let _permit = self.admit(overlay, &scope)?;
         match tokio::time::timeout(self.config.deadline, self.dispatch(&scope, overlay, call)).await
         {
@@ -919,8 +1053,16 @@ impl HostCallHandler for OverlayHostCalls {
         &'a self,
         call: &'a HostCallBody,
     ) -> BoxFut<'a, Result<serde_json::Value, HostCallError>> {
+        self.handle_from(call, &CallOrigin::Other)
+    }
+
+    fn handle_from<'a>(
+        &'a self,
+        call: &'a HostCallBody,
+        origin: &'a CallOrigin,
+    ) -> BoxFut<'a, Result<serde_json::Value, HostCallError>> {
         Box::pin(async move {
-            let result = self.run(call).await;
+            let result = self.run(call, origin).await;
             let capability = capability_label(call.capability);
             match &result {
                 Ok(_) => CALLS.with_label_values(&[capability, "ok"]).inc(),
@@ -1165,7 +1307,7 @@ mod tests {
             .handle(&lookup(TWITCH, Some("11"), "9", "twitch"))
             .await
             .is_ok());
-        t.deactivate(11);
+        t.deactivate(&scope("twitch", 5, 9, 11));
         assert_eq!(
             h.handle(&lookup(TWITCH, Some("11"), "9", "twitch")).await,
             Err(denied(DenyReason::UnknownConnection)),
@@ -1287,7 +1429,6 @@ mod tests {
             flags(YOUTUBE, "13"),
             tier(DISCORD, "12"),
             tier(YOUTUBE, "13"),
-            log(TWITCH, "11"),
             log(YOUTUBE, "13"),
         ] {
             assert_eq!(
@@ -1298,7 +1439,9 @@ mod tests {
                 c.app_id
             );
         }
+        // twitch and discord declare `platform.log` (diagnostics, PII-free); youtube does not.
         assert!(h.handle(&log(DISCORD, "12")).await.is_ok());
+        assert!(h.handle(&log(TWITCH, "11")).await.is_ok());
         assert!(h.handle(&tier(TWITCH, "11")).await.is_ok());
     }
 
@@ -1658,9 +1801,42 @@ mod tests {
         t.activate(scope("twitch", 1, 2, 3)).unwrap();
         assert_eq!(t.len(), 1);
         assert_eq!(t.scope_of(3), Some(scope("twitch", 1, 2, 3)));
-        t.deactivate(3);
+        t.deactivate(&scope("twitch", 1, 2, 3));
         assert_eq!(t.scope_of(3), None);
         assert!(t.is_empty());
+    }
+
+    /// Security review MEDIUM: a conflicting activation is refused (never
+    /// overwrites), and a stale guard's deactivate removes only its own scope.
+    #[test]
+    fn conflicting_activation_is_refused_and_deactivate_is_compare_and_remove() {
+        let t = ActiveConnections::new();
+        let a = scope("twitch", 1, 2, 3);
+        t.activate(a.clone()).unwrap();
+        // Another community / tenant / platform reusing connection id 3.
+        for other in [
+            scope("twitch", 9, 2, 3),
+            scope("twitch", 1, 8, 3),
+            scope("youtube", 1, 2, 3),
+        ] {
+            assert_eq!(t.activate(other.clone()), Err(ActivateError::Conflict));
+            assert_eq!(t.scope_of(3), Some(a.clone()), "never overwritten");
+            // ... and a stale guard of the OTHER scope removes nothing.
+            t.deactivate(&other);
+            assert_eq!(t.scope_of(3), Some(a.clone()));
+        }
+        // Restart overlap: the same scope registered twice; the OLD guard
+        // dropping must NOT remove the NEW registration.
+        t.activate(a.clone()).unwrap();
+        t.deactivate(&a);
+        assert_eq!(t.scope_of(3), Some(a.clone()), "new registration survives");
+        t.deactivate(&a);
+        assert_eq!(t.scope_of(3), None);
+        // Once gone, a different scope may take the id.
+        t.activate(scope("twitch", 9, 2, 3)).unwrap();
+        // Releasing an unregistered scope is a no-op.
+        t.deactivate(&a);
+        assert_eq!(t.scope_of(3), Some(scope("twitch", 9, 2, 3)));
     }
 
     #[test]
@@ -1678,7 +1854,7 @@ mod tests {
             t.activate(scope("twitch", 1, 2, 4)),
             Err(ActivateError::Poisoned)
         );
-        t.deactivate(3);
+        t.deactivate(&scope("twitch", 1, 2, 3));
         assert_eq!(t.len(), 0);
     }
 
@@ -2099,5 +2275,210 @@ mod tests {
             "the fast call is not blocked behind the slow one"
         );
         assert_eq!(read_frame(&mut io).await.unwrap().id, 70);
+    }
+
+    fn build_origin(app: &str) -> CallOrigin {
+        CallOrigin::BuildRequest {
+            app_id: app.to_string(),
+        }
+    }
+
+    fn flag_call(app: &str, op: &str, key: &str) -> HostCallBody {
+        call(
+            app,
+            CapabilityKind::Flags,
+            op,
+            None,
+            serde_json::json!({ "key": key }),
+        )
+    }
+
+    /// The A2 open issue: with a handler installed, a `build-request` flag read
+    /// (no `ConnectionCtx`, so no `_scope`) was denied and the Twitch overlay
+    /// refused to build. The host-recorded build-request origin serves it.
+    #[tokio::test]
+    async fn a_build_request_origin_serves_the_overlays_own_cutover_flag() {
+        let h = handler(Scripted::ok());
+        let on = h
+            .handle_from(
+                &flag_call(TWITCH, "enabled", "waddles.overlay-twitch"),
+                &build_origin(TWITCH),
+            )
+            .await
+            .unwrap();
+        assert_eq!(on["enabled"], true, "twitch overlay is ON by baseline");
+        // Another platform's flag, and an unknown key, read OFF (never ON).
+        for key in ["waddles.overlay-discord", "waddles.connector-tools", ""] {
+            let v = h
+                .handle_from(&flag_call(TWITCH, "enabled", key), &build_origin(TWITCH))
+                .await
+                .unwrap();
+            assert_eq!(v["enabled"], false, "{key:?}");
+        }
+        let tier = h
+            .handle_from(&flag_call(TWITCH, "tier", ""), &build_origin(TWITCH))
+            .await
+            .unwrap();
+        assert_eq!(tier["tier"], "free");
+    }
+
+    /// An overlay whose baseline is OFF reads OFF from a build-request origin.
+    #[tokio::test]
+    async fn a_build_request_flag_read_honors_the_env_baseline_off() {
+        let h = OverlayHostCalls::new(
+            table(),
+            Scripted::ok(),
+            HostCallConfig::new(Vec::<&str>::new()).unwrap(),
+        );
+        let v = h
+            .handle_from(
+                &flag_call(TWITCH, "enabled", "waddles.overlay-twitch"),
+                &build_origin(TWITCH),
+            )
+            .await
+            .unwrap();
+        assert_eq!(v["enabled"], false);
+    }
+
+    /// Mutation target: unscoped calls stay denied. Without a host-recorded
+    /// build-request origin the same flag read is refused (`unscoped_call`), and
+    /// from a build-request origin NOTHING but the flag read is served.
+    #[tokio::test]
+    async fn unscoped_calls_stay_denied_without_the_build_request_origin() {
+        let tok = Scripted::ok();
+        let h = handler(tok.clone());
+        let flag = flag_call(TWITCH, "enabled", "waddles.overlay-twitch");
+        // No origin (`handle`), `Other`: denied, unscoped.
+        assert_eq!(
+            h.handle(&flag).await.unwrap_err(),
+            denied(DenyReason::UnscopedCall)
+        );
+        assert_eq!(
+            h.handle_from(&flag, &CallOrigin::Other).await.unwrap_err(),
+            denied(DenyReason::UnscopedCall)
+        );
+        // From a build-request origin every non-flag capability is still denied.
+        let others = [
+            lookup(TWITCH, None, "9", "twitch"),
+            call(
+                TWITCH,
+                CapabilityKind::Context,
+                "get-context",
+                None,
+                serde_json::json!({}),
+            ),
+            call(
+                TWITCH,
+                CapabilityKind::Log,
+                "write",
+                None,
+                serde_json::json!({"level": "info", "message": "x"}),
+            ),
+            call(
+                TWITCH,
+                CapabilityKind::Clock,
+                "now-millis",
+                None,
+                serde_json::json!({}),
+            ),
+            call(
+                TWITCH,
+                CapabilityKind::Http,
+                "send",
+                None,
+                serde_json::json!({}),
+            ),
+            call(
+                TWITCH,
+                CapabilityKind::Kv,
+                "get",
+                None,
+                serde_json::json!({}),
+            ),
+            flag_call(TWITCH, "set", "waddles.overlay-twitch"),
+        ];
+        for c in &others {
+            assert_eq!(
+                h.handle_from(c, &build_origin(TWITCH)).await.unwrap_err(),
+                denied(DenyReason::UnscopedCall),
+                "{:?}/{}",
+                c.capability,
+                c.op
+            );
+        }
+        assert_eq!(tok.calls(), 0, "nothing tokenized from an unscoped origin");
+    }
+
+    /// The origin names the invoked connector: a call whose `app_id` is a
+    /// different overlay (or unknown) is refused even from a build-request origin.
+    #[tokio::test]
+    async fn a_build_request_origin_cannot_be_used_by_another_overlay() {
+        let h = handler(Scripted::ok());
+        assert_eq!(
+            h.handle_from(
+                &flag_call(DISCORD, "enabled", "waddles.overlay-discord"),
+                &build_origin(TWITCH),
+            )
+            .await
+            .unwrap_err(),
+            denied(DenyReason::UnknownOverlay)
+        );
+        assert_eq!(
+            h.handle_from(
+                &flag_call("waddles.core.service.nope", "enabled", "x"),
+                &build_origin("waddles.core.service.nope"),
+            )
+            .await
+            .unwrap_err(),
+            denied(DenyReason::UnknownOverlay)
+        );
+        // The discord overlay's manifest has no `flags.read`: grant missing.
+        assert_eq!(
+            h.handle_from(
+                &flag_call(DISCORD, "enabled", "waddles.overlay-discord"),
+                &build_origin(DISCORD),
+            )
+            .await
+            .unwrap_err(),
+            denied(DenyReason::GrantMissing)
+        );
+    }
+
+    /// A forged `_scope` on a build-request origin goes through the normal scope
+    /// checks (unknown connection), never the unscoped flag allowance.
+    #[tokio::test]
+    async fn a_forged_scope_on_a_build_request_origin_is_still_checked() {
+        let h = handler(Scripted::ok());
+        let forged = call(
+            TWITCH,
+            CapabilityKind::Flags,
+            "enabled",
+            Some("999"),
+            serde_json::json!({"key": "waddles.overlay-twitch"}),
+        );
+        assert_eq!(
+            h.handle_from(&forged, &build_origin(TWITCH))
+                .await
+                .unwrap_err(),
+            denied(DenyReason::UnknownConnection)
+        );
+    }
+
+    /// The build-request path is admission-controlled like every other call:
+    /// at the per-overlay cap it is refused (never queued), and the slot frees.
+    #[tokio::test]
+    async fn build_request_flag_reads_respect_the_per_overlay_in_flight_cap() {
+        let h = handler_with(Scripted::ok(), |c| c.max_per_overlay = 1);
+        let overlay = overlay_for(TWITCH).unwrap();
+        let held = h.admit_overlay(overlay).unwrap();
+        let call = flag_call(TWITCH, "enabled", "waddles.overlay-twitch");
+        assert_eq!(
+            h.handle_from(&call, &build_origin(TWITCH))
+                .await
+                .unwrap_err(),
+            HostCallError::QuotaExceeded
+        );
+        drop(held);
+        assert!(h.handle_from(&call, &build_origin(TWITCH)).await.is_ok());
     }
 }
