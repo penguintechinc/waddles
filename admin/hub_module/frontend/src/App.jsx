@@ -323,7 +323,7 @@ function App() {
         <Route path="/admin/:communityId/marketplace" element={<MarketplaceRedirect />} />
         <Route path="/admin/:communityId/marketplace/:source/:id" element={<ServedFeature feature="community-marketplace-install"><AdminMarketplaceModuleDetail /></ServedFeature>} />
         <Route path="/admin/:communityId/premium" element={<AdminCommunityPremium />} />
-        <Route path="/admin/:communityId/stream-overlays" element={<ServedFeature feature="browser-sources"><AdminStreamOverlays /></ServedFeature>} />
+        <Route path="/admin/:communityId/stream-overlays" element={<AdminStreamOverlays />} />
         <Route path="/admin/:communityId/domains" element={<ServedFeature feature="custom-domains"><AdminDomains /></ServedFeature>} />
         <Route path="/admin/:communityId/servers" element={<ServedFeature feature="linked-servers"><AdminServers /></ServedFeature>} />
         <Route path="/admin/:communityId/connected-platforms" element={<ServedFeature feature="community-oauth-credentials"><AdminConnectedPlatforms /></ServedFeature>} />

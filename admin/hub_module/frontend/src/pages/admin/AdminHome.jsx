@@ -13,11 +13,11 @@ function AdminHome() {
   useEffect(() => {
     async function fetchStats() {
       try {
-        // Browser sources and custom domains have no hub-api route yet: never call them.
+        // Custom domains have no hub-api route yet: never call them.
         const [members, modules, sources, domains] = await Promise.all([
           adminApi.getMembers(communityId, { limit: 1 }),
           adminApi.getModules(communityId),
-          isFeatureServed('browser-sources') ? adminApi.getBrowserSources(communityId) : null,
+          adminApi.getBrowserSources(communityId),
           isFeatureServed('custom-domains') ? adminApi.getDomains(communityId) : null,
         ]);
         setStats({
@@ -38,7 +38,7 @@ function AdminHome() {
   const cards = [
     { to: `/admin/${communityId}/members`, icon: UserGroupIcon, label: 'Members', value: stats?.memberCount, color: 'bg-blue-500' },
     { to: `/admin/${communityId}/modules`, icon: PuzzlePieceIcon, label: 'Modules', value: stats?.moduleCount, color: 'bg-purple-500' },
-    { to: `/admin/${communityId}/browser-sources`, icon: ComputerDesktopIcon, label: 'Browser Sources', value: stats?.sourceCount, color: 'bg-green-500', feature: 'browser-sources' },
+    { to: `/admin/${communityId}/stream-overlays`, icon: ComputerDesktopIcon, label: 'Browser Sources', value: stats?.sourceCount, color: 'bg-green-500' },
     { to: `/admin/${communityId}/domains`, icon: GlobeAltIcon, label: 'Custom Domains', value: stats?.domainCount, color: 'bg-orange-500', feature: 'custom-domains' },
   ];
 

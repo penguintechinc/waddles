@@ -76,6 +76,11 @@ use crate::pipeline::{
 use crate::rtc::ingest_auth::{IngestAuthError, WhipTokenAuthorizer};
 use crate::spec_builder::{plan_push_outputs, DEFAULT_PROFILE};
 use crate::telemetry::stream::{protocol_label, SessionFailure, Stage, StreamMetrics};
+
+/// How long the pump waits for the supervisor to attach ffmpeg's stdin after
+/// `start()` before giving the session up (spawn failed or wedged).
+const STDIN_ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Dedicated profile for `Record` outputs -- always `Copy`/`Copy`
 /// regardless of `streaming_configs.transcode_enabled`, deliberately never
 /// sharing a name with `DEFAULT_PROFILE`. Two *transcoded* (non-`Copy`)
@@ -663,6 +668,15 @@ impl Orchestrator {
         if matches!(kind, IngestKind::Rtmp | IngestKind::Srt) {
             match self.supervisor.stdin_writer(pipeline_id).await {
                 Ok(stdin) => {
+                    // The supervisor spawns ffmpeg asynchronously: pumping before
+                    // its stdin is attached would drop the FLV header and codec
+                    // sequence headers (unrecoverable for the session).
+                    if let Err(err) = stdin.wait_attached(STDIN_ATTACH_TIMEOUT).await {
+                        tracing::error!(%pipeline_id, error = %err, "orchestrator: ffmpeg stdin never attached -- tearing the pipeline down");
+                        metrics.record_session_failure(kind, SessionFailure::StdinUnavailable);
+                        self.stop_pipeline(pipeline_id).await;
+                        return;
+                    }
                     // Live for exactly as long as bytes are being pumped; the
                     // guard's `Drop` records the session lifetime and
                     // decrements the active gauge on every exit path.

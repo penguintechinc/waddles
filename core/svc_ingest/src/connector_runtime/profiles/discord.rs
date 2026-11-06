@@ -55,8 +55,11 @@ pub const CAPABILITY: &str = "chat_ingest";
 pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 /// Handle the overlay's IDENTIFY names for the bot token (`secret_refs`).
 pub const BOT_HANDLE: &str = "discord-bot";
-/// Byte prefix the credential slot may directly follow in the IDENTIFY/RESUME.
-pub const TOKEN_PREFIX: &str = "\"token\":\"";
+/// IDENTIFY (op 2) leading context the credential slot may directly follow;
+/// anchored at frame offset 0 by the transport.
+pub const TOKEN_PREFIX: &str = "{\"op\":2,\"d\":{\"token\":\"";
+/// RESUME (op 6) counterpart of [`TOKEN_PREFIX`].
+pub const TOKEN_PREFIX_RESUME: &str = "{\"op\":6,\"d\":{\"token\":\"";
 /// Hosts a captured `resume_gateway_url` may point at.
 pub const RESUME_ALLOWED_HOSTS: &str = "*.discord.gg";
 /// Query appended to the captured resume URL.
@@ -241,7 +244,10 @@ fn ws_config(guild_id: &str, conn: ConnectionRef, env: &RuntimeEnv) -> WsConfig 
         max_frame_bytes: env.max_frame_bytes,
         dedup_window: 0,
         allow_loopback_insecure: false,
-        slot_prefixes: vec![TOKEN_PREFIX.to_string()],
+        slot_prefixes: HashMap::from([(
+            BOT_HANDLE.to_string(),
+            vec![TOKEN_PREFIX.to_string(), TOKEN_PREFIX_RESUME.to_string()],
+        )]),
         auto_replies: Vec::new(),
         self_echo: None,
         // The interval is captured from HELLO (`session.heartbeat`).
@@ -429,7 +435,13 @@ mod tests {
                 }
             )])
         );
-        assert_eq!(c.slot_prefixes, vec!["\"token\":\"".to_string()]);
+        assert_eq!(
+            c.slot_prefixes,
+            HashMap::from([(
+                "discord-bot".to_string(),
+                vec![TOKEN_PREFIX.to_string(), TOKEN_PREFIX_RESUME.to_string()]
+            )])
+        );
         assert_eq!(c.resume_token, None);
         assert_eq!(c.connect_timeout, Duration::from_secs(15));
         assert_eq!(c.idle_timeout, Duration::from_secs(150));
@@ -813,7 +825,13 @@ mod tests {
     async fn only_the_bot_token_handle_resolves_through_the_real_secret_source() {
         let c = ws(plan_ok(&binding(Some(GUILD))));
         assert_eq!(c.handles.keys().collect::<Vec<_>>(), vec!["discord-bot"]);
-        assert_eq!(c.slot_prefixes, vec!["\"token\":\"".to_string()]);
+        assert_eq!(
+            c.slot_prefixes,
+            HashMap::from([(
+                "discord-bot".to_string(),
+                vec![TOKEN_PREFIX.to_string(), TOKEN_PREFIX_RESUME.to_string()]
+            )])
+        );
         let conn = c.handles["discord-bot"];
         let secrets = crate::connector::TransportSecrets::new(std::sync::Arc::new(OneRow), 7)
             .unwrap()
@@ -833,6 +851,49 @@ mod tests {
         };
         let gw = Destination::from_url(&reqwest::Url::parse(GATEWAY_URL).unwrap()).unwrap();
         assert!(secrets.resolve(other, gw).await.is_err(), "other community");
+    }
+
+    /// regression: per-handle anchored prefixes through the REAL
+    /// `TransportSecrets`: IDENTIFY/RESUME with the token first are accepted;
+    /// the token nested after other keys or inside another string is refused.
+    #[tokio::test]
+    async fn mid_payload_token_placement_is_refused_through_the_real_source() {
+        use crate::connector::transport_common::substitute_slots;
+        let c = ws(plan_ok(&binding(Some(GUILD))));
+        let secrets = crate::connector::TransportSecrets::new(std::sync::Arc::new(OneRow), 7)
+            .unwrap()
+            .with_expected_provider("discord");
+        let gw = || Destination::from_url(&reqwest::Url::parse(GATEWAY_URL).unwrap()).unwrap();
+        let refs = vec![("{{T}}".to_string(), "discord-bot".to_string())];
+        let run = |bytes: &'static [u8]| {
+            let (secrets, c, refs) = (&secrets, &c, &refs);
+            async move {
+                substitute_slots(secrets, &c.handles, bytes, refs, &c.slot_prefixes, &gw()).await
+            }
+        };
+        let id = run(br#"{"op":2,"d":{"token":"{{T}}","intents":1}}"#)
+            .await
+            .unwrap();
+        assert_eq!(&id[..], br#"{"op":2,"d":{"token":"bot-tok","intents":1}}"#);
+        let rs = run(br#"{"op":6,"d":{"token":"{{T}}","seq":5}}"#)
+            .await
+            .unwrap();
+        assert_eq!(&rs[..], br#"{"op":6,"d":{"token":"bot-tok","seq":5}}"#);
+        for evil in [
+            &br#"{"d":{"intents":1,"token":"{{T}}"},"op":2}"#[..],
+            br#"{"op":2,"d":{"x":"a","token":"{{T}}"}}"#,
+            br#"{"op":2,"d":{"a":{"token":"{{T}}"}}}"#,
+            br#"{"op":3,"d":{"token":"{{T}}"}}"#,
+            br#"{"op":2,"d":{"text":"\"token\":\"{{T}}"}}"#,
+        ] {
+            assert!(
+                run(Box::leak(evil.to_vec().into_boxed_slice()))
+                    .await
+                    .is_err(),
+                "{}",
+                String::from_utf8_lossy(evil)
+            );
+        }
     }
 
     /// The tenant is never read from (editable) binding metadata.
