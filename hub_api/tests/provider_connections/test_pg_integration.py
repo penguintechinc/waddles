@@ -356,6 +356,70 @@ class TestLifecycleOnPostgres:
         assert [i for i in relay.items if i.tenant_id == ids.tenant] == []
 
 
+class TestBindingFeedOnPostgres:
+    """tenantId from the communities join and the secret_version counter, on real Postgres."""
+
+    async def test_tenant_comes_from_the_community_and_a_foreign_grant_is_refused(
+        self,
+        service: ProviderConnectionService,
+        slow_twitch: SlowTwitch,
+        pg_db: PgTestDatabase,
+        ids: Ids,
+    ) -> None:
+        view = await _create(service, ids, slow_twitch.mint(account=BOT))
+        link = view.binding.connection.id
+        for community in (ids.second, ids.other_community):
+            _sql(
+                pg_db,
+                "INSERT INTO community_connection_access (community_id, connection_id, status, "
+                "enabled) VALUES (%s, %s, 'approved', true)",
+                (community, link),
+            )
+        page = await service.list_for_dataplane(
+            provider="twitch", capability="chat_ingest", after=0, limit=1000
+        )
+        mine = {(i.community_id, i.tenant_id) for i in page.items if i.connection_id == link}
+        # The cross-tenant grant (other_community) is withheld, never relabelled.
+        assert mine == {(ids.community, ids.tenant), (ids.second, ids.tenant)}
+
+    async def test_secret_version_is_a_db_counter_bumped_only_by_credential_replacement(
+        self,
+        service: ProviderConnectionService,
+        slow_twitch: SlowTwitch,
+        pg_db: PgTestDatabase,
+        ids: Ids,
+    ) -> None:
+        view = await _create(service, ids, slow_twitch.mint(account=BOT))
+        link = view.binding.connection.id
+
+        def stored() -> int:
+            return int(
+                _sql(pg_db, "SELECT secret_version FROM platform_connections WHERE id=%s", (link,))[
+                    0
+                ][0]
+            )
+
+        assert stored() == 1
+        access, refresh = slow_twitch.mint(account=BOT)
+        await service.update(
+            tenant_id=ids.tenant,
+            community_id=ids.community,
+            actor_user_id=None,
+            connection_id=link,
+            enabled=None,
+            metadata=None,
+            access_token=access,
+            refresh_token=refresh,
+        )
+        assert stored() == 2
+        page = await service.list_for_dataplane(
+            provider="twitch", capability=None, after=0, limit=1000
+        )
+        assert [i.secret_version for i in page.items if i.connection_id == link] == [2]
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            _sql(pg_db, "UPDATE platform_connections SET secret_version=0 WHERE id=%s", (link,))
+
+
 class TestRefreshLock:
     async def test_concurrent_resolvers_spend_the_single_use_refresh_token_exactly_once(
         self,

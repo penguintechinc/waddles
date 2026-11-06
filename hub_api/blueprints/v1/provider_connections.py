@@ -252,7 +252,11 @@ class UpdateConnectionRequest:
 
 @dataclass(slots=True, frozen=True)
 class DataPlaneBindingDTO:
-    """One (community, connection) pair the data plane should run. Carries no token."""
+    """One (community, connection) pair the data plane should run. Carries no token.
+
+    ``tenantId`` is derived server-side from the community's own tenant (never metadata);
+    ``secretVersion`` is a rotation counter -- a change means the credential was replaced.
+    """
 
     grantId: int
     connectionId: int
@@ -266,6 +270,7 @@ class DataPlaneBindingDTO:
     updatedAt: str | None
     metadata: dict[str, str]
     kind: int = 1
+    secretVersion: int = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -440,6 +445,7 @@ def _dataplane_dto(item: DataPlaneBinding) -> DataPlaneBindingDTO | None:
         updatedAt=_iso(item.updated_at),
         metadata=metadata,
         kind=item.kind,
+        secretVersion=item.secret_version,
     )
 
 

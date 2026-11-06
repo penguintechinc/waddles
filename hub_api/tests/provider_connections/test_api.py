@@ -583,6 +583,7 @@ class TestInternalApi:
             "updatedAt",
             "metadata",
             "kind",
+            "secretVersion",
         }
         assert (item["connectionId"], item["communityId"], item["resourceId"]) == (
             cid,
