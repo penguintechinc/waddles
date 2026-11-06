@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -122,6 +123,7 @@ from identity_crypto import (
     TtlCachedDekProvider,
 )
 from outbound_drain import DRAIN_SOCKET_TIMEOUT_S, TwitchOutboundDrain
+from overlay_selector import OverlaySelector
 from receivers.discord_gateway import CONSUMES_TAG as DISCORD_CONSUMES_TAG
 from receivers.discord_gateway import DiscordGatewayReceiver
 from receivers.kick_pusher import CONSUMES_TAG as KICK_CONSUMES_TAG
@@ -676,8 +678,15 @@ def _register_twitch_receivers(
     *,
     redis_client: Any,
     registry: AppRegistry,
+    register_inbound: bool = True,
+    register_outbound: bool = True,
 ) -> None:
-    """Build + lease-guard + supervise one Twitch IRC receiver per channel, if configured."""
+    """Build + lease-guard + supervise one Twitch IRC receiver per channel, if configured.
+
+    `register_inbound`/`register_outbound` are the overlay-selector suppression
+    switches: the overlay runtime owns inbound when OVERLAY_TWITCH_ENABLED, and
+    the outbound drain only when the executor path (CONNECTOR_TOOLS_ENABLED) does.
+    """
     if not (Config.TWITCH_BOT_TOKEN_REF and Config.TWITCH_CHANNELS):
         logger.system(
             "svc-ingest starting with no Twitch IRC receivers -- "
@@ -707,7 +716,7 @@ def _register_twitch_receivers(
             registry=registry,
         )
 
-    for channel in Config.TWITCH_CHANNELS:
+    for channel in Config.TWITCH_CHANNELS if register_inbound else ():
         twitch_receiver = TwitchIrcReceiver()
         # ONE lease per channel -- IrcTransport.receive() is a single-
         # channel-per-connection contract, so two replicas must never
@@ -732,40 +741,41 @@ def _register_twitch_receivers(
 
     app.config["twitch_leased_receivers"] = leased_receivers
 
-    # Dedicated Valkey connection for the drain's own blocking BRPOP --
-    # NOT the shared redis_client above, whose socket_timeout
-    # (Config.REDIS_SOCKET_TIMEOUT_S, explicit as of 2026-09-09 -- see
-    # this function's own redis_client construction) equals the BRPOP
-    # block timeout and would race it on every idle poll (see
-    # outbound_drain.py's own module docstring for the full root-cause).
-    # Closed in shutdown() below alongside redis_client.
-    drain_redis_client = redis.from_url(
-        Config.VALKEY_URL,
-        encoding="utf-8",
-        decode_responses=True,
-        socket_timeout=DRAIN_SOCKET_TIMEOUT_S,
-    )
-    app.config["twitch_outbound_drain_redis_client"] = drain_redis_client
+    if register_outbound:
+        # Dedicated Valkey connection for the drain's own blocking BRPOP --
+        # NOT the shared redis_client above, whose socket_timeout
+        # (Config.REDIS_SOCKET_TIMEOUT_S, explicit as of 2026-09-09 -- see
+        # this function's own redis_client construction) equals the BRPOP
+        # block timeout and would race it on every idle poll (see
+        # outbound_drain.py's own module docstring for the full root-cause).
+        # Closed in shutdown() below alongside redis_client.
+        drain_redis_client = redis.from_url(
+            Config.VALKEY_URL,
+            encoding="utf-8",
+            decode_responses=True,
+            socket_timeout=DRAIN_SOCKET_TIMEOUT_S,
+        )
+        app.config["twitch_outbound_drain_redis_client"] = drain_redis_client
 
-    outbound_drain = TwitchOutboundDrain(
-        redis_client=drain_redis_client,
-        # The ORDINARY shared client (same one every other Twitch/Discord
-        # lease already uses) for the drain's own claim/renew/release --
-        # deliberately NOT drain_redis_client, see outbound_drain.py's own
-        # "Two separate Valkey clients" docstring section for why sharing
-        # one connection between a blocking BRPOP and lease SET/EVAL calls
-        # is unsafe.
-        lease_redis_client=redis_client,
-        irc_config_base=irc_config_base,
-        # Same replica_id as this replica's own per-channel leases above --
-        # one owner identity per svc-ingest process across every Twitch
-        # lease it may hold (inbound receive AND outbound transmit).
-        owner_id=replica_id,
-        ttl_s=Config.SOCKET_LEASE_TTL_S,
-        renew_interval_s=Config.SOCKET_LEASE_RENEW_INTERVAL_S,
-    )
-    app.config["twitch_outbound_drain"] = outbound_drain
-    supervisor.register("twitch_outbound_drain", outbound_drain.run)
+        outbound_drain = TwitchOutboundDrain(
+            redis_client=drain_redis_client,
+            # The ORDINARY shared client (same one every other Twitch/Discord
+            # lease already uses) for the drain's own claim/renew/release --
+            # deliberately NOT drain_redis_client, see outbound_drain.py's own
+            # "Two separate Valkey clients" docstring section for why sharing
+            # one connection between a blocking BRPOP and lease SET/EVAL calls
+            # is unsafe.
+            lease_redis_client=redis_client,
+            irc_config_base=irc_config_base,
+            # Same replica_id as this replica's own per-channel leases above --
+            # one owner identity per svc-ingest process across every Twitch
+            # lease it may hold (inbound receive AND outbound transmit).
+            owner_id=replica_id,
+            ttl_s=Config.SOCKET_LEASE_TTL_S,
+            renew_interval_s=Config.SOCKET_LEASE_RENEW_INTERVAL_S,
+        )
+        app.config["twitch_outbound_drain"] = outbound_drain
+        supervisor.register("twitch_outbound_drain", outbound_drain.run)
 
     logger.system(
         "svc-ingest registered Twitch IRC receivers",
@@ -793,6 +803,30 @@ def _register_twitch_eventsub(*, redis_client: Any, registry: AppRegistry) -> No
         tenant_slug=Config.RUNNER_TENANT_SLUG,
     )
     logger.system("svc-ingest registered Twitch EventSub handler", action="startup")
+
+
+def _log_overlay_skips(selector: OverlaySelector) -> None:
+    """One INFO line per Python receiver set the overlay runtime now owns."""
+    for platform in ("twitch", "discord", "youtube"):
+        if selector.overlay(platform):
+            logger.system(
+                f"svc-ingest overlay ON for {platform}; python receivers not registered",
+                action="startup",
+                result="SKIPPED",
+                platform=platform,
+            )
+    if selector.twitch and not selector.twitch_outbound_legacy:
+        logger.system(
+            "svc-ingest overlay+tools ON for twitch; python outbound drain not registered",
+            action="startup",
+            result="SKIPPED",
+        )
+    if selector.twitch and not selector.twitch_eventsub_legacy:
+        logger.system(
+            "svc-ingest runtime owns twitch webhooks; python EventSub handler not registered",
+            action="startup",
+            result="SKIPPED",
+        )
 
 
 @app.before_serving
@@ -867,13 +901,29 @@ async def startup() -> None:
     # loud and fail closed, never continue serving with a receiver that
     # never actually registered.
     try:
-        _register_discord_receiver(supervisor, redis_client=redis_client, registry=registry)
+        # Same env baselines as the Rust svc-ingest (one helm value feeds
+        # both); never the flag client. Malformed/blocked is fatal.
+        selector = OverlaySelector.from_env(os.environ)
+        app.config["overlay_selector"] = selector
+        _log_overlay_skips(selector)
+        if selector.legacy("discord"):
+            _register_discord_receiver(supervisor, redis_client=redis_client, registry=registry)
         _register_slack_receiver(supervisor, redis_client=redis_client, registry=registry)
-        _register_youtube_live_receiver(supervisor, redis_client=redis_client, registry=registry)
+        if selector.legacy("youtube"):
+            _register_youtube_live_receiver(
+                supervisor, redis_client=redis_client, registry=registry
+            )
         _register_kick_receivers(supervisor, redis_client=redis_client, registry=registry)
         _register_spectrum_receivers(supervisor, redis_client=redis_client, registry=registry)
-        _register_twitch_receivers(supervisor, redis_client=redis_client, registry=registry)
-        _register_twitch_eventsub(redis_client=redis_client, registry=registry)
+        _register_twitch_receivers(
+            supervisor,
+            redis_client=redis_client,
+            registry=registry,
+            register_inbound=selector.legacy("twitch"),
+            register_outbound=selector.twitch_outbound_legacy,
+        )
+        if selector.twitch_eventsub_legacy:
+            _register_twitch_eventsub(redis_client=redis_client, registry=registry)
         await supervisor.start()
     except Exception as exc:
         logger.error(

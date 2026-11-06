@@ -7,6 +7,8 @@
 
 use axum::body::Bytes;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 type ConnectInfoRejection =
     <ConnectInfo<SocketAddr> as axum::extract::FromRequestParts<AppState>>::Rejection;
@@ -43,6 +45,46 @@ fn render(outcome: WebhookOutcome) -> Response {
     (status, Json(serde_json::json!({ "status": tag }))).into_response()
 }
 
+/// Discord requires an interaction response within 3 s; answer with margin so
+/// a slow secret/dedup backend fails loud (503) instead of timing out blind.
+pub const DISCORD_ACK_DEADLINE: Duration = Duration::from_millis(2500);
+
+/// Platform slug whose routes use the interaction-ack contract.
+const DISCORD: &str = "discord";
+
+/// Host-side interaction response for a VERIFIED Discord interaction body:
+/// PING -> PONG, commands/modals/components -> deferred ack (the overlay does
+/// the real work asynchronously). `None` for an unsupported type (loud 400).
+fn discord_ack(body: &[u8]) -> Option<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    match v.get("type")?.as_u64()? {
+        1 => Some(serde_json::json!({ "type": 1 })),
+        // APPLICATION_COMMAND -> DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+        2 => Some(serde_json::json!({ "type": 5 })),
+        // MESSAGE_COMPONENT / MODAL_SUBMIT -> DEFERRED_UPDATE_MESSAGE
+        3 | 5 => Some(serde_json::json!({ "type": 6 })),
+        // APPLICATION_COMMAND_AUTOCOMPLETE -> empty choices
+        4 => Some(serde_json::json!({ "type": 8, "data": { "choices": [] } })),
+        _ => None,
+    }
+}
+
+/// Renders a Discord route's outcome: verified deliveries get the interaction
+/// response; every rejection keeps the uniform content-free mapping.
+fn render_discord(outcome: WebhookOutcome, body: &[u8]) -> Response {
+    match outcome {
+        WebhookOutcome::Accepted | WebhookOutcome::Duplicate => match discord_ack(body) {
+            Some(ack) => (StatusCode::OK, Json(ack)).into_response(),
+            None => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "status": "unsupported_interaction_type" })),
+            )
+                .into_response(),
+        },
+        other => render(other),
+    }
+}
+
 async fn intake(
     State(state): State<AppState>,
     Path(route_key): Path<String>,
@@ -57,17 +99,36 @@ async fn intake(
     // Peer IP (when the server provides ConnectInfo) is used only to
     // throttle that source's failed verifications.
     let source = peer.ok().map(|ConnectInfo(a)| a.ip().to_string());
-    render(
-        ingress
-            .handle_from(
-                &route_key,
-                source.as_deref(),
-                &headers,
-                &body,
-                chrono::Utc::now().timestamp(),
-            )
-            .await,
-    )
+    let now = chrono::Utc::now().timestamp();
+    if ingress.owner_of(&route_key).as_deref() != Some(DISCORD) {
+        return render(
+            ingress
+                .handle_from(&route_key, source.as_deref(), &headers, &body, now)
+                .await,
+        );
+    }
+    // Discord: run the ingress as a DETACHED task and bound only our wait, so
+    // the 3 s deadline never cancels the dedup mark/dispatch mid-flight.
+    let ing = Arc::clone(ingress);
+    let (key, hdrs, payload) = (route_key.clone(), headers, body.clone());
+    let mut task = tokio::spawn(async move {
+        ing.handle_from(&key, source.as_deref(), &hdrs, &payload, now)
+            .await
+    });
+    match tokio::time::timeout(DISCORD_ACK_DEADLINE, &mut task).await {
+        Ok(Ok(outcome)) => render_discord(outcome, &body),
+        Ok(Err(err)) => {
+            tracing::error!(error = %err, "discord webhook task failed");
+            render(WebhookOutcome::Unavailable)
+        }
+        Err(_) => {
+            tracing::warn!(
+                route_fp = %crate::connector_runtime::webhook_boot::route_fingerprint(&route_key),
+                "discord interaction missed the ack deadline; answering 503"
+            );
+            render(WebhookOutcome::Unavailable)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -261,3 +322,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod discord_tests;
