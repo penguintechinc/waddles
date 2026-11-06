@@ -225,6 +225,11 @@ pipeline:
   # network call mocked: 228,876,288 bytes (~218Mi) for BOTH bundles. Limits set to
   # ~1.5x that measured peak, rounded up, with extra headroom for real asyncpg/Postgres
   # (vs the measurement's sqlite fixture) and OTel SDK overhead not present in the probe.
+  # Seeder publishes the signed connector objects the executor pins at boot; digests are build
+  # outputs (see values.yaml pipeline.connectors) -- set digests.<p> from the seeder log after
+  # the first deploy, then enable the connector (connectorRuntime.connector.<p>.enabled).
+  connectors:
+    publishAtSeed: true
   coreBundleSeeder:
     enabled: true
     # fix/preexisting-test-failures: the alpha Discord ingest source, moved here from

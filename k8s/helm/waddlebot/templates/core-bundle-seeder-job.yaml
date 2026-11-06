@@ -181,6 +181,13 @@ spec:
         - name: CORE_BUNDLES_PLATFORM_CONNECTIONS
           value: {{ toJson $connections | quote }}
         {{- end }}
+        {{- if ((.Values.pipeline.connectors | default dict).publishAtSeed) }}
+        # Publish connectors/<p>/<digest>.{wasm,json} (signed) for the executor boot pin --
+        # seed_core_bundles.py / services/connector_publish_service.py. Digests are logged for
+        # `pipeline.connectors.digests`.
+        - name: CORE_BUNDLES_PUBLISH_CONNECTORS
+          value: "true"
+        {{- end }}
         {{- if .Values.pipeline.coreBundleSeeder.tenantSlugs }}
         - name: CORE_BUNDLES_TENANT_SLUGS
           value: {{ .Values.pipeline.coreBundleSeeder.tenantSlugs | quote }}

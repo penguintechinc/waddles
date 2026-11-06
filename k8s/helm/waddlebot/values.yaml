@@ -1025,6 +1025,11 @@ pipeline:
   # (sha256:<64 lowercase hex>; empty = unset). Rendered into svc-ingest
   # SENDER_EXEC_DIGEST_<P> AND bundle-executor CONNECTOR_PIN_DIGEST_<P>.
   connectors:
+    # Seeder Job publishes connectors/<p>/<digest>.{wasm,json} (signed with the platform key) from
+    # the reproducibly-built wasm in its image and logs the digests to set below. Digests are
+    # build outputs, NOT committed per-env: copy them from the seeder log or the output of
+    # `make publish-connector-bundles ENV=<env>` (scripts/publish-connector-bundles.sh).
+    publishAtSeed: false
     digests:
       twitch: ""
       discord: ""
