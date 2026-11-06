@@ -17,7 +17,7 @@ import {
   SignalIcon,
   WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline';
-import api from '../../services/api';
+import { vendorApi } from '../../services/api';
 
 const SYNC_MODES = [
   { value: 'tickets_only', label: 'Tickets Only' },
@@ -195,10 +195,10 @@ function ConnectionModal({ open, editTarget, onClose, onSaved, showToast }) {
     try {
       setSaving(true);
       if (editTarget?.id) {
-        await api.put(`/vendor/github-sync/connections/${editTarget.id}`, form);
+        await vendorApi.updateGithubConnection(editTarget.id, form);
         showToast('success', 'Connection updated');
       } else {
-        await api.post('/vendor/github-sync/connections', form);
+        await vendorApi.createGithubConnection(form);
         showToast('success', 'Repository connected');
       }
       onSaved();
@@ -379,7 +379,7 @@ function VendorGithubSync() {
   const loadConnections = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await api.get('/vendor/github-sync/connections');
+      const res = await vendorApi.getGithubConnections();
       setConnections(res.data?.connections || []);
     } catch (err) {
       showToast('error', err.response?.data?.error?.message || 'Failed to load connections');
@@ -410,7 +410,7 @@ function VendorGithubSync() {
   const handleDisconnect = async () => {
     if (!confirmDisconnect) return;
     try {
-      await api.delete(`/vendor/github-sync/connections/${confirmDisconnect.id}`);
+      await vendorApi.deleteGithubConnection(confirmDisconnect.id);
       showToast('success', `Disconnected ${confirmDisconnect.repoOwner}/${confirmDisconnect.repoName}`);
       loadConnections();
     } catch (err) {
@@ -423,7 +423,7 @@ function VendorGithubSync() {
   const handleTestConnection = async (conn) => {
     try {
       setTestingId(conn.id);
-      await api.post(`/vendor/github-sync/connections/${conn.id}/test`);
+      await vendorApi.testGithubConnection(conn.id);
       showToast('success', 'Connection test passed');
     } catch (err) {
       showToast('error', err.response?.data?.error?.message || 'Connection test failed');

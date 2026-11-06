@@ -14,7 +14,7 @@ import {
   XCircleIcon,
   PencilSquareIcon,
 } from '@heroicons/react/24/outline';
-import api from '../../services/api';
+import { vendorApi } from '../../services/api';
 
 function VendorModules() {
   const [modules, setModules] = useState([]);
@@ -29,7 +29,7 @@ function VendorModules() {
   const loadModules = async () => {
     try {
       setLoading(true);
-      const response = await api.get('/vendor/modules');
+      const response = await vendorApi.getModules();
       setModules(response.data?.modules || []);
       setError(null);
     } catch (err) {

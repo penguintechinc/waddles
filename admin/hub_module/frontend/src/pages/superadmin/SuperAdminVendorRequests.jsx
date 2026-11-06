@@ -8,9 +8,31 @@ import {
   XCircleIcon,
   ClockIcon,
 } from '@heroicons/react/24/outline';
-import api from '../../services/api';
+import { marketplaceAdminApi } from '../../services/api';
 import { FormModalBuilder } from '@penguintechinc/react-libs';
 import { WADDLES_GOLD_COLORS } from '../../theme/waddlebotTheme';
+
+/**
+ * hub-api serialises vendor requests camelCase (`requestId`, `userDisplayName`, ...); the
+ * page renders the legacy snake_case shape, so map once at the boundary (never leave
+ * `request_id` undefined: it would build `/vendor-requests/undefined/approve`).
+ */
+function fromWire(r) {
+  return {
+    ...r,
+    request_id: r.requestId ?? r.request_id,
+    user_display_name: r.userDisplayName ?? r.user_display_name,
+    user_email: r.userEmail ?? r.user_email,
+    company_name: r.companyName ?? r.company_name,
+    business_description: r.businessDescription ?? r.business_description,
+    experience_summary: r.experienceSummary ?? r.experience_summary,
+    contact_email: r.contactEmail ?? r.contact_email,
+    contact_phone: r.contactPhone ?? r.contact_phone,
+    requested_at: r.requestedAt ?? r.requested_at,
+    rejection_reason: r.rejectionReason ?? r.rejection_reason,
+    admin_notes: r.adminNotes ?? r.admin_notes,
+  };
+}
 
 function SuperAdminVendorRequests() {
   const [requests, setRequests] = useState([]);
@@ -30,11 +52,8 @@ function SuperAdminVendorRequests() {
   const loadRequests = async () => {
     try {
       setLoading(true);
-      const params = new URLSearchParams();
-      params.append('status', filters.status);
-
-      const response = await api.get(`/admin/vendor/requests?${params.toString()}`);
-      setRequests(response.data?.requests || []);
+      const response = await marketplaceAdminApi.getVendorRequests({ status: filters.status });
+      setRequests((response.data?.requests || []).map(fromWire));
       setError(null);
     } catch (err) {
       setError(err.response?.data?.error?.message || 'Failed to load requests');
@@ -58,8 +77,8 @@ function SuperAdminVendorRequests() {
     if (!selectedRequest) return;
 
     try {
-      await api.post(`/admin/vendor/requests/${selectedRequest.request_id}/approve`, {
-        adminNotes: formData.adminNotes || '',
+      await marketplaceAdminApi.approveVendorRequest(selectedRequest.request_id, {
+        notes: formData.adminNotes || '',
       });
 
       setError(null);
@@ -79,9 +98,9 @@ function SuperAdminVendorRequests() {
     }
 
     try {
-      await api.post(`/admin/vendor/requests/${selectedRequest.request_id}/reject`, {
-        rejectionReason: formData.rejectionReason,
-        adminNotes: formData.adminNotes || '',
+      await marketplaceAdminApi.rejectVendorRequest(selectedRequest.request_id, {
+        reason: formData.rejectionReason,
+        notes: formData.adminNotes || '',
       });
 
       setError(null);
