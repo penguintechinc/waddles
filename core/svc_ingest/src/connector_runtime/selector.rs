@@ -438,6 +438,49 @@ mod tests {
         }
     }
 
+    /// Shared with the Python selector (`tests/test_overlay_selector.py`): one
+    /// fixture, both implementations must reach the same legacy decisions.
+    #[test]
+    fn shared_decision_table_parity() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/overlay_selector_table.json"
+        ))
+        .unwrap();
+        let cases = table["cases"].as_array().unwrap();
+        assert!(cases.len() >= 100, "fixture must not be empty");
+        for case in cases {
+            let m: HashMap<String, String> = case["env"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+                .collect();
+            let lookup = move |k: &str| m.get(k).cloned();
+            let ready = case["identify_budget_ready"].as_bool().unwrap();
+            let sel = OverlaySelector::parse(&lookup, ready);
+            if case["expect"] == "error" {
+                assert!(sel.is_err(), "{case}");
+                continue;
+            }
+            let sel = sel.unwrap();
+            let raw = lookup("CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS").unwrap_or_default();
+            let wh = parse_webhook_platforms(&raw).unwrap();
+            let tools = lookup("CONNECTOR_TOOLS_ENABLED").as_deref() == Some("true");
+            let plan = LegacyPlan::new(&sel, &wh, tools);
+            let e = &case["expect"];
+            assert_eq!(plan.twitch_inbound, e["twitch_inbound"], "{case}");
+            assert_eq!(plan.twitch_eventsub, e["twitch_eventsub"], "{case}");
+            assert_eq!(plan.twitch_outbound, e["twitch_outbound"], "{case}");
+            assert_eq!(plan.discord_inbound, e["discord_inbound"], "{case}");
+            assert_eq!(plan.discord_outbound, e["discord_outbound"], "{case}");
+            assert_eq!(
+                sel.legacy("youtube"),
+                e["youtube_inbound"].as_bool().unwrap(),
+                "{case}"
+            );
+        }
+    }
+
     #[test]
     fn legacy_plan_off_is_everything_legacy() {
         let p = LegacyPlan::new(&OverlaySelector::default(), &[], true);

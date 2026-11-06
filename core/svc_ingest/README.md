@@ -395,6 +395,8 @@ Env baselines, default OFF, strict booleans, read identically by the Rust and Py
 | `OVERLAY_YOUTUBE_ENABLED` | Python `youtube_live_poll` off |
 | `CONNECTOR_RUNTIME_ENABLED`, `CONNECTOR_RECONCILE_INTERVAL_SECS` (60), `CONNECTOR_MAX_CONNECTIONS` (500), `CONNECTOR_START_CONCURRENCY` (8), `CONNECTOR_DISCORD_START_PACE_MS` (5500), `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` | see spec 2026-11-05 section 1.3 |
 
+**Legacy suppression (Python svc-ingest).** The per-platform overlay baseline alone decides: overlay ON means that platform's Python receiver factory is never called (one INFO line, platform only). `CONNECTOR_RUNTIME_ENABLED` is not an input (Rust treats it as a consistency check only), and there is deliberately no `waddles.overlay-<platform>` flag fetch: the env baseline IS that flag's value (spec section 5), so there is no flag-fetch failure mode, unset means legacy keeps running, and Rust and Python cannot both own a platform. Discord overlay ON is fatal in both services until `IDENTIFY_BUDGET_READY`, so Python never parks Discord and keeps running alongside the overlay. Parity: `tests/fixtures/overlay_selector_table.json` is one decision table asserted by `tests/test_overlay_selector.py` and the Rust `shared_decision_table_parity`.
+
 Any overlay ON validates, in order and naming the item: `INGEST_DYNAMIC_CONNECTIONS`, `HUB_API_GRPC_ENDPOINT`, `SERVICE_JWT_TOKEN_ENDPOINT`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_SERVER_CERT_FILE`/`_KEY_FILE`/`HOST_API_CLIENT_CA_FILE`/`HOST_API_CLIENT_IDENTITY`, spine config, `CONNECTOR_ROUTE_KEY_SECRET` (when webhooks listed). `/readyz` reports each overlay platform (`overlay[]`, reason while not ready).
 
 ## Outbound executor — boot wiring & rollout order (P6a, `src/outbound_boot.rs`)
