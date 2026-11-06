@@ -246,29 +246,49 @@ def _ca_of(docs: list[dict[str, Any]], suffix: str) -> Any:
     return crypto.load_pem_x509_certificate(sec["stringData"]["ca.crt"].encode()), sec
 
 
-def test_alpha_connector_certs_share_the_stage_ca() -> None:
-    """One trust root: stage, svc-ingest server and executor client Secrets carry the same CA and
-    their leaf certs are signed by it (executor trusts only HOST_API_CA_FILE)."""
+def test_alpha_connector_certs_use_a_separate_ca_and_executor_trusts_both() -> None:
+    """Stage servers only chain-verify clients, so connector certs MUST NOT chain to the stage CA.
+    The executor trusts stage CA + connector CA through a bundle mounted over HOST_API_CA_FILE."""
     crypto = pytest.importorskip("cryptography.x509")
     hashes = pytest.importorskip("cryptography.hazmat.primitives.hashes")
     docs = _docs(_yt())
-    stage, _ = _ca_of(docs, "-host-api-tls")
+    stage, stage_sec = _ca_of(docs, "-host-api-tls")
     srv_ca, srv = _ca_of(docs, "-svc-ingest-host-api-tls")
     cli_ca, cli = _ca_of(docs, "-ingest-executor-tls")
-    assert stage.fingerprint(hashes.SHA256()) == srv_ca.fingerprint(hashes.SHA256()) \
-        == cli_ca.fingerprint(hashes.SHA256())
+    fp = lambda c: c.fingerprint(hashes.SHA256())  # noqa: E731
+    assert fp(srv_ca) == fp(cli_ca) and fp(srv_ca) != fp(stage)
     for sec in (srv, cli):
         leaf = crypto.load_pem_x509_certificate(sec["stringData"]["tls.crt"].encode())
-        assert leaf.issuer == stage.subject
-    assert srv["stringData"]["tls.crt"] != cli["stringData"]["tls.crt"]
+        assert leaf.issuer == srv_ca.subject and leaf.issuer != stage.subject
+    # the stage cert must not verify as anything signed by the connector CA and vice versa
+    stage_leaf = crypto.load_pem_x509_certificate(stage_sec["stringData"]["tls.crt"].encode())
+    assert stage_leaf.issuer == stage.subject
+    # SANs distinct; svc-ingest cert SAN is not any stage identity
+    def sans(sec: dict[str, Any]) -> set[str]:
+        c = crypto.load_pem_x509_certificate(sec["stringData"]["tls.crt"].encode())
+        return set(c.extensions.get_extension_for_class(crypto.SubjectAlternativeName).value.get_values_for_type(crypto.DNSName))
+    stage_sans = sans(stage_sec)
+    assert not (sans(srv) & sans(cli)) and not (sans(srv) & stage_sans) and not (sans(cli) & stage_sans)
+    # bundle = stage CA + connector CA, mounted over the executor's HOST_API_CA_FILE path
+    bundle = next(d for d in docs if d.get("kind") == "Secret" and d["metadata"]["name"].endswith("-executor-ca-bundle"))
+    pems = bundle["stringData"]["ca.crt"].split("-----END CERTIFICATE-----")
+    certs = [crypto.load_pem_x509_certificate((p + "-----END CERTIFICATE-----").encode()) for p in pems if "BEGIN" in p]
+    assert {fp(c) for c in certs} == {fp(stage), fp(srv_ca)}
+    ex = _dep(docs, "-bundle-executor")
+    mounts = ex["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    m = next(m for m in mounts if m["name"] == "executor-ca-bundle")
+    assert m["mountPath"] == _env(ex)["HOST_API_CA_FILE"]["value"] and m["subPath"] == "ca.crt"
 
 
-def test_external_connector_secrets_require_shared_ca_attestation() -> None:
+def test_external_connector_secrets_require_executor_ca_bundle_secret() -> None:
     ext = ["--set", f"{_CT}.hostApiTls.externalSecret=true"]
     res = _render(*_yt(*ext))
-    assert res.returncode != 0 and "sharedCa" in res.stderr
-    ok = _render(*_yt(*ext, "--set", f"{_CT}.hostApiTls.sharedCa=true"))
+    assert res.returncode != 0 and "executorCaBundleSecretName" in res.stderr
+    ok = _render(*_yt(*ext, "--set", f"{_CT}.hostApiTls.executorCaBundleSecretName=my-bundle"))
     assert ok.returncode == 0, ok.stderr[-600:]
+    docs = [d for d in yaml.safe_load_all(ok.stdout) if d]
+    vols = _dep(docs, "-bundle-executor")["spec"]["template"]["spec"]["volumes"]
+    assert next(v for v in vols if v["name"] == "executor-ca-bundle")["secret"]["secretName"] == "my-bundle"
 
 
 @pytest.mark.parametrize("values", ["values-alpha.yaml", "values-dal2alpha.yaml", "values-local.yaml"])

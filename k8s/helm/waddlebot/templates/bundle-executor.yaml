@@ -209,7 +209,7 @@ spec:
         # nowhere else. It pins svc-ingest's own server SAN, never the svc-action identity.
         # Env names match executor config.rs: CONNECTOR_HOST_API_{ADDR,IDENTITY,CLIENT_CERT_FILE,
         # CLIENT_KEY_FILE}; the CA is REUSED from HOST_API_CA_FILE (hostApiTlsClientEnv) -- there is
-        # no CONNECTOR_HOST_API_CA_FILE.
+        # no CONNECTOR_HOST_API_CA_FILE, so the executor-ca-bundle (stage + connector CA) is mounted over it.
         - name: CONNECTOR_HOST_API_ADDR
           value: "{{ include "waddlebot.svcIngestHostApiServiceName" . }}:{{ (.Values.pipeline.rustDataPlane.svcIngest.connectorTools).hostApiPort | default 8301 }}"
         - name: CONNECTOR_HOST_API_IDENTITY
@@ -268,6 +268,11 @@ spec:
         - name: connector-host-api-tls
           mountPath: /etc/waddlebot/connector-host-api-tls
           readOnly: true
+        # Stage CA + connector CA bundle OVER the stage ca.crt path HOST_API_CA_FILE points at.
+        - name: executor-ca-bundle
+          mountPath: /etc/waddlebot/host-api-tls/ca.crt
+          subPath: ca.crt
+          readOnly: true
         {{- end }}
       volumes:
       - name: tmp
@@ -285,6 +290,10 @@ spec:
       - name: connector-host-api-tls
         secret:
           secretName: {{ include "waddlebot.ingestExecutorTlsSecretName" . }}
+          defaultMode: 0440
+      - name: executor-ca-bundle
+        secret:
+          secretName: {{ include "waddlebot.executorCaBundleSecretName" . }}
           defaultMode: 0440
       {{- end }}
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.

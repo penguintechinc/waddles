@@ -128,19 +128,60 @@ also sign the connector server + executor client certs. Mirrors that template's 
 {{- end -}}
 {{- end }}
 
-{{/* Emits the svc-ingest connector server Secret + the executor-only client Secret, both signed by
-the CA passed in (the stage host-api CA). Called from host-api-tls-secret.yaml's generate branch. */}}
-{{- define "waddlebot.connectorHostApiTlsSecrets" -}}
+{{/* Executor trust-bundle Secret name: operator-supplied when connectorTools.hostApiTls.executorCaBundleSecretName
+is set (externalSecret mode), else the chart-built `<fullname>-executor-ca-bundle` (stage CA + connector CA). */}}
+{{- define "waddlebot.executorCaBundleSecretName" -}}
+{{- $ct := .Values.pipeline.rustDataPlane.svcIngest.connectorTools | default dict -}}
+{{- $ht := $ct.hostApiTls | default dict -}}
+{{- $ht.executorCaBundleSecretName | default (printf "%s-executor-ca-bundle" (include "waddlebot.fullname" .)) -}}
+{{- end }}
+
+{{/* Stage host-api CA PEM known at render time: supplied value, else the live stage Secret. "" when
+neither is available (fresh install whose stage Secret is generated in host-api-tls-secret.yaml, which
+passes its own CA to connectorTrustSecrets instead). */}}
+{{- define "waddlebot.stageCaPem" -}}
+{{- $ht := .Values.global.hostApiTls -}}
+{{- if $ht.ca.crt -}}{{ $ht.ca.crt }}
+{{- else -}}
+{{- $s := lookup "v1" "Secret" .Values.namespace (printf "%s-host-api-tls" (include "waddlebot.fullname" .)) -}}
+{{- if $s -}}{{ index $s.data "ca.crt" | b64dec }}{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/* SEPARATE connector trust domain: the svc-ingest connector server cert and the executor-only client
+cert are issued by a connector CA that is NOT the stage CA (stage servers only chain-verify clients,
+core/svc_action/src/host_api.rs, core/svc_process/src/host_api.rs, so a stage-CA cert for svc-ingest
+would be accepted as a stage client). The executor trusts BOTH CAs via a bundle mounted over its
+HOST_API_CA_FILE (stage dial still SAN-pins the stage identity, core/bundle_executor/src/tls.rs).
+dict "root" . "stageCa" <PEM or "">. Emits the Secrets that must be minted/updated this render. */}}
+{{- define "waddlebot.connectorTrustSecrets" -}}
 {{- $ := .root -}}
-{{- $ca := .ca -}}
-{{- $fullname := include "waddlebot.fullname" $ }}
-{{- $srvName := include "waddlebot.svcIngestHostApiTlsSecretName" $ }}
-{{- $cliName := include "waddlebot.ingestExecutorTlsSecretName" $ }}
-{{- $clientId := include "waddlebot.svcIngestHostApiClientIdentity" $ }}
-{{- $ns := $.Values.namespace }}
-{{- $svc := printf "%s-svc-ingest-rust" $fullname }}
-{{- $srv := genSignedCert $svc nil (list $svc (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns)) 365 $ca }}
-{{- $cli := genSignedCert $clientId nil (list $clientId) 365 $ca }}
+{{- $ct := $.Values.pipeline.rustDataPlane.svcIngest.connectorTools | default dict -}}
+{{- $ht := $ct.hostApiTls | default dict -}}
+{{- $fullname := include "waddlebot.fullname" $ -}}
+{{- $srvName := include "waddlebot.svcIngestHostApiTlsSecretName" $ -}}
+{{- $cliName := include "waddlebot.ingestExecutorTlsSecretName" $ -}}
+{{- $bundleName := include "waddlebot.executorCaBundleSecretName" $ -}}
+{{- $clientId := include "waddlebot.svcIngestHostApiClientIdentity" $ -}}
+{{- $ns := $.Values.namespace -}}
+{{- $tier := $.Values.global.deploymentTier -}}
+{{- $srvExisting := lookup "v1" "Secret" $ns $srvName -}}
+{{- $cliExisting := lookup "v1" "Secret" $ns $cliName -}}
+{{- $connCa := "" -}}
+{{- if and $srvExisting $cliExisting -}}
+{{- $connCa = index $srvExisting.data "ca.crt" | b64dec -}}
+{{- else if $ht.externalSecret -}}
+{{- if not $ht.executorCaBundleSecretName -}}
+{{- fail (printf "svcIngest.connectorTools.hostApiTls.externalSecret=true requires hostApiTls.executorCaBundleSecretName: a Secret (key ca.crt) holding the stage CA + the connector CA, mounted over the executor's HOST_API_CA_FILE. %q/%q must chain to the connector CA, NOT the stage CA (stage servers only chain-verify clients)." $srvName $cliName) -}}
+{{- end -}}
+{{- else if not (or (eq $tier "alpha") (eq $tier "local")) -}}
+{{- fail (printf "svcIngest.connectorTools.hostApiTls: Secrets %q and %q not found in %q and global.deploymentTier=%q is outside alpha/local -- supply them (ca.crt/tls.crt/tls.key each, issued by a connector CA SEPARATE from the stage CA; server cert SAN = the svc-ingest Service; client cert identity %q) or set hostApiTls.externalSecret=true with executorCaBundleSecretName" $srvName $cliName $ns $tier $clientId) -}}
+{{- else -}}
+{{- $ca := genCA (printf "%s-connector-host-api-ca" $fullname) 365 -}}
+{{- $svc := printf "%s-svc-ingest-rust" $fullname -}}
+{{- $srv := genSignedCert $svc nil (list $svc (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns)) 365 $ca -}}
+{{- $cli := genSignedCert $clientId nil (list $clientId) 365 $ca -}}
+{{- $connCa = $ca.Cert -}}
 ---
 apiVersion: v1
 kind: Secret
@@ -173,4 +214,22 @@ stringData:
   ca.crt: {{ $ca.Cert | quote }}
   tls.crt: {{ $cli.Cert | quote }}
   tls.key: {{ $cli.Key | quote }}
+{{- end -}}
+{{- if not $ht.externalSecret }}
+{{- if not .stageCa }}
+{{- fail (printf "svcIngest.connectorTools: cannot build %q -- the stage host-api CA is not available at render time (no global.hostApiTls.ca.crt and Secret %s-host-api-tls not found). Provision the stage Secret first, or use hostApiTls.externalSecret=true with executorCaBundleSecretName." $bundleName $fullname) }}
+{{- end }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $bundleName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: executor-ca-bundle
+type: Opaque
+stringData:
+  ca.crt: {{ printf "%s\n%s" (.stageCa | trim) ($connCa | trim) | quote }}
+{{- end }}
 {{- end }}

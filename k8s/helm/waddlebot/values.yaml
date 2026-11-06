@@ -1590,10 +1590,11 @@ pipeline:
           secretName: ""
           clientIdentity: ""
           externalSecret: false
-          # ONE-CA rule: the executor trusts only HOST_API_CA_FILE (stage CA), so these Secrets must
-          # chain to it. alpha/local generate them from the stage CA; with externalSecret=true set
-          # sharedCa=true to attest the external certs chain to that same CA (else render fails).
-          sharedCa: false
+          # Separate connector trust domain: these Secrets are issued by a CONNECTOR CA, never the stage
+          # CA. The executor trusts both via `<fullname>-executor-ca-bundle` mounted over HOST_API_CA_FILE
+          # (follow-up executor PR: a dedicated connector CA env). With externalSecret=true, supply
+          # executorCaBundleSecretName (Secret key ca.crt = stage CA + connector CA).
+          executorCaBundleSecretName: ""
         # Connector component digests are NO LONGER set here: single source of truth is
         # `pipeline.connectors.digests` (also feeds the executor's CONNECTOR_PIN_DIGEST_<P>).
         # Setting a non-empty `digests.*` here fails the render.
