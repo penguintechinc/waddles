@@ -124,7 +124,8 @@ def _parse_starts(value: Any) -> int | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    except ValueError as exc:
+        log.debug("feed.bad_timestamp", error_type=type(exc).__name__)
         return None
     if parsed.tzinfo is None:
         return None
@@ -209,7 +210,8 @@ def _valid_feed_url(raw: str) -> str | None:
     try:
         parts = urlsplit(raw)
         port = parts.port
-    except ValueError:
+    except ValueError as exc:
+        log.debug("feed.bad_feed_url", error_type=type(exc).__name__)
         return None
     host = (parts.hostname or "").lower()
     if parts.scheme != "https" or parts.username or parts.password or port not in (None, 443):
