@@ -364,10 +364,6 @@ const OUTBOUND_SCHEMA_VERSION: u32 = 1;
 /// The verb of an outbound platform action (provider-framework Step 0,
 /// issue #719). Mirrors `svc_ingest::outbound_ops::OutboundAction`; the
 /// wire string is the same `op` field the queue envelope carries.
-/// Verified external, non-chat platforms whose events may drive channel-less role ops
-/// (binding guild only, `guild:-`). Everything else is refused; extend deliberately.
-const EXTERNAL_ROLE_PLATFORMS: &[&str] = &["wix"];
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RelayOp {
     ChatSend,
@@ -1978,35 +1974,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             }
             RelayOp::RoleAdd | RelayOp::RoleRemove => {
                 let what = op.as_str();
-                let platform = scope.origin_platform.as_deref();
-                let has_channel = platform == Some("discord") && scope.origin_channel_id.is_some();
-                let origin_channel: &str = if guild_scoped && !has_channel {
-                    // ONE platform field decides. Discord needs a proven source guild;
-                    // `guild:-` (binding guild only) is for verified EXTERNAL non-chat platforms
-                    // whose community comes from a verified binding. Chat origins (twitch,
-                    // youtube, ...) and unknown/absent platforms cannot trigger role ops.
-                    role_scope = match (platform, scope.origin_guild_id.as_deref()) {
-                        (Some("discord"), Some(g)) => format!("guild:{g}"),
-                        (Some("discord"), None) => {
-                            return Err(denied(
-                                "invalid_args",
-                                format!(
-                                "discord {what} from a discord event needs a valid source guild"
-                            ),
-                            ))
-                        }
-                        (Some(p), _) if EXTERNAL_ROLE_PLATFORMS.contains(&p) => {
-                            "guild:-".to_string()
-                        }
-                        _ => {
-                            return Err(denied(
-                                "invalid_args",
-                                format!(
-                                    "discord {what} cannot be triggered from this event origin"
-                                ),
-                            ))
-                        }
-                    };
+                let origin_channel: &str = if guild_scoped {
+                    role_scope = discord_role_tools::tool_origin_scope(scope, what)?;
                     &role_scope
                 } else {
                     origin(what)?

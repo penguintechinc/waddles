@@ -385,6 +385,8 @@ snowflake are the host's to pin.
 |---|---|---|---|---|
 | `discord.member.roles.add` | write, dangerous | `user` (lowercase UUID, required), `role_key` (`^[a-z][a-z0-9_-]{0,31}$`, required) | `{"ok":true,"op":"role.add"}` | managed-role KEY mapped through the binding allowlist; never a snowflake |
 | `discord.member.roles.remove` | write, dangerous | same | `{"ok":true,"op":"role.remove"}` | same pins |
+| `discord.member.roles.set` | write, dangerous | `user` (uuid), `role_keys` (1..=16 managed-role keys) | `{"ok":true,"op":"role.set"}` | host reads the member's CURRENT roles, applies the minimal add/remove diff inside the managed allowlist (unmanaged roles never touched); refuses an unknown/privileged key before any change |
+| `discord.roles.list` | read, normal | none (`{}`) | `{"ok":true,"roles":[{"key":"vip","assignable":true}]}` | managed-role keys + assignability (privileged / absent roles are `false`); served host-side, no guest HTTP |
 | `discord.scheduled_event.create` | write, dangerous | `name`, `scheduled_start_time`, `scheduled_end_time`, `location` (required), `description` | `{"ok":true,"event_id":".."}` | see event sync |
 | `discord.scheduled_event.update` | write, dangerous | `event_id` + the create fields | `{"ok":true,"event_id":null}` | |
 | `discord.scheduled_event.cancel` / `.delete` | write, dangerous | `event_id` (`^[0-9]{1,20}$`) | `{"ok":true,...}` | |
@@ -410,9 +412,9 @@ with SEVERAL paired guilds is refused with the typed `ambiguous_paired_guild` (n
 Other constraints: the user is the tokenized UUID (the host detokenizes for the drain); a role KEY
 absent from the community's managed roles is refused by the drain (`role_not_managed`) and surfaced
 as `target_unavailable`; privileged roles (ADMINISTRATOR / MANAGE_ROLES / MANAGE_GUILD) are refused.
-**Not yet served:** `discord.member.roles.set` and `discord.roles.list` are NOT declared or executed
-(each needs a new drain op with a result payload / multi-request orchestration) -- calling them is
-refused (`forbidden`: the target does not export them), never a silent no-op.
+`set` / `list` are composite drain ops (`role.set` / `role.list`, same pin_sig / replay / origin rules);
+`set` expands to ordinary pinned `role.add|remove` sub-ops, so every per-op gate applies again. A failed
+sub-op aborts the rest; re-running converges (the diff is recomputed).
 
 ## Not in B0 (explicit, typed, not silent)
 

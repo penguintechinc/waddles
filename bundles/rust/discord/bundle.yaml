@@ -8,7 +8,7 @@
 schema_version: 2
 app_id: waddles.core.service.discord
 name: Discord Platform Connector (Rust)
-version: 1.0.5
+version: 1.0.6
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -204,6 +204,47 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+  - name: discord.member.roles.set
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+        role_keys:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            type: string
+            pattern: "^[a-z][a-z0-9_-]{0,31}$"
+      required:
+        - user
+        - role_keys
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: discord.roles.list
+    access: read
+    risk: normal
+    input_schema:
+      type: object
+      properties: {}
+      additionalProperties: false
+    output_schema:
+      type: object
+      properties:
+        roles:
+          type: array
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+              assignable:
+                type: boolean
 author: PenguinTech/waddles
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/discord

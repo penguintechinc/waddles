@@ -200,6 +200,15 @@ pub trait SlotSource: Send + Sync {
         -> Result<HashMap<String, SlotValue>, SlotError>;
 }
 
+/// What a [`DutyHook::role_bulk`] decided.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RoleBulkPlan {
+    /// `role.set`: the minimal `(add?, role_key)` ops to apply, in order.
+    Apply(Vec<(bool, String)>),
+    /// `role.list`: the JSON result handed back to the producer.
+    Data(String),
+}
+
 /// Context a [`DutyHook`] works from.
 #[derive(Debug)]
 pub struct DutyCx<'a> {
@@ -247,6 +256,13 @@ pub trait DutyHook: Send + Sync {
     /// The `payload-json` handed to `build-request` for a claimed kind
     /// (e.g. a `{user:<uuid>}` recipient placeholder).
     async fn payload(&self, cx: &DutyCx<'_>) -> Result<String, ExecError>;
+
+    /// Plans a composite [`OutboundAction::RoleBulk`] (`role.set` / `role.list`): runs the same
+    /// binding / origin / managed-role gates as the single-role ops and does the host-side reads.
+    /// The default claims nothing.
+    async fn role_bulk(&self, _cx: &DutyCx<'_>) -> Result<RoleBulkPlan, ExecError> {
+        Err(ExecError::HostDutyMissing)
+    }
 
     /// Value for a [`SlotOrigin::Duty`] slot (e.g. the DM channel id from
     /// the reply to the host's own `POST /users/@me/channels`).
@@ -564,6 +580,8 @@ fn kind_label(k: &str) -> &'static str {
         "dm.send" => "dm.send",
         "role.add" => "role.add",
         "role.remove" => "role.remove",
+        "role.set" => "role.set",
+        "role.list" => "role.list",
         "event.create" => "event.create",
         "event.update" => "event.update",
         "event.cancel" => "event.cancel",
@@ -649,6 +667,67 @@ where
             ),
         }
         res
+    }
+
+    /// Executes a composite [`OutboundAction::RoleBulk`]: the duty hook plans it (host-side
+    /// reads + every gate), then each add/remove runs through the NORMAL [`Self::execute`] path
+    /// as a `role.add|remove`, so the per-op pin, allowlist, privilege and tokenization gates
+    /// all apply again. The first failing op aborts (the op is idempotent: a re-run converges).
+    pub(crate) async fn execute_role_bulk(
+        &self,
+        platform: &'static str,
+        community_id: Option<i64>,
+        action: &OutboundAction,
+    ) -> Result<Option<String>, ExecError> {
+        let OutboundAction::RoleBulk {
+            user_id,
+            origin_channel,
+            tenant_id,
+            ..
+        } = action
+        else {
+            return Err(ExecError::BadAction);
+        };
+        if !self.flags.enabled(CONNECTOR_TOOLS_FLAG).await {
+            return Err(ExecError::FlagOff);
+        }
+        self.policies
+            .iter()
+            .find(|p| p.platform == platform)
+            .ok_or(ExecError::UnsupportedPlatform)?;
+        let pinned = pin_channel(platform, action, false)?;
+        if !self.duties.claims(platform, action.op()) {
+            return Err(ExecError::HostDutyMissing);
+        }
+        let cx = DutyCx {
+            platform,
+            action,
+            community_id,
+            pinned_channel: pinned.as_deref(),
+            client: &self.client,
+        };
+        match self.duties.role_bulk(&cx).await? {
+            RoleBulkPlan::Data(json) => Ok(Some(json)),
+            RoleBulkPlan::Apply(ops) => {
+                let user = user_id.clone().ok_or(ExecError::BadAction)?;
+                for (add, key) in ops {
+                    let sub = OutboundAction::RoleOp {
+                        add,
+                        user_id: user.clone(),
+                        role_key: key,
+                        origin_channel: origin_channel.clone(),
+                        tenant_id: *tenant_id,
+                    };
+                    self.execute(&ExecRequest {
+                        platform,
+                        action: &sub,
+                        community_id,
+                    })
+                    .await?;
+                }
+                Ok(None)
+            }
+        }
     }
 
     async fn execute_inner(&self, req: &ExecRequest<'_>) -> Result<ExecOutcome, ExecError> {
@@ -857,8 +936,14 @@ fn pin_channel(
         {
             return Ok(None);
         }
+        OutboundAction::RoleBulk { origin_channel, .. }
+            if role_guild_scope(origin_channel).is_some() =>
+        {
+            return Ok(None);
+        }
         OutboundAction::DmSend { origin_channel, .. }
-        | OutboundAction::RoleOp { origin_channel, .. } => {
+        | OutboundAction::RoleOp { origin_channel, .. }
+        | OutboundAction::RoleBulk { origin_channel, .. } => {
             (origin_channel.as_str(), Some(origin_channel.as_str()))
         }
         // Event ops name no channel: the guild is pinned from the binding by
@@ -903,6 +988,7 @@ fn default_payload(kind: &KindPolicy, action: &OutboundAction) -> Result<String,
         }
         OutboundAction::DmSend { .. }
         | OutboundAction::RoleOp { .. }
+        | OutboundAction::RoleBulk { .. }
         | OutboundAction::EventOp { .. } => return Err(ExecError::BadAction),
     };
     serde_json::to_string(&v).map_err(|_| ExecError::BadAction)

@@ -26,7 +26,7 @@
 //! Logs and metrics carry fixed reason codes only: no user id, role id,
 //! handle or message text.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,11 +36,11 @@ use serde_json::json;
 use super::discord_slots::{Rest, API_BASE};
 use super::role_guild_scope;
 use super::subst::SlotValue;
-use super::{DutyCx, DutyHook, ExecError, RequestTpl, SlotError};
+use super::{DutyCx, DutyHook, ExecError, RequestTpl, RoleBulkPlan, SlotError};
 use crate::discord_rest::{classify_membership, is_snowflake, Membership};
 use crate::outbound_creds::CredError;
 use crate::outbound_creds_discord::{is_role_key, DiscordBinding, DiscordCredentialSource};
-use crate::outbound_ops::{EventKind, OutboundAction};
+use crate::outbound_ops::{EventKind, OutboundAction, RoleBulkKind};
 
 use super::twitch_slots::map_cred;
 
@@ -174,6 +174,10 @@ fn canonical_uuid(s: &str) -> Option<String> {
 fn user_uuid(action: &OutboundAction) -> Result<String, ExecError> {
     let raw = match action {
         OutboundAction::DmSend { user_id, .. } | OutboundAction::RoleOp { user_id, .. } => user_id,
+        OutboundAction::RoleBulk {
+            user_id: Some(user_id),
+            ..
+        } => user_id,
         _ => return Err(ExecError::BadAction),
     };
     let inner = raw
@@ -280,9 +284,9 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
         let uuid = user_uuid(action)?;
         // The stamp's tenant is MAC-bound; without it detokenization is refused.
         let tenant = match action {
-            OutboundAction::DmSend { tenant_id, .. } | OutboundAction::RoleOp { tenant_id, .. } => {
-                tenant_id.filter(|t| *t > 0)
-            }
+            OutboundAction::DmSend { tenant_id, .. }
+            | OutboundAction::RoleOp { tenant_id, .. }
+            | OutboundAction::RoleBulk { tenant_id, .. } => tenant_id.filter(|t| *t > 0),
             _ => None,
         }
         .ok_or_else(|| refused("no_tenant_scope"))?;
@@ -338,22 +342,18 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
         }
     }
 
-    /// Role gate: the pinned channel is in the community's guild, the key is
-    /// allowlisted and its role is unprivileged, and the user is one of the
-    /// community's identities.
-    async fn role_gate(&self, cx: &DutyCx<'_>) -> Result<(), ExecError> {
-        let (community, binding) = self.binding(cx).await?;
-        let rest = Rest {
-            client: cx.client,
-            base: &self.api_base,
-            token: binding.bot_token.expose(),
-        };
-        // Where the op is allowed to land. A channel-pinned op proves its community by the
-        // channel's guild; a guild-scoped op (gateway / external event, no channel) lands ONLY
-        // in the community's own binding guild, and any guild the producer asserts (the source
-        // guild of a gateway event) must equal it.
+    /// Where a role op is allowed to land (see the `role_gate` doc): a channel-pinned op proves its
+    /// community by the channel's guild; a guild-scoped op lands ONLY in the binding guild and any
+    /// asserted source guild must equal it.
+    async fn check_role_origin(
+        &self,
+        rest: &Rest<'_>,
+        binding: &DiscordBinding,
+        cx: &DutyCx<'_>,
+    ) -> Result<(), ExecError> {
         let guild_scope = match cx.action {
-            OutboundAction::RoleOp { origin_channel, .. } => role_guild_scope(origin_channel),
+            OutboundAction::RoleOp { origin_channel, .. }
+            | OutboundAction::RoleBulk { origin_channel, .. } => role_guild_scope(origin_channel),
             _ => None,
         };
         match (cx.pinned_channel, guild_scope) {
@@ -371,6 +371,115 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
             }
             _ => return Err(refused("no_origin_pin")),
         }
+        Ok(())
+    }
+
+    /// Plans `role.set` / `role.list` (see [`RoleBulkPlan`]).
+    async fn plan_role_bulk(&self, cx: &DutyCx<'_>) -> Result<RoleBulkPlan, ExecError> {
+        let OutboundAction::RoleBulk {
+            kind, role_keys, ..
+        } = cx.action
+        else {
+            return Err(ExecError::BadAction);
+        };
+        let (community, binding) = self.binding(cx).await?;
+        let rest = Rest {
+            client: cx.client,
+            base: &self.api_base,
+            token: binding.bot_token.expose(),
+        };
+        self.check_role_origin(&rest, &binding, cx).await?;
+        // Every allowlisted key with its role id and whether it is assignable (unprivileged and
+        // present in the guild). One cached `GET /guilds/{g}/roles` serves them all.
+        let mut managed: BTreeMap<String, (String, bool)> = BTreeMap::new();
+        for (key, id) in &binding.managed_roles {
+            if !is_role_key(key) {
+                continue;
+            }
+            let assignable = match self.role_perms(&rest, &binding.guild_id, id).await {
+                Ok(p) => p & FORBIDDEN_ROLE_PERMS == 0,
+                Err(ExecError::Slot(SlotError::Refused("role_not_found"))) => false,
+                Err(e) => return Err(e),
+            };
+            managed.insert(key.clone(), (id.clone(), assignable));
+        }
+        match kind {
+            RoleBulkKind::List => {
+                let roles: Vec<_> = managed
+                    .iter()
+                    .map(|(k, (_, a))| json!({"key": k, "assignable": a}))
+                    .collect();
+                Ok(RoleBulkPlan::Data(json!({ "roles": roles }).to_string()))
+            }
+            RoleBulkKind::Set => {
+                // Desired keys must be allowlisted AND assignable; anything else refuses the whole
+                // op before a single change is made.
+                for k in role_keys {
+                    match managed.get(k) {
+                        None => return Err(refused("role_not_managed")),
+                        Some((_, false)) => return Err(refused("role_privileged")),
+                        Some(_) => {}
+                    }
+                }
+                let raw = self.raw_user(community, cx.action).await?;
+                let resp = rest
+                    .call(
+                        reqwest::Method::GET,
+                        &format!("/guilds/{}/members/{}", binding.guild_id, raw.expose()),
+                        None,
+                    )
+                    .await
+                    .map_err(ExecError::Slot)?;
+                let current: HashSet<String> = match classify_membership(resp.status, &resp.body) {
+                    Membership::Member => {
+                        let v: serde_json::Value =
+                            serde_json::from_slice(&resp.body).map_err(|_| {
+                                ExecError::Slot(SlotError::Unavailable("membership_lookup_failed"))
+                            })?;
+                        v.get("roles")
+                            .and_then(serde_json::Value::as_array)
+                            .ok_or(ExecError::Slot(SlotError::Unavailable(
+                                "membership_lookup_failed",
+                            )))?
+                            .iter()
+                            .filter_map(|r| r.as_str().map(str::to_string))
+                            .collect()
+                    }
+                    Membership::NotMember => return Err(refused("not_in_community")),
+                    Membership::Unknown => {
+                        return Err(ExecError::Slot(SlotError::Unavailable(
+                            "membership_lookup_failed",
+                        )))
+                    }
+                };
+                // Minimal diff within the allowlist: add missing desired, remove held managed
+                // (assignable) roles that are not desired. Unmanaged roles are never touched.
+                let mut ops = Vec::new();
+                for (key, (id, assignable)) in &managed {
+                    let want = role_keys.contains(key);
+                    let has = current.contains(id);
+                    if want && !has {
+                        ops.push((true, key.clone()));
+                    } else if !want && has && *assignable {
+                        ops.push((false, key.clone()));
+                    }
+                }
+                Ok(RoleBulkPlan::Apply(ops))
+            }
+        }
+    }
+
+    /// Role gate: the pinned channel is in the community's guild, the key is
+    /// allowlisted and its role is unprivileged, and the user is one of the
+    /// community's identities.
+    async fn role_gate(&self, cx: &DutyCx<'_>) -> Result<(), ExecError> {
+        let (community, binding) = self.binding(cx).await?;
+        let rest = Rest {
+            client: cx.client,
+            base: &self.api_base,
+            token: binding.bot_token.expose(),
+        };
+        self.check_role_origin(&rest, &binding, cx).await?;
         self.managed_role(&rest, &binding, cx.action).await?;
         self.raw_user(community, cx.action).await?;
         Ok(())
@@ -549,7 +658,14 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
                     | "event.update"
                     | "event.cancel"
                     | "event.delete"
+                    | "role.set"
+                    | "role.list"
             )
+    }
+
+    async fn role_bulk(&self, cx: &DutyCx<'_>) -> Result<RoleBulkPlan, ExecError> {
+        let kind = cx.action.op();
+        self.plan_role_bulk(cx).await.map_err(|e| deny(kind, e))
     }
 
     async fn gate(&self, cx: &DutyCx<'_>) -> Result<(), ExecError> {

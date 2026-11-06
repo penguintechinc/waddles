@@ -12,13 +12,97 @@
 use bundle_tool_call::ToolRefusal;
 use serde_json::{json, Value};
 
-use super::{is_role_key, RelayOp, RelayQueue, StageCapabilities};
+use super::{
+    denied, is_discord_snowflake, is_role_key, now_epoch_ms, InvokeScope, RelayOp, RelayQueue,
+    StageCapabilities, DISCORD_DRAIN_READY_KEY, DISCORD_OP_ACK_KEY_PREFIX, DISCORD_OP_ACK_POLL,
+    OUTBOUND_SCHEMA_VERSION,
+};
 use bundle_host_kv::KvBackend;
+use penguin_bundle_host::wire::HostResultError;
 
 /// Tool name: grant a managed role.
 pub(crate) const TOOL_ROLES_ADD: &str = "discord.member.roles.add";
 /// Tool name: revoke a managed role.
 pub(crate) const TOOL_ROLES_REMOVE: &str = "discord.member.roles.remove";
+
+/// Tool name: make a member hold exactly the given managed roles (read-then-diff, host-side).
+pub(crate) const TOOL_ROLES_SET: &str = "discord.member.roles.set";
+/// Tool name: list the community's managed roles with their assignability.
+pub(crate) const TOOL_ROLES_LIST: &str = "discord.roles.list";
+
+/// Verified external, non-chat platforms whose events may drive channel-less role ops
+/// (binding guild only, `guild:-`). Everything else is refused; extend deliberately.
+const EXTERNAL_ROLE_PLATFORMS: &[&str] = &["wix"];
+
+/// The MAC-covered wire `origin_channel` a role tool op is queued with, decided by the ONE
+/// platform field (`scope.origin_platform`): a Discord event with a channel keeps the channel pin;
+/// a Discord event without one asserts its host-derived source guild (`guild:<id>`) or is refused;
+/// an allowlisted external platform gets `guild:-` (binding guild only); every other origin
+/// (twitch/youtube/unknown) is refused.
+pub(crate) fn tool_origin_scope(
+    scope: &InvokeScope,
+    what: &str,
+) -> Result<String, HostResultError> {
+    let platform = scope.origin_platform.as_deref();
+    if platform == Some("discord") {
+        if let Some(channel) = scope.origin_channel_id.as_deref() {
+            return if is_discord_snowflake(channel) {
+                Ok(channel.to_string())
+            } else {
+                Err(denied(
+                    "invalid_args",
+                    format!("discord {what} origin channel id is not a valid snowflake"),
+                ))
+            };
+        }
+    }
+    match (platform, scope.origin_guild_id.as_deref()) {
+        (Some("discord"), Some(g)) => Ok(format!("guild:{g}")),
+        (Some("discord"), None) => Err(denied(
+            "invalid_args",
+            format!("discord {what} from a discord event needs a valid source guild"),
+        )),
+        (Some(p), _) if EXTERNAL_ROLE_PLATFORMS.contains(&p) => Ok("guild:-".to_string()),
+        _ => Err(denied(
+            "invalid_args",
+            format!("discord {what} cannot be triggered from this event origin"),
+        )),
+    }
+}
+
+/// Validates `discord.member.roles.set` args: exactly `{user: uuid, role_keys: [1..=16 keys]}`.
+/// Any other key is REFUSED (guild/role ids are the host's to pin). Returns `(user, keys)` with
+/// the keys sorted and deduplicated.
+fn bulk_set_args(args: &Value) -> Result<(String, Vec<String>), ToolRefusal> {
+    let bad = |m: &str| ToolRefusal::InvalidArgs(m.to_string());
+    let obj = args
+        .as_object()
+        .ok_or_else(|| bad("args must be an object"))?;
+    if let Some(extra) = obj.keys().find(|k| *k != "user" && *k != "role_keys") {
+        return Err(ToolRefusal::InvalidArgs(format!(
+            "unexpected argument {extra:?}: the guild, channel and role id are host-pinned"
+        )));
+    }
+    let user = obj
+        .get("user")
+        .and_then(Value::as_str)
+        .filter(|u| is_canonical_uuid(u))
+        .ok_or_else(|| bad("`user` must be a lowercase canonical UUID"))?;
+    let mut keys: Vec<String> = obj
+        .get("role_keys")
+        .and_then(Value::as_array)
+        .ok_or_else(|| bad("`role_keys` must be an array of managed-role keys"))?
+        .iter()
+        .map(|k| k.as_str().filter(|k| is_role_key(k)).map(str::to_string))
+        .collect::<Option<_>>()
+        .ok_or_else(|| bad("`role_keys` entries must be managed-role keys"))?;
+    keys.sort();
+    keys.dedup();
+    if keys.is_empty() || keys.len() > 16 {
+        return Err(bad("`role_keys` must hold 1..=16 distinct keys"));
+    }
+    Ok((format!("{{user:{user}}}"), keys))
+}
 
 /// The outbound op a role tool NAME maps to; `None` for any other tool (the caller has already
 /// matched the Discord service target).
@@ -89,6 +173,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         tool: &str,
         args: &Value,
     ) -> Option<Result<Value, ToolRefusal>> {
+        if tool == TOOL_ROLES_SET || tool == TOOL_ROLES_LIST {
+            return Some(self.run_bulk_role_tool(scope, tool, args).await);
+        }
         let op = role_tool_op(tool)?;
         let result = async {
             let message = relay_message(op, args)?;
@@ -110,6 +197,135 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         }
         .await;
         Some(result)
+    }
+}
+
+impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
+    /// `discord.member.roles.set` / `discord.roles.list`: queues the host-side bulk drain op
+    /// (`role.set` / `role.list`) under the same origin scope rules as add/remove and returns the
+    /// drain's confirmed result (`list` returns its `roles` payload to the caller).
+    async fn run_bulk_role_tool(
+        &self,
+        scope: &InvokeScope,
+        tool: &str,
+        args: &Value,
+    ) -> Result<Value, ToolRefusal> {
+        let is_set = tool == TOOL_ROLES_SET;
+        let op: &'static str = if is_set { "role.set" } else { "role.list" };
+        let (user, keys) = if is_set {
+            let (u, k) = bulk_set_args(args)?;
+            (Some(u), k)
+        } else {
+            if args.as_object().is_none_or(|o| !o.is_empty()) {
+                return Err(ToolRefusal::InvalidArgs(
+                    "discord.roles.list takes no arguments".to_string(),
+                ));
+            }
+            (None, Vec::new())
+        };
+        if scope.tenant_id < 1 || scope.community_id < 1 {
+            return Err(ToolRefusal::Forbidden(
+                "discord role tools need a community-scoped invoke".to_string(),
+            ));
+        }
+        let origin =
+            tool_origin_scope(scope, op).map_err(|e| ToolRefusal::InvalidArgs(e.message))?;
+        self.throttle_role_op(scope)
+            .await
+            .map_err(|e| ToolRefusal::TargetUnavailable(e.code))?;
+        let unavailable =
+            |c: &str| ToolRefusal::TargetUnavailable(format!("discord {op} refused: {c}"));
+        match self.relay_queue.key_exists(DISCORD_DRAIN_READY_KEY).await {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return Err(unavailable("relay_unavailable")),
+        }
+        let op_id = uuid::Uuid::new_v4().to_string();
+        let ack_timeout = self.discord_ack_timeout;
+        let exp_ms = now_epoch_ms()
+            .saturating_add(u64::try_from(ack_timeout.as_millis()).unwrap_or(u64::MAX));
+        let mut env = json!({
+            "v": OUTBOUND_SCHEMA_VERSION, "op": op, "platform": "discord",
+            "origin_channel": origin,
+            "community_id": i64::from(scope.community_id),
+            "tenant_id": i64::from(scope.tenant_id),
+            "op_id": op_id, "exp_ms": exp_ms,
+        });
+        if let (Some(obj), Some(u)) = (env.as_object_mut(), user) {
+            obj.insert("user_id".to_string(), Value::String(u));
+            obj.insert("text".to_string(), Value::String(keys.join(",")));
+        }
+        self.sign_envelope(&mut env)
+            .map_err(|_| unavailable("relay_unavailable"))?;
+        self.relay_queue
+            .lpush(&super::outbound_relay_queue_key("discord"), env.to_string())
+            .await
+            .map_err(|_| unavailable("relay_unavailable"))?;
+        let ack = self.await_bulk_ack(&op_id, ack_timeout).await?;
+        match ack.get("ok").and_then(Value::as_bool) {
+            Some(true) => Ok(if is_set {
+                json!({"ok": true, "op": op})
+            } else {
+                let roles = ack
+                    .pointer("/data/roles")
+                    .cloned()
+                    .ok_or_else(|| unavailable("bad_result"))?;
+                json!({"ok": true, "roles": roles})
+            }),
+            _ => Err(refusal_for_code(
+                ack.get("code").and_then(Value::as_str),
+                op,
+            )),
+        }
+    }
+
+    /// Polls the drain's result key for `op_id` until `timeout`; a result that never arrives is
+    /// `not_confirmed` (the op may or may not have run -- never reported as done).
+    async fn await_bulk_ack(
+        &self,
+        op_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Value, ToolRefusal> {
+        let key = format!("{DISCORD_OP_ACK_KEY_PREFIX}{op_id}");
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match self.relay_queue.take(&key).await {
+                Ok(Some(raw)) => {
+                    return serde_json::from_str(&raw).map_err(|_| {
+                        ToolRefusal::TargetUnavailable(
+                            "discord bulk role result unreadable".to_string(),
+                        )
+                    })
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    return Err(ToolRefusal::TargetUnavailable(
+                        "relay_unavailable".to_string(),
+                    ))
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ToolRefusal::TargetUnavailable("not_confirmed".to_string()));
+            }
+            tokio::time::sleep(DISCORD_OP_ACK_POLL).await;
+        }
+    }
+}
+
+/// Maps a drain refusal code onto the tool framework's taxonomy (typed, never swallowed).
+fn refusal_for_code(code: Option<&str>, op: &str) -> ToolRefusal {
+    let c = code.unwrap_or("relay_failed");
+    let msg = format!("discord {op} refused: {c}");
+    match c {
+        "role_not_managed"
+        | "role_privileged"
+        | "role_not_found"
+        | "user_not_in_community"
+        | "not_in_community"
+        | "bad_request" => ToolRefusal::InvalidArgs(msg),
+        "ambiguous_paired_guild" | "guild_mismatch" | "channel_not_owned" | "no_origin_pin" => {
+            ToolRefusal::Forbidden(msg)
+        }
+        _ => ToolRefusal::TargetUnavailable(msg),
     }
 }
 
@@ -252,7 +468,7 @@ mod tests {
         for t in [
             "classify_frame",
             "discord.scheduled_event.create",
-            "discord.member.roles.set",
+            "discord.member.roles.explode",
         ] {
             assert!(
                 c.run_discord_role_tool(&discord_scope(), t, &json!({}))
@@ -392,5 +608,139 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn set_args(extra: Value) -> Value {
+        let mut v = json!({"user": UUID_A, "role_keys": ["vip", "mod", "vip"]});
+        for (k, val) in extra.as_object().unwrap() {
+            v[k] = val.clone();
+        }
+        v
+    }
+
+    #[tokio::test]
+    async fn roles_set_queues_one_bulk_op_with_sorted_keys_and_the_pinned_scope() {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let mut sc = discord_scope();
+        sc.origin_channel_id = None;
+        sc.origin_guild_id = Some("123456789012345679".to_string());
+        let out = c
+            .run_discord_role_tool(&sc, TOOL_ROLES_SET, &set_args(json!({})))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out, json!({"ok": true, "op": "role.set"}));
+        let envs = c.relay_queue.envelopes();
+        assert_eq!(envs.len(), 1, "one bulk op; the HOST expands the diff");
+        let e = &envs[0];
+        assert_eq!(e["op"], "role.set");
+        assert_eq!(e["text"], "mod,vip");
+        assert_eq!(e["user_id"], format!("{{user:{UUID_A}}}"));
+        assert_eq!(e["origin_channel"], "guild:123456789012345679");
+        assert_eq!(
+            (e["tenant_id"].as_i64(), e["community_id"].as_i64()),
+            (Some(7), Some(3))
+        );
+        for never in ["guild_id", "role_id", "channel"] {
+            assert!(e.get(never).is_none());
+        }
+        assert!(e["pin_sig"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn roles_list_returns_the_drains_roles_payload_and_carries_no_user() {
+        let c = caps(FakeRelayQueue::with_drain_result(
+            r#"{"ok":true,"data":{"roles":[{"key":"vip","assignable":true}]}}"#,
+        ));
+        let mut sc = scope();
+        sc.origin_platform = Some("wix".to_string());
+        sc.origin_channel_id = None;
+        let out = c
+            .run_discord_role_tool(&sc, TOOL_ROLES_LIST, &json!({}))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({"ok": true, "roles": [{"key": "vip", "assignable": true}]})
+        );
+        let e = &c.relay_queue.envelopes()[0];
+        assert_eq!(
+            (e["op"].as_str(), e["origin_channel"].as_str()),
+            (Some("role.list"), Some("guild:-"))
+        );
+        assert!(e.get("user_id").is_none() && e.get("text").is_none());
+    }
+
+    #[tokio::test]
+    async fn bulk_tool_arguments_and_origins_are_validated_before_anything_is_queued() {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        for a in [
+            set_args(json!({"guild_id": "1"})),
+            set_args(json!({"role_id": "1"})),
+            set_args(json!({"role_keys": []})),
+            set_args(json!({"role_keys": ["222222222222222222"]})),
+            set_args(json!({"role_keys": "vip"})),
+            set_args(json!({"role_keys": (0..17).map(|i| format!("k{i}")).collect::<Vec<_>>()})),
+            set_args(json!({"user": "333333333333333333"})),
+            json!([]),
+        ] {
+            let r = c
+                .run_discord_role_tool(&discord_scope(), TOOL_ROLES_SET, &a)
+                .await
+                .unwrap();
+            assert!(matches!(r, Err(ToolRefusal::InvalidArgs(_))), "{a}");
+        }
+        for a in [json!({"x": 1}), json!([])] {
+            let r = c
+                .run_discord_role_tool(&discord_scope(), TOOL_ROLES_LIST, &a)
+                .await
+                .unwrap();
+            assert!(matches!(r, Err(ToolRefusal::InvalidArgs(_))), "{a}");
+        }
+        // Chat origins cannot reach the bulk ops either.
+        let mut sc = scope();
+        sc.origin_platform = Some("twitch".to_string());
+        sc.origin_channel_id = None;
+        let r = c
+            .run_discord_role_tool(&sc, TOOL_ROLES_SET, &set_args(json!({})))
+            .await
+            .unwrap();
+        assert!(matches!(r, Err(ToolRefusal::InvalidArgs(_))));
+        assert!(c.relay_queue.envelopes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bulk_drain_refusals_map_to_typed_errors() {
+        for (code, want) in [
+            ("role_privileged", "invalid"),
+            ("role_not_managed", "invalid"),
+            ("ambiguous_paired_guild", "forbidden"),
+            ("guild_mismatch", "forbidden"),
+            ("upstream_down", "unavailable"),
+        ] {
+            let c = caps(FakeRelayQueue::with_drain_result(&format!(
+                r#"{{"ok":false,"code":"{code}"}}"#
+            )));
+            let r = c
+                .run_discord_role_tool(&discord_scope(), TOOL_ROLES_SET, &set_args(json!({})))
+                .await
+                .unwrap();
+            let got = match r {
+                Err(ToolRefusal::InvalidArgs(_)) => "invalid",
+                Err(ToolRefusal::Forbidden(_)) => "forbidden",
+                Err(ToolRefusal::TargetUnavailable(_)) => "unavailable",
+                other => panic!("{code}: {other:?}"),
+            };
+            assert_eq!(got, want, "{code}");
+        }
+        // No drain: refused before queueing; unanswered drain: not_confirmed (never "done").
+        let c = caps(FakeRelayQueue::default());
+        let r = c
+            .run_discord_role_tool(&discord_scope(), TOOL_ROLES_LIST, &json!({}))
+            .await
+            .unwrap();
+        assert!(matches!(r, Err(ToolRefusal::TargetUnavailable(_))));
+        assert!(c.relay_queue.envelopes().is_empty());
     }
 }
