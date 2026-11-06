@@ -644,3 +644,14 @@ spire:
 # R5: no Tetragon agent on local clusters (networkPolicy.enabled is already false above).
 tetragon:
   enabled: false
+
+# chore/presentation-beta-slice -- local/MicroK8s runs the Rust svc-presentation (the overlay
+# beta path), exactly like alpha/dal2alpha. templates/svc-presentation-rust.yaml renders INSTEAD
+# of the Python templates/svc-presentation.yaml (mutually exclusive, same Deployment/Service
+# names) so the two can never serve the same routes. Image: svc-presentation-rust:<global.imageTag>.
+presentation:
+  rust:
+    enabled: true
+    nodePort:
+      enabled: true
+      port: 31032

@@ -178,7 +178,13 @@ def _connections_issuer() -> ServiceJwtIssuer:
         k8s_namespace="waddlebot",
         k8s_service_account="svc-process",
         allowed_scopes=frozenset(
-            {SCOPE, "connections:resolve", "connections:resolve:static", "connections:list"}
+            {
+                SCOPE,
+                "connections:resolve",
+                "connections:resolve:static",
+                "connections:list",
+                "presentation.overlay:push",
+            }
         ),
         tenant="system",
     )
@@ -269,3 +275,49 @@ async def test_token_endpoint_unbound_list_scope_never_has_community(app: Quart)
 async def test_other_scopes_reject_binding_fields(app: Quart) -> None:
     response = await _post_body(app, {"scope": SCOPE, "community_id": 7})
     assert response.status_code == 400
+
+
+# --- overlay PUSH scope (svc-presentation `overlay_auth::push_scope`) -----------------------
+
+
+async def test_overlay_push_token_carries_the_exact_per_community_scope(app: Quart) -> None:
+    response = await _post_body(app, {"scope": "presentation.overlay:push", "community_id": 42})
+    assert response.status_code == 200
+    body = await response.get_json()
+    claims = (
+        app.config["SERVICE_JWT_ISSUER"]
+        .as_verifier()
+        .verify(body["token"], required_scope="presentation.overlay:push:42")
+    )
+    assert claims["community"] == 42 and claims["tenant"] == "system"
+    assert body["expires_in"] <= 300
+    with pytest.raises(Exception):  # noqa: B017 -- any InvalidServiceToken: wrong community
+        app.config["SERVICE_JWT_ISSUER"].as_verifier().verify(
+            body["token"], required_scope="presentation.overlay:push:91"
+        )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"scope": "presentation.overlay:push"},
+        {"scope": "presentation.overlay:push", "community_id": 7, "connection_id": 1},
+        {"scope": "presentation.overlay:push", "community_id": -1},
+        # a caller must never name the per-community form itself
+        {"scope": "presentation.overlay:push:7", "community_id": 7},
+        {"scope": "presentation.overlay:push:7"},
+    ],
+)
+async def test_overlay_push_requests_are_validated(app: Quart, body: dict[str, Any]) -> None:
+    response = await _post_body(app, body)
+    assert response.status_code in (400, 401)
+
+
+async def test_overlay_push_requires_the_identity_grant(app: Quart) -> None:
+    app.config["SERVICE_JWT_ISSUER"] = _issuer()  # allow-list has no overlay push scope
+    response = await app.test_client().post(
+        "/internal/service-token",
+        headers={"Authorization": "Bearer sa"},
+        json={"scope": "presentation.overlay:push", "community_id": 7},
+    )
+    assert response.status_code == 401
