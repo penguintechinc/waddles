@@ -243,5 +243,11 @@
       "PUT /api/v1/admin/ai-knowledge/settings/:communityId",
       "GET /api/v1/admin/ai-knowledge/health/:communityId"
     ]
+  },
+  "media-byok": {
+    "label": "Media generation (Gemini key)",
+    "endpoints": [
+      "GET /api/v1/admin/:communityId/media/usage"
+    ]
   }
 }

@@ -108,7 +108,9 @@ def machine_authenticated(
 
     ``required_scope`` may be a collection: a credential holding ANY one of them is accepted, and
     the scopes the caller actually holds are published on ``quart.g.machine_scopes`` so a handler
-    can apply a finer, per-resource check (least privilege by connection kind).
+    can apply a finer, per-resource check (least privilege by connection kind). The verified caller
+    identity (the JWT ``sub`` / the allow-listed SVID's SPIFFE id) is published on
+    ``quart.g.machine_subject`` for handlers that additionally allow-list *which* service may call.
     """
     accepted = (required_scope,) if isinstance(required_scope, str) else tuple(required_scope)
 
@@ -184,6 +186,7 @@ async def _jwt_path(
         _count(_MECH_JWT, _OUT_UNAUTHORIZED)
         return _UNAUTHORIZED, 401
     g.machine_scopes = frozenset({str(claims.get("scope"))})
+    g.machine_subject = str(claims.get("sub") or "")
     if claims.get("tenant") != SYSTEM_TENANT:
         logger.warning(wrong_tenant_event)
         _count(_MECH_JWT, _OUT_FORBIDDEN)
@@ -248,5 +251,6 @@ async def _svid_path(
             _count(_MECH_SVID, _OUT_FORBIDDEN)
             return _FORBIDDEN, 403
     g.machine_scopes = frozenset(identity.allowed_scopes)
+    g.machine_subject = identity.service_id
     _count(_MECH_SVID, _OUT_OK)
     return await handler(*args, **kwargs)
