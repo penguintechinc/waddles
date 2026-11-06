@@ -1514,14 +1514,14 @@ bundles:
       - tenant_slug: global
         community_id: null
 
-  # Bar Citizen read-only module (#484): `!bc` events/info from a cached public feed. GET-only
-  # egress to barcitizen.org (ASSUMED host, see bundles/python/barcitizen_readonly/README.md).
-  - app_id: waddles.core.barcitizen.readonly
+  # Community feed reader (#484): `!feed` events/info from a per-community configured public
+  # JSON feed url; the operator grants net.http.fqdn:<host> per community (no fixed host).
+  - app_id: waddles.core.community.feed
     version: "1.0.0"
     language: python
-    source_dir: python/barcitizen_readonly
-    manifest_path: barcitizen-readonly.manifest.yaml
-    artifact_path: barcitizen-readonly.wasm
+    source_dir: python/community_feed
+    manifest_path: community-feed.manifest.yaml
+    artifact_path: community-feed.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null

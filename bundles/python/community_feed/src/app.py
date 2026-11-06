@@ -1,20 +1,27 @@
-"""`!bc` -> READ-ONLY Bar Citizen events and public info (`waddles.core.barcitizen.readonly`).
+"""`!feed` -> READ-ONLY community events and public info (`waddles.core.community.feed`).
 
-Commands (all answer from a per-community cached snapshot of Bar Citizen's public JSON feed):
+Commands (all answer from a per-community cached snapshot of the community's public JSON feed):
 
-- `!bc` / `!bc events`   -- the next upcoming events (soonest first).
-- `!bc event <n>`        -- one event by its list position (1 = soonest) or its feed id.
-- `!bc info [topic]`     -- public informative entries; with no topic, the available topics.
-- `!bc sync`             -- mod/broadcaster-only: force a refresh now (skip the TTL wait).
+- `!feed` / `!feed events`   -- the next upcoming events (soonest first).
+- `!feed event <n>`        -- one event by its list position (1 = soonest) or its feed id.
+- `!feed info [topic]`     -- public informative entries; with no topic, the available topics.
+- `!feed sync`             -- (mod) force a refresh now (skip the TTL wait).
+- `!feed set url <https-url>` / `!feed reset url` -- (mod) per-community feed url config.
 
-Read-only by construction (issue #484): the only egress is `net.http.fqdn:barcitizen.org` with
-**GET** only and no credentials; the bundle never writes anything back to the source, never posts
-to a platform except the reply to the invoking channel, and requests no write/admin scope. `kv` is
-a CACHE of the last good snapshot, never a source of truth.
+Read-only by construction (issue #484): GET only, no credentials; the bundle never writes
+anything back to the source, never posts except the reply to the invoking channel, and requests
+no write/admin scope. `kv` is a CACHE of the last good snapshot (plus the configured url), never a
+source of truth.
 
-Feed contract (assumption until the customer confirms the real source, spec open question 1 --
-the host/path below are one constant to change; the schema is validated strictly so a different
-source fails loudly rather than rendering garbage):
+**Per-community feed url, not a hardcoded host.** A moderator sets it with `!feed set url`. The
+bundle validates it (https, hostname only, no credentials/port/fragment/IP literal/local suffix)
+before storing it, but the hard boundary is the host's egress allowlist: wildcard fqdn grants are
+rejected by the capability gate, so the manifest declares no fixed host and the platform operator
+grants `net.http.fqdn:<host>` for the community's chosen feed host. Without a grant the host denies
+the call and the reply is an explicit "unavailable" (fail closed, never an open fetch).
+
+Feed contract (schema validated strictly so a different source fails loudly rather than rendering
+garbage):
 
     {"events": [{"id": str, "title": str, "starts_at": RFC3339, "location"?: str, "url"?: str}],
      "info":   [{"id": str, "title": str, "body": str}]}
@@ -36,7 +43,8 @@ Logs carry only the command, counts, HTTP status and exception class names -- ne
 State (`waddle_sdk.community_kv`, community-scoped; `community=None` is the host's valid
 tenant-wide sentinel, passed through). Keys use `.` only (gh-631):
 
-- `bcro.snapshot` -- JSON `{"synced_ms": int, "events": [...], "info": [...]}` (<< 64 KiB cap)
+- `feed.url`      -- the validated https feed url
+- `feed.snapshot` -- JSON `{"synced_ms": int, "events": [...], "info": [...]}` (<< 64 KiB cap)
 
 Activation-gated only -- the platform's installed -> enabled -> activated check is the gate, so the
 module is OFF until a community admin activates it (the repo's command-bundle convention,
@@ -49,17 +57,19 @@ import json
 import re
 from datetime import UTC, datetime
 from typing import Any, NoReturn, cast
+from urllib.parse import urlsplit
 
 from waddle_sdk import clock, community_kv, log, relay
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.http import HttpClient
 from waddle_sdk.safe_text import guard_leading_command, sanitize_user_text
 
-COMMAND = "!bc"
-FEED_HOST = "barcitizen.org"
-FEED_URL = f"https://{FEED_HOST}/api/public/feed.json"
+COMMAND = "!feed"
 
-SNAPSHOT_KEY = "bcro.snapshot"
+SNAPSHOT_KEY = "feed.snapshot"
+URL_KEY = "feed.url"
+MAX_FEED_URL_LEN = 200
+_HOST_LABEL_RE = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 CACHE_TTL_SECONDS = 300
 MAX_EVENTS = 25
 MAX_INFO = 12
@@ -72,15 +82,26 @@ MAX_ID_LEN = 40
 MAX_TOPIC_LEN = 40
 
 _ID_RE = re.compile(r"[A-Za-z0-9_.\-]{1,40}")
-_USAGE = "Usage: !bc [events] | !bc event <n> | !bc info [topic] | !bc sync (mod)"
-_PERMISSION_DENIED_MSG = "only moderators/broadcasters can force a sync"
-_UNAVAILABLE_MSG = "Bar Citizen info is unavailable right now - please try again later."
+_USAGE = (
+    "Usage: !feed [events] | !feed event <n> | !feed info [topic] | "
+    "!feed sync | !feed set url <https-url> | !feed reset url (last three: mod)"
+)
+_NOT_CONFIGURED_MSG = (
+    "No feed is configured - a moderator can set one with !feed set url <https-url>"
+)
+_BAD_URL_MSG = "the feed url must be a public https URL (a hostname, no credentials, no port)"
+_PERMISSION_DENIED_MSG = "only moderators/broadcasters can do that"
+_UNAVAILABLE_MSG = "Community feed is unavailable right now - please try again later."
 _STALE_MARK = " (cached - may be out of date)"
-_KNOWN_COMMANDS = frozenset({"events", "event", "info", "sync", "usage"})
+_KNOWN_COMMANDS = frozenset({"events", "event", "info", "sync", "set_url", "reset_url", "usage"})
 
 
 class _FeedError(Exception):
     """Internal-only: the feed fetch/validation failed (already logged); always caught."""
+
+
+class _NotConfiguredError(Exception):
+    """Internal-only: the community has not set a feed url yet. Always caught."""
 
 
 class _KvFailure(Exception):
@@ -156,41 +177,90 @@ def _parse_feed(body: bytes, now_ms: int) -> dict[str, Any]:
     try:
         doc = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
-        log.error("bcro.feed_bad_json", error_type=type(exc).__name__)
+        log.error("feed.feed_bad_json", error_type=type(exc).__name__)
         raise _FeedError("bad json") from exc
     if not isinstance(doc, dict):
-        log.error("bcro.feed_bad_shape")
+        log.error("feed.feed_bad_shape")
         raise _FeedError("bad shape")
     raw_events, raw_info = doc.get("events", []), doc.get("info", [])
     if not isinstance(raw_events, list) or not isinstance(raw_info, list):
-        log.error("bcro.feed_bad_shape")
+        log.error("feed.feed_bad_shape")
         raise _FeedError("bad shape")
 
     events = [e for e in (_valid_event(r) for r in raw_events[: MAX_EVENTS * 2]) if e is not None]
     info = [i for i in (_valid_info(r) for r in raw_info[: MAX_INFO * 2]) if i is not None]
     dropped = (len(raw_events) + len(raw_info)) - (len(events) + len(info))
     if (raw_events or raw_info) and not events and not info:
-        log.error("bcro.feed_all_invalid", dropped=dropped)
+        log.error("feed.feed_all_invalid", dropped=dropped)
         raise _FeedError("no valid items")
     events.sort(key=lambda e: cast("int", e["starts_ms"]))
-    log.info("bcro.feed_parsed", events=len(events), info=len(info), dropped=dropped)
+    log.info("feed.feed_parsed", events=len(events), info=len(info), dropped=dropped)
     return {"synced_ms": now_ms, "events": events[:MAX_EVENTS], "info": info[:MAX_INFO]}
 
 
-async def _fetch_snapshot() -> dict[str, Any]:
-    """GET the feed and return a validated snapshot.
+def _valid_feed_url(raw: str) -> str | None:
+    """The url if it is a public https URL (hostname only, no credentials/port/fragment), else None.
+
+    The manifest egress allowlist is the hard boundary; this is the bundle-side first filter so a
+    mod cannot even store `http://`, an IP literal, `localhost`, userinfo or a custom port.
+    """
+    if not raw or len(raw) > MAX_FEED_URL_LEN or not raw.isascii() or _has_ws_or_ctl(raw):
+        return None
+    try:
+        parts = urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or parts.username or parts.password or port not in (None, 443):
+        return None
+    if parts.fragment or "." not in host or host.endswith("."):
+        return None
+    if not all(_HOST_LABEL_RE.fullmatch(label) for label in host.split(".")):
+        return None
+    if host.rsplit(".", 1)[1].isdigit() or host.endswith((".local", ".internal", ".localhost")):
+        return None
+    return raw
+
+
+def _has_ws_or_ctl(value: str) -> bool:
+    """True if `value` has whitespace or any ASCII control character."""
+    return any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value)
+
+
+async def _load_url(community: str | None) -> str:
+    """The community's configured feed url.
+
+    Raises:
+        _NotConfiguredError: None stored.
+        _KvFailure: kv failed or the stored url no longer validates.
+    """
+    try:
+        raw = await community_kv.get(community, URL_KEY)
+    except Exception as exc:
+        raise _KvFailure(f"kv.get failed: {type(getattr(exc, 'value', exc)).__name__}") from exc
+    if raw is None:
+        raise _NotConfiguredError
+    url = _valid_feed_url(raw.decode("utf-8", "replace"))
+    if url is None:
+        raise _KvFailure("stored feed url invalid")
+    return url
+
+
+async def _fetch_snapshot(url: str) -> dict[str, Any]:
+    """GET the configured feed url and return a validated snapshot.
 
     Raises:
         _FeedError: Transport failure, non-200, truncated, or invalid document (already logged).
     """
     try:
-        response = await HttpClient().get(FEED_URL)
+        response = await HttpClient().get(url)
     except Exception as exc:  # noqa: BLE001 - SDK raises Retryable/NonRetryable transport errors
-        log.error("bcro.feed_unavailable", error_type=type(exc).__name__)
+        log.error("feed.feed_unavailable", error_type=type(exc).__name__)
         raise _FeedError("transport") from exc
     status = response["status"]
     if status != 200 or response["truncated"]:
-        log.error("bcro.feed_bad_status", status=status, truncated=bool(response["truncated"]))
+        log.error("feed.feed_bad_status", status=status, truncated=bool(response["truncated"]))
         raise _FeedError("status")
     return _parse_feed(cast("bytes", response["body"]), clock.now_millis())
 
@@ -232,18 +302,20 @@ async def _current(community: str | None, *, force: bool) -> tuple[dict[str, Any
     Raises:
         _FeedError: Refresh failed and there is no cached snapshot to fall back on.
         _KvFailure: The cache could not be read or written.
+        _NotConfiguredError: No feed url has been set for this community.
     """
+    url = await _load_url(community)
     cached = await _load_snapshot(community)
     now_ms = clock.now_millis()
     fresh = cached is not None and 0 <= now_ms - cached["synced_ms"] < CACHE_TTL_SECONDS * 1000
     if fresh and not force:
         return cast("dict[str, Any]", cached), False
     try:
-        snapshot = await _fetch_snapshot()
+        snapshot = await _fetch_snapshot(url)
     except _FeedError:
         if cached is None:
             raise
-        log.warn("bcro.serving_stale", age_s=max(0, (now_ms - cached["synced_ms"]) // 1000))
+        log.warn("feed.serving_stale", age_s=max(0, (now_ms - cached["synced_ms"]) // 1000))
         return cached, True
     await _store_snapshot(community, snapshot)
     return snapshot, False
@@ -264,13 +336,13 @@ def _render_events(snapshot: dict[str, Any], now_ms: int) -> str:
     """One-line summary of the next few upcoming events."""
     upcoming = _upcoming(snapshot, now_ms)
     if not upcoming:
-        return "No upcoming Bar Citizen events right now."
+        return "No upcoming community events right now."
     parts = [
         f"{i}. {e['title']} ({_fmt_when(e['starts_ms'])})"
         for i, e in enumerate(upcoming[:LIST_SHOW], 1)
     ]
     more = f" (+{len(upcoming) - LIST_SHOW} more)" if len(upcoming) > LIST_SHOW else ""
-    return "Bar Citizen events: " + " | ".join(parts) + more + " - !bc event <n> for details"
+    return "Community events: " + " | ".join(parts) + more + " - !feed event <n> for details"
 
 
 def _render_event(snapshot: dict[str, Any], now_ms: int, ref: str) -> str:
@@ -282,7 +354,7 @@ def _render_event(snapshot: dict[str, Any], now_ms: int, ref: str) -> str:
     else:
         chosen = next((e for e in upcoming if e["id"] == ref), None)
     if chosen is None:
-        return "No such upcoming event - try !bc events"
+        return "No such upcoming event - try !feed events"
     out = f"{chosen['title']} - {_fmt_when(chosen['starts_ms'])}"
     if "location" in chosen:
         out += f" @ {chosen['location']}"
@@ -295,16 +367,14 @@ def _render_info(snapshot: dict[str, Any], topic: str) -> str:
     """The info entry matching `topic` (id or title, case-insensitive), or the topic list."""
     info = cast("list[dict[str, str]]", snapshot["info"])
     if not info:
-        return "No Bar Citizen info published yet."
+        return "No community info published yet."
     if not topic:
-        return (
-            "Bar Citizen info topics: " + ", ".join(i["id"] for i in info) + " - !bc info <topic>"
-        )
+        return "Info topics: " + ", ".join(i["id"] for i in info) + " - !feed info <topic>"
     wanted = topic.lower()
     for entry in info:
         if wanted in (entry["id"].lower(), entry["title"].lower()):
             return f"{entry['title']}: {entry['body']}"
-    return "No such topic - try !bc info"
+    return "No such topic - try !feed info"
 
 
 def _parse(rest: str) -> dict[str, Any]:
@@ -315,6 +385,13 @@ def _parse(rest: str) -> dict[str, Any]:
         return {"command": "events"} if not tail else {"command": "usage"}
     if verb == "sync":
         return {"command": "sync"} if not tail else {"command": "usage"}
+    if verb in ("set", "reset"):
+        sub, _, arg = tail.partition(" ")
+        if sub.lower() != "url":
+            return {"command": "usage"}
+        if verb == "reset":
+            return {"command": "reset_url"} if not arg.strip() else {"command": "usage"}
+        return {"command": "set_url", "url": arg.strip()}
     if verb == "event" and tail and " " not in tail and len(tail) <= MAX_ID_LEN:
         return {"command": "event", "ref": tail}
     if verb == "info" and len(tail) <= MAX_TOPIC_LEN:
@@ -323,7 +400,7 @@ def _parse(rest: str) -> dict[str, Any]:
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: recognize `!bc ...` and parse its grammar.
+    """Implement `process-stage.transform`: recognize `!feed ...` and parse its grammar.
 
     Returns `None` for non-matching text. A recognized-but-malformed command still yields a
     `usage` reply -- the caller did invoke it, never silently dropped.
@@ -340,7 +417,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         payload["is_mod"] = event.payload["is_mod"] is True
     if "is_broadcaster" in event.payload:
         payload["is_broadcaster"] = event.payload["is_broadcaster"] is True
-    log.info("bcro.transform matched", command=payload["command"])
+    log.info("feed.transform matched", command=payload["command"])
     return PlatformEvent(
         platform=event.platform,
         event_type=event.event_type,
@@ -365,14 +442,33 @@ class DispatchResult:
 
 async def _fail(reason: str, *, provider: str, channel_id: str) -> NoReturn:
     """Fail-loud path: log the reason, reply an explicit error to chat, then raise."""
-    log.error("bcro.failed", reason=reason)
+    log.error("feed.failed", reason=reason)
     await relay.push(provider, {"channel": channel_id, "text": _UNAVAILABLE_MSG})
-    raise RuntimeError(f"bar citizen read failed: {reason}")
+    raise RuntimeError(f"community feed read failed: {reason}")
 
 
 def _is_privileged(payload: dict[str, Any]) -> bool:
     """True only for a real boolean `True` mod/broadcaster badge (absent badges = denied)."""
     return payload.get("is_mod") is True or payload.get("is_broadcaster") is True
+
+
+async def _configure(command: str, raw_url: str, community: str | None) -> str:
+    """`set url` / `reset url`: validate + store (or clear) the url, dropping the stale cache."""
+    try:
+        if command == "set_url":
+            url = _valid_feed_url(raw_url)
+            if url is None:
+                return _BAD_URL_MSG
+            await community_kv.set(community, URL_KEY, url.encode("utf-8"), ttl_seconds=0)
+            reply = "Feed url saved. Use !feed sync to load it."
+        else:
+            await community_kv.delete(community, URL_KEY)
+            reply = "Feed url cleared."
+        await community_kv.delete(community, SNAPSHOT_KEY)
+    except Exception as exc:
+        raise _KvFailure(f"kv op failed: {type(getattr(exc, 'value', exc)).__name__}") from exc
+    log.info("feed.configured", command=command)
+    return reply
 
 
 async def dispatch(
@@ -388,25 +484,34 @@ async def dispatch(
     payload = envelope.event.payload
     channel_id = payload.get("channel_id")
     if not channel_id:
-        raise ValueError("bar citizen reply requires a channel_id from the inbound chat.message")
+        raise ValueError("community feed reply requires a channel_id from the inbound chat.message")
     command = payload.get("command")
     if command not in _KNOWN_COMMANDS:
-        raise ValueError(f"unrecognized bar citizen command: {command!r}")
+        raise ValueError(f"unrecognized community feed command: {command!r}")
     provider = envelope.event.platform
     community = envelope.community
 
     if command == "usage":
         reply = _USAGE
-    elif command == "sync" and not _is_privileged(payload):
-        log.info("bcro.permission_denied", command=command)
+    elif command in ("sync", "set_url", "reset_url") and not _is_privileged(payload):
+        log.info("feed.permission_denied", command=command)
         reply = _PERMISSION_DENIED_MSG
+    elif command in ("set_url", "reset_url"):
+        try:
+            reply = await _configure(command, str(payload.get("url", "")), community)
+        except _KvFailure as exc:
+            await _fail(str(exc), provider=provider, channel_id=channel_id)
     else:
         try:
             snapshot, stale = await _current(community, force=command == "sync")
+        except _NotConfiguredError:
+            snapshot, stale = None, False
         except (_FeedError, _KvFailure) as exc:
             await _fail(str(exc), provider=provider, channel_id=channel_id)
         now_ms = clock.now_millis()
-        if command == "sync":
+        if snapshot is None:
+            reply = _NOT_CONFIGURED_MSG
+        elif command == "sync":
             counts = f"{len(snapshot['events'])} events, {len(snapshot['info'])} info entries"
             reply = (
                 f"Sync failed - still serving cached data: {counts}"
@@ -423,5 +528,5 @@ async def dispatch(
             reply += _STALE_MARK if stale else ""
 
     await relay.push(provider, {"channel": channel_id, "text": guard_leading_command(reply)})
-    log.info("bcro.dispatch relayed", platform=provider, command=command)
+    log.info("feed.dispatch relayed", platform=provider, command=command)
     return DispatchResult(transport=provider, detail=str(command))

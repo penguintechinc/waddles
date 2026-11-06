@@ -1,14 +1,16 @@
-# hub-api install-pipeline manifest (schema_version 2) for waddles.core.barcitizen.readonly -- see bundles/python/pyping/hub-manifest.yaml for why this is separate from bundle.yaml.
 schema_version: 2
-app_id: waddles.core.barcitizen.readonly
-name: Bar Citizen Read-Only Module (Python)
+app_id: waddles.core.community.feed
+name: Community Feed Reader (Python)
 version: 1.0.0
-feature: waddles.core.barcitizen
+feature: waddles.core.community
 module: core
 provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/community_feed
 language: python
-artifact: prebuilt
-execution_model: native
+artifact: component
+execution_model: wasi-component
 is_default: false
 stages:
   process:
@@ -17,16 +19,21 @@ stages:
       - platform: twitch
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!bc"]
+          command_prefix: ["!feed"]
       - platform: discord
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!bc"]
+          command_prefix: ["!feed"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
   action:
     entry: "waddle:bundle/action-stage#dispatch"
-egress:
-  - host: barcitizen.org
-    methods: ["GET"]
+    config: {}
+    spec:
+      required_config: []
+egress: []
 data:
   tables: []
 limits:
@@ -35,13 +42,15 @@ limits:
   egress_rps: 2
 permissions:
   - id: storage.kv
-    justification: "per-community cache of the last good Bar Citizen feed snapshot (events + public info); never the source of truth"
-  - id: net.http.fqdn:barcitizen.org
-    justification: "read-only pull of Bar Citizen's public events/info JSON feed; GET only, no credentials"
-    params:
-      methods: ["GET"]
+    justification: "per-community feed url config and cache of the last good feed snapshot (events + public info); never the source of truth"
   - id: "chat.send:discord"
     justification: "replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
   - id: "chat.send:twitch"
     justification: "replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
-routes_to: []
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null
