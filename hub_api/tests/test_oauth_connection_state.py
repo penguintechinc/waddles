@@ -17,7 +17,10 @@ from quart import Quart
 
 from config import HubAPIConfig
 from services import oauth_connection_state as state_module
+from services.install_state_binding import ERR_STATE, InstallStateError, nonce_hash
 from services.rate_limiting import RATE_LIMITER_CONFIG_KEY
+
+NONCE = "browser-nonce-0123456789"
 
 
 class FakeRedis:
@@ -30,6 +33,15 @@ class FakeRedis:
     async def set(self, key: str, value: str, ex: int | None = None) -> None:
         expires_at = time.monotonic() + ex if ex is not None else None
         self.store[key] = (value, expires_at)
+
+    async def get(self, key: str) -> str | None:
+        entry = self.store.get(key)
+        if entry is None:
+            return None
+        value, expires_at = entry
+        if expires_at is not None and time.monotonic() > expires_at:
+            return None
+        return value
 
     async def getdel(self, key: str) -> str | None:
         entry = self.store.pop(key, None)
@@ -90,13 +102,14 @@ class TestCreateAndConsumeState:
     ) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 community_id=1,
                 provider="youtube",
                 user_id=42,
                 redirect_uri="http://localhost/cb/youtube",
                 code_verifier="verifier-123",
             )
-            payload = await state_module.consume_state(token)
+            payload = await state_module.consume_state(token, NONCE)
 
         assert payload == state_module.StatePayload(
             community_id=1,
@@ -111,13 +124,14 @@ class TestCreateAndConsumeState:
     ) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 community_id=2,
                 provider="spotify",
                 user_id=1,
                 redirect_uri="http://localhost/cb/spotify",
                 code_verifier=None,
             )
-            payload = await state_module.consume_state(token)
+            payload = await state_module.consume_state(token, NONCE)
 
         assert payload is not None
         assert payload.code_verifier is None
@@ -125,34 +139,39 @@ class TestCreateAndConsumeState:
     async def test_state_is_single_use(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 community_id=1,
                 provider="twitch",
                 user_id=1,
                 redirect_uri="http://localhost/cb/twitch",
                 code_verifier=None,
             )
-            first = await state_module.consume_state(token)
-            second = await state_module.consume_state(token)
+            first = await state_module.consume_state(token, NONCE)
+            with pytest.raises(InstallStateError) as replay:
+                await state_module.consume_state(token, NONCE)
 
         assert first is not None
-        assert second is None
+        assert replay.value.code == ERR_STATE
 
     async def test_unknown_token_returns_none(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
-            result = await state_module.consume_state("never-issued-token")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("never-issued-token", NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_empty_state_returns_none_without_touching_redis(
         self, app: Quart, fake_redis: FakeRedis
     ) -> None:
         async with app.app_context():
-            result = await state_module.consume_state("")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("", NONCE)
+            assert refused.value.code == ERR_STATE
         assert fake_redis.store == {}
 
     async def test_expired_state_returns_none(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 community_id=1,
                 provider="discord",
                 user_id=1,
@@ -160,37 +179,45 @@ class TestCreateAndConsumeState:
                 code_verifier=None,
             )
             fake_redis.force_expire(f"oauth:conn:state:{token}")
-            result = await state_module.consume_state(token)
-
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state(token, NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_redis_error_on_consume_returns_none(
         self, app: Quart, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         class _ExplodingRedis:
+            async def get(self, _key: str) -> str:
+                raise ConnectionError("redis unreachable")
+
             async def getdel(self, _key: str) -> str:
                 raise ConnectionError("redis unreachable")
 
         monkeypatch.setattr(state_module, "_redis_client", lambda: _ExplodingRedis())
         async with app.app_context():
-            result = await state_module.consume_state("some-token")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("some-token", NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_malformed_payload_returns_none(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
             await fake_redis.set("oauth:conn:state:bogus", "not-valid-json", ex=600)
-            result = await state_module.consume_state("bogus")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("bogus", NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_payload_missing_required_field_returns_none(
         self, app: Quart, fake_redis: FakeRedis
     ) -> None:
         async with app.app_context():
             await fake_redis.set(
-                "oauth:conn:state:bogus2", '{"community_id": 1, "provider": "kick"}', ex=600
+                "oauth:conn:state:bogus2",
+                f'{{"community_id": 1, "provider": "kick", "binding": "{nonce_hash(NONCE)}"}}',
+                ex=600,
             )
-            result = await state_module.consume_state("bogus2")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("bogus2", NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_create_stores_under_configured_ttl(
         self, app: Quart, fake_redis: FakeRedis
@@ -198,6 +225,7 @@ class TestCreateAndConsumeState:
         app.config["HUB_API_CONFIG"] = _test_hub_config(ttl_s=42)
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 community_id=1,
                 provider="slack",
                 user_id=1,

@@ -43,6 +43,9 @@ def _pass_through_ssrf_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(install_module, "validate_outbound_url", _pass_through)
 
 
+NONCE = "browser-nonce-0123456789"
+
+
 class FakeRedis:
     """Minimal async fake -- same shape `test_tenant_discord_install_state.py` uses."""
 
@@ -52,6 +55,9 @@ class FakeRedis:
 
     async def set(self, key: str, value: str, ex: int | None = None) -> None:
         self.store[key] = value
+
+    async def get(self, key: str) -> str | None:
+        return self.store.get(key)
 
     async def getdel(self, key: str) -> str | None:
         return self.store.pop(key, None)
@@ -68,6 +74,7 @@ class TestBuildAuthorizeUrl:
     async def test_global_tenant_is_rejected(self, fake_redis: FakeRedis) -> None:
         with pytest.raises(ApiError) as exc_info:
             await build_authorize_url(
+                binding_nonce=NONCE,
                 tenant_id=1,
                 is_global_tenant=True,
                 admin_user_id=1,
@@ -81,6 +88,7 @@ class TestBuildAuthorizeUrl:
     async def test_blank_application_id_is_rejected(self, fake_redis: FakeRedis) -> None:
         with pytest.raises(ApiError) as exc_info:
             await build_authorize_url(
+                binding_nonce=NONCE,
                 tenant_id=5,
                 is_global_tenant=False,
                 admin_user_id=1,
@@ -94,6 +102,7 @@ class TestBuildAuthorizeUrl:
     async def test_blank_client_secret_is_rejected(self, fake_redis: FakeRedis) -> None:
         with pytest.raises(ApiError) as exc_info:
             await build_authorize_url(
+                binding_nonce=NONCE,
                 tenant_id=5,
                 is_global_tenant=False,
                 admin_user_id=1,
@@ -106,6 +115,7 @@ class TestBuildAuthorizeUrl:
 
     async def test_builds_discord_authorize_url_with_bot_scope(self, fake_redis: FakeRedis) -> None:
         url = await build_authorize_url(
+            binding_nonce=NONCE,
             tenant_id=5,
             is_global_tenant=False,
             admin_user_id=9,
@@ -128,6 +138,7 @@ class TestBuildAuthorizeUrl:
         self, fake_redis: FakeRedis
     ) -> None:
         url = await build_authorize_url(
+            binding_nonce=NONCE,
             tenant_id=5,
             is_global_tenant=False,
             admin_user_id=9,
@@ -143,12 +154,14 @@ class TestBuildAuthorizeUrl:
 class TestCompleteInstall:
     async def test_missing_code_is_rejected(self, fake_redis: FakeRedis) -> None:
         with pytest.raises(ApiError) as exc_info:
-            await complete_install(object(), code="", state="whatever")
+            await complete_install(object(), code="", state="whatever", binding_nonce=NONCE)
         assert exc_info.value.status_code == 400
 
     async def test_invalid_state_is_rejected(self, fake_redis: FakeRedis) -> None:
         with pytest.raises(DiscordInstallError) as exc_info:
-            await complete_install(object(), code="auth-code", state="never-issued")
+            await complete_install(
+                object(), code="auth-code", state="never-issued", binding_nonce=NONCE
+            )
         assert exc_info.value.status_code == 400
 
     async def test_replayed_state_is_rejected(
@@ -156,6 +169,7 @@ class TestCompleteInstall:
     ) -> None:
         dal, _community_id, tenant_id, _global_id = bar_citizen_db
         state = await state_module.create_state(
+            binding_nonce=NONCE,
             tenant_id=tenant_id,
             admin_user_id=1,
             application_id="app-1",
@@ -167,16 +181,17 @@ class TestCompleteInstall:
             "services.discord_install_service._exchange_code",
             new=AsyncMock(return_value={"access_token": "tok"}),
         ):
-            await complete_install(dal, code="auth-code", state=state)
+            await complete_install(dal, code="auth-code", state=state, binding_nonce=NONCE)
 
         with pytest.raises(DiscordInstallError):
-            await complete_install(dal, code="auth-code", state=state)
+            await complete_install(dal, code="auth-code", state=state, binding_nonce=NONCE)
 
     async def test_happy_path_stores_verified_credentials(
         self, fake_redis: FakeRedis, bar_citizen_db: Any
     ) -> None:
         dal, _community_id, tenant_id, _global_id = bar_citizen_db
         state = await state_module.create_state(
+            binding_nonce=NONCE,
             tenant_id=tenant_id,
             admin_user_id=7,
             application_id="app-happy",
@@ -189,7 +204,7 @@ class TestCompleteInstall:
             "services.discord_install_service._exchange_code",
             new=AsyncMock(return_value={"access_token": "tok", "token_type": "Bearer"}),
         ):
-            result = await complete_install(dal, code="auth-code", state=state)
+            result = await complete_install(dal, code="auth-code", state=state, binding_nonce=NONCE)
 
         assert result == InstallResult(
             tenant_id=tenant_id, platform="discord", installed_by_user_id=7
@@ -210,6 +225,7 @@ class TestCompleteInstall:
     ) -> None:
         dal, _community_id, tenant_id, _global_id = bar_citizen_db
         state = await state_module.create_state(
+            binding_nonce=NONCE,
             tenant_id=tenant_id,
             admin_user_id=7,
             application_id="app-fail",
@@ -223,7 +239,7 @@ class TestCompleteInstall:
             new=AsyncMock(side_effect=DiscordInstallError("boom", 502)),
         ):
             with pytest.raises(DiscordInstallError):
-                await complete_install(dal, code="auth-code", state=state)
+                await complete_install(dal, code="auth-code", state=state, binding_nonce=NONCE)
 
         from services.credential_resolver import TransportUnavailable
 
@@ -240,6 +256,7 @@ class TestCompleteInstall:
 
         dal, _community_id, tenant_id, _global_id = bar_citizen_db
         state = await state_module.create_state(
+            binding_nonce=NONCE,
             tenant_id=tenant_id,
             admin_user_id=7,
             application_id="app-net",
@@ -253,13 +270,14 @@ class TestCompleteInstall:
             new=AsyncMock(side_effect=httpx.ConnectError("boom")),
         ):
             with pytest.raises(DiscordInstallError):
-                await complete_install(dal, code="auth-code", state=state)
+                await complete_install(dal, code="auth-code", state=state, binding_nonce=NONCE)
 
     async def test_exchange_non_2xx_raises(
         self, fake_redis: FakeRedis, bar_citizen_db: Any
     ) -> None:
         dal, _community_id, tenant_id, _global_id = bar_citizen_db
         state = await state_module.create_state(
+            binding_nonce=NONCE,
             tenant_id=tenant_id,
             admin_user_id=7,
             application_id="app-bad",
@@ -279,7 +297,7 @@ class TestCompleteInstall:
             new=AsyncMock(return_value=_FakeResponse()),
         ):
             with pytest.raises(DiscordInstallError) as exc_info:
-                await complete_install(dal, code="auth-code", state=state)
+                await complete_install(dal, code="auth-code", state=state, binding_nonce=NONCE)
         # The error message carries only an HTTP status -- never the secret.
         assert "secret-bad" not in exc_info.value.message
 

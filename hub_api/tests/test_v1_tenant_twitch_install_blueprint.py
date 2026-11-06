@@ -22,6 +22,7 @@ from quart_schema import QuartSchema
 import blueprints.v1.tenant_twitch_install as install_module
 from blueprints.v1.tenant_twitch_install import tenant_twitch_install_bp
 from config import HubAPIConfig
+from services.install_state_binding import ERR_STATE, InstallStateError
 from services.twitch_install_oauth import TwitchOAuthError, TwitchTokenResult
 from services.twitch_install_state import TwitchInstallStatePayload
 
@@ -184,7 +185,11 @@ class TestAuthorize:
 
 class TestCallback:
     async def test_invalid_or_expired_state_is_400(self, client: Any, monkeypatch: Any) -> None:
-        monkeypatch.setattr(install_module.state_svc, "consume_state", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            install_module.state_svc,
+            "consume_state",
+            AsyncMock(side_effect=InstallStateError(ERR_STATE)),
+        )
         response = await client.get("/api/v1/tenant/twitch-install/callback?state=bogus&code=abc")
         assert response.status_code == 400
         text = await response.get_data(as_text=True)

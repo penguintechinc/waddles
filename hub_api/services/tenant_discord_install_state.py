@@ -35,6 +35,12 @@ from typing import Any, cast
 from quart import current_app
 
 from config import HubAPIConfig
+from services.install_state_binding import (
+    ERR_STATE,
+    InstallStateError,
+    consume_bound,
+    nonce_hash,
+)
 from services.platform_integrations_crypto import (
     PlatformCredentialCryptoError,
 )
@@ -105,12 +111,14 @@ async def create_state(
     client_secret: str,
     bot_token: str | None,
     redirect_uri: str,
+    binding_nonce: str,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
 ) -> str:
     """Mint a fresh single-use `state` token and stash its (encrypted) context in Redis.
 
     Returns the opaque token to embed in Discord's `authorize` URL --
-    never the submitted credentials themselves.
+    never the submitted credentials themselves. Only the SHA-256 of
+    `binding_nonce` (the initiating browser's cookie) is stored.
     """
     token = secrets.token_urlsafe(32)
     payload = {
@@ -120,31 +128,29 @@ async def create_state(
         "client_secret": seal_secret(client_secret),
         "bot_token": seal_secret(bot_token) if bot_token else None,
         "redirect_uri": redirect_uri,
+        "binding": nonce_hash(binding_nonce),
     }
     client = _redis_client()
     await client.set(f"{_STATE_KEY_PREFIX}{token}", json.dumps(payload), ex=ttl_seconds)
     return token
 
 
-async def consume_state(state: str) -> PendingInstall | None:
-    """Atomically fetch-and-delete `state`'s context; `None` if absent/expired/already used/corrupt.
+async def consume_state(state: str, binding_nonce: str | None) -> PendingInstall:
+    """Verify the browser binding, then atomically fetch-and-delete `state`'s context.
 
-    `GETDEL` makes this single-use -- a replayed `state` always misses,
-    even under two concurrent callback requests. Every failure mode
-    (missing, expired, malformed JSON, missing field, undecryptable
-    ciphertext) returns `None` uniformly -- callers treat any `None` as a
-    rejected callback, never partially trust a payload.
+    Raises `InstallStateError`: `invalid_or_expired_state` for absent/expired/
+    replayed/corrupt state, `state_binding_mismatch` for a missing/foreign
+    binding cookie (state left untouched). `GETDEL` makes it single-use.
     """
-    if not state:
-        return None
-    client = _redis_client()
+    if not state or len(state) > 128:
+        raise InstallStateError(ERR_STATE)
     try:
-        raw = await client.getdel(f"{_STATE_KEY_PREFIX}{state}")
-    except Exception:  # noqa: BLE001 - a Redis hiccup must fail the flow, not crash it
+        raw = await consume_bound(_redis_client(), f"{_STATE_KEY_PREFIX}{state}", binding_nonce)
+    except InstallStateError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a Redis hiccup must fail the flow, not crash it
         logger.exception("tenant_discord_install_state.consume_failed")
-        return None
-    if raw is None:
-        return None
+        raise InstallStateError(ERR_STATE) from exc
     try:
         data = json.loads(raw)
         encrypted_bot_token = data.get("bot_token")
@@ -158,7 +164,7 @@ async def consume_state(state: str) -> PendingInstall | None:
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         logger.warning("tenant_discord_install_state.malformed_payload")
-        return None
+        raise InstallStateError(ERR_STATE) from None
     except PlatformCredentialCryptoError:
         logger.error("tenant_discord_install_state.decrypt_failed")
-        return None
+        raise InstallStateError(ERR_STATE) from None

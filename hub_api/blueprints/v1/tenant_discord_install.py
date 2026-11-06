@@ -38,9 +38,10 @@ from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
-from quart import Blueprint, current_app, request
+from quart import Blueprint, after_this_request, current_app, request
 from quart_schema import validate_response
 
+from services import install_state_binding as binding
 from services.current_user import get_current_user_id
 from services.discord_install_service import (
     DiscordInstallError,
@@ -48,6 +49,7 @@ from services.discord_install_service import (
     complete_install,
 )
 from services.errors import ApiError, bad_request, unauthorized
+from services.tenant_discord_install_state import DEFAULT_TTL_SECONDS
 
 tenant_discord_install_bp = Blueprint("v1_tenant_discord_install", __name__, url_prefix="/api/v1")
 
@@ -58,6 +60,9 @@ tenant_discord_install_bp = Blueprint("v1_tenant_discord_install", __name__, url
 #: `state` to consume) -- no separate gate needed on the public route
 #: itself.
 FEATURE_TENANT_DISCORD_INSTALL = "waddles.tenant.discord_install"
+
+#: ``__Host-`` cookie carrying the initiating browser's state-binding nonce.
+BINDING_COOKIE = binding.cookie_name("dc_install")
 
 
 @dataclass(slots=True, frozen=True)
@@ -130,6 +135,7 @@ async def start_install() -> AuthorizeUrlResponse | tuple[dict[str, object], int
         return _err(bad_request("bot_token, if given, must be a string"))
 
     actor_id = get_current_user_id(request)
+    nonce = binding.new_nonce()
     try:
         authorize_url = await build_authorize_url(
             tenant_id=ctx.tenant_id,
@@ -139,9 +145,16 @@ async def start_install() -> AuthorizeUrlResponse | tuple[dict[str, object], int
             client_secret=client_secret,
             bot_token=bot_token,
             redirect_uri=_redirect_uri(),
+            binding_nonce=nonce,
         )
     except ApiError as exc:
         return _err(exc)
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Bind the state to THIS browser (``__Host-`` HttpOnly Secure SameSite=Lax cookie)."""
+        binding.set_binding_cookie(response, BINDING_COOKIE, nonce, DEFAULT_TTL_SECONDS)
+        return response
 
     return AuthorizeUrlResponse(success=True, authorize_url=authorize_url)
 
@@ -160,8 +173,17 @@ async def install_callback() -> InstallCallbackResponse | tuple[dict[str, object
     code = request.args.get("code", "")
     state = request.args.get("state", "")
 
+    @after_this_request
+    def _clear_binding(response: Any) -> Any:
+        """Expire the binding cookie once the install completed."""
+        if response.status_code < 400:
+            binding.clear_binding_cookie(response, BINDING_COOKIE)
+        return response
+
     try:
-        result = await complete_install(_dal(), code=code, state=state)
+        result = await complete_install(
+            _dal(), code=code, state=state, binding_nonce=request.cookies.get(BINDING_COOKIE)
+        )
     except DiscordInstallError as exc:
         return _err(exc)
     except ApiError as exc:
