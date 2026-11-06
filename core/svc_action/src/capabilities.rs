@@ -94,6 +94,11 @@ pub struct InvokeScope {
     /// `origin_channel_id` only when this names the SAME platform, so a
     /// channel id from a different platform is never reinterpreted.
     pub origin_platform: Option<String>,
+    /// The guild a DISCORD gateway event came from (`event.payload.guild_id` of a `discord`
+    /// event, host-derived from the delivered envelope, never bundle-supplied); `None` for any
+    /// non-Discord (e.g. Wix) event. Used only to ASSERT the source guild equals the community's
+    /// own paired guild for channel-less role ops -- it is never a destination.
+    pub origin_guild_id: Option<String>,
     /// Numeric `tenants.id`/`communities.id` (spec
     /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     /// SS5.1/SS4 `GrantScopeKey`) -- resolved by `crate::dispatch::
@@ -1831,6 +1836,23 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         op: RelayOp,
         message: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
+        self.handle_discord_queued_op_scoped(scope, op, message, false)
+            .await
+    }
+
+    /// [`Self::handle_discord_queued_op`] with `guild_scoped`: when `true` (the
+    /// `tool.invoke` role tools ONLY) a role op whose triggering event has no Discord channel
+    /// (a gateway member event, or an external Wix-style event) is queued with the wire scope
+    /// `guild:<source guild>` / `guild:-` instead of being refused. The host pins the target
+    /// guild to the community's OWN binding guild; the scope is only an assertion that a
+    /// gateway event's source guild equals it. Never taken from the call's args.
+    pub(crate) async fn handle_discord_queued_op_scoped(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+        message: &serde_json::Value,
+        guild_scoped: bool,
+    ) -> Result<serde_json::Value, HostResultError> {
         let str_field = |name: &str| {
             message
                 .get(name)
@@ -1883,6 +1905,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 role_key: &'a str,
             },
         }
+        let role_scope: String;
         let pending = match op {
             RelayOp::ChatDelete => {
                 let channel_id = origin("chat.delete")?;
@@ -1941,7 +1964,15 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             }
             RelayOp::RoleAdd | RelayOp::RoleRemove => {
                 let what = op.as_str();
-                let origin_channel = origin(what)?;
+                let has_channel = scope.origin_platform.as_deref() == Some("discord")
+                    && scope.origin_channel_id.is_some();
+                let origin_channel: &str = if guild_scoped && !has_channel {
+                    role_scope =
+                        format!("guild:{}", scope.origin_guild_id.as_deref().unwrap_or("-"));
+                    &role_scope
+                } else {
+                    origin(what)?
+                };
                 // The bundle names a tokenized user and a managed-role KEY --
                 // never a role snowflake, never a guild (the drain maps the key
                 // through the community's binding allowlist and pins the guild
@@ -3529,6 +3560,7 @@ mod tests {
             app_id: "waddles.bot.commands.default".to_string(),
             origin_channel_id: None,
             origin_platform: None,
+            origin_guild_id: None,
             tenant_id: 7,
             community_id: 3,
             app_version: 1,
@@ -3553,6 +3585,7 @@ mod tests {
         InvokeScope {
             origin_channel_id: Some("somechannel".to_string()),
             origin_platform: Some("twitch".to_string()),
+            origin_guild_id: None,
             ..scope()
         }
     }
@@ -3564,6 +3597,7 @@ mod tests {
         InvokeScope {
             origin_channel_id: Some("123456789012345678".to_string()),
             origin_platform: Some("discord".to_string()),
+            origin_guild_id: None,
             ..scope()
         }
     }
@@ -3910,6 +3944,7 @@ mod tests {
             let c = caps(FakeRelayQueue::default());
             let sc = InvokeScope {
                 origin_platform: platform.map(str::to_string),
+                origin_guild_id: None,
                 origin_channel_id: origin.map(str::to_string),
                 ..scope()
             };
@@ -3938,6 +3973,7 @@ mod tests {
             .with_discord(transport.clone(), crate::config::Secret::new("t"));
         let sc = InvokeScope {
             origin_platform: Some("twitch".to_string()),
+            origin_guild_id: None,
             ..discord_scope()
         };
         let err = c
@@ -4080,6 +4116,7 @@ mod tests {
             let sc = InvokeScope {
                 origin_channel_id: origin,
                 origin_platform: Some("twitch".to_string()),
+                origin_guild_id: None,
                 ..scope()
             };
             let err = caps
@@ -5013,6 +5050,7 @@ mod tests {
         let bad_origin = InvokeScope {
             origin_channel_id: Some("not-a-snowflake".to_string()),
             origin_platform: Some("discord".to_string()),
+            origin_guild_id: None,
             ..scope()
         };
         let cases = [
@@ -6047,6 +6085,7 @@ mod tests {
         let bad_scope = InvokeScope {
             origin_channel_id: Some("not-a-snowflake".to_string()),
             origin_platform: Some("discord".to_string()),
+            origin_guild_id: None,
             ..scope()
         };
         let err = caps

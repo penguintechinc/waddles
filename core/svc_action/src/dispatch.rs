@@ -507,6 +507,7 @@ pub async fn invoke_dispatch(
         // concept. Never re-derived from anything a bundle returns.
         origin_channel_id: env.event.source.as_ref().and_then(|s| s.channel_id.clone()),
         origin_platform: env.event.source.as_ref().map(|s| s.platform.clone()),
+        origin_guild_id: discord_event_guild(env),
         tenant_id,
         community_id,
         // Resolved once at startup from the active-set row that loaded
@@ -554,6 +555,20 @@ pub async fn invoke_dispatch(
             detail: None,
         }),
     }
+}
+
+/// The guild snowflake a Discord gateway event came from (`payload.guild_id` of a `discord`
+/// event); `None` for any other platform or a malformed value.
+fn discord_event_guild(env: &penguin_spine::StageEnvelope) -> Option<String> {
+    if env.event.platform != "discord" {
+        return None;
+    }
+    env.event
+        .payload
+        .get("guild_id")
+        .and_then(|g| g.as_str())
+        .filter(|g| !g.is_empty() && g.len() <= 20 && g.bytes().all(|b| b.is_ascii_digit()))
+        .map(str::to_string)
 }
 
 /// Runs ONE nested `tool.invoke` leg: sends an `ExportKind::ToolCall` invoke for
@@ -3935,6 +3950,41 @@ mod tests {
             let after = started.load(Ordering::Relaxed);
             tokio::time::sleep(Duration::from_millis(60)).await;
             assert_eq!(started.load(Ordering::Relaxed), after);
+        }
+    }
+
+    fn env_with(platform: &str, payload: serde_json::Value) -> penguin_spine::StageEnvelope {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 2, "tenant": "acme", "community": "main",
+            "app_id": "waddles.bot.commands.default", "stage": "action",
+            "event": {"platform": platform, "event_type": "guild.member.update",
+                "actor": null, "payload": payload,
+                "occurred_at": "2026-09-14T12:00:00.000Z", "source": null},
+            "ts": "2026-09-14T12:00:00.123Z", "target_app_id": null,
+            "workstream_id": "8f14e45f-ceea-467e-adde-3fb5c9752730",
+            "event_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "session_id": null,
+            "trace": null, "binding": {"kid": "k1", "mac": "0".repeat(64)}
+        }))
+        .expect("test envelope")
+    }
+
+    #[test]
+    fn discord_event_guild_is_taken_only_from_a_discord_events_snowflake() {
+        let g = |p: &str, v: serde_json::Value| discord_event_guild(&env_with(p, v));
+        assert_eq!(
+            g("discord", serde_json::json!({"guild_id": "123"})).as_deref(),
+            Some("123")
+        );
+        // A Wix (or any non-Discord) event can never carry a guild assertion.
+        assert_eq!(g("wix", serde_json::json!({"guild_id": "123"})), None);
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"guild_id": 5}),
+            serde_json::json!({"guild_id": ""}),
+            serde_json::json!({"guild_id": "12x"}),
+            serde_json::json!({"guild_id": "1".repeat(21)}),
+        ] {
+            assert_eq!(g("discord", bad.clone()), None, "{bad}");
         }
     }
 }

@@ -338,6 +338,7 @@ fn scope_for(app: &str, version: i64, chain: &[&str], deadline: Option<Instant>)
         app_id: app.to_string(),
         origin_channel_id: None,
         origin_platform: None,
+        origin_guild_id: None,
         tenant_id: TENANT_ID,
         community_id: COMMUNITY_ID,
         app_version: version,

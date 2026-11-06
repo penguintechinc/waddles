@@ -849,6 +849,14 @@ fn pin_channel(
             origin_channel,
             ..
         } => (channel.as_str(), origin_channel.as_deref()),
+        // A role op carrying a GUILD scope (`guild:<snowflake>` / `guild:-`) names no channel
+        // (a gateway / external event has none): the guild is pinned from the community's
+        // binding by the duty hook, which also compares the assertion to it.
+        OutboundAction::RoleOp { origin_channel, .. }
+            if role_guild_scope(origin_channel).is_some() =>
+        {
+            return Ok(None);
+        }
         OutboundAction::DmSend { origin_channel, .. }
         | OutboundAction::RoleOp { origin_channel, .. } => {
             (origin_channel.as_str(), Some(origin_channel.as_str()))
@@ -868,6 +876,18 @@ fn pin_channel(
     crate::outbound_pin::pin_target(platform, channel, origin)
         .map(Some)
         .map_err(ExecError::Pin)
+}
+
+/// Parses a role op's guild-scope wire form: `guild:-` -> `Some(None)` (no assertion, pin from
+/// the binding alone), `guild:<snowflake>` -> `Some(Some(guild))` (assertion compared to the
+/// binding), anything else -> `None` (a channel-pinned op, or a malformed scope).
+pub(crate) fn role_guild_scope(origin: &str) -> Option<Option<&str>> {
+    let rest = origin.strip_prefix("guild:")?;
+    if rest == "-" {
+        return Some(None);
+    }
+    (!rest.is_empty() && rest.len() <= 20 && rest.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(Some(rest))
 }
 
 /// The connector payload for a plain (non-duty) kind: ONLY the text / message

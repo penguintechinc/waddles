@@ -92,7 +92,10 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         let op = role_tool_op(tool)?;
         let result = async {
             let message = relay_message(op, args)?;
-            match self.handle_discord_queued_op(scope, op, &message).await {
+            match self
+                .handle_discord_queued_op_scoped(scope, op, &message, true)
+                .await
+            {
                 Ok(_confirmed) => Ok(json!({"ok": true, "op": op.as_str()})),
                 Err(e) if e.code == "invalid_args" => Err(ToolRefusal::InvalidArgs(e.message)),
                 Err(e) => Err(ToolRefusal::TargetUnavailable(format!(
@@ -223,15 +226,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_discord_origin_unready_drain_and_other_tools_are_handled_loudly() {
-        // A non-Discord origin event cannot pin a channel: invalid_args, nothing queued.
-        let c = caps(FakeRelayQueue::with_live_drain());
-        let r = c
-            .run_discord_role_tool(&scope(), TOOL_ROLES_ADD, &args(json!({})))
-            .await
-            .unwrap();
-        assert!(matches!(r, Err(ToolRefusal::InvalidArgs(_))));
-        assert!(c.relay_queue.envelopes().is_empty());
+    async fn unready_drain_drain_refusal_and_other_tools_are_handled_loudly() {
         // No drain advertising readiness: refused before queueing, as target_unavailable.
         let c = caps(FakeRelayQueue::default());
         let r = c
@@ -262,5 +257,74 @@ mod tests {
                 "{t}"
             );
         }
+    }
+
+    fn queued_scope(c: &StageCapabilities<FakeRelayQueue>) -> String {
+        c.relay_queue.envelopes()[0]["origin_channel"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// External (Wix-style) event: no Discord channel, no guild -> the op is queued guild-scoped
+    /// with NO assertion, i.e. pinned to the community's own paired guild by the drain.
+    #[tokio::test]
+    async fn an_external_event_role_op_is_guild_scoped_with_no_assertion() {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let mut sc = scope();
+        sc.origin_platform = Some("wix".to_string());
+        sc.origin_channel_id = None;
+        let out = c
+            .run_discord_role_tool(&sc, TOOL_ROLES_ADD, &args(json!({})))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out["ok"], true);
+        assert_eq!(queued_scope(&c), "guild:-");
+    }
+
+    /// Discord gateway event (guild known, no channel): the SOURCE guild is asserted so the
+    /// drain refuses when it is not the community's paired guild.
+    #[tokio::test]
+    async fn a_gateway_event_role_op_asserts_its_source_guild() {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let mut sc = discord_scope();
+        sc.origin_channel_id = None;
+        sc.origin_guild_id = Some("123456789012345679".to_string());
+        c.run_discord_role_tool(&sc, TOOL_ROLES_REMOVE, &args(json!({})))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(queued_scope(&c), "guild:123456789012345679");
+    }
+
+    /// A channel-bearing Discord event keeps the channel pin (unchanged); the guild scope is never
+    /// taken from the tool args (injection is refused before this point).
+    #[tokio::test]
+    async fn a_channel_event_keeps_the_channel_pin() {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let mut sc = discord_scope();
+        sc.origin_guild_id = Some("999".to_string());
+        c.run_discord_role_tool(&sc, TOOL_ROLES_ADD, &args(json!({})))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(queued_scope(&c), "123456789012345678");
+    }
+
+    /// The `relay.push` role path is NOT widened: a channel-less event is still refused there.
+    #[tokio::test]
+    async fn relay_push_role_ops_still_require_a_channel() {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let mut sc = scope();
+        sc.origin_platform = Some("wix".to_string());
+        sc.origin_channel_id = None;
+        let msg = json!({"op":"role.add","user_id":format!("{{user:{UUID_A}}}"),"role_key":"vip"});
+        let e = c
+            .handle_discord_queued_op(&sc, RelayOp::RoleAdd, &msg)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "invalid_args");
+        assert!(c.relay_queue.envelopes().is_empty());
     }
 }

@@ -728,6 +728,136 @@ async fn role_add_and_remove_map_the_key_pin_the_guild_and_build_the_url() {
     }
 }
 
+fn guild_role(add: bool, scope: &str) -> OutboundAction {
+    OutboundAction::RoleOp {
+        add,
+        user_id: UUID_A.to_string(),
+        role_key: "vip".to_string(),
+        origin_channel: scope.to_string(),
+        tenant_id: Some(9),
+    }
+}
+
+/// Guild-scoped role ops (gateway / external events carry no channel): the op lands ONLY in the
+/// community's own binding guild; no channel lookup happens; an agreeing gateway-guild assertion
+/// is allowed, a foreign one is refused before anything is sent.
+#[tokio::test]
+async fn guild_scoped_role_ops_pin_the_binding_guild_and_refuse_a_foreign_asserted_guild() {
+    for (add, verb) in [(true, "PUT"), (false, "DELETE")] {
+        for scope in ["guild:-".to_string(), format!("guild:{GUILD}")] {
+            let r = rig(|b| good_role(b, verb, "vip")).await;
+            mock_roles(&r.server).await;
+            mock_role_put(&r.server, verb, RAW_A, "222").await;
+            r.exec
+                .execute(&rq(&guild_role(add, &scope), 1))
+                .await
+                .unwrap();
+            let reqs = seen(&r.server).await;
+            assert!(
+                reqs.contains(&(
+                    verb.to_string(),
+                    format!("/api/v10/guilds/{GUILD}/members/{RAW_A}/roles/222")
+                )),
+                "{scope}: {reqs:?}"
+            );
+            assert!(
+                reqs.iter()
+                    .all(|(_, p)| !p.starts_with("/api/v10/channels/")),
+                "no channel lookup for a guild-scoped op"
+            );
+        }
+    }
+    // A gateway event from ANOTHER guild than the community's paired one is refused.
+    let r = rig(|b| good_role(b, "PUT", "vip")).await;
+    mock_roles(&r.server).await;
+    mock_role_put(&r.server, "PUT", RAW_A, "222").await;
+    let before = refusal_count("role.add", "guild_mismatch");
+    let e = r
+        .exec
+        .execute(&rq(&guild_role(true, "guild:999000999"), 1))
+        .await
+        .unwrap_err();
+    assert_eq!(e, ExecError::Slot(SlotError::Refused("guild_mismatch")));
+    assert_eq!(writes(&r.server).await, 0, "nothing was sent");
+    assert!(refusal_count("role.add", "guild_mismatch") > before);
+}
+
+/// A community's op is pinned to ITS binding guild even when another community is bound to a
+/// different guild (Wix-style external event: scope `guild:-`).
+#[tokio::test]
+async fn an_external_event_op_can_only_touch_the_communitys_own_paired_guild() {
+    let r = rig(|b| good_role(b, "PUT", "vip")).await;
+    mock_roles(&r.server).await;
+    mock_role_put(&r.server, "PUT", RAW_A, "222").await;
+    // community 2 is bound to guild 222000 with ITS OWN token: the request goes there only.
+    Mock::given(method("GET"))
+        .and(path("/api/v10/guilds/222000/roles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {"id": "222", "permissions": "0"}
+        ])))
+        .mount(&r.server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(
+            "/api/v10/guilds/222000/members/800000000000000009/roles/222",
+        ))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&r.server)
+        .await;
+    r.exec
+        .execute(&rq(&guild_role(true, "guild:-"), 2))
+        .await
+        .unwrap();
+    let reqs = r.server.received_requests().await.unwrap();
+    let put = reqs.iter().find(|q| q.method.as_str() == "PUT").unwrap();
+    assert_eq!(
+        put.url.path(),
+        "/api/v10/guilds/222000/members/800000000000000009/roles/222"
+    );
+    assert_eq!(
+        put.headers.get("authorization").unwrap(),
+        &format!("Bot {TOKEN2}")
+    );
+}
+
+#[tokio::test]
+async fn malformed_guild_scopes_are_refused() {
+    for scope in [
+        "guild:",
+        "guild:abc",
+        "guild:12345678901234567890123",
+        "guild:-x",
+    ] {
+        let r = rig(|b| good_role(b, "PUT", "vip")).await;
+        mock_roles(&r.server).await;
+        mock_role_put(&r.server, "PUT", RAW_A, "222").await;
+        let e = r
+            .exec
+            .execute(&rq(&guild_role(true, scope), 1))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, ExecError::Pin(_)), "{scope}: {e:?}");
+        assert_eq!(writes(&r.server).await, 0, "{scope}");
+    }
+}
+
+#[test]
+fn guild_scope_wire_form() {
+    use super::role_guild_scope as g;
+    assert_eq!(g("guild:-"), Some(None));
+    assert_eq!(g("guild:123"), Some(Some("123")));
+    for bad in [
+        "123",
+        "guild:",
+        "guild:x",
+        "Guild:1",
+        "guild:1 ",
+        &format!("guild:{}", "1".repeat(21)),
+    ] {
+        assert_eq!(g(bad), None, "{bad}");
+    }
+}
+
 #[tokio::test]
 async fn a_privileged_role_is_refused_even_when_allowlisted() {
     // ADMINISTRATOR, MANAGE_ROLES, MANAGE_GUILD, and a mixed-bit set carrying ADMINISTRATOR

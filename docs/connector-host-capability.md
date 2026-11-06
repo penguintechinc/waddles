@@ -390,14 +390,27 @@ snowflake are the host's to pin.
 | `discord.scheduled_event.cancel` / `.delete` | write, dangerous | `event_id` (`^[0-9]{1,20}$`) | `{"ok":true,...}` | |
 | `classify_frame`, `classify_close_code` | read | gateway frame / close code | classification | guest-run (pure) |
 
-**Role-tool constraints (inherited from the `role.add|remove` producer):** the user is the
-tokenized UUID (the host detokenizes for the drain); the call must run under a Discord-origin
-dispatch (the pinned origin channel is how the community is proven), so it cannot be issued from a
-non-Discord event or an event without a channel; a role KEY absent from the community's managed
-roles is refused by the drain and surfaced as `target_unavailable`. **Not yet served:**
-`discord.member.roles.set` and `discord.roles.list` are NOT declared or executed (they need a
-host-side read of the current member roles / managed-role data) -- calling them is refused
-(`forbidden`: the target does not export them), never a silent no-op.
+**Guild pinning for role tools (host decision, never from the event or args).** The target
+guild is ALWAYS the community's OWN paired guild, resolved from its Discord binding by the drain.
+By origin of the triggering event the producer stamps the MAC-covered wire scope:
+
+| Triggering event | Wire `origin_channel` | Drain rule |
+|---|---|---|
+| Discord event with a channel (chat, interaction) | the channel snowflake | channel must belong to the binding's guild (`channel_not_owned`) |
+| Discord gateway event, no channel (`guild.member.update`, ...) | `guild:<source guild>` | source guild must equal the binding's guild (`guild_mismatch`); the op lands in the binding guild |
+| External event (Wix, ...) | `guild:-` | no assertion; the op can ONLY touch the community's binding guild |
+
+The source guild is host-derived from the delivered envelope (`payload.guild_id` of a `discord`
+event), never from tool args (a `guild_id` arg is `invalid_args`). A community with no binding, or
+whose binding cannot be resolved uniquely, is refused by the binding source (no guessing). The
+`relay.push` role path is unchanged (still requires a channel).
+
+Other constraints: the user is the tokenized UUID (the host detokenizes for the drain); a role KEY
+absent from the community's managed roles is refused by the drain (`role_not_managed`) and surfaced
+as `target_unavailable`; privileged roles (ADMINISTRATOR / MANAGE_ROLES / MANAGE_GUILD) are refused.
+**Not yet served:** `discord.member.roles.set` and `discord.roles.list` are NOT declared or executed
+(each needs a new drain op with a result payload / multi-request orchestration) -- calling them is
+refused (`forbidden`: the target does not export them), never a silent no-op.
 
 ## Not in B0 (explicit, typed, not silent)
 
