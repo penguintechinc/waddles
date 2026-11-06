@@ -51,6 +51,22 @@ fn caps(
     community: i32,
     wiring: Option<MediaWiring>,
 ) -> StageCapabilities {
+    caps_d(
+        app,
+        granted,
+        community,
+        wiring,
+        std::time::Instant::now() + Duration::from_secs(30),
+    )
+}
+
+fn caps_d(
+    app: &str,
+    granted: bool,
+    community: i32,
+    wiring: Option<MediaWiring>,
+    deadline: std::time::Instant,
+) -> StageCapabilities {
     let snapshot = InMemoryGrantSnapshot::new();
     if granted {
         snapshot.set(
@@ -109,7 +125,7 @@ fn caps(
         gate,
     );
     match wiring {
-        Some(w) => c.with_media(w),
+        Some(w) => c.with_media(w, deadline),
         None => c,
     }
 }
@@ -148,10 +164,12 @@ fn wiring(
             ..MediaConfig::default()
         },
     );
-    MediaWiring {
-        host: Arc::new(host),
-        flag: Arc::new(Flag(flag)),
-    }
+    MediaWiring::new(
+        Arc::new(host),
+        Arc::new(Flag(flag)),
+        Duration::from_secs(5),
+        4,
+    )
 }
 
 fn memory() -> Backends {
@@ -547,4 +565,108 @@ async fn image_and_video_job_end_to_end_on_valkey_and_seaweedfs_with_bundle_isol
             .unwrap_err();
         assert_eq!(e.code, "not_found");
     }
+}
+
+fn with_limits(mut w: MediaWiring, max_call: Duration, max_concurrent: usize) -> MediaWiring {
+    w.max_call_timeout = max_call;
+    w.concurrency = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    w
+}
+
+#[tokio::test]
+async fn sync_image_is_bounded_by_the_invocation_deadline() {
+    let (f, base) = fake_gemini().await;
+    let b = memory();
+    let w = wiring(&b, base, Tier::Professional, Some(GOOD_KEY), true);
+    // Near-deadline: refused as unavailable, provider never called.
+    let near = caps_d(
+        "a",
+        true,
+        COMMUNITY,
+        Some(w.clone()),
+        std::time::Instant::now() + Duration::from_millis(50),
+    );
+    let e = img(&near).await.unwrap_err();
+    assert_eq!(e.code, "unavailable");
+    assert!(f.posts.lock().unwrap().is_empty());
+    let past = caps_d(
+        "a",
+        true,
+        COMMUNITY,
+        Some(w.clone()),
+        std::time::Instant::now(),
+    );
+    assert_eq!(img(&past).await.unwrap_err().code, "unavailable");
+
+    // Slow provider vs a short remaining budget: the timeout is enforced by the stage.
+    f.image_delay_ms
+        .store(5_000, std::sync::atomic::Ordering::SeqCst);
+    let tight = caps_d(
+        "a",
+        true,
+        COMMUNITY,
+        Some(with_limits(w.clone(), Duration::from_millis(600), 4)),
+        std::time::Instant::now() + Duration::from_secs(30),
+    );
+    let t = std::time::Instant::now();
+    let e = img(&tight).await.unwrap_err();
+    assert_eq!(e.code, "timeout");
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    // Deadline (not the ceiling) is the binding limit.
+    let short = caps_d(
+        "a",
+        true,
+        COMMUNITY,
+        Some(w.clone()),
+        std::time::Instant::now() + ai_margin() + Duration::from_millis(700),
+    );
+    let t = std::time::Instant::now();
+    assert_eq!(img(&short).await.unwrap_err().code, "timeout");
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+}
+
+fn ai_margin() -> Duration {
+    svc_process::ai::DEADLINE_MARGIN
+}
+
+#[tokio::test]
+async fn sync_image_concurrency_is_capped_process_wide() {
+    let (f, base) = fake_gemini().await;
+    f.image_delay_ms
+        .store(1_500, std::sync::atomic::Ordering::SeqCst);
+    let b = memory();
+    let w = with_limits(
+        wiring(&b, base, Tier::Professional, Some(GOOD_KEY), true),
+        Duration::from_secs(10),
+        1,
+    );
+    let c1 = caps("a", true, COMMUNITY, Some(w.clone()));
+    let c2 = caps("b", true, COMMUNITY, Some(w));
+    let args = serde_json::json!({"prompt": "cat"});
+    let first = c1.handle(call("a", "media.generate_image", args.clone()));
+    let second = c2.handle(call("b", "media.generate_image", args.clone()));
+    let observe = async {
+        // While the first call holds the only permit (its provider call is slow),
+        // the second must be waiting, not calling the provider.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        f.posts.lock().unwrap().len()
+    };
+    let (r1, r2, in_flight) = tokio::join!(first, second, observe);
+    assert_eq!(in_flight, 1, "cap of 1: only one provider call in flight");
+    assert!(
+        r1.is_ok() && r2.is_ok(),
+        "the waiter runs after the permit frees"
+    );
+    assert_eq!(f.posts.lock().unwrap().len(), 2);
+}
+
+async fn img(
+    c: &StageCapabilities,
+) -> Result<serde_json::Value, penguin_bundle_host::wire::HostResultError> {
+    c.handle(call(
+        "a",
+        "media.generate_image",
+        serde_json::json!({"prompt": "cat"}),
+    ))
+    .await
 }

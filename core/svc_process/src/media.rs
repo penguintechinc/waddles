@@ -35,6 +35,33 @@ pub struct MediaWiring {
     /// `waddles.harness-media-generation` gate -- OFF denies `feature_disabled`
     /// before any provider, key or storage is touched.
     pub flag: Arc<dyn FeatureGate>,
+    /// Ceiling on one synchronous image call; further clamped by the handler to
+    /// the invocation's remaining deadline (like `AiWiring::max_call_timeout`).
+    pub max_call_timeout: Duration,
+    /// Process-wide cap on concurrent synchronous image generations, so many
+    /// bundles (each within its own quota) cannot saturate the stage or the
+    /// provider. A call waits for a permit INSIDE its deadline-clamped timeout.
+    pub concurrency: Arc<tokio::sync::Semaphore>,
+}
+
+/// Default process-wide cap on concurrent synchronous image generations.
+pub const DEFAULT_IMAGE_CONCURRENCY: usize = 4;
+
+impl MediaWiring {
+    /// Builds the wiring with a `max_concurrent` (>= 1) image-generation cap.
+    pub fn new(
+        host: Arc<MediaHost>,
+        flag: Arc<dyn FeatureGate>,
+        max_call_timeout: Duration,
+        max_concurrent: usize,
+    ) -> Self {
+        Self {
+            host,
+            flag,
+            max_call_timeout,
+            concurrency: Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1))),
+        }
+    }
 }
 
 /// [`BearerSource`] over the stage's machine-JWT client.
@@ -115,12 +142,15 @@ pub fn build_media_wiring(
     let tier = HubTierResolver::new(
         http.clone(),
         cli.hub_api_url.clone(),
-        bearer("media:tier:read"),
+        bearer(bundle_host_media::tier::TIER_SCOPE),
         Duration::from_secs(60),
         Duration::from_secs(900),
     );
-    let creds =
-        HubCredentialResolver::new(http, cli.hub_api_url.clone(), bearer("media:byok:resolve"));
+    let creds = HubCredentialResolver::new(
+        http,
+        cli.hub_api_url.clone(),
+        bearer(bundle_host_media::credentials::BYOK_SCOPE),
+    );
     let provider = GeminiProvider::production(
         GeminiModels {
             image: cli.media_image_model.clone(),
@@ -142,8 +172,10 @@ pub fn build_media_wiring(
         bucket = %cli.media_bucket_name,
         "media capability: configured (flag-gated, default OFF; Professional+ and BYOK enforced host-side)"
     );
-    Some(MediaWiring {
-        host: Arc::new(host),
-        flag: Arc::new(HarnessMediaGenerationGate::new(Arc::clone(license_client))),
-    })
+    Some(MediaWiring::new(
+        Arc::new(host),
+        Arc::new(HarnessMediaGenerationGate::new(Arc::clone(license_client))),
+        MediaConfig::default().image_timeout,
+        DEFAULT_IMAGE_CONCURRENCY,
+    ))
 }

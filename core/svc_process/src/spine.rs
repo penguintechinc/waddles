@@ -1366,7 +1366,10 @@ async fn handle_delivered_inner<S: SpineOps>(
             None => caps,
         };
         let caps = match &deps.media_wiring {
-            Some(media) => caps.with_media(media.clone()),
+            Some(media) => caps.with_media(
+                media.clone(),
+                std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
+            ),
             None => caps,
         };
         // `identity`: the invocation's host-derived identity facts come from

@@ -9,6 +9,11 @@ use zeroize::Zeroizing;
 use crate::auth::BearerSource;
 use crate::types::Scope;
 
+/// hub-api path (pinned by `tests/hub_contract.rs` against the Python blueprint).
+pub const BYOK_RESOLVE_PATH: &str = "/api/v1/internal/media/byok/resolve";
+/// Machine-JWT scope hub-api requires for [`BYOK_RESOLVE_PATH`].
+pub const BYOK_SCOPE: &str = "media:byok:resolve";
+
 /// A provider API key; zeroized on drop, `Debug` redacted.
 pub struct ApiKey(Zeroizing<String>);
 
@@ -35,6 +40,9 @@ pub enum CredentialError {
     /// The community has no key for this provider.
     #[error("not configured")]
     NotConfigured,
+    /// hub-api says the effective tier is below Professional.
+    #[error("tier required")]
+    TierRequired,
     /// hub-api unreachable / answered unexpectedly.
     #[error("credential resolver unavailable: {0}")]
     Unavailable(String),
@@ -48,8 +56,9 @@ pub trait CredentialResolver: Send + Sync {
 }
 
 /// Production resolver: hub-api `POST /api/v1/internal/media/byok/resolve`
-/// `{tenant_id, community_id, provider}` (machine JWT) -> `{api_key}`; 404 or a
-/// `{"code":"not_configured"}` body is the typed not-configured answer.
+/// `{tenant_id, community_id, provider}` (machine JWT, scope `media:byok:resolve`)
+/// -> 200 `{status: ok|not_configured|tier_required, tier, api_key|null}`; any
+/// non-200 (400/401/403/404/429/503/500) and any unknown status fails closed.
 pub struct HubCredentialResolver {
     http: reqwest::Client,
     base_url: String,
@@ -75,13 +84,9 @@ impl HubCredentialResolver {
 impl CredentialResolver for HubCredentialResolver {
     async fn resolve(&self, scope: &Scope, provider: &str) -> Result<ApiKey, CredentialError> {
         #[derive(serde::Deserialize)]
-        struct Ok200 {
-            api_key: String,
-        }
-        #[derive(serde::Deserialize)]
-        struct Typed {
-            code: Option<String>,
-            error: Option<String>,
+        struct Reply {
+            status: String,
+            api_key: Option<String>,
         }
         let token = self
             .bearer
@@ -90,10 +95,7 @@ impl CredentialResolver for HubCredentialResolver {
             .map_err(|e| CredentialError::Unavailable(format!("machine jwt: {e}")))?;
         let resp = self
             .http
-            .post(format!(
-                "{}/api/v1/internal/media/byok/resolve",
-                self.base_url
-            ))
+            .post(format!("{}{}", self.base_url, BYOK_RESOLVE_PATH))
             .bearer_auth(token.as_ref())
             .json(&serde_json::json!({
                 "tenant_id": scope.tenant_id,
@@ -106,32 +108,24 @@ impl CredentialResolver for HubCredentialResolver {
                 CredentialError::Unavailable(format!("request failed: {}", e.without_url()))
             })?;
         let status = resp.status();
-        if status.is_success() {
-            let body: Ok200 = resp
-                .json()
-                .await
-                .map_err(|_| CredentialError::Unavailable("malformed resolver response".into()))?;
-            if body.api_key.is_empty() {
-                return Err(CredentialError::NotConfigured);
-            }
-            return Ok(ApiKey::new(body.api_key));
+        if !status.is_success() {
+            return Err(CredentialError::Unavailable(format!(
+                "hub-api status {}",
+                status.as_u16()
+            )));
         }
-        if status.as_u16() == 404 {
-            return Err(CredentialError::NotConfigured);
+        let body: Reply = resp
+            .json()
+            .await
+            .map_err(|_| CredentialError::Unavailable("malformed resolver response".into()))?;
+        match (body.status.as_str(), body.api_key) {
+            ("ok", Some(k)) if !k.is_empty() => Ok(ApiKey::new(k)),
+            ("ok", _) => Err(CredentialError::Unavailable("ok without api_key".into())),
+            ("not_configured", _) => Err(CredentialError::NotConfigured),
+            ("tier_required", _) => Err(CredentialError::TierRequired),
+            _ => Err(CredentialError::Unavailable(
+                "unknown resolver status".into(),
+            )),
         }
-        if let Ok(t) = resp.json::<Typed>().await {
-            let tag = match (&t.code, &t.error) {
-                (Some(c), _) => c.as_str(),
-                (None, Some(e)) => e.as_str(),
-                (None, None) => "",
-            };
-            if tag == "not_configured" || tag == "byok_not_configured" {
-                return Err(CredentialError::NotConfigured);
-            }
-        }
-        Err(CredentialError::Unavailable(format!(
-            "hub-api status {}",
-            status.as_u16()
-        )))
     }
 }

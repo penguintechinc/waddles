@@ -396,3 +396,30 @@ async fn pending_job_deadline_boundary_is_exclusive() {
         JobState::Failed(MediaError::Timeout)
     );
 }
+
+struct TierRequiredCreds;
+#[async_trait::async_trait]
+impl bundle_host_media::credentials::CredentialResolver for TierRequiredCreds {
+    async fn resolve(
+        &self,
+        _s: &bundle_host_media::Scope,
+        _p: &str,
+    ) -> Result<bundle_host_media::credentials::ApiKey, bundle_host_media::credentials::CredentialError> {
+        Err(bundle_host_media::credentials::CredentialError::TierRequired)
+    }
+}
+
+#[tokio::test]
+async fn hub_tier_required_from_the_byok_resolver_maps_to_tier_required() {
+    let (_f, base) = fake_gemini().await;
+    let host = bundle_host_media::MediaHost::new(
+        std::sync::Arc::new(FixedTier(Ok(Tier::Professional))),
+        std::sync::Arc::new(TierRequiredCreds),
+        std::sync::Arc::new(provider(base, Duration::from_secs(5))),
+        std::sync::Arc::new(bundle_host_media::store::InMemoryStore::default()),
+        std::sync::Arc::new(bundle_host_media::jobs::InMemoryJobStore::default()),
+        std::sync::Arc::new(bundle_host_media::SystemClock),
+        fast_cfg(),
+    );
+    assert_eq!(host.generate_image(&scope("a"), "cat").await.unwrap_err(), MediaError::TierRequired("professional".into()));
+}

@@ -140,6 +140,9 @@ impl MediaHost {
             Err(CredentialError::NotConfigured) => {
                 return Err(MediaError::ByokMissing(provider.into()))
             }
+            Err(CredentialError::TierRequired) => {
+                return Err(MediaError::TierRequired("professional".into()))
+            }
             Err(CredentialError::Unavailable(m)) => {
                 tracing::warn!(reason = %m, "media byok resolver unavailable");
                 return Err(MediaError::Unavailable("credential resolver".into()));

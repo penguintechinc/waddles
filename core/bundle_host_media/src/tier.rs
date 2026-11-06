@@ -12,6 +12,11 @@ use async_trait::async_trait;
 use crate::auth::BearerSource;
 use crate::types::{MediaError, Scope, Tier, LICENSE_UNKNOWN};
 
+/// hub-api path (pinned by `tests/hub_contract.rs` against the Python blueprint).
+pub const EFFECTIVE_TIER_PATH: &str = "/api/v1/internal/media/effective-tier";
+/// Machine-JWT scope hub-api requires for [`EFFECTIVE_TIER_PATH`].
+pub const TIER_SCOPE: &str = "media:tier:resolve";
+
 /// Why a tier could not be established.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TierError {
@@ -28,12 +33,6 @@ pub enum TierError {
 pub trait TierResolver: Send + Sync {
     /// Effective tier (`max(tenant, community)`).
     async fn effective_tier(&self, scope: &Scope) -> Result<Tier, TierError>;
-}
-
-/// `max(tenant, community)`: a community lifts a Free tenant; a Free community
-/// never lowers a paid tenant.
-pub fn effective(tenant: Tier, community: Tier) -> Tier {
-    tenant.max(community)
 }
 
 /// The gate itself: Professional or higher, else `tier-required`; an unresolvable
@@ -53,8 +52,10 @@ pub async fn require_professional(
 }
 
 /// Production resolver: hub-api
-/// `GET /api/v1/internal/media/tier?tenant_id=&community_id=` (machine JWT) ->
-/// `{"tenant_tier","community_tier"}`; the `max` is taken HERE. Last-known values
+/// `POST /api/v1/internal/media/effective-tier` `{tenant_id, community_id}`
+/// (machine JWT, scope `media:tier:resolve`) -> `{"tier"}`, already
+/// max(tenant, community) and fail-closed to `free` hub-side (404 = community
+/// not in tenant -> refused). Last-known values
 /// are served within `grace` when hub-api is unreachable; a never-seen scope with
 /// hub-api down is refused.
 pub struct HubTierResolver {
@@ -104,23 +105,21 @@ impl HubTierResolver {
     async fn fetch(&self, scope: &Scope) -> Result<Tier, TierError> {
         #[derive(serde::Deserialize)]
         struct Body {
-            tenant_tier: String,
-            community_tier: String,
+            tier: String,
         }
         let token = self
             .bearer
             .bearer()
             .await
             .map_err(|e| TierError::Unavailable(format!("machine jwt: {e}")))?;
-        let url = format!("{}/api/v1/internal/media/tier", self.base_url);
         let resp = self
             .http
-            .get(url)
-            .query(&[
-                ("tenant_id", scope.tenant_id.to_string()),
-                ("community_id", scope.community_id.to_string()),
-            ])
+            .post(format!("{}{}", self.base_url, EFFECTIVE_TIER_PATH))
             .bearer_auth(token.as_ref())
+            .json(&serde_json::json!({
+                "tenant_id": scope.tenant_id,
+                "community_id": scope.community_id,
+            }))
             .send()
             .await
             .map_err(|e| TierError::Unavailable(format!("request failed: {}", e.without_url())))?;
@@ -131,13 +130,7 @@ impl HubTierResolver {
             )));
         }
         let body: Body = resp.json().await.map_err(|_| TierError::Unknown)?;
-        match (
-            Tier::parse(&body.tenant_tier),
-            Tier::parse(&body.community_tier),
-        ) {
-            (Some(t), Some(c)) => Ok(effective(t, c)),
-            _ => Err(TierError::Unknown),
-        }
+        Tier::parse(&body.tier).ok_or(TierError::Unknown)
     }
 }
 

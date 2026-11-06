@@ -504,6 +504,9 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `None` until [`Self::with_media`] -- every `media.*` call denies
     /// `not_implemented` in that state (fail-loud, never a canned result).
     media: Option<MediaWiring>,
+    /// The instant this invocation's executor deadline expires, set with
+    /// [`Self::with_media`]; bounds the synchronous image call.
+    media_deadline: Option<std::time::Instant>,
     /// The HOST-derived identity facts of THIS invocation (who triggered it,
     /// which mentions its message carried) -- built by `crate::spine` from the
     /// event it delivered, never from guest input. Paired with [`Self::identity`]
@@ -566,6 +569,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             ai: None,
             ai_deadline: None,
             media: None,
+            media_deadline: None,
             invocation_identity: None,
             verified_scope: None,
             stage_metrics: stage_metrics::stage_metrics(),
@@ -682,8 +686,9 @@ impl<K: KvBackend> StageCapabilities<K> {
     }
 
     /// Attaches the `media` capability's live wiring (flag + `MediaHost`).
-    pub fn with_media(mut self, media: MediaWiring) -> Self {
+    pub fn with_media(mut self, media: MediaWiring, invoke_deadline: std::time::Instant) -> Self {
         self.media = Some(media);
+        self.media_deadline = Some(invoke_deadline);
         self
     }
 
@@ -833,11 +838,33 @@ impl<K: KvBackend> StageCapabilities<K> {
         let media_err = |e: bundle_host_media::MediaError| denied(e.code(), e.detail());
         match op {
             Op::Image(prompt) => {
-                let handle = host
-                    .generate_image(&scope, &prompt)
-                    .await
-                    .map_err(media_err)?;
-                Ok(serde_json::json!({ "handle": handle }))
+                // The synchronous call may not outlive the invocation: clamp to
+                // the time left on its deadline (less a margin to answer) and to
+                // the configured ceiling; too little left is refused, not
+                // attempted. The permit wait shares the same timeout.
+                let remaining = self
+                    .media_deadline
+                    .map(|d| d.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or(wiring.max_call_timeout);
+                let budget = remaining
+                    .saturating_sub(ai::DEADLINE_MARGIN)
+                    .min(wiring.max_call_timeout);
+                if budget < ai::MIN_CALL_BUDGET {
+                    return Err(denied(
+                        "unavailable",
+                        "too little of the invocation deadline remains for media.generate-image",
+                    ));
+                }
+                let guarded = async {
+                    let _permit = wiring.concurrency.acquire().await;
+                    host.generate_image(&scope, &prompt).await
+                };
+                match tokio::time::timeout(budget, guarded).await {
+                    Err(_elapsed) => Err(denied("timeout", "")),
+                    Ok(r) => r
+                        .map(|handle| serde_json::json!({ "handle": handle }))
+                        .map_err(media_err),
+                }
             }
             Op::Submit(kind, prompt) => {
                 let job_id = host

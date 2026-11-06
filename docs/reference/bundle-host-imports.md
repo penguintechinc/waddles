@@ -266,7 +266,7 @@ stop; there is no code path that substitutes the tokenized pseudonym for a UUID.
 
 **Providers (Gemini API, official docs 2026-11-06):** image = Nano Banana (`gemini-nano-banana-2.1`), music = Lyria 3.5 (`lyria-3.5`), video = Gemini Omni Flash (`gemini-omni-1.2-flash`), all `POST /v1beta/interactions` on `generativelanguage.googleapis.com`; music/video use `background: true` and `GET /v1beta/interactions/{id}`. Imagen and Veo 3.1 preview were shut down by Google; model ids are operator config (`MEDIA_GEMINI_*_MODEL`).
 
-**Deployment inputs:** `MEDIA_BUCKET_ENDPOINT/NAME/REGION` + `MEDIA_BUCKET_ACCESS_KEY_ID/SECRET_ACCESS_KEY`, Valkey (job store), `SERVICE_JWT_TOKEN_ENDPOINT`, `HUB_API_URL`. hub-api must serve `GET /api/v1/internal/media/tier?tenant_id=&community_id=` -> `{tenant_tier, community_tier}` and `POST /api/v1/internal/media/byok/resolve`; until then the capability fails closed.
+**Deployment inputs:** `MEDIA_BUCKET_ENDPOINT/NAME/REGION` + `MEDIA_BUCKET_ACCESS_KEY_ID/SECRET_ACCESS_KEY`, Valkey (job store), `SERVICE_JWT_TOKEN_ENDPOINT`, `HUB_API_URL`. hub-api (#1070) serves `POST /api/v1/internal/media/effective-tier` (`{tenant_id, community_id}` -> `{tier}`, scope `media:tier:resolve`) and `POST /api/v1/internal/media/byok/resolve` (-> `{status: ok|not_configured|tier_required, tier, api_key|null}`, scope `media:byok:resolve`); any non-200 or unknown status fails closed. `tests/hub_contract.rs` pins both against the blueprint source. Synchronous image calls are bounded by the invocation deadline and a process-wide concurrency cap (`unavailable` when too little time remains).
 
 ## Numeric scope: `world stage-v2`
 
