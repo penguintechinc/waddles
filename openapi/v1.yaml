@@ -11249,7 +11249,8 @@ paths:
                 type: object
           description: Response DTO for `GET .../streams` -- `config` is null until
             one is created.
-      summary: Get the stream configuration (never the key) for a community.
+      summary: Get the stream configuration (never the key); Professional-tier gated
+        as before.
     post:
       description: ''
       operationId: post_create_stream_config

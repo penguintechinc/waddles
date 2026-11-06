@@ -111,7 +111,7 @@ impl EgressGuard {
             IpAddr::V4(v4) => v4.to_string(),
             IpAddr::V6(v6) => format!("[{v6}]"),
         };
-        let port_part = parts.port.map(|p| format!(":{p}")).unwrap_or_default();
+        let port_part = parts.port.map_or_else(String::new, |p| format!(":{p}"));
         let pinned = format!("{}://{}{}{}", parts.scheme, host, port_part, parts.rest);
         // Re-parse what ffmpeg will actually receive: it must name exactly the validated IP.
         let reparsed = url::Url::parse(&pinned).map_err(|_| reject("pinned url invalid".into()))?;

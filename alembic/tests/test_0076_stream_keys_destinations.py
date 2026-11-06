@@ -118,7 +118,7 @@ def test_downgrade_removes_everything_and_upgrade_restores() -> None:
         alembic_cli("upgrade", "head", dsn=db.dsn)
         alembic_cli("downgrade", "0075_ai_knowledge_token_enc", dsn=db.dsn)
         assert not _exists(db.dsn, "streaming_destinations")
-        assert not (_NEW_COLUMNS & _config_columns(db.dsn))
+        assert _NEW_COLUMNS <= _config_columns(db.dsn)  # retained on purpose
         alembic_cli("upgrade", "head", dsn=db.dsn)
         assert _NEW_COLUMNS <= _config_columns(db.dsn)
 

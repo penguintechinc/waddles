@@ -107,6 +107,12 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     )
 
 
+@streaming_bp.errorhandler(ApiError)  # type: ignore[misc]
+async def _handle_api_error(exc: ApiError) -> tuple[dict[str, object], int]:
+    """Render any service-layer `ApiError` as the flask_core error envelope."""
+    return _err(exc)
+
+
 def _dal() -> tuple[Any, Any]:
     """Return `(async_dal, dal)` from app config with this group's tables bound."""
     async_dal, dal = current_app.config["async_dal"], current_app.config["dal"]
@@ -147,13 +153,10 @@ async def get_stream_config(
     community_id: int,
 ) -> ConfigResponse | tuple[dict[str, object], int]:
     """Get the stream configuration (never the key); Professional-tier gated as before."""
-    try:
-        async_dal, dal = await _authorize(community_id, require_broadcast=True)
-        config = await svc.get_config(
-            async_dal, dal, community_id=community_id, ingest_url=_ingest_url()
-        )
-    except ApiError as exc:
-        return _err(exc)
+    async_dal, dal = await _authorize(community_id, require_broadcast=True)
+    config = await svc.get_config(
+        async_dal, dal, community_id=community_id, ingest_url=_ingest_url()
+    )
     return ConfigResponse(success=True, config=config)
 
 
@@ -164,18 +167,15 @@ async def create_stream_config(
     community_id: int,
 ) -> tuple[KeyRevealResponse, int, dict[str, str]] | tuple[dict[str, object], int]:
     """Create the community's stream config; the one-time plaintext key is in `streamKey`."""
-    try:
-        async_dal, dal = await _authorize(community_id)
-        body = await _json_body()
-        config, key = await svc.create_config(
-            async_dal,
-            dal,
-            community_id=community_id,
-            enabled=body.get("enabled") is not False,
-            ingest_url=_ingest_url(),
-        )
-    except ApiError as exc:
-        return _err(exc)
+    async_dal, dal = await _authorize(community_id)
+    body = await _json_body()
+    config, key = await svc.create_config(
+        async_dal,
+        dal,
+        community_id=community_id,
+        enabled=body.get("enabled") is not False,
+        ingest_url=_ingest_url(),
+    )
     return KeyRevealResponse(success=True, config=config, streamKey=key), 201, _NO_STORE
 
 
@@ -186,13 +186,10 @@ async def regenerate_stream_key(
     community_id: int,
 ) -> tuple[KeyRevealResponse, int, dict[str, str]] | tuple[dict[str, object], int]:
     """Rotate the stream key; the old key stops authorizing immediately."""
-    try:
-        async_dal, dal = await _authorize(community_id)
-        config, key = await svc.rotate_key(
-            async_dal, dal, community_id=community_id, ingest_url=_ingest_url()
-        )
-    except ApiError as exc:
-        return _err(exc)
+    async_dal, dal = await _authorize(community_id)
+    config, key = await svc.rotate_key(
+        async_dal, dal, community_id=community_id, ingest_url=_ingest_url()
+    )
     return KeyRevealResponse(success=True, config=config, streamKey=key), 200, _NO_STORE
 
 
@@ -203,11 +200,8 @@ async def get_destinations(
     community_id: int,
 ) -> DestinationsResponse | tuple[dict[str, object], int]:
     """List restream destinations (URL redacted to scheme://host, key never returned)."""
-    try:
-        async_dal, dal = await _authorize(community_id, require_broadcast=True)
-        destinations = await svc.list_destinations(async_dal, dal, community_id=community_id)
-    except ApiError as exc:
-        return _err(exc)
+    async_dal, dal = await _authorize(community_id, require_broadcast=True)
+    destinations = await svc.list_destinations(async_dal, dal, community_id=community_id)
     return DestinationsResponse(success=True, destinations=destinations)
 
 
@@ -218,16 +212,11 @@ async def add_destination(
     community_id: int,
 ) -> tuple[DestinationResponse, int] | tuple[dict[str, object], int]:
     """Add a restream destination; its URL and key are sealed at rest."""
-    try:
-        async_dal, dal = await _authorize(community_id, require_broadcast=True)
-        data = svc.validate_destination_input(await _json_body())
-        # SSRF guard: runs in this frame, before anything is stored for svc-streaming to dial.
-        await validate_outbound_url(data.rtmp_url, allowed_schemes=("rtmp", "rtmps"))
-        destination = await svc.add_destination(
-            async_dal, dal, community_id=community_id, data=data
-        )
-    except ApiError as exc:
-        return _err(exc)
+    async_dal, dal = await _authorize(community_id, require_broadcast=True)
+    data = svc.validate_destination_input(await _json_body())
+    # SSRF guard: runs in this frame, before anything is stored for svc-streaming to dial.
+    await validate_outbound_url(data.rtmp_url, allowed_schemes=("rtmp", "rtmps"))
+    destination = await svc.add_destination(async_dal, dal, community_id=community_id, data=data)
     return DestinationResponse(success=True, destination=destination), 201
 
 
@@ -238,13 +227,10 @@ async def remove_destination(
     community_id: int, destination_id: str
 ) -> MessageResponse | tuple[dict[str, object], int]:
     """Remove a restream destination (404 if it is not this community's)."""
-    try:
-        async_dal, dal = await _authorize(community_id, require_broadcast=True)
-        await svc.remove_destination(
-            async_dal, dal, community_id=community_id, destination_id=destination_id
-        )
-    except ApiError as exc:
-        return _err(exc)
+    async_dal, dal = await _authorize(community_id, require_broadcast=True)
+    await svc.remove_destination(
+        async_dal, dal, community_id=community_id, destination_id=destination_id
+    )
     return MessageResponse(success=True, message="Destination removed successfully")
 
 
@@ -257,21 +243,18 @@ async def toggle_force_cut(
     community_id: int, destination_id: str
 ) -> DestinationResponse | tuple[dict[str, object], int]:
     """Set force-cut from a boolean body field, or toggle it when the body omits one."""
-    try:
-        async_dal, dal = await _authorize(community_id, require_broadcast=True)
-        body = await _json_body()
-        raw = body.get("force_cut", body.get("forceCut"))
-        if raw is not None and not isinstance(raw, bool):
-            raise bad_request("force_cut must be a boolean")
-        destination = await svc.set_force_cut(
-            async_dal,
-            dal,
-            community_id=community_id,
-            destination_id=destination_id,
-            force_cut=raw,
-        )
-    except ApiError as exc:
-        return _err(exc)
+    async_dal, dal = await _authorize(community_id, require_broadcast=True)
+    body = await _json_body()
+    raw = body.get("force_cut", body.get("forceCut"))
+    if raw is not None and not isinstance(raw, bool):
+        raise bad_request("force_cut must be a boolean")
+    destination = await svc.set_force_cut(
+        async_dal,
+        dal,
+        community_id=community_id,
+        destination_id=destination_id,
+        force_cut=raw,
+    )
     return DestinationResponse(success=True, destination=destination)
 
 
@@ -282,11 +265,8 @@ async def get_stream_status(
     community_id: int,
 ) -> StatusResponse | tuple[dict[str, object], int]:
     """Get live streaming status for a community."""
-    try:
-        async_dal, dal = await _authorize(community_id)
-        status = await svc.get_status(async_dal, dal, community_id=community_id)
-    except ApiError as exc:
-        return _err(exc)
+    async_dal, dal = await _authorize(community_id)
+    status = await svc.get_status(async_dal, dal, community_id=community_id)
     return StatusResponse(success=True, status=status)
 
 

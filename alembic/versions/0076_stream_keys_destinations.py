@@ -14,8 +14,8 @@ UI can list a destination without decrypting anything.
 
 Same two-environment rule as 0061: a populated ``schema_migrations`` ledger means a real
 legacy DB where ``streaming_configs`` MUST exist (missing raises); without the ledger (the
-minimal CI bootstrap) the DDL is skipped with a WARNING. Downgrade drops the new table and
-columns (the key material is hashes/ciphertext only; nothing operator-authored is lost).
+minimal CI bootstrap) the DDL is skipped with a WARNING. Downgrade drops only the destinations table;
+the hash columns are retained so minted keys survive a rollback.
 
 Revision ID: 0076_stream_keys_destinations
 Revises: 0075_ai_knowledge_token_enc
@@ -116,14 +116,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the destinations table and the key-hash columns."""
+    """Drop the destinations table; the key-hash columns/index are retained (hashes only), the
+    same convention as 0060/0061, so a rollback never invalidates minted stream keys."""
     op.execute(sa.text("DROP TABLE IF EXISTS streaming_destinations"))
-    op.execute(sa.text("DROP INDEX IF EXISTS uq_streaming_configs_stream_key_hash"))
-    op.execute(
-        sa.text(
-            "ALTER TABLE IF EXISTS streaming_configs "
-            "DROP COLUMN IF EXISTS stream_key_hash, "
-            "DROP COLUMN IF EXISTS stream_key_fingerprint, "
-            "DROP COLUMN IF EXISTS stream_key_rotated_at"
-        )
-    )
