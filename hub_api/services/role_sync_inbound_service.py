@@ -30,6 +30,16 @@ no new authority:
   dangling for an operator to repair) but never auto-demotes anyone -- demotion
   stays an explicit admin action / the periodic reconcile's guarded pass.
 
+- **Entries are verified before anything is applied** (same checks as
+  ``svc_process::hop::verify_hop``): ``binding.mac`` is recomputed with the shared spine
+  keyring (``ENVELOPE_BINDING_KEYS``; faithful port of ``penguin_spine::verify_binding``, v2 + v3,
+  pinned to the Rust test vectors), the envelope tenant/community must equal the scope parsed
+  from the STREAM KEY, and the numeric ids are resolved from the DB by that scope -- never taken
+  from the JSON. Any failure acks the entry, increments
+  ``waddles_role_sync_inbound_tenant_boundary_violations_total`` and applies nothing.
+- **Bridge:** this consumer is a beta bridge on hub-api; it is to be migrated into the platform
+  service bundles (svc-gateway / connector side) -- tracked in a follow-up issue.
+
 The periodic reconcile (``role_sync_service``) remains the correctness backstop
 for missed pushes (gateway gap, bot offline); this is the low-latency path.
 
@@ -40,9 +50,13 @@ logged -- never a username, nickname or the member's platform id.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
+import re
+import struct
 import sys
 from dataclasses import dataclass
 from typing import Any
@@ -86,8 +100,172 @@ _applied_counter = _meter.create_counter(
 )
 
 
+_violations_counter = _meter.create_counter(
+    "waddles_role_sync_inbound_tenant_boundary_violations_total",
+    description="inbound entries refused by MAC / stream-scope / DB-scope verification",
+)
+
+_TENANT_WIDE_SEGMENT = "_tenant"
+_V3_DOMAIN = b"waddles.binding.v3\0"
+_TRACEPARENT = re.compile(r"^00-([0-9a-fA-F]{32})-[0-9a-fA-F]{16}-[0-9a-fA-F]{2}$")
+
+
 class InboundEventError(ValueError):
     """A stream entry that is not a well-formed inbound role event (poison; acked + counted)."""
+
+
+class TenantBoundaryError(ValueError):
+    """An entry failed MAC / scope verification (forged, replayed cross-tenant, or misrouted)."""
+
+    def __init__(self, reason: str) -> None:
+        """Carry the stable metric-label ``reason``."""
+        super().__init__(reason)
+        self.reason = reason
+
+
+class KeyRing:
+    """``kid -> HMAC key`` ring parsed from ``ENVELOPE_BINDING_KEYS`` (``kid:hex[,kid:hex]``)."""
+
+    def __init__(self, keys: dict[str, bytes]) -> None:
+        """Hold the ring; an empty ring is refused (never fail-open)."""
+        if not keys:
+            raise ValueError("binding keyring is empty -- refusing to verify with no keys")
+        self._keys = keys
+
+    @classmethod
+    def parse(cls, raw: str) -> KeyRing:
+        """Parse the env shape; a malformed/empty ring is a hard error (never fail-open)."""
+        keys: dict[str, bytes] = {}
+        for entry in (e.strip() for e in raw.split(",")):
+            if not entry:
+                continue
+            kid, sep, hexkey = entry.partition(":")
+            if not sep or not kid or not hexkey:
+                raise ValueError("ENVELOPE_BINDING_KEYS entry is not of the form kid:hexkey")
+            keys[kid] = bytes.fromhex(hexkey)
+        return cls(keys)
+
+    def key_for(self, kid: str) -> bytes | None:
+        """The key bytes for ``kid`` or ``None``."""
+        return self._keys.get(kid)
+
+
+def _framed(field: str) -> bytes:
+    raw = field.encode()
+    return struct.pack(">I", len(raw)) + raw
+
+
+def compute_binding_mac(
+    ring: KeyRing,
+    kid: str,
+    tenant: str,
+    community: str | None,
+    workstream_id: str,
+    event_id: str,
+    trace_id: str | None,
+) -> str:
+    """Schema-v2 ``binding.mac`` (port of ``penguin_spine::compute_binding_mac``)."""
+    key = ring.key_for(kid)
+    if key is None:
+        raise TenantBoundaryError("unknown_kid")
+    msg = tenant + (community or _TENANT_WIDE_SEGMENT) + workstream_id + event_id + (trace_id or "")
+    return hmac.new(key, msg.encode(), hashlib.sha256).hexdigest()
+
+
+def compute_binding_mac_v3(
+    ring: KeyRing,
+    kid: str,
+    tenant_id: int,
+    community_id: int,
+    tenant: str,
+    community: str | None,
+    workstream_id: str,
+    event_id: str,
+    trace_id: str | None,
+) -> str:
+    """Schema-v3 ``binding.mac`` (port of ``penguin_spine::compute_binding_mac_v3``)."""
+    key = ring.key_for(kid)
+    if key is None:
+        raise TenantBoundaryError("unknown_kid")
+    msg = _V3_DOMAIN + struct.pack(">q", tenant_id) + struct.pack(">i", community_id)
+    msg += _framed(tenant)
+    msg += b"\x01" + _framed(community) if community is not None else b"\x00"
+    msg += _framed(workstream_id) + _framed(event_id) + _framed(trace_id or "")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def verify_binding(ring: KeyRing, env: dict[str, Any]) -> None:
+    """Recompute ``binding.mac`` and compare in constant time; raises on ANY mismatch.
+
+    Mirrors ``penguin_spine::verify_binding``: v3 requires both numeric ids and signs them; a v2
+    envelope smuggling numeric ids is refused; any other schema version is refused.
+    """
+    binding = env.get("binding")
+    if not isinstance(binding, dict):
+        raise TenantBoundaryError("no_binding")
+    kid, mac = binding.get("kid"), binding.get("mac")
+    tenant, community = env.get("tenant"), env.get("community")
+    ws, event_id = env.get("workstream_id"), env.get("event_id")
+    if not all(isinstance(v, str) for v in (kid, mac, tenant, ws, event_id)) or not (
+        community is None or isinstance(community, str)
+    ):
+        raise TenantBoundaryError("malformed_binding_fields")
+    trace = env.get("trace")
+    tp = trace.get("traceparent") if isinstance(trace, dict) else None
+    match = _TRACEPARENT.match(tp) if isinstance(tp, str) else None
+    trace_id = match.group(1) if match else None
+    version = env.get("schema_version")
+    tid, cid = env.get("tenant_id"), env.get("community_id")
+    if version == 3:
+        if not isinstance(tid, int) or not isinstance(cid, int):
+            raise TenantBoundaryError("v3_missing_ids")
+        expected = compute_binding_mac_v3(
+            ring, kid, tid, cid, tenant, community, ws, event_id, trace_id
+        )
+    elif version == 2:
+        if tid is not None or cid is not None:
+            raise TenantBoundaryError("v2_with_ids")
+        expected = compute_binding_mac(ring, kid, tenant, community, ws, event_id, trace_id)
+    else:
+        raise TenantBoundaryError("unsupported_schema_version")
+    if not hmac.compare_digest(expected.encode(), mac.encode()):
+        raise TenantBoundaryError("mac_mismatch")
+
+
+def parse_scope_from_key(key: str) -> tuple[str, str | None] | None:
+    """``waddles:t:{tenant}:c:{community}:...`` -> ``(tenant, community|None)`` (spine parser)."""
+    rest = key.removeprefix("waddles:t:") if key.startswith("waddles:t:") else None
+    if rest is None or ":c:" not in rest:
+        return None
+    tenant, _, tail = rest.partition(":c:")
+    community = tail.split(":", 1)[0]
+    if not tenant or not community:
+        return None
+    return tenant, (None if community == _TENANT_WIDE_SEGMENT else community)
+
+
+def _resolve_scope_ids(dal: Any, tenant_slug: str, community_name: str) -> tuple[int, int]:
+    """Numeric ``(tenant_id, community_id)`` for the stream-key scope, from the DB only."""
+    _bind_scope_tables(dal)
+    tenant = dal(dal.tenants.slug == tenant_slug).select().first()
+    if tenant is None:
+        raise TenantBoundaryError("unknown_tenant")
+    community = (
+        dal((dal.communities.name == community_name) & (dal.communities.tenant_id == tenant.id))
+        .select()
+        .first()
+    )
+    if community is None:
+        raise TenantBoundaryError("unknown_community")
+    return int(tenant.id), int(community.id)
+
+
+def _bind_scope_tables(dal: Any) -> None:
+    from services.role_sync_service import _bind_reference_tenants
+    from services.schema import bind_auth_tables
+
+    bind_auth_tables(dal)
+    _bind_reference_tenants(dal)
 
 
 @dataclass(slots=True, frozen=True)
@@ -121,11 +299,16 @@ def _snowflake(value: Any, field: str) -> str:
     return value
 
 
-def parse_inbound_entry(fields: dict[Any, Any]) -> InboundRoleEvent | None:
-    """Decode one ``XREADGROUP`` entry. ``None`` = a valid event of a type this worker ignores.
+def parse_inbound_entry(
+    fields: dict[Any, Any], *, stream_key: str, ring: KeyRing, dal: Any
+) -> InboundRoleEvent | None:
+    """Decode AND VERIFY one ``XREADGROUP`` entry. ``None`` = a type this worker ignores.
 
-    Raises ``InboundEventError`` for a malformed Discord role event. Non-role events (messages,
-    interactions) are the normal traffic on the same stream and return ``None``.
+    Raises ``InboundEventError`` for a malformed role event and ``TenantBoundaryError`` when
+    the MAC, the stream-key scope or the DB scope check fails. The returned event's numeric ids
+    come from the DB resolution of the STREAM KEY scope, never from the entry's JSON.
+    Non-role events (messages, interactions) are normal traffic and return ``None`` unverified
+    (nothing is applied for them).
     """
     decoded = {_decode(k): v for k, v in fields.items()}
     raw = decoded.get("env")
@@ -146,9 +329,7 @@ def parse_inbound_entry(fields: dict[Any, Any]) -> InboundRoleEvent | None:
     payload = event.get("payload")
     if not isinstance(payload, dict):
         raise InboundEventError("`payload` missing")
-    tenant_id, community_id = env.get("tenant_id"), env.get("community_id")
-    if not isinstance(tenant_id, int) or not isinstance(community_id, int):
-        raise InboundEventError("envelope carries no resolved tenant/community ids")
+    tenant_id, community_id = _verified_scope(env, stream_key, ring, dal)
     guild_id = _snowflake(payload.get("guild_id"), "guild_id")
     if event_type == _MEMBER_EVENT:
         roles = payload.get("role_ids")
@@ -172,6 +353,29 @@ def parse_inbound_entry(fields: dict[Any, Any]) -> InboundRoleEvent | None:
         role_id=_snowflake(payload.get("role_id"), "role_id"),
         role_ids=frozenset(),
     )
+
+
+def _verified_scope(
+    env: dict[str, Any], stream_key: str, ring: KeyRing, dal: Any
+) -> tuple[int, int]:
+    """MAC + stream-key scope + DB-resolved numeric ids (``verify_hop`` parity)."""
+    verify_binding(ring, env)
+    scope = parse_scope_from_key(stream_key)
+    if scope is None or scope[1] is None:
+        raise TenantBoundaryError("bad_stream_key")
+    key_tenant, key_community = scope
+    if env.get("tenant") != key_tenant:
+        raise TenantBoundaryError("tenant_mismatch")
+    if env.get("community") != key_community:
+        raise TenantBoundaryError("community_mismatch")
+    tenant_id, community_id = _resolve_scope_ids(dal, key_tenant, key_community)
+    for claimed, resolved in (
+        (env.get("tenant_id"), tenant_id),
+        (env.get("community_id"), community_id),
+    ):
+        if claimed is not None and claimed != resolved:
+            raise TenantBoundaryError("json_ids_differ_from_scope")
+    return tenant_id, community_id
 
 
 def _find_pairing(dal: Any, community_id: int, guild_id: str) -> Any | None:
@@ -276,6 +480,7 @@ class InboundBatchResult:
     applied: int = 0
     poison: int = 0
     failed: int = 0
+    violations: int = 0
 
 
 async def _ensure_group(client: Any, stream: str) -> None:
@@ -287,7 +492,12 @@ async def _ensure_group(client: Any, stream: str) -> None:
 
 
 async def run_inbound_batch(
-    dal: Any, redis_client: Any, *, batch_size: int = 200, consumer_name: str = "hub-api-1"
+    dal: Any,
+    redis_client: Any,
+    ring: KeyRing,
+    *,
+    batch_size: int = 200,
+    consumer_name: str = "hub-api-1",
 ) -> InboundBatchResult:
     """One bounded, non-blocking drain of every Discord source stream.
 
@@ -307,15 +517,27 @@ async def run_inbound_batch(
             for _key, entries in response or []:
                 for entry_id, fields in entries:
                     result.examined += 1
-                    await _handle_entry(dal, redis_client, stream, entry_id, fields, result)
+                    await _handle_entry(dal, redis_client, ring, stream, entry_id, fields, result)
     return result
 
 
 async def _handle_entry(
-    dal: Any, redis_client: Any, stream: str, entry_id: Any, fields: Any, result: InboundBatchResult
+    dal: Any,
+    redis_client: Any,
+    ring: KeyRing,
+    stream: str,
+    entry_id: Any,
+    fields: Any,
+    result: InboundBatchResult,
 ) -> None:
     try:
-        event = parse_inbound_entry(fields)
+        event = parse_inbound_entry(fields, stream_key=stream, ring=ring, dal=dal)
+    except TenantBoundaryError as exc:
+        result.violations += 1
+        _violations_counter.add(1, {"reason": exc.reason})
+        logger.error("role_sync.inbound_tenant_boundary_violation reason=%s", exc.reason)
+        await redis_client.xack(stream, INBOUND_CONSUMER_GROUP, entry_id)
+        return
     except InboundEventError:
         result.poison += 1
         _events_counter.add(1, {"outcome": "poison"})
@@ -344,23 +566,25 @@ async def _handle_entry(
 
 async def main() -> int:
     """CronJob entrypoint: drain up to 20 batches, print denominators."""
+    ring = KeyRing.parse(os.environ["ENVELOPE_BINDING_KEYS"])
     redis_client = build_client()
     total = InboundBatchResult()
     with open_worker_dal(os.environ["DATABASE_URL"]) as async_dal:
         for _ in range(20):
-            r = await run_inbound_batch(async_dal.dal, redis_client)
+            r = await run_inbound_batch(async_dal.dal, redis_client, ring)
             total.streams = max(total.streams, r.streams)
             total.examined += r.examined
             total.role_events += r.role_events
             total.applied += r.applied
             total.poison += r.poison
             total.failed += r.failed
+            total.violations += r.violations
             if r.examined == 0:
                 break
     print(
         f"role_sync_inbound: streams={total.streams} examined={total.examined} "
         f"role_events={total.role_events} applied={total.applied} "
-        f"poison={total.poison} failed={total.failed}"
+        f"poison={total.poison} failed={total.failed} violations={total.violations}"
     )
     if total.streams == 0:
         print("role_sync_inbound: zero Discord streams found", file=sys.stderr)
