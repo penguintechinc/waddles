@@ -225,6 +225,26 @@ svc-ingest                              hub-api
   binding, or one session per binding -- the framework deliberately does not decide that for you.
 * Responses are `Cache-Control: no-store`.
 
+### Binding-feed fields (consumer contract for the connector runtime)
+
+Rust-side consumer note (hub-api change only; `core/connection_resolver` `BindingWire` /
+`BindingSummary` and `connector_runtime/feed.rs` adopt these in their own PR -- unknown fields are
+ignored today, so this is additive). Every list item is exactly these keys, nothing else
+(`DataPlaneBindingDTO`, `tests/provider_connections/test_binding_feed_fields.py` pins the set):
+
+| Key | Type | Meaning / how a profile must use it |
+|---|---|---|
+| `grantId`, `connectionId`, `communityId` | int | numeric ids (cursor = last scanned `grantId`) |
+| `tenantId` | int | **server-derived**: the tenant of the *community* row the grant points at (`communities.tenant_id`), never `resource_metadata`. A grant whose community tenant differs from the link's tenant, or whose community no longer exists, is **not served** (error-logged by ids). Profiles must read the tenant from this field only and refuse any tenant found in `metadata`. |
+| `secretVersion` | int >= 1 | credential-rotation counter (migration `0074`, `platform_connections.secret_version`). Bumped atomically when an admin **replaces** the credential; **not** bumped by an OAuth token refresh, an `enabled` toggle or a metadata edit. Include it in the connection fingerprint: a change means *restart this connection* (re-`resolve` for the new token). It is a counter, never a hash or any secret material. |
+| `capabilities` | string[] | effective set, sorted: stored capabilities unioned with what the adapter grants today, so rows connected before a capability existed are still served |
+| `kind` | int | `ConnectionKind` code (1 `platform_oauth` ...) |
+| `provider`, `resourceType`, `resourceId`, `expiresAt`, `updatedAt`, `metadata` | as before | `metadata` is the adapter's flat string->string binding contract |
+
+`capability=chat_ingest` now returns rows for **Twitch, YouTube and Discord** (Discord's gateway
+inbound feed runs on the same bot token as its `action_relay`; it was previously unlisted, so a
+`chat_ingest` scan returned no Discord rows). An unknown capability is still a 400.
+
 ### svc-ingest's service identity (the scope grant)
 
 hub-api's token endpoint (`hub_api/blueprints/service_jwt_bp.py`) only mints a scope the caller's

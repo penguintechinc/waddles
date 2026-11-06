@@ -1674,8 +1674,15 @@ components:
       title: DashboardStatsDTO
       type: object
     DataPlaneBindingDTO:
-      description: One (community, connection) pair the data plane should run. Carries
+      description: 'One (community, connection) pair the data plane should run. Carries
         no token.
+
+
+        ``tenantId`` is derived server-side from the community''s own tenant (never
+        metadata);
+
+        ``secretVersion`` is a rotation counter -- a change means the credential was
+        replaced.'
       properties:
         capabilities:
           items:
@@ -1714,6 +1721,10 @@ components:
         resourceType:
           title: Resourcetype
           type: string
+        secretVersion:
+          default: 1
+          title: Secretversion
+          type: integer
         tenantId:
           title: Tenantid
           type: integer

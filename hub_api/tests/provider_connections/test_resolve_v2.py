@@ -552,7 +552,8 @@ class TestListScopeSplit:
                 f"{INTERNAL}/provider-connections?provider={provider}", headers=_svc(service_issuer)
             )
             assert listed.status_code == 200
-            text = await listed.get_data(as_text=True)
+            # ``secretVersion`` is the non-secret rotation counter; strip its key before the scan.
+            text = (await listed.get_data(as_text=True)).replace('"secretVersion"', "")
             (item,) = (await listed.get_json())["items"]
             assert (
                 item["kind"] == {"external_http": 2, "aws_lambda": 3, "gcp_function": 4}[provider]
