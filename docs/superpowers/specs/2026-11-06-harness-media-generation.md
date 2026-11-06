@@ -97,3 +97,11 @@ OpenAI images and every other provider; routing through WaddleAI; spend caps and
 ## 7. Test matrix
 
 Tier free/pro/enterprise/unknown × BYOK missing/present; community-tier lift (`max`); adapter exact request shapes + auth headers + operation polling against fake APIs; safety-refusal mapping; cross-community job/URL refusal; rate + spend cap; PII-prompt reject; executor e2e (fixture bundle -> fake provider -> scoped URL); cargo-mutants on the tier gate and scope check; >=90% line coverage.
+
+## Implementation notes (Rust PR, 2026-11-06)
+
+- **Provider models changed under us.** Imagen is shut down and Veo 3.1 preview was shut down 2026-10-22 (Gemini API docs). The adapters use Nano Banana (image), Lyria 3.5 (music) and Gemini Omni Flash (video) via the Interactions API on the one pinned host; no Vertex host is needed. Model ids are operator config.
+- **Storage design superseded:** outputs go to the single bundle bucket under the media-harness prefix, tagged `app-bundle:<requesting bundle>`, and the guest receives an object handle (`media://{tenant}/{community}/{job}.{ext}`), not a URL; `object-url` presigns for the owning bundle only (interim; replaced by the bundle-object-storage capability's presign-get).
+- **Polling does not spend the generation budget:** `job-status`/`object-url` use `CapabilityGate::check_granted` (grant + instance policy, no quota).
+- **Hard-coded tier finding:** `gate_scope()` pins `TenantTier::Free` in svc_process and svc_action; left untouched. Media uses `TierResolver` (hub-api) instead.
+- **hub-api contracts (#1070):** `POST /api/v1/internal/media/effective-tier` and `POST /api/v1/internal/media/byok/resolve`; the Rust client is pinned to them by `core/bundle_host_media/tests/hub_contract.rs`. Non-200/unknown status fails closed.

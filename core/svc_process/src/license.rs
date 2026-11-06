@@ -387,6 +387,27 @@ impl FeatureGate for BundleAiCapabilityGate {
     }
 }
 
+/// Default-OFF PostHog flag gating the bundle `media` host capability
+/// (`media.generate`: Gemini image/music/video, Professional+ and BYOK).
+pub const HARNESS_MEDIA_GENERATION_FLAG: &str = "waddles.harness-media-generation";
+
+/// Production [`FeatureGate`] for [`HARNESS_MEDIA_GENERATION_FLAG`] -- plain read of
+/// `LicenseClient::flag_enabled` (fail-closed default). The flag is NOT the tier
+/// gate: tier and BYOK are enforced inside `bundle_host_media`.
+pub struct HarnessMediaGenerationGate(Arc<LicenseClient>);
+
+impl HarnessMediaGenerationGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for HarnessMediaGenerationGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(HARNESS_MEDIA_GENERATION_FLAG).await })
+    }
+}
+
 /// Opt-out kill-switch for the inbound PII-tokenization pre-dispatch pass
 /// (`crate::pii_tokenize`, `rules/critical-rules.md` PII Tokenization) --
 /// same opt-out-kill-switch shape as [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]:

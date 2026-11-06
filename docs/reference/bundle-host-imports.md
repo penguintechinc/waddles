@@ -249,6 +249,25 @@ stop; there is no code path that substitutes the tokenized pseudonym for a UUID.
 | Placeholder pseudonyms | `core/svc_process/src/pii_tokenize.rs` mints a `handle:<name>` placeholder pseudonym for every free-text `@handle` (it needs an opaque token for the text). That row is a token, not an identity: hub-api's handle matcher (`identity_resolution_service._HANDLE_CANDIDATES_SQL`) excludes `platform_user_id LIKE 'handle:%'`, otherwise every mentioned Twitch `@bob` would turn into an `ambiguous` pair next to the real chatter's row. The placeholder still detokenizes (`ResolveDisplayNames`). The tokenizer's scanner also no longer reads the digits inside a Discord `<@123>` as a second `@123` handle mention |
 
 
+## `media` (`media.generate`): Gemini image / music / video
+
+`stage-next`/`stage-v2`/`stage-tools` import `waddle:bundle/media`; carried as `capability = db`, `op = "media.*"` and served by `svc_process::capabilities::handle_media` over `core/bundle_host_media`. Spec `docs/superpowers/specs/2026-11-06-harness-media-generation.md`.
+
+| Call | Op | Result |
+|---|---|---|
+| `generate-image(prompt)` | `media.generate_image` | sync (60 s bound) -> object handle |
+| `submit-music(prompt)` / `submit-video(prompt)` | `media.submit_music` / `media.submit_video` | job id (poll) |
+| `job-status(job-id)` | `media.job_status` | `pending` / `done(handle)` / `failed(error)` |
+| `object-url(handle)` | `media.object_url` | short-TTL presigned GET (interim until the generic bundle storage capability lands) |
+
+**Order (fail loud):** args shape -> gate (`media.generate`: grant, instance policy, 6/min for generation only; polling/URL use the quota-free `check_granted`) -> wired (`not_implemented`) -> flag `waddles.harness-media-generation` (default OFF, `feature_disabled`) -> community-scoped activation -> PII reject (`contains_pii`) -> `MediaHost`: tier gate (effective tier = max(tenant, community) >= Professional; unknown license = `tier-required(license_unknown)`, never allowed) -> BYOK key from hub-api (`byok-missing`) -> per-community rate (6/min) and in-flight cap -> Gemini -> magic-byte + size validation -> tagged storage.
+
+**Outputs are handles, never bytes or public URLs.** Objects live in the single bundle bucket under `media-harness/{tenant}/{community}/{job}.{ext}`, tagged `app-bundle:<requesting bundle id>`; `object-url` and `job-status` answer `not-found` for any other bundle or community, even one holding `media.generate`. The layout mirrors the bundle-object-storage design so swapping in its host API is a `MediaStore` impl.
+
+**Providers (Gemini API, official docs 2026-11-06):** image = Nano Banana (`gemini-nano-banana-2.1`), music = Lyria 3.5 (`lyria-3.5`), video = Gemini Omni Flash (`gemini-omni-1.2-flash`), all `POST /v1beta/interactions` on `generativelanguage.googleapis.com`; music/video use `background: true` and `GET /v1beta/interactions/{id}`. Imagen and Veo 3.1 preview were shut down by Google; model ids are operator config (`MEDIA_GEMINI_*_MODEL`).
+
+**Deployment inputs:** `MEDIA_BUCKET_ENDPOINT/NAME/REGION` + `MEDIA_BUCKET_ACCESS_KEY_ID/SECRET_ACCESS_KEY`, Valkey (job store), `SERVICE_JWT_TOKEN_ENDPOINT`, `HUB_API_URL`. hub-api (#1070) serves `POST /api/v1/internal/media/effective-tier` (`{tenant_id, community_id}` -> `{tier}`, scope `media:tier:resolve`) and `POST /api/v1/internal/media/byok/resolve` (-> `{status: ok|not_configured|tier_required, tier, api_key|null}`, scope `media:byok:resolve`); any non-200 or unknown status fails closed. `tests/hub_contract.rs` pins both against the blueprint source. Synchronous image calls are bounded by the invocation deadline and a process-wide concurrency cap (`unavailable` when too little time remains).
+
 ## Numeric scope: `world stage-v2`
 
 `tenant-id` (s64, >= 1) and `community-id` (s32, 0 = tenant-wide) are the AUTHORITATIVE scope keys; the `tenant` slug and

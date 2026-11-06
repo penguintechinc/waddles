@@ -746,6 +746,68 @@ interface ai {
   generate: func(prompt: string, opts: options) -> result<string, error>;
 }
 
+/// Host-mediated Gemini media generation (image / music / video). Additive,
+/// `stage-next`/`stage-v2`-only; the package stays `@1.0.0` (same precedent as
+/// `ai`). Spec `docs/superpowers/specs/2026-11-06-harness-media-generation.md`.
+///
+/// Capability: `media.generate` (dangerous, 6 calls / 60 s per community).
+/// Professional-or-higher effective tier (max(tenant, community)) AND a BYOK
+/// Gemini key are enforced HOST-SIDE; the guest can influence neither. Gated by
+/// the default-OFF flag `waddles.harness-media-generation`.
+///
+/// Outputs are never bytes and never public URLs: a finished product is stored
+/// under the media-harness prefix of the bundle bucket tagged
+/// `app-bundle:<requesting bundle>` and the guest receives an opaque OBJECT
+/// HANDLE only. Only the requesting bundle can resolve it (`object-url`, short
+/// TTL presigned GET) -- a handle issued to another bundle is `not-found`.
+///
+/// Wire note: carried as `capability = db`, `op = "media.*"` like `ai`.
+interface media {
+  variant error {
+    /// Effective tier below Professional; carries `professional`, or
+    /// `license_unknown` when the license state could not be established
+    /// (fail closed).
+    tier-required(string),
+    /// No BYOK key configured for this provider; carries the provider name.
+    byok-missing(string),
+    /// The provider refused (safety/policy/no output); closed vocabulary,
+    /// never provider text.
+    provider-refused(string),
+    /// Rate limit or in-flight cap hit; carries the window (`minute`/`inflight`).
+    quota(string),
+    timeout,
+    /// The gate denied the call (not granted, instance policy, ...) or the
+    /// prompt carries PII/secrets (`contains_pii`).
+    denied(string),
+    invalid(string),
+    /// Flag OFF / capability not wired -- fail-loud.
+    unavailable(string),
+    /// Unknown job/handle, or one issued to another bundle/community
+    /// (indistinguishable by design).
+    not-found,
+    backend(string),
+  }
+
+  variant job-state {
+    pending,
+    /// Finished; carries the object handle.
+    done(string),
+    failed(error),
+  }
+
+  /// Synchronous image generation (60 s bound). Returns an object handle.
+  generate-image: func(prompt: string) -> result<string, error>;
+  /// Starts music generation; returns a job id to poll.
+  submit-music: func(prompt: string) -> result<string, error>;
+  /// Starts video generation; returns a job id to poll.
+  submit-video: func(prompt: string) -> result<string, error>;
+  /// Polls a job started by THIS bundle in THIS community.
+  job-status: func(job-id: string) -> result<job-state, error>;
+  /// Resolves an object handle this bundle owns to a short-TTL presigned GET
+  /// URL. Interim until the generic bundle storage capability lands.
+  object-url: func(handle: string) -> result<string, error>;
+}
+
 /// PostHog flag + license entitlement, two-gate, cached, fail-open to the
 /// supplied default. Capability: always granted.
 ///
@@ -861,6 +923,7 @@ world stage-next {
   import economy;
   import identity;
   import ai;
+  import media;
 
   export process-stage;
   export action-stage;
@@ -967,6 +1030,7 @@ world stage-v2 {
   import economy;
   import identity;
   import ai;
+  import media;
 
   export process-stage;
   export action-stage-v2;
