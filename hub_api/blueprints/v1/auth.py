@@ -31,7 +31,13 @@ from quart import Blueprint, after_this_request, current_app, redirect, request
 from quart_schema import validate_request, validate_response
 
 from config import HubAPIConfig
-from services import auth_service, branding_service, oauth_service, passkey_service
+from services import (
+    auth_service,
+    branding_service,
+    login_providers,
+    oauth_service,
+    passkey_service,
+)
 from services import install_state_binding as binding
 from services.current_user import (
     get_current_session_id,
@@ -40,6 +46,7 @@ from services.current_user import (
 )
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
+from services.login_providers import ERR_PROVIDER_DISABLED
 from services.session_cookie import (
     clear_session_cookie_after_request,
     issue_refresh_cookie,
@@ -298,6 +305,22 @@ class SetPasswordRequest:
 
     newPassword: str
     currentPassword: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class AuthProviderDTO:
+    """One enabled login/link provider."""
+
+    platform: str
+    displayName: str
+
+
+@dataclass(slots=True, frozen=True)
+class AuthProvidersResponse:
+    """Response DTO for the enabled-providers endpoint."""
+
+    success: bool
+    providers: list[AuthProviderDTO]
 
 
 @dataclass(slots=True, frozen=True)
@@ -768,6 +791,19 @@ async def tenant_login_info(slug: str) -> TenantLoginInfoResponse | tuple[dict[s
 # ---------------------------------------------------------------------------
 
 
+@auth_bp.route("/providers", methods=["GET"])
+@validate_response(AuthProvidersResponse)
+async def list_auth_providers() -> AuthProvidersResponse:
+    """Public list of enabled login/link providers -- the only list the webui renders from."""
+    providers = await login_providers.enabled_providers()
+    return AuthProvidersResponse(
+        success=True,
+        providers=[
+            AuthProviderDTO(platform=p.platform, displayName=p.display_name) for p in providers
+        ],
+    )
+
+
 @auth_bp.route("/oauth/<platform>", methods=["GET"])
 @validate_response(OAuthStartResponse)
 async def oauth_start(platform: str) -> OAuthStartResponse | tuple[dict[str, object], int]:
@@ -832,7 +868,11 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
             binding_nonce=request.cookies.get(LOGIN_BINDING_COOKIE),
         )
     except ApiError as exc:
-        error = exc.code if exc.code in (binding.ERR_BINDING, binding.ERR_STATE) else "oauth_failed"
+        error = (
+            exc.code
+            if exc.code in (binding.ERR_BINDING, binding.ERR_STATE, ERR_PROVIDER_DISABLED)
+            else "oauth_failed"
+        )
         return redirect(f"{frontend_origin}/login?error={error}")
 
     exchange_code = await oauth_service.create_oauth_exchange_code(
@@ -915,7 +955,11 @@ async def oauth_link_callback(platform: str):  # type: ignore[no-untyped-def]
             binding_nonce=request.cookies.get(LINK_BINDING_COOKIE),
         )
     except ApiError as exc:
-        error = exc.code if exc.code in (binding.ERR_BINDING, binding.ERR_STATE) else "link_failed"
+        error = (
+            exc.code
+            if exc.code in (binding.ERR_BINDING, binding.ERR_STATE, ERR_PROVIDER_DISABLED)
+            else "link_failed"
+        )
         return redirect(f"{frontend_origin}/dashboard/settings?error={error}")
     page = redirect(f"{frontend_origin}/dashboard/settings?linked={platform}")
     binding.clear_binding_cookie(page, LINK_BINDING_COOKIE)

@@ -61,6 +61,8 @@ export default api;
 
 // Server-side OAuth login: hub-api owns client_id + redirect and returns the authorize URL.
 export const oauthApi = {
+  // Enabled login/link providers (hub-api flags `waddles.login-<provider>`); the only list the UI renders.
+  providers: () => api.get('/api/v1/auth/providers'),
   start: (platform) => api.get(`/api/v1/auth/oauth/${platform}`),
   // Link a provider to the signed-in account; resolves { authorizeUrl, state } (needs the session cookie).
   startLink: (platform) => api.get(`/api/v1/auth/oauth/${platform}/link`),

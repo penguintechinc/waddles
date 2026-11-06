@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
+import useAuthProviders from '../../hooks/useAuthProviders';
 import api, { passkeyApi, userOAuthApi } from '../../services/api';
 import { ServedFeature } from '../../components/ui';
 import { isFeatureServed } from '../../lib/unservedFeatures';
@@ -63,6 +64,7 @@ const PLATFORMS = {
 
 function AccountSettings() {
   const { user } = useAuth();
+  const { platforms: enabledPlatforms } = useAuthProviders();
   const [searchParams] = useSearchParams();
   const [linkedPlatforms, setLinkedPlatforms] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -360,7 +362,9 @@ function AccountSettings() {
         </p>
 
         <div className="space-y-3">
-          {Object.entries(PLATFORMS).map(([key, platform]) => {
+          {Object.entries(PLATFORMS)
+            .filter(([key]) => enabledPlatforms.includes(key) || isLinked(key))
+            .map(([key, platform]) => {
             const linked = isLinked(key);
             const info = getLinkedInfo(key);
 

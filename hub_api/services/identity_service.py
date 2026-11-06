@@ -19,7 +19,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from services import ban_suppression
+from services import ban_suppression, login_providers
 from services.errors import ApiError, bad_request, not_found
 from services.install_state_binding import (
     ERR_STATE,
@@ -145,6 +145,8 @@ async def start_identity_link(
     """
     from services import oauth_service  # local import: avoids a module-load cycle
 
+    await login_providers.require_enabled(platform)
+
     exists = await async_dal.select_async(
         dal(
             (dal.hub_user_identities.hub_user_id == user_id)
@@ -193,6 +195,8 @@ async def identity_link_callback(
     raises `bad_request`, same as an invalid state.
     """
     from services import oauth_service  # local import: avoids a module-load cycle
+
+    await login_providers.require_enabled(platform)
 
     try:
         verify_state_binding(state, binding_nonce)
