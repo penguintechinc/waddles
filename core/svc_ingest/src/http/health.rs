@@ -66,11 +66,42 @@ pub struct ReceiverReadinessStatus {
     pub ready: bool,
 }
 
+/// Connector-runtime platform readiness reported on `/readyz`.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct OverlayReadinessStatus {
+    pub platform: &'static str,
+    pub enabled: bool,
+    pub ready: bool,
+    /// Fixed PII-free reason label while not ready.
+    pub reason: Option<&'static str>,
+    pub live: u32,
+    pub desired: u32,
+}
+
+/// Maps one overlay status onto its `/readyz` line.
+fn overlay_line(s: &crate::OverlayStatus) -> OverlayReadinessStatus {
+    use crate::connector_runtime::Readiness;
+    let (ready, reason, live, desired) = match s.readiness {
+        Readiness::Disabled => (true, None, 0, 0),
+        Readiness::NotReady(r) => (false, Some(r), 0, 0),
+        Readiness::Ready { live, desired } => (true, None, live, desired),
+    };
+    OverlayReadinessStatus {
+        platform: s.platform,
+        enabled: !matches!(s.readiness, Readiness::Disabled),
+        ready,
+        reason,
+        live,
+        desired,
+    }
+}
+
 /// `GET /readyz` response body.
 #[derive(Debug, Serialize)]
 pub struct ReadyBody {
     pub status: &'static str,
     pub receivers: Vec<ReceiverReadinessStatus>,
+    pub overlay: Vec<OverlayReadinessStatus>,
     /// Connector-runtime overlay platforms (enabled, executor_attached,
     /// pinned_ok, desired, live, discovery_failed); absent when the runtime is
     /// not enabled in this process.
@@ -110,7 +141,9 @@ pub async fn readyz(State(state): State<AppState>) -> (axum::http::StatusCode, J
         Some(status) => status.snapshots(),
         None => Vec::new(),
     };
-    compose_ready(r.all_ready(), receivers, overlays)
+    let overlay: Vec<OverlayReadinessStatus> =
+        r.overlay_status().iter().map(overlay_line).collect();
+    compose_ready(r.all_ready(), receivers, overlay, overlays)
 }
 
 /// Builds the `/readyz` answer: `503` unless every enabled receiver AND every
@@ -118,6 +151,7 @@ pub async fn readyz(State(state): State<AppState>) -> (axum::http::StatusCode, J
 fn compose_ready(
     receivers_ok: bool,
     receivers: Vec<ReceiverReadinessStatus>,
+    overlay: Vec<OverlayReadinessStatus>,
     overlays: Vec<PlatformSnapshot>,
 ) -> (axum::http::StatusCode, Json<ReadyBody>) {
     let ok = receivers_ok && overlays.iter().all(|o| o.ready);
@@ -131,6 +165,7 @@ fn compose_ready(
         Json(ReadyBody {
             status: if ok { "ok" } else { "degraded" },
             receivers,
+            overlay,
             overlays,
         }),
     )
@@ -227,7 +262,7 @@ mod tests {
 
     #[test]
     fn readyz_is_degraded_when_an_overlay_platform_is_not_ready() {
-        let (code, Json(body)) = compose_ready(true, vec![], vec![snap(false)]);
+        let (code, Json(body)) = compose_ready(true, vec![], vec![], vec![snap(false)]);
         assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.status, "degraded");
         let v = serde_json::to_value(&body).unwrap();
@@ -247,16 +282,105 @@ mod tests {
 
     #[test]
     fn readyz_is_ok_when_overlays_and_receivers_are_ready_and_omits_empty_overlays() {
-        let (code, _) = compose_ready(true, vec![], vec![snap(true)]);
+        let (code, _) = compose_ready(true, vec![], vec![], vec![snap(true)]);
         assert_eq!(code, axum::http::StatusCode::OK);
-        let (code, Json(body)) = compose_ready(true, vec![], vec![]);
+        let (code, Json(body)) = compose_ready(true, vec![], vec![], vec![]);
         assert_eq!(code, axum::http::StatusCode::OK);
         assert!(serde_json::to_value(&body)
             .unwrap()
             .get("overlays")
             .is_none());
-        let (code, _) = compose_ready(false, vec![], vec![snap(true)]);
+        let (code, _) = compose_ready(false, vec![], vec![], vec![snap(true)]);
         assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn readyz_overlay_on_without_a_runtime_is_not_ready_with_reason() {
+        let state = test_state();
+        state.receiver_readiness.set_overlay(vec!["twitch"], None);
+        let (code, Json(body)) = readyz(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "degraded");
+        assert_eq!(
+            body.overlay,
+            vec![OverlayReadinessStatus {
+                platform: "twitch",
+                enabled: true,
+                ready: false,
+                reason: Some("runtime_not_wired"),
+                live: 0,
+                desired: 0,
+            }]
+        );
+    }
+
+    struct Fixed(crate::connector_runtime::Readiness);
+    impl crate::connector_runtime::RuntimeReady for Fixed {
+        fn ready(&self, _platform: &str) -> crate::connector_runtime::Readiness {
+            self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn readyz_maps_runtime_readiness_per_platform() {
+        use crate::connector_runtime::Readiness;
+        for (r, code, ready, reason, live) in [
+            (
+                Readiness::Ready {
+                    live: 2,
+                    desired: 3,
+                },
+                axum::http::StatusCode::OK,
+                true,
+                None,
+                2,
+            ),
+            (
+                Readiness::NotReady("first_reconcile_pending"),
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                Some("first_reconcile_pending"),
+                0,
+            ),
+        ] {
+            let state = test_state();
+            state
+                .receiver_readiness
+                .set_overlay(vec!["twitch"], Some(std::sync::Arc::new(Fixed(r))));
+            let (c, Json(body)) = readyz(State(state)).await;
+            assert_eq!(c, code);
+            assert_eq!(body.overlay[0].ready, ready);
+            assert_eq!(body.overlay[0].reason, reason);
+            assert_eq!(body.overlay[0].live, live);
+        }
+    }
+
+    #[tokio::test]
+    async fn readyz_disabled_runtime_platform_does_not_block() {
+        let state = test_state();
+        state.receiver_readiness.set_overlay(
+            vec!["youtube"],
+            Some(std::sync::Arc::new(Fixed(
+                crate::connector_runtime::Readiness::Disabled,
+            ))),
+        );
+        let (code, Json(body)) = readyz(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert!(!body.overlay[0].enabled);
+    }
+
+    #[tokio::test]
+    async fn readyz_without_overlay_has_no_overlay_lines() {
+        let (_, Json(body)) = readyz(State(test_state())).await;
+        assert!(body.overlay.is_empty());
+    }
+
+    #[test]
+    fn set_overlay_twice_keeps_the_first() {
+        let r = crate::ReceiverReadiness::new();
+        r.set_overlay(vec!["twitch"], None);
+        r.set_overlay(vec!["youtube"], None);
+        assert_eq!(r.overlay_status()[0].platform, "twitch");
     }
 
     #[tokio::test]

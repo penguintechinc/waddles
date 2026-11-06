@@ -149,6 +149,24 @@ pub struct ReceiverReadiness {
     pub twitch_irc: ReceiverFlag,
     pub discord: ReceiverFlag,
     pub twitch_outbound: ReceiverFlag,
+    /// Overlay-runtime platforms and the runtime's readiness handle; set
+    /// once at boot by [`ReceiverReadiness::set_overlay`].
+    overlay: std::sync::OnceLock<OverlayReadiness>,
+}
+
+/// The overlay-ON platforms and, once the runtime is built, its readiness
+/// handle. `handle: None` with platforms listed means the runtime is not
+/// wired -- reported not-ready, never silently nothing.
+struct OverlayReadiness {
+    platforms: Vec<&'static str>,
+    handle: Option<Arc<dyn connector_runtime::RuntimeReady>>,
+}
+
+/// One overlay platform's `/readyz` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayStatus {
+    pub platform: &'static str,
+    pub readiness: connector_runtime::Readiness,
 }
 
 impl ReceiverReadiness {
@@ -159,7 +177,48 @@ impl ReceiverReadiness {
     /// `true` only when every *enabled* receiver is also connected --
     /// `GET /readyz`'s overall status.
     pub fn all_ready(&self) -> bool {
-        self.twitch_irc.ok() && self.discord.ok() && self.twitch_outbound.ok()
+        self.twitch_irc.ok()
+            && self.discord.ok()
+            && self.twitch_outbound.ok()
+            && self
+                .overlay_status()
+                .iter()
+                .all(|s| !matches!(s.readiness, connector_runtime::Readiness::NotReady(_)))
+    }
+
+    /// Records the overlay-ON platforms and the runtime's readiness handle.
+    /// Set once; a second call is ignored (boot runs once).
+    pub fn set_overlay(
+        &self,
+        platforms: Vec<&'static str>,
+        handle: Option<Arc<dyn connector_runtime::RuntimeReady>>,
+    ) {
+        // A second set is a no-op by contract (boot runs once).
+        if self
+            .overlay
+            .set(OverlayReadiness { platforms, handle })
+            .is_err()
+        {
+            tracing::warn!("overlay readiness already set; ignoring");
+        }
+    }
+
+    /// Per overlay-ON platform readiness. A platform whose runtime is not
+    /// wired reports `NotReady("runtime_not_wired")`.
+    pub fn overlay_status(&self) -> Vec<OverlayStatus> {
+        let Some(o) = self.overlay.get() else {
+            return Vec::new();
+        };
+        o.platforms
+            .iter()
+            .map(|p| OverlayStatus {
+                platform: p,
+                readiness: match &o.handle {
+                    Some(h) => h.ready(p),
+                    None => connector_runtime::Readiness::NotReady("runtime_not_wired"),
+                },
+            })
+            .collect()
     }
 }
 
@@ -277,6 +336,33 @@ where
     // A contradictory Twitch config (dynamic flag ON + a static identity, or
     // bad timing) fails loudly even when the data plane below is OFF.
     config::validate_twitch_mode(&config)?;
+    // Host selector (spec 2026-11-05 s5): env baselines only, never the flag
+    // client. Validated BEFORE any receiver starts; fatal and loud.
+    let env_lookup = |k: &str| std::env::var(k).ok();
+    let selector = connector_runtime::selector::OverlaySelector::from_env(&env_lookup)?;
+    let webhook_platforms = connector_runtime::selector::parse_webhook_platforms(
+        &config.cli.connector_runtime_webhook_platforms,
+    )?;
+    connector_runtime::selector::validate(&connector_runtime::selector::BootInputs {
+        cli: &config.cli,
+        selector: &selector,
+        webhook_platforms: &webhook_platforms,
+        spine_configured: penguin_spine::SpineConfig::from_env().is_ok(),
+        lookup: &env_lookup,
+    })?;
+    let tools_enabled = connector_runtime::selector::tools_enabled(&env_lookup)?;
+    let legacy_plan =
+        connector_runtime::selector::LegacyPlan::new(&selector, &webhook_platforms, tools_enabled);
+    // `/readyz` reports every overlay-ON platform; until the runtime handle is
+    // wired below it is NotReady("runtime_not_wired") -- loud, never silent.
+    state
+        .receiver_readiness
+        .set_overlay(selector.enabled_platforms(), None);
+    // SEAM (PR-C/PR-D): when `selector.any_overlay()` the ConnectorRuntime is
+    // built and spawned here, `webhook_boot::build_ingress` is called and its
+    // result set on `state.webhook` BEFORE `http::router(state)`, and
+    // `ConnectorRuntime::ready_handle()` is stored on `receiver_readiness`.
+    // With every overlay OFF nothing is built.
     let license_client = license::build_license_client();
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
         // Schema-v3 producer: resolver is installed BEFORE any receiver can
@@ -296,21 +382,18 @@ where
         // onto the same underlying TTL cache / HTTP client.
         let dek_provider = build_dek_provider(&config, reqwest::Client::new());
 
-        start_twitch_inbound(
-            &config,
-            ingest_metrics.clone(),
-            Arc::clone(&receiver_readiness),
-            dek_provider.clone(),
-        )?;
-        try_start_discord(
-            &config,
-            ingest_metrics.clone(),
-            Arc::clone(&receiver_readiness),
-            dek_provider.clone(),
-        );
+        // Outbound drains are owned by `start_outbound` (the
+        // `waddles.connector-tools` mode picks executor vs legacy for every
+        // platform); the selector's outbound callbacks are therefore no-ops.
         start_outbound(&config).await?;
-        state.eventsub =
-            try_build_eventsub_state(&config, ingest_metrics.clone(), dek_provider).await;
+        let mut legacy = RealLegacy {
+            config: &config,
+            metrics: ingest_metrics.clone(),
+            readiness: Arc::clone(&receiver_readiness),
+            dek_provider,
+            state: &mut state,
+        };
+        connector_runtime::selector::start_legacy(&legacy_plan, &mut legacy).await?;
     } else {
         // WARN, not INFO: with the flag OFF no outbound drain runs, so
         // `svc_action` refuses every Discord chat.delete/dm.send (no
@@ -340,6 +423,52 @@ where
     )?;
 
     Ok(())
+}
+
+/// The real legacy starters, driven by
+/// [`connector_runtime::selector::start_legacy`].
+struct RealLegacy<'a> {
+    config: &'a config::Config,
+    metrics: Arc<telemetry::IngestMetrics>,
+    readiness: Arc<ReceiverReadiness>,
+    dek_provider:
+        identity_crypto::ConfiguredDekProvider<identity_crypto::UnimplementedMachineJwtProvider>,
+    state: &'a mut http::AppState,
+}
+
+impl connector_runtime::selector::LegacyStarters for RealLegacy<'_> {
+    fn twitch_inbound(&mut self) -> anyhow::Result<()> {
+        start_twitch_inbound(
+            self.config,
+            self.metrics.clone(),
+            Arc::clone(&self.readiness),
+            self.dek_provider.clone(),
+        )
+    }
+
+    fn discord_inbound(&mut self) {
+        try_start_discord(
+            self.config,
+            self.metrics.clone(),
+            Arc::clone(&self.readiness),
+            self.dek_provider.clone(),
+        );
+    }
+
+    fn twitch_outbound(&mut self) -> anyhow::Result<()> {
+        // Owned by `start_outbound` (executor vs legacy by connector-tools mode).
+        Ok(())
+    }
+
+    fn discord_outbound(&mut self) {
+        // Owned by `start_outbound`.
+    }
+
+    async fn twitch_eventsub(&mut self) {
+        self.state.eventsub =
+            try_build_eventsub_state(self.config, self.metrics.clone(), self.dek_provider.clone())
+                .await;
+    }
 }
 
 /// A fresh shutdown receiver completed by SIGINT/SIGTERM -- the same
