@@ -13,7 +13,16 @@ OTHER="1111111111111111111111111111111111111111"
 # gh shim: pr view -> $FIXTURE; api jobs/<id>/logs -> $SCRATCH/log-<id>; everything else fails loudly.
 cat > "$SCRATCH/bin/gh" <<'SHIM'
 #!/usr/bin/env bash
-if [ "$1" = "pr" ] && [ "$2" = "view" ]; then cat "$FIXTURE"; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  if [ -n "${FAIL_PRVIEW:-}" ]; then
+    n=0; [ -f "$SCRATCH/prview.n" ] && n="$(cat "$SCRATCH/prview.n")"
+    n=$((n + 1)); echo "$n" > "$SCRATCH/prview.n"
+    if [ "$FAIL_PRVIEW" = always ] || [ "$n" -le "$FAIL_PRVIEW" ]; then
+      echo "Post https://api.github.com/graphql: dial tcp: i/o timeout" >&2; exit 1
+    fi
+  fi
+  cat "$FIXTURE"; exit 0
+fi
 if [ "$1" = "api" ]; then
   id="${2#repos/*/actions/jobs/}"; id="${id%/logs}"
   [ -f "$SCRATCH/log-$id" ] || exit 1
@@ -61,6 +70,20 @@ n="$(grep -c 'RERUN refused' <<<"$out" || true)"
 if [ "$rc" -eq 124 ] && [ "$n" -ge 2 ] && [ "$(cat "$SCRATCH/state2/rerun-7")" = 0 ]; then
   PASS=$((PASS + 1)); echo "ok   refused rerun: watcher survives, retries ($n), counter unspent"
 else FAIL=$((FAIL + 1)); echo "FAIL refused rerun (rc=$rc refused=$n)"; printf '%s\n' "$out"; fi
+
+# transient API error: first gh pr view fails, watcher logs + retries, then evaluates normally
+mk "$H" "[$GATE_BAD,$(fail_chk a 7 13)]"; rc=0; rm -f "$SCRATCH/prview.n"
+out="$(env SCRATCH="$SCRATCH" FAIL_PRVIEW=1 FIXTURE="$SCRATCH/f.json" RELEASE_AUTO_MERGE_STATE="$SCRATCH/state3" PATH="$SCRATCH/bin:$PATH" timeout 5 bash "$SCRIPT" --interval 1 5 2>&1)" || rc=$?
+if [ "$rc" -eq 124 ] && grep -q 'API error, retry next tick' <<<"$out" && grep -q 'REAL FAILURE' <<<"$out"; then
+  PASS=$((PASS + 1)); echo "ok   API error once: watcher survives and recovers"
+else FAIL=$((FAIL + 1)); echo "FAIL api retry (rc=$rc)"; printf '%s\n' "$out"; fi
+
+# persistent API failure aborts loudly after 10 consecutive ticks
+rc=0; rm -f "$SCRATCH/prview.n"
+out="$(env SCRATCH="$SCRATCH" FAIL_PRVIEW=always FIXTURE="$SCRATCH/f.json" RELEASE_AUTO_MERGE_STATE="$SCRATCH/state4" PATH="$SCRATCH/bin:$PATH" timeout 20 bash "$SCRIPT" --interval 0 5 2>&1)" || rc=$?
+if [ "$rc" -eq 2 ] && grep -q 'consecutive ticks; aborting' <<<"$out"; then
+  PASS=$((PASS + 1)); echo "ok   persistent API failure aborts after 10 ticks"
+else FAIL=$((FAIL + 1)); echo "FAIL api abort (rc=$rc)"; printf '%s\n' "$out" | tail -5; fi
 
 # bad pin / symlinked state must be refused (non-zero exit)
 rc=0; PATH="$SCRATCH/bin:$PATH" bash "$SCRIPT" --dry-run "5@abc" >/dev/null 2>&1 || rc=$?

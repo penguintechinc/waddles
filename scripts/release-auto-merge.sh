@@ -10,6 +10,7 @@ set -euo pipefail
 REPO="${RELEASE_AUTO_MERGE_REPO:-penguintechinc/waddles}"
 IGNORE_CONTEXT="submit-queue"
 MAX_RERUNS=2
+MAX_API_FAIL_TICKS=10   # consecutive ticks with any GitHub API read failure before aborting
 INTERVAL=60; MAX_HOURS=6; DRY=0; PRS=""; PINS=""
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="${RELEASE_AUTO_MERGE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/release-auto-merge/${REPO##*/}}"
@@ -79,11 +80,13 @@ is_flake_job() {
   grep -Eq 'timed out after 10 minutes|apt attempt .*(failed|timed out)' <<<"$logs"
 }
 
-# eval_pr <pr>: examine one PR; sets RESULT to merged|open|closed|waiting|skipped.
+# eval_pr <pr>: examine one PR; sets RESULT to merged|open|closed|waiting|skipped|apierr.
 eval_pr() {
   local pr="$1" json base head hname state mstate norm name bucket run job pin
   RESULT=open
-  json="$(gh pr view "$pr" -R "$REPO" --json baseRefName,headRefName,headRefOid,mergeStateStatus,state,statusCheckRollup)"
+  if ! json="$(gh pr view "$pr" -R "$REPO" --json baseRefName,headRefName,headRefOid,mergeStateStatus,state,statusCheckRollup 2>"$STATE/api-err")"; then
+    RESULT=apierr; log "pr=$pr API error, retry next tick: $(head -c 200 "$STATE/api-err")"; return 0
+  fi
   state="$(jq -r .state <<<"$json")"; base="$(jq -r .baseRefName <<<"$json")"
   head="$(jq -r .headRefOid <<<"$json")"; hname="$(jq -r .headRefName <<<"$json")"
   mstate="$(jq -r .mergeStateStatus <<<"$json")"
@@ -178,16 +181,18 @@ eval_pr() {
   return 0
 }
 
+API_FAIL_TICKS=0
 START="$(date +%s)"; DEADLINE=$((START + MAX_HOURS * 3600))
 log "start repo=$REPO prs=[${PRS# }] dry_run=$DRY interval=${INTERVAL}s max=${MAX_HOURS}h state=$STATE"
 while :; do
-  examined=0; n_open=0; n_merged=0; n_closed=0; n_skip=0; n_wait=0; merged_now=0
+  examined=0; n_open=0; n_merged=0; n_closed=0; n_skip=0; n_wait=0; merged_now=0; n_api=0
   for pr in $PRS; do
     eval_pr "$pr"; examined=$((examined + 1))
     case "$RESULT" in
       merged) n_merged=$((n_merged + 1)); [ -e "$STATE/done-$pr" ] || { : >"$STATE/done-$pr"; [ "$DRY" = 1 ] || merged_now=1; } ;;
       closed) n_closed=$((n_closed + 1)) ;;
       skipped) n_skip=$((n_skip + 1)); n_open=$((n_open + 1)) ;;
+      apierr) n_api=$((n_api + 1)); n_open=$((n_open + 1)) ;;
       waiting) n_wait=$((n_wait + 1)); n_open=$((n_open + 1)) ;;
       *) n_open=$((n_open + 1)) ;;
     esac
@@ -195,7 +200,11 @@ while :; do
     [ "$merged_now" = 1 ] && break
   done
   [ "$examined" -gt 0 ] || die "zero PRs examined"
-  log "TICK examined=$examined open=$n_open merged=$n_merged closed=$n_closed skipped=$n_skip waiting=$n_wait"
+  log "TICK examined=$examined open=$n_open merged=$n_merged closed=$n_closed skipped=$n_skip waiting=$n_wait api_errors=$n_api"
+  if [ "$n_api" -gt 0 ]; then
+    API_FAIL_TICKS=$((API_FAIL_TICKS + 1))
+    if [ "$API_FAIL_TICKS" -ge "$MAX_API_FAIL_TICKS" ]; then die "GitHub API failed on $API_FAIL_TICKS consecutive ticks; aborting"; fi
+  else API_FAIL_TICKS=0; fi
   if [ "$n_open" -eq 0 ]; then log "all PRs merged/closed; done"; exit 0; fi
   if [ "$DRY" = 1 ]; then log "dry-run: single tick only"; exit 0; fi
   [ "$merged_now" = 1 ] && continue
