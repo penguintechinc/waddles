@@ -71,3 +71,20 @@ never the stage registry); takes the same global admission slot as a tool call (
 capped at `max_tool_args_bytes` BEFORE admission and the template at `max_tool_result_bytes` BEFORE it is encoded
 (`MALFORMED_FRAME`); a caller deadline can only tighten `limits.deadline_ms`; fuel/deadline/memory trips map to the usual typed
 codes. The host half is `svc_ingest::connector::sender_exec::WireTemplateBuilder`.
+
+## Connector runtime link (`src/connector_boot.rs`)
+
+Boot pinning and a SECOND dial loop to svc-ingest's connector host-API listener (connector runtime spec S2).
+
+| Env | Meaning |
+|---|---|
+| `CONNECTOR_PIN_DIGEST_{TWITCH,DISCORD,YOUTUBE}` | `sha256:<64hex>`; fetches `connectors/<p>/<digest>.wasm` + signed sidecar `.json`, verifies signature + digest, pins as `waddles.core.service.<p>` (`connector-tools`). Any failure aborts startup naming the platform. Empty = not pinned |
+| `CONNECTOR_HOST_API_ADDR` | `service-dns-name:port` (IP literals refused); unset/empty = no connector dial; requires >=1 pin digest |
+| `CONNECTOR_HOST_API_IDENTITY` | listener SAN to pin (must differ from `HOST_API_STAGE_IDENTITY`) |
+| `CONNECTOR_HOST_API_CLIENT_CERT_FILE` / `_KEY_FILE` | the executor's OWN client identity, SAN = executor only; must not be the stage cert (shares `HOST_API_CA_FILE` for trust) |
+| `EXECUTOR_CONNECTOR_CONNECTIONS` | must be `1` (the listener's `attach` replaces the previous session) |
+
+The link serves connector exports only (`load`/`unload`/stage exports are refused). Every guest host-call goes back over the
+link with `args._scope = {connection_id}` stamped from the invoked export's `ConnectionCtx` after guest code (overwritten if
+present; stripped for ctx-less `tool-call`/`build-request`). The link has its own liveness probe file (`<EXECUTOR_PROBE_FILE>.connector`)
+and counts attempts as `connector_connected`/`connector_failed` on `waddles_executor_connection_attempts_total`.

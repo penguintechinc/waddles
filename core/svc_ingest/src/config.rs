@@ -99,6 +99,17 @@ pub struct CliConfig {
     #[arg(long, env = "INGEST_DYNAMIC_CONNECTIONS", default_value_t = false)]
     pub dynamic_connections: bool,
 
+    /// Env baseline for the `waddles.connector-tools` flag, read ONCE at
+    /// startup (env only, like `INGEST_DYNAMIC_CONNECTIONS`: this service's
+    /// `*.waddles.app` license-bypass would evaluate every PostHog flag ON, so
+    /// the licensing client can never provide a default-OFF gate). OFF
+    /// (default) = the legacy outbound drains, unchanged. ON = the generic
+    /// outbound executor path; every prerequisite is then validated at boot
+    /// (`crate::outbound_boot`) and a missing one is fatal -- never a silent
+    /// fallback to legacy.
+    #[arg(long, env = "CONNECTOR_TOOLS_ENABLED", default_value_t = false)]
+    pub connector_tools: bool,
+
     /// Deployment environment label (`alpha`/`beta`/`gamma`/`production`) --
     /// plaintext `http://` to hub-api is only tolerated in `alpha`.
     #[arg(long, env = "WADDLES_ENVIRONMENT", default_value = "")]

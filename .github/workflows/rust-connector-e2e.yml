@@ -44,6 +44,8 @@ jobs:
     uses: ./.github/workflows/rust-crate-ci.yml
     with:
       crate_name: connector-e2e
+      # tests/outbound_exec.rs drains a REAL Valkey list (VALKEY_URL unset FAILS, never skips).
+      valkey: true
       working_directory: core/connector_e2e
       # ring/aws-lc-sys need a C/C++ toolchain; cmake for aws-lc-sys.
       # protoc: hub_client's build.rs (svc-ingest path dependency).

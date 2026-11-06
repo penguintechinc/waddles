@@ -33,6 +33,7 @@
 pub mod discord_duties;
 pub mod discord_slots;
 pub mod policy;
+pub mod router;
 pub mod subst;
 pub mod twitch_slots;
 pub mod verify;
@@ -48,6 +49,7 @@ use bundle_host_http::guarded::{GuardedClient, GuardedLimits};
 use tracing::Instrument;
 
 pub use policy::{KindPolicy, PlatformPolicy, SlotOrigin};
+pub use router::PlatformSlotRouter;
 pub use subst::{PreparedRequest, SlotValue, SubstError};
 pub use verify::TemplateError;
 pub use wire_builder::WireTemplateBuilder;

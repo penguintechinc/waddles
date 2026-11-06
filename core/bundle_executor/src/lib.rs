@@ -32,6 +32,7 @@
 pub mod bucket;
 pub mod config;
 pub mod connector;
+pub mod connector_boot;
 pub mod connector_wire;
 pub mod engine;
 pub mod error;
@@ -43,6 +44,7 @@ pub mod metrics;
 pub mod parity_support;
 pub mod probe;
 pub mod signing;
+pub mod stage_bridge;
 pub mod telemetry;
 pub mod tls;
 pub mod wire;
@@ -245,8 +247,17 @@ pub async fn run() -> Result<(), ExecutorError> {
     let mut signals = ShutdownSignals::install()?;
     let source = BucketComponentSource::from_cli(&cfg)?;
     let executor = Arc::new(Executor::new(&cfg, source)?);
+    // Pin the configured connector overlays BEFORE any link is dialed. Any
+    // failure (missing object, digest mismatch, bad signature, malformed
+    // digest) aborts startup loudly, naming the platform.
+    match connector_boot::pin_configured(&executor, &cfg).await {
+        Ok(pinned) => info!(pinned, "connector overlays pinned"),
+        Err(e) => {
+            error!(error = %e, "connector pinning failed; refusing to start");
+            return Err(e);
+        }
+    }
     let heartbeat_cfg = HeartbeatConfig::from_cli(&cfg);
-    let heartbeat_metrics = Arc::new(HeartbeatMetrics::default());
     info!(
         heartbeat_interval_secs = heartbeat_cfg.interval.as_secs(),
         self_ping_enabled = heartbeat_cfg.self_ping_enabled,
@@ -254,44 +265,18 @@ pub async fn run() -> Result<(), ExecutorError> {
         "host-api session liveness configured"
     );
 
+    // The stage link always runs; the connector link only when
+    // `CONNECTOR_HOST_API_ADDR` is configured (unset = no dial).
     let serve = async {
-        let mut backoff = std::time::Duration::from_secs(1);
-        let backoff_cap = std::time::Duration::from_secs(30);
-        let mut attempt: u32 = 0;
-        let mut disconnected_at: Option<Instant> = None;
-        let jitter = Jitter::from_entropy();
-        loop {
-            attempt += 1;
-            match connect_and_serve(
-                &cfg,
-                &executor,
-                attempt,
-                heartbeat_cfg,
-                Arc::clone(&heartbeat_metrics),
-                disconnected_at,
-            )
-            .await
-            {
-                Ok(()) => {
-                    info!(attempt, "host-api connection closed cleanly, reconnecting");
-                    backoff = std::time::Duration::from_secs(1);
-                }
-                Err(e) => {
-                    let sleep_for = jittered_backoff(&jitter, backoff);
-                    error!(
-                        error = %e,
-                        attempt,
-                        backoff_s = backoff.as_secs(),
-                        sleep_s = sleep_for.as_secs_f64(),
-                        "host-api connection failed, retrying"
-                    );
-                    tokio::time::sleep(sleep_for).await;
-                    backoff = (backoff * 2).min(backoff_cap);
-                }
+        let stage = dial_loop(&cfg, &executor, Link::Stage, heartbeat_cfg);
+        let connector = async {
+            if cfg.connector_dial_addr().is_some() {
+                dial_loop(&cfg, &executor, Link::Connector, heartbeat_cfg).await;
+            } else {
+                std::future::pending::<()>().await;
             }
-            disconnected_at = Some(Instant::now());
-            heartbeat_metrics.record_reconnect();
-        }
+        };
+        tokio::join!(stage, connector);
     };
     serve_until_shutdown(
         serve,
@@ -303,42 +288,159 @@ pub async fn run() -> Result<(), ExecutorError> {
     Ok(())
 }
 
-/// Dials the stage and runs one connection to completion (spec SS4.5).
+/// Which host-API listener a dial loop serves: the stage (svc-process/
+/// svc-action) or the connector listener (svc-ingest).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Link {
+    Stage,
+    Connector,
+}
+
+impl Link {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Stage => "stage",
+            Self::Connector => "connector",
+        }
+    }
+}
+
+/// The never-ending dial/reconnect loop for one [`Link`]: jittered
+/// exponential backoff on any failure (spec SS4.5), never an exit.
+async fn dial_loop<S: ComponentSource>(
+    cfg: &CliConfig,
+    executor: &Arc<Executor<S>>,
+    link: Link,
+    heartbeat_cfg: HeartbeatConfig,
+) {
+    let heartbeat_metrics = Arc::new(HeartbeatMetrics::default());
+    let mut backoff = std::time::Duration::from_secs(1);
+    let backoff_cap = std::time::Duration::from_secs(30);
+    let mut attempt: u32 = 0;
+    let mut disconnected_at: Option<Instant> = None;
+    let jitter = Jitter::from_entropy();
+    loop {
+        attempt += 1;
+        match connect_and_serve(
+            cfg,
+            executor,
+            link,
+            attempt,
+            heartbeat_cfg,
+            Arc::clone(&heartbeat_metrics),
+            disconnected_at,
+        )
+        .await
+        {
+            Ok(()) => {
+                info!(
+                    link = link.label(),
+                    attempt, "host-api connection closed cleanly, reconnecting"
+                );
+                backoff = std::time::Duration::from_secs(1);
+            }
+            Err(e) => {
+                let sleep_for = jittered_backoff(&jitter, backoff);
+                error!(
+                    link = link.label(),
+                    error = %e,
+                    attempt,
+                    backoff_s = backoff.as_secs(),
+                    sleep_s = sleep_for.as_secs_f64(),
+                    "host-api connection failed, retrying"
+                );
+                tokio::time::sleep(sleep_for).await;
+                backoff = (backoff * 2).min(backoff_cap);
+            }
+        }
+        disconnected_at = Some(Instant::now());
+        heartbeat_metrics.record_reconnect();
+    }
+}
+
+/// Dials the connector listener ONCE and serves that connection to
+/// completion (the body of one [`dial_loop`] iteration, without the retry).
+/// Public so the real-mTLS e2e tests can drive exactly the production dial
+/// path; `run` never calls it.
+pub async fn serve_connector_link_once<S: ComponentSource>(
+    cfg: &CliConfig,
+    executor: &Arc<Executor<S>>,
+) -> Result<(), ExecutorError> {
+    connect_and_serve(
+        cfg,
+        executor,
+        Link::Connector,
+        1,
+        HeartbeatConfig::from_cli(cfg),
+        Arc::new(HeartbeatMetrics::default()),
+        None,
+    )
+    .await
+}
+
+/// The liveness probe file for the connector link: the stage's path plus a
+/// `.connector` suffix. It must NOT be the stage's file, or a healthy
+/// connector link would keep the pod "live" through a dead stage link.
+fn connector_probe_file(stage_probe: &std::path::Path) -> std::path::PathBuf {
+    let mut name = stage_probe.as_os_str().to_os_string();
+    name.push(".connector");
+    std::path::PathBuf::from(name)
+}
+
+/// Dials `link` and runs one connection to completion (spec SS4.5).
 /// `attempt` is this process's monotonically increasing connection-attempt
 /// counter (1 on the very first dial, logged alongside the peer address so
 /// an operator can tell "first connect" from "the Nth reconnect" at a
 /// glance). `disconnected_at`, when set, is when the PREVIOUS connection
 /// ended -- used only to log how long the host-api link was down once this
 /// one's handshake completes (`crate::heartbeat::Heartbeat::on_connected`).
+/// The connector link serves only connector exports
+/// ([`connector_boot::ConnectorLinkHandler`]), keeps its own probe file and
+/// does not drive the stage's session gauge.
 async fn connect_and_serve<S: ComponentSource>(
     cfg: &CliConfig,
     executor: &Arc<Executor<S>>,
+    link: Link,
     attempt: u32,
     heartbeat_cfg: HeartbeatConfig,
     heartbeat_metrics: Arc<HeartbeatMetrics>,
     disconnected_at: Option<Instant>,
 ) -> Result<(), ExecutorError> {
     let metrics = metrics::executor_metrics();
-    let io = match tls::dial_stage(cfg).await {
+    let (ok_label, fail_label) = match link {
+        Link::Stage => ("connected", "failed"),
+        Link::Connector => ("connector_connected", "connector_failed"),
+    };
+    let dialed = match link {
+        Link::Stage => tls::dial_stage(cfg).await,
+        Link::Connector => tls::dial_connector(cfg).await,
+    };
+    let io = match dialed {
         Ok(io) => io,
         Err(err) => {
-            metrics.record_connection_attempt("failed");
+            metrics.record_connection_attempt(fail_label);
             return Err(err);
         }
     };
-    let peer = io
-        .get_ref()
-        .0
-        .peer_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|_| cfg.stage_host_api_addr.clone());
-    info!(peer = %peer, attempt, "host-api connecting");
+    // A connected socket with no peer address is a dead connection: fail loud
+    // (counted as a failed attempt) instead of logging a made-up peer.
+    let peer = match io.get_ref().0.peer_addr() {
+        Ok(a) => a.to_string(),
+        Err(e) => {
+            metrics.record_connection_attempt(fail_label);
+            return Err(ExecutorError::Io(e));
+        }
+    };
+    info!(link = link.label(), peer = %peer, attempt, "host-api connecting");
 
     let hello = executor.hello(
         cfg.sandbox_gvisor,
         if cfg.sandbox_gvisor { "gvisor" } else { "runc" },
     );
-    let probe_file = cfg.executor_probe_file.clone();
+    let probe_file = match link {
+        Link::Stage => cfg.executor_probe_file.clone(),
+        Link::Connector => connector_probe_file(&cfg.executor_probe_file),
+    };
     let on_connected_peer = peer.clone();
     // Set once, when the hello/hello-ok handshake completes: distinguishes a
     // session that was established (and has a length) from a dial that never
@@ -346,35 +448,55 @@ async fn connect_and_serve<S: ComponentSource>(
     let connected_at: Arc<std::sync::OnceLock<Instant>> = Arc::new(std::sync::OnceLock::new());
     let on_connected_metrics = Arc::clone(&metrics);
     let on_connected_at = Arc::clone(&connected_at);
+    let on_connected_probe = probe_file.clone();
     let heartbeat = Heartbeat {
         cfg: heartbeat_cfg,
         metrics: heartbeat_metrics,
         probe_file: probe_file.clone(),
         probe_grace: std::time::Duration::from_secs(cfg.executor_grace_secs),
         on_connected: Some(Box::new(move || {
-            on_connected_metrics.record_connection_attempt("connected");
-            on_connected_metrics.set_connection_up(true);
+            on_connected_metrics.record_connection_attempt(ok_label);
+            if link == Link::Stage {
+                on_connected_metrics.set_connection_up(true);
+            }
             let _ = on_connected_at.set(Instant::now());
             if let Some(since) = disconnected_at {
-                on_connected_metrics.record_outage(since.elapsed());
+                if link == Link::Stage {
+                    on_connected_metrics.record_outage(since.elapsed());
+                }
                 info!(
+                    link = link.label(),
                     peer = %on_connected_peer,
                     attempt,
                     outage_ms = since.elapsed().as_millis() as u64,
                     "host-api reconnected"
                 );
             }
-            if let Err(e) = probe::touch(&probe_file) {
-                warn!(error = %e, probe_file = ?probe_file, "failed to refresh liveness probe file on connect");
+            if let Err(e) = probe::touch(&on_connected_probe) {
+                warn!(error = %e, probe_file = ?on_connected_probe, "failed to refresh liveness probe file on connect");
             }
         })),
     };
-    let outcome = wire::run_connection(io, hello, Arc::clone(executor), &peer, heartbeat).await;
-    metrics.set_connection_up(false);
+    let outcome = match link {
+        Link::Stage => {
+            wire::run_connection(io, hello, Arc::clone(executor), &peer, heartbeat).await
+        }
+        Link::Connector => {
+            let handler = connector_boot::ConnectorLinkHandler::new(Arc::clone(executor));
+            wire::run_connection(io, hello, handler, &peer, heartbeat).await
+        }
+    };
+    if link == Link::Stage {
+        metrics.set_connection_up(false);
+    }
     match connected_at.get() {
-        Some(connected) => metrics.record_session(connected.elapsed()),
+        Some(connected) => {
+            if link == Link::Stage {
+                metrics.record_session(connected.elapsed());
+            }
+        }
         // The dial succeeded but the handshake never completed.
-        None => metrics.record_connection_attempt("failed"),
+        None => metrics.record_connection_attempt(fail_label),
     }
     outcome
 }
@@ -720,6 +842,7 @@ mod tests {
         connect_and_serve(
             &cfg,
             &executor,
+            Link::Stage,
             1,
             crate::heartbeat::HeartbeatConfig::disabled(),
             Arc::new(crate::heartbeat::HeartbeatMetrics::default()),
@@ -760,6 +883,7 @@ mod tests {
         let outcome = connect_and_serve(
             &cfg,
             &executor,
+            Link::Stage,
             1,
             crate::heartbeat::HeartbeatConfig::disabled(),
             Arc::new(crate::heartbeat::HeartbeatMetrics::default()),
@@ -856,6 +980,7 @@ mod tests {
         connect_and_serve(
             &cfg,
             &executor,
+            Link::Stage,
             2,
             crate::heartbeat::HeartbeatConfig::disabled(),
             Arc::new(crate::heartbeat::HeartbeatMetrics::default()),

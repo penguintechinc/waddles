@@ -74,6 +74,7 @@ pub mod ingest;
 pub mod license;
 pub mod normalize;
 pub mod outbound;
+pub mod outbound_boot;
 pub mod outbound_creds;
 pub mod outbound_creds_discord;
 pub mod outbound_creds_youtube;
@@ -381,6 +382,10 @@ where
         // onto the same underlying TTL cache / HTTP client.
         let dek_provider = build_dek_provider(&config, reqwest::Client::new());
 
+        // Outbound drains are owned by `start_outbound` (the
+        // `waddles.connector-tools` mode picks executor vs legacy for every
+        // platform); the selector's outbound callbacks are therefore no-ops.
+        start_outbound(&config).await?;
         let mut legacy = RealLegacy {
             config: &config,
             metrics: ingest_metrics.clone(),
@@ -451,23 +456,52 @@ impl connector_runtime::selector::LegacyStarters for RealLegacy<'_> {
     }
 
     fn twitch_outbound(&mut self) -> anyhow::Result<()> {
-        if self.config.cli.dynamic_connections {
-            // Per-community credentials: never the process-wide identity.
-            try_start_twitch_outbound_percommunity(self.config)
-        } else {
-            try_start_twitch_outbound(self.config);
-            Ok(())
-        }
+        // Owned by `start_outbound` (executor vs legacy by connector-tools mode).
+        Ok(())
     }
 
     fn discord_outbound(&mut self) {
-        try_start_discord_outbound(self.config);
+        // Owned by `start_outbound`.
     }
 
     async fn twitch_eventsub(&mut self) {
         self.state.eventsub =
             try_build_eventsub_state(self.config, self.metrics.clone(), self.dek_provider.clone())
                 .await;
+    }
+}
+
+/// A fresh shutdown receiver completed by SIGINT/SIGTERM -- the same
+/// per-drain pattern the legacy `try_start_*` functions use.
+fn shutdown_receiver() -> tokio::sync::oneshot::Receiver<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = tx.send(());
+    });
+    rx
+}
+
+/// Starts the outbound drains for the path the `waddles.connector-tools`
+/// startup flag selects ([`outbound_boot::mode`]). OFF: the legacy drains,
+/// exactly as before this flag existed. ON: the generic executor path, where
+/// ANY missing/malformed prerequisite is a fatal `Err` -- never a silent
+/// downgrade to legacy.
+async fn start_outbound(config: &config::Config) -> anyhow::Result<()> {
+    match outbound_boot::mode(&config.cli) {
+        outbound_boot::OutboundMode::Executor => {
+            outbound_boot::start(&config.cli, shutdown_receiver).await
+        }
+        outbound_boot::OutboundMode::Legacy => {
+            if config.cli.dynamic_connections {
+                // Per-community credentials: never the process-wide identity.
+                try_start_twitch_outbound_percommunity(config)?;
+            } else {
+                try_start_twitch_outbound(config);
+            }
+            try_start_discord_outbound(config);
+            Ok(())
+        }
     }
 }
 
@@ -827,6 +861,7 @@ fn try_start_twitch_outbound(config: &config::Config) {
     );
 
     let pin = resolve_outbound_pin_keys("twitch");
+    outbound_boot::record_path(outbound_boot::OutboundMode::Legacy, "twitch");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         shutdown_signal().await;
@@ -873,6 +908,7 @@ fn try_start_twitch_outbound_percommunity(config: &config::Config) -> anyhow::Re
     };
     let creds = outbound_creds::ResolverTwitchCredentials::new(resolver);
     let pin = resolve_outbound_pin_keys("twitch");
+    outbound_boot::record_path(outbound_boot::OutboundMode::Legacy, "twitch");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         shutdown_signal().await;
@@ -918,6 +954,7 @@ fn try_start_discord_outbound(config: &config::Config) {
         }
     };
     let pin = resolve_outbound_pin_keys("discord");
+    outbound_boot::record_path(outbound_boot::OutboundMode::Legacy, "discord");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         shutdown_signal().await;
@@ -1677,6 +1714,33 @@ mod tests {
         config.cli.binding_active_kid = "k1".to_string();
         config.envelope_binding_keys = Some(crate::config::Secret::new("not-valid"));
         assert!(resolve_binding_keyring(&config, "test").is_none());
+    }
+
+    /// Flag OFF (the default) is exactly today's behaviour: the legacy
+    /// drains are chosen, an unconfigured deployment is a logged no-op, and
+    /// none of the executor-only prerequisites are ever consulted.
+    #[tokio::test]
+    async fn connector_tools_off_keeps_the_legacy_outbound_path() {
+        let config = base_config();
+        assert!(!config.cli.connector_tools);
+        assert_eq!(
+            outbound_boot::mode(&config.cli),
+            outbound_boot::OutboundMode::Legacy
+        );
+        start_outbound(&config).await.unwrap();
+    }
+
+    /// Flag ON with the executor prerequisites absent is FATAL -- no silent
+    /// fallback to the legacy drains.
+    #[tokio::test]
+    async fn connector_tools_on_without_prerequisites_is_fatal_not_legacy() {
+        let mut config = base_config();
+        config.cli.connector_tools = true;
+        let err = start_outbound(&config).await.unwrap_err();
+        assert!(
+            err.to_string().contains("waddles.connector-tools is ON"),
+            "{err}"
+        );
     }
 
     #[test]

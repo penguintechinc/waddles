@@ -145,16 +145,79 @@ impl ServerCertVerifier for PinnedIdentityVerifier {
     }
 }
 
+/// Where one mTLS dial goes and how it authenticates: the address, the CA,
+/// this side's client certificate/key and the pinned server identity. Built
+/// from config only -- never from anything read off a wire frame.
+struct DialParams<'a> {
+    addr: &'a str,
+    /// The env var `addr` came from, so a config error names it.
+    addr_var: &'static str,
+    ca_file: Option<&'a std::path::Path>,
+    client_cert_file: Option<&'a std::path::Path>,
+    client_key_file: Option<&'a std::path::Path>,
+    /// The `(cert, key)` env vars, for the "must be set together" error.
+    client_vars: (&'static str, &'static str),
+    server_identity: Option<&'a str>,
+}
+
+impl<'a> DialParams<'a> {
+    /// The stage link: `STAGE_HOST_API_ADDR` with the `HOST_API_*` material.
+    fn stage(cfg: &'a CliConfig) -> Self {
+        Self {
+            addr: &cfg.stage_host_api_addr,
+            addr_var: "STAGE_HOST_API_ADDR",
+            ca_file: cfg.host_api_ca_file.as_deref(),
+            client_cert_file: cfg.host_api_client_cert_file.as_deref(),
+            client_key_file: cfg.host_api_client_key_file.as_deref(),
+            client_vars: ("HOST_API_CLIENT_CERT_FILE", "HOST_API_CLIENT_KEY_FILE"),
+            server_identity: cfg.host_api_stage_identity.as_deref(),
+        }
+    }
+
+    /// The connector link: `CONNECTOR_HOST_API_ADDR`, the cluster CA shared
+    /// with the stage link, but its OWN client certificate and server
+    /// identity -- the stage's must never be presented here.
+    fn connector(cfg: &'a CliConfig, addr: &'a str) -> Self {
+        Self {
+            addr,
+            addr_var: "CONNECTOR_HOST_API_ADDR",
+            ca_file: cfg.host_api_ca_file.as_deref(),
+            client_cert_file: cfg.connector_host_api_client_cert_file.as_deref(),
+            client_key_file: cfg.connector_host_api_client_key_file.as_deref(),
+            client_vars: (
+                "CONNECTOR_HOST_API_CLIENT_CERT_FILE",
+                "CONNECTOR_HOST_API_CLIENT_KEY_FILE",
+            ),
+            server_identity: cfg.connector_host_api_identity.as_deref(),
+        }
+    }
+}
+
 /// Dials `cfg.stage_host_api_addr` and completes a TLS 1.2+ handshake
 /// (mutual if client cert/key are configured), returning a stream
 /// `crate::wire::run_connection` can frame directly.
 pub async fn dial_stage(cfg: &CliConfig) -> Result<TlsStream<TcpStream>, ExecutorError> {
-    let tcp = TcpStream::connect(&cfg.stage_host_api_addr).await?;
+    dial(&DialParams::stage(cfg)).await
+}
+
+/// Dials the connector listener (`CONNECTOR_HOST_API_ADDR`) with the
+/// executor's dedicated client certificate, pinning the listener's identity
+/// to `CONNECTOR_HOST_API_IDENTITY`. A config with no connector address is a
+/// typed error, never a silent dial of the stage address.
+pub async fn dial_connector(cfg: &CliConfig) -> Result<TlsStream<TcpStream>, ExecutorError> {
+    let addr = cfg.connector_dial_addr().ok_or_else(|| {
+        ExecutorError::Config("CONNECTOR_HOST_API_ADDR is not configured".to_string())
+    })?;
+    dial(&DialParams::connector(cfg, addr)).await
+}
+
+async fn dial(params: &DialParams<'_>) -> Result<TlsStream<TcpStream>, ExecutorError> {
+    let tcp = TcpStream::connect(params.addr).await?;
     configure_keepalive(&tcp)?;
-    let tls_config = build_client_config(cfg)?;
+    let tls_config = build_client_config_for(params)?;
     let connector = TlsConnector::from(Arc::new(tls_config));
 
-    let server_name = server_name_from_addr(&cfg.stage_host_api_addr)?;
+    let server_name = server_name_from_addr(params.addr_var, params.addr)?;
     let stream = connector
         .connect(server_name, tcp)
         .await
@@ -185,27 +248,36 @@ fn configure_keepalive(tcp: &TcpStream) -> Result<(), ExecutorError> {
         .map_err(ExecutorError::Io)
 }
 
-fn server_name_from_addr(addr: &str) -> Result<ServerName<'static>, ExecutorError> {
+fn server_name_from_addr(
+    addr_var: &'static str,
+    addr: &str,
+) -> Result<ServerName<'static>, ExecutorError> {
     let host = addr.split(':').next().unwrap_or(addr).to_string();
-    ServerName::try_from(host.clone()).map_err(|e| {
-        ExecutorError::Config(format!("invalid STAGE_HOST_API_ADDR host {host:?}: {e}"))
-    })
+    ServerName::try_from(host.clone())
+        .map_err(|e| ExecutorError::Config(format!("invalid {addr_var} host {host:?}: {e}")))
+}
+
+/// Builds the stage link's rustls `ClientConfig` (see
+/// [`build_client_config_for`]).
+#[cfg(test)]
+fn build_client_config(cfg: &CliConfig) -> Result<ClientConfig, ExecutorError> {
+    build_client_config_for(&DialParams::stage(cfg))
 }
 
 /// Builds the rustls `ClientConfig`: the configured CA as the sole root
 /// (never the system trust store -- this is a closed mTLS pair, not a
 /// connection to the public internet), a client certificate/key when both
 /// are configured (spec SS6.6: "Both peers present certificates"), and --
-/// when `HOST_API_STAGE_IDENTITY` is configured -- [`PinnedIdentityVerifier`]
+/// when a server identity is configured -- [`PinnedIdentityVerifier`]
 /// in place of the standard verifier (see this module's own doc for why).
 /// `CliConfig::validate_host_api_tls` requires all three (CA, client cert,
 /// stage identity) in production; this function itself stays permissive
 /// (falls back to base verification / no client auth when unset) so the
 /// narrower unit tests in this module and `crate::wire` that don't
 /// exercise the full production posture keep working unchanged.
-fn build_client_config(cfg: &CliConfig) -> Result<ClientConfig, ExecutorError> {
+fn build_client_config_for(params: &DialParams<'_>) -> Result<ClientConfig, ExecutorError> {
     let mut roots = RootCertStore::empty();
-    if let Some(ca_path) = &cfg.host_api_ca_file {
+    if let Some(ca_path) = params.ca_file {
         for cert in load_certs(ca_path)? {
             roots
                 .add(cert)
@@ -214,9 +286,9 @@ fn build_client_config(cfg: &CliConfig) -> Result<ClientConfig, ExecutorError> {
     }
     let roots = Arc::new(roots);
 
-    let builder = match &cfg.host_api_stage_identity {
+    let builder = match params.server_identity {
         Some(expected_identity) if !expected_identity.is_empty() => {
-            let verifier = PinnedIdentityVerifier::new(roots, expected_identity.clone())?;
+            let verifier = PinnedIdentityVerifier::new(roots, expected_identity.to_string())?;
             ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(verifier))
@@ -224,10 +296,7 @@ fn build_client_config(cfg: &CliConfig) -> Result<ClientConfig, ExecutorError> {
         _ => ClientConfig::builder().with_root_certificates(roots),
     };
 
-    let config = match (
-        &cfg.host_api_client_cert_file,
-        &cfg.host_api_client_key_file,
-    ) {
+    let config = match (params.client_cert_file, params.client_key_file) {
         (Some(cert_path), Some(key_path)) => {
             let certs = load_certs(cert_path)?;
             let key = load_private_key(key_path)?;
@@ -237,10 +306,10 @@ fn build_client_config(cfg: &CliConfig) -> Result<ClientConfig, ExecutorError> {
         }
         (None, None) => builder.with_no_client_auth(),
         _ => {
-            return Err(ExecutorError::Config(
-                "HOST_API_CLIENT_CERT_FILE and HOST_API_CLIENT_KEY_FILE must be set together"
-                    .to_string(),
-            ))
+            return Err(ExecutorError::Config(format!(
+                "{} and {} must be set together",
+                params.client_vars.0, params.client_vars.1
+            )))
         }
     };
     Ok(config)
@@ -281,7 +350,7 @@ mod tests {
 
     #[test]
     fn server_name_extracts_host_without_port() -> Result<(), ExecutorError> {
-        let name = server_name_from_addr("svc-process:8301")?;
+        let name = server_name_from_addr("STAGE_HOST_API_ADDR", "svc-process:8301")?;
         assert!(matches!(name, ServerName::DnsName(_)));
         Ok(())
     }
@@ -291,7 +360,7 @@ mod tests {
         // An IPv6-literal-looking-but-invalid host with no brackets is
         // neither a valid DNS name nor a valid IP address.
         assert!(matches!(
-            server_name_from_addr(":::not-a-host:8301"),
+            server_name_from_addr("STAGE_HOST_API_ADDR", ":::not-a-host:8301"),
             Err(ExecutorError::Config(_))
         ));
     }
