@@ -105,3 +105,35 @@ Flag: `waddles.bundle-platform-table-capability` (default OFF; unwired -> `not_i
 1. spec + manifest/catalog/gate + seeder carve-out (this doc is PR 1).
 2. host store + WIT + dispatch.
 3. hub-api approval/ack + webui red warning.
+
+## 7. Generic grant-kind machinery (reused by `storage_access`)
+
+The approval/audit/re-approval machinery is kind-agnostic. A grant kind
+(`table`, `storage_prefix`, ...) is one `AccessGrantKind` registered in
+`hub_api/services/bundle_access_grants.py`:
+
+```python
+register_kind(AccessGrantKind(
+    kind="storage_prefix", id_prefix="platform.storage.", summary_key="storageAccess",
+    requests_of=lambda manifest: manifest.storage_access,   # validated requests
+    summarize=lambda reqs: [...],     # JSON-safe entries; each carries "reason"
+    atoms=lambda entry: {...},        # diff atoms -> widened set forces re-approval
+))
+```
+
+What a registered kind gets for free: (a) NEVER auto-granted (core seeder
+carve-out + system approval path cannot write or erase its ids); (b) direct
+declaration in `permissions:` rejected (`use_table_access_block`-style); (c)
+consent-summary block `summary[summary_key]` -- hashed, so widening changes
+`permissionHash`/`classify_diff == widened` -> re-approval; (d) the global
+approval ack (`incomplete_dangerous_ack`) and community consent
+(`consent_required`) because the expanded ids are `dangerous`; (e) audit +
+revoke through the existing permission ledger; (f) the bold-red webui block
+`AccessGrantWarning` (`admin/hub_module/frontend/src/components/bundles/`) which
+renders every `summary[summary_key]` entry registered in its `KINDS` map.
+
+A new kind MUST still provide: its own manifest parser (fold into dangerous ids
+`<id_prefix><...>`), `resolve_risk`/`permission_family` entries in
+`bundle_permission_catalog.py`, the Rust `PermissionFamily` + parser in
+`core/bundle_capability_gate`, and its host enforcement. Rust gate/host pieces
+are per kind; the hub-api + UI pieces are not.
