@@ -208,6 +208,20 @@ frame-announced heartbeat interval, reconnect/park directives and WS close-code 
 YouTube), limits, metrics: `docs/connector-host-capability.md` "Session lifecycle". Tests:
 `cargo test --locked --lib connector::lifecycle`, `--test connector_session_lifecycle`, `--test connector_heartbeat`.
 
+## Connector IDENTIFY budget (`src/connector/identify_budget.rs`, `handshake_gate.rs`)
+
+Fleet-wide Discord IDENTIFY budget as a reusable host module (port of the legacy `ingest::discord_identify_budget`, which
+stays until T4). The WS driver awaits a `HandshakeGate` after `on-connect` and before the handshake is sent;
+`DiscordIdentifyGate` skips the budget for a RESUME (session token carries `session_id`) and otherwise takes one slot from
+Valkey (atomic Lua: daily `session_start_limit` counter + `shard % max_concurrency` 5s bucket windows, keys hold only a
+SHA-256 of the bot token). **Fails CLOSED**: a Valkey outage is a retryable `GateError`, never an unchecked IDENTIFY (the
+legacy path failed open); exhaustion is a typed `retry_after` the driver honours instead of hammering. `session_start_limit`
+comes from `GET /gateway/bot` through the guarded client (or an explicit host-config fallback, logged and counted).
+Metric: `connector_identify_budget_total{outcome}`. Details: `docs/connector-host-capability.md` "IDENTIFY budget".
+
+Tests: `cargo test --test connector_identify_budget` needs Docker (real Valkey via `core/test_support`, one container per
+test); `--test connector_handshake_gate` and the module unit tests need nothing.
+
 ## Connector egress (SSRF guard)
 
 Poll/WebSocket connector transports resolve and pin their endpoint through `connector::egress_guard`, a thin
