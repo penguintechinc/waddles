@@ -32,8 +32,6 @@ limits:
 permissions:
   - id: storage.kv
     justification: "per-community Wix member links (keyed by community user UUID, opaque Wix UUID value), a 5-minute status cache and the module flags"
-  - id: flags.read
-    justification: "reads the tenant license tier (flags.tier) to enforce the Professional-tier gate"
   - id: identity.resolve
     justification: "resolves the verified caller and host-issued @mentions to community UUIDs so no raw handle is ever stored or logged"
   - id: net.http.fqdn:www.wixapis.com

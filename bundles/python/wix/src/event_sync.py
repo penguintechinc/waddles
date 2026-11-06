@@ -10,9 +10,7 @@ silent no-op flag.
 
 from __future__ import annotations
 
-TARGET_TOOLS = (
-    "discord.scheduled_event.create",
-)
+TARGET_TOOLS = ("discord.scheduled_event.create",)
 #: The WIT import the tool-invocation path needs; absent in the current `stage-next` build.
 REQUIRED_IMPORT = "tool"
 MISSING_CAPABILITY_MSG = (

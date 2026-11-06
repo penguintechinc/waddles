@@ -1,7 +1,6 @@
 """`!wix` -> Wix FULL (read/write) Discord module (`waddles.core.integration.wix`, #485).
 
-Commands (Discord only; mod/broadcaster = a real boolean `True` badge, fail-closed). Every command
-requires the Professional tier (hard block + upgrade reply; unknown tier fails closed):
+Commands (Discord only; mod/broadcaster = a real boolean `True` badge, fail-closed):
 
 - `!wix` / `!wix status`          -- the caller's Wix membership status (needs a link).
 - `!wix status @user`             -- (mod) another member's Wix membership status.
@@ -37,9 +36,8 @@ sentinel). Keys use `.` only (gh-631):
 - `wix.status.<user_uuid>`  -- cached Wix status (TTL `STATUS_TTL_SECONDS`, rate-limit kindness)
 - `wix.module.<name>`       -- `1` when a feature module is enabled (default absent = OFF)
 
-Activation-gated AND license-gated: every command needs the Professional tier
-(`tier_at_least("professional")`, hard block + upgrade reply; an unknown/unavailable tier degrades
-to `free`, i.e. fails closed). Feed host / Wix endpoint are single constants the customer confirms.
+Activation-gated only (free first-party bundle; no tier/licence gate). The Wix endpoint is a
+single provider constant (`WIX_MEMBER_URL`).
 """
 
 from __future__ import annotations
@@ -50,7 +48,6 @@ from typing import Any, cast
 
 from waddle_sdk import community_kv, identity, log, relay
 from waddle_sdk.flask_core import get_bundle_context
-from waddle_sdk.flask_core.feature_flags import tier_at_least
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.http import HttpClient, resolve_secret
 from waddle_sdk.safe_text import guard_leading_command
@@ -75,7 +72,6 @@ _USAGE = (
     "!wix remove @user (mod) | !wix enable|disable roles|events (mod)"
 )
 _MODULES: dict[str, Any] = {"roles": plan_roles, "events": event_sync}
-_UPGRADE = "Wix membership tools need the Professional tier - ask an admin to upgrade the license."
 _DENIED = "only moderators/broadcasters can do that"
 _UNAVAILABLE = "Wix membership services are unavailable right now - please try again later."
 _NOT_CONFIGURED = "The Wix link isn't configured correctly - please tell a moderator."
@@ -329,15 +325,6 @@ async def _run(rest: str, payload: dict[str, Any], community: str | None) -> str
     return _USAGE
 
 
-async def _licensed() -> bool:
-    """True iff the tenant tier is Professional+; any tier-lookup failure fails closed (False)."""
-    try:
-        return await tier_at_least("professional")
-    except Exception as exc:  # noqa: BLE001 - a host-call failure must deny, never crash or allow
-        log.error("wix.tier_error", error_type=type(getattr(exc, "value", exc)).__name__)
-        return False
-
-
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!wix ...`, do the work, build the reply.
 
@@ -352,11 +339,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     community = get_bundle_context().community
     try:
-        if not await _licensed():
-            log.info("wix.tier_denied")
-            reply = _UPGRADE
-        else:
-            reply = await _run(rest, event.payload, community)
+        reply = await _run(rest, event.payload, community)
     except _KvFailureError as exc:
         log.error("wix.kv_error", reason=str(exc))
         reply = _UNAVAILABLE

@@ -13,7 +13,6 @@ from app import (
     _DENIED,
     _NOT_CONFIGURED,
     _UNAVAILABLE,
-    _UPGRADE,
     _USAGE,
     STATUS_TTL_SECONDS,
     WIX_MEMBER_URL,
@@ -45,7 +44,6 @@ class _Host:
         self.relay_calls: list[tuple[str, dict[str, Any]]] = []
         self.log_calls: list[tuple[int, str, str]] = []
         self.now = 1_790_000_000_000
-        self.tier: str | None = "professional"
 
     def logs_text(self) -> str:
         return " ".join(f"{m} {f}" for _l, m, f in self.log_calls)
@@ -89,12 +87,6 @@ def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
         send=send,
     )
 
-    def _tier() -> str:
-        if state.tier is None:
-            raise RuntimeError("license state unavailable")
-        return state.tier
-
-    wit.imports.flags = types.SimpleNamespace(enabled=lambda k, d: d, tier=_tier)
     wit.imports.clock = types.SimpleNamespace(now_millis=lambda: state.now)
     wit.imports.relay = types.SimpleNamespace(
         push=lambda p, m: state.relay_calls.append((p, json.loads(m)))
@@ -372,34 +364,6 @@ def test_kv_delete_failure_on_unlink(host: _Host, monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(sys.modules["wit_world"].imports.kv, "delete", boom)
     assert _say(host, "!wix remove") == _UNAVAILABLE
-
-
-@pytest.mark.parametrize(
-    ("tier", "allowed"),
-    [
-        ("free", False),
-        ("professional", True),
-        ("enterprise", True),
-        (None, False),
-        ("bogus", False),
-    ],
-)
-def test_professional_tier_gate(host: _Host, tier: str | None, allowed: bool) -> None:
-    host.tier = tier
-    reply = _say(host, "!wix status", **MOD)
-    assert (reply != _UPGRADE) is allowed or tier is None
-    if tier is None:
-        assert reply == _UPGRADE
-        assert "wix.tier_error" in host.logs_text()
-    if not allowed:
-        assert host.kv.calls == []
-        assert host.http_calls == []
-        assert _say(host, "!wix set @x y", **MOD) == _UPGRADE
-
-
-def test_missing_flags_binding_degrades_to_free(host: _Host) -> None:
-    del sys.modules["wit_world"].imports.flags
-    assert _say(host, "!wix status", **MOD) == _UPGRADE
 
 
 @pytest.mark.parametrize("module", ["roles", "events"])
