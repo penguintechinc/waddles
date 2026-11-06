@@ -153,6 +153,7 @@ impl OverlayProfile for TestProfile {
         let ws = |conn| desired_ws("twitch", b.community_id, conn, 1, channel, 7);
         match b.metadata.get("mode").map(String::as_str) {
             Some("bad") => Err(PlanError::MissingKey("channel")),
+            Some("budget") => Err(PlanError::IdentifyBudgetNotReady),
             Some("mismatch") => Ok(vec![ws(b.connection_id + 1)]),
             Some("two") => Ok(vec![
                 ws(b.connection_id),

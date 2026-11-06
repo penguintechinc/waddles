@@ -9,6 +9,13 @@
 //! current set. Terminal failures park a connection until its fingerprint
 //! changes.
 //!
+//! Per-frame context: the driver reuses the connect-time `ConnectionCtx` for
+//! every frame of a connection, so session state captured AFTER connect (a
+//! Discord READY's `self_user_id`) reaches the guest only on the next connect.
+//! The supervisor does not change that; the Discord profile closes the gap with
+//! a `READY -> Reconnect` directive so the next connect is a RESUME whose
+//! session token carries `self_user_id` (see `profiles/discord.rs`).
+//!
 //! The connection futures are polled by the `run` future itself
 //! (`FuturesUnordered`), not `tokio::spawn`ed: the connector traits are
 //! `async fn`-in-trait without a `Send` bound, so a generic `spawn` cannot be
@@ -34,6 +41,7 @@ use super::metrics::{
 };
 use super::observed::{ObservedInvoker, ObservedTransport, Pacer, SharedSecrets};
 use super::ready::{ExecutorStatus, RuntimeReady, RuntimeStatus};
+use super::tenant::{TenantError, TenantResolve, TENANT_UNRESOLVED};
 use crate::connector::webhook::BoxFut;
 use crate::connector::webhook::WebhookTransport;
 use crate::connector::ConnectorInvoker;
@@ -156,25 +164,43 @@ pub struct SinkBuildError(pub &'static str);
 /// Builds one [`EventSink`] per connection (scope from the connection's
 /// resolved numeric `tenant_id`/`community_id`).
 pub trait SinkFactory<S>: Send + Sync {
-    /// The sink for `desired`.
-    fn build<'a>(&'a self, desired: &'a DesiredConnection)
-        -> BoxFut<'a, Result<S, SinkBuildError>>;
+    /// The sink for `desired`, scoped to the RESOLVED `tenant_id` (never the
+    /// profile's `desired.tenant_id`, which is only a cross-check).
+    fn build<'a>(
+        &'a self,
+        desired: &'a DesiredConnection,
+        tenant_id: i64,
+    ) -> BoxFut<'a, Result<S, SinkBuildError>>;
 }
 
 /// Builds the per-connection, community-bound credential source.
 pub trait SecretsFactory: Send + Sync {
-    /// Secrets bound to `key.community_id`; guest data can never change that.
+    /// Secrets bound to `desired.key.community_id`; guest data can never
+    /// change that. Gets the whole plan so a platform can wrap the source
+    /// with plan-derived field resolution (Twitch).
     fn for_connection(
         &self,
-        key: &ConnKey,
+        desired: &DesiredConnection,
     ) -> Result<Arc<dyn TransportSecretSource>, TransportError>;
 }
+
+/// Wraps the community-bound secret source for one platform, given the plan
+/// (e.g. Twitch: `TwitchFieldSecrets::from_config(inner, &ws_cfg)`).
+pub type SecretsWrapper = Arc<
+    dyn Fn(
+            Arc<dyn TransportSecretSource>,
+            &DesiredConnection,
+        ) -> Result<Arc<dyn TransportSecretSource>, TransportError>
+        + Send
+        + Sync,
+>;
 
 /// [`SecretsFactory`] over a [`ConnectionResolve`], pinning each platform to
 /// its hub-api provider name.
 pub struct ResolverSecrets<R: ConnectionResolve + 'static> {
     resolver: Arc<R>,
     providers: BTreeMap<&'static str, &'static str>,
+    wrappers: BTreeMap<&'static str, SecretsWrapper>,
 }
 
 impl<R: ConnectionResolve + 'static> ResolverSecrets<R> {
@@ -183,22 +209,36 @@ impl<R: ConnectionResolve + 'static> ResolverSecrets<R> {
         Self {
             resolver,
             providers,
+            wrappers: BTreeMap::new(),
         }
+    }
+
+    /// Wraps every `platform` connection's secret source with `wrapper`; a
+    /// wrapper error refuses the connection (it parks as `transport_build`).
+    #[must_use]
+    pub fn with_wrapper(mut self, platform: &'static str, wrapper: SecretsWrapper) -> Self {
+        self.wrappers.insert(platform, wrapper);
+        self
     }
 }
 
 impl<R: ConnectionResolve + 'static> SecretsFactory for ResolverSecrets<R> {
     fn for_connection(
         &self,
-        key: &ConnKey,
+        desired: &DesiredConnection,
     ) -> Result<Arc<dyn TransportSecretSource>, TransportError> {
+        let key = &desired.key;
         let provider = self
             .providers
             .get(key.platform)
             .ok_or_else(|| TransportError::Connect("no provider for platform".into()))?;
         let s = TransportSecrets::new(self.resolver.clone(), key.community_id)?
             .with_expected_provider(*provider);
-        Ok(Arc::new(s))
+        let inner: Arc<dyn TransportSecretSource> = Arc::new(s);
+        match self.wrappers.get(key.platform) {
+            Some(wrap) => wrap(inner, desired),
+            None => Ok(inner),
+        }
     }
 }
 
@@ -232,6 +272,9 @@ where
     pub lease: Arc<L>,
     /// Per-connection credential source.
     pub secrets: Arc<dyn SecretsFactory>,
+    /// Resolves each connection's tenant from its community (never from
+    /// binding metadata).
+    pub tenants: Arc<dyn TenantResolve>,
     /// Executor attachment, for `/readyz`.
     pub executor: Arc<dyn ExecutorStatus>,
     /// Existing connector driver metrics.
@@ -266,6 +309,7 @@ struct Shared<I: ConnectorInvoker, S: EventSink, L: SessionLease> {
     sinks: Arc<dyn SinkFactory<S>>,
     lease: Arc<L>,
     secrets: Arc<dyn SecretsFactory>,
+    tenants: Arc<dyn TenantResolve>,
     status: Arc<RuntimeStatus>,
     connector_metrics: ConnectorMetrics,
     metrics: RuntimeMetrics,
@@ -341,6 +385,16 @@ where
     }
 }
 
+/// Logs a tenant-resolution outcome with numeric ids only.
+fn log_tenant(key: &ConnKey, what: &'static str) {
+    tracing::warn!(
+        platform = key.platform,
+        community_id = key.community_id,
+        connection_id = key.connection_id,
+        "{what}"
+    );
+}
+
 /// Lease, start permit, sink and secrets for one connection, or the end that
 /// stopped it from starting.
 async fn prepare<I, S, L>(
@@ -385,7 +439,26 @@ where
     let Ok(permit) = sh.start_sem.clone().acquire_owned().await else {
         return Err(TaskEnd::Failed(RestartReason::Ended));
     };
-    let sink = match sh.sinks.build(desired).await {
+    let tenant_id = match sh.tenants.resolve(desired).await {
+        Ok(t) if t >= 1 && (desired.tenant_id == TENANT_UNRESOLVED || desired.tenant_id == t) => t,
+        Ok(t) if t >= 1 => {
+            log_tenant(key, "profile tenant disagrees with the resolved tenant");
+            return Err(TaskEnd::Parked(ParkReason::TenantMismatch));
+        }
+        Ok(_) | Err(TenantError::Unresolved) => {
+            log_tenant(key, "tenant could not be resolved");
+            return Err(TaskEnd::Parked(ParkReason::TenantUnresolved));
+        }
+        Err(TenantError::Mismatch) => {
+            log_tenant(key, "resolved community disagrees with the connection");
+            return Err(TaskEnd::Parked(ParkReason::TenantMismatch));
+        }
+        Err(TenantError::Transient) => {
+            log_tenant(key, "tenant lookup failed; will retry");
+            return Err(TaskEnd::Failed(RestartReason::TenantLookup));
+        }
+    };
+    let sink = match sh.sinks.build(desired, tenant_id).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(
@@ -398,7 +471,7 @@ where
             return Err(TaskEnd::Failed(RestartReason::SinkBuild));
         }
     };
-    let secrets = match sh.secrets.for_connection(key) {
+    let secrets = match sh.secrets.for_connection(desired) {
         Ok(s) => SharedSecrets(s),
         Err(e) => {
             tracing::warn!(
@@ -873,6 +946,7 @@ impl<
             sinks: deps.sinks,
             lease: deps.lease,
             secrets: deps.secrets,
+            tenants: deps.tenants,
             status: status.clone(),
             connector_metrics: deps.connector_metrics,
             metrics: deps.metrics,

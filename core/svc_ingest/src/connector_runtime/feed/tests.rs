@@ -248,3 +248,18 @@ async fn feed_set_routes_by_platform_and_rejects_unknown() {
         Err(FeedError::UnknownPlatform(_))
     ));
 }
+
+#[tokio::test]
+async fn bindings_refused_for_the_identify_budget_are_skipped_loudly_not_run() {
+    let cap = capture();
+    let f = feed(ScriptedResolver::new(vec![page(
+        vec![
+            binding(1, 1, &[("mode", "budget")]),
+            binding(2, 2, &[("channel", "ok")]),
+        ],
+        None,
+    )]));
+    let got = f.desired("twitch").await.expect("desired");
+    assert_eq!(keys(&got), vec![(2, 2)]);
+    assert!(cap.text().contains("identify budget is not ready"));
+}

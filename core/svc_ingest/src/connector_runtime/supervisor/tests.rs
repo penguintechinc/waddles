@@ -19,6 +19,7 @@ use crate::connector::{
 use crate::connector_runtime::feed::FeedError;
 use crate::connector_runtime::metrics::RuntimeMetrics;
 use crate::connector_runtime::ready::Readiness;
+use crate::connector_runtime::tenant::{TenantError, TenantResolve};
 use crate::connector_runtime::testkit::{
     capture, desired_webhook, desired_ws, BlackholeServer, WsServer,
 };
@@ -130,6 +131,7 @@ struct Events {
     fail_build: Mutex<HashSet<i64>>,
     hang_build: AtomicBool,
     built: AtomicUsize,
+    tenants_seen: Mutex<Vec<i64>>,
 }
 
 impl Events {
@@ -176,6 +178,7 @@ impl SinkFactory<RecSink> for RecFactory {
     fn build<'a>(
         &'a self,
         d: &'a DesiredConnection,
+        tenant_id: i64,
     ) -> BoxFut<'a, Result<RecSink, SinkBuildError>> {
         Box::pin(async move {
             if self.0.hang_build.load(Ordering::SeqCst) {
@@ -191,6 +194,7 @@ impl SinkFactory<RecSink> for RecFactory {
                 return Err(SinkBuildError("scope unresolved"));
             }
             self.0.built.fetch_add(1, Ordering::SeqCst);
+            self.0.tenants_seen.lock().expect("lock").push(tenant_id);
             Ok(RecSink {
                 community: d.key.community_id,
                 ev: self.0.clone(),
@@ -310,12 +314,32 @@ struct FakeSecrets {
 impl SecretsFactory for FakeSecrets {
     fn for_connection(
         &self,
-        _k: &ConnKey,
+        _d: &DesiredConnection,
     ) -> Result<Arc<dyn TransportSecretSource>, TransportError> {
         if self.fail.load(Ordering::SeqCst) {
             return Err(TransportError::Connect("no secrets".into()));
         }
         Ok(Arc::new(NoAuth))
+    }
+}
+
+/// Tenant resolver answering from a switchable mode.
+struct FakeTenants {
+    mode: Mutex<std::result::Result<i64, TenantError>>,
+}
+
+impl FakeTenants {
+    fn ok(tenant: i64) -> Arc<Self> {
+        Arc::new(Self {
+            mode: Mutex::new(Ok(tenant)),
+        })
+    }
+}
+
+impl TenantResolve for FakeTenants {
+    fn resolve<'a>(&'a self, _d: &'a DesiredConnection) -> BoxFut<'a, Result<i64, TenantError>> {
+        let r = *self.mode.lock().expect("lock");
+        Box::pin(async move { r })
     }
 }
 
@@ -427,6 +451,7 @@ struct Opts {
     webhook: Option<Arc<dyn WebhookAttach>>,
     executor_attached: bool,
     secrets_fail: bool,
+    tenants: Arc<FakeTenants>,
 }
 
 impl Default for Opts {
@@ -436,6 +461,7 @@ impl Default for Opts {
             webhook: None,
             executor_attached: true,
             secrets_fail: false,
+            tenants: FakeTenants::ok(1),
         }
     }
 }
@@ -517,6 +543,7 @@ fn start(sh: &Shared3, cfg: RuntimeConfig, owner: &str, opts: Opts) -> Running {
             secrets: Arc::new(FakeSecrets {
                 fail: AtomicBool::new(opts.secrets_fail),
             }),
+            tenants: opts.tenants.clone(),
             executor: executor.clone(),
             connector_metrics,
             metrics: metrics.clone(),
@@ -1096,6 +1123,7 @@ async fn construction_rejects_an_invalid_config() {
             secrets: Arc::new(FakeSecrets {
                 fail: AtomicBool::new(false),
             }),
+            tenants: FakeTenants::ok(1),
             executor: Arc::new(Attached(AtomicBool::new(true))),
             connector_metrics,
             metrics,
@@ -1144,6 +1172,7 @@ fn core_rig(cfg: RuntimeConfig) -> (TestCore, Arc<LeaseStore>, RuntimeMetrics) {
             secrets: Arc::new(FakeSecrets {
                 fail: AtomicBool::new(false),
             }),
+            tenants: FakeTenants::ok(1),
             executor: Arc::new(Attached(AtomicBool::new(true))),
             connector_metrics,
             metrics: metrics.clone(),
@@ -1481,12 +1510,143 @@ async fn resolver_secrets_bind_the_community_and_require_a_provider() {
     let r = Arc::new(ScriptedResolver::new(vec![]));
     let providers = BTreeMap::from([("twitch", "twitchprov")]);
     let f = ResolverSecrets::new(r, providers);
-    assert!(f.for_connection(&key(1, 10)).is_ok());
-    let mut other = key(1, 10);
-    other.platform = "discord";
+    assert!(f.for_connection(&d(1, 10, 1)).is_ok());
+    let mut other = d(1, 10, 1);
+    other.key.platform = "discord";
     assert!(f.for_connection(&other).is_err(), "no provider configured");
     assert!(
-        f.for_connection(&key(0, 10)).is_err(),
+        f.for_connection(&d(0, 10, 1)).is_err(),
         "community must be positive"
     );
+}
+
+#[tokio::test]
+async fn a_platform_wrapper_is_applied_only_to_its_platform_and_can_refuse() {
+    use crate::connector_runtime::testkit::ScriptedResolver;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let wrapper: SecretsWrapper = Arc::new(move |inner, d| {
+        c.fetch_add(1, Ordering::SeqCst);
+        // The wrapper sees the whole plan (Twitch needs the ws config).
+        assert!(matches!(d.plan, TransportPlan::Ws(_)));
+        if d.key.connection_id == 666 {
+            return Err(TransportError::Connect("refused".into()));
+        }
+        Ok(inner)
+    });
+    let r = Arc::new(ScriptedResolver::new(vec![]));
+    let providers = BTreeMap::from([("twitch", "twitchprov"), ("discord", "discordprov")]);
+    let f = ResolverSecrets::new(r, providers).with_wrapper("twitch", wrapper);
+    assert!(f.for_connection(&d(1, 10, 1)).is_ok());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let mut disc = d(1, 10, 1);
+    disc.key.platform = "discord";
+    assert!(f.for_connection(&disc).is_ok());
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "not applied to discord");
+    assert!(f.for_connection(&d(1, 666, 1)).is_err(), "wrapper refusal");
+}
+
+#[tokio::test]
+async fn the_sink_is_scoped_to_the_resolved_tenant_not_the_profiles() {
+    let srv = WsServer::start().await;
+    let sh = Shared3::new(vec![Spec::ws(1, 10, srv.port)]);
+    let opts = Opts {
+        tenants: FakeTenants::ok(1),
+        ..Opts::default()
+    };
+    // desired_ws sets tenant_id 1; a resolver answering 1 agrees.
+    let mut r = start(&sh, fast_config(), "a", opts);
+    eventually("flows", || sh.ev.count(1) > 2).await;
+    assert_eq!(sh.ev.tenants_seen.lock().expect("lock").first(), Some(&1));
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn a_profile_tenant_that_disagrees_with_the_resolved_one_parks_with_a_metric() {
+    let srv = WsServer::start().await;
+    let sh = Shared3::new(vec![Spec::ws(1, 10, srv.port)]);
+    let opts = Opts {
+        tenants: FakeTenants::ok(2), // profile (testkit) says tenant 1
+        ..Opts::default()
+    };
+    let mut r = start(&sh, fast_config(), "a", opts);
+    eventually("parked", || r.counter("parked", "tenant_mismatch") == 1).await;
+    settle(200).await;
+    assert_eq!(r.counter("parked", "tenant_mismatch"), 1, "stays parked");
+    assert_eq!(sh.ev.built.load(Ordering::SeqCst), 0, "no sink was built");
+    assert_eq!(srv.accepted(), 0);
+    assert_eq!(sh.store.len(), 0, "lease released");
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn an_unresolved_tenant_parks_and_the_unresolved_sentinel_is_filled_by_the_resolver() {
+    let srv = WsServer::start().await;
+    // Resolver answers "unresolved".
+    let sh = Shared3::new(vec![Spec::ws(1, 10, srv.port)]);
+    let tenants = FakeTenants::ok(1);
+    *tenants.mode.lock().expect("lock") = Err(TenantError::Unresolved);
+    let opts = Opts {
+        tenants: tenants.clone(),
+        ..Opts::default()
+    };
+    let mut r = start(&sh, fast_config(), "a", opts);
+    eventually("parked unresolved", || {
+        r.counter("parked", "tenant_unresolved") == 1
+    })
+    .await;
+    assert_eq!(srv.accepted(), 0);
+    r.stop().await;
+
+    // A resolver answering 0 is also "unresolved" (never a default tenant).
+    let sh = Shared3::new(vec![Spec::ws(1, 10, srv.port)]);
+    let opts = Opts {
+        tenants: FakeTenants::ok(0),
+        ..Opts::default()
+    };
+    let mut r = start(&sh, fast_config(), "a", opts);
+    eventually("parked on tenant 0", || {
+        r.counter("parked", "tenant_unresolved") == 1
+    })
+    .await;
+    r.stop().await;
+}
+
+#[tokio::test]
+async fn a_resolver_mismatch_error_parks_and_a_transient_one_retries() {
+    let srv = WsServer::start().await;
+    let sh = Shared3::new(vec![Spec::ws(1, 10, srv.port)]);
+    let tenants = FakeTenants::ok(1);
+    *tenants.mode.lock().expect("lock") = Err(TenantError::Mismatch);
+    let mut r = start(
+        &sh,
+        fast_config(),
+        "a",
+        Opts {
+            tenants: tenants.clone(),
+            ..Opts::default()
+        },
+    );
+    eventually("parked mismatch", || {
+        r.counter("parked", "tenant_mismatch") == 1
+    })
+    .await;
+    r.stop().await;
+
+    let sh = Shared3::new(vec![Spec::ws(1, 10, srv.port)]);
+    let tenants = FakeTenants::ok(1);
+    *tenants.mode.lock().expect("lock") = Err(TenantError::Transient);
+    let mut r = start(
+        &sh,
+        fast_config(),
+        "a",
+        Opts {
+            tenants: tenants.clone(),
+            ..Opts::default()
+        },
+    );
+    eventually("retried", || r.counter("restart", "tenant_lookup") >= 1).await;
+    *tenants.mode.lock().expect("lock") = Ok(1);
+    eventually("flows after recovery", || sh.ev.count(1) > 2).await;
+    r.stop().await;
 }
