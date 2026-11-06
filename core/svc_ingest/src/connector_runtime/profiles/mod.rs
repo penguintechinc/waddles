@@ -2,4 +2,6 @@
 //! [`OverlayProfile`](super::plan::OverlayProfile) with host-constant
 //! derivation. One registration line per platform keeps merges trivial.
 
+pub mod discord;
+pub mod twitch;
 pub mod youtube;

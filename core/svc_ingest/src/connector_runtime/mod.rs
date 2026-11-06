@@ -6,6 +6,7 @@
 //! |---|---|
 //! | [`feed`] | desired-set types and the [`BindingFeed`] over hub-api bindings |
 //! | [`plan`] | the platform-static [`OverlayProfile`] seam and [`RuntimeEnv`] |
+//! | [`profiles`] | the per-platform [`OverlayProfile`] implementations |
 //! | [`supervisor`] | the reconcile loop and per-connection supervision |
 //! | [`lease`] | the per-connection Valkey lease (`connector:<platform>:<id>`) |
 //! | [`observed`] | delegating wrappers recording readiness facts |
@@ -19,10 +20,12 @@ pub mod observed;
 pub mod plan;
 pub mod profiles;
 pub mod ready;
+pub mod selector;
 pub mod supervisor;
 pub mod tenant;
 #[cfg(test)]
 pub(crate) mod testkit;
+pub mod webhook_boot;
 
 pub use feed::{
     BindingFeed, ConnKey, DesiredConnection, DynFeed, FeedError, FeedSet, HubBindingFeed,

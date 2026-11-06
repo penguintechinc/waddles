@@ -614,6 +614,7 @@ dependencies = [
  "bundle-host-http",
  "clap",
  "connection_resolver",
+ "futures-util",
  "penguin-spine",
  "prometheus",
  "redis",
@@ -621,6 +622,7 @@ dependencies = [
  "sha2",
  "svc-ingest",
  "tokio",
+ "tokio-tungstenite",
  "wiremock",
 ]
 
