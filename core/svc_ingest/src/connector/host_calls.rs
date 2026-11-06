@@ -109,7 +109,7 @@ pub const OVERLAYS: &[Overlay] = &[
     Overlay {
         platform: "twitch",
         app_id: "waddles.core.service.twitch",
-        grants: &[Grant::PiiRead, Grant::FlagsRead],
+        grants: &[Grant::PiiRead, Grant::FlagsRead, Grant::PlatformLog],
     },
     Overlay {
         platform: "discord",
@@ -1429,7 +1429,6 @@ mod tests {
             flags(YOUTUBE, "13"),
             tier(DISCORD, "12"),
             tier(YOUTUBE, "13"),
-            log(TWITCH, "11"),
             log(YOUTUBE, "13"),
         ] {
             assert_eq!(
@@ -1440,7 +1439,9 @@ mod tests {
                 c.app_id
             );
         }
+        // twitch and discord declare `platform.log` (diagnostics, PII-free); youtube does not.
         assert!(h.handle(&log(DISCORD, "12")).await.is_ok());
+        assert!(h.handle(&log(TWITCH, "11")).await.is_ok());
         assert!(h.handle(&tier(TWITCH, "11")).await.is_ok());
     }
 

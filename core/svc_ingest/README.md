@@ -482,7 +482,7 @@ Opt-in per platform by the env baselines `OVERLAY_{TWITCH,DISCORD,YOUTUBE}_ENABL
 
 | Piece | Behavior |
 |---|---|
-| Tenant | `ScopeTenantResolve`: hub-api scope resolution of the profile's upstream resource (twitch channel / discord guild) must resolve to the connection's own community, else the connection is parked (`tenant_unresolved`/`tenant_mismatch`). YouTube has no scope mapping yet: parked `tenant_unresolved` (not defaulted). Profiles take the feed's `tenantId` and still refuse a metadata tenant. |
+| Tenant | `ScopeTenantResolve`: hub-api scope resolution of the profile's upstream resource (twitch channel / discord guild) must resolve to the connection's own community, else the connection is parked (`tenant_unresolved`/`tenant_mismatch`). YouTube (no `community_servers` link for a live chat) asks hub-api's reserved scope lookup `platform=community&source_id=<numeric community id>` (hub-api `dataplane_scope.COMMUNITY_PLATFORM`; active community + active tenant, fail-closed) and the answer must equal both the connection's community and the feed's `tenantId`. Profiles take the feed's `tenantId` and still refuse a metadata tenant. |
 | Sink | `ScopedSinkFactory`: one sink per connection stamping that connection's resolved numeric scope (transports' `source_id` is an opaque hash no per-event lookup could resolve). |
 | Twitch secrets | `ResolverSecrets::with_wrapper("twitch", TwitchFieldSecrets)`: `pass` via the community-bound source, `nick`/`channel` from the validated config only. |
 | Host calls | `ConnectionCtx.connection_id` is pinned to the hub connection row id (what the executor stamps into `_scope`); `TableActivator` registers `(platform, community, tenant, connection)`. A different scope for a live id is refused (`activation_failed` park) and `deactivate` is compare-and-remove (refcounted per exact scope), so a stale guard never removes a newer registration. |
@@ -493,4 +493,4 @@ Opt-in per platform by the env baselines `OVERLAY_{TWITCH,DISCORD,YOUTUBE}_ENABL
 Env (helm #1012 names): `OVERLAY_<P>_ENABLED`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_{SERVER_CERT,SERVER_KEY,CLIENT_CA}_FILE`, `HOST_API_CLIENT_IDENTITY`,
 `SENDER_EXEC_HOST_API_PORT`, `HUB_API_GRPC_ENDPOINT`/`HUB_API_GRPC_CA_FILE`, `CONNECTOR_RECONCILE_INTERVAL_SECS`, `CONNECTOR_MAX_CONNECTIONS`,
 `CONNECTOR_START_CONCURRENCY`, `CONNECTOR_DISCORD_START_PACE_MS`, `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`, `CONNECTOR_ROUTE_KEY_SECRET`,
-`CONNECTOR_HEARTBEAT_ENABLED` (new, default false).
+`CONNECTOR_HEARTBEAT_ENABLED` (new, default false). Twitch overlay now declares `platform.log` (manifest + host-call grants + executor pin grants, subset-of-manifest tests) for its debug-level, PII-free lifecycle log.

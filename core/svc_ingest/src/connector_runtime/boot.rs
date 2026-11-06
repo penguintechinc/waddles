@@ -481,19 +481,46 @@ pub struct Started {
     pub ready: Arc<dyn super::RuntimeReady>,
 }
 
-/// Starts the host-API listener (mTLS, SAN-pinned executor identity) over a
-/// link with the host-call allowlist installed.
+/// Binds the host-API listener (mTLS, SAN-pinned executor identity) over a
+/// link with the host-call allowlist installed, and returns the bridge plus the
+/// bound address. The tokenizer is the only hub-api dependency of the bridge.
 ///
 /// # Errors
-/// Missing/malformed TLS or hub items, an unreadable certificate, a bind failure
-/// or an unreachable hub-api -- all fatal, named without values.
-pub async fn start_bridge(
-    cli: &CliConfig,
-    lookup: &(dyn Fn(&str) -> Option<String> + Sync),
+/// An unreadable certificate, an unknown platform, or a bind failure.
+pub async fn start_bridge_with(
+    tls: &crate::connector::host_api_listener::HostApiTls,
+    addr: std::net::SocketAddr,
+    tokenizer: Arc<dyn IdentityTokenizer>,
     enabled: &[&'static str],
     shutdown: impl Fn() -> tokio::sync::oneshot::Receiver<()>,
-) -> anyhow::Result<HostBridge> {
-    let (tls, addr) = crate::outbound_boot::host_api_from_lookup(cli, lookup)?;
+) -> anyhow::Result<(HostBridge, std::net::SocketAddr)> {
+    let bridge = HostBridge::new(tokenizer, enabled)?;
+    let acceptor = crate::connector::host_api_listener::build_acceptor(tls)?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("host-api listener bind failed: {e}"))?;
+    let bound = listener
+        .local_addr()
+        .map_err(|e| anyhow::anyhow!("host-api listener address unavailable: {e}"))?;
+    tokio::spawn(crate::connector::host_api_listener::serve(
+        listener,
+        acceptor,
+        Arc::clone(&bridge.link),
+        shutdown(),
+    ));
+    tracing::info!(addr = %bound, "connector host-api listener started");
+    Ok((bridge, bound))
+}
+
+/// The hub-api identity tokenizer (`MintEphemeralPseudonyms`, machine JWT with
+/// the mint scope) from the process environment.
+///
+/// # Errors
+/// A missing hub endpoint or an unreachable/untrusted hub-api.
+pub async fn connect_tokenizer(
+    cli: &CliConfig,
+    lookup: &(dyn Fn(&str) -> Option<String> + Sync),
+) -> anyhow::Result<Arc<dyn IdentityTokenizer>> {
     let endpoint = lookup("HUB_API_GRPC_ENDPOINT")
         .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty())
@@ -510,22 +537,28 @@ pub async fn start_bridge(
     )
     .await
     .map_err(|e| anyhow::anyhow!("hub-api identity client unavailable: {e}"))?;
-    let bridge = HostBridge::new(
-        Arc::new(crate::connector::host_calls::HubIdentityTokenizer::from_client(client)),
-        enabled,
-    )?;
-    let acceptor = crate::connector::host_api_listener::build_acceptor(&tls)?;
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("host-api listener bind failed: {e}"))?;
-    tokio::spawn(crate::connector::host_api_listener::serve(
-        listener,
-        acceptor,
-        Arc::clone(&bridge.link),
-        shutdown(),
-    ));
-    tracing::info!(%addr, "connector host-api listener started");
-    Ok(bridge)
+    Ok(Arc::new(
+        crate::connector::host_calls::HubIdentityTokenizer::from_client(client),
+    ))
+}
+
+/// [`start_bridge_with`] configured from the environment: TLS/port items first
+/// (named when missing), then the hub-api tokenizer.
+///
+/// # Errors
+/// Missing/malformed TLS or hub items, an unreadable certificate, a bind failure
+/// or an unreachable hub-api -- all fatal, named without values.
+pub async fn start_bridge(
+    cli: &CliConfig,
+    lookup: &(dyn Fn(&str) -> Option<String> + Sync),
+    enabled: &[&'static str],
+    shutdown: impl Fn() -> tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<HostBridge> {
+    let (tls, addr) = crate::outbound_boot::host_api_from_lookup(cli, lookup)?;
+    let tokenizer = connect_tokenizer(cli, lookup).await?;
+    Ok(start_bridge_with(&tls, addr, tokenizer, enabled, shutdown)
+        .await?
+        .0)
 }
 
 /// Builds (but does not spawn) the webhook ingress when a webhook platform is
@@ -573,11 +606,12 @@ pub fn build_resolver(cli: &CliConfig) -> anyhow::Result<connection_resolver::Co
 /// Any missing prerequisite (scope resolver, binding keyring, spine, Valkey) or
 /// assembly failure -- fatal to the process by design.
 #[allow(clippy::too_many_arguments)]
-pub async fn start_runtime(
+pub async fn start_runtime<R: ConnectionResolve + 'static>(
     config: &crate::config::Config,
     settings: &RuntimeSettings,
     bridge: HostBridge,
-    resolver: Arc<connection_resolver::ConnectionResolver>,
+    resolver: Arc<R>,
+    scope: Arc<dyn ScopeLookup>,
     webhook: Option<(Arc<WebhookIngress>, Arc<WebhookEnv>)>,
     redis_client: &redis::Client,
     spine_cfg: penguin_spine::SpineConfig,
@@ -588,8 +622,6 @@ pub async fn start_runtime(
     registry: prometheus::Registry,
 ) -> anyhow::Result<Started> {
     let cli = &config.cli;
-    let scope: Arc<dyn ScopeLookup> = crate::publish::installed_scope_resolver()
-        .ok_or_else(|| anyhow::anyhow!("connector runtime needs the dataplane scope resolver"))?;
     let keyring = crate::resolve_binding_keyring(config, "connector runtime").ok_or_else(|| {
         anyhow::anyhow!(
             "connector runtime needs a valid ENVELOPE_BINDING_KEYS + ENVELOPE_BINDING_ACTIVE_KID"
@@ -649,8 +681,8 @@ pub async fn start_runtime(
 }
 
 /// The whole overlay boot sequence `lib.rs` runs when any `OVERLAY_<P>_ENABLED`
-/// is ON: settings, host-API listener, webhook ingress (stored on `state`
-/// BEFORE the router is built), spine/Valkey, runtime spawn.
+/// is ON, from the real process environment: the hub-api resolver, identity
+/// tokenizer and the installed dataplane scope resolver, then [`start_overlay_with`].
 ///
 /// # Errors
 /// Any missing prerequisite -- fatal to the process, never a silent fallback.
@@ -665,8 +697,58 @@ pub async fn start_overlay(
     >,
 ) -> anyhow::Result<Started> {
     let lookup = |k: &str| std::env::var(k).ok();
+    let scope: Arc<dyn ScopeLookup> = crate::publish::installed_scope_resolver()
+        .ok_or_else(|| anyhow::anyhow!("connector runtime needs the dataplane scope resolver"))?;
+    let resolver = Arc::new(build_resolver(&config.cli)?);
+    let tokenizer = connect_tokenizer(&config.cli, &lookup).await?;
+    start_overlay_with(
+        config,
+        selector,
+        webhook_env,
+        state,
+        metrics,
+        dek,
+        OverlayDeps {
+            resolver,
+            scope,
+            tokenizer,
+            lookup: &lookup,
+        },
+    )
+    .await
+}
+
+/// The injected dependencies of [`start_overlay_with`] (hub-api resolver, scope
+/// authority, identity tokenizer and the env lookup).
+pub struct OverlayDeps<'a, R: ConnectionResolve + 'static> {
+    /// hub-api connection resolver.
+    pub resolver: Arc<R>,
+    /// Scope authority (tenant refusal + sink scope).
+    pub scope: Arc<dyn ScopeLookup>,
+    /// Identity tokenizer behind the host-call allowlist.
+    pub tokenizer: Arc<dyn IdentityTokenizer>,
+    /// Env lookup (digests, TLS, ports).
+    pub lookup: &'a (dyn Fn(&str) -> Option<String> + Sync),
+}
+
+/// Settings, webhook ingress (stored on `state` BEFORE the router is built),
+/// host-API listener, spine/Valkey and the runtime spawn.
+///
+/// # Errors
+/// Any missing prerequisite -- fatal to the process, never a silent fallback.
+pub async fn start_overlay_with<R: ConnectionResolve + 'static>(
+    config: &crate::config::Config,
+    selector: &OverlaySelector,
+    webhook_env: &Arc<WebhookEnv>,
+    state: &mut crate::http::AppState,
+    metrics: Arc<crate::telemetry::IngestMetrics>,
+    dek: crate::identity_crypto::ConfiguredDekProvider<
+        crate::identity_crypto::UnimplementedMachineJwtProvider,
+    >,
+    deps: OverlayDeps<'_, R>,
+) -> anyhow::Result<Started> {
     let cli = &config.cli;
-    let settings = RuntimeSettings::from_inputs(cli, selector, &lookup)?;
+    let settings = RuntimeSettings::from_inputs(cli, selector, deps.lookup)?;
     let registry = (*state.metrics).clone();
     crate::connector::host_calls::register_metrics(&registry)
         .map_err(|_| anyhow::anyhow!("host-call metrics could not be registered"))?;
@@ -679,17 +761,30 @@ pub async fn start_overlay(
             e.kind()
         )
     })?;
-    let resolver = Arc::new(build_resolver(cli)?);
     // BEFORE `http::router(state)`: the route is 503 only while this is `None`.
-    let ingress =
-        build_webhook(webhook_env, Arc::clone(&resolver), &redis_client, &registry).await?;
+    let ingress = build_webhook(
+        webhook_env,
+        Arc::clone(&deps.resolver),
+        &redis_client,
+        &registry,
+    )
+    .await?;
     state.webhook = ingress.clone();
-    let bridge = start_bridge(cli, &lookup, &settings.platforms, crate::shutdown_receiver).await?;
+    let (tls, addr) = crate::outbound_boot::host_api_from_lookup(cli, deps.lookup)?;
+    let (bridge, _) = start_bridge_with(
+        &tls,
+        addr,
+        deps.tokenizer,
+        &settings.platforms,
+        crate::shutdown_receiver,
+    )
+    .await?;
     start_runtime(
         config,
         &settings,
         bridge,
-        resolver,
+        deps.resolver,
+        deps.scope,
         ingress.map(|i| (i, Arc::clone(webhook_env))),
         &redis_client,
         spine_cfg,
@@ -1146,7 +1241,7 @@ mod tests {
         let hub = Arc::new(EmptyHub(std::sync::atomic::AtomicUsize::new(0)));
         let registry = prometheus::Registry::new();
         let rt = assemble(
-            &settings(vec!["twitch", "youtube"]),
+            &settings(vec!["twitch", "discord", "youtube"]),
             deps(hub.clone(), registry.clone()).await,
         )
         .unwrap();
@@ -1155,11 +1250,11 @@ mod tests {
             ready.ready("twitch"),
             super::super::Readiness::NotReady(_)
         ));
-        assert_eq!(ready.ready("discord"), super::super::Readiness::Disabled);
+        assert_eq!(ready.ready("slack"), super::super::Readiness::Disabled);
         let (stop, rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(rt.run(rx));
         for _ in 0..100 {
-            if hub.0.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+            if hub.0.load(std::sync::atomic::Ordering::SeqCst) >= 3 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1176,6 +1271,103 @@ mod tests {
             Some(BootError::Malformed("connector runtime metrics")),
             "duplicate series on one registry"
         );
+    }
+
+    /// The Twitch wrapper over a REAL profile-derived plan yields a credential
+    /// source that answers `nick`/`channel` itself and refuses unknown refs.
+    #[tokio::test]
+    async fn the_twitch_wrapper_wraps_a_real_profile_plan() {
+        use crate::connector_runtime::plan::OverlayProfile;
+        let binding = connection_resolver::BindingSummary {
+            community_id: 7,
+            connection_id: 9,
+            tenant_id: 5,
+            secret_version: 1,
+            provider: "twitch".into(),
+            kind: connection_resolver::ConnectionKind::PlatformOauth,
+            metadata: [("channel", "somechan"), ("bot_login", "waddlebot")]
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+        };
+        let env = settings(vec!["twitch"]).runtime_env();
+        let desired = twitch::TwitchProfile::from_feed()
+            .plan(&binding, &env)
+            .unwrap()
+            .remove(0);
+        struct Pass;
+        impl TransportSecretSource for Pass {
+            fn resolve(
+                &self,
+                _r: ConnectionRef,
+                _d: crate::connector::secrets::Destination,
+            ) -> BoxFut<'_, Result<crate::connector::secrets::ResolvedAuth, SecretError>>
+            {
+                Box::pin(async {
+                    Ok(crate::connector::secrets::ResolvedAuth {
+                        secret: SecretString::new("tok".to_owned()),
+                        header: None,
+                    })
+                })
+            }
+        }
+        let wrapped = twitch_secrets_wrapper()(Arc::new(Pass), &desired).unwrap();
+        let dest = || {
+            crate::connector::secrets::Destination::from_url(
+                &reqwest::Url::parse("wss://irc-ws.chat.twitch.tv:443").unwrap(),
+            )
+            .unwrap()
+        };
+        let pass = ConnectionRef {
+            community_id: 7,
+            connection_id: 9,
+        };
+        assert!(wrapped.resolve(pass, dest()).await.is_ok());
+        let nick = ConnectionRef {
+            community_id: 7,
+            connection_id: twitch::NICK_CONN_ID,
+        };
+        assert!(wrapped.resolve(nick, dest()).await.is_ok());
+        let foreign = ConnectionRef {
+            community_id: 8,
+            connection_id: 9,
+        };
+        assert!(
+            wrapped.resolve(foreign, dest()).await.is_err(),
+            "other community refused"
+        );
+    }
+
+    /// The test doubles themselves fail closed (so a test can never pass because
+    /// a fake quietly said yes).
+    #[tokio::test]
+    async fn the_test_doubles_fail_closed() {
+        let scope = CallScope {
+            platform: "twitch",
+            community_id: 1,
+            tenant_id: 1,
+            connection_id: 1,
+        };
+        assert!(NoTok.tokenize(&scope, "u").await.is_err());
+        assert!(Sec
+            .resolve(ConnectionRef {
+                community_id: 1,
+                connection_id: 1
+            })
+            .await
+            .is_err());
+        assert!(Dd.first_seen("k").await.unwrap().is_none());
+        Dd.release("k", &DedupToken("k".into())).await.unwrap();
+        let hub = EmptyHub(std::sync::atomic::AtomicUsize::new(0));
+        assert!(hub
+            .resolve(ConnectionRef {
+                community_id: 1,
+                connection_id: 1
+            })
+            .await
+            .is_err());
+        assert!(NoScope.lookup("twitch", "x").await.is_err());
+        assert!(FixedDek.get_dek("t").await.is_ok());
     }
 
     #[tokio::test]

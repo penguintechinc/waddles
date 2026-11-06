@@ -474,6 +474,54 @@ class TestResolve:
         assert response.status_code == 400
 
 
+class TestCommunityScope:
+    """Reserved ``platform=community``: a numeric community id resolves to ITS tenant (YouTube)."""
+
+    async def test_community_id_resolves_to_its_own_tenant_and_slugs(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        response = await app.test_client().get(
+            f"{URL}?platform=community&source_id={db.seed.other_community}", headers=_auth(issuer)
+        )
+        assert response.status_code == 200
+        assert await response.get_json() == {
+            "success": True,
+            "tenantId": db.seed.other_tenant,
+            "communityId": db.seed.other_community,
+            "tenantSlug": "other-corp",
+            "communityName": "other-main",
+        }
+
+    async def test_unknown_inactive_or_malformed_ids_are_refused(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        db.dal(db.dal.communities.id == db.seed.other_community).update(is_active=False)
+        db.dal.commit()
+        client = app.test_client()
+        for source, status in [
+            (str(db.seed.other_community), 404),  # inactive community
+            ("999999", 404),  # unknown
+            ("0", 400),
+            ("-1", 400),
+            ("1e3", 400),
+            ("99999999999", 400),
+        ]:
+            response = await client.get(
+                f"{URL}?platform=community&source_id={source}", headers=_auth(issuer)
+            )
+            assert response.status_code == status, source
+
+    async def test_inactive_tenant_is_refused(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        db.dal(db.dal.tenants.id == db.seed.other_tenant).update(is_active=False)
+        db.dal.commit()
+        response = await app.test_client().get(
+            f"{URL}?platform=community&source_id={db.seed.other_community}", headers=_auth(issuer)
+        )
+        assert response.status_code == 404
+
+
 class TestAuth:
     async def test_no_bearer_is_401(self, app: Quart) -> None:
         client = app.test_client()

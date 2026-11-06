@@ -64,6 +64,25 @@ pub fn scope_source(platform: &str, source_key: &str) -> Option<String> {
     (!id.is_empty()).then(|| id.to_owned())
 }
 
+/// hub-api's reserved scope-lookup pseudo-platform: `source` is a NUMERIC
+/// community id and the answer is that community's own tenant scope.
+pub const COMMUNITY_PLATFORM: &str = "community";
+
+/// What to ask the scope authority for `desired`: the upstream resource for
+/// twitch/discord, else (youtube, whose live chats have no `community_servers`
+/// link) the connection's own numeric community from the server-derived feed.
+/// Never read from binding metadata. `None` for a webhook plan or an unknown platform.
+#[must_use]
+pub fn lookup_target(desired: &DesiredConnection) -> Option<(&'static str, String)> {
+    let platform = desired.key.platform;
+    let key = source_key_of(desired)?;
+    match platform {
+        "twitch" | "discord" => scope_source(platform, key).map(|s| (platform, s)),
+        "youtube" => Some((COMMUNITY_PLATFORM, desired.key.community_id.to_string())),
+        _ => None,
+    }
+}
+
 /// [`TenantResolve`] over a [`ScopeLookup`]: the tenant is what hub-api says owns
 /// the connection's upstream resource, and the resolved community must be the
 /// connection's own. Unresolved / mismatch refuse (the runtime parks the
@@ -87,8 +106,7 @@ impl TenantResolve for ScopeTenantResolve {
     ) -> BoxFut<'a, Result<i64, TenantError>> {
         Box::pin(async move {
             let platform = desired.key.platform;
-            let Some(source) = source_key_of(desired).and_then(|k| scope_source(platform, k))
-            else {
+            let Some((lookup_platform, source)) = lookup_target(desired) else {
                 tracing::warn!(
                     platform,
                     community_id = desired.key.community_id,
@@ -98,7 +116,7 @@ impl TenantResolve for ScopeTenantResolve {
                 return Err(TenantError::Unresolved);
             };
             tenant_from_scope(
-                self.lookup.lookup(platform, &source).await,
+                self.lookup.lookup(lookup_platform, &source).await,
                 desired.key.community_id,
             )
         })
@@ -150,13 +168,11 @@ impl<A: EventAppender + 'static, D: DekProvider + 'static> SinkFactory<Connectio
         tenant_id: i64,
     ) -> BoxFut<'a, Result<ConnectionSink<A, D>, SinkBuildError>> {
         Box::pin(async move {
-            let platform = desired.key.platform;
-            let source = source_key_of(desired)
-                .and_then(|k| scope_source(platform, k))
+            let (lookup_platform, source) = lookup_target(desired)
                 .ok_or(SinkBuildError("no scope-resolvable upstream resource"))?;
             let resolved = self
                 .lookup
-                .lookup(platform, &source)
+                .lookup(lookup_platform, &source)
                 .await
                 .map_err(|_| SinkBuildError("scope is not resolvable"))?;
             // The sink scope is the authority; it must be the connection's own.
@@ -300,7 +316,9 @@ mod tests {
             Script::default()
                 .with("twitch", "good", Ok(scope(5, 7)))
                 .with("twitch", "other", Ok(scope(5, 8)))
-                .with("twitch", "flaky", Err(Unresolved::Transient)),
+                .with("twitch", "flaky", Err(Unresolved::Transient))
+                .with("community", "7", Ok(scope(5, 7)))
+                .with("community", "8", Ok(scope(5, 99))),
         );
         let r = ScopeTenantResolve::new(lookup.clone());
         // (community 7, resource "good") -> tenant 5.
@@ -315,9 +333,21 @@ mod tests {
         // A transient failure retries, it is not a refusal.
         let d = desired_ws("twitch", 7, 9, 1, "twitch:flaky", 1);
         assert_eq!(r.resolve(&d).await, Err(TenantError::Transient));
-        // No scope mapping (youtube) and a webhook plan: unresolved, no lookup.
-        let asked_before = lookup.asked.lock().unwrap().len();
+        // YouTube: resolved by the connection's own numeric community through
+        // hub-api's reserved `community` lookup (never from metadata): the
+        // resolved community must be the connection's, else refused.
         let d = desired_ws("youtube", 7, 9, 1, "youtube:livechat:abc", 1);
+        assert_eq!(r.resolve(&d).await, Ok(5));
+        let d = desired_ws("youtube", 8, 9, 1, "youtube:livechat:abc", 1);
+        assert_eq!(r.resolve(&d).await, Err(TenantError::Mismatch));
+        assert!(lookup
+            .asked
+            .lock()
+            .unwrap()
+            .contains(&("community".to_owned(), "7".to_owned())));
+        // Unknown platform and a webhook plan: unresolved, no lookup.
+        let asked_before = lookup.asked.lock().unwrap().len();
+        let d = desired_ws("slack", 7, 9, 1, "slack:x", 1);
         assert_eq!(r.resolve(&d).await, Err(TenantError::Unresolved));
         let d = desired_webhook(7, 9, "route-key-1", 1);
         assert_eq!(r.resolve(&d).await, Err(TenantError::Unresolved));
@@ -404,7 +434,8 @@ mod tests {
         let lookup = Arc::new(
             Script::default()
                 .with("twitch", "good", Ok(scope(5, 7)))
-                .with("twitch", "other", Ok(scope(5, 8))),
+                .with("twitch", "other", Ok(scope(5, 8)))
+                .with("community", "7", Ok(scope(5, 7))),
         );
         let f = factory(lookup, rec);
         let ok = desired_ws("twitch", 7, 9, 1, "twitch:good", 1);
@@ -416,7 +447,15 @@ mod tests {
         // Unresolvable and unmapped resources.
         let missing = desired_ws("twitch", 7, 9, 1, "twitch:nope", 1);
         assert!(f.build(&missing, 5).await.is_err());
+        // YouTube builds from the community scope when it agrees ...
         let yt = desired_ws("youtube", 7, 9, 1, "youtube:livechat:abc", 1);
-        assert!(f.build(&yt, 5).await.is_err());
+        assert!(f.build(&yt, 5).await.is_ok());
+        assert!(
+            f.build(&yt, 6).await.is_err(),
+            "tenant disagreement refused"
+        );
+        // ... and an unmapped platform is refused.
+        let slack = desired_ws("slack", 7, 9, 1, "slack:x", 1);
+        assert!(f.build(&slack, 5).await.is_err());
     }
 }
