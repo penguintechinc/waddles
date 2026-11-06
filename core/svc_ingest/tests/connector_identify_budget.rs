@@ -603,7 +603,7 @@ fn ctx(token: Option<&str>) -> GateCtx<'_> {
         connection_id: "c",
         session_token: token,
         handshake: if token.is_some() {
-            br#"{"op":6,"d":{"token":"x","session_id":"s","seq":1}}"#
+            br#"{"op":6,"d":{"token":"x","session_id":"s-1","seq":9}}"#
         } else {
             br#"{"op":2,"d":{"token":"x"}}"#
         },
