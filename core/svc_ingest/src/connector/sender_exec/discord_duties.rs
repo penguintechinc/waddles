@@ -34,9 +34,11 @@ use bundle_host_http::guarded::GuardedClient;
 use serde_json::json;
 
 use super::discord_slots::{Rest, API_BASE};
+use super::role_guild_scope;
 use super::subst::SlotValue;
 use super::{DutyCx, DutyHook, ExecError, RequestTpl, SlotError};
 use crate::discord_rest::{classify_membership, is_snowflake, Membership};
+use crate::outbound_creds::CredError;
 use crate::outbound_creds_discord::{is_role_key, DiscordBinding, DiscordCredentialSource};
 use crate::outbound_ops::{EventKind, OutboundAction};
 
@@ -260,7 +262,11 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
             .creds
             .binding(Some(community))
             .await
-            .map_err(|e| ExecError::Slot(map_cred(e)))?;
+            .map_err(|e| match e {
+                // Several usable bindings for the community: the guild is never guessed.
+                CredError::AmbiguousBinding => refused("ambiguous_paired_guild"),
+                e => ExecError::Slot(map_cred(e)),
+            })?;
         Ok((community, b))
     }
 
@@ -342,13 +348,28 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
             base: &self.api_base,
             token: binding.bot_token.expose(),
         };
-        let channel = cx.pinned_channel.ok_or_else(|| refused("no_origin_pin"))?;
-        match rest.channel_guild(channel).await {
-            Ok(Some(g)) if g == binding.guild_id => {}
-            Ok(_) | Err(SlotError::Refused("channel_not_owned")) => {
-                return Err(refused("channel_not_owned"))
+        // Where the op is allowed to land. A channel-pinned op proves its community by the
+        // channel's guild; a guild-scoped op (gateway / external event, no channel) lands ONLY
+        // in the community's own binding guild, and any guild the producer asserts (the source
+        // guild of a gateway event) must equal it.
+        let guild_scope = match cx.action {
+            OutboundAction::RoleOp { origin_channel, .. } => role_guild_scope(origin_channel),
+            _ => None,
+        };
+        match (cx.pinned_channel, guild_scope) {
+            (Some(channel), None) => match rest.channel_guild(channel).await {
+                Ok(Some(g)) if g == binding.guild_id => {}
+                Ok(_) | Err(SlotError::Refused("channel_not_owned")) => {
+                    return Err(refused("channel_not_owned"))
+                }
+                Err(e) => return Err(ExecError::Slot(e)),
+            },
+            (None, Some(asserted)) => {
+                if asserted.is_some_and(|g| g != binding.guild_id) {
+                    return Err(refused("guild_mismatch"));
+                }
             }
-            Err(e) => return Err(ExecError::Slot(e)),
+            _ => return Err(refused("no_origin_pin")),
         }
         self.managed_role(&rest, &binding, cx.action).await?;
         self.raw_user(community, cx.action).await?;

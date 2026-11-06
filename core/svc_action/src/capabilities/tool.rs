@@ -158,12 +158,19 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             "tool.invoke authorized"
         );
 
-        // 5b. The Discord service bundle's `discord.scheduled_event.*` tools are
-        // HOST-executed (binding-pinned guild + credential): the planner above has
-        // already enforced the manifest request, approved grant and write key.
+        // 5b. The Discord service bundle's tools are HOST-executed (binding-pinned guild +
+        // credential): the planner above has already enforced the manifest request, approved
+        // grant and write key. `discord.scheduled_event.*` first, then the member-role tools
+        // (served by the pinned `role.add|remove` outbound producer) -- ONE dispatch path.
         if plan.target_app_id == super::event_sync::DISCORD_SERVICE_APP_ID {
             if let Some(res) = self
                 .run_discord_event_tool(scope, &plan.tool, &plan.args)
+                .await
+            {
+                return res;
+            }
+            if let Some(res) = self
+                .run_discord_role_tool(scope, &plan.tool, &plan.args)
                 .await
             {
                 return res;
@@ -181,6 +188,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             app_id: plan.target_app_id.clone(),
             origin_channel_id: scope.origin_channel_id.clone(),
             origin_platform: scope.origin_platform.clone(),
+            origin_guild_id: scope.origin_guild_id.clone(),
             tenant_id: scope.tenant_id,
             community_id: scope.community_id,
             app_version: plan.target_version,

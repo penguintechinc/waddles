@@ -64,6 +64,7 @@ use crate::pin_sig::{PinFields, PinKeys};
 use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
+mod discord_role_tools;
 mod event_sync;
 pub use event_sync::{run_event_sync_consumer, EVENT_SYNC_REQUEST_QUEUE, EVENT_SYNC_RESULT_PREFIX};
 mod tool;
@@ -93,6 +94,11 @@ pub struct InvokeScope {
     /// `origin_channel_id` only when this names the SAME platform, so a
     /// channel id from a different platform is never reinterpreted.
     pub origin_platform: Option<String>,
+    /// The guild a DISCORD gateway event came from (`event.payload.guild_id` of a `discord`
+    /// event, host-derived from the delivered envelope, never bundle-supplied); `None` for any
+    /// non-Discord (e.g. Wix) event. Used only to ASSERT the source guild equals the community's
+    /// own paired guild for channel-less role ops -- it is never a destination.
+    pub origin_guild_id: Option<String>,
     /// Numeric `tenants.id`/`communities.id` (spec
     /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     /// SS5.1/SS4 `GrantScopeKey`) -- resolved by `crate::dispatch::
@@ -358,6 +364,10 @@ const OUTBOUND_SCHEMA_VERSION: u32 = 1;
 /// The verb of an outbound platform action (provider-framework Step 0,
 /// issue #719). Mirrors `svc_ingest::outbound_ops::OutboundAction`; the
 /// wire string is the same `op` field the queue envelope carries.
+/// Verified external, non-chat platforms whose events may drive channel-less role ops
+/// (binding guild only, `guild:-`). Everything else is refused; extend deliberately.
+const EXTERNAL_ROLE_PLATFORMS: &[&str] = &["wix"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RelayOp {
     ChatSend,
@@ -605,6 +615,8 @@ enum AckOutcome {
 enum AckFailure {
     NotInCommunity,
     Unsupported,
+    /// The community has several paired guilds / usable bindings: never guessed.
+    AmbiguousPairedGuild,
     Failed,
 }
 
@@ -619,6 +631,7 @@ fn parse_ack(raw: &str) -> Result<AckOutcome, String> {
             match v.get("code").and_then(serde_json::Value::as_str) {
                 Some("not_in_community") => AckFailure::NotInCommunity,
                 Some("unsupported") => AckFailure::Unsupported,
+                Some("ambiguous_paired_guild") => AckFailure::AmbiguousPairedGuild,
                 _ => AckFailure::Failed,
             },
         )),
@@ -1736,6 +1749,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                                         op.as_str()
                                     ),
                                 ),
+                                AckFailure::AmbiguousPairedGuild => denied(
+                                    "ambiguous_paired_guild",
+                                    format!(
+                                        "discord {} refused: the community has several paired guilds; the target guild is never guessed",
+                                        op.as_str()
+                                    ),
+                                ),
                                 AckFailure::Failed => denied(
                                     "relay_failed",
                                     format!("discord {} failed at the platform", op.as_str()),
@@ -1830,6 +1850,23 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         op: RelayOp,
         message: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
+        self.handle_discord_queued_op_scoped(scope, op, message, false)
+            .await
+    }
+
+    /// [`Self::handle_discord_queued_op`] with `guild_scoped`: when `true` (the
+    /// `tool.invoke` role tools ONLY) a role op whose triggering event has no Discord channel
+    /// (a gateway member event, or an external Wix-style event) is queued with the wire scope
+    /// `guild:<source guild>` / `guild:-` instead of being refused. The host pins the target
+    /// guild to the community's OWN binding guild; the scope is only an assertion that a
+    /// gateway event's source guild equals it. Never taken from the call's args.
+    pub(crate) async fn handle_discord_queued_op_scoped(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+        message: &serde_json::Value,
+        guild_scoped: bool,
+    ) -> Result<serde_json::Value, HostResultError> {
         let str_field = |name: &str| {
             message
                 .get(name)
@@ -1882,6 +1919,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 role_key: &'a str,
             },
         }
+        let role_scope: String;
         let pending = match op {
             RelayOp::ChatDelete => {
                 let channel_id = origin("chat.delete")?;
@@ -1940,7 +1978,39 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             }
             RelayOp::RoleAdd | RelayOp::RoleRemove => {
                 let what = op.as_str();
-                let origin_channel = origin(what)?;
+                let platform = scope.origin_platform.as_deref();
+                let has_channel = platform == Some("discord") && scope.origin_channel_id.is_some();
+                let origin_channel: &str = if guild_scoped && !has_channel {
+                    // ONE platform field decides. Discord needs a proven source guild;
+                    // `guild:-` (binding guild only) is for verified EXTERNAL non-chat platforms
+                    // whose community comes from a verified binding. Chat origins (twitch,
+                    // youtube, ...) and unknown/absent platforms cannot trigger role ops.
+                    role_scope = match (platform, scope.origin_guild_id.as_deref()) {
+                        (Some("discord"), Some(g)) => format!("guild:{g}"),
+                        (Some("discord"), None) => {
+                            return Err(denied(
+                                "invalid_args",
+                                format!(
+                                "discord {what} from a discord event needs a valid source guild"
+                            ),
+                            ))
+                        }
+                        (Some(p), _) if EXTERNAL_ROLE_PLATFORMS.contains(&p) => {
+                            "guild:-".to_string()
+                        }
+                        _ => {
+                            return Err(denied(
+                                "invalid_args",
+                                format!(
+                                    "discord {what} cannot be triggered from this event origin"
+                                ),
+                            ))
+                        }
+                    };
+                    &role_scope
+                } else {
+                    origin(what)?
+                };
                 // The bundle names a tokenized user and a managed-role KEY --
                 // never a role snowflake, never a guild (the drain maps the key
                 // through the community's binding allowlist and pins the guild
@@ -3536,6 +3606,7 @@ mod tests {
             app_id: "waddles.bot.commands.default".to_string(),
             origin_channel_id: None,
             origin_platform: None,
+            origin_guild_id: None,
             tenant_id: 7,
             community_id: 3,
             app_version: 1,
@@ -3560,6 +3631,7 @@ mod tests {
         InvokeScope {
             origin_channel_id: Some("somechannel".to_string()),
             origin_platform: Some("twitch".to_string()),
+            origin_guild_id: None,
             ..scope()
         }
     }
@@ -3567,10 +3639,11 @@ mod tests {
     /// Same as [`scope`] but carrying an origin channel id, as
     /// `crate::dispatch::invoke_dispatch` would populate it from a real
     /// inbound Discord event's `event.source.channel_id`.
-    fn discord_scope() -> InvokeScope {
+    pub(super) fn discord_scope() -> InvokeScope {
         InvokeScope {
             origin_channel_id: Some("123456789012345678".to_string()),
             origin_platform: Some("discord".to_string()),
+            origin_guild_id: None,
             ..scope()
         }
     }
@@ -3917,6 +3990,7 @@ mod tests {
             let c = caps(FakeRelayQueue::default());
             let sc = InvokeScope {
                 origin_platform: platform.map(str::to_string),
+                origin_guild_id: None,
                 origin_channel_id: origin.map(str::to_string),
                 ..scope()
             };
@@ -3945,6 +4019,7 @@ mod tests {
             .with_discord(transport.clone(), crate::config::Secret::new("t"));
         let sc = InvokeScope {
             origin_platform: Some("twitch".to_string()),
+            origin_guild_id: None,
             ..discord_scope()
         };
         let err = c
@@ -4087,6 +4162,7 @@ mod tests {
             let sc = InvokeScope {
                 origin_channel_id: origin,
                 origin_platform: Some("twitch".to_string()),
+                origin_guild_id: None,
                 ..scope()
             };
             let err = caps
@@ -5035,6 +5111,7 @@ mod tests {
         let bad_origin = InvokeScope {
             origin_channel_id: Some("not-a-snowflake".to_string()),
             origin_platform: Some("discord".to_string()),
+            origin_guild_id: None,
             ..scope()
         };
         let cases = [
@@ -5393,6 +5470,10 @@ mod tests {
         assert_eq!(
             parse_ack(r#"{"ok":false,"code":"unsupported"}"#),
             Ok(AckOutcome::Refused(AckFailure::Unsupported))
+        );
+        assert_eq!(
+            parse_ack(r#"{"ok":false,"code":"ambiguous_paired_guild"}"#),
+            Ok(AckOutcome::Refused(AckFailure::AmbiguousPairedGuild))
         );
         assert_eq!(
             parse_ack(r#"{"ok":false,"code":"anything-else"}"#),
@@ -6069,6 +6150,7 @@ mod tests {
         let bad_scope = InvokeScope {
             origin_channel_id: Some("not-a-snowflake".to_string()),
             origin_platform: Some("discord".to_string()),
+            origin_guild_id: None,
             ..scope()
         };
         let err = caps
