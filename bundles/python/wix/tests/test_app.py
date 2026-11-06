@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 import types
+from collections.abc import Iterator
 from typing import Any, cast
 
 import pytest
@@ -16,17 +17,24 @@ from app import (
     _USAGE,
     STATUS_TTL_SECONDS,
     WIX_MEMBER_URL,
-    dispatch,
-    transform,
+    dispatch as _app_dispatch,
+    transform as _app_transform,
 )
 from waddle_sdk.flask_core import bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.testing import FakeIdentityHost, FakeKvHost, install_fake_kv_host
+from waddle_sdk.testing import FakeIdentityHost, FakeKvHost, StageGuard, install_fake_kv_host
 
 ALICE = "11111111-2222-3333-4444-555555555555"
 BOB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 WIX_A = "99999999-8888-7777-6666-555555555555"
 WIX_B = "01234567-89ab-cdef-0123-456789abcdef"
+
+
+#: Stage-faithful fakes: identity is served to `transform` only, relay to `dispatch` only; a call
+#: from the wrong stage is recorded and fails the test (asserted in the `host` fixture teardown).
+GUARD = StageGuard()
+transform = GUARD.process_stage(_app_transform)
+dispatch = GUARD.action_stage(_app_dispatch)
 
 
 def _run(coro: Any) -> Any:
@@ -64,13 +72,15 @@ class _Host:
 
 
 @pytest.fixture
-def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
+def host(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Host]:
+    GUARD.reset()
     kv = install_fake_kv_host(monkeypatch)
     ident = FakeIdentityHost(members={ALICE, BOB}, actor=ALICE)
     state = _Host(kv, ident)
     wit = sys.modules["wit_world"]
     wit.imports.identity = types.SimpleNamespace(
-        resolve_actor=ident.resolve_actor, resolve_mention=ident.resolve_mention
+        resolve_actor=GUARD.process_only("identity.resolve_actor", ident.resolve_actor),
+        resolve_mention=GUARD.process_only("identity.resolve_mention", ident.resolve_mention),
     )
 
     def send(request: Any) -> Any:
@@ -89,13 +99,16 @@ def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
 
     wit.imports.clock = types.SimpleNamespace(now_millis=lambda: state.now)
     wit.imports.relay = types.SimpleNamespace(
-        push=lambda p, m: state.relay_calls.append((p, json.loads(m)))
+        push=GUARD.action_only(
+            "relay.push", lambda p, m: state.relay_calls.append((p, json.loads(m)))
+        )
     )
     wit.imports.log = types.SimpleNamespace(
         Level={"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3},
         write=lambda lvl, msg, fields: state.log_calls.append((lvl, msg, fields)),
     )
-    return state
+    yield state
+    GUARD.assert_clean()
 
 
 def _say(host: _Host, text: str, *, community: str | None = "c1", **badges: Any) -> str:

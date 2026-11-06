@@ -21,8 +21,13 @@ MISSING_CAPABILITY_MSG = (
 
 def capability_available() -> bool:
     """True iff the runtime's `wit_world.imports` exposes the tool-invocation import."""
+    # The capability probe's contract is a boolean: callers refuse enabling loudly with
+    # MISSING_CAPABILITY_MSG when it is False. `log` itself needs `wit_world`, so it cannot be
+    # used here -- absence of the import IS the signal being reported, not a swallowed error.
     try:
         import wit_world
     except ImportError:
+        wit_world = None
+    if wit_world is None:
         return False
     return getattr(wit_world.imports, REQUIRED_IMPORT, None) is not None

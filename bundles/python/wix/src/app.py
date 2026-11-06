@@ -105,7 +105,8 @@ def _valid_wix_id(raw: str) -> str | None:
     """Canonical lower-case UUID text for a Wix member id, or `None` if it isn't a UUID."""
     try:
         parsed = uuid.UUID(raw)
-    except ValueError:
+    except ValueError as exc:
+        log.debug("wix.bad_member_id", error_type=type(exc).__name__)
         return None
     return str(parsed) if len(raw) == 36 else None
 
@@ -203,6 +204,7 @@ async def _status_for(community: str | None, user: str, *, mine: bool) -> str:
         try:
             status = await _fetch_wix_status(wix_id)
         except _WixError as exc:
+            log.warn("wix.status_lookup_failed", error_type=type(exc).__name__)
             return exc.reply
         await _kv_set(community, f"wix.status.{user}", status.encode(), STATUS_TTL_SECONDS)
     who = "Your" if mine else "That member's"
