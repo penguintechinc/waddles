@@ -1,0 +1,62 @@
+name: Rust bundle-executor e2e (main tier)
+
+# core/bundle_executor/tests/flag_on_command_e2e.rs: docker + componentize-py real-path
+# e2e (7-9 min). Main tier only -- PRs into main and push to main. Release PRs run the
+# bundle-executor unit coverage job (rust-bundle-executor.yml) without it. No path filter:
+# ci-gate's main tier requires this check to be present (scripts/ci/ci-gate-tier.py).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  flag-on-command-e2e:
+    name: Rust bundle-executor e2e (flag-on command, main tier)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: core/bundle_executor
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup build deps (C toolchain, cmake)
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages: 'cmake build-essential'
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache cargo registry + git + target
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/bundle_executor/target
+          key: cargo-bundle-executor-e2e-1.97.1-${{ runner.os }}-${{ hashFiles('core/bundle_executor/Cargo.lock') }}
+          restore-keys: |
+            cargo-bundle-executor-e2e-1.97.1-${{ runner.os }}-
+
+      - name: flag_on_command_e2e (cargo test --features e2e-main-tier)
+        run: |
+          set -euo pipefail
+          cargo test --locked --features e2e-main-tier --test flag_on_command_e2e -- --nocapture 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -qE 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/e2e.log"

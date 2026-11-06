@@ -51,6 +51,7 @@ MAIN_ONLY = [
     "CodeQL Analysis",
     "kind install/upgrade",
     "kind upgrade-path (merge-base -> PR)",
+    "Rust bundle-executor e2e (flag-on command, main tier)",
 ]
 
 
@@ -81,8 +82,9 @@ def test_failing_fast_check_stays_fatal_on_release():
 
 def test_missing_required_check_fails_both_tiers():
     for t in ("release", "main"):
-        assert tier.missing(t, mk(FAST)) == []
-        short = mk([n for n in FAST if n != "Security & Code Quality"])
+        assert tier.missing(t, mk(FAST + (tier.MAIN_EXTRA_PRESENT if t == "main" else []))) == []
+        extra = tier.MAIN_EXTRA_PRESENT if t == "main" else []
+        short = mk([n for n in FAST if n != "Security & Code Quality"] + extra)
         assert tier.missing(t, short) == ["Security & Code Quality"]
         assert len(tier.missing(t, [])) == len(tier.required_present(t)) > 0
 
@@ -90,6 +92,15 @@ def test_missing_required_check_fails_both_tiers():
 def test_required_present_are_all_in_release_set():
     assert set(tier.required_present("release")) <= set(FAST)
     assert set(tier.required_present("main")) >= set(tier.required_present("release"))
+
+
+def test_bundle_executor_e2e_required_on_main_only():
+    name = "Rust bundle-executor e2e (flag-on command, main tier)"
+    assert name in tier.required_present("main")
+    assert name not in tier.required_present("release")
+    assert tier.missing("main", mk(FAST)) == [name]
+    assert tier.missing("release", mk(FAST)) == []
+    assert tier.is_main_only(name)
 
 
 def test_tier_for_base():
