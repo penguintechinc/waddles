@@ -1,7 +1,7 @@
 """`GET /api/v1/communities/<id>/discord/roles` -- authz, tenancy, DTO shape, Discord error mapping.
 
 Discord REST is mocked at the httpx transport; the pairing/tenant lookup
-runs against the real pydal `bar_citizen_db` fixture.
+runs against the real pydal `guild_pairing_db` fixture.
 """
 
 from __future__ import annotations
@@ -36,11 +36,11 @@ class _FakeResolver:
 
 
 @pytest.fixture
-def app(bar_citizen_db: Any) -> Quart:
+def app(guild_pairing_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     quart_app.register_blueprint(guild_pairing_bp)
-    quart_app.config["dal"] = bar_citizen_db[0]
+    quart_app.config["dal"] = guild_pairing_db[0]
     return quart_app
 
 
@@ -75,8 +75,8 @@ def _mock_discord(monkeypatch: pytest.MonkeyPatch, handler: Any) -> list[httpx.R
     return seen
 
 
-def _pair(bar_citizen_db: Any, guild: str = GUILD) -> None:
-    dal, community_id, *_ = bar_citizen_db
+def _pair(guild_pairing_db: Any, guild: str = GUILD) -> None:
+    dal, community_id, *_ = guild_pairing_db
     dal.guild_tenant_pairings.insert(
         community_id=community_id,
         discord_guild_id=guild,
@@ -99,12 +99,12 @@ ROLES = [
 
 
 async def test_happy_path_dto_shape_sorted_everyone_excluded(
-    client: Any, auth_headers: Any, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    client: Any, auth_headers: Any, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _pair(bar_citizen_db)
+    _pair(guild_pairing_db)
     seen = _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=ROLES))
     resp = await client.get(
-        _url(bar_citizen_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
     )
     assert resp.status_code == 200
     body = await resp.get_json()
@@ -136,14 +136,14 @@ async def test_happy_path_dto_shape_sorted_everyone_excluded(
 async def test_discord_errors_map_to_distinct_codes(
     client: Any,
     auth_headers: Any,
-    bar_citizen_db: Any,
+    guild_pairing_db: Any,
     monkeypatch: pytest.MonkeyPatch,
     status: int,
     payload: Any,
     http_status: int,
     code: str,
 ) -> None:
-    _pair(bar_citizen_db)
+    _pair(guild_pairing_db)
 
     def handler(r: httpx.Request) -> httpx.Response:
         if payload is None:
@@ -152,54 +152,54 @@ async def test_discord_errors_map_to_distinct_codes(
 
     _mock_discord(monkeypatch, handler)
     resp = await client.get(
-        _url(bar_citizen_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
     )
     assert resp.status_code == http_status
     assert (await resp.get_json())["error"]["code"] == code
 
 
 async def test_transport_error_is_502(
-    client: Any, auth_headers: Any, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    client: Any, auth_headers: Any, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _pair(bar_citizen_db)
+    _pair(guild_pairing_db)
 
     def boom(r: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("down")
 
     _mock_discord(monkeypatch, boom)
     resp = await client.get(
-        _url(bar_citizen_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
     )
     assert resp.status_code == 502
     assert (await resp.get_json())["error"]["code"] == "DISCORD_UNAVAILABLE"
 
 
 async def test_malformed_payload_is_502(
-    client: Any, auth_headers: Any, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    client: Any, auth_headers: Any, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _pair(bar_citizen_db)
+    _pair(guild_pairing_db)
     _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=[{"nope": 1}]))
     resp = await client.get(
-        _url(bar_citizen_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
     )
     assert resp.status_code == 502
 
 
-async def test_no_pairing_is_404(client: Any, auth_headers: Any, bar_citizen_db: Any) -> None:
+async def test_no_pairing_is_404(client: Any, auth_headers: Any, guild_pairing_db: Any) -> None:
     resp = await client.get(
-        _url(bar_citizen_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
     )
     assert resp.status_code == 404
     assert (await resp.get_json())["error"]["code"] == "DISCORD_PAIRING_NOT_FOUND"
 
 
 async def test_unpaired_guild_param_is_404_and_never_calls_discord(
-    client: Any, auth_headers: Any, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    client: Any, auth_headers: Any, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _pair(bar_citizen_db)
+    _pair(guild_pairing_db)
     seen = _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=[]))
     resp = await client.get(
-        _url(bar_citizen_db[1], "?guild_id=999"),
+        _url(guild_pairing_db[1], "?guild_id=999"),
         headers=auth_headers(scope="community.guild_pairing:read"),
     )
     assert resp.status_code == 404
@@ -207,14 +207,14 @@ async def test_unpaired_guild_param_is_404_and_never_calls_discord(
 
 
 async def test_multiple_guilds_require_guild_id(
-    client: Any, auth_headers: Any, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    client: Any, auth_headers: Any, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _pair(bar_citizen_db)
-    _pair(bar_citizen_db, "555")
+    _pair(guild_pairing_db)
+    _pair(guild_pairing_db, "555")
     _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=[]))
     headers = auth_headers(scope="community.guild_pairing:read")
-    assert (await client.get(_url(bar_citizen_db[1]), headers=headers)).status_code == 400
-    ok = await client.get(_url(bar_citizen_db[1], "?guild_id=555"), headers=headers)
+    assert (await client.get(_url(guild_pairing_db[1]), headers=headers)).status_code == 400
+    ok = await client.get(_url(guild_pairing_db[1], "?guild_id=555"), headers=headers)
     assert ok.status_code == 200
     assert (await ok.get_json()) == {"success": True, "roles": []}
 
@@ -223,51 +223,51 @@ async def test_multiple_guilds_require_guild_id(
 async def test_credentials_missing_is_503(
     client: Any,
     auth_headers: Any,
-    bar_citizen_db: Any,
+    guild_pairing_db: Any,
     monkeypatch: pytest.MonkeyPatch,
     payload: Any,
 ) -> None:
-    _pair(bar_citizen_db)
+    _pair(guild_pairing_db)
     monkeypatch.setattr(roles_module, "DefaultCredentialResolver", lambda: _FakeResolver(payload))
     resp = await client.get(
-        _url(bar_citizen_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
     )
     assert resp.status_code == 503
     assert (await resp.get_json())["error"]["code"] == "DISCORD_NOT_CONFIGURED"
 
 
 async def test_real_resolver_with_no_tenant_credentials_is_503(
-    client: Any, auth_headers: Any, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    client: Any, auth_headers: Any, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _pair(bar_citizen_db)
+    _pair(guild_pairing_db)
     monkeypatch.undo()  # drop the fake resolver -> real DefaultCredentialResolver, empty DB
     import blueprints.v1.guild_pairing as bp
 
     monkeypatch.setattr(bp, "feature_enabled", AsyncMock(return_value=True))
     resp = await client.get(
-        _url(bar_citizen_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
     )
     assert resp.status_code == 503
 
 
 @pytest.mark.parametrize("scope", ["", "community.guild_pairing:write", "other:read"])
 async def test_wrong_scope_is_403(
-    client: Any, auth_headers: Any, bar_citizen_db: Any, scope: str
+    client: Any, auth_headers: Any, guild_pairing_db: Any, scope: str
 ) -> None:
-    _pair(bar_citizen_db)
-    resp = await client.get(_url(bar_citizen_db[1]), headers=auth_headers(scope=scope))
+    _pair(guild_pairing_db)
+    resp = await client.get(_url(guild_pairing_db[1]), headers=auth_headers(scope=scope))
     assert resp.status_code == 403
 
 
-async def test_no_token_is_rejected(client: Any, bar_citizen_db: Any) -> None:
-    resp = await client.get(_url(bar_citizen_db[1]))
+async def test_no_token_is_rejected(client: Any, guild_pairing_db: Any) -> None:
+    resp = await client.get(_url(guild_pairing_db[1]))
     assert resp.status_code in (401, 403)
 
 
 async def test_cross_tenant_community_is_404(
-    client: Any, auth_headers: Any, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    client: Any, auth_headers: Any, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    dal = bar_citizen_db[0]
+    dal = guild_pairing_db[0]
     other_tenant = dal.tenants.insert(slug="other-corp", is_active=True, is_global=False)
     other_community = dal.communities.insert(name="other", tenant_id=other_tenant)
     dal.guild_tenant_pairings.insert(
@@ -287,30 +287,30 @@ async def test_cross_tenant_community_is_404(
 
 
 async def test_feature_flag_off_is_402(
-    client: Any, auth_headers: Any, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    client: Any, auth_headers: Any, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import blueprints.v1.guild_pairing as bp
 
     monkeypatch.setattr(bp, "feature_enabled", AsyncMock(return_value=False))
     resp = await client.get(
-        _url(bar_citizen_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
     )
     assert resp.status_code == 402
 
 
 async def test_default_client_is_used_and_closed(
-    bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Service-level: no injected client -> builds + closes its own; injected client untouched."""
-    _pair(bar_citizen_db)
+    _pair(guild_pairing_db)
     _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=ROLES))
-    roles = await roles_module.list_guild_roles(bar_citizen_db[0], bar_citizen_db[1])
+    roles = await roles_module.list_guild_roles(guild_pairing_db[0], guild_pairing_db[1])
     assert [r.id for r in roles] == ["333", "222"]
     async with _REAL_ASYNC_CLIENT(
         transport=httpx.MockTransport(lambda r: httpx.Response(200, json=ROLES))
     ) as injected:
         roles = await roles_module.list_guild_roles(
-            bar_citizen_db[0], bar_citizen_db[1], http_client=injected
+            guild_pairing_db[0], guild_pairing_db[1], http_client=injected
         )
         assert len(roles) == 2
         assert not injected.is_closed
@@ -320,12 +320,12 @@ async def test_default_client_is_used_and_closed(
 async def test_guild_paired_to_other_community_is_404_and_never_calls_discord(
     client: Any,
     auth_headers: Any,
-    bar_citizen_db: Any,
+    guild_pairing_db: Any,
     monkeypatch: pytest.MonkeyPatch,
     same_tenant: bool,
 ) -> None:
     """Regression: a guild_id paired to a DIFFERENT community/tenant is not reachable via ours."""
-    dal, community_id, *_ = bar_citizen_db
+    dal, community_id, *_ = guild_pairing_db
     own_tenant = dal.communities[community_id].tenant_id
     tenant = (
         own_tenant
@@ -342,7 +342,7 @@ async def test_guild_paired_to_other_community_is_404_and_never_calls_discord(
         role_name_prefix="",
     )
     dal.commit()
-    _pair(bar_citizen_db)  # caller's own legit pairing exists too
+    _pair(guild_pairing_db)  # caller's own legit pairing exists too
     seen = _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=ROLES))
     resp = await client.get(
         _url(community_id, f"?guild_id={victim_guild}"),

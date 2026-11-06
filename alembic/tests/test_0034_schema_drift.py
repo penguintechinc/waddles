@@ -1,4 +1,4 @@
-"""Schema-drift guard: 0034_bar_citizen_guild_pairing's SQL vs its SQLAlchemy models.
+"""Schema-drift guard: the 0034 guild-pairing migration's SQL vs its SQLAlchemy models.
 
 Same methodology as `test_0012_schema_drift_columns.py`, adapted: this
 migration's tables are read at runtime via penguin-dal's `AsyncDB.reflect()`
@@ -23,7 +23,7 @@ from unittest.mock import patch
 import pytest
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parent.parent / "versions" / "0034_bar_citizen_guild_pairing.py"
+    Path(__file__).resolve().parent.parent / "versions" / "0034_guild_pairing.py"
 )
 
 # (CREATE TABLE name, model class name) pairs this migration/models module share.
@@ -45,7 +45,7 @@ _COLUMNS_ADDED_BY_LATER_MIGRATIONS: dict[str, set[str]] = {
 
 def _load_migration() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
-        "migration_0034_bar_citizen_guild_pairing", _MIGRATION_PATH
+        "migration_0034_guild_pairing", _MIGRATION_PATH
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

@@ -156,7 +156,7 @@ bundles:
   # (`community_id: null` below) instead of only erroring -- scoped under
   # `waddle_sdk.community_kv.TENANT_WIDE_SENTINEL`, see src/app.py's module docstring.
   - app_id: waddles.core.example.lurk
-    version: "1.0.11"
+    version: "1.0.12"
     language: python
     source_dir: python/lurk
     manifest_path: lurk.manifest.yaml
@@ -430,7 +430,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.shoutout
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/shoutout
     manifest_path: shoutout.manifest.yaml
@@ -1489,7 +1489,7 @@ bundles:
   # bundle-MCP-tools P6b: discord platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-discord defaults OFF.
   - app_id: waddles.core.service.discord
-    version: "1.0.2"
+    version: "1.0.4"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1517,11 +1517,25 @@ bundles:
   # Community feed reader (#484): `!feed` events/info from a per-community configured public
   # JSON feed url; the operator grants net.http.fqdn:<host> per community (no fixed host).
   - app_id: waddles.core.community.feed
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/community_feed
     manifest_path: community-feed.manifest.yaml
     artifact_path: community-feed.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
+  # Wix webhook connector (Rust `kind: service`, inbound-only, `connector-tools` world, egress []).
+  # Verified by svc-ingest Scheme::WixJwt; the cutover flag waddles.connector-wix defaults OFF.
+  - app_id: waddles.core.service.wix
+    version: "1.0.0"
+    language: rust
+    wit_world: connector-tools
+    kind: service
+    source_dir: rust/wix
+    manifest_path: wix.manifest.yaml
+    artifact_path: wix.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null

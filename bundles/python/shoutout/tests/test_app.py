@@ -831,15 +831,15 @@ def test_auto_list_corrupt_state_fails_loud(fake_host: _FakeHost) -> None:
 # -- dispatch(): ai sub-module license gating ------------------------------------
 
 
-def test_enable_ai_denied_on_free_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_enable_ai_never_checks_the_license_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The host enforces the AI tier; the bundle enables on every tier, free included."""
     host = _FakeHost()
     _install(monkeypatch, host, tier="free")
     result = _run(
         dispatch(_sample_envelope("twitch", "config_enable_ai", is_mod=True), {}, http_client=None)
     )
     assert result.detail == "config_enable_ai"
-    assert "professional" in _last_reply(host)
-    assert _scoped("submodule.shoutout.ai") not in host.store
+    assert host.store[_scoped("submodule.shoutout.ai")] == b"1"
 
 
 @pytest.mark.parametrize("tier", ["professional", "enterprise"])
@@ -872,13 +872,8 @@ def test_disable_ai_requires_no_license(monkeypatch: pytest.MonkeyPatch) -> None
     assert _scoped("submodule.shoutout.ai") not in host.store
 
 
-def test_tier_binding_unavailable_degrades_to_free_and_denies(fake_host: _FakeHost) -> None:
-    """No `flags` import at all on `wit_world.imports` -- same as a stale/unwizened component.
-
-    `tier_at_least()` degrades to `"free"` (`feature_flags.tier`'s own
-    documented behavior, see `sdk/waddle-sdk/tests/test_feature_flags.py`),
-    so `enable ai` must still fail closed rather than crash.
-    """
+def test_enable_ai_works_without_any_tier_binding(fake_host: _FakeHost) -> None:
+    """No `flags` import at all: the bundle must not depend on a tier binding."""
     fake_wit_world = sys.modules["wit_world"]
     del fake_wit_world.imports.flags  # type: ignore[attr-defined]
     _run(
@@ -886,8 +881,7 @@ def test_tier_binding_unavailable_degrades_to_free_and_denies(fake_host: _FakeHo
             _sample_envelope("twitch", "config_enable_ai", is_mod=True), {}, http_client=None
         )
     )
-    assert "professional" in _last_reply(fake_host)
-    assert _scoped("submodule.shoutout.ai") not in fake_host.store
+    assert fake_host.store[_scoped("submodule.shoutout.ai")] == b"1"
 
 
 # -- dispatch(): kv backend failures ----------------------------------------------

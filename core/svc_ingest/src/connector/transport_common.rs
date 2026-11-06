@@ -14,11 +14,6 @@ use super::transport::TransportError;
 use super::webhook::SecretError;
 use super::webhook_verify::hex_encode;
 
-/// Test-only: serializes the process-wide proxy-env mutation in poll's pin test
-/// against tests whose HTTP clients read that env (reader = client user).
-#[cfg(test)]
-pub(crate) static PROXY_ENV: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
-
 /// Validates a transport endpoint: `https`/`wss` only (plain `http`/`ws` is
 /// accepted solely for a loopback host and only when `allow_loopback_insecure`
 /// is set -- test harnesses), no embedded userinfo, a host is present.

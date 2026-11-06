@@ -230,9 +230,9 @@ class TestHttpDiscordClient:
 
 class TestLoopPrevention:
     async def test_discord_to_platform_never_calls_discord_write_api(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _t, _g = bar_citizen_db
+        dal, community_id, _t, _g = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id, direction="bidirectional")
         _link_identity(
             dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_PLATFORM_USER
@@ -257,9 +257,9 @@ class TestLoopPrevention:
         assert client.remove_calls == []
 
     async def test_twitch_to_discord_never_writes_community_member_role(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _t, _g = bar_citizen_db
+        dal, community_id, _t, _g = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
         _link_identity(dal, hub_user_id=1, platform="twitch", platform_user_id=_TWITCH_SUB_USER)
         _link_identity(dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_SUB_USER)
@@ -279,8 +279,8 @@ class TestLoopPrevention:
 
 
 class TestPlatformDirectionFailClosed:
-    async def test_no_op_when_wrong_direction(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _t, _g = bar_citizen_db
+    async def test_no_op_when_wrong_direction(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _t, _g = guild_pairing_db
         pairing = _make_pairing(dal, community_id)  # twitch_to_discord
         result = await svc.reconcile_pairing_discord_to_platform(
             dal,
@@ -291,10 +291,10 @@ class TestPlatformDirectionFailClosed:
         assert (result.error, result.community_roles_applied) == (None, 0)
 
     async def test_flag_off_skips_without_touching_discord(
-        self, bar_citizen_db: Any, _flag_on: AsyncMock
+        self, guild_pairing_db: Any, _flag_on: AsyncMock
     ) -> None:
         _flag_on.return_value = False
-        dal, community_id, _t, _g = bar_citizen_db
+        dal, community_id, _t, _g = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
         client = _FakeDiscordClient({})
         result = await svc.reconcile_pairing_discord_to_platform(
@@ -307,9 +307,9 @@ class TestPlatformDirectionFailClosed:
         assert client.list_guild_members_calls == 0
 
     async def test_credential_transport_failure_reports_error_type(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _t, _g = bar_citizen_db
+        dal, community_id, _t, _g = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
         result = await svc.reconcile_pairing_discord_to_platform(
             dal,
@@ -319,8 +319,8 @@ class TestPlatformDirectionFailClosed:
         )
         assert result.error == TransportUnavailable.__name__
 
-    async def test_discord_api_error_reports_error_type(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _t, _g = bar_citizen_db
+    async def test_discord_api_error_reports_error_type(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _t, _g = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
         client = _FakeDiscordClient({})
         client.list_guild_members = AsyncMock(side_effect=svc.DiscordSyncError("x"))  # type: ignore[method-assign]
@@ -332,8 +332,8 @@ class TestPlatformDirectionFailClosed:
         )
         assert result.error == "DiscordSyncError"
 
-    async def test_unexpected_exception_is_contained(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _t, _g = bar_citizen_db
+    async def test_unexpected_exception_is_contained(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _t, _g = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
         client = _FakeDiscordClient({})
         client.list_guild_members = AsyncMock(side_effect=RuntimeError("bug"))  # type: ignore[method-assign]
@@ -348,9 +348,9 @@ class TestPlatformDirectionFailClosed:
 
 class TestBatchAndMain:
     async def test_unknown_direction_is_counted_not_dropped(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, community_id, _t, _g = bar_citizen_db
+        dal, community_id, _t, _g = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
         weird = SimpleNamespace(id=pairing.id, direction="sideways")
         monkeypatch.setattr(svc, "_list_enabled_pairings", lambda d: [weird])
@@ -365,9 +365,9 @@ class TestBatchAndMain:
         assert summary.pairings_synced == 0
 
     async def test_batch_default_clients_and_credential_failure_counts_failed(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _t, _g = bar_citizen_db
+        dal, community_id, _t, _g = guild_pairing_db
         _make_pairing(dal, community_id, direction="bidirectional")
         summary = await svc.run_role_sync_reconcile_batch(
             dal,
@@ -413,7 +413,7 @@ class TestBatchAndMain:
 
     async def test_main_runs_on_a_real_pydal_dal_not_an_asyncdb_attribute(
         self,
-        bar_citizen_db: Any,
+        guild_pairing_db: Any,
         tmp_path: Any,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
@@ -425,13 +425,13 @@ class TestBatchAndMain:
         the real `get_decrypted_tokens` reads it through `select_async`. A reintroduced
         `build_install_dal(...).dal` dies here with the production error.
         """
-        dal, community_id, _t, _g = bar_citizen_db
+        dal, community_id, _t, _g = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
         # An unknown direction is counted (never dropped) with no Twitch/Discord I/O.
         dal(dal.guild_tenant_pairings.id == pairing.id).update(direction="sideways")
         dal.commit()
         seed_twitch_connection(dal, community_id, "tok-real")
-        monkeypatch.setenv("DATABASE_URL", f"sqlite://{tmp_path / 'bar_citizen_test.db'}")
+        monkeypatch.setenv("DATABASE_URL", f"sqlite://{tmp_path / 'guild_pairing_test.db'}")
 
         seen: dict[str, Any] = {}
         real_batch = svc.run_role_sync_reconcile_batch

@@ -1,4 +1,4 @@
-"""Per-tenant Discord OAuth2 bot-install flow (Bar Citizen Units C/D), built on `#563`'s seam.
+"""Per-tenant Discord OAuth2 bot-install flow (Units C/D), built on `#563`'s seam.
 
 Every tenant beyond the global/SaaS tenant brings its OWN Discord
 application (client id/secret/bot token) -- the server owner invites that

@@ -64,6 +64,8 @@ use crate::pin_sig::{PinFields, PinKeys};
 use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
+mod event_sync;
+pub use event_sync::{run_event_sync_consumer, EVENT_SYNC_REQUEST_QUEUE, EVENT_SYNC_RESULT_PREFIX};
 mod tool;
 pub use tool::ToolWiring;
 
@@ -1037,6 +1039,9 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// (`relay_unavailable`) -- an unsigned entry would only be dropped by
     /// the drain, so failing here is the loud, early version of that.
     pin_keys: Option<Arc<PinKeys>>,
+    /// Verify-only ring for hub-api's signed event-sync requests
+    /// (`EVENT_SYNC_REQUEST_KEYS`); `None` drops every request unanswered.
+    event_sync_keys: Option<Arc<PinKeys>>,
 }
 
 /// The outbound PII-detokenization dependency: a live resolver over
@@ -1083,6 +1088,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             egress_dispatcher_flag: None,
             tool: None,
             pin_keys: None,
+            event_sync_keys: None,
         }
     }
 
@@ -2929,25 +2935,25 @@ mod tests {
     /// * `fail*` -- inject a Valkey outage on one primitive.
     #[derive(Default)]
     pub(super) struct FakeRelayQueue {
-        pushed: Mutex<Vec<(String, String)>>,
-        fail: bool,
-        fail_key_exists: bool,
-        fail_incr: bool,
-        fail_take: bool,
-        ready: bool,
-        auto_ack: Option<String>,
-        acks: Mutex<std::collections::HashMap<String, String>>,
-        windows: Mutex<std::collections::HashMap<String, u64>>,
+        pub(super) pushed: Mutex<Vec<(String, String)>>,
+        pub(super) fail: bool,
+        pub(super) fail_key_exists: bool,
+        pub(super) fail_incr: bool,
+        pub(super) fail_take: bool,
+        pub(super) ready: bool,
+        pub(super) auto_ack: Option<String>,
+        pub(super) acks: Mutex<std::collections::HashMap<String, String>>,
+        pub(super) windows: Mutex<std::collections::HashMap<String, u64>>,
     }
 
     impl FakeRelayQueue {
         /// A queue with a live, healthy drain: ready, and every op acked `ok`.
-        fn with_live_drain() -> Self {
+        pub(super) fn with_live_drain() -> Self {
             Self::with_drain_result(r#"{"ok":true}"#)
         }
 
         /// A queue with a live drain that answers every op with `ack_json`.
-        fn with_drain_result(ack_json: &str) -> Self {
+        pub(super) fn with_drain_result(ack_json: &str) -> Self {
             Self {
                 ready: true,
                 auto_ack: Some(ack_json.to_string()),
@@ -2956,7 +2962,7 @@ mod tests {
         }
 
         /// The parsed envelopes pushed so far.
-        fn envelopes(&self) -> Vec<serde_json::Value> {
+        pub(super) fn envelopes(&self) -> Vec<serde_json::Value> {
             self.pushed
                 .lock()
                 .unwrap()
@@ -3186,7 +3192,7 @@ mod tests {
     /// every happy-path test keeps proving its own capability logic, not
     /// this landing's gate wiring (which the dedicated `gate_*` tests below
     /// exercise directly, including the deny-without-grant cases).
-    fn permissive_gate() -> Arc<CapabilityGate> {
+    pub(super) fn permissive_gate() -> Arc<CapabilityGate> {
         let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
         for app_id in ["waddles.bot.commands.default", "waddles.bot.other"] {
             let mut grants = std::collections::HashMap::new();
@@ -3246,7 +3252,7 @@ mod tests {
         ))
     }
 
-    fn caps(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
+    pub(super) fn caps(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
         caps_with_usage(queue, Arc::new(Mutex::new(UsageBatcher::new())))
     }
 
@@ -3515,7 +3521,7 @@ mod tests {
         .with_kv(FakeKvBackend::default(), Arc::new(snapshot))
     }
 
-    fn scope() -> InvokeScope {
+    pub(super) fn scope() -> InvokeScope {
         InvokeScope {
             tenant: "acme".to_string(),
             community: Some("main".to_string()),

@@ -108,6 +108,7 @@ mod tests {
         handles: &'a [&'static str],
     ) -> SlotRequest<'a> {
         SlotRequest {
+            guild_scoped: false,
             platform,
             community_id: Some(1),
             pinned_channel: pin,

@@ -51,8 +51,10 @@ def _token(*, access: str = "tok_1", refresh: str = "ref_1") -> TwitchTokenResul
 
 
 class TestStoreInitialCredentials:
-    async def test_stores_layer1_app_creds_and_layer2_connection(self, bar_citizen_db: Any) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+    async def test_stores_layer1_app_creds_and_layer2_connection(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         await mod.store_initial_credentials(
             dal,
             tenant_id=tenant_id,
@@ -87,10 +89,10 @@ class TestStoreInitialCredentials:
         assert connection.installed_by_user_id == 7
 
     async def test_resource_lookup_failure_raises_transport_unavailable(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The layer-1 app row is still persisted even if the channel lookup fails."""
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         monkeypatch.setattr(
             mod, "fetch_token_user_id", AsyncMock(side_effect=TwitchOAuthError("boom"))
         )
@@ -122,19 +124,19 @@ class TestStoreInitialCredentials:
 
 class TestRefreshStoredCredentials:
     async def test_no_stored_credentials_raises_transport_unavailable(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         with pytest.raises(TransportUnavailable):
             await mod.refresh_stored_credentials(dal, tenant_id=tenant_id)
 
     async def test_app_creds_without_connection_raises_transport_unavailable(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
         """Layer 1 (app creds) alone, with no layer-2 connection, is still unrefreshable."""
         from services.credential_resolver import store_tenant_credentials
 
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         store_tenant_credentials(
             dal,
             tenant_id=tenant_id,
@@ -147,9 +149,9 @@ class TestRefreshStoredCredentials:
             await mod.refresh_stored_credentials(dal, tenant_id=tenant_id)
 
     async def test_successful_refresh_rotates_refresh_token(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         await mod.store_initial_credentials(
             dal,
             tenant_id=tenant_id,
@@ -179,10 +181,10 @@ class TestRefreshStoredCredentials:
         assert connection.access_token == "tok_new"
 
     async def test_rejected_refresh_revokes_connection_not_app_creds(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Twitch rejecting a reused/rotated refresh token revokes the layer-2 connection only."""
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         await mod.store_initial_credentials(
             dal,
             tenant_id=tenant_id,

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-community-feed"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!feed events|event|info` -> read-only community community events and public info, cached per community in kv from a public JSON feed (GET only, no write scope)."
 requires-python = ">=3.13"
 dependencies = []

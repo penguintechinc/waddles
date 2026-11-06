@@ -158,6 +158,18 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             "tool.invoke authorized"
         );
 
+        // 5b. The Discord service bundle's `discord.scheduled_event.*` tools are
+        // HOST-executed (binding-pinned guild + credential): the planner above has
+        // already enforced the manifest request, approved grant and write key.
+        if plan.target_app_id == super::event_sync::DISCORD_SERVICE_APP_ID {
+            if let Some(res) = self
+                .run_discord_event_tool(scope, &plan.tool, &plan.args)
+                .await
+            {
+                return res;
+            }
+        }
+
         // 6. Nested invoke on the active executor connection.
         let deadline = bundle_tool_call::nested_deadline(scope.deadline_at)?;
         let conn = wiring.connections.active().ok_or_else(|| {
