@@ -158,7 +158,20 @@ fn rejects_bad_bindings_without_echoing_values() {
     );
     assert_eq!(
         p.plan(&binding(&[("kind", "lobby")]), &env()).unwrap_err(),
-        PlanError::MissingKey("source_id")
+        PlanError::MissingKey("community_id")
+    );
+    assert_eq!(
+        p.plan(
+            &binding(&[
+                ("kind", "roster"),
+                ("source_id", "1"),
+                ("community_id", "1")
+            ]),
+            &env()
+        )
+        .unwrap_err(),
+        PlanError::InvalidValue("source_id"),
+        "the two forms are exclusive"
     );
     for bad in [
         "",
@@ -233,6 +246,33 @@ fn fingerprint_tracks_source_tenant_and_rotation_not_secrets() {
     let mut moved = binding(&[("kind", "lobby"), ("source_id", "1")]);
     moved.tenant_id = 9;
     assert_ne!(base.fingerprint, one(&moved).fingerprint);
+}
+
+#[test]
+fn hub_community_contract_derives_org_kinds_only() {
+    let roster = one(&binding(&[("community_id", "555")]));
+    assert_eq!(
+        plan_of(&roster).spec.kind,
+        SpectrumKind::Roster,
+        "default kind"
+    );
+    assert_eq!(plan_of(&roster).poll.source_key, "spectrum:roster:555");
+    let ev = one(&binding(&[("community_id", "555"), ("kind", "events")]));
+    assert_eq!(plan_of(&ev).spec.kind, SpectrumKind::Events);
+    let p = SpectrumProfile::new();
+    for bad in ["lobby", "forum", "nope"] {
+        assert_eq!(
+            p.plan(&binding(&[("community_id", "555"), ("kind", bad)]), &env())
+                .unwrap_err(),
+            PlanError::InvalidValue("kind"),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        p.plan(&binding(&[("community_id", "a/b")]), &env())
+            .unwrap_err(),
+        PlanError::InvalidValue("source_id")
+    );
 }
 
 #[test]

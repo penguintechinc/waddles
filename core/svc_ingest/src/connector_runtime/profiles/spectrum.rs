@@ -13,8 +13,9 @@
 //!
 //! | Metadata key | Role |
 //! |---|---|
-//! | `kind` | required: `lobby` \| `forum` \| `roster` \| `events` |
-//! | `source_id` | required: lobby / forum-channel / community id |
+//! | `community_id` | the hub-api provider's contract: the Spectrum community id; kind is then `roster` (default) or `events` |
+//! | `kind` | `lobby` \| `forum` \| `roster` \| `events`; required with `source_id` |
+//! | `source_id` | direct form: lobby / forum-channel / community id (mutually exclusive with `community_id`) |
 //! | `poll_interval_s` | optional integer seconds, clamped to the kind's floor |
 //!
 //! Spectrum is one-way INBOUND (#101): no outbound path exists in the profile,
@@ -50,6 +51,8 @@ pub const API_BASE: &str = "https://robertsspaceindustries.com/api/spectrum";
 pub const HANDLE_SESSION: &str = "spectrum.session";
 /// Metadata key: source kind.
 pub const META_KIND: &str = "kind";
+/// Metadata key: the hub-api provider's Spectrum community id.
+pub const META_COMMUNITY_ID: &str = "community_id";
 /// Metadata key: source id.
 pub const META_SOURCE_ID: &str = "source_id";
 /// Metadata key: optional interval.
@@ -227,15 +230,33 @@ impl ConnectorProfile for SpectrumProfile {
         ) {
             return Err(PlanError::WrongKind);
         }
-        let kind_raw = b
-            .metadata
-            .get(META_KIND)
-            .ok_or(PlanError::MissingKey(META_KIND))?;
-        let kind = parse_kind(kind_raw).ok_or(PlanError::InvalidValue(META_KIND))?;
-        let source_id = b
-            .metadata
-            .get(META_SOURCE_ID)
-            .ok_or(PlanError::MissingKey(META_SOURCE_ID))?;
+        let (kind, source_id) = match (
+            b.metadata.get(META_COMMUNITY_ID),
+            b.metadata.get(META_SOURCE_ID),
+        ) {
+            (Some(_), Some(_)) => return Err(PlanError::InvalidValue(META_SOURCE_ID)),
+            // hub-api contract: one Spectrum community; org kinds only.
+            (Some(c), None) => {
+                let kind = match b.metadata.get(META_KIND) {
+                    None => SpectrumKind::Roster,
+                    Some(k) => parse_kind(k)
+                        .filter(|k| k.is_org())
+                        .ok_or(PlanError::InvalidValue(META_KIND))?,
+                };
+                (kind, c)
+            }
+            (None, Some(sid)) => {
+                let k = b
+                    .metadata
+                    .get(META_KIND)
+                    .ok_or(PlanError::MissingKey(META_KIND))?;
+                (
+                    parse_kind(k).ok_or(PlanError::InvalidValue(META_KIND))?,
+                    sid,
+                )
+            }
+            (None, None) => return Err(PlanError::MissingKey(META_COMMUNITY_ID)),
+        };
         if !is_source_id(source_id) {
             return Err(PlanError::InvalidValue(META_SOURCE_ID));
         }

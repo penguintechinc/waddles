@@ -31,7 +31,7 @@ use penguin_spine::{KeyRing, SpineMetrics};
 use super::feed::{ConnKey, DynFeed, FeedSet, HubBindingFeed, TransportPlan, WebhookPlan};
 use super::metrics::RuntimeMetrics;
 use super::plan::{ConnectorProfile, RuntimeEnv};
-use super::profiles::{discord, twitch, youtube};
+use super::profiles::{discord, spectrum, twitch, youtube};
 use super::scoped::{ConnectionSink, ScopeLookup, ScopeTenantResolve, ScopedSinkFactory};
 use super::selector::{BootError, ConnectorSelector, IDENTIFY_BUDGET_READY};
 use super::supervisor::{
@@ -45,6 +45,7 @@ use crate::connector::host_calls::{
     ActiveConnections, CallScope, ConnectorHostCalls, HostCallConfig, IdentityTokenizer,
 };
 use crate::connector::secrets::TransportSecretSource;
+use crate::connector::spectrum::{RedisSpectrumStore, SpectrumStore};
 use crate::connector::webhook::{WebhookIngress, WebhookTransport};
 use crate::connector::{
     register_connector_metrics, ConnectorRegistry, DiscordIdentifyGate, ExecutorLink,
@@ -77,6 +78,7 @@ fn platform_consts(platform: &str) -> Option<(&'static str, &'static str)> {
         "twitch" => Some((twitch::APP_ID, twitch::PROVIDER)),
         "discord" => Some((discord::APP_ID, discord::PROVIDER)),
         "youtube" => Some((youtube::APP_ID, youtube::PROVIDER)),
+        "spectrum" => Some((spectrum::APP_ID, spectrum::PROVIDER)),
         _ => None,
     }
 }
@@ -484,6 +486,12 @@ fn feed_for<R: ConnectionResolve + 'static>(
             metrics,
         )),
         "youtube" => Some(make(resolver, youtube::YoutubeProfile::new(), env, metrics)),
+        "spectrum" => Some(make(
+            resolver,
+            spectrum::SpectrumProfile::new(),
+            env,
+            metrics,
+        )),
         _ => None,
     }
 }
@@ -555,6 +563,10 @@ where
     let webhook = deps
         .webhook
         .map(|(ingress, env)| Arc::new(IngressAttach::new(ingress, env)) as Arc<dyn WebhookAttach>);
+    let spectrum_store: Option<Arc<dyn SpectrumStore>> =
+        settings.platforms.contains(&"spectrum").then(|| {
+            Arc::new(RedisSpectrumStore::new(deps.lease_conn.clone())) as Arc<dyn SpectrumStore>
+        });
     let runtime_deps = RuntimeDeps {
         feed: feeds,
         invoker: Arc::new(WireConnectorInvoker::new(
@@ -576,8 +588,10 @@ where
         frame_metrics: Some(frame_metrics),
         webhook,
         activator: Some(Arc::new(TableActivator(deps.bridge.active))),
-        // Spectrum is not an enabled boot platform yet (selector slice): no store.
-        spectrum: None,
+        // Dedupe/snapshot state rides the same real Valkey as the leases; only
+        // built when the selector enabled Spectrum (otherwise Spectrum plans
+        // would park loudly, but none exist).
+        spectrum: spectrum_store,
     };
     ConnectorRuntime::new(runtime_deps, settings.runtime_config()).map_err(|e| match e {
         RuntimeError::Config(m) => BootError::Malformed(m),

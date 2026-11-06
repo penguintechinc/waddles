@@ -103,11 +103,21 @@ SPECTRUM_SPEC: Final = AdapterSpec(
             pattern=COMMUNITY_ID_PATTERN,
             max_length=18,
         ),
+        MetadataField(
+            "kind",
+            False,
+            "What to ingest from the community: roster (default) or events. Read-only sync.",
+            pattern="roster|events",
+            max_length=6,
+        ),
     ),
-    public_metadata_keys=frozenset({"community_id", "scopes", "capabilities"}),
-    runtime_metadata_keys=frozenset({"community_id", "scopes", "capabilities"}),
+    public_metadata_keys=frozenset({"community_id", "kind", "scopes", "capabilities"}),
+    runtime_metadata_keys=frozenset({"community_id", "kind", "scopes", "capabilities"}),
     refreshable=False,
-    binding_metadata=(BindingKey("community_id", "community_id", required=True),),
+    binding_metadata=(
+        BindingKey("community_id", "community_id", required=True),
+        BindingKey("kind", "kind"),
+    ),
 )
 
 

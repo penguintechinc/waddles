@@ -384,3 +384,20 @@ class TestHttpAdmin:
         assert (await sclient.post(_base(pc_db), headers=no_scope, data=_body())).status_code == 403
         assert (await sclient.post(_base(pc_db), data=_body())).status_code == 401
         assert await raw_rows(pc_db, "platform_connections") == []
+
+
+def test_kind_metadata_is_optional_org_only_and_reaches_the_data_plane() -> None:
+    """The data plane derives roster (default) or events from the optional ``kind``; never lobby."""
+    import re
+
+    fields = {f.name: f for f in SPECTRUM_SPEC.metadata_fields}
+    assert fields["community_id"].required is True
+    assert fields["kind"].required is False
+    assert fields["kind"].pattern is not None
+    for ok in ("roster", "events"):
+        assert re.fullmatch(fields["kind"].pattern, ok)
+    for bad in ("lobby", "forum", "roster;x", ""):
+        assert not re.fullmatch(fields["kind"].pattern, bad)
+    assert "kind" in SPECTRUM_SPEC.runtime_metadata_keys
+    wire = {(b.wire, b.required) for b in SPECTRUM_SPEC.binding_metadata}
+    assert wire == {("community_id", True), ("kind", False)}
