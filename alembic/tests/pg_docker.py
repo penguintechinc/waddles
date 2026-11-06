@@ -137,7 +137,12 @@ CREATE TABLE community_members (
     -- 000_create_base_schema.sql (is_active, left_at) + 0012_schema_drift_columns (removed_at)
     is_active BOOLEAN DEFAULT TRUE,
     left_at TIMESTAMP,
-    removed_at TIMESTAMP
+    removed_at TIMESTAMP,
+    -- 0079_bundle_platform_table column-scopes GRANTs over these baseline columns
+    -- (000_create_base_schema.sql): role is the only UPDATE-able one.
+    role VARCHAR(50),
+    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 -- 0039_event_sync_enabled is the first Alembic migration to FK into
 -- calendar_events -- a legacy table owned by config/postgres/migrations/
