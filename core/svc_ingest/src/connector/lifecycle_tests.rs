@@ -175,7 +175,7 @@ fn ws_cfg(addr: SocketAddr, session: SessionRules) -> WsConfig {
         max_frame_bytes: 1024,
         dedup_window: 0,
         allow_loopback_insecure: true,
-        slot_prefixes: vec![r#""token":""#.into()],
+        slot_prefixes: HashMap::from([("h1".to_string(), vec![r#""token":""#.to_string()])]),
         auto_replies: vec![],
         self_echo: None,
         heartbeat_interval: None,

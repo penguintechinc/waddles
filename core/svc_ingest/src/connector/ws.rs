@@ -36,7 +36,8 @@ pub use super::lifecycle::{LifecycleError, SessionRules};
 use super::secrets::{Destination, TransportSecretSource};
 use super::transport::{Transport, TransportError};
 use super::transport_common::{
-    opaque_id, substitute_slots, validate_endpoint, Applied, FrameRuleMetrics, FrameRules,
+    opaque_id, slot_refusal, slot_refused_error, substitute_slots, validate_endpoint, Applied,
+    FrameRuleMetrics, FrameRules, SlotPrefixes,
 };
 pub use super::transport_common::{AutoReplyRule, FrameRuleError, SelfEchoFilter};
 use super::types::{ConnectionCtx, Handshake};
@@ -87,10 +88,13 @@ pub struct WsConfig {
     /// Permit `ws://` to a loopback host (tests only; the address must
     /// still be in `egress_allow`).
     pub allow_loopback_insecure: bool,
-    /// Host-pinned byte prefixes a credential slot may directly follow in the
-    /// connector-authored handshake (e.g. `PASS oauth:`). Empty = the handshake
-    /// may not carry any secret slot (fail closed); never derived from guest data.
-    pub slot_prefixes: Vec<String>,
+    /// Host-pinned byte prefixes, PER secret handle, that the handle's
+    /// credential slot may directly follow in the connector-authored handshake
+    /// (e.g. `pass` -> `PASS oauth:`, `discord-bot` -> `"token":"`). A handle
+    /// with no entry may not be substituted (fail closed), one handle's prefix
+    /// never authorizes another's slot, and every key must be a declared
+    /// handle (refused at construction). Never derived from guest data.
+    pub slot_prefixes: SlotPrefixes,
     /// Host-owned, declarative auto-reply rules (e.g. a keepalive
     /// `PING :<t>` -> `PONG :<t>`), answered by the transport itself because
     /// the connector's `on-frame` can only return events. Empty = none (the
@@ -151,6 +155,13 @@ impl<S: TransportSecretSource> WsTransport<S> {
         }
         let rules = FrameRules::new(cfg.auto_replies.clone(), cfg.self_echo.clone())
             .map_err(|e| TransportError::Connect(e.to_string()))?;
+        if cfg.slot_prefixes.iter().any(|(h, v)| {
+            !cfg.handles.contains_key(h) || v.is_empty() || v.iter().any(String::is_empty)
+        }) {
+            return Err(TransportError::Connect(
+                "slot_prefixes must name declared handles with non-empty prefixes".into(),
+            ));
+        }
         let engine = SessionEngine::new_with(cfg.session.clone(), cfg.allow_loopback_insecure)
             .map_err(|e| TransportError::Connect(e.to_string()))?;
         if engine.has_token_template() && cfg.resume_token.is_some() {
@@ -267,18 +278,21 @@ impl<S: TransportSecretSource> WsTransport<S> {
                 secret_refs: handshake.secret_refs,
             }
         };
-        let prefixes: Vec<Vec<u8>> = self
-            .cfg
-            .slot_prefixes
-            .iter()
-            .map(|p| p.as_bytes().to_vec())
-            .collect();
+        if let Some(refusal) = slot_refusal(
+            &handshake.bytes,
+            &handshake.secret_refs,
+            &self.cfg.slot_prefixes,
+        ) {
+            self.count("slot_pairing", refusal.outcome(), 1);
+            tracing::warn!(platform = %self.cfg.platform, outcome = refusal.outcome(), "handshake credential slot refused: handle/prefix pairing not declared");
+            return Err(slot_refused_error());
+        }
         let payload = substitute_slots(
             &self.secrets,
             &self.cfg.handles,
             &handshake.bytes,
             &handshake.secret_refs,
-            &prefixes,
+            &self.cfg.slot_prefixes,
             &dest,
         )
         .await?;
@@ -639,7 +653,7 @@ mod tests {
             max_frame_bytes: 1024,
             dedup_window: 0,
             allow_loopback_insecure: true,
-            slot_prefixes: vec![r#""token":""#.into()],
+            slot_prefixes: HashMap::from([("h1".to_string(), vec![r#""token":""#.to_string()])]),
             auto_replies: vec![],
             self_echo: None,
             heartbeat_interval: None,
@@ -693,6 +707,86 @@ mod tests {
         };
         assert!(t.send_handshake(evil).await.is_err());
         assert_eq!(n.load(Ordering::SeqCst), 0, "secret never resolved");
+    }
+
+    /// Slot after a prefix declared only for a DIFFERENT handle is refused,
+    /// counted with its typed reason, and the secret is never resolved.
+    #[tokio::test]
+    async fn handshake_slot_after_other_handles_prefix_is_refused_and_counted() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve(l, vec![(false, vec![])], tx));
+        let n = Arc::new(AtomicUsize::new(0));
+        let mut c = cfg(addr);
+        c.handles.insert("h2".into(), REF);
+        c.slot_prefixes = HashMap::from([
+            ("h1".to_string(), vec!["PASS oauth:".to_string()]),
+            ("h2".to_string(), vec!["NICK ".to_string()]),
+        ]);
+        let reg = prometheus::Registry::new();
+        let m = FrameRuleMetrics::register(&reg).unwrap();
+        let mut t = WsTransport::new(c, CountingSecrets(n.clone()))
+            .unwrap()
+            .with_metrics(m);
+        t.connect().await.unwrap();
+        let evil = Handshake {
+            bytes: b"NICK {{TOKEN}}\r\n".to_vec(),
+            secret_refs: vec![("{{TOKEN}}".into(), "h1".into())],
+        };
+        assert!(t.send_handshake(evil).await.is_err());
+        // Handle with no declared prefix at all.
+        let undeclared = Handshake {
+            bytes: b"x{{N}}".to_vec(),
+            secret_refs: vec![("{{N}}".into(), "h1".into())],
+        };
+        let mut t2 = t;
+        t2.cfg.slot_prefixes = HashMap::new();
+        assert!(t2.send_handshake(undeclared).await.is_err());
+        assert_eq!(n.load(Ordering::SeqCst), 0, "secret never resolved");
+        let fam = reg
+            .gather()
+            .into_iter()
+            .find(|f| f.name() == "svc_ingest_transport_frame_rules_total")
+            .unwrap();
+        let mut got: Vec<(String, u64)> = fam
+            .get_metric()
+            .iter()
+            .map(|m| {
+                let outcome = m
+                    .get_label()
+                    .iter()
+                    .find(|l| l.name() == "outcome")
+                    .unwrap()
+                    .value()
+                    .to_string();
+                (outcome, m.get_counter().value() as u64)
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("refused_placement".to_string(), 1),
+                ("refused_undeclared".to_string(), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn slot_prefix_config_is_validated_at_construction() {
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let n = || CountingSecrets(Arc::new(AtomicUsize::new(0)));
+        for bad in [
+            HashMap::from([("nope".to_string(), vec!["x".to_string()])]),
+            HashMap::from([("h1".to_string(), vec![])]),
+            HashMap::from([("h1".to_string(), vec![String::new()])]),
+        ] {
+            let mut c = cfg(addr);
+            c.slot_prefixes = bad;
+            assert!(WsTransport::new(c, n()).is_err());
+        }
+        assert!(WsTransport::new(cfg(addr), n()).is_ok());
     }
 
     #[tokio::test]

@@ -84,12 +84,48 @@ fn uniform() -> TransportError {
     TransportError::Handshake("handshake secret substitution failed".into())
 }
 
+/// Host-pinned credential-slot prefixes, keyed by secret handle: each handle
+/// declares the exact byte prefix(es) its slot may directly follow (e.g.
+/// `pass` -> `PASS oauth:`). A handle with no entry may not be substituted at
+/// all, and one handle's prefix never authorizes another handle's slot.
+pub type SlotPrefixes = HashMap<String, Vec<String>>;
+
+/// Why a slot/handle pairing was refused (host-side diagnostics and metrics
+/// only; the guest-visible error stays uniform).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SlotRefusal {
+    /// The handle has no declared prefix at all (fail closed).
+    #[error("handle has no declared slot prefix")]
+    HandleNotDeclared,
+    /// An occurrence of the slot is not directly after one of ITS handle's
+    /// prefixes and before a terminator.
+    #[error("slot placement does not match the handle's declared prefix")]
+    PlacementRefused,
+}
+
+impl SlotRefusal {
+    /// Stable, low-cardinality metric outcome label.
+    #[must_use]
+    pub fn outcome(self) -> &'static str {
+        match self {
+            Self::HandleNotDeclared => "refused_undeclared",
+            Self::PlacementRefused => "refused_placement",
+        }
+    }
+}
+
+/// The guest-visible error for a refused slot pairing (identical to every
+/// other substitution failure: no oracle).
+pub(crate) fn slot_refused_error() -> TransportError {
+    uniform()
+}
+
 /// True when EVERY occurrence of `slot` in `bytes` sits directly after one of
-/// the host-pinned `prefixes` and directly before a terminator (end, `"`, CR or
-/// LF). The connector authors the template, so without this a hostile one could
-/// place the credential in a message body or target (e.g. `PRIVMSG #x :{{AUTH}}`)
-/// and publish it. No prefixes configured = nothing may be substituted.
-fn placement_ok(bytes: &[u8], slot: &[u8], prefixes: &[Vec<u8>]) -> bool {
+/// the handle's own host-pinned `prefixes` and directly before a terminator
+/// (end, `"`, CR or LF). The connector authors the template, so without this a
+/// hostile one could place the credential in a message body or target (e.g.
+/// `PRIVMSG #x :{{AUTH}}`) and publish it. No prefixes = nothing substituted.
+fn placement_ok(bytes: &[u8], slot: &[u8], prefixes: &[String]) -> bool {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i..].starts_with(slot) {
@@ -97,7 +133,7 @@ fn placement_ok(bytes: &[u8], slot: &[u8], prefixes: &[Vec<u8>]) -> bool {
             let term_ok = matches!(after, None | Some(b'"' | b'\r' | b'\n'));
             let pre_ok = prefixes
                 .iter()
-                .any(|p| !p.is_empty() && bytes[..i].ends_with(p));
+                .any(|p| !p.is_empty() && bytes[..i].ends_with(p.as_bytes()));
             if !(term_ok && pre_ok) {
                 return false;
             }
@@ -109,19 +145,52 @@ fn placement_ok(bytes: &[u8], slot: &[u8], prefixes: &[Vec<u8>]) -> bool {
     true
 }
 
+/// Checks one `slot`/`handle` pairing against the handle's own declared
+/// `prefixes`; `Some` is the refusal reason.
+fn pairing_refusal(
+    bytes: &[u8],
+    slot: &str,
+    handle: &str,
+    prefixes: &SlotPrefixes,
+) -> Option<SlotRefusal> {
+    let declared = prefixes
+        .get(handle)
+        .filter(|v| v.iter().any(|p| !p.is_empty()));
+    let Some(declared) = declared else {
+        return Some(SlotRefusal::HandleNotDeclared);
+    };
+    if placement_ok(bytes, slot.as_bytes(), declared) {
+        None
+    } else {
+        Some(SlotRefusal::PlacementRefused)
+    }
+}
+
+/// Checks every `(slot, handle)` pairing; the first violation is returned.
+/// [`substitute_slots`] enforces the same check; transports call this first
+/// to record the typed reason (log + metric) before failing uniformly.
+pub(crate) fn slot_refusal(
+    bytes: &[u8],
+    refs: &[(String, String)],
+    prefixes: &SlotPrefixes,
+) -> Option<SlotRefusal> {
+    refs.iter()
+        .find_map(|(slot, handle)| pairing_refusal(bytes, slot, handle, prefixes))
+}
+
 /// Substitutes every `(slot, handle)` pair into `bytes` in ONE pass over the
 /// IMMUTABLE original (already-substituted text is never re-scanned). `slot`
 /// is the literal placeholder the connector put in the handshake; each must
 /// occur at least once, none may be empty, duplicated, or a substring of
 /// another slot. Output is a pre-sized zeroizing buffer (no realloc copies);
 /// resolved secrets zeroize on drop inside this call. Every slot occurrence must
-/// satisfy [`placement_ok`] against the host-owned `prefixes` (fail closed).
+/// satisfy its OWN handle's host-owned `prefixes` (fail closed).
 pub(crate) async fn substitute_slots<S: TransportSecretSource>(
     secrets: &S,
     handles: &HashMap<String, ConnectionRef>,
     bytes: &[u8],
     refs: &[(String, String)],
-    prefixes: &[Vec<u8>],
+    prefixes: &SlotPrefixes,
     dest: &Destination,
 ) -> Result<Zeroizing<Vec<u8>>, TransportError> {
     if refs.len() > MAX_SECRET_REFS {
@@ -135,7 +204,7 @@ pub(crate) async fn substitute_slots<S: TransportSecretSource>(
         if bad_shape
             || !handles.contains_key(handle)
             || count_matches(bytes, slot.as_bytes()) == 0
-            || !placement_ok(bytes, slot.as_bytes(), prefixes)
+            || pairing_refusal(bytes, slot, handle, prefixes).is_some()
         {
             return Err(uniform());
         }
@@ -542,6 +611,15 @@ mod tests {
             .collect()
     }
 
+    /// Per-handle prefix map from `(handle, prefix)` pairs.
+    fn pins(v: &[(&str, &str)]) -> SlotPrefixes {
+        let mut m = SlotPrefixes::new();
+        for (h, p) in v {
+            m.entry(h.to_string()).or_default().push(p.to_string());
+        }
+        m
+    }
+
     fn refs(v: &[(&str, &str)]) -> Vec<(String, String)> {
         v.iter()
             .map(|(a, b)| (a.to_string(), b.to_string()))
@@ -557,7 +635,7 @@ mod tests {
             &handles(),
             b"k={{A}}\nk={{B}}\nk={{A}}",
             &refs(&[("{{A}}", "a"), ("{{B}}", "b")]),
-            &[b"k=".to_vec()],
+            &pins(&[("a", "k="), ("b", "k=")]),
             &dest(),
         )
         .await
@@ -583,7 +661,7 @@ mod tests {
                 &h,
                 b"{{A}} {{A}}x",
                 &refs(&c),
-                &[b" ".to_vec()],
+                &pins(&[("a", " "), ("b", " ")]),
                 &dest(),
             )
             .await
@@ -594,9 +672,11 @@ mod tests {
         let many: Vec<(String, String)> = (0..=MAX_SECRET_REFS)
             .map(|i| (format!("{{{{S{i}}}}}"), "a".into()))
             .collect();
-        assert!(substitute_slots(&s, &h, b"x", &many, &[], &dest())
-            .await
-            .is_err());
+        assert!(
+            substitute_slots(&s, &h, b"x", &many, &SlotPrefixes::new(), &dest())
+                .await
+                .is_err()
+        );
     }
 
     /// regression: p982-A -- a connector-authored template must not be able to
@@ -607,7 +687,7 @@ mod tests {
         let s = MapSecrets(HashMap::from([(1, "tok"), (2, "x")]));
         let h = handles();
         let r = refs(&[("{{AUTH}}", "a")]);
-        let pins = [b"PASS oauth:".to_vec()];
+        let pins = pins(&[("a", "PASS oauth:")]);
         let ok = substitute_slots(
             &s,
             &h,
@@ -634,11 +714,16 @@ mod tests {
             );
         }
         // No pins configured = deny everything (fail closed).
-        assert!(
-            substitute_slots(&s, &h, b"PASS oauth:{{AUTH}}", &r, &[], &dest())
-                .await
-                .is_err()
-        );
+        assert!(substitute_slots(
+            &s,
+            &h,
+            b"PASS oauth:{{AUTH}}",
+            &r,
+            &SlotPrefixes::new(),
+            &dest()
+        )
+        .await
+        .is_err());
     }
 
     /// regression: p982-C -- CRLF in the guest template cannot move the
@@ -647,7 +732,7 @@ mod tests {
     async fn crlf_injected_template_cannot_relocate_secret() {
         let s = MapSecrets(HashMap::from([(1, "tok")]));
         let r = refs(&[("{{AUTH}}", "a")]);
-        let pins = [b"PASS oauth:".to_vec()];
+        let pins = pins(&[("a", "PASS oauth:")]);
         let out = substitute_slots(
             &s,
             &handles(),
@@ -858,5 +943,79 @@ mod tests {
             reg.gather()[0].get_metric()[0].get_counter().value() as u64,
             2
         );
+    }
+
+    /// regression: per-handle prefixes -- a credential slot after a
+    /// NON-credential prefix (`NICK `) is refused even though that prefix is
+    /// declared for another handle.
+    #[tokio::test]
+    async fn slot_prefix_is_bound_to_its_own_handle() {
+        let s = MapSecrets(HashMap::from([(1, "tok"), (2, "nickname")]));
+        let h = handles();
+        // a = secret (PASS oauth:), b = nick (NICK ).
+        let p = pins(&[("a", "PASS oauth:"), ("b", "NICK ")]);
+        let r = refs(&[("{{PASS}}", "a"), ("{{NICK}}", "b")]);
+        let ok = substitute_slots(
+            &s,
+            &h,
+            b"PASS oauth:{{PASS}}\r\nNICK {{NICK}}\r\n",
+            &r,
+            &p,
+            &dest(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(&ok[..], b"PASS oauth:tok\r\nNICK nickname\r\n");
+        // Secret slot placed after the nick handle's prefix: refused.
+        for evil in [
+            &b"NICK {{PASS}}\r\nPASS oauth:{{NICK}}"[..],
+            b"NICK {{PASS}}",
+        ] {
+            assert!(
+                substitute_slots(&s, &h, evil, &r, &p, &dest())
+                    .await
+                    .is_err(),
+                "{}",
+                String::from_utf8_lossy(evil)
+            );
+        }
+        // Same slot legitimately placed once and illegitimately once: refused.
+        assert!(substitute_slots(
+            &s,
+            &h,
+            b"PASS oauth:{{PASS}}\r\nNICK {{PASS}}",
+            &refs(&[("{{PASS}}", "a")]),
+            &p,
+            &dest()
+        )
+        .await
+        .is_err());
+    }
+
+    #[test]
+    fn refusal_reasons_are_typed() {
+        let r = refs(&[("{{A}}", "a")]);
+        let p = pins(&[("a", "k=")]);
+        assert_eq!(slot_refusal(b"k={{A}}", &r, &p), None);
+        assert_eq!(
+            slot_refusal(b"x={{A}}", &r, &p),
+            Some(SlotRefusal::PlacementRefused)
+        );
+        assert_eq!(
+            slot_refusal(b"k={{A}}", &r, &pins(&[("b", "k=")])),
+            Some(SlotRefusal::HandleNotDeclared)
+        );
+        assert_eq!(
+            slot_refusal(b"k={{A}}", &r, &pins(&[("a", "")])),
+            Some(SlotRefusal::HandleNotDeclared)
+        );
+        assert_eq!(
+            SlotRefusal::HandleNotDeclared.outcome(),
+            "refused_undeclared"
+        );
+        assert_eq!(SlotRefusal::PlacementRefused.outcome(), "refused_placement");
+        assert!(!SlotRefusal::PlacementRefused.to_string().is_empty());
+        assert!(!SlotRefusal::HandleNotDeclared.to_string().is_empty());
+        assert_eq!(slot_refused_error(), uniform());
     }
 }

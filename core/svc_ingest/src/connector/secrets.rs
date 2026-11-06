@@ -454,7 +454,7 @@ mod tests {
             &HashMap::from([("auth".into(), CONNECTION)]),
             template,
             &[("{{AUTH}}".into(), "auth".into())],
-            &[b"\"token\":\"".to_vec()],
+            &HashMap::from([("auth".to_string(), vec!["\"token\":\"".to_string()])]),
             &dest(),
         )
         .await
@@ -468,6 +468,55 @@ mod tests {
                 .err(),
             Some(SecretError::Missing)
         );
+    }
+
+    /// Per-handle prefix pairing against the REAL `TransportSecrets` source:
+    /// the secret handle only substitutes after its own prefix, and a refused
+    /// pairing never reaches the hub (no credential resolve happens).
+    #[tokio::test]
+    async fn secret_handle_only_substitutes_after_its_own_prefix() {
+        let _env = env_read().await;
+        let server = MockServer::start().await;
+        let (resolver, _sa) = resolver(&server).await;
+        let resolver = Arc::new(resolver);
+        credential(&server, "oauth-token").await;
+        let source = TransportSecrets::new(resolver, 7).unwrap();
+        let handles = HashMap::from([
+            ("pass".to_string(), CONNECTION),
+            ("nick".to_string(), CONNECTION),
+        ]);
+        let prefixes = HashMap::from([
+            ("pass".to_string(), vec!["PASS oauth:".to_string()]),
+            ("nick".to_string(), vec!["NICK ".to_string()]),
+        ]);
+        let refs = [("{{PASS}}".to_string(), "pass".to_string())];
+        let before = server.received_requests().await.unwrap().len();
+        let refused = substitute_slots(
+            &source,
+            &handles,
+            b"NICK {{PASS}}\r\n",
+            &refs,
+            &prefixes,
+            &dest(),
+        )
+        .await;
+        assert!(refused.is_err());
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            before,
+            "no resolve on refusal"
+        );
+        let ok = substitute_slots(
+            &source,
+            &handles,
+            b"PASS oauth:{{PASS}}\r\n",
+            &refs,
+            &prefixes,
+            &dest(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(&ok[..], b"PASS oauth:oauth-token\r\n");
     }
 
     /// A foreign community handle is rejected before a machine JWT is minted,
