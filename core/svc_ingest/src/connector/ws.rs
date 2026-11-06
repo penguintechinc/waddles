@@ -37,7 +37,7 @@ use super::secrets::{Destination, TransportSecretSource};
 use super::transport::{Transport, TransportError};
 use super::transport_common::{
     opaque_id, slot_refusal, slot_refused_error, substitute_slots, validate_endpoint, Applied,
-    FrameRuleMetrics, FrameRules, SlotPrefixes,
+    FrameRuleMetrics, FrameRules, SlotPrefixes, SECRET_NOT_SPLICE_SAFE,
 };
 pub use super::transport_common::{AutoReplyRule, FrameRuleError, SelfEchoFilter};
 use super::types::{ConnectionCtx, Handshake};
@@ -295,7 +295,13 @@ impl<S: TransportSecretSource> WsTransport<S> {
             &self.cfg.slot_prefixes,
             &dest,
         )
-        .await?;
+        .await
+        .inspect_err(|e| {
+            if matches!(e, TransportError::Fatal(m) if m == SECRET_NOT_SPLICE_SAFE) {
+                self.count("slot_pairing", "refused_secret_charset", 1);
+                tracing::warn!(platform = %self.cfg.platform, "handshake secret refused: not splice-safe");
+            }
+        })?;
         let stream = self
             .stream
             .as_mut()
@@ -653,7 +659,10 @@ mod tests {
             max_frame_bytes: 1024,
             dedup_window: 0,
             allow_loopback_insecure: true,
-            slot_prefixes: HashMap::from([("h1".to_string(), vec![r#""token":""#.to_string()])]),
+            slot_prefixes: HashMap::from([(
+                "h1".to_string(),
+                vec![r#"{"op":"auth","token":""#.to_string()],
+            )]),
             auto_replies: vec![],
             self_echo: None,
             heartbeat_interval: None,
@@ -771,6 +780,50 @@ mod tests {
                 ("refused_undeclared".to_string(), 1)
             ]
         );
+    }
+
+    /// Resolves a hostile secret carrying CRLF (command injection attempt).
+    struct CrlfSecrets;
+    impl TransportSecretSource for CrlfSecrets {
+        fn resolve(
+            &self,
+            _r: ConnectionRef,
+            _d: Destination,
+        ) -> BoxFut<'_, Result<crate::connector::secrets::ResolvedAuth, SecretError>> {
+            Box::pin(async {
+                Ok(crate::connector::secrets::ResolvedAuth {
+                    secret: SecretString::new("a\r\nPRIVMSG #c :x".into()),
+                    header: None,
+                })
+            })
+        }
+    }
+
+    /// A secret that could inject structure is refused (typed, counted) and
+    /// nothing is sent.
+    #[tokio::test]
+    async fn crlf_secret_is_refused_and_counted() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(serve(l, vec![(false, vec![])], tx));
+        let reg = prometheus::Registry::new();
+        let m = FrameRuleMetrics::register(&reg).unwrap();
+        let mut t = WsTransport::new(cfg(addr), CrlfSecrets)
+            .unwrap()
+            .with_metrics(m);
+        t.connect().await.unwrap();
+        assert!(t.send_handshake(hs()).await.is_err());
+        let fam = reg
+            .gather()
+            .into_iter()
+            .find(|f| f.name() == "svc_ingest_transport_frame_rules_total")
+            .unwrap();
+        assert!(fam.get_metric().iter().any(|m| m
+            .get_label()
+            .iter()
+            .any(|l| l.value() == "refused_secret_charset")
+            && m.get_counter().value() as u64 == 1));
     }
 
     #[test]

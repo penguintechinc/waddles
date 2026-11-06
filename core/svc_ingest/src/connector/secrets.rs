@@ -448,18 +448,21 @@ mod tests {
         let (resolver, _sa) = resolver(&server).await;
         let resolver = Arc::new(resolver);
         credential(&server, "oauth-token").await;
-        let template = b"{\"token\":\"{{AUTH}}\"}";
+        let template = b"{\"op\":2,\"d\":{\"token\":\"{{AUTH}}\"}}";
         let output = substitute_slots(
             &TransportSecrets::new(resolver.clone(), 7).unwrap(),
             &HashMap::from([("auth".into(), CONNECTION)]),
             template,
             &[("{{AUTH}}".into(), "auth".into())],
-            &HashMap::from([("auth".to_string(), vec!["\"token\":\"".to_string()])]),
+            &HashMap::from([(
+                "auth".to_string(),
+                vec![r#"{"op":2,"d":{"token":""#.to_string()],
+            )]),
             &dest(),
         )
         .await
         .unwrap();
-        assert_eq!(&output[..], b"{\"token\":\"oauth-token\"}");
+        assert_eq!(&output[..], b"{\"op\":2,\"d\":{\"token\":\"oauth-token\"}}");
         credential(&server, "oauth-token").await;
         assert_eq!(
             ConnectionResolverSecrets(resolver)

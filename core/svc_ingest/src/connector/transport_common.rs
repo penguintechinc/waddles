@@ -75,6 +75,10 @@ fn splice_safe(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| !c.is_control() && c != '"' && c != '\\')
 }
 
+/// Reason text of the typed refusal for a secret that could inject structure
+/// (CR/LF/NUL/control, `"` or `\`); transports key their metric on it.
+pub(crate) const SECRET_NOT_SPLICE_SAFE: &str = "secret not splice-safe";
+
 /// Max `(slot, handle)` pairs per handshake.
 pub(crate) const MAX_SECRET_REFS: usize = 8;
 
@@ -120,8 +124,24 @@ pub(crate) fn slot_refused_error() -> TransportError {
     uniform()
 }
 
+/// True when `prefix` ends exactly at `slot_at`, STARTS at offset 0 or directly
+/// after CR/LF, and the bytes in between equal it exactly. A mere suffix match
+/// is not enough: `PRIVMSG #c :PASS oauth:{{S}}` ends with the prefix but would
+/// publish the credential into chat.
+fn anchored_prefix(bytes: &[u8], slot_at: usize, prefix: &str) -> bool {
+    let p = prefix.as_bytes();
+    if p.is_empty() {
+        return false;
+    }
+    slot_at.checked_sub(p.len()).is_some_and(|start| {
+        let at_boundary = start == 0 || matches!(bytes[start - 1], b'\n' | b'\r');
+        at_boundary && &bytes[start..slot_at] == p
+    })
+}
+
 /// True when EVERY occurrence of `slot` in `bytes` sits directly after one of
-/// the handle's own host-pinned `prefixes` and directly before a terminator
+/// the handle's own host-pinned `prefixes` (anchored at frame/line start, see
+/// [`anchored_prefix`]) and directly before a terminator
 /// (end, `"`, CR or LF). The connector authors the template, so without this a
 /// hostile one could place the credential in a message body or target (e.g.
 /// `PRIVMSG #x :{{AUTH}}`) and publish it. No prefixes = nothing substituted.
@@ -131,9 +151,7 @@ fn placement_ok(bytes: &[u8], slot: &[u8], prefixes: &[String]) -> bool {
         if bytes[i..].starts_with(slot) {
             let after = bytes.get(i + slot.len()).copied();
             let term_ok = matches!(after, None | Some(b'"' | b'\r' | b'\n'));
-            let pre_ok = prefixes
-                .iter()
-                .any(|p| !p.is_empty() && bytes[..i].ends_with(p.as_bytes()));
+            let pre_ok = prefixes.iter().any(|p| anchored_prefix(bytes, i, p));
             if !(term_ok && pre_ok) {
                 return false;
             }
@@ -214,7 +232,7 @@ pub(crate) async fn substitute_slots<S: TransportSecretSource>(
     for (slot, handle) in refs {
         let secret = resolve_handle(secrets, handles, handle, dest).await?.secret;
         if !splice_safe(secret.expose()) {
-            return Err(TransportError::Fatal("secret not splice-safe".into()));
+            return Err(TransportError::Fatal(SECRET_NOT_SPLICE_SAFE.into()));
         }
         extra = extra.saturating_add(
             count_matches(bytes, slot.as_bytes()).saturating_mul(secret.expose().len()),
@@ -1017,5 +1035,88 @@ mod tests {
         assert!(!SlotRefusal::PlacementRefused.to_string().is_empty());
         assert!(!SlotRefusal::HandleNotDeclared.to_string().is_empty());
         assert_eq!(slot_refused_error(), uniform());
+    }
+
+    /// regression: unanchored suffix match -- a prefix that merely ENDS the
+    /// preceding bytes (mid-line IRC body, nested JSON key) is refused; a
+    /// prefix at frame start or right after CR/LF is accepted.
+    #[tokio::test]
+    async fn prefix_must_be_anchored_at_frame_or_line_start() {
+        let s = MapSecrets(HashMap::from([(1, "tok"), (2, "x")]));
+        let h = handles();
+        let r = refs(&[("{{S}}", "a")]);
+        let irc = pins(&[("a", "PASS oauth:")]);
+        for ok in [
+            &b"PASS oauth:{{S}}"[..],
+            b"CAP REQ :x\r\nPASS oauth:{{S}}\r\n",
+            b"CAP REQ :x\nPASS oauth:{{S}}",
+        ] {
+            assert!(substitute_slots(&s, &h, ok, &r, &irc, &dest())
+                .await
+                .is_ok());
+        }
+        for evil in [
+            &b"PRIVMSG #chan :PASS oauth:{{S}}"[..],
+            b"PASS oauth:{{S}}\r\nPRIVMSG #c :PASS oauth:{{S}}",
+            b"xPASS oauth:{{S}}",
+        ] {
+            assert!(
+                substitute_slots(&s, &h, evil, &r, &irc, &dest())
+                    .await
+                    .is_err(),
+                "{}",
+                String::from_utf8_lossy(evil)
+            );
+        }
+        let json = pins(&[("a", r#"{"op":2,"d":{"token":""#)]);
+        let ok = substitute_slots(
+            &s,
+            &h,
+            br#"{"op":2,"d":{"token":"{{S}}"}}"#,
+            &r,
+            &json,
+            &dest(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(&ok[..], br#"{"op":2,"d":{"token":"tok"}}"#);
+        for evil in [
+            &br#"{"op":2,"d":{"x":"a","y":{"token":"{{S}}"}}}"#[..],
+            br#"{"op":2,"d":{"x":"\"token\":\"{{S}}"}}"#,
+            br#"{"a":"x"token":"{{S}}"}"#,
+        ] {
+            assert!(
+                substitute_slots(&s, &h, evil, &r, &json, &dest())
+                    .await
+                    .is_err(),
+                "{}",
+                String::from_utf8_lossy(evil)
+            );
+        }
+    }
+
+    #[test]
+    fn anchored_prefix_edges() {
+        assert!(!anchored_prefix(b"ab", 0, "ab"));
+        assert!(!anchored_prefix(b"ab", 2, ""));
+        assert!(!anchored_prefix(b"ab", 1, "abc"));
+        assert!(anchored_prefix(b"\rab", 3, "ab"));
+        assert!(!anchored_prefix(b" ab", 3, "ab"));
+    }
+
+    /// A secret carrying CR/LF/NUL/quote/backslash can never be spliced
+    /// (structure injection): fail closed with the typed splice reason.
+    #[tokio::test]
+    async fn secret_with_structure_chars_is_refused() {
+        let h = handles();
+        let r = refs(&[("{{S}}", "a")]);
+        let p = pins(&[("a", "PASS oauth:")]);
+        for bad in ["a\r\nPRIVMSG #c :x", "a\nb", "a\0b", "a\"b", "a\\b"] {
+            let s = MapSecrets(HashMap::from([(1, bad)]));
+            let e = substitute_slots(&s, &h, b"PASS oauth:{{S}}", &r, &p, &dest())
+                .await
+                .unwrap_err();
+            assert_eq!(e, TransportError::Fatal(SECRET_NOT_SPLICE_SAFE.into()));
+        }
     }
 }

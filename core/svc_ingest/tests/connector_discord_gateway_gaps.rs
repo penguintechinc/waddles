@@ -177,7 +177,13 @@ fn cfg(addr: SocketAddr, session: SessionRules) -> WsConfig {
         max_frame_bytes: 4096,
         dedup_window: 0,
         allow_loopback_insecure: true,
-        slot_prefixes: HashMap::from([("bot".to_string(), vec![r#""token":""#.to_string()])]),
+        slot_prefixes: HashMap::from([(
+            "bot".to_string(),
+            vec![
+                r#"{"op":2,"d":{"token":""#.to_string(),
+                r#"{"op":6,"d":{"token":""#.to_string(),
+            ],
+        )]),
         auto_replies: vec![],
         self_echo: None,
         heartbeat_interval: None,

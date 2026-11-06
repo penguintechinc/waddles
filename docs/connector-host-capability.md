@@ -377,13 +377,13 @@ wire, fake platform endpoints; only scheme+host of the overlay template is rewri
 
 `WsConfig::slot_prefixes` is a `HashMap<handle, Vec<prefix>>` (type `SlotPrefixes`). A handshake slot
 may be substituted only when EVERY occurrence sits directly after one of ITS OWN handle's declared prefixes
-and directly before a terminator (end, `"`, CR, LF). One handle's prefix never authorizes another handle's slot,
+(ANCHORED: the prefix starts at frame offset 0 or right after CR/LF and the bytes from there to the slot equal it exactly, so `PRIVMSG #c :PASS oauth:{{S}}` is refused) and directly before a terminator (end, `"`, CR, LF). One handle's prefix never authorizes another handle's slot,
 so a signed overlay cannot place the secret-bearing handle after a non-credential prefix such as `NICK `.
 
 | Profile | `slot_prefixes` |
 |---|---|
 | Twitch IRC | `pass` -> `PASS oauth:`, `nick` -> `NICK `, `channel` -> `JOIN #` |
-| Discord gateway | `discord-bot` -> `"token":"` |
+| Discord gateway | `discord-bot` -> `{"op":2,"d":{"token":"` and `{"op":6,"d":{"token":"` (full leading context from frame start) |
 
 - Fail closed: a handle with no (or only empty) prefix entry is refused; a key that is not a declared handle,
   an empty prefix list or an empty prefix string is refused at `WsTransport::new`.
@@ -391,3 +391,4 @@ so a signed overlay cannot place the secret-bearing handle after a non-credentia
 - A refused pairing returns the uniform handshake error (no oracle), logs a `warn`, and increments
   `svc_ingest_transport_frame_rules_total{rule="slot_pairing",outcome="refused_undeclared|refused_placement"}`.
   The secret is never resolved on refusal.
+- A secret containing CR/LF/NUL/control chars, `"` or `\` is never spliced (`TransportError::Fatal`, metric outcome `refused_secret_charset`).
