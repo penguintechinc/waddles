@@ -785,6 +785,7 @@ async def oauth_start(platform: str) -> OAuthStartResponse | tuple[dict[str, obj
             binding_nonce=nonce,
         )
     except ApiError as exc:
+        logger.warning("auth.oauth_start.refused type=%s code=%s", type(exc).__name__, exc.code)
         return _err(exc)
 
     @after_this_request
@@ -832,6 +833,7 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
             binding_nonce=request.cookies.get(LOGIN_BINDING_COOKIE),
         )
     except ApiError as exc:
+        logger.warning("auth.oauth_callback.refused type=%s code=%s", type(exc).__name__, exc.code)
         error = exc.code if exc.code in (binding.ERR_BINDING, binding.ERR_STATE) else "oauth_failed"
         return redirect(f"{frontend_origin}/login?error={error}")
 
@@ -871,6 +873,7 @@ async def exchange_oauth_code(
             binding_nonce=request.cookies.get(oauth_service.EXCHANGE_BINDING_COOKIE),
         )
     except ApiError as exc:
+        logger.warning("auth.exchange.refused type=%s code=%s", type(exc).__name__, exc.code)
         return _err(exc)
 
     @after_this_request
@@ -900,6 +903,9 @@ async def oauth_link_start(platform: str) -> OAuthStartResponse | tuple[dict[str
             binding_nonce=nonce,
         )
     except ApiError as exc:
+        logger.warning(
+            "auth.oauth_link_start.refused type=%s code=%s", type(exc).__name__, exc.code
+        )
         return _err(exc)
 
     @after_this_request
@@ -933,6 +939,9 @@ async def oauth_link_callback(platform: str):  # type: ignore[no-untyped-def]
             binding_nonce=request.cookies.get(LINK_BINDING_COOKIE),
         )
     except ApiError as exc:
+        logger.warning(
+            "auth.oauth_link_callback.refused type=%s code=%s", type(exc).__name__, exc.code
+        )
         error = exc.code if exc.code in (binding.ERR_BINDING, binding.ERR_STATE) else "link_failed"
         return redirect(f"{frontend_origin}/dashboard/settings?error={error}")
     page = redirect(f"{frontend_origin}/dashboard/settings?linked={platform}")

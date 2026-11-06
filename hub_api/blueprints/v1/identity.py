@@ -12,6 +12,7 @@ under the current login flow.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -25,6 +26,8 @@ from services import identity_service
 from services import install_state_binding as binding
 from services.current_user import get_current_user_id
 from services.errors import ApiError
+
+logger = logging.getLogger(__name__)
 
 identity_bp = Blueprint("v1_user_identities", __name__, url_prefix="/api/v1/user/identities")
 
@@ -183,6 +186,7 @@ async def start_identity_link(platform: str) -> LinkStartResponse | tuple[dict[s
             binding_nonce=nonce,
         )
     except ApiError as exc:
+        logger.warning("identity.link_start.refused type=%s code=%s", type(exc).__name__, exc.code)
         return _err(exc)
 
     @after_this_request
@@ -215,6 +219,9 @@ async def identity_link_callback(platform: str):  # type: ignore[no-untyped-def]
             binding_nonce=request.cookies.get(IDENTITY_BINDING_COOKIE),
         )
     except ApiError as exc:
+        logger.warning(
+            "identity.link_callback.refused type=%s code=%s", type(exc).__name__, exc.code
+        )
         error = (
             exc.code if exc.code in (binding.ERR_BINDING, binding.ERR_STATE) else "linking_failed"
         )
