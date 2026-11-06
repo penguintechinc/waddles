@@ -406,15 +406,9 @@ async fn connect_and_serve<S: ComponentSource>(
     disconnected_at: Option<Instant>,
 ) -> Result<(), ExecutorError> {
     let metrics = metrics::executor_metrics();
-    let (ok_label, fail_label, dial_addr) = match link {
-        Link::Stage => ("connected", "failed", cfg.stage_host_api_addr.as_str()),
-        Link::Connector => (
-            "connector_connected",
-            "connector_failed",
-            cfg.connector_dial_addr().ok_or_else(|| {
-                ExecutorError::Config("CONNECTOR_HOST_API_ADDR is not configured".to_string())
-            })?,
-        ),
+    let (ok_label, fail_label) = match link {
+        Link::Stage => ("connected", "failed"),
+        Link::Connector => ("connector_connected", "connector_failed"),
     };
     let dialed = match link {
         Link::Stage => tls::dial_stage(cfg).await,
@@ -427,12 +421,15 @@ async fn connect_and_serve<S: ComponentSource>(
             return Err(err);
         }
     };
-    let peer = io
-        .get_ref()
-        .0
-        .peer_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|_| dial_addr.to_string());
+    // A connected socket with no peer address is a dead connection: fail loud
+    // (counted as a failed attempt) instead of logging a made-up peer.
+    let peer = match io.get_ref().0.peer_addr() {
+        Ok(a) => a.to_string(),
+        Err(e) => {
+            metrics.record_connection_attempt(fail_label);
+            return Err(ExecutorError::Io(e));
+        }
+    };
     info!(link = link.label(), peer = %peer, attempt, "host-api connecting");
 
     let hello = executor.hello(
