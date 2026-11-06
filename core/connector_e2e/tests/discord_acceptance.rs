@@ -327,6 +327,10 @@ enum Script {
     Lifecycle,
     /// RESUMED, then hold the connection open (heartbeats ACKed).
     Hold,
+    /// RESUMED, then the inbound role-sync dispatches (a member update for
+    /// `FOREIGN_ID`, one for the bot itself, a role create/update/delete),
+    /// then hold the connection open.
+    Roles,
 }
 
 fn dispatch(t: &str, s: u64, d: &serde_json::Value) -> Message {
@@ -481,6 +485,24 @@ async fn play(
         }
         (Script::Hold, _) => {
             let _ = ws.send(resumed).await;
+        }
+        (Script::Roles, _) => {
+            let _ = ws.send(resumed).await;
+            let member = |id: &str, roles: &[&str]| {
+                serde_json::json!({
+                    "guild_id": GUILD, "roles": roles, "nick": "acceptnick",
+                    "user": {"id": id, "username": "acceptdiscorduser"}
+                })
+            };
+            let own = member(BOT_ID, &["9"]);
+            let foreign = member(FOREIGN_ID, &["2002", "1001"]);
+            let _ = ws.send(dispatch("GUILD_MEMBER_UPDATE", 3, &own)).await;
+            let _ = ws.send(dispatch("GUILD_MEMBER_UPDATE", 4, &foreign)).await;
+            let role = serde_json::json!({"guild_id": GUILD, "role": {"id": "1001", "name": "x"}});
+            let gone = serde_json::json!({"guild_id": GUILD, "role_id": "1001"});
+            let _ = ws.send(dispatch("GUILD_ROLE_CREATE", 5, &role)).await;
+            let _ = ws.send(dispatch("GUILD_ROLE_UPDATE", 6, &role)).await;
+            let _ = ws.send(dispatch("GUILD_ROLE_DELETE", 7, &gone)).await;
         }
     }
     false
@@ -1102,7 +1124,7 @@ async fn discord_ingests_tokenizes_publishes_and_meters_every_identify() {
         let v: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(v["op"], 2);
         assert_eq!(v["d"]["token"], ctx.token.as_str(), "slot substituted");
-        assert_eq!(v["d"]["intents"], 33_281);
+        assert_eq!(v["d"]["intents"], 33_283);
         assert!(
             text.contains(r#""d":{"token":""#),
             "token-first IDENTIFY (version 1.0.1): {text}"
@@ -1288,4 +1310,75 @@ async fn a_dead_valkey_fails_closed_and_sends_no_identify() {
 #[test]
 fn production_gateway_bot_base_is_the_discord_api() {
     assert_eq!(DISCORD_API_BASE, "https://discord.com/api/v10");
+}
+
+/// Inbound role sync through the real gateway -> connector -> sink path: the
+/// member update publishes a `guild.member.update` whose actor is the
+/// tokenized UUID (no raw handle / nick anywhere in the stream), the bot's own
+/// member update is dropped, and the role dispatches publish id-only
+/// `guild.role.*` events with no actor. Exactly four events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn role_dispatches_publish_normalized_events_with_a_uuid_actor() {
+    let ctx = Ctx::new(5, Script::Roles, 1000).await;
+    let mut rig = Rig::boot(&ctx, one_bind(&ctx), ctx.kc().await).await;
+    eventually("member update + three role events publish", || {
+        published(&rig.registry) >= 4.0
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        published(&rig.registry),
+        4.0,
+        "the bot's own update is dropped"
+    );
+
+    let keys = ctx.keys().await;
+    assert!(!keys.is_empty(), "no stream under the resolved slug");
+    let mut seen: Vec<String> = Vec::new();
+    for key in &keys {
+        for entry in ctx.entries(key).await {
+            let d = Decoded::of(&entry);
+            assert_eq!(d.env["community_id"], 7);
+            let kind = d.s("/event/event_type").to_owned();
+            match kind.as_str() {
+                "guild.member.update" => {
+                    let actor = d.decrypt(key, "actor", "/event/actor").await;
+                    assert!(is_uuid(&actor), "actor is not a UUID: {actor}");
+                    assert_eq!(actor, pseudonym_uuid("discord", FOREIGN_ID));
+                    assert_eq!(d.s("/event/payload/guild_id"), GUILD);
+                    assert_eq!(d.s("/event/payload/user_id"), FOREIGN_ID);
+                    assert_eq!(
+                        d.env.pointer("/event/payload/role_ids"),
+                        Some(&serde_json::json!(["1001", "2002"])),
+                        "sorted role ids"
+                    );
+                    assert!(
+                        !d.env.to_string().contains("acceptnick"),
+                        "nick must never be published"
+                    );
+                }
+                "guild.role.create" | "guild.role.update" | "guild.role.delete" => {
+                    assert!(
+                        d.env["event"]["actor"].is_null(),
+                        "role events have no actor"
+                    );
+                    assert_eq!(d.s("/event/payload/role_id"), "1001");
+                }
+                other => panic!("unexpected event type {other}"),
+            }
+            seen.push(kind);
+        }
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        [
+            "guild.member.update",
+            "guild.role.create",
+            "guild.role.delete",
+            "guild.role.update"
+        ]
+    );
+    rig.shutdown().await;
+    ctx.cleanup().await;
 }

@@ -301,6 +301,24 @@ pub struct CliConfig {
     )]
     pub bundle_reputation_membership_refresh_s: u64,
 
+    /// Production wiring for the bundle `platform-table` host capability
+    /// (`bundle_host_platform_table::connect`) -- the least-privilege
+    /// `waddles_platform_table` role (`alembic/versions/
+    /// 0079_bundle_platform_table.py`): column-scoped SELECT/UPDATE on the
+    /// allowlisted `community_members` columns + audit INSERT, nothing else.
+    #[arg(long, env = "BUNDLE_PLATFORM_TABLE_HOST", default_value = "localhost")]
+    pub bundle_platform_table_host: String,
+    #[arg(long, env = "BUNDLE_PLATFORM_TABLE_PORT", default_value_t = 5432)]
+    pub bundle_platform_table_port: u16,
+    #[arg(long, env = "BUNDLE_PLATFORM_TABLE_NAME", default_value = "waddlebot")]
+    pub bundle_platform_table_name: String,
+    #[arg(
+        long,
+        env = "BUNDLE_PLATFORM_TABLE_USER",
+        default_value = "waddles_platform_table"
+    )]
+    pub bundle_platform_table_user: String,
+
     /// Production wiring for the bundle `economy` host capability (issue
     /// #714, `bundle_host_economy::connect`) -- the least-privilege
     /// `waddles_economy_runtime` role (`alembic/versions/
@@ -354,6 +372,38 @@ pub struct CliConfig {
     /// `[1, 64]` by [`CliConfig::ai_max_concurrency`]).
     #[arg(long, env = "BUNDLE_AI_MAX_CONCURRENCY", default_value_t = 4)]
     pub ai_max_concurrency: usize,
+    /// S3 endpoint of the bundle bucket (SeaweedFS) the `media` capability writes
+    /// finished products to, under the media-harness prefix (credentials come
+    /// from `MEDIA_BUCKET_ACCESS_KEY_ID` / `MEDIA_BUCKET_SECRET_ACCESS_KEY`).
+    #[arg(
+        long,
+        env = "MEDIA_BUCKET_ENDPOINT",
+        default_value = "http://seaweedfs:8333"
+    )]
+    pub media_bucket_endpoint: String,
+    /// Bundle bucket name for `media` outputs.
+    #[arg(long, env = "MEDIA_BUCKET_NAME", default_value = "waddlebot-bundles")]
+    pub media_bucket_name: String,
+    /// Bundle bucket region for `media` outputs.
+    #[arg(long, env = "MEDIA_BUCKET_REGION", default_value = "us-east-1")]
+    pub media_bucket_region: String,
+    /// Gemini model id for `media.generate-image` (operator config, never a guest value).
+    #[arg(
+        long,
+        env = "MEDIA_GEMINI_IMAGE_MODEL",
+        default_value = "gemini-nano-banana-2.1"
+    )]
+    pub media_image_model: String,
+    /// Gemini model id for `media.submit-music`.
+    #[arg(long, env = "MEDIA_GEMINI_MUSIC_MODEL", default_value = "lyria-3.5")]
+    pub media_music_model: String,
+    /// Gemini model id for `media.submit-video`.
+    #[arg(
+        long,
+        env = "MEDIA_GEMINI_VIDEO_MODEL",
+        default_value = "gemini-omni-1.2-flash"
+    )]
+    pub media_video_model: String,
     /// Poll interval, in whole seconds, for the change-log consumer's
     /// incremental tick (`bundle_active_set::read_safe_seq`/`read_changes`)
     /// -- the full active-set re-read only runs for scopes the change-log
@@ -672,6 +722,11 @@ pub struct Config {
     /// unprovisioned deployment must start; the capability then denies
     /// `not_implemented`. An empty value is treated as unset.
     pub bundle_economy_password: Option<Secret>,
+    /// `BUNDLE_PLATFORM_TABLE_PASSWORD` for the `platform-table` capability's
+    /// `waddles_platform_table` connection. `Option`: flag defaults OFF, an
+    /// unprovisioned deployment must start; the capability then denies
+    /// `not_implemented`. Empty is treated as unset.
+    pub bundle_platform_table_password: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -696,6 +751,13 @@ impl fmt::Debug for Config {
                 "bundle_reputation_password",
                 &self
                     .bundle_reputation_password
+                    .as_ref()
+                    .map(|_| Secret::new("")),
+            )
+            .field(
+                "bundle_platform_table_password",
+                &self
+                    .bundle_platform_table_password
                     .as_ref()
                     .map(|_| Secret::new("")),
             )
@@ -758,6 +820,10 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .map(Secret::new);
+        let bundle_platform_table_password = std::env::var("BUNDLE_PLATFORM_TABLE_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
         Ok(Self {
             cli,
             db_password,
@@ -768,6 +834,7 @@ impl Config {
             bundle_db_password,
             bundle_reputation_password,
             bundle_economy_password,
+            bundle_platform_table_password,
         })
     }
 }
@@ -795,6 +862,7 @@ mod tests {
             "BUNDLE_DB_PASSWORD",
             "BUNDLE_REPUTATION_PASSWORD",
             "BUNDLE_ECONOMY_PASSWORD",
+            "BUNDLE_PLATFORM_TABLE_PASSWORD",
         ] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.

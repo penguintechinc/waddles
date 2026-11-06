@@ -100,6 +100,7 @@ fn poll_cfg(s: &MockServer, org: bool) -> PollConfig {
             }],
             page_field: org.then(|| "page".to_owned()),
         },
+        rediscover: None,
     }
 }
 

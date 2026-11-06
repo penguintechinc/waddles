@@ -10,6 +10,14 @@ import * as AuthContext from '../../../contexts/AuthContext';
 import MyChannels from '../MyChannels';
 
 const LINKED = '/api/v1/user/linked-platforms';
+const PROVIDERS = {
+  success: true,
+  providers: [
+    { platform: 'discord', displayName: 'Discord' },
+    { platform: 'twitch', displayName: 'Twitch' },
+    { platform: 'google', displayName: 'Google' },
+  ],
+};
 let http;
 const realLocation = window.location;
 
@@ -36,6 +44,7 @@ function mount() {
 describe('MyChannels connect flow', () => {
   it('GETs the link route with the session and redirects to the authorizeUrl from hub-api', async () => {
     http = stubHttp([api, apiClient], {
+      'GET /api/v1/auth/providers': PROVIDERS,
       [`GET ${LINKED}`]: { platforms: [] },
       'GET /api/v1/auth/oauth/discord/link': { success: true, authorizeUrl: 'https://discord.example/authorize?state=s1', state: 's1' },
     });
@@ -46,8 +55,9 @@ describe('MyChannels connect flow', () => {
     expect(http.seen.some((r) => r.url === '/api/v1/auth/discord')).toBe(false);
   });
 
-  it.each(['twitch', 'slack'])('supports %s', async (key) => {
+  it.each(['twitch'])('supports %s', async (key) => {
     http = stubHttp([api, apiClient], {
+      'GET /api/v1/auth/providers': PROVIDERS,
       [`GET ${LINKED}`]: { platforms: [] },
       [`GET /api/v1/auth/oauth/${key}/link`]: { authorizeUrl: `https://${key}.example/a` },
     });
@@ -56,8 +66,19 @@ describe('MyChannels connect flow', () => {
     await waitFor(() => expect(window.location.href).toBe(`https://${key}.example/a`));
   });
 
+  it('hides providers hub-api does not enable (Slack) from the connect list', async () => {
+    http = stubHttp([api, apiClient], {
+      'GET /api/v1/auth/providers': PROVIDERS,
+      [`GET ${LINKED}`]: { platforms: [] },
+    });
+    mount();
+    await screen.findByRole('button', { name: 'Connect Discord' });
+    expect(screen.queryByRole('button', { name: /Connect Slack/i })).toBeNull();
+  });
+
   it('surfaces the server error and does not navigate', async () => {
     http = stubHttp([api, apiClient], {
+      'GET /api/v1/auth/providers': PROVIDERS,
       [`GET ${LINKED}`]: { platforms: [] },
       'GET /api/v1/auth/oauth/discord/link': () => {
         throw Object.assign(new Error('bad'), { isAxiosError: true, response: { status: 400, data: { error: { message: 'Discord login is not configured' } } } });
@@ -72,6 +93,7 @@ describe('MyChannels connect flow', () => {
 
   it('shows a generic error when the request fails without a body, and when no URL comes back', async () => {
     http = stubHttp([api, apiClient], {
+      'GET /api/v1/auth/providers': PROVIDERS,
       [`GET ${LINKED}`]: { platforms: [] },
       'GET /api/v1/auth/oauth/twitch/link': { success: true },
     });
@@ -82,24 +104,30 @@ describe('MyChannels connect flow', () => {
     expect(await screen.findByText('Not found')).toBeInTheDocument();
   });
 
-  it('refuses providers hub-api cannot link (YouTube/KICK) with a visible message and no request', async () => {
-    http = stubHttp([api, apiClient], { [`GET ${LINKED}`]: { platforms: [] } });
+  it('hides providers hub-api cannot link (YouTube/KICK) rather than offering a dead button', async () => {
+    http = stubHttp([api, apiClient], {
+      'GET /api/v1/auth/providers': PROVIDERS,
+      [`GET ${LINKED}`]: { platforms: [] },
+    });
     mount();
-    fireEvent.click(await screen.findByRole('button', { name: 'Connect YouTube' }));
-    expect(await screen.findByText("Connecting YouTube isn't supported yet.")).toBeInTheDocument();
-    expect(http.seen.map((r) => r.url)).toEqual([LINKED]);
+    await screen.findByRole('button', { name: 'Connect Discord' });
+    expect(screen.queryByRole('button', { name: 'Connect YouTube' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Connect KICK/i })).toBeNull();
   });
 });
 
 describe('MyChannels gating', () => {
   it('shows "not available yet" for link requests and never calls the unserved routes', async () => {
-    http = stubHttp([api, apiClient], { [`GET ${LINKED}`]: { platforms: [{ platform: 'discord', username: 'penguin' }] } });
+    http = stubHttp([api, apiClient], {
+      'GET /api/v1/auth/providers': PROVIDERS,
+      [`GET ${LINKED}`]: { platforms: [{ platform: 'discord', username: 'penguin' }] },
+    });
     mount();
     await screen.findByText('penguin');
     const gated = screen.getByTestId('not-available-yet');
     expect(gated).toHaveAttribute('data-feature', 'member-server-link-requests');
     expect(screen.queryByText('Request to Join a Community')).not.toBeInTheDocument();
-    expect(http.seen.map((r) => r.url)).toEqual([LINKED]);
+    expect(http.seen.map((r) => r.url).sort()).toEqual(['/api/v1/auth/providers', LINKED].sort());
   });
 
   it('reports a load failure', async () => {

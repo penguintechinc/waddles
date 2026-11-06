@@ -1,4 +1,4 @@
-"""`services/credential_resolver.py` -- `CredentialResolver` seam tests (Bar Citizen foundation).
+"""`services/credential_resolver.py` -- `CredentialResolver` seam tests (guild-pairing foundation).
 
 Covers both lanes `DefaultCredentialResolver.resolve()` takes (tenant 0 /
 SaaS env vars, tenant N / decrypted DB row) and the `TransportUnavailable`
@@ -42,9 +42,9 @@ def resolver() -> DefaultCredentialResolver:
 
 class TestGlobalTenantLane:
     async def test_resolves_from_env_vars(
-        self, resolver: DefaultCredentialResolver, bar_citizen_db: Any, monkeypatch: Any
+        self, resolver: DefaultCredentialResolver, guild_pairing_db: Any, monkeypatch: Any
     ) -> None:
-        dal, _community_id, _tenant_id, global_tenant_id = bar_citizen_db
+        dal, _community_id, _tenant_id, global_tenant_id = guild_pairing_db
         monkeypatch.setenv("DISCORD_CLIENT_ID", "saas-client-id")
         monkeypatch.setenv("DISCORD_CLIENT_SECRET", "saas-client-secret")
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "saas-bot-token")
@@ -60,9 +60,9 @@ class TestGlobalTenantLane:
         }
 
     async def test_missing_env_vars_raises_transport_unavailable(
-        self, resolver: DefaultCredentialResolver, bar_citizen_db: Any, monkeypatch: Any
+        self, resolver: DefaultCredentialResolver, guild_pairing_db: Any, monkeypatch: Any
     ) -> None:
-        dal, _community_id, _tenant_id, global_tenant_id = bar_citizen_db
+        dal, _community_id, _tenant_id, global_tenant_id = guild_pairing_db
         monkeypatch.delenv("DISCORD_CLIENT_ID", raising=False)
         monkeypatch.delenv("DISCORD_CLIENT_SECRET", raising=False)
 
@@ -74,9 +74,9 @@ class TestGlobalTenantLane:
 
 class TestTenantLane:
     async def test_resolves_stored_encrypted_credentials(
-        self, resolver: DefaultCredentialResolver, bar_citizen_db: Any
+        self, resolver: DefaultCredentialResolver, guild_pairing_db: Any
     ) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         store_tenant_credentials(
             dal,
             tenant_id=tenant_id,
@@ -93,18 +93,18 @@ class TestTenantLane:
         assert creds.payload == {"client_id": "tenant-id", "client_secret": "tenant-secret"}
 
     async def test_missing_row_raises_transport_unavailable(
-        self, resolver: DefaultCredentialResolver, bar_citizen_db: Any
+        self, resolver: DefaultCredentialResolver, guild_pairing_db: Any
     ) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         with pytest.raises(TransportUnavailable):
             await resolver.resolve(
                 dal, tenant_id=tenant_id, is_global_tenant=False, platform="twitch"
             )
 
     async def test_corrupt_ciphertext_raises_transport_unavailable(
-        self, resolver: DefaultCredentialResolver, bar_citizen_db: Any
+        self, resolver: DefaultCredentialResolver, guild_pairing_db: Any
     ) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         t = dal.tenant_platform_apps
         t.insert(
             tenant_id=tenant_id,
@@ -118,8 +118,8 @@ class TestTenantLane:
                 dal, tenant_id=tenant_id, is_global_tenant=False, platform="discord"
             )
 
-    def test_store_rejects_global_tenant(self, bar_citizen_db: Any) -> None:
-        dal, _community_id, _tenant_id, global_tenant_id = bar_citizen_db
+    def test_store_rejects_global_tenant(self, guild_pairing_db: Any) -> None:
+        dal, _community_id, _tenant_id, global_tenant_id = guild_pairing_db
         with pytest.raises(ApiError) as excinfo:
             store_tenant_credentials(
                 dal,
@@ -131,8 +131,8 @@ class TestTenantLane:
             )
         assert excinfo.value.status_code == 400
 
-    def test_store_upserts_existing_row(self, bar_citizen_db: Any) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+    def test_store_upserts_existing_row(self, guild_pairing_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         store_tenant_credentials(
             dal,
             tenant_id=tenant_id,
@@ -157,8 +157,8 @@ class TestTenantLane:
 class TestPlatformConnections:
     """Layer 2 (`platform_connections`) seam -- migration 0035 (connection-model-port)."""
 
-    def test_upsert_then_get_round_trips_decrypted_tokens(self, bar_citizen_db: Any) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+    def test_upsert_then_get_round_trips_decrypted_tokens(self, guild_pairing_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         connection_id = upsert_platform_connection(
             dal,
             tenant_id=tenant_id,
@@ -180,8 +180,8 @@ class TestPlatformConnections:
         assert connection.status == "active"
         assert connection.installed_by_user_id == 7
 
-    def test_upsert_is_idempotent_per_resource(self, bar_citizen_db: Any) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+    def test_upsert_is_idempotent_per_resource(self, guild_pairing_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         first_id = upsert_platform_connection(
             dal,
             tenant_id=tenant_id,
@@ -210,16 +210,16 @@ class TestPlatformConnections:
         assert connection is not None
         assert connection.access_token == "tok_2"
 
-    def test_get_missing_connection_returns_none(self, bar_citizen_db: Any) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+    def test_get_missing_connection_returns_none(self, guild_pairing_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         assert (
             get_platform_connection(dal, tenant_id=tenant_id, platform="twitch", resource_id="nope")
             is None
         )
 
-    def test_cross_tenant_isolation_same_resource_id(self, bar_citizen_db: Any) -> None:
+    def test_cross_tenant_isolation_same_resource_id(self, guild_pairing_db: Any) -> None:
         """Two tenants sharing the same `resource_id` never see each other's connection row."""
-        dal, _community_id, tenant_a_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_a_id, _global_id = guild_pairing_db
         tenant_b_id = dal.tenants.insert(
             slug="other-tenant", display_name="Other Tenant", is_active=True, is_global=False
         )
@@ -256,8 +256,8 @@ class TestPlatformConnections:
         assert conn_b is not None and conn_b.access_token == "tok_b"
         assert conn_a.id != conn_b.id
 
-    def test_delete_platform_connection_cascades_access_grant(self, bar_citizen_db: Any) -> None:
-        dal, community_id, tenant_id, _global_id = bar_citizen_db
+    def test_delete_platform_connection_cascades_access_grant(self, guild_pairing_db: Any) -> None:
+        dal, community_id, tenant_id, _global_id = guild_pairing_db
         connection_id = upsert_platform_connection(
             dal,
             tenant_id=tenant_id,
@@ -283,8 +283,8 @@ class TestPlatformConnections:
 class TestCommunityConnectionAccess:
     """Layer 3 (`community_connection_access`) seam -- grant-only, no tokens."""
 
-    def test_resolve_requires_approved_status(self, bar_citizen_db: Any) -> None:
-        dal, community_id, tenant_id, _global_id = bar_citizen_db
+    def test_resolve_requires_approved_status(self, guild_pairing_db: Any) -> None:
+        dal, community_id, tenant_id, _global_id = guild_pairing_db
         connection_id = upsert_platform_connection(
             dal,
             tenant_id=tenant_id,
@@ -320,8 +320,8 @@ class TestCommunityConnectionAccess:
         assert resolved.access_token == "tok_1"
         assert resolved.id == connection_id
 
-    def test_revoked_connection_access_never_resolves(self, bar_citizen_db: Any) -> None:
-        dal, community_id, tenant_id, _global_id = bar_citizen_db
+    def test_revoked_connection_access_never_resolves(self, guild_pairing_db: Any) -> None:
+        dal, community_id, tenant_id, _global_id = guild_pairing_db
         connection_id = upsert_platform_connection(
             dal,
             tenant_id=tenant_id,
@@ -343,7 +343,7 @@ class TestCommunityConnectionAccess:
             resolve_community_connection(dal, community_id=community_id, platform="twitch") is None
         )
 
-    def test_grant_rejects_cross_tenant_connection(self, bar_citizen_db: Any) -> None:
+    def test_grant_rejects_cross_tenant_connection(self, guild_pairing_db: Any) -> None:
         """A community can never be granted access to a connection installed under another tenant.
 
         `grant_community_connection_access()`'s own tenant-match check is
@@ -351,7 +351,7 @@ class TestCommunityConnectionAccess:
         this proves the guard is enforced at grant time, not merely
         assumed at resolve time.
         """
-        dal, community_id, _tenant_a_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_a_id, _global_id = guild_pairing_db
         tenant_b_id = dal.tenants.insert(
             slug="other-tenant-2", display_name="Other Tenant 2", is_active=True, is_global=False
         )
@@ -368,7 +368,7 @@ class TestCommunityConnectionAccess:
             installed_by_user_id=1,
         )
 
-        # `community_id` belongs to tenant A (seeded by `bar_citizen_db`) -- granting it access
+        # `community_id` belongs to tenant A (seeded by `guild_pairing_db`) -- granting it access
         # to tenant B's connection must be rejected outright, never silently stored.
         with pytest.raises(ApiError) as excinfo:
             grant_community_connection_access(
@@ -404,23 +404,23 @@ class TestPlatformConnectionRowBoundSealing:
         t = dal.platform_connections
         return dal(t.id == connection_id).select().first()
 
-    def test_new_writes_are_version_1_and_carry_a_public_id(self, bar_citizen_db: Any) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+    def test_new_writes_are_version_1_and_carry_a_public_id(self, guild_pairing_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         connection_id = self._upsert(dal, tenant_id, "chan-new", "new")
         row = self._row(dal, connection_id)
         assert row.seal_version == 1 and row.public_id
         aad = platform_connection_aad(public_id=UUID(str(row.public_id)), platform="twitch")
         assert open_secret(row.access_token, aad=aad, seal_version=1) == "acc-new"
 
-    def test_upsert_keeps_the_rows_public_id(self, bar_citizen_db: Any) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+    def test_upsert_keeps_the_rows_public_id(self, guild_pairing_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         connection_id = self._upsert(dal, tenant_id, "chan-keep", "one")
         first = self._row(dal, connection_id).public_id
         assert self._upsert(dal, tenant_id, "chan-keep", "two") == connection_id
         assert self._row(dal, connection_id).public_id == first
 
-    def test_ciphertext_swapped_between_rows_fails_open(self, bar_citizen_db: Any) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+    def test_ciphertext_swapped_between_rows_fails_open(self, guild_pairing_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         one = self._upsert(dal, tenant_id, "chan-a", "a")
         two = self._upsert(dal, tenant_id, "chan-b", "b")
         t = dal.platform_connections
@@ -434,8 +434,8 @@ class TestPlatformConnectionRowBoundSealing:
                     dal, tenant_id=tenant_id, platform="twitch", resource_id=resource
                 )
 
-    def test_legacy_v0_row_still_opens_then_reseals_on_read(self, bar_citizen_db: Any) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+    def test_legacy_v0_row_still_opens_then_reseals_on_read(self, guild_pairing_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         connection_id = self._upsert(dal, tenant_id, "chan-legacy", "x")
         t = dal.platform_connections
         dal(t.id == connection_id).update(
@@ -455,9 +455,9 @@ class TestPlatformConnectionRowBoundSealing:
         assert open_secret(row.refresh_token, aad=aad, seal_version=1) == "ref-legacy"
 
     def test_a_failed_lazy_reseal_never_breaks_the_read(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         connection_id = self._upsert(dal, tenant_id, "chan-noreseal", "x")
         t = dal.platform_connections
         dal(t.id == connection_id).update(
@@ -474,8 +474,8 @@ class TestPlatformConnectionRowBoundSealing:
         assert connection is not None and connection.access_token == "acc-legacy"
         assert self._row(dal, connection_id).seal_version == 0  # left for the reseal job
 
-    def test_a_row_without_a_public_id_fails_closed(self, bar_citizen_db: Any) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+    def test_a_row_without_a_public_id_fails_closed(self, guild_pairing_db: Any) -> None:
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         connection_id = self._upsert(dal, tenant_id, "chan-noid", "x")
         t = dal.platform_connections
         dal(t.id == connection_id).update(public_id=None)

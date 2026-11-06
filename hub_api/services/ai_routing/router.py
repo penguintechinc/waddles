@@ -72,7 +72,8 @@ logger = logging.getLogger(__name__)
 FEATURE_AI_ROUTING = "waddles.ai.routing"
 #: Premium-local-metered tier gate (spec §7) -- flag AND Enterprise tier.
 FEATURE_AI_PREMIUM = "waddles.ai.premium_models"
-#: BYOK tier gate (spec §7) -- flag AND Enterprise tier.
+#: BYOK tier gate -- flag AND Professional-or-higher tier (2026-11-06 decision;
+#: was Enterprise in spec §7).
 FEATURE_AI_BYOK = "waddles.ai.byok"
 
 
@@ -95,6 +96,15 @@ async def _is_enterprise_tier(async_dal: Any, dal: Any, *, community_id: int) ->
     return tier == "enterprise"
 
 
+async def _is_professional_or_higher(async_dal: Any, dal: Any, *, community_id: int) -> bool:
+    """Community `license_tier` is professional or enterprise (BYOK floor); unknown -> False."""
+    rows = await async_dal.select_async(dal(dal.communities.id == community_id))
+    if not rows:
+        return False
+    tier = (rows.first().license_tier or "").strip().lower()
+    return tier in ("professional", "enterprise")
+
+
 async def _premium_entitled(async_dal: Any, dal: Any, *, tenant: str, community_id: int) -> bool:
     if not await feature_enabled(FEATURE_AI_PREMIUM, tenant=tenant, community=community_id):
         return False
@@ -104,7 +114,7 @@ async def _premium_entitled(async_dal: Any, dal: Any, *, tenant: str, community_
 async def _byok_entitled(async_dal: Any, dal: Any, *, tenant: str, community_id: int) -> bool:
     if not await feature_enabled(FEATURE_AI_BYOK, tenant=tenant, community=community_id):
         return False
-    return await _is_enterprise_tier(async_dal, dal, community_id=community_id)
+    return await _is_professional_or_higher(async_dal, dal, community_id=community_id)
 
 
 @dataclass(slots=True, frozen=True)
@@ -391,7 +401,7 @@ async def _route(
             fallback_reason = "not_entitled" if not entitled else "byok_provider_not_configured"
         else:
             if not entitled:
-                raise not_entitled("BYOK requires an Enterprise plan")
+                raise not_entitled("BYOK requires a Professional plan or higher")
             raise byok_key_missing("No BYOK provider configured for this community")
 
     return await _run_free(ai_request, fallback_reason=fallback_reason, guard=guard)

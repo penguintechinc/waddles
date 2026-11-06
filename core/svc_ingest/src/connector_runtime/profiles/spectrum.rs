@@ -303,6 +303,7 @@ impl ConnectorProfile for SpectrumProfile {
                 }],
                 page_field: kind.is_org().then(|| PAGE_FIELD.to_owned()),
             },
+            rediscover: None,
         };
         let url = reqwest::Url::parse(&cfg.url)
             .map_err(|_| PlanError::Config("derived poll url is invalid"))?;

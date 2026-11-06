@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import api, { communityApi, oauthApi, userApi } from '../../services/api';
+import useAuthProviders from '../../hooks/useAuthProviders';
 import { ServedFeature } from '../../components/ui';
 import { isFeatureServed } from '../../lib/unservedFeatures';
 import {
@@ -65,8 +66,6 @@ const STATUS_BADGE = {
   rejected: 'bg-red-500/20 text-red-300 border-red-500/30',
 };
 
-/** Providers hub-api can start an account-link flow for (`GET /api/v1/auth/oauth/<platform>/link`). */
-const LINKABLE_PLATFORMS = ['discord', 'twitch', 'slack', 'google'];
 
 /** Member server-link requests have no hub-api route yet; see unservedFeatures.json. */
 const LINK_REQUESTS_FEATURE = 'member-server-link-requests';
@@ -77,6 +76,8 @@ const LINK_REQUESTS_FEATURE = 'member-server-link-requests';
  */
 function MyChannels() {
   const { user } = useAuth();
+  // hub-api's enabled providers are the only linkable ones (`GET /api/v1/auth/providers`).
+  const { platforms: linkablePlatforms } = useAuthProviders();
   const [linkedPlatforms, setLinkedPlatforms] = useState([]);
   const [myRequests, setMyRequests] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -114,7 +115,7 @@ function MyChannels() {
   const handleConnectPlatform = async (platformKey) => {
     const name = PLATFORMS[platformKey]?.name ?? platformKey;
     setError(null);
-    if (!LINKABLE_PLATFORMS.includes(platformKey)) {
+    if (!linkablePlatforms.includes(platformKey)) {
       setError(`Connecting ${name} isn't supported yet.`);
       return;
     }
@@ -226,7 +227,9 @@ function MyChannels() {
       <section>
         <h2 className="text-lg font-semibold text-sky-100 mb-4">Connected Platforms</h2>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {Object.entries(PLATFORMS).map(([key, platform]) => {
+          {Object.entries(PLATFORMS)
+            .filter(([key]) => linkablePlatforms.includes(key) || linkedPlatformKeys.has(key))
+            .map(([key, platform]) => {
             const isLinked = linkedPlatformKeys.has(key);
             const linkedData = linkedPlatforms.find((p) => p.platform?.toLowerCase() === key);
             return (

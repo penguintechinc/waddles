@@ -1,0 +1,33 @@
+[package]
+name = "bundle-host-platform-table"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Bundle `platform-table` host capability store (spec 2026-11-06-bundle-table-access-grants): key-addressed read/write of ALLOWLISTED platform-table columns (initially community_members.role), ALWAYS scoped by host-injected community_id + tenant_id, parameterized, audited per write in the same transaction. A path dependency within this repo consumed by core/svc_process. Runs under the least-privilege `waddles_platform_table` role (alembic 0079)."
+
+[lib]
+name = "bundle_host_platform_table"
+path = "src/lib.rs"
+
+# Exact-version pins only -- rules/critical-rules.md Dependency Pinning.
+# Versions mirror core/bundle_host_reputation's for the same crates.
+[dependencies]
+sea-orm = { version = "=2.0.2", default-features = false, features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-uuid",
+] }
+thiserror = "=2.0.20"
+tracing = "=0.1.44"
+tokio = { version = "=1.53.3", features = ["time", "sync"] }
+uuid = { version = "=1.26.1", features = ["v4"] }
+serde_json = "=1.0.151"
+# The single source of truth for the allowlist (`platform_table::ALLOWLIST`).
+bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
+opentelemetry = "=0.32.0"
+
+[dev-dependencies]
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }

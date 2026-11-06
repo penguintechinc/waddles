@@ -124,7 +124,13 @@ fn derived_poll_config_golden() {
             HttpErrorRule {
                 status: 403,
                 reason_pointer: "/error/errors/0/reason".to_owned(),
-                reasons: q(&["forbidden", "insufficientPermissions", "liveChatEnded"]),
+                reasons: q(&["liveChatEnded"]),
+                action: HttpAction::Rediscover,
+            },
+            HttpErrorRule {
+                status: 403,
+                reason_pointer: "/error/errors/0/reason".to_owned(),
+                reasons: q(&["forbidden", "insufficientPermissions"]),
                 action: HttpAction::Park,
             },
         ],
@@ -395,4 +401,187 @@ fn lifecycle_constant_validates() {
     cfg.lifecycle
         .validate(&cfg.handles, cfg.cursor_param.as_deref(), &url)
         .expect("host constants form a valid lifecycle");
+}
+
+// ------------------------------------------------------ rediscovery ----
+
+use crate::connector::{Rediscover, RediscoverError, RediscoverOutcome};
+
+fn key() -> ConnKey {
+    ConnKey {
+        platform: PLATFORM,
+        community_id: 7,
+        connection_id: 12,
+    }
+}
+
+fn hook(
+    channel: Option<&str>,
+    overrides: &Arc<LiveChatOverrides>,
+    current: &str,
+) -> YoutubeRediscover {
+    YoutubeRediscover::new(
+        key(),
+        CHAT.to_owned(),
+        current.to_owned(),
+        channel.map(str::to_owned),
+        Arc::clone(overrides),
+    )
+}
+
+fn broadcasts(items: &[(&str, &str)]) -> Vec<u8> {
+    let items: Vec<_> = items
+        .iter()
+        .map(|(chat, ch)| serde_json::json!({"snippet": {"liveChatId": chat, "channelId": ch}}))
+        .collect();
+    serde_json::to_vec(&serde_json::json!({ "items": items })).unwrap()
+}
+
+#[test]
+fn rediscovery_lifecycle_and_urls_are_host_constants() {
+    let d = one(&good());
+    let cfg = poll_of(&d);
+    let rd = cfg.rediscover.as_ref().expect("youtube always rediscovers");
+    let url = reqwest::Url::parse(&rd.url).unwrap();
+    assert_eq!(url.host_str(), Some("www.googleapis.com"));
+    assert_eq!(url.path(), "/youtube/v3/liveBroadcasts");
+    let q: HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(q["broadcastStatus"], "active");
+    assert_eq!(q["part"], "snippet");
+    assert_eq!(q["maxResults"], "5");
+    assert!(
+        !rd.url.contains(CHAT),
+        "no binding value reaches the discovery url"
+    );
+    let ended = cfg
+        .lifecycle
+        .error_rules
+        .iter()
+        .find(|r| r.reasons == ["liveChatEnded"])
+        .expect("a liveChatEnded rule");
+    assert_eq!(ended.action, HttpAction::Rediscover);
+    assert!(
+        !format!("{rd:?}").contains("googleapis"),
+        "Debug hides urls"
+    );
+}
+
+#[test]
+fn the_hook_picks_the_first_live_chat_of_the_bound_channel() {
+    let t = Arc::new(LiveChatOverrides::new());
+    let h = hook(Some("UCme"), &t, CHAT);
+    let body = broadcasts(&[
+        ("DecoyOther_1", "UCother"),
+        (CHAT, "UCme"),
+        ("NewLive_2", "UCme"),
+        ("NewLive_3", "UCme"),
+    ]);
+    assert_eq!(h.apply(&body), Ok(RediscoverOutcome::Rediscovered));
+    assert_eq!(
+        h.take_outcome(),
+        Some(RediscoverOutcome::Rediscovered),
+        "other channel skipped, the ended chat skipped"
+    );
+    assert_eq!(h.take_outcome(), None, "outcome is cleared on read");
+    assert_eq!(t.effective(&key(), CHAT), "NewLive_2");
+}
+
+#[test]
+fn the_hook_waits_when_nothing_acceptable_is_live() {
+    let t = Arc::new(LiveChatOverrides::new());
+    let h = hook(Some("UCme"), &t, CHAT);
+    for body in [
+        broadcasts(&[]),
+        broadcasts(&[("DecoyOther_1", "UCother")]),
+        broadcasts(&[(CHAT, "UCme")]),
+        broadcasts(&[("bad chat id!", "UCme")]),
+        br#"{"items":[{"snippet":{}},{}]}"#.to_vec(),
+        b"{}".to_vec(),
+    ] {
+        assert_eq!(h.apply(&body), Ok(RediscoverOutcome::WaitingForLive));
+        assert_eq!(h.take_outcome(), Some(RediscoverOutcome::WaitingForLive));
+    }
+    assert!(t.is_empty(), "nothing recorded while waiting");
+}
+
+#[test]
+fn without_a_pinned_channel_the_credential_scope_decides() {
+    let t = Arc::new(LiveChatOverrides::new());
+    let h = hook(None, &t, CHAT);
+    assert_eq!(
+        h.apply(&broadcasts(&[("AnyLive_1", "UCwhoever")])),
+        Ok(RediscoverOutcome::Rediscovered)
+    );
+    assert_eq!(t.effective(&key(), CHAT), "AnyLive_1");
+}
+
+#[test]
+fn a_malformed_response_is_an_error_not_a_wait() {
+    let t = Arc::new(LiveChatOverrides::new());
+    let h = hook(None, &t, CHAT);
+    for body in [&b"not json"[..], b"", br#"{"items":"x"}"#] {
+        assert_eq!(h.apply(body), Err(RediscoverError::Malformed));
+    }
+    assert_eq!(h.take_outcome(), None);
+}
+
+#[test]
+fn overrides_apply_only_to_their_binding_and_are_bounded() {
+    let t = Arc::new(LiveChatOverrides::new());
+    t.record(&key(), CHAT, "NewLive_2").unwrap();
+    assert_eq!(t.effective(&key(), CHAT), "NewLive_2");
+    // hub-api re-pinned the binding: the stale override is dropped.
+    assert_eq!(t.effective(&key(), "Repinned_9"), "Repinned_9");
+    assert!(t.is_empty());
+    assert_eq!(t.effective(&key(), CHAT), CHAT, "stays dropped");
+    // Another connection is untouched.
+    let mut other = key();
+    other.connection_id = 13;
+    t.record(&key(), CHAT, "NewLive_2").unwrap();
+    assert_eq!(t.effective(&other, CHAT), CHAT);
+    // Bounded: a new key past the cap is refused, an existing one updates.
+    for i in 0..(rediscover::MAX_OVERRIDES as i64) {
+        let mut k = key();
+        k.connection_id = 1_000 + i;
+        let _ = t.record(&k, CHAT, "X");
+    }
+    assert_eq!(t.len(), rediscover::MAX_OVERRIDES);
+    let mut fresh = key();
+    fresh.connection_id = 999_999;
+    assert_eq!(t.record(&fresh, CHAT, "Y"), Err(RediscoverError::Refused));
+    t.record(&key(), CHAT, "Updated_1").unwrap();
+    assert_eq!(t.effective(&key(), CHAT), "Updated_1");
+}
+
+#[test]
+fn the_plan_follows_a_recorded_override_and_restarts_on_it() {
+    let p = YoutubeProfile::new();
+    let first = p.plan(&good(), &env()).unwrap().remove(0);
+    p.overrides().record(&key(), CHAT, "NewLive_2").unwrap();
+    let second = p.plan(&good(), &env()).unwrap().remove(0);
+    let cfg = poll_of(&second);
+    assert!(cfg.url.contains("liveChatId=NewLive_2"), "{}", cfg.url);
+    assert_eq!(cfg.source_key, "youtube:livechat:NewLive_2");
+    assert_ne!(
+        first.fingerprint, second.fingerprint,
+        "a retarget is a clean restart"
+    );
+    // A re-pinned binding wins over the stale override.
+    let repinned = binding(&[("live_chat_id", "Repinned_9"), ("tenant_id", "3")]);
+    let third = p.plan(&repinned, &env()).unwrap().remove(0);
+    assert!(poll_of(&third).url.contains("liveChatId=Repinned_9"));
+}
+
+#[test]
+fn the_binding_channel_is_validated() {
+    let ok = binding(&[("live_chat_id", CHAT), ("channel_id", "UCgood_1-x")]);
+    assert!(YoutubeProfile::new().plan(&ok, &env()).is_ok());
+    for bad in ["", "has space", "a/b", &"x".repeat(65)] {
+        let b = binding(&[("live_chat_id", CHAT), ("channel_id", bad)]);
+        assert_eq!(
+            YoutubeProfile::new().plan(&b, &env()).unwrap_err(),
+            PlanError::InvalidValue("channel_id")
+        );
+    }
+    assert!(rediscover::is_channel_id("UC-_09az"));
 }

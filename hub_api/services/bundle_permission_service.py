@@ -36,6 +36,8 @@ from penguin_dal import AsyncDB
 from sqlalchemy import func, select
 
 from services import bundle_audit, valkey_admin_client
+from services.bundle_access_grants import is_access_grant_id, summarize_access_grants
+from services.bundle_access_grants import kinds as access_grant_kinds
 from services.bundle_approval_service import _reparse_trusted
 from services.bundle_manifest_v2 import BundleManifestV2, PermissionDeclaration
 from services.bundle_permission_catalog import CORE_NAMESPACE_PREFIX, is_dangerous
@@ -62,6 +64,31 @@ async def manifest_for_version(
     if upload is None:
         raise not_found(f"version {version} of {app_id} not found")
     return _reparse_trusted(upload.manifest_json)
+
+
+def access_grant_permission_ids(manifest: BundleManifestV2) -> frozenset[str]:
+    """Every dangerous resource-access grant id (platform.table.*, ...) the manifest declares."""
+    return frozenset(d.id for d in manifest.permission_declarations if is_access_grant_id(d.id))
+
+
+async def get_access_grants(
+    install_dal: AsyncDB, *, app_id: str, version: str
+) -> tuple[dict[str, list[dict[str, Any]]], frozenset[str], frozenset[str], frozenset[str]]:
+    """`(summary_blocks, requested_ids, globally_approved_ids, dangerous_ids)` for one version.
+
+    `dangerous_ids` is EVERY dangerous id the manifest declares (access grants and
+    others) -- exactly the set the global approve endpoint requires acknowledging.
+
+    `summary_blocks` is `summarize_access_grants` (table/columns/ops/reason per kind);
+    `approved` is the subset of `requested` a global admin has approved -- anything
+    requested but not approved (a widened manifest's new ids) stays unusable until
+    it is.
+    """
+    manifest = await manifest_for_version(install_dal, app_id=app_id, version=version)
+    requested = access_grant_permission_ids(manifest)
+    approved = await get_approved_permission_ids(install_dal, app_id=app_id, version=version)
+    dangerous = frozenset(d.id for d in manifest.permission_declarations if d.risk == "dangerous")
+    return summarize_access_grants(manifest), requested, requested & approved, dangerous
 
 
 #: Every write to a grant table publishes here (spec Sec4). Consumers:
@@ -246,10 +273,16 @@ async def record_permission_requests(
 
     table = install_dal.metadata.tables["app_permission_requests"]
     now = datetime.now(UTC)
+    delete_where = (table.c.app_id == app_id) & (table.c.version == version)
+    if approval_source == _SYSTEM_APPROVAL_SOURCE:
+        # Defense in depth for the never-auto-granted rule: the system path can
+        # neither write nor erase a human-approved dangerous access-grant row.
+        declarations = tuple(d for d in declarations if not is_access_grant_id(d.id))
+        for grant_kind in access_grant_kinds():
+            for prefix in grant_kind.prefixes:
+                delete_where = delete_where & ~table.c.permission_id.like(f"{prefix}%")
     async with install_dal.engine.begin() as conn:
-        await conn.execute(
-            table.delete().where((table.c.app_id == app_id) & (table.c.version == version))
-        )
+        await conn.execute(table.delete().where(delete_where))
         if declarations:
             await conn.execute(
                 table.insert(),
@@ -287,12 +320,20 @@ async def seed_core_permission_requests(
     `install_version_globally(install_source="system:core-seeder")` call
     -- `approved_by=None` (the SYSTEM-actor convention already used for
     `app_install_approvals.approval_source`, migration 0026).
+
+    EXCEPTION: `platform.table.*` ids (platform-table access, spec
+    2026-11-06-bundle-table-access-grants Sec3) are NEVER auto-granted, not even
+    to a core bundle -- they are filtered out here and need a human global-admin
+    approval like any vendor bundle. Existing blanket grants (e.g.
+    `connector.pii.read`) are unchanged and deliberately not extended.
     """
     await record_permission_requests(
         install_dal,
         app_id=app_id,
         version=version,
-        declarations=manifest.permission_declarations,
+        declarations=tuple(
+            d for d in manifest.permission_declarations if not is_access_grant_id(d.id)
+        ),
         approved_by=None,
         approval_source=_SYSTEM_APPROVAL_SOURCE,
     )

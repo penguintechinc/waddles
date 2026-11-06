@@ -64,6 +64,9 @@ use crate::pin_sig::{PinFields, PinKeys};
 use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
+mod discord_role_tools;
+mod event_sync;
+pub use event_sync::{run_event_sync_consumer, EVENT_SYNC_REQUEST_QUEUE, EVENT_SYNC_RESULT_PREFIX};
 mod tool;
 pub use tool::ToolWiring;
 
@@ -91,6 +94,11 @@ pub struct InvokeScope {
     /// `origin_channel_id` only when this names the SAME platform, so a
     /// channel id from a different platform is never reinterpreted.
     pub origin_platform: Option<String>,
+    /// The guild a DISCORD gateway event came from (`event.payload.guild_id` of a `discord`
+    /// event, host-derived from the delivered envelope, never bundle-supplied); `None` for any
+    /// non-Discord (e.g. Wix) event. Used only to ASSERT the source guild equals the community's
+    /// own paired guild for channel-less role ops -- it is never a destination.
+    pub origin_guild_id: Option<String>,
     /// Numeric `tenants.id`/`communities.id` (spec
     /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     /// SS5.1/SS4 `GrantScopeKey`) -- resolved by `crate::dispatch::
@@ -603,6 +611,8 @@ enum AckOutcome {
 enum AckFailure {
     NotInCommunity,
     Unsupported,
+    /// The community has several paired guilds / usable bindings: never guessed.
+    AmbiguousPairedGuild,
     Failed,
 }
 
@@ -617,6 +627,7 @@ fn parse_ack(raw: &str) -> Result<AckOutcome, String> {
             match v.get("code").and_then(serde_json::Value::as_str) {
                 Some("not_in_community") => AckFailure::NotInCommunity,
                 Some("unsupported") => AckFailure::Unsupported,
+                Some("ambiguous_paired_guild") => AckFailure::AmbiguousPairedGuild,
                 _ => AckFailure::Failed,
             },
         )),
@@ -1037,6 +1048,9 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// (`relay_unavailable`) -- an unsigned entry would only be dropped by
     /// the drain, so failing here is the loud, early version of that.
     pin_keys: Option<Arc<PinKeys>>,
+    /// Verify-only ring for hub-api's signed event-sync requests
+    /// (`EVENT_SYNC_REQUEST_KEYS`); `None` drops every request unanswered.
+    event_sync_keys: Option<Arc<PinKeys>>,
 }
 
 /// The outbound PII-detokenization dependency: a live resolver over
@@ -1083,6 +1097,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             egress_dispatcher_flag: None,
             tool: None,
             pin_keys: None,
+            event_sync_keys: None,
         }
     }
 
@@ -1730,6 +1745,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                                         op.as_str()
                                     ),
                                 ),
+                                AckFailure::AmbiguousPairedGuild => denied(
+                                    "ambiguous_paired_guild",
+                                    format!(
+                                        "discord {} refused: the community has several paired guilds; the target guild is never guessed",
+                                        op.as_str()
+                                    ),
+                                ),
                                 AckFailure::Failed => denied(
                                     "relay_failed",
                                     format!("discord {} failed at the platform", op.as_str()),
@@ -1824,6 +1846,23 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         op: RelayOp,
         message: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
+        self.handle_discord_queued_op_scoped(scope, op, message, false)
+            .await
+    }
+
+    /// [`Self::handle_discord_queued_op`] with `guild_scoped`: when `true` (the
+    /// `tool.invoke` role tools ONLY) a role op whose triggering event has no Discord channel
+    /// (a gateway member event, or an external Wix-style event) is queued with the wire scope
+    /// `guild:<source guild>` / `guild:-` instead of being refused. The host pins the target
+    /// guild to the community's OWN binding guild; the scope is only an assertion that a
+    /// gateway event's source guild equals it. Never taken from the call's args.
+    pub(crate) async fn handle_discord_queued_op_scoped(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+        message: &serde_json::Value,
+        guild_scoped: bool,
+    ) -> Result<serde_json::Value, HostResultError> {
         let str_field = |name: &str| {
             message
                 .get(name)
@@ -1876,6 +1915,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 role_key: &'a str,
             },
         }
+        let role_scope: String;
         let pending = match op {
             RelayOp::ChatDelete => {
                 let channel_id = origin("chat.delete")?;
@@ -1934,7 +1974,12 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             }
             RelayOp::RoleAdd | RelayOp::RoleRemove => {
                 let what = op.as_str();
-                let origin_channel = origin(what)?;
+                let origin_channel: &str = if guild_scoped {
+                    role_scope = discord_role_tools::tool_origin_scope(scope, what)?;
+                    &role_scope
+                } else {
+                    origin(what)?
+                };
                 // The bundle names a tokenized user and a managed-role KEY --
                 // never a role snowflake, never a guild (the drain maps the key
                 // through the community's binding allowlist and pins the guild
@@ -2872,6 +2917,14 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             CapabilityKind::Db if call.op.starts_with("tool.") => {
                 self.handle_tool(scope, &call).await
             }
+            // `platform_table.*` is hosted by the PROCESS stage only (like
+            // `reputation`/`economy`/`identity`/`ai`: community-scoped, stage-next
+            // process-world capabilities). The action stage fails LOUD rather than
+            // letting the op fall into `handle_db`'s unrelated `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("platform_table.") => Err(denied(
+                "not_implemented",
+                "platform-table is hosted by the process stage only (not the action stage)",
+            )),
             CapabilityKind::Db => self.handle_db(scope, &call).await,
             // `enabled` is wired to a real `penguin_licensing::
             // LicenseClient` (`crate::flags::resolve_flag`) -- see
@@ -2929,25 +2982,25 @@ mod tests {
     /// * `fail*` -- inject a Valkey outage on one primitive.
     #[derive(Default)]
     pub(super) struct FakeRelayQueue {
-        pushed: Mutex<Vec<(String, String)>>,
-        fail: bool,
-        fail_key_exists: bool,
-        fail_incr: bool,
-        fail_take: bool,
-        ready: bool,
-        auto_ack: Option<String>,
-        acks: Mutex<std::collections::HashMap<String, String>>,
-        windows: Mutex<std::collections::HashMap<String, u64>>,
+        pub(super) pushed: Mutex<Vec<(String, String)>>,
+        pub(super) fail: bool,
+        pub(super) fail_key_exists: bool,
+        pub(super) fail_incr: bool,
+        pub(super) fail_take: bool,
+        pub(super) ready: bool,
+        pub(super) auto_ack: Option<String>,
+        pub(super) acks: Mutex<std::collections::HashMap<String, String>>,
+        pub(super) windows: Mutex<std::collections::HashMap<String, u64>>,
     }
 
     impl FakeRelayQueue {
         /// A queue with a live, healthy drain: ready, and every op acked `ok`.
-        fn with_live_drain() -> Self {
+        pub(super) fn with_live_drain() -> Self {
             Self::with_drain_result(r#"{"ok":true}"#)
         }
 
         /// A queue with a live drain that answers every op with `ack_json`.
-        fn with_drain_result(ack_json: &str) -> Self {
+        pub(super) fn with_drain_result(ack_json: &str) -> Self {
             Self {
                 ready: true,
                 auto_ack: Some(ack_json.to_string()),
@@ -2956,7 +3009,7 @@ mod tests {
         }
 
         /// The parsed envelopes pushed so far.
-        fn envelopes(&self) -> Vec<serde_json::Value> {
+        pub(super) fn envelopes(&self) -> Vec<serde_json::Value> {
             self.pushed
                 .lock()
                 .unwrap()
@@ -3186,7 +3239,7 @@ mod tests {
     /// every happy-path test keeps proving its own capability logic, not
     /// this landing's gate wiring (which the dedicated `gate_*` tests below
     /// exercise directly, including the deny-without-grant cases).
-    fn permissive_gate() -> Arc<CapabilityGate> {
+    pub(super) fn permissive_gate() -> Arc<CapabilityGate> {
         let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
         for app_id in ["waddles.bot.commands.default", "waddles.bot.other"] {
             let mut grants = std::collections::HashMap::new();
@@ -3246,7 +3299,7 @@ mod tests {
         ))
     }
 
-    fn caps(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
+    pub(super) fn caps(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
         caps_with_usage(queue, Arc::new(Mutex::new(UsageBatcher::new())))
     }
 
@@ -3515,13 +3568,14 @@ mod tests {
         .with_kv(FakeKvBackend::default(), Arc::new(snapshot))
     }
 
-    fn scope() -> InvokeScope {
+    pub(super) fn scope() -> InvokeScope {
         InvokeScope {
             tenant: "acme".to_string(),
             community: Some("main".to_string()),
             app_id: "waddles.bot.commands.default".to_string(),
             origin_channel_id: None,
             origin_platform: None,
+            origin_guild_id: None,
             tenant_id: 7,
             community_id: 3,
             app_version: 1,
@@ -3546,6 +3600,7 @@ mod tests {
         InvokeScope {
             origin_channel_id: Some("somechannel".to_string()),
             origin_platform: Some("twitch".to_string()),
+            origin_guild_id: None,
             ..scope()
         }
     }
@@ -3553,10 +3608,11 @@ mod tests {
     /// Same as [`scope`] but carrying an origin channel id, as
     /// `crate::dispatch::invoke_dispatch` would populate it from a real
     /// inbound Discord event's `event.source.channel_id`.
-    fn discord_scope() -> InvokeScope {
+    pub(super) fn discord_scope() -> InvokeScope {
         InvokeScope {
             origin_channel_id: Some("123456789012345678".to_string()),
             origin_platform: Some("discord".to_string()),
+            origin_guild_id: None,
             ..scope()
         }
     }
@@ -3903,6 +3959,7 @@ mod tests {
             let c = caps(FakeRelayQueue::default());
             let sc = InvokeScope {
                 origin_platform: platform.map(str::to_string),
+                origin_guild_id: None,
                 origin_channel_id: origin.map(str::to_string),
                 ..scope()
             };
@@ -3931,6 +3988,7 @@ mod tests {
             .with_discord(transport.clone(), crate::config::Secret::new("t"));
         let sc = InvokeScope {
             origin_platform: Some("twitch".to_string()),
+            origin_guild_id: None,
             ..discord_scope()
         };
         let err = c
@@ -4073,6 +4131,7 @@ mod tests {
             let sc = InvokeScope {
                 origin_channel_id: origin,
                 origin_platform: Some("twitch".to_string()),
+                origin_guild_id: None,
                 ..scope()
             };
             let err = caps
@@ -4207,6 +4266,21 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "no_table");
+    }
+
+    #[tokio::test]
+    async fn platform_table_is_refused_loudly_on_the_action_stage() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        for op in ["platform_table.read", "platform_table.write"] {
+            let err = capabilities
+                .handle(
+                    &scope(),
+                    call(CapabilityKind::Db, op, serde_json::json!({})),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_implemented", "{op}");
+        }
     }
 
     #[tokio::test]
@@ -5006,6 +5080,7 @@ mod tests {
         let bad_origin = InvokeScope {
             origin_channel_id: Some("not-a-snowflake".to_string()),
             origin_platform: Some("discord".to_string()),
+            origin_guild_id: None,
             ..scope()
         };
         let cases = [
@@ -5364,6 +5439,10 @@ mod tests {
         assert_eq!(
             parse_ack(r#"{"ok":false,"code":"unsupported"}"#),
             Ok(AckOutcome::Refused(AckFailure::Unsupported))
+        );
+        assert_eq!(
+            parse_ack(r#"{"ok":false,"code":"ambiguous_paired_guild"}"#),
+            Ok(AckOutcome::Refused(AckFailure::AmbiguousPairedGuild))
         );
         assert_eq!(
             parse_ack(r#"{"ok":false,"code":"anything-else"}"#),
@@ -6040,6 +6119,7 @@ mod tests {
         let bad_scope = InvokeScope {
             origin_channel_id: Some("not-a-snowflake".to_string()),
             origin_platform: Some("discord".to_string()),
+            origin_guild_id: None,
             ..scope()
         };
         let err = caps

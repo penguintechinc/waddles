@@ -323,8 +323,18 @@ PollConfig { /* url = ".../liveChat/messages?part=id,snippet,authorDetails&liveC
     }, ..
 }
 ```
-`liveChatEnded`-style 403s are left unclassified (Fatal) on purpose: rediscovery is the connector/host discovery loop's
-job (not in this change). Tests: `connector/lifecycle_tests.rs` (real local WS + HTTP servers, wire asserted),
+A `liveChatEnded` 403 is classified `HttpAction::Rediscover` (host constant, YouTube profile): the transport asks
+`liveBroadcasts?broadcastStatus=active` with the connection's own OAuth credential through the same pinned/guarded
+client (same host, validated at construction), hands the body to the profile's `Rediscover` hook and ends the run.
+The hook accepts only a valid `liveChatId` of the binding's pinned `channel_id` (when set) that is not the chat that
+just ended, and records it in a per-connection override table keyed by the binding's own `live_chat_id` (a hub-api
+re-pin wins). The next reconcile derives the plan with the override (new URL/source key = new fingerprint = clean
+restart, no cursor carry-over; the feed's cross-community claim check sees the new chat too). No acceptable live
+broadcast = `waiting_for_live` (`connector_runtime_parked_total{reason="waiting_for_live"}`, a non-terminal cooldown
+slot re-checked every reconcile); a transient discovery failure is a `Read` error retried under the driver backoff,
+a 401/403 on discovery or a refused target parks. Tests: `connector_e2e/tests/youtube_rediscovery.rs` (production
+runtime, real connector + executor + Valkey, fake YouTube API), `connector/lifecycle_tests.rs` (rediscovery section).
+Other tests: `connector/lifecycle_tests.rs` (real local WS + HTTP servers, wire asserted),
 `tests/connector_session_lifecycle.rs` (real driver + `WsTransport`: HELLO -> heartbeat with live seq -> op 7 -> RESUME
 -> 4004 parks), `tests/connector_heartbeat.rs` (announced interval start/re-schedule/out-of-range/flag-off).
 
@@ -359,6 +369,62 @@ through `tool.invoke`, never a platform-specific host path.
   `_call_seconds` with `export="tool-call"`; logs carry `app_id` only (never args or results).
 - **Tests.** `core/bundle_executor/tests/connector_tools.rs` (real compiled fixtures through the production
   engine/linker/wire path), `src/connector_wire.rs` and `src/manifest.rs` unit tests.
+
+## Discord service-bundle tools (host-mediated `tool.invoke`)
+
+The Discord service bundle (`waddles.core.service.discord`) **declares** these tools
+(`exported_tools`: names + JSON arg schemas). The **host** executes them -- the guest has no
+mutating egress -- through the existing binding-pinned outbound producers, so every pin
+(guild from the binding, credential, managed-role allowlist, `pin_sig`, `op_id` replay guard,
+rate limit, drain confirmation) applies unchanged. One dispatch path: `svc_action`
+`capabilities/tool.rs` step 5b, after the generic planner's checks.
+
+**Caller convention** (an APP bundle; app -> app is forbidden, app -> service only):
+
+* manifest `requested_tools`: `{target_app_id: waddles.core.service.discord, tool: <name>, access: write}`
+* grant: `tool.call:waddles.core.service.discord:<tool>` with params `{"write": true}` (dangerous, consent-ack)
+* call `tool.invoke(target, tool, args, idempotency-key)`; write tools REQUIRE the key.
+* Result: `{"ok": true, ...}`; refusal codes are the standard `tool.invoke` set
+  (`invalid_args`, `not_granted`, `forbidden`, `target_unavailable`, ...).
+
+Arguments are **closed objects**: any key not listed (`guild_id`, `role_id`, `channel`,
+`tenant_id`, ...) is REFUSED with `invalid_args`, never ignored -- the guild, channel and role
+snowflake are the host's to pin.
+
+| Tool | Access | Args (JSON schema, `additionalProperties:false`) | Result | Notes |
+|---|---|---|---|---|
+| `discord.member.roles.add` | write, dangerous | `user` (lowercase UUID, required), `role_key` (`^[a-z][a-z0-9_-]{0,31}$`, required) | `{"ok":true,"op":"role.add"}` | managed-role KEY mapped through the binding allowlist; never a snowflake |
+| `discord.member.roles.remove` | write, dangerous | same | `{"ok":true,"op":"role.remove"}` | same pins |
+| `discord.member.roles.set` | write, dangerous | `user` (uuid), `role_keys` (1..=16 managed-role keys) | `{"ok":true,"op":"role.set"}` | host reads the member's CURRENT roles, applies the minimal add/remove diff inside the managed allowlist (unmanaged roles never touched); refuses an unknown/privileged key before any change |
+| `discord.roles.list` | read, normal | none (`{}`) | `{"ok":true,"roles":[{"key":"vip","assignable":true}]}` | managed-role keys + assignability (privileged / absent roles are `false`); served host-side, no guest HTTP |
+| `discord.scheduled_event.create` | write, dangerous | `name`, `scheduled_start_time`, `scheduled_end_time`, `location` (required), `description` | `{"ok":true,"event_id":".."}` | see event sync |
+| `discord.scheduled_event.update` | write, dangerous | `event_id` + the create fields | `{"ok":true,"event_id":null}` | |
+| `discord.scheduled_event.cancel` / `.delete` | write, dangerous | `event_id` (`^[0-9]{1,20}$`) | `{"ok":true,...}` | |
+| `classify_frame`, `classify_close_code` | read | gateway frame / close code | classification | guest-run (pure) |
+
+**Guild pinning for role tools (host decision, never from the event or args).** The target
+guild is ALWAYS the community's OWN paired guild, resolved from its Discord binding by the drain.
+By origin of the triggering event the producer stamps the MAC-covered wire scope:
+
+| Triggering event | Wire `origin_channel` | Drain rule |
+|---|---|---|
+| Discord event with a channel (chat, interaction) | the channel snowflake | channel must belong to the binding's guild (`channel_not_owned`) |
+| Discord gateway event, no channel (`guild.member.update`, ...) | `guild:<source guild>` | source guild must equal the binding's guild (`guild_mismatch`); the op lands in the binding guild |
+| External event (allowlist: `wix`) | `guild:-` | no assertion; the op can ONLY touch the community's binding guild |
+| Discord event with no valid source guild | refused `invalid_args` | never falls through to `guild:-` |
+| Twitch / YouTube / any other chat or unknown origin | refused `invalid_args` | cannot trigger role ops via `guild:-` |
+
+The source guild is host-derived from the delivered envelope (`payload.guild_id` of a `discord`
+event), never from tool args (a `guild_id` arg is `invalid_args`). A community with no binding, or
+with SEVERAL paired guilds is refused with the typed `ambiguous_paired_guild` (never guessed). The
+`relay.push` role path is unchanged (still requires a channel).
+
+Other constraints: the user is the tokenized UUID (the host detokenizes for the drain); a role KEY
+absent from the community's managed roles is refused by the drain (`role_not_managed`) and surfaced
+as `target_unavailable`; privileged roles (ADMINISTRATOR / MANAGE_ROLES / MANAGE_GUILD) are refused.
+`set` / `list` are composite drain ops (`role.set` / `role.list`, same pin_sig / replay / origin rules);
+`set` expands to ordinary pinned `role.add|remove` sub-ops, so every per-op gate applies again. A failed
+sub-op aborts the rest; re-running converges (the diff is recomputed).
 
 ## Not in B0 (explicit, typed, not silent)
 

@@ -73,6 +73,10 @@ use bundle_host_economy::{
 };
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
+use bundle_host_platform_table::{
+    Change as PlatformTableChange, PlatformTableError, PlatformTableScope, PlatformTableStore,
+};
+use bundle_host_storage::{GrantSet as StorageGrantSet, StorageError, StorageHost, StorageScope};
 use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
@@ -81,6 +85,7 @@ use crate::identity::{
     self, IdentityError, IdentityScope, IdentityWiring, InvocationIdentity, MAX_MENTION_TOKEN_LEN,
 };
 use crate::license::FeatureGate;
+use crate::media::MediaWiring;
 use crate::stage_metrics::{self, StageMetrics};
 
 mod tool;
@@ -415,6 +420,54 @@ pub struct ReputationWiring {
     pub flag: Arc<dyn FeatureGate>,
 }
 
+/// Live wiring for the `platform-table` bundle host capability (spec
+/// 2026-11-06-bundle-table-access-grants): the durable, scope-bound store plus
+/// the opt-in flag. `None` on the handler means every `platform_table.*` call
+/// denies `not_implemented`.
+#[derive(Clone)]
+pub struct PlatformTableWiring {
+    pub store: Arc<dyn PlatformTableStore>,
+    /// `crate::license::BUNDLE_PLATFORM_TABLE_CAPABILITY_FLAG` gate -- OFF denies
+    /// every call `feature_disabled` before the store is touched.
+    pub flag: Arc<dyn FeatureGate>,
+}
+
+/// Live wiring for the `object-storage` bundle host capability (spec
+/// 2026-11-06-bundle-object-storage): the scope-enforcing [`StorageHost`] (S3
+/// credentials + durable audit live INSIDE it, never in a bundle) plus the opt-in
+/// flag. `None` on the handler means every `object_storage.*` call denies
+/// `not_implemented`.
+#[derive(Clone)]
+pub struct ObjectStorageWiring {
+    pub host: Arc<StorageHost>,
+    /// `crate::license::BUNDLE_OBJECT_STORAGE_CAPABILITY_FLAG` gate -- OFF denies
+    /// every call `feature_disabled` before the host is touched.
+    pub flag: Arc<dyn FeatureGate>,
+}
+
+/// Maps a host error onto the host-result wire (backend detail is logged, never
+/// forwarded to the guest). Codes use `_` (the executor maps them onto the WIT variant).
+fn storage_error_to_host(err: StorageError) -> HostResultError {
+    match &err {
+        StorageError::Backend(detail) => {
+            tracing::error!(error = %detail, "object-storage host backend error");
+            denied("backend", "object-storage backend error")
+        }
+        StorageError::TooLarge(n) => denied("too_large", n.to_string()),
+        other => denied(&other.wire_code().replace('-', "_"), other.to_string()),
+    }
+}
+
+/// Maps a store error onto the host-result wire (backend detail is logged, never
+/// forwarded to the guest).
+fn platform_table_error_to_host(err: PlatformTableError) -> HostResultError {
+    if let PlatformTableError::Backend(detail) = &err {
+        tracing::error!(error = %detail, "platform-table store backend error");
+        return denied("backend", "platform-table store backend error");
+    }
+    denied(err.wire_code(), err.to_string())
+}
+
 /// Live wiring for the `economy` bundle host capability (issue #714): the
 /// durable store plus the opt-in flag. Built once at startup
 /// (`crate::lib::try_build_economy_wiring`) and cloned (cheap, `Arc`) into
@@ -489,6 +542,12 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `not_implemented` in that state (never panics, never a silent default
     /// balance).
     economy: Option<EconomyWiring>,
+    /// `None` until [`Self::with_platform_table`] -- every `platform_table.*`
+    /// call denies `not_implemented` in that state (never a silent no-op).
+    platform_table: Option<PlatformTableWiring>,
+    /// `None` until [`Self::with_object_storage`] -- every `object_storage.*` call
+    /// denies `not_implemented` in that state.
+    object_storage: Option<ObjectStorageWiring>,
     /// `None` until [`Self::with_identity`] -- every `identity.*` call denies
     /// `not_implemented` in that state (never panics, never a default or
     /// guessed identity).
@@ -500,6 +559,12 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// [`Self::with_ai`]. Every model call is clamped to what remains of it, so a
     /// slow model can never hold the stage past the invocation's own deadline.
     ai_deadline: Option<std::time::Instant>,
+    /// `None` until [`Self::with_media`] -- every `media.*` call denies
+    /// `not_implemented` in that state (fail-loud, never a canned result).
+    media: Option<MediaWiring>,
+    /// The instant this invocation's executor deadline expires, set with
+    /// [`Self::with_media`]; bounds the synchronous image call.
+    media_deadline: Option<std::time::Instant>,
     /// The HOST-derived identity facts of THIS invocation (who triggered it,
     /// which mentions its message carried) -- built by `crate::spine` from the
     /// event it delivered, never from guest input. Paired with [`Self::identity`]
@@ -558,9 +623,13 @@ impl<K: KvBackend> StageCapabilities<K> {
             db: None,
             reputation: None,
             economy: None,
+            platform_table: None,
+            object_storage: None,
             identity: None,
             ai: None,
             ai_deadline: None,
+            media: None,
+            media_deadline: None,
             invocation_identity: None,
             verified_scope: None,
             stage_metrics: stage_metrics::stage_metrics(),
@@ -644,6 +713,20 @@ impl<K: KvBackend> StageCapabilities<K> {
         self
     }
 
+    /// Attaches the `platform-table` capability's live wiring -- called once per
+    /// invoke with a clone of the process-wide [`PlatformTableWiring`].
+    pub fn with_platform_table(mut self, platform_table: PlatformTableWiring) -> Self {
+        self.platform_table = Some(platform_table);
+        self
+    }
+
+    /// Attaches the `object-storage` capability's live wiring -- called once per
+    /// invoke with a clone of the process-wide [`ObjectStorageWiring`].
+    pub fn with_object_storage(mut self, object_storage: ObjectStorageWiring) -> Self {
+        self.object_storage = Some(object_storage);
+        self
+    }
+
     /// Attaches the `economy` capability's live wiring -- called once per
     /// invoke with a clone of the process-wide [`EconomyWiring`].
     pub fn with_economy(mut self, economy: EconomyWiring) -> Self {
@@ -674,6 +757,215 @@ impl<K: KvBackend> StageCapabilities<K> {
         self.ai = Some(ai);
         self.ai_deadline = Some(invoke_deadline);
         self
+    }
+
+    /// Attaches the `media` capability's live wiring (flag + `MediaHost`).
+    pub fn with_media(mut self, media: MediaWiring, invoke_deadline: std::time::Instant) -> Self {
+        self.media = Some(media);
+        self.media_deadline = Some(invoke_deadline);
+        self
+    }
+
+    /// `media.generate_image` / `media.submit_music` / `media.submit_video` /
+    /// `media.job_status` / `media.object_url` (`wit/waddle-bundle/stage.wit`
+    /// `interface media`), carried as `capability = db`, `op = "media.*"`.
+    ///
+    /// Fail-loud order: (1) argument SHAPE (unknown keys refused so a guest can
+    /// never name a model, key, provider, tenant or URL); (2) **the gate
+    /// authorizes FIRST** (`media.generate`: grant, 6/min, instance policy);
+    /// (3) wiring and the default-OFF flag `waddles.harness-media-generation`;
+    /// (4) a community-scoped activation (BYOK and tier are per community);
+    /// (5) PII/secret rejection of the prompt (same guard as `ai.generate`);
+    /// (6) `bundle_host_media::MediaHost` -- tier gate (effective tier =
+    /// max(tenant, community) >= Professional, fail closed), BYOK, limits,
+    /// provider, tagged storage. Scope is always the host-derived invoke scope.
+    async fn handle_media(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PromptArgs {
+            prompt: String,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct JobArgs {
+            job_id: String,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct HandleArgs {
+            handle: String,
+        }
+        enum Op {
+            Image(String),
+            Submit(bundle_host_media::MediaKind, String),
+            Status(String),
+            Url(String),
+        }
+        let bad = |what: &str| {
+            denied(
+                "invalid_args",
+                format!("{} args malformed ({what})", call.op),
+            )
+        };
+        let op = match call.op.as_str() {
+            "media.generate_image" => Op::Image(
+                serde_json::from_value::<PromptArgs>(call.args.clone())
+                    .map_err(|_| bad("expected prompt: string"))?
+                    .prompt,
+            ),
+            "media.submit_music" => Op::Submit(
+                bundle_host_media::MediaKind::Music,
+                serde_json::from_value::<PromptArgs>(call.args.clone())
+                    .map_err(|_| bad("expected prompt: string"))?
+                    .prompt,
+            ),
+            "media.submit_video" => Op::Submit(
+                bundle_host_media::MediaKind::Video,
+                serde_json::from_value::<PromptArgs>(call.args.clone())
+                    .map_err(|_| bad("expected prompt: string"))?
+                    .prompt,
+            ),
+            "media.job_status" => Op::Status(
+                serde_json::from_value::<JobArgs>(call.args.clone())
+                    .map_err(|_| bad("expected job_id: string"))?
+                    .job_id,
+            ),
+            "media.object_url" => Op::Url(
+                serde_json::from_value::<HandleArgs>(call.args.clone())
+                    .map_err(|_| bad("expected handle: string"))?
+                    .handle,
+            ),
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("media op {other:?} not supported"),
+                ))
+            }
+        };
+
+        match &op {
+            // Generation spends the key owner's money: full authorize (6/min).
+            Op::Image(_) | Op::Submit(..) => self
+                .gate
+                .authorize(
+                    &self.gate_scope(),
+                    PermissionId::MediaGenerate,
+                    ResourceRef::AppScoped(AppScopedResource::None),
+                )
+                .map(|_| ())
+                .map_err(denied_from_gate)?,
+            // Polling a job / resolving an owned handle costs nothing: grant +
+            // instance policy only, so polling never spends the generation
+            // budget (host-side scoping still binds them to this bundle).
+            Op::Status(_) | Op::Url(_) => self
+                .gate
+                .check_granted(&self.gate_scope(), PermissionId::MediaGenerate)
+                .map_err(denied_from_gate)?,
+        }
+
+        let Some(wiring) = &self.media else {
+            return Err(denied(
+                "not_implemented",
+                "media capability is not provisioned in this deployment",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "media capability is disabled (waddles.harness-media-generation is OFF)",
+            ));
+        }
+        if self.tenant_id <= 0 || self.community_id <= 0 {
+            return Err(denied(
+                "invalid_args",
+                "media requires a community-scoped activation (tier and BYOK are per community)",
+            ));
+        }
+        let scope = bundle_host_media::Scope {
+            tenant_id: i64::from(self.tenant_id),
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        };
+        if let Op::Image(prompt) | Op::Submit(_, prompt) = &op {
+            // Same content guard as `ai.generate`: PII / secret-shaped prompts are
+            // REJECTED, never redacted. The framed messages are discarded -- the
+            // provider receives the guest's words as a plain generation prompt.
+            ai::prepare(prompt, false).map_err(|refusal| match refusal {
+                PromptRefusal::ContainsPii(category) => denied(
+                    Denied::ContainsPii.reason_str(),
+                    format!(
+                        "prompt contains {category}; tokenize or remove personal data before \
+                         calling media.generate"
+                    ),
+                ),
+                PromptRefusal::Empty => denied("invalid_args", "prompt must not be empty"),
+                PromptRefusal::TooManyTokens(_) => denied("invalid_args", "prompt too long"),
+                PromptRefusal::GuardUnavailable => {
+                    denied("backend", "media prompt guard unavailable")
+                }
+            })?;
+        }
+        let host = &wiring.host;
+        let media_err = |e: bundle_host_media::MediaError| denied(e.code(), e.detail());
+        match op {
+            Op::Image(prompt) => {
+                // The synchronous call may not outlive the invocation: clamp to
+                // the time left on its deadline (less a margin to answer) and to
+                // the configured ceiling; too little left is refused, not
+                // attempted. The permit wait shares the same timeout.
+                let remaining = self
+                    .media_deadline
+                    .map(|d| d.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or(wiring.max_call_timeout);
+                let budget = remaining
+                    .saturating_sub(ai::DEADLINE_MARGIN)
+                    .min(wiring.max_call_timeout);
+                if budget < ai::MIN_CALL_BUDGET {
+                    return Err(denied(
+                        "unavailable",
+                        "too little of the invocation deadline remains for media.generate-image",
+                    ));
+                }
+                let guarded = async {
+                    let _permit = wiring.concurrency.acquire().await;
+                    host.generate_image(&scope, &prompt).await
+                };
+                match tokio::time::timeout(budget, guarded).await {
+                    Err(_elapsed) => Err(denied("timeout", "")),
+                    Ok(r) => r
+                        .map(|handle| serde_json::json!({ "handle": handle }))
+                        .map_err(media_err),
+                }
+            }
+            Op::Submit(kind, prompt) => {
+                let job_id = host
+                    .submit(&scope, kind, &prompt)
+                    .await
+                    .map_err(media_err)?;
+                Ok(serde_json::json!({ "job_id": job_id }))
+            }
+            Op::Status(job_id) => {
+                use bundle_host_media::JobState;
+                Ok(
+                    match host.job_status(&scope, &job_id).await.map_err(media_err)? {
+                        JobState::Pending => serde_json::json!({ "state": "pending" }),
+                        JobState::Done(handle) => {
+                            serde_json::json!({ "state": "done", "handle": handle })
+                        }
+                        JobState::Failed(e) => serde_json::json!({
+                            "state": "failed", "code": e.code(), "message": e.detail()
+                        }),
+                    },
+                )
+            }
+            Op::Url(handle) => {
+                let url = host.object_url(&scope, &handle).await.map_err(media_err)?;
+                Ok(serde_json::json!({ "url": url }))
+            }
+        }
     }
 
     /// `identity.resolve_actor` / `identity.resolve_mention`
@@ -787,10 +1079,10 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// length-capped. The success value is `{"text": "<completion>"}`. Neither the
     /// prompt nor the completion is ever logged or used as a metric label.
     ///
-    /// **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in
-    /// any environment until issue #858 is resolved.** Gating today is the
-    /// default-OFF flag plus the `ai.generate` 'dangerous' consent-ack;
-    /// Enterprise-tier enforcement is NOT YET implemented in code (issue #858).
+    /// Gating: the default-OFF flag, the `ai.generate` 'dangerous' consent-ack,
+    /// and a platform-side license-tier check (>= Professional; unknown tier
+    /// fails closed) applied here for every bundle. BYOK/Enterprise (#858) and
+    /// per-community effective-tier resolution are not yet implemented.
     async fn handle_ai(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
         /// The only four fields a bundle may influence.
         #[derive(serde::Deserialize)]
@@ -842,6 +1134,37 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
         let model = wiring.backend.model_for(args.json).to_string();
         let started = std::time::Instant::now();
+        // Platform-side tier enforcement (every bundle, none check it themselves).
+        match wiring.tier.tier().await {
+            Some(t) if t >= ai::AI_TIER_REQUIRED => {}
+            Some(t) => {
+                ai::record_call(&model, ai::outcome::TIER_REFUSED, 0.0);
+                tracing::warn!(
+                    tenant_id = self.tenant_id,
+                    community_id = self.community_id,
+                    app_id = %self.app_id,
+                    tier = ?t,
+                    "ai.generate refused: license tier below Professional"
+                );
+                return Err(denied(
+                    "tier_required",
+                    "AI features require a Professional license or higher",
+                ));
+            }
+            None => {
+                ai::record_call(&model, ai::outcome::TIER_UNKNOWN, 0.0);
+                tracing::warn!(
+                    tenant_id = self.tenant_id,
+                    community_id = self.community_id,
+                    app_id = %self.app_id,
+                    "ai.generate refused: license tier unknown (fail closed)"
+                );
+                return Err(denied(
+                    "tier_unknown",
+                    "AI features are unavailable: license tier could not be determined",
+                ));
+            }
+        }
         let refuse = |outcome: &'static str, err: HostResultError| {
             ai::record_call(&model, outcome, started.elapsed().as_secs_f64());
             err
@@ -1606,6 +1929,341 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
         identity::record_actor_binding(op, "bound");
         Ok(())
+    }
+
+    /// `platform_table.read` / `platform_table.write` (`wit/waddle-bundle/stage.wit`
+    /// `interface platform-table`), carried as `capability = db`. Fail-loud order:
+    /// (1) argument parsing; (2) the activation must have a community; (3) the
+    /// gate authorizes EVERY named column as its own `platform.table.<op>:<table>.<column>`
+    /// permission (an off-allowlist triple does not even parse -> `not_allowlisted`);
+    /// (4) wiring/flag state; (5) the store, which re-checks the allowlist and
+    /// scopes every statement by host-derived (tenant, community) -- never guest input.
+    async fn handle_platform_table(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        use bundle_capability_gate::platform_table::TableOp;
+        let op = match call.op.as_str() {
+            "platform_table.read" => TableOp::Read,
+            "platform_table.write" => TableOp::Write,
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("platform_table op {other:?} not supported"),
+                ))
+            }
+        };
+        let table = call
+            .args
+            .get("table")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| denied("invalid_args", "table must be a string"))?;
+        let user = call
+            .args
+            .get("user")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| denied("invalid_args", "user must be a UUID string"))
+            .and_then(|s| {
+                uuid::Uuid::parse_str(s)
+                    .map_err(|_| denied("invalid_args", "user must be a UUID string"))
+            })?;
+
+        let (columns, changes): (Vec<String>, Vec<PlatformTableChange>) = match op {
+            TableOp::Read => {
+                let cols = call
+                    .args
+                    .get("columns")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| denied("invalid_args", "columns must be an array"))?
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| denied("invalid_args", "columns must be strings"))?;
+                (cols, Vec::new())
+            }
+            TableOp::Write => {
+                let items = call
+                    .args
+                    .get("changes")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| denied("invalid_args", "changes must be an array"))?;
+                let changes = items
+                    .iter()
+                    .map(|c| {
+                        Some(PlatformTableChange {
+                            column: c.get("column")?.as_str()?.to_string(),
+                            value: c.get("value")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| {
+                        denied("invalid_args", "changes must be {column, value} strings")
+                    })?;
+                (changes.iter().map(|c| c.column.clone()).collect(), changes)
+            }
+        };
+        if columns.is_empty() || columns.len() > bundle_host_platform_table::MAX_COLUMNS {
+            return Err(denied(
+                "invalid_args",
+                format!(
+                    "columns must be 1..={}",
+                    bundle_host_platform_table::MAX_COLUMNS
+                ),
+            ));
+        }
+
+        if self.community_id == 0 || self.community.is_none() {
+            return Err(denied(
+                "invalid_args",
+                "platform-table access is community-scoped; this activation has no community",
+            ));
+        }
+
+        for column in &columns {
+            let id = format!("platform.table.{}:{table}.{column}", op.as_str());
+            let permission = PermissionId::parse(&id).map_err(|_| {
+                bundle_host_platform_table::record_denied("not_allowlisted");
+                denied(
+                    "not_allowlisted",
+                    format!("{}.{table}.{column} is not allowlisted", op.as_str()),
+                )
+            })?;
+            self.gate
+                .authorize(
+                    &self.gate_scope(),
+                    permission,
+                    ResourceRef::AppScoped(AppScopedResource::None),
+                )
+                .map_err(|e| {
+                    bundle_host_platform_table::record_denied("gate");
+                    denied_from_gate(e)
+                })?;
+        }
+
+        let Some(wiring) = &self.platform_table else {
+            return Err(denied(
+                "not_implemented",
+                "platform-table capability is not provisioned in this deployment \
+                 (BUNDLE_PLATFORM_TABLE_PASSWORD unset or connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "platform-table capability is disabled \
+                 (waddles.bundle-platform-table-capability is OFF)",
+            ));
+        }
+
+        let scope = PlatformTableScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+            app_version: self.app_version,
+        };
+        match op {
+            TableOp::Read => {
+                let columns_json = wiring
+                    .store
+                    .read(&scope, table, user, &columns)
+                    .await
+                    .map_err(platform_table_error_to_host)?;
+                Ok(serde_json::json!({ "columns": columns_json }))
+            }
+            TableOp::Write => {
+                wiring
+                    .store
+                    .write(&scope, table, user, &changes)
+                    .await
+                    .map_err(platform_table_error_to_host)?;
+                Ok(serde_json::json!({ "ok": true }))
+            }
+        }
+    }
+
+    /// `object_storage.*` (`wit/waddle-bundle/stage.wit` `interface object-storage`),
+    /// carried as `capability = db`. Order: (1) op/arg parsing; (2) wiring + flag
+    /// (cheap, before any gate quota is spent); (3) for a CROSS-prefix data op the
+    /// gate authorizes `storage.<op>:<owner>` (own prefix needs no grant; tag ops
+    /// are owner-only and never cross-prefix); (4) the host, which re-checks the
+    /// grant, filters by tag + system tags, enforces limits and audits. Tenant and
+    /// community come from this invoke's scope -- never from `call.args`.
+    async fn handle_object_storage(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        use base64::Engine as _;
+        use bundle_capability_gate::storage_access::StorageOp;
+        let op = call
+            .op
+            .strip_prefix("object_storage.")
+            .ok_or_else(|| denied("unknown_op", "not an object_storage op"))?;
+        let args = &call.args;
+        let str_arg = |k: &str| -> Result<String, HostResultError> {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| denied("invalid_args", format!("{k} must be a string")))
+        };
+        let opt_str = |k: &str| -> Result<Option<String>, HostResultError> {
+            match args.get(k) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+                Some(_) => Err(denied("invalid_args", format!("{k} must be a string or null"))),
+            }
+        };
+        let owner = opt_str("owner")?;
+        let grant_op = match op {
+            "put" => Some(StorageOp::Write),
+            "get" | "head" | "presign_get" => Some(StorageOp::Read),
+            "list" => Some(StorageOp::List),
+            "delete" => Some(StorageOp::Delete),
+            "tag_add" | "tag_remove" => None,
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("object_storage op {other:?} not supported"),
+                ))
+            }
+        };
+
+        let Some(wiring) = &self.object_storage else {
+            return Err(denied(
+                "not_implemented",
+                "object-storage capability is not provisioned in this deployment \
+                 (BUNDLE_STORAGE_* unset or the S3/audit connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "object-storage capability is disabled (waddles.bundle-object-storage is OFF)",
+            ));
+        }
+
+        // Cross-prefix data op: the gate must hold `storage.<op>:<owner>`.
+        let mut grants: Vec<String> = Vec::new();
+        if let (Some(gop), Some(o)) = (grant_op, owner.as_deref()) {
+            if o != self.app_id {
+                let permission = PermissionId::parse(&format!("storage.{}:{o}", gop.as_str()))
+                    .map_err(|_| denied("invalid_args", "bad prefix owner"))?;
+                self.gate
+                    .authorize(
+                        &self.gate_scope(),
+                        permission,
+                        ResourceRef::AppScoped(AppScopedResource::None),
+                    )
+                    .map_err(denied_from_gate)?;
+                grants.push(format!("storage.{}:{o}", gop.as_str()));
+            }
+        }
+        let scope = StorageScope {
+            app_id: self.app_id.clone(),
+            tenant: u64::try_from(self.tenant_id)
+                .map_err(|_| denied("invalid_args", "tenant id out of range"))?,
+            community: u64::try_from(self.community_id)
+                .map_err(|_| denied("invalid_args", "community id out of range"))?,
+            grants: StorageGrantSet::from_permission_ids(grants.iter().map(String::as_str))
+                .map_err(storage_error_to_host)?,
+            enabled: true,
+            request_id: format!("{}-{}", self.app_id.replace('.', "-"), call.call_id),
+        };
+        let host = &wiring.host;
+        let owner_ref = owner.as_deref();
+        let info = |i: &bundle_host_storage::host::ObjectInfo| {
+            serde_json::json!({ "key": i.key, "size": i.size, "content_type": i.content_type })
+        };
+        match op {
+            "put" => {
+                let body = base64::engine::general_purpose::STANDARD
+                    .decode(str_arg("body_b64")?)
+                    .map_err(|_| denied("invalid_args", "body_b64 must be base64"))?;
+                let tags: Vec<String> = match args.get("tags") {
+                    None | Some(serde_json::Value::Null) => Vec::new(),
+                    Some(serde_json::Value::Array(a)) => a
+                        .iter()
+                        .map(|v| v.as_str().map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| denied("invalid_args", "tags must be strings"))?,
+                    Some(_) => return Err(denied("invalid_args", "tags must be an array")),
+                };
+                let i = host
+                    .put(
+                        &scope,
+                        owner_ref,
+                        &str_arg("key")?,
+                        bundle_host_storage::Bytes::from(body),
+                        &str_arg("content_type")?,
+                        &tags,
+                    )
+                    .await
+                    .map_err(storage_error_to_host)?;
+                Ok(info(&i))
+            }
+            "get" => {
+                let (i, body) = host
+                    .get(&scope, owner_ref, &str_arg("key")?)
+                    .await
+                    .map_err(storage_error_to_host)?;
+                let mut v = info(&i);
+                v["body_b64"] = serde_json::Value::String(
+                    base64::engine::general_purpose::STANDARD.encode(&body),
+                );
+                Ok(v)
+            }
+            "head" => host
+                .head(&scope, owner_ref, &str_arg("key")?)
+                .await
+                .map(|i| info(&i))
+                .map_err(storage_error_to_host),
+            "list" => {
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .ok_or_else(|| denied("invalid_args", "limit must be a u32"))?;
+                let page = host
+                    .list(
+                        &scope,
+                        owner_ref,
+                        &str_arg("key_prefix")?,
+                        opt_str("cursor")?.as_deref(),
+                        limit,
+                    )
+                    .await
+                    .map_err(storage_error_to_host)?;
+                Ok(serde_json::json!({
+                    "objects": page.objects.iter().map(info).collect::<Vec<_>>(),
+                    "next_cursor": page.next_cursor,
+                }))
+            }
+            "delete" => host
+                .delete(&scope, owner_ref, &str_arg("key")?)
+                .await
+                .map(|_| serde_json::json!({ "ok": true }))
+                .map_err(storage_error_to_host),
+            "presign_get" => {
+                let ttl = args
+                    .get("ttl_seconds")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .ok_or_else(|| denied("invalid_args", "ttl_seconds must be a u32"))?;
+                host.presign_get(&scope, owner_ref, &str_arg("key")?, ttl)
+                    .await
+                    .map(|url| serde_json::json!({ "url": url }))
+                    .map_err(storage_error_to_host)
+            }
+            "tag_add" => host
+                .tag_add(&scope, owner_ref, &str_arg("key")?, &str_arg("consumer")?)
+                .await
+                .map(|_| serde_json::json!({ "ok": true }))
+                .map_err(storage_error_to_host),
+            _ => host
+                .tag_remove(&scope, owner_ref, &str_arg("key")?, &str_arg("consumer")?)
+                .await
+                .map(|_| serde_json::json!({ "ok": true }))
+                .map_err(storage_error_to_host),
+        }
     }
 
     /// `reputation.get` / `reputation.adjust` (`wit/waddle-bundle/stage.wit`
@@ -2714,6 +3372,15 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // `economy.*` ops (issue #714) likewise: own gate permissions
             // (`economy.read`/`economy.wager`/`economy.transfer`), own
             // handler, never the `storage.tables` path.
+            // `platform_table.*` ops (spec 2026-11-06): own gate permissions
+            // (`platform.table.<op>:<table>.<column>`), own handler, never the
+            // `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("object_storage.") => {
+                self.handle_object_storage(&call).await
+            }
+            CapabilityKind::Db if call.op.starts_with("platform_table.") => {
+                self.handle_platform_table(&call).await
+            }
             CapabilityKind::Db if call.op.starts_with("economy.") => {
                 self.handle_economy(&call).await
             }
@@ -2730,6 +3397,9 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // `ai.*` ops likewise: own gate permission (`ai.generate`), own
             // handler, never the `storage.tables` path.
             CapabilityKind::Db if call.op.starts_with("ai.") => self.handle_ai(&call).await,
+            // `media.*` ops likewise: own gate permission (`media.generate`), own
+            // handler (`bundle_host_media`), never the `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("media.") => self.handle_media(&call).await,
             CapabilityKind::Db => self.handle_db(&call).await,
             // `enabled` is wired to a real `penguin_licensing::
             // LicenseClient` (`crate::license::resolve_flag`) -- see
@@ -4446,3 +5116,7 @@ mod identity_tests;
 #[cfg(test)]
 #[path = "capabilities_ai_tests.rs"]
 mod ai_tests;
+
+#[cfg(test)]
+#[path = "capabilities_platform_table_tests.rs"]
+mod platform_table_tests;

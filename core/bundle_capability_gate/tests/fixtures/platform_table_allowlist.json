@@ -1,0 +1,7 @@
+{
+  "community_members": {
+    "role": ["read", "write"],
+    "is_active": ["read"],
+    "joined_at": ["read"]
+  }
+}

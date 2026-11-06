@@ -78,7 +78,9 @@ pub fn lookup_target(desired: &DesiredConnection) -> Option<(&'static str, Strin
     let key = source_key_of(desired)?;
     match platform {
         "twitch" | "discord" => scope_source(platform, key).map(|s| (platform, s)),
-        "youtube" | "spectrum" => Some((COMMUNITY_PLATFORM, desired.key.community_id.to_string())),
+        "youtube" | "spectrum" | "wix" => {
+            Some((COMMUNITY_PLATFORM, desired.key.community_id.to_string()))
+        }
         _ => None,
     }
 }

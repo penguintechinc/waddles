@@ -334,7 +334,7 @@ async fn discord_profile_drives_the_real_connector_through_the_whole_gateway_lif
         identify["d"]["token"], TOKEN,
         "slot substituted by the host"
     );
-    assert_eq!(identify["d"]["intents"], 33_281);
+    assert_eq!(identify["d"]["intents"], 33_283);
     assert!(identify["d"].get("shard").is_none(), "single shard");
     assert!(!w.identify.as_ref().unwrap().contains("{{"));
 

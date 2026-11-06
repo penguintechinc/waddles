@@ -22,6 +22,7 @@ from quart_schema import QuartSchema
 import blueprints.v1.tenant_twitch_install as install_module
 from blueprints.v1.tenant_twitch_install import tenant_twitch_install_bp
 from config import HubAPIConfig
+from services.install_state_binding import ERR_STATE, InstallStateError
 from services.twitch_install_oauth import TwitchOAuthError, TwitchTokenResult
 from services.twitch_install_state import TwitchInstallStatePayload
 
@@ -53,8 +54,8 @@ def _test_hub_config() -> HubAPIConfig:
 
 
 @pytest.fixture
-def app(bar_citizen_db: Any) -> Quart:
-    dal, _community_id, _tenant_id, _global_id = bar_citizen_db
+def app(guild_pairing_db: Any) -> Quart:
+    dal, _community_id, _tenant_id, _global_id = guild_pairing_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     quart_app.register_blueprint(tenant_twitch_install_bp)
@@ -75,9 +76,9 @@ def _feature_enabled_default_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestAuthorize:
     async def test_success_builds_state_and_authorize_url(
-        self, client: Any, user_auth_headers: Any, bar_citizen_db: Any, monkeypatch: Any
+        self, client: Any, user_auth_headers: Any, guild_pairing_db: Any, monkeypatch: Any
     ) -> None:
-        _dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        _dal, _community_id, tenant_id, _global_id = guild_pairing_db
         mock_create_state = AsyncMock(return_value="state-token-abc")
         monkeypatch.setattr(install_module.state_svc, "create_state", mock_create_state)
 
@@ -184,7 +185,11 @@ class TestAuthorize:
 
 class TestCallback:
     async def test_invalid_or_expired_state_is_400(self, client: Any, monkeypatch: Any) -> None:
-        monkeypatch.setattr(install_module.state_svc, "consume_state", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            install_module.state_svc,
+            "consume_state",
+            AsyncMock(side_effect=InstallStateError(ERR_STATE)),
+        )
         response = await client.get("/api/v1/tenant/twitch-install/callback?state=bogus&code=abc")
         assert response.status_code == 400
         text = await response.get_data(as_text=True)
@@ -249,9 +254,9 @@ class TestCallback:
         assert "tcsecret" not in text
 
     async def test_success_stores_credentials(
-        self, client: Any, bar_citizen_db: Any, monkeypatch: Any
+        self, client: Any, guild_pairing_db: Any, monkeypatch: Any
     ) -> None:
-        _dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        _dal, _community_id, tenant_id, _global_id = guild_pairing_db
         payload = TwitchInstallStatePayload(
             tenant_id=tenant_id,
             installed_by_user_id=1,

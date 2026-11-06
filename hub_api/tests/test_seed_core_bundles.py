@@ -2073,11 +2073,12 @@ _CONNECTOR_APP_IDS = (
     "waddles.core.service.twitch",
     "waddles.core.service.discord",
     "waddles.core.service.youtube",
+    "waddles.core.service.wix",
 )
 
 
-def test_real_catalog_has_the_three_connector_tools_rows() -> None:
-    """P6b: twitch/discord/youtube connectors are catalog rows with the connector-tools shape."""
+def test_real_catalog_has_the_connector_tools_rows() -> None:
+    """P6b: twitch/discord/youtube/wix connectors are catalog rows (connector-tools shape)."""
     bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
     by_id = {e.app_id: e for e in load_catalog(bundles_dir / "core-bundles.yaml")}
     raw = yaml.safe_load((bundles_dir / "core-bundles.yaml").read_text())["bundles"]

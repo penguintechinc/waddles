@@ -54,6 +54,7 @@ fn scope() -> InvokeScope {
         app_id: "waddles.scrape.test".to_string(),
         origin_channel_id: None,
         origin_platform: None,
+        origin_guild_id: None,
         tenant_id: 7,
         community_id: 3,
         app_version: 1,

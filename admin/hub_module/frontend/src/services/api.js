@@ -61,6 +61,8 @@ export default api;
 
 // Server-side OAuth login: hub-api owns client_id + redirect and returns the authorize URL.
 export const oauthApi = {
+  // Enabled login/link providers (hub-api flags `waddles.login-<provider>`); the only list the UI renders.
+  providers: () => api.get('/api/v1/auth/providers'),
   start: (platform) => api.get(`/api/v1/auth/oauth/${platform}`),
   // Link a provider to the signed-in account; resolves { authorizeUrl, state } (needs the session cookie).
   startLink: (platform) => api.get(`/api/v1/auth/oauth/${platform}/link`),
@@ -1082,6 +1084,17 @@ export const bundleApi = {
     api.post(
       `/api/v1/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(version)}/deny`,
       data,
+    ),
+  // Dangerous access grants (platform tables, ...) a version requests + approval state.
+  getAccessGrants: (appId, version) =>
+    api.get(
+      `/api/v1/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(version)}/access-grants`,
+    ),
+  // Global approval of the requested permission ids; every dangerous id must be acked.
+  approvePermissions: (appId, version, approvedPermissions) =>
+    api.post(
+      `/api/v1/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(version)}/permissions/approve`,
+      { approvedPermissions },
     ),
 };
 

@@ -26,7 +26,7 @@ use super::tests::Flag;
 use super::*;
 use crate::outbound_creds::CredError;
 use crate::outbound_creds_discord::{DiscordBinding, DiscordCredentialSource};
-use crate::outbound_ops::parse_outbound_entry;
+use crate::outbound_ops::{parse_outbound_entry, EventKind, RoleBulkKind};
 
 const DIGEST: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const TOKEN: &str = "BOT-SECRET-ONE";
@@ -60,6 +60,7 @@ fn roles() -> BTreeMap<String, String> {
         ("guildmgr", "335"),
         ("mixed", "336"),
         ("ghost", "999999"),
+        ("helper", "337"),
     ]
     .iter()
     .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -147,10 +148,14 @@ impl PlatformUserResolver for Users {
     }
 }
 
+type DynTpl = Arc<dyn Fn(&SenderAction) -> RequestTpl + Send + Sync>;
+
 #[derive(Clone)]
 struct Tpl {
     tpl: Arc<Mutex<RequestTpl>>,
     calls: Arc<Mutex<Vec<SenderAction>>>,
+    /// Builds the template per action (add vs remove, per role key) for bulk tests.
+    dynamic: Arc<Mutex<Option<DynTpl>>>,
 }
 
 impl Tpl {
@@ -158,6 +163,7 @@ impl Tpl {
         Self {
             tpl: Arc::new(Mutex::new(tpl)),
             calls: Arc::new(Mutex::new(Vec::new())),
+            dynamic: Arc::new(Mutex::new(None)),
         }
     }
     fn calls(&self) -> usize {
@@ -172,8 +178,12 @@ impl TemplateBuilder for Tpl {
         action: &SenderAction,
     ) -> Result<BuiltTemplate, BuildError> {
         self.calls.lock().unwrap().push(action.clone());
+        let tpl = match self.dynamic.lock().unwrap().as_ref() {
+            Some(f) => f(action),
+            None => self.tpl.lock().unwrap().clone(),
+        };
         Ok(BuiltTemplate {
-            tpl: self.tpl.lock().unwrap().clone(),
+            tpl,
             component_digest: DIGEST.to_string(),
         })
     }
@@ -230,6 +240,14 @@ fn role_tpl(base: &str, method: &str, guild: &str, user: &str, role: &str) -> Re
 }
 
 async fn rig_with(tpl: impl FnOnce(&str) -> RequestTpl, ttl: Duration) -> Rig {
+    rig_full(tpl, ttl, None).await
+}
+
+async fn rig_full(
+    tpl: impl FnOnce(&str) -> RequestTpl,
+    ttl: Duration,
+    err: Option<CredError>,
+) -> Rig {
     let server = MockServer::start().await;
     let base = server.uri();
     let tpl = Tpl::new(tpl(&base));
@@ -249,7 +267,8 @@ async fn rig_with(tpl: impl FnOnce(&str) -> RequestTpl, ttl: Duration) -> Rig {
             vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
         );
     let api = format!("{base}/api/v10");
-    let creds = Creds::new();
+    let mut creds = Creds::new();
+    creds.err = err;
     let users = Users::new();
     let exec = SenderExecutor::with_duties(
         tpl.clone(),
@@ -321,6 +340,7 @@ async fn mock_roles(s: &MockServer) {
             {"id": "334", "permissions": "268435456"},
             {"id": "335", "permissions": "32"},
             {"id": "336", "permissions": "2147483656"},
+            {"id": "337", "permissions": "0"},
         ])))
         .mount(s)
         .await;
@@ -728,6 +748,429 @@ async fn role_add_and_remove_map_the_key_pin_the_guild_and_build_the_url() {
     }
 }
 
+fn guild_role(add: bool, scope: &str) -> OutboundAction {
+    OutboundAction::RoleOp {
+        add,
+        user_id: UUID_A.to_string(),
+        role_key: "vip".to_string(),
+        origin_channel: scope.to_string(),
+        tenant_id: Some(9),
+    }
+}
+
+/// Guild-scoped role ops (gateway / external events carry no channel): the op lands ONLY in the
+/// community's own binding guild; no channel lookup happens; an agreeing gateway-guild assertion
+/// is allowed, a foreign one is refused before anything is sent.
+#[tokio::test]
+async fn guild_scoped_role_ops_pin_the_binding_guild_and_refuse_a_foreign_asserted_guild() {
+    for (add, verb) in [(true, "PUT"), (false, "DELETE")] {
+        for scope in ["guild:-".to_string(), format!("guild:{GUILD}")] {
+            let r = rig(|b| good_role(b, verb, "vip")).await;
+            mock_roles(&r.server).await;
+            mock_role_put(&r.server, verb, RAW_A, "222").await;
+            r.exec
+                .execute(&rq(&guild_role(add, &scope), 1))
+                .await
+                .unwrap();
+            let reqs = seen(&r.server).await;
+            assert!(
+                reqs.contains(&(
+                    verb.to_string(),
+                    format!("/api/v10/guilds/{GUILD}/members/{RAW_A}/roles/222")
+                )),
+                "{scope}: {reqs:?}"
+            );
+            assert!(
+                reqs.iter()
+                    .all(|(_, p)| !p.starts_with("/api/v10/channels/")),
+                "no channel lookup for a guild-scoped op"
+            );
+        }
+    }
+    // A gateway event from ANOTHER guild than the community's paired one is refused.
+    let r = rig(|b| good_role(b, "PUT", "vip")).await;
+    mock_roles(&r.server).await;
+    mock_role_put(&r.server, "PUT", RAW_A, "222").await;
+    let before = refusal_count("role.add", "guild_mismatch");
+    let e = r
+        .exec
+        .execute(&rq(&guild_role(true, "guild:999000999"), 1))
+        .await
+        .unwrap_err();
+    assert_eq!(e, ExecError::Slot(SlotError::Refused("guild_mismatch")));
+    assert_eq!(writes(&r.server).await, 0, "nothing was sent");
+    assert!(refusal_count("role.add", "guild_mismatch") > before);
+}
+
+/// A community's op is pinned to ITS binding guild even when another community is bound to a
+/// different guild (Wix-style external event: scope `guild:-`).
+#[tokio::test]
+async fn an_external_event_op_can_only_touch_the_communitys_own_paired_guild() {
+    let r = rig(|b| good_role(b, "PUT", "vip")).await;
+    mock_roles(&r.server).await;
+    mock_role_put(&r.server, "PUT", RAW_A, "222").await;
+    // community 2 is bound to guild 222000 with ITS OWN token: the request goes there only.
+    Mock::given(method("GET"))
+        .and(path("/api/v10/guilds/222000/roles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {"id": "222", "permissions": "0"}
+        ])))
+        .mount(&r.server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(
+            "/api/v10/guilds/222000/members/800000000000000009/roles/222",
+        ))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&r.server)
+        .await;
+    r.exec
+        .execute(&rq(&guild_role(true, "guild:-"), 2))
+        .await
+        .unwrap();
+    let reqs = r.server.received_requests().await.unwrap();
+    let put = reqs.iter().find(|q| q.method.as_str() == "PUT").unwrap();
+    assert_eq!(
+        put.url.path(),
+        "/api/v10/guilds/222000/members/800000000000000009/roles/222"
+    );
+    assert_eq!(
+        put.headers.get("authorization").unwrap(),
+        &format!("Bot {TOKEN2}")
+    );
+}
+
+/// A community with several usable Discord bindings is refused with the typed
+/// `ambiguous_paired_guild` BEFORE anything is built or sent -- for channel-pinned and
+/// guild-scoped ops alike; the guild is never guessed.
+#[tokio::test]
+async fn several_paired_guilds_are_refused_explicitly() {
+    for scope in ["guild:-".to_string(), format!("guild:{GUILD}")] {
+        let r = rig_full(
+            |b| good_role(b, "PUT", "vip"),
+            Duration::from_secs(30),
+            Some(CredError::AmbiguousBinding),
+        )
+        .await;
+        mock_roles(&r.server).await;
+        mock_role_put(&r.server, "PUT", RAW_A, "222").await;
+        let e = r
+            .exec
+            .execute(&rq(&guild_role(true, &scope), 1))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e,
+            ExecError::Slot(SlotError::Refused("ambiguous_paired_guild")),
+            "{scope}"
+        );
+        assert_eq!(writes(&r.server).await, 0, "nothing was sent");
+    }
+}
+
+// ---- bulk role ops (role.set / role.list) ---------------------------------
+
+fn bulk(kind: RoleBulkKind, user: Option<&str>, keys: &[&str], scope: &str) -> OutboundAction {
+    OutboundAction::RoleBulk {
+        kind,
+        user_id: user.map(str::to_string),
+        role_keys: keys.iter().map(|k| (*k).to_string()).collect(),
+        origin_channel: scope.to_string(),
+        tenant_id: Some(9),
+    }
+}
+
+/// A rig whose template follows the sub-op (PUT/DELETE, per role key), like the real connector.
+async fn bulk_rig() -> Rig {
+    let r = rig(|b| good_role(b, "PUT", "vip")).await;
+    let base = r.server.uri();
+    *r.tpl.dynamic.lock().unwrap() = Some(Arc::new(move |a: &SenderAction| {
+        let v: serde_json::Value = serde_json::from_str(&a.payload_json).unwrap();
+        let key = v["role"].as_str().unwrap().to_string();
+        let verb = if a.kind == "role.remove" {
+            "DELETE"
+        } else {
+            "PUT"
+        };
+        good_role(&base, verb, &key)
+    }));
+    r
+}
+
+async fn mock_member_roles(s: &MockServer, raw: &str, roles: &[&str]) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v10/guilds/{GUILD}/members/{raw}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"roles": roles})))
+        .mount(s)
+        .await;
+}
+
+/// `role.set` reads the member's roles host-side and applies the MINIMAL add/remove diff inside
+/// the managed allowlist: wanted-and-missing -> PUT, held-managed-not-wanted -> DELETE; unmanaged
+/// roles held by the member are never touched.
+#[tokio::test]
+async fn role_set_applies_the_minimal_diff_within_the_allowlist() {
+    let r = bulk_rig().await;
+    mock_roles(&r.server).await;
+    // vip=222 held (not wanted), helper=337 missing (wanted); 999 is unmanaged and untouched.
+    mock_member_roles(&r.server, RAW_A, &["222", "999"]).await;
+    mock_role_put(&r.server, "PUT", RAW_A, "337").await;
+    mock_role_put(&r.server, "DELETE", RAW_A, "222").await;
+    let out = r
+        .exec
+        .execute_role_bulk(
+            "discord",
+            Some(1),
+            &bulk(RoleBulkKind::Set, Some(UUID_A), &["helper"], "guild:-"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out, None);
+    let mut writes_seen: Vec<_> = seen(&r.server)
+        .await
+        .into_iter()
+        .filter(|(m, _)| m == "PUT" || m == "DELETE")
+        .collect();
+    writes_seen.sort();
+    assert_eq!(
+        writes_seen,
+        vec![
+            (
+                "DELETE".to_string(),
+                format!("/api/v10/guilds/{GUILD}/members/{RAW_A}/roles/222")
+            ),
+            (
+                "PUT".to_string(),
+                format!("/api/v10/guilds/{GUILD}/members/{RAW_A}/roles/337")
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn role_set_that_already_matches_changes_nothing_and_unknown_or_privileged_keys_refuse_first()
+{
+    let r = bulk_rig().await;
+    mock_roles(&r.server).await;
+    mock_member_roles(&r.server, RAW_A, &["222"]).await;
+    r.exec
+        .execute_role_bulk(
+            "discord",
+            Some(1),
+            &bulk(RoleBulkKind::Set, Some(UUID_A), &["vip"], "guild:-"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(writes(&r.server).await, 0, "already converged");
+    for (key, want) in [("nope", "role_not_managed"), ("adm", "role_privileged")] {
+        let e = r
+            .exec
+            .execute_role_bulk(
+                "discord",
+                Some(1),
+                &bulk(RoleBulkKind::Set, Some(UUID_A), &["vip", key], "guild:-"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code(&e), want, "{key}");
+    }
+    assert_eq!(writes(&r.server).await, 0, "refused before any change");
+}
+
+/// `role.list` returns the managed keys with assignability (privileged / missing roles are not
+/// assignable); nothing is written and no user is needed.
+/// A privileged managed role the member already holds is NEVER removed by `role.set` (nor
+/// added): only unprivileged managed roles take part in the diff.
+#[tokio::test]
+async fn role_set_never_touches_a_privileged_managed_role() {
+    let r = bulk_rig().await;
+    mock_roles(&r.server).await;
+    // adm=333 (ADMINISTRATOR) and vip=222 held; helper=337 wanted.
+    mock_member_roles(&r.server, RAW_A, &["222", "333"]).await;
+    mock_role_put(&r.server, "PUT", RAW_A, "337").await;
+    mock_role_put(&r.server, "DELETE", RAW_A, "222").await;
+    r.exec
+        .execute_role_bulk(
+            "discord",
+            Some(1),
+            &bulk(RoleBulkKind::Set, Some(UUID_A), &["helper"], "guild:-"),
+        )
+        .await
+        .unwrap();
+    let touched: Vec<_> = seen(&r.server)
+        .await
+        .into_iter()
+        .filter(|(m, _)| m == "PUT" || m == "DELETE")
+        .collect();
+    assert_eq!(touched.len(), 2, "{touched:?}");
+    assert!(
+        touched.iter().all(|(_, p)| !p.ends_with("/333")),
+        "{touched:?}"
+    );
+}
+
+#[tokio::test]
+async fn role_list_returns_managed_keys_with_assignability() {
+    let r = bulk_rig().await;
+    mock_roles(&r.server).await;
+    let out = r
+        .exec
+        .execute_role_bulk(
+            "discord",
+            Some(1),
+            &bulk(RoleBulkKind::List, None, &[], "guild:-"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let roles = v["roles"].as_array().unwrap();
+    let get = |k: &str| roles.iter().find(|r| r["key"] == k).unwrap()["assignable"].clone();
+    assert_eq!(get("vip"), true);
+    assert_eq!(get("adm"), false);
+    assert_eq!(get("ghost"), false, "allowlisted but absent from the guild");
+    assert_eq!(writes(&r.server).await, 0);
+}
+
+/// Bulk ops obey the SAME guild pinning as single ops.
+#[tokio::test]
+async fn bulk_ops_are_pinned_to_the_binding_guild() {
+    let r = bulk_rig().await;
+    mock_roles(&r.server).await;
+    mock_member_roles(&r.server, RAW_A, &[]).await;
+    mock_role_put(&r.server, "PUT", RAW_A, "222").await;
+    for kind_user in [
+        (RoleBulkKind::Set, Some(UUID_A)),
+        (RoleBulkKind::List, None),
+    ] {
+        let e = r
+            .exec
+            .execute_role_bulk(
+                "discord",
+                Some(1),
+                &bulk(
+                    kind_user.0,
+                    kind_user.1,
+                    &["vip"][..usize::from(kind_user.1.is_some())],
+                    "guild:999000999",
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code(&e), "guild_mismatch");
+    }
+    assert_eq!(writes(&r.server).await, 0);
+    // several paired guilds -> typed refusal
+    let r = rig_full(
+        |b| good_role(b, "PUT", "vip"),
+        Duration::from_secs(30),
+        Some(CredError::AmbiguousBinding),
+    )
+    .await;
+    let e = r
+        .exec
+        .execute_role_bulk(
+            "discord",
+            Some(1),
+            &bulk(RoleBulkKind::List, None, &[], "guild:-"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), "ambiguous_paired_guild");
+}
+
+#[test]
+fn bulk_wire_forms_parse_and_malformed_ones_are_refused() {
+    use crate::outbound_ops::parse_outbound_entry;
+    let uu = format!("{{user:{UUID_A}}}");
+    let set = format!(
+        r#"{{"v":1,"op":"role.set","platform":"discord","user_id":"{uu}","text":"vip,helper,vip","origin_channel":"guild:-","tenant_id":9,"community_id":1}}"#
+    );
+    let e = parse_outbound_entry(&set, "discord").unwrap();
+    assert_eq!(
+        e.action,
+        OutboundAction::RoleBulk {
+            kind: RoleBulkKind::Set,
+            user_id: Some(uu.clone()),
+            role_keys: vec!["helper".into(), "vip".into()],
+            origin_channel: "guild:-".into(),
+            tenant_id: Some(9),
+        }
+    );
+    assert_eq!(e.action.op(), "role.set");
+    let list = r#"{"v":1,"op":"role.list","platform":"discord","origin_channel":"guild:-","tenant_id":9,"community_id":1}"#;
+    assert_eq!(
+        parse_outbound_entry(list, "discord").unwrap().action.op(),
+        "role.list"
+    );
+    let many = (0..17)
+        .map(|i| format!("k{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    for bad in [
+        r#"{"op":"role.set","platform":"discord","text":"vip","origin_channel":"guild:-"}"#
+            .to_string(),
+        format!(
+            r#"{{"op":"role.set","platform":"discord","user_id":"{uu}","origin_channel":"guild:-"}}"#
+        ),
+        format!(
+            r#"{{"op":"role.set","platform":"discord","user_id":"{uu}","text":"222222222222222222","origin_channel":"guild:-"}}"#
+        ),
+        format!(
+            r#"{{"op":"role.set","platform":"discord","user_id":"{uu}","text":"VIP","origin_channel":"guild:-"}}"#
+        ),
+        format!(
+            r#"{{"op":"role.set","platform":"discord","user_id":"{uu}","text":"{many}","origin_channel":"guild:-"}}"#
+        ),
+        r#"{"op":"role.list","platform":"discord","text":"vip","origin_channel":"guild:-"}"#
+            .to_string(),
+        format!(
+            r#"{{"op":"role.list","platform":"discord","user_id":"{uu}","origin_channel":"guild:-"}}"#
+        ),
+        r#"{"op":"role.list","platform":"discord"}"#.to_string(),
+    ] {
+        assert!(parse_outbound_entry(&bad, "discord").is_err(), "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn malformed_guild_scopes_are_refused() {
+    for scope in [
+        "guild:",
+        "guild:abc",
+        "guild:12345678901234567890123",
+        "guild:-x",
+    ] {
+        let r = rig(|b| good_role(b, "PUT", "vip")).await;
+        mock_roles(&r.server).await;
+        mock_role_put(&r.server, "PUT", RAW_A, "222").await;
+        let e = r
+            .exec
+            .execute(&rq(&guild_role(true, scope), 1))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, ExecError::Pin(_)), "{scope}: {e:?}");
+        assert_eq!(writes(&r.server).await, 0, "{scope}");
+    }
+}
+
+#[test]
+fn guild_scope_wire_form() {
+    use super::role_guild_scope as g;
+    assert_eq!(g("guild:-"), Some(None));
+    assert_eq!(g("guild:123"), Some(Some("123")));
+    for bad in [
+        "123",
+        "guild:",
+        "guild:x",
+        "Guild:1",
+        "guild:1 ",
+        &format!("guild:{}", "1".repeat(21)),
+    ] {
+        assert_eq!(g(bad), None, "{bad}");
+    }
+}
+
 #[tokio::test]
 async fn a_privileged_role_is_refused_even_when_allowlisted() {
     // ADMINISTRATOR, MANAGE_ROLES, MANAGE_GUILD, and a mixed-bit set carrying ADMINISTRATOR
@@ -1089,12 +1532,14 @@ async fn the_slot_source_refuses_foreign_platforms_unknown_handles_and_missing_p
     let src =
         DiscordSlots::with_endpoint(Creds::new(), guard(), "http://127.0.0.1:1/api/v10".into());
     let base = SlotRequest {
+        guild_scoped: false,
         platform: "discord",
         community_id: Some(1),
         pinned_channel: Some(CHANNEL),
         handles: &["discord-bot"],
     };
     let mut r = SlotRequest {
+        guild_scoped: false,
         platform: "twitch",
         ..clone_req(&base)
     };
@@ -1103,6 +1548,7 @@ async fn the_slot_source_refuses_foreign_platforms_unknown_handles_and_missing_p
         SlotError::Refused("unsupported_platform")
     );
     r = SlotRequest {
+        guild_scoped: false,
         handles: &["token"],
         ..clone_req(&base)
     };
@@ -1111,6 +1557,7 @@ async fn the_slot_source_refuses_foreign_platforms_unknown_handles_and_missing_p
         SlotError::Refused("unknown_handle")
     );
     r = SlotRequest {
+        guild_scoped: false,
         pinned_channel: None,
         ..clone_req(&base)
     };
@@ -1125,6 +1572,7 @@ async fn the_slot_source_refuses_foreign_platforms_unknown_handles_and_missing_p
     );
     // a non-snowflake channel never reaches the wire
     r = SlotRequest {
+        guild_scoped: false,
         pinned_channel: Some("../x"),
         ..clone_req(&base)
     };
@@ -1136,6 +1584,7 @@ async fn the_slot_source_refuses_foreign_platforms_unknown_handles_and_missing_p
 
 fn clone_req<'a>(r: &SlotRequest<'a>) -> SlotRequest<'a> {
     SlotRequest {
+        guild_scoped: false,
         platform: r.platform,
         community_id: r.community_id,
         pinned_channel: r.pinned_channel,
@@ -1354,5 +1803,383 @@ async fn resolver_failures_map_to_distinct_typed_outcomes() {
         assert_eq!(code(&e), expect);
         assert_eq!(!e.is_policy_refusal(), retryable, "{expect}");
         assert_eq!(writes(&r.server).await, 0);
+    }
+}
+
+// ---- guild scheduled events ---------------------------------------------
+
+const EVENT_ID: &str = "900000000000000001";
+const EVENT_JSON: &str = r#"{"name":"n","scheduled_start_time":"2026-12-01T19:00:00Z","scheduled_end_time":"2026-12-01T20:00:00Z","location":"l"}"#;
+
+fn event(kind: EventKind, guild: &str, tenant: Option<i64>) -> OutboundAction {
+    let (event_id, event_json) = match kind {
+        EventKind::Create => (None, Some(EVENT_JSON.to_string())),
+        EventKind::Update => (Some(EVENT_ID.to_string()), Some(EVENT_JSON.to_string())),
+        EventKind::Cancel | EventKind::Delete => (Some(EVENT_ID.to_string()), None),
+    };
+    OutboundAction::EventOp {
+        kind,
+        event_id,
+        event_json,
+        expect_guild: (guild != "-").then(|| guild.to_string()),
+        tenant_id: tenant,
+    }
+}
+
+fn event_tpl(base: &str, method: &str, id: Option<&str>) -> RequestTpl {
+    let tail = id.map_or_else(String::new, |i| format!("/{i}"));
+    RequestTpl {
+        method: method.into(),
+        url: format!("{base}/api/v10/guilds/{{target.guild_id}}/scheduled-events{tail}"),
+        headers: if method == "DELETE" {
+            vec![]
+        } else {
+            vec![("Content-Type".into(), "application/json".into())]
+        },
+        body: (method != "DELETE").then(|| br#"{"name":"n"}"#.to_vec()),
+        secret_refs: vec![("Authorization".into(), "discord-bot".into())],
+    }
+}
+
+async fn mock_events(s: &MockServer, verb: &str, p: &str, status: u16, body: serde_json::Value) {
+    Mock::given(method(verb))
+        .and(path(p.to_string()))
+        .respond_with(ResponseTemplate::new(status).set_body_json(body))
+        .mount(s)
+        .await;
+}
+
+#[tokio::test]
+async fn event_create_pins_the_binding_guild_and_returns_the_new_event_id() {
+    let r = rig(|b| event_tpl(b, "POST", None)).await;
+    mock_events(
+        &r.server,
+        "POST",
+        &format!("/api/v10/guilds/{GUILD}/scheduled-events"),
+        200,
+        json!({"id": EVENT_ID}),
+    )
+    .await;
+    let out = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, GUILD, Some(9)), 1))
+        .await
+        .unwrap();
+    assert_eq!(out.result_id.as_deref(), Some(EVENT_ID));
+    let reqs = r.server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs.len(),
+        1,
+        "no channel/role/membership lookups for events"
+    );
+    assert_eq!(
+        reqs[0].headers.get("authorization").unwrap(),
+        &format!("Bot {TOKEN}")
+    );
+    // The connector payload carries the producer's fields and NO guild/channel.
+    let calls = r.tpl.calls.lock().unwrap().clone();
+    assert_eq!(calls[0].kind, "event.create");
+    let p: serde_json::Value = serde_json::from_str(&calls[0].payload_json).unwrap();
+    assert_eq!(p["name"], "n");
+    assert!(p.get("guild_id").is_none() && p.get("channel_id").is_none());
+    assert!(p.get("event_id").is_none());
+}
+
+#[tokio::test]
+async fn event_update_cancel_delete_address_the_event_in_the_binding_guild() {
+    for (kind, verb, status) in [
+        (EventKind::Update, "PATCH", 200),
+        (EventKind::Cancel, "PATCH", 200),
+        (EventKind::Delete, "DELETE", 204),
+    ] {
+        let r = rig(|b| event_tpl(b, verb, Some(EVENT_ID))).await;
+        let p = format!("/api/v10/guilds/{GUILD}/scheduled-events/{EVENT_ID}");
+        mock_events(&r.server, verb, &p, status, json!({})).await;
+        let out = r
+            .exec
+            .execute(&rq(&event(kind, GUILD, Some(9)), 1))
+            .await
+            .unwrap();
+        assert_eq!(out.result_id, None, "{kind:?}");
+        let calls = r.tpl.calls.lock().unwrap().clone();
+        let payload: serde_json::Value = serde_json::from_str(&calls[0].payload_json).unwrap();
+        assert_eq!(payload["event_id"], EVENT_ID);
+        assert_eq!(seen(&r.server).await, vec![(verb.to_string(), p)]);
+    }
+}
+
+#[tokio::test]
+async fn an_event_guild_assertion_that_differs_from_the_binding_is_refused_before_the_connector() {
+    let r = rig(|b| event_tpl(b, "POST", None)).await;
+    mock_events(
+        &r.server,
+        "POST",
+        &format!("/api/v10/guilds/{GUILD}/scheduled-events"),
+        200,
+        json!({"id": EVENT_ID}),
+    )
+    .await;
+    let before = refusal_count("event.create", "guild_mismatch");
+    // regression: guild pinning -- the producer's guild is an assertion only.
+    let e = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, "222000", Some(9)), 1))
+        .await
+        .unwrap_err();
+    assert_eq!(e, ExecError::Slot(SlotError::Refused("guild_mismatch")));
+    assert!(e.is_policy_refusal());
+    assert_eq!(r.tpl.calls(), 0, "refused before the connector ran");
+    assert!(seen(&r.server).await.is_empty());
+    assert!(refusal_count("event.create", "guild_mismatch") > before);
+    // Community 2's binding is another guild: its own assertion passes the gate
+    // only for ITS guild, never community 1's.
+    let e = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, GUILD, Some(9)), 2))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), "guild_mismatch");
+    assert!(seen(&r.server).await.is_empty());
+}
+
+#[tokio::test]
+async fn event_ops_without_tenant_or_community_scope_are_refused() {
+    let r = rig(|b| event_tpl(b, "POST", None)).await;
+    let e = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, GUILD, None), 1))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), "no_tenant_scope");
+    let e = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, GUILD, Some(9)), 99))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, ExecError::Slot(_)), "{e:?}");
+    assert!(seen(&r.server).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_create_reply_without_a_snowflake_id_fails_loudly() {
+    for body in [json!({}), json!({"id": "abc"}), json!({"id": 5})] {
+        let r = rig(|b| event_tpl(b, "POST", None)).await;
+        mock_events(
+            &r.server,
+            "POST",
+            &format!("/api/v10/guilds/{GUILD}/scheduled-events"),
+            200,
+            body,
+        )
+        .await;
+        let e = r
+            .exec
+            .execute(&rq(&event(EventKind::Create, GUILD, Some(9)), 1))
+            .await
+            .unwrap_err();
+        assert_eq!(e, ExecError::Egress("bad_response"));
+        assert!(!e.is_policy_refusal());
+    }
+}
+
+#[tokio::test]
+async fn a_template_naming_another_guild_or_path_for_an_event_is_refused_by_the_verifier() {
+    for url_tail in [
+        "/api/v10/guilds/999/scheduled-events",
+        "/api/v10/guilds/{target.guild_id}/scheduled-events/../roles",
+        "/api/v10/guilds/{target.guild_id}/roles",
+        "/api/v10/channels/{target.channel_id}/messages",
+    ] {
+        let r = rig(|b| {
+            let mut t = event_tpl(b, "POST", None);
+            t.url = format!("{b}{url_tail}");
+            t
+        })
+        .await;
+        let res = r
+            .exec
+            .execute(&rq(&event(EventKind::Create, GUILD, Some(9)), 1))
+            .await;
+        assert!(res.is_err(), "{url_tail}");
+        assert!(
+            r.server.received_requests().await.unwrap().is_empty(),
+            "{url_tail}"
+        );
+    }
+}
+
+#[test]
+fn event_payload_shapes_per_kind_and_malformed_inputs() {
+    use super::discord_duties::event_payload as ep;
+    let v = |s: String| serde_json::from_str::<serde_json::Value>(&s).unwrap();
+    assert_eq!(
+        v(ep(EventKind::Create, None, Some(EVENT_JSON)).unwrap())["name"],
+        "n"
+    );
+    let u = v(ep(EventKind::Update, Some("7"), Some(EVENT_JSON)).unwrap());
+    assert_eq!(
+        (u["name"].as_str(), u["event_id"].as_str()),
+        (Some("n"), Some("7"))
+    );
+    assert_eq!(
+        v(ep(EventKind::Cancel, Some("7"), None).unwrap()),
+        json!({"event_id": "7"})
+    );
+    assert_eq!(
+        v(ep(EventKind::Delete, Some("7"), None).unwrap()),
+        json!({"event_id": "7"})
+    );
+    for bad in [
+        ep(EventKind::Create, Some("7"), Some(EVENT_JSON)),
+        ep(EventKind::Create, None, None),
+        ep(EventKind::Create, None, Some("[]")),
+        ep(EventKind::Create, None, Some("nope")),
+        ep(EventKind::Update, None, Some(EVENT_JSON)),
+        ep(EventKind::Cancel, None, None),
+        ep(EventKind::Cancel, Some("7"), Some(EVENT_JSON)),
+        ep(EventKind::Delete, Some("7"), Some("{}")),
+    ] {
+        assert_eq!(bad, Err(ExecError::BadAction));
+    }
+}
+
+#[test]
+fn event_wire_entries_parse_with_per_kind_field_rules() {
+    let base = |op: &str, extra: &str| {
+        format!(
+            r#"{{"v":1,"op":"{op}","platform":"discord","origin_channel":"111","tenant_id":9{extra}}}"#
+        )
+    };
+    let ok = |op: &str, extra: &str| parse_outbound_entry(&base(op, extra), "discord");
+    let t = r#","text":"{\"name\":\"n\"}""#;
+    let m = r#","message_id":"42""#;
+    assert!(matches!(
+        ok("event.create", t).unwrap().action,
+        OutboundAction::EventOp {
+            kind: EventKind::Create,
+            event_id: None,
+            ..
+        }
+    ));
+    let u = ok("event.update", &format!("{t}{m}")).unwrap().action;
+    assert!(matches!(
+        u,
+        OutboundAction::EventOp { kind: EventKind::Update, ref event_id, ref expect_guild, tenant_id: Some(9), .. }
+            if event_id.as_deref() == Some("42") && expect_guild.as_deref() == Some("111")
+    ));
+    for op in ["event.cancel", "event.delete"] {
+        assert_eq!(ok(op, m).unwrap().action.op(), op);
+        assert!(
+            ok(op, &format!("{m}{t}")).is_err(),
+            "{op} must not carry text"
+        );
+        assert!(ok(op, "").is_err(), "{op} needs an id");
+    }
+    assert!(ok("event.create", "").is_err());
+    assert!(ok("event.create", &format!("{t}{m}")).is_err());
+    assert!(ok("event.update", t).is_err());
+    assert!(ok("event.update", m).is_err());
+    // `-` = no assertion; anything else that is not a snowflake is refused
+    assert!(matches!(
+        parse_outbound_entry(
+            &base("event.delete", m).replace("\"111\"", "\"-\""),
+            "discord"
+        )
+        .unwrap()
+        .action,
+        OutboundAction::EventOp {
+            expect_guild: None,
+            ..
+        }
+    ));
+    assert!(parse_outbound_entry(
+        &base("event.delete", m).replace("\"111\"", "\"12ab\""),
+        "discord"
+    )
+    .is_err());
+    let no_guild = r#"{"v":1,"op":"event.delete","platform":"discord","message_id":"42"}"#;
+    assert!(parse_outbound_entry(no_guild, "discord").is_err());
+    // never defaulted: an unknown event op is an unknown op
+    assert!(ok("event.explode", m).is_err());
+}
+
+#[test]
+fn only_the_event_kinds_declared_in_policy_are_executable() {
+    let p = PlatformPolicy::discord();
+    for (k, method) in [
+        ("event.create", "POST"),
+        ("event.update", "PATCH"),
+        ("event.cancel", "PATCH"),
+        ("event.delete", "DELETE"),
+    ] {
+        let kp = p.kind(k).unwrap();
+        assert_eq!(kp.method, method);
+        assert!(kp.needs_duty && kp.slots == vec!["target.guild_id"]);
+    }
+    assert!(p.kind("event.fetch").is_none());
+}
+
+#[tokio::test]
+async fn guild_scoped_slot_requests_skip_the_channel_proof_and_nothing_else_does() {
+    let r = rig(|b| event_tpl(b, "POST", None)).await;
+    let slots = DiscordSlots::with_endpoint(
+        r.creds.clone(),
+        guard(),
+        format!("{}/api/v10", r.server.uri()),
+    );
+    let req = |pin: Option<&'static str>, guild_scoped: bool, community: i64| SlotRequest {
+        guild_scoped,
+        platform: "discord",
+        community_id: Some(community),
+        pinned_channel: pin,
+        handles: &["discord-bot"],
+    };
+    // guild-scoped, no channel: the community's own token, no channel lookup.
+    let ok = slots.resolve(&req(None, true, 1)).await.unwrap();
+    assert_eq!(ok["discord-bot"].expose(), TOKEN);
+    assert!(seen(&r.server).await.is_empty());
+    // every mismatch between pin and scope is refused loudly
+    for (pin, scoped) in [(None, false), (Some(CHANNEL), true)] {
+        assert_eq!(
+            slots.resolve(&req(pin, scoped, 1)).await.unwrap_err(),
+            SlotError::Refused("no_origin_pin")
+        );
+    }
+    // never another community's credential
+    assert!(slots.resolve(&req(None, true, 99)).await.is_err());
+}
+
+#[tokio::test]
+async fn an_event_with_no_guild_assertion_pins_from_the_binding_alone() {
+    let r = rig(|b| event_tpl(b, "POST", None)).await;
+    mock_events(
+        &r.server,
+        "POST",
+        &format!("/api/v10/guilds/{GUILD}/scheduled-events"),
+        200,
+        json!({"id": EVENT_ID}),
+    )
+    .await;
+    let out = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, "-", Some(9)), 1))
+        .await
+        .unwrap();
+    assert_eq!(out.result_id.as_deref(), Some(EVENT_ID));
+}
+
+#[test]
+fn a_discord_404_on_an_event_op_acks_a_distinct_not_found_code() {
+    use crate::outbound_ops::exec_to_sender_error;
+    let nf = exec_to_sender_error("discord", "event.update", &ExecError::Upstream(404));
+    assert_eq!(nf.ack_code(), "upstream_not_found");
+    // other ops / statuses keep the generic failed code
+    for (op, st) in [
+        ("chat.delete", 404),
+        ("event.update", 500),
+        ("event.create", 403),
+    ] {
+        let e = exec_to_sender_error("discord", op, &ExecError::Upstream(st));
+        assert_eq!(e.ack_code(), "failed", "{op} {st}");
     }
 }

@@ -73,6 +73,7 @@ const AdminAIInsights = lazy(() => import('./pages/admin/AdminAIInsights'));
 const AdminAIResearcherConfig = lazy(() => import('./pages/admin/AdminAIResearcherConfig'));
 const AdminAIChatterConfig = lazy(() => import('./pages/admin/AdminAIChatterConfig'));
 const AdminBotDetection = lazy(() => import('./pages/admin/AdminBotDetection'));
+const AdminMediaByok = lazy(() => import('./pages/admin/AdminMediaByok'));
 const AdminAnnouncements = lazy(() => import('./pages/admin/AdminAnnouncements'));
 const AdminAnalytics = lazy(() => import('./pages/admin/AdminAnalytics'));
 const AdminMemberAnalytics = lazy(() => import('./pages/admin/AdminMemberAnalytics'));
@@ -335,6 +336,7 @@ function App() {
         <Route path="/admin/:communityId/ai-config" element={<ServedFeature feature="ai-researcher"><AdminAIResearcherConfig /></ServedFeature>} />
         <Route path="/admin/:communityId/ai-chatter" element={<AdminAIChatterConfig />} />
         <Route path="/admin/:communityId/bot-detection" element={<ServedFeature feature="bot-detection"><AdminBotDetection /></ServedFeature>} />
+        <Route path="/admin/:communityId/media-byok" element={<ServedFeature feature="media-byok"><AdminMediaByok /></ServedFeature>} />
         <Route path="/admin/:communityId/announcements" element={<AdminAnnouncements />} />
         <Route path="/admin/:communityId/analytics" element={<ServedFeature feature="community-analytics"><AdminAnalytics /></ServedFeature>} />
         <Route path="/admin/:communityId/security" element={<ServedFeature feature="community-security"><AdminSecurity /></ServedFeature>} />
