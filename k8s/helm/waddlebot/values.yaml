@@ -1571,6 +1571,16 @@ pipeline:
       connectorTools:
         enabled: false
         hostApiPort: 8301
+        # svc-ingest's DEDICATED host-api mTLS material (never the shared executor/stage
+        # host-api-tls). Secret `secretName` (ca.crt = CA the executor client cert must chain to,
+        # tls.crt/tls.key = server-only cert with the svc-ingest SAN) is generated on alpha/local;
+        # elsewhere supply it (externalSecret: true = an external controller owns it). The listener
+        # pins `clientIdentity` (the ingest-dedicated executor cert); the matching client Secret
+        # `<fullname>-ingest-executor-tls` is for the executor track and is mounted by nothing here.
+        hostApiTls:
+          secretName: ""
+          clientIdentity: ""
+          externalSecret: false
         # Pinned connector component digests, sha256:<64 lowercase hex> (docs/connector-host-capability.md).
         digests:
           twitch: ""

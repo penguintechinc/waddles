@@ -191,7 +191,16 @@ spec:
         - name: HUB_API_GRPC_ENDPOINT
           value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
-        {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}
+        # svc-ingest's OWN server-only cert/key (dedicated Secret, svc-ingest SAN only) -- never the
+        # shared executor/stage host-api-tls material. The client identity is pinned.
+        - name: HOST_API_SERVER_CERT_FILE
+          value: /etc/waddlebot/svc-ingest-host-api-tls/tls.crt
+        - name: HOST_API_SERVER_KEY_FILE
+          value: /etc/waddlebot/svc-ingest-host-api-tls/tls.key
+        - name: HOST_API_CLIENT_CA_FILE
+          value: /etc/waddlebot/svc-ingest-host-api-tls/ca.crt
+        - name: HOST_API_CLIENT_IDENTITY
+          value: {{ include "waddlebot.svcIngestHostApiClientIdentity" . | quote }}
         {{- end }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid }}
         - name: ENVELOPE_BINDING_ACTIVE_KID
@@ -301,7 +310,9 @@ spec:
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
         {{- end }}
         {{- if $ct.enabled }}
-        {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
+        - name: svc-ingest-host-api-tls
+          mountPath: /etc/waddlebot/svc-ingest-host-api-tls
+          readOnly: true
         {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
         {{- end }}
       volumes:
@@ -311,7 +322,10 @@ spec:
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
       {{- end }}
       {{- if $ct.enabled }}
-      {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      - name: svc-ingest-host-api-tls
+        secret:
+          secretName: {{ include "waddlebot.svcIngestHostApiTlsSecretName" . }}
+          defaultMode: 0440
       {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
       {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}

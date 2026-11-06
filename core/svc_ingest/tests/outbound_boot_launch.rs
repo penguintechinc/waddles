@@ -81,6 +81,7 @@ fn env(cert: &str, key: &str, ca: &str, port: u16) -> HashMap<&'static str, Stri
         ("HOST_API_SERVER_CERT_FILE", cert.to_string()),
         ("HOST_API_SERVER_KEY_FILE", key.to_string()),
         ("HOST_API_CLIENT_CA_FILE", ca.to_string()),
+        ("HOST_API_CLIENT_IDENTITY", "executor".to_string()),
         ("SENDER_EXEC_HOST_API_PORT", port.to_string()),
     ])
 }

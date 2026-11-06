@@ -2914,6 +2914,7 @@ dependencies = [
  "uuid",
  "wiremock",
  "x25519-dalek",
+ "x509-parser",
  "zeroize",
 ]
 

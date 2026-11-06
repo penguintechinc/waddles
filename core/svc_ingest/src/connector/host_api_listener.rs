@@ -16,8 +16,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustls::client::danger::HandshakeSignatureValid;
+use rustls::pki_types::UnixTime;
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::WebPkiClientVerifier;
-use rustls::{RootCertStore, ServerConfig};
+use rustls::{
+    DigitallySignedStruct, DistinguishedName, RootCertStore, ServerConfig, SignatureScheme,
+};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::net::TcpListener;
@@ -40,6 +45,99 @@ pub struct HostApiTls {
     pub server_key: PathBuf,
     /// PEM CA bundle the executor's client certificate must chain to.
     pub client_ca: PathBuf,
+    /// The ONLY client identity (URI/DNS SAN, else Subject CN) the executor's
+    /// certificate may carry. A certificate that chains to the CA but names
+    /// another identity (e.g. a stage/server certificate) is refused.
+    pub client_identity: String,
+}
+
+/// Wraps the standard client verifier (chain, expiry, client-auth EKU) and
+/// additionally requires the leaf to carry exactly the pinned identity.
+#[derive(Debug)]
+struct PinnedClientVerifier {
+    inner: Arc<dyn ClientCertVerifier>,
+    identity: String,
+}
+
+impl PinnedClientVerifier {
+    /// True when `cert`'s URI/DNS SAN or Subject CN equals the pinned identity;
+    /// a parse failure is "no match" (fail closed).
+    fn matches(&self, cert: &CertificateDer<'_>) -> bool {
+        let Ok((_, parsed)) = x509_parser::parse_x509_certificate(cert.as_ref()) else {
+            return false;
+        };
+        if let Ok(Some(san)) = parsed.subject_alternative_name() {
+            for name in &san.value.general_names {
+                let candidate = match name {
+                    x509_parser::extensions::GeneralName::URI(v)
+                    | x509_parser::extensions::GeneralName::DNSName(v) => Some(*v),
+                    _ => None,
+                };
+                if candidate == Some(self.identity.as_str()) {
+                    return true;
+                }
+            }
+        }
+        let cn_matches = parsed
+            .subject()
+            .iter_common_name()
+            .filter_map(|cn| cn.as_str().ok())
+            .any(|cn| cn == self.identity);
+        cn_matches
+    }
+}
+
+impl ClientCertVerifier for PinnedClientVerifier {
+    fn offer_client_auth(&self) -> bool {
+        self.inner.offer_client_auth()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.inner.client_auth_mandatory()
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        self.inner.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        self.inner
+            .verify_client_cert(end_entity, intermediates, now)?;
+        if self.matches(end_entity) {
+            Ok(ClientCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(
+                "client certificate identity is not the pinned executor identity".to_string(),
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
 }
 
 /// Why the listener could not be built. Names the file role, never content.
@@ -79,9 +177,16 @@ pub fn build_acceptor(tls: &HostApiTls) -> Result<TlsAcceptor, ListenerError> {
     for ca in certs(&tls.client_ca, "client_ca")? {
         roots.add(ca).map_err(|_| ListenerError::Tls("client_ca"))?;
     }
-    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+    if tls.client_identity.trim().is_empty() {
+        return Err(ListenerError::Tls("client_identity"));
+    }
+    let inner = WebPkiClientVerifier::builder(Arc::new(roots))
         .build()
         .map_err(|_| ListenerError::Tls("client_verifier"))?;
+    let verifier = Arc::new(PinnedClientVerifier {
+        inner,
+        identity: tls.client_identity.clone(),
+    });
     let cfg = ServerConfig::builder()
         .with_client_cert_verifier(verifier)
         .with_single_cert(chain, key)
@@ -151,6 +256,9 @@ mod tests {
         client_key_pem: String,
         rogue_cert_pem: String,
         rogue_key_pem: String,
+        /// Same CA, but a STAGE identity (a server certificate used as a client).
+        stage_cert_pem: String,
+        stage_key_pem: String,
     }
 
     /// Minimal self-cleaning temp dir (no extra dependency).
@@ -207,6 +315,7 @@ mod tests {
         let (srv_c, srv_k) = leaf("svc-ingest", vec!["localhost".into()], &good);
         let (cli_c, cli_k) = leaf("executor", vec!["executor".into()], &good);
         let (rg_c, rg_k) = leaf("executor", vec!["executor".into()], &rogue);
+        let (st_c, st_k) = leaf("svc-action", vec!["svc-action".into()], &good);
         let w = |n: &str, s: &str| {
             let p = dir.path().join(n);
             std::fs::File::create(&p)
@@ -220,6 +329,7 @@ mod tests {
             server_cert: w("srv.pem", &srv_c),
             server_key: w("srv.key", &srv_k),
             client_ca: w("ca.pem", &ca_pem),
+            client_identity: "executor".to_string(),
         };
         Pki {
             dir,
@@ -229,6 +339,8 @@ mod tests {
             client_key_pem: cli_k,
             rogue_cert_pem: rg_c,
             rogue_key_pem: rg_k,
+            stage_cert_pem: st_c,
+            stage_key_pem: st_k,
         }
     }
 
@@ -309,6 +421,28 @@ mod tests {
         let res = hello_over(addr, client(&p, &p.rogue_cert_pem, &p.rogue_key_pem)).await;
         assert!(res.is_err(), "rogue client must not get a reply");
         assert!(!link.is_attached());
+    }
+
+    /// A certificate that chains to the SAME CA but carries a stage identity
+    /// (not the pinned executor one) is refused as an executor.
+    #[tokio::test]
+    async fn a_stage_certificate_is_refused_as_an_executor() {
+        let p = pki("stage");
+        let (addr, link, _stop) = start(&p).await;
+        let res = hello_over(addr, client(&p, &p.stage_cert_pem, &p.stage_key_pem)).await;
+        assert!(res.is_err(), "wrong-SAN client must not get a reply");
+        assert!(!link.is_attached());
+    }
+
+    #[test]
+    fn a_blank_pinned_identity_is_a_configuration_error() {
+        let p = pki("blank");
+        let mut t = p.tls.clone();
+        t.client_identity = "  ".to_string();
+        assert_eq!(
+            build_acceptor(&t).err(),
+            Some(ListenerError::Tls("client_identity"))
+        );
     }
 
     #[tokio::test]

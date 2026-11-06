@@ -219,6 +219,7 @@ impl ExecBootConfig {
             server_cert: PathBuf::from(required(lookup, "HOST_API_SERVER_CERT_FILE")?),
             server_key: PathBuf::from(required(lookup, "HOST_API_SERVER_KEY_FILE")?),
             client_ca: PathBuf::from(required(lookup, "HOST_API_CLIENT_CA_FILE")?),
+            client_identity: required(lookup, "HOST_API_CLIENT_IDENTITY")?,
         };
         let port = match lookup("SENDER_EXEC_HOST_API_PORT")
             .map(|v| v.trim().to_string())
@@ -461,6 +462,7 @@ mod tests {
             ("HOST_API_SERVER_CERT_FILE", "/tls/tls.crt".to_string()),
             ("HOST_API_SERVER_KEY_FILE", "/tls/tls.key".to_string()),
             ("HOST_API_CLIENT_CA_FILE", "/tls/ca.crt".to_string()),
+            ("HOST_API_CLIENT_IDENTITY", "executor".to_string()),
         ])
     }
 
@@ -493,6 +495,7 @@ mod tests {
             "HOST_API_SERVER_CERT_FILE",
             "HOST_API_SERVER_KEY_FILE",
             "HOST_API_CLIENT_CA_FILE",
+            "HOST_API_CLIENT_IDENTITY",
         ] {
             let mut env = full();
             env.remove(name);

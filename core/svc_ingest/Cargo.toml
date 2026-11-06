@@ -188,6 +188,8 @@ rustls = { version = "=0.23.46", default-features = false, features = [
 # (`src/connector/host_api_listener.rs`); same exact pins as `core/svc_action`.
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
 rustls-pki-types = "=1.15.1"
+# Client-certificate identity pinning for that listener (same exact pin as core/bundle_executor).
+x509-parser = "=0.18.1"
 # Twitch EventSub webhook signature verification (`src/ingest/
 # twitch_eventsub.rs`): HMAC-SHA256 over `message_id + timestamp + body`,
 # byte-identical to the legacy Python module's own algorithm (see that

@@ -389,7 +389,7 @@ for the path that started.
 | `SENDER_EXEC_DIGEST_TWITCH` / `_DISCORD` / `_YOUTUBE` (`sha256:<64 hex>`) | chart `svcIngest.connectorTools.digests.*` |
 | `TWITCH_CLIENT_ID` (public Helix app id) | platform-credentials Secret key |
 | `HUB_API_GRPC_ENDPOINT` (+ `HUB_API_GRPC_CA_FILE`) | `HubPlatformUserResolver::connect`, scope `identity:platform-user:resolve` |
-| `HOST_API_SERVER_CERT_FILE` / `_KEY_FILE` / `HOST_API_CLIENT_CA_FILE`, `SENDER_EXEC_HOST_API_PORT` (8301) | mTLS listener the executor dials (`connector/host_api_listener.rs`) |
+| `HOST_API_SERVER_CERT_FILE` / `_KEY_FILE` / `HOST_API_CLIENT_CA_FILE`, `HOST_API_CLIENT_IDENTITY`, `SENDER_EXEC_HOST_API_PORT` (8301) | mTLS listener the executor dials (`connector/host_api_listener.rs`). Server-only cert from svc-ingest's OWN Secret (never the shared executor/stage `host-api-tls`); the client cert must chain to its CA AND carry exactly `HOST_API_CLIENT_IDENTITY` (a stage cert is refused) |
 
 Wiring: `PlatformSlotRouter` (twitch/discord/youtube slot sources; unknown platform -> typed
 `slot_platform_unknown`) + `DiscordDuties` + `WireTemplateBuilder` over the `ExecutorLink`; the drains are
