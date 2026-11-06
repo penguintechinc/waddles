@@ -52,6 +52,7 @@ pub mod http;
 pub mod identity;
 pub mod identity_crypto;
 pub mod license;
+pub mod media;
 pub mod metrics_facade;
 pub mod pii_tokenize;
 pub mod source_supervisor;
@@ -1487,6 +1488,7 @@ fn try_start_process_loop(
                 // path runs at the `(0, 0)` fail-closed scope, where the gate
                 // denies every non-platform permission (`ai.generate` included).
                 ai_wiring: None,
+                media_wiring: None,
                 // Env-only legacy mode has no `BUNDLE_SCOPE_TENANT_ID`/DB
                 // reader to resolve a real tenant from -- `(0, 0)` fails
                 // closed (denies every non-platform permission) rather than
@@ -2011,6 +2013,22 @@ fn try_start_changelog_consumer(
                     deps.ai_wiring = bundle_db_license_client
                         .as_ref()
                         .and_then(|client| build_ai_wiring(&config.cli, client));
+                    // `media` host capability: Valkey (job store), the bundle
+                    // bucket (outputs), hub-api (tier + BYOK) and Gemini; every
+                    // missing dependency leaves it unwired (fail loud, never a
+                    // stub) and it stays behind the default-OFF flag.
+                    deps.media_wiring = match (&bundle_db_license_client, &deps.kv_conn) {
+                        (Some(client), Some(conn)) => {
+                            media::build_media_wiring(&config.cli, client, conn.clone())
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "media capability: no license client or Valkey connection; \
+                                 every media.* host-call will report not_implemented"
+                            );
+                            None
+                        }
+                    };
                     Some(Arc::new(source_supervisor::SpineConsumerSupervisor {
                         deps: Arc::new(deps),
                     })
@@ -2128,6 +2146,7 @@ async fn build_source_supervisor_deps(
         economy_wiring: None,
         identity_wiring: None,
         ai_wiring: None,
+        media_wiring: None,
     })
 }
 

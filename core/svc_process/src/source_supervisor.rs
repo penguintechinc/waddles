@@ -196,6 +196,9 @@ pub struct SupervisorDeps {
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::ai_wiring`'s doc.
     pub ai_wiring: Option<crate::ai::AiWiring>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::media_wiring`'s doc.
+    pub media_wiring: Option<crate::media::MediaWiring>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -350,6 +353,7 @@ async fn run_binding_consumer(
             economy_wiring: deps.economy_wiring.clone(),
             identity_wiring: deps.identity_wiring.clone(),
             ai_wiring: deps.ai_wiring.clone(),
+            media_wiring: deps.media_wiring.clone(),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

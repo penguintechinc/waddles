@@ -916,6 +916,11 @@ pub struct ProcessDeps<S: SpineOps> {
     /// a valid self-hosted URL or no license client exists (every `ai.generate`
     /// call then denies `not_implemented`).
     pub ai_wiring: Option<crate::ai::AiWiring>,
+    /// The `media` host capability's production wiring
+    /// (`crate::media::build_media_wiring`), cloned into every per-invoke
+    /// `StageCapabilities`. `None` when its config/dependencies are not
+    /// provisioned (every `media.*` call then denies `not_implemented`).
+    pub media_wiring: Option<crate::media::MediaWiring>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -1358,6 +1363,10 @@ async fn handle_delivered_inner<S: SpineOps>(
                 ai.clone(),
                 std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
             ),
+            None => caps,
+        };
+        let caps = match &deps.media_wiring {
+            Some(media) => caps.with_media(media.clone()),
             None => caps,
         };
         // `identity`: the invocation's host-derived identity facts come from
@@ -2465,6 +2474,7 @@ mod tests {
             economy_wiring: None,
             identity_wiring: None,
             ai_wiring: None,
+            media_wiring: None,
         };
         (deps, metrics)
     }
