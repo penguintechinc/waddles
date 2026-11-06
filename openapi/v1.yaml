@@ -2943,6 +2943,42 @@ components:
       - communities
       title: MeUserDTO
       type: object
+    MediaByokKeyDTO:
+      description: Masked key record -- never carries the real key.
+      properties:
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        is_active:
+          title: Is Active
+          type: boolean
+        key_last4:
+          title: Key Last4
+          type: string
+        provider:
+          title: Provider
+          type: string
+        rotated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Rotated At
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+      required:
+      - provider
+      - key_last4
+      - is_active
+      - created_at
+      - updated_at
+      - rotated_at
+      title: MediaByokKeyDTO
+      type: object
     MemberDTO:
       description: Community member DTO.
       properties:
@@ -9006,6 +9042,151 @@ paths:
           description: Undocumented response
       summary: '`POST /api/v1/admin/<id>/loyalty/wipe` -- zero every balance in the
         community.'
+  /api/v1/admin/{community_id}/media/byok-keys:
+    get:
+      description: ''
+      operationId: get_get_media_byok_status
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET` response: `configured` is true iff an ACTIVE key
+                  is on file.'
+                properties:
+                  configured:
+                    title: Configured
+                    type: boolean
+                  keys:
+                    items:
+                      $ref: '#/components/schemas/MediaByokKeyDTO'
+                    title: Keys
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - configured
+                title: MediaByokStatusResponse
+                type: object
+          description: '`GET` response: `configured` is true iff an ACTIVE key is
+            on file.'
+      summary: '`GET /api/v1/admin/<community_id>/media/byok-keys` -- masked status,
+        never the key.'
+    put:
+      description: '
+
+        Never logs or echoes `data.api_key`; the response is the masked record.'
+      operationId: put_set_media_byok_key
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: '`PUT` body -- set-or-rotate one provider''s key.'
+              properties:
+                api_key:
+                  title: Api Key
+                  type: string
+                provider:
+                  title: Provider
+                  type: string
+              required:
+              - provider
+              - api_key
+              title: SetMediaByokRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Masked key record -- never carries the real key.
+                properties:
+                  created_at:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Created At
+                  is_active:
+                    title: Is Active
+                    type: boolean
+                  key_last4:
+                    title: Key Last4
+                    type: string
+                  provider:
+                    title: Provider
+                    type: string
+                  rotated_at:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Rotated At
+                  updated_at:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Updated At
+                required:
+                - provider
+                - key_last4
+                - is_active
+                - created_at
+                - updated_at
+                - rotated_at
+                title: MediaByokKeyDTO
+                type: object
+          description: Masked key record -- never carries the real key.
+      summary: '`PUT .../media/byok-keys` -- Professional+ required; validated against
+        Gemini first.'
+  /api/v1/admin/{community_id}/media/byok-keys/{provider}:
+    delete:
+      description: ''
+      operationId: delete_delete_media_byok_key
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: provider
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Generic `{success, message}` response.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - message
+                title: MediaMessageResponse
+                type: object
+          description: Generic `{success, message}` response.
+      summary: '`DELETE .../media/byok-keys/<provider>` -- deactivates; allowed at
+        any tier.'
   /api/v1/admin/{community_id}/members:
     get:
       description: ''
@@ -17337,6 +17518,112 @@ paths:
           description: Undocumented response
       summary: '`POST /api/v1/internal/marketplace/execute/<moduleId>` -- service-to-service
         only.'
+  /api/v1/internal/media/byok/resolve:
+    post:
+      description: '
+
+        Fail-closed ladder after machine auth: caller allow-list (403) -> rate limit
+        (429, or 503 when
+
+        no limiter is wired) -> input shape (400) -> tenant/community scope (404)
+        -> tier -> key.
+
+        The audit row is written BEFORE a key is returned; if it cannot be written
+        the key is withheld
+
+        (500) -- a resolve that cannot be audited does not happen.'
+      operationId: post_resolve_byok
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Resolver body. Numeric ids only (data-plane keys never
+                use slugs).
+              properties:
+                community_id:
+                  title: Community Id
+                  type: integer
+                provider:
+                  title: Provider
+                  type: string
+                tenant_id:
+                  title: Tenant Id
+                  type: integer
+              required:
+              - tenant_id
+              - community_id
+              - provider
+              title: ResolveRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`status` is `ok` (api_key set) | `not_configured` |
+                  `tier_required`.'
+                properties:
+                  api_key:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Api Key
+                  status:
+                    title: Status
+                    type: string
+                  tier:
+                    title: Tier
+                    type: string
+                required:
+                - status
+                - tier
+                title: ResolveResponse
+                type: object
+          description: '`status` is `ok` (api_key set) | `not_configured` | `tier_required`.'
+      summary: '`POST /api/v1/internal/media/byok/resolve` -> `{status, tier, api_key?}`.'
+  /api/v1/internal/media/effective-tier:
+    post:
+      description: ''
+      operationId: post_effective_tier_route
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Effective-tier body.
+              properties:
+                community_id:
+                  title: Community Id
+                  type: integer
+                tenant_id:
+                  title: Tenant Id
+                  type: integer
+              required:
+              - tenant_id
+              - community_id
+              title: TierRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`tier` is `free` | `professional` | `enterprise` (fail-closed
+                  to free).'
+                properties:
+                  tier:
+                    title: Tier
+                    type: string
+                required:
+                - tier
+                title: TierResponse
+                type: object
+          description: '`tier` is `free` | `professional` | `enterprise` (fail-closed
+            to free).'
+      summary: '`POST /api/v1/internal/media/effective-tier` -> `{tier}` = max(tenant,
+        community).'
   /api/v1/internal/music/playback:
     post:
       description: '
