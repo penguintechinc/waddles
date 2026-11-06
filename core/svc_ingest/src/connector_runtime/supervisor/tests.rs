@@ -1122,20 +1122,10 @@ async fn the_feed_is_asked_once_per_platform_per_pass() {
 // ---- deterministic Core tests (synthetic connection futures) ------------
 
 type TestFut = std::pin::Pin<Box<dyn Future<Output = (ConnKey, TaskEnd)>>>;
+type TestMake = Box<dyn Fn(Arc<DesiredConnection>, oneshot::Receiver<()>) -> TestFut>;
+type TestCore = Core<TestFut, TestMake, FakeInvoker, RecSink, MemLease>;
 
-fn core_rig(
-    cfg: RuntimeConfig,
-) -> (
-    Core<
-        TestFut,
-        Box<dyn Fn(Arc<DesiredConnection>, oneshot::Receiver<()>) -> TestFut>,
-        FakeInvoker,
-        RecSink,
-        MemLease,
-    >,
-    Arc<LeaseStore>,
-    RuntimeMetrics,
-) {
+fn core_rig(cfg: RuntimeConfig) -> (TestCore, Arc<LeaseStore>, RuntimeMetrics) {
     let sh3 = Shared3::new(vec![]);
     let reg = prometheus::Registry::new();
     let connector_metrics = register_connector_metrics(&reg).expect("cm");

@@ -146,28 +146,27 @@ impl RuntimeStatus {
         self.with(platform, |s| s.pinned_ok = true);
     }
 
-    /// One more connection established; returns the new live count.
-    pub(crate) fn live_inc(&self, platform: &str) -> u32 {
+    /// One more connection established; the new live count, or `None` for a
+    /// platform that is not tracked.
+    pub(crate) fn live_inc(&self, platform: &str) -> Option<u32> {
         self.with(platform, |s| {
             s.live = s.live.saturating_add(1);
             s.refresh_below();
             s.live
         })
-        .unwrap_or(0)
     }
 
-    /// One connection lost; returns the new live count.
-    pub(crate) fn live_dec(&self, platform: &str) -> u32 {
+    /// One connection lost; the new live count, or `None` for a platform
+    /// that is not tracked.
+    pub(crate) fn live_dec(&self, platform: &str) -> Option<u32> {
         self.with(platform, |s| {
             s.live = s.live.saturating_sub(1);
             s.refresh_below();
             s.live
         })
-        .unwrap_or(0)
     }
 
-    fn evaluate(&self, platform: &'static str, s: &PlatformState) -> Readiness {
-        let _ = platform;
+    fn evaluate(&self, s: &PlatformState) -> Readiness {
         if !self.executor.attached() {
             return Readiness::NotReady("executor_detached");
         }
@@ -193,7 +192,7 @@ impl RuntimeStatus {
     pub fn snapshot(&self, platform: &str) -> Option<PlatformSnapshot> {
         let (name, m) = self.states.get_key_value(platform)?;
         let g = m.lock().unwrap_or_else(PoisonError::into_inner);
-        let r = self.evaluate(name, &g);
+        let r = self.evaluate(&g);
         let (ready, reason) = match r {
             Readiness::NotReady(why) => (false, Some(why)),
             _ => (true, None),
@@ -225,9 +224,9 @@ impl RuntimeReady for RuntimeStatus {
     fn ready(&self, platform: &str) -> Readiness {
         match self.states.get_key_value(platform) {
             None => Readiness::Disabled,
-            Some((name, m)) => {
+            Some((_, m)) => {
                 let g = m.lock().unwrap_or_else(PoisonError::into_inner);
-                self.evaluate(name, &g)
+                self.evaluate(&g)
             }
         }
     }
@@ -337,12 +336,12 @@ mod tests {
         s.live_inc("twitch");
         tokio::time::advance(DEGRADE_AFTER * 2).await;
         assert!(matches!(s.ready("twitch"), Readiness::Ready { .. }));
-        assert_eq!(s.live_dec("twitch"), 0);
+        assert_eq!(s.live_dec("twitch"), Some(0));
         tokio::time::advance(Duration::from_secs(10)).await;
         assert!(matches!(s.ready("twitch"), Readiness::Ready { .. }));
-        assert_eq!(s.live_dec("twitch"), 0, "saturates at zero");
-        assert_eq!(s.live_inc("unknown"), 0);
-        assert_eq!(s.live_dec("unknown"), 0);
+        assert_eq!(s.live_dec("twitch"), Some(0), "saturates at zero");
+        assert_eq!(s.live_inc("unknown"), None);
+        assert_eq!(s.live_dec("unknown"), None);
     }
 
     #[test]
@@ -367,6 +366,6 @@ mod tests {
     fn arc_executor_status_delegates() {
         let f: Arc<dyn ExecutorStatus> = Arc::new(Flag(AtomicBool::new(true)));
         assert!(ExecutorStatus::attached(&f));
-        assert!(ExecutorStatus::attached(&ExecutorLink::new()) == false);
+        assert!(!ExecutorStatus::attached(&ExecutorLink::new()));
     }
 }

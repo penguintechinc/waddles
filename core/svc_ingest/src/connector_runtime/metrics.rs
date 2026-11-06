@@ -4,6 +4,13 @@
 
 use prometheus::{IntCounterVec, IntGaugeVec, Opts, Registry};
 
+/// `n` as a `u32`, saturating at `u32::MAX` (counts never wrap or panic).
+#[must_use]
+pub(crate) fn saturating_u32(n: usize) -> u32 {
+    // Clamped to u32::MAX first, so the cast cannot truncate.
+    n.min(u32::MAX as usize) as u32
+}
+
 /// Why a reconcile pass ended the way it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileOutcome {
@@ -257,6 +264,12 @@ impl RuntimeMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saturating_u32_clamps_instead_of_wrapping() {
+        assert_eq!(saturating_u32(7), 7);
+        assert_eq!(saturating_u32(usize::MAX), u32::MAX);
+    }
 
     #[test]
     fn registers_once_and_duplicate_is_a_typed_error() {

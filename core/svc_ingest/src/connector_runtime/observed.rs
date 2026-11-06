@@ -154,7 +154,9 @@ impl<T: Transport> ObservedTransport<T> {
         } else {
             self.status.live_dec(self.platform)
         };
-        self.gauge.set(i64::from(n));
+        if let Some(n) = n {
+            self.gauge.set(i64::from(n));
+        }
     }
 }
 

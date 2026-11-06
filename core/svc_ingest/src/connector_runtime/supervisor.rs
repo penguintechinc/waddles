@@ -29,7 +29,9 @@ use tokio::time::Instant;
 
 use super::feed::{BindingFeed, ConnKey, DesiredConnection, TransportPlan, WebhookPlan};
 use super::lease::{lease_tuple, platform_ns};
-use super::metrics::{LeaseOutcome, ParkReason, ReconcileOutcome, RestartReason, RuntimeMetrics};
+use super::metrics::{
+    saturating_u32, LeaseOutcome, ParkReason, ReconcileOutcome, RestartReason, RuntimeMetrics,
+};
 use super::observed::{ObservedInvoker, ObservedTransport, Pacer, SharedSecrets};
 use super::ready::{ExecutorStatus, RuntimeReady, RuntimeStatus};
 use crate::connector::webhook::BoxFut;
@@ -586,8 +588,11 @@ where
     fn request_stop(slot: &mut Slot) {
         slot.stopping = true;
         if let Some(tx) = slot.stop.take() {
-            // The receiver is gone only if the task already ended.
-            let _ = tx.send(());
+            if tx.send(()).is_err() {
+                // The receiver is gone only if the task already ended; its
+                // end is applied by the next poll of the task set.
+                tracing::debug!("stop signal not delivered: connection already ended");
+            }
         }
     }
 
@@ -671,12 +676,13 @@ where
         }
         let mut keys: Vec<ConnKey> = wanted.keys().cloned().collect();
         keys.sort();
-        self.status.reconcile_ok(platform, to_u32(keys.len()));
+        self.status
+            .reconcile_ok(platform, saturating_u32(keys.len()));
         self.sh
             .metrics
             .desired
             .with_label_values(&[platform])
-            .set(i64::try_from(keys.len()).unwrap_or(i64::MAX));
+            .set(i64::from(saturating_u32(keys.len())));
 
         // Stop what is no longer desired.
         let gone: Vec<ConnKey> = self
@@ -819,10 +825,6 @@ where
     }
 }
 
-fn to_u32(n: usize) -> u32 {
-    u32::try_from(n).unwrap_or(u32::MAX)
-}
-
 /// 0-20% of `base`, drawn from a fresh random UUID.
 fn jitter(base: Duration) -> Duration {
     let r = uuid::Uuid::new_v4().as_u128();
@@ -899,10 +901,14 @@ impl<
             let sh = sh.clone();
             async move {
                 let key = d.key.clone();
-                let end = AssertUnwindSafe(run_connection(sh.clone(), d, rx))
+                let outcome = AssertUnwindSafe(run_connection(sh.clone(), d, rx))
                     .catch_unwind()
-                    .await
-                    .unwrap_or_else(|_| {
+                    .await;
+                let end = match outcome {
+                    Ok(end) => end,
+                    Err(_) => {
+                        // The panic payload is never logged: it can carry
+                        // frame or handle text.
                         tracing::error!(
                             platform = key.platform,
                             community_id = key.community_id,
@@ -910,7 +916,8 @@ impl<
                             "connector connection panicked; isolating it"
                         );
                         TaskEnd::Failed(RestartReason::Panic)
-                    });
+                    }
+                };
                 (key, end)
             }
         };

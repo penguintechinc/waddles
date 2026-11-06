@@ -17,7 +17,7 @@ use std::time::Duration;
 use connection_resolver::{ConnectionResolve, ResolveError};
 use sha2::{Digest, Sha256};
 
-use super::metrics::{RuntimeMetrics, SkipReason};
+use super::metrics::{saturating_u32, RuntimeMetrics, SkipReason};
 use super::plan::{OverlayProfile, RuntimeEnv};
 use crate::connector::webhook::WebhookRoute;
 use crate::connector::{PollConfig, WsConfig};
@@ -183,7 +183,7 @@ fn dedup(all: Vec<DesiredConnection>) -> (Vec<DesiredConnection>, DedupReport) {
             continue;
         }
         group.sort_by_key(|g| g.key.connection_id);
-        report.duplicate += u32::try_from(group.len() - 1).unwrap_or(u32::MAX);
+        report.duplicate += saturating_u32(group.len() - 1);
         out.extend(group.into_iter().take(1));
     }
     out.sort_by(|a, b| a.key.cmp(&b.key));
