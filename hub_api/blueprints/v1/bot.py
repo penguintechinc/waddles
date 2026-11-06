@@ -37,6 +37,7 @@ import asyncio
 import dataclasses
 import logging
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from flask_core.authz import require_scope
@@ -79,6 +80,19 @@ async def _require_community(community_id: int) -> tuple[dict[str, Any], int] | 
     ok = await asyncio.to_thread(community_belongs_to_tenant, dal, community_id, ctx.tenant_id)
     if not ok:
         return _error("Community not found for this tenant", 403, "FORBIDDEN")
+    return None
+
+
+async def _require_server(community_id: int, server_id: int) -> tuple[dict[str, Any], int] | None:
+    """404 unless `server_id` is an active server of `community_id` (no cross-community ids).
+
+    Run after `_require_community` on every `<server_id>` route so a foreign server id is
+    indistinguishable from a missing one, independent of the downstream module's own checks.
+    """
+    try:
+        await asyncio.to_thread(bot_rcon.get_active_server, _dal(), community_id, server_id)
+    except bot_rcon.RconNotFoundError as exc:
+        return _error(str(exc), 404, "NOT_FOUND")
     return None
 
 
@@ -878,8 +892,23 @@ async def submit_suggestion_feedback(data: SuggestionFeedbackRequest, suggestion
     if not data.feedback:
         return _error("feedback is required", 400, "BAD_REQUEST")
     try:
+        bot_ai_knowledge.validate_feedback(data.feedback)
+    except bot_ai_knowledge.KnowledgeServiceError as exc:
+        return _error(str(exc), exc.status, "BAD_REQUEST")
+    exists, owner = await asyncio.to_thread(
+        bot_ai_knowledge.get_suggestion_scope, _dal(), suggestion_id
+    )
+    if not exists or not await _scope_allowed(owner, None):
+        return _error("Suggestion not found", 404, "NOT_FOUND")
+    try:
         suggestion = await asyncio.to_thread(
-            bot_ai_knowledge.record_feedback, _dal(), suggestion_id, data.feedback
+            partial(
+                bot_ai_knowledge.record_feedback,
+                _dal(),
+                suggestion_id,
+                data.feedback,
+                community_id=owner,
+            )
         )
     except bot_ai_knowledge.KnowledgeServiceError as exc:
         return _error(str(exc), exc.status, "NOT_FOUND" if exc.status == 404 else "BAD_REQUEST")
@@ -1137,6 +1166,9 @@ async def execute_rcon_command(
     denied = await _require_community(community_id)
     if denied:
         return denied
+    denied = await _require_server(community_id, server_id)
+    if denied:
+        return denied
     try:
         return await bot_rcon.execute_command(
             _dal(), community_id, server_id, command=data.command, user_id=_user_id()
@@ -1152,6 +1184,9 @@ async def execute_rcon_command(
 async def kick_rcon_player(data: KickPlayerRequest, community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.kickPlayer` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
+    if denied:
+        return denied
+    denied = await _require_server(community_id, server_id)
     if denied:
         return denied
     try:
@@ -1176,6 +1211,9 @@ async def ban_rcon_player(data: BanPlayerRequest, community_id: int, server_id: 
     denied = await _require_community(community_id)
     if denied:
         return denied
+    denied = await _require_server(community_id, server_id)
+    if denied:
+        return denied
     try:
         return await bot_rcon.ban_player(
             _dal(),
@@ -1198,6 +1236,9 @@ async def get_rcon_channels(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    denied = await _require_server(community_id, server_id)
+    if denied:
+        return denied
     return await bot_rcon.get_channels(_dal(), community_id, server_id)
 
 
@@ -1208,6 +1249,9 @@ async def get_rcon_channels(community_id: int, server_id: int) -> Any:
 async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.moveUser` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
+    if denied:
+        return denied
+    denied = await _require_server(community_id, server_id)
     if denied:
         return denied
     try:
@@ -1225,6 +1269,9 @@ async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: in
 async def send_rcon_message(data: SendMessageRequest, community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.sendMessage` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
+    if denied:
+        return denied
+    denied = await _require_server(community_id, server_id)
     if denied:
         return denied
     try:
@@ -1271,6 +1318,9 @@ async def get_rcon_access_policy(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    denied = await _require_server(community_id, server_id)
+    if denied:
+        return denied
     return await bot_rcon.get_access_policy(_dal(), community_id, server_id)
 
 
@@ -1287,6 +1337,9 @@ async def update_rcon_access_policy(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    denied = await _require_server(community_id, server_id)
+    if denied:
+        return denied
     policy = await request.get_json(force=True, silent=True) or {}
     return await bot_rcon.update_access_policy(_dal(), community_id, server_id, policy)
 
@@ -1299,6 +1352,9 @@ async def trigger_rcon_enforcement(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    denied = await _require_server(community_id, server_id)
+    if denied:
+        return denied
     return await bot_rcon.trigger_enforcement(_dal(), community_id, server_id)
 
 
@@ -1308,6 +1364,9 @@ async def trigger_rcon_enforcement(community_id: int, server_id: int) -> Any:
 async def get_rcon_access_log(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getAccessLog` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
+    if denied:
+        return denied
+    denied = await _require_server(community_id, server_id)
     if denied:
         return denied
     limit = min(200, max(1, _int_arg("limit", 50)))
@@ -1341,6 +1400,9 @@ async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    denied = await _require_server(community_id, server_id)
+    if denied:
+        return denied
     return await bot_rcon.get_server_status(_dal(), community_id, server_id)
 
 
@@ -1350,6 +1412,9 @@ async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
 async def get_rcon_player_list(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getPlayerList` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
+    if denied:
+        return denied
+    denied = await _require_server(community_id, server_id)
     if denied:
         return denied
     return await bot_rcon.get_player_list(_dal(), community_id, server_id)
