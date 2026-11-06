@@ -143,19 +143,21 @@ where
         Arc::new(egress::relay::RelaySink::with_policy(relay_policy).with_metrics(relay_metrics));
 
     let record_metrics = egress::record::register_metrics(&state.metrics);
-    let record = match egress::record::RecordSink::from_env(
+    let record_result = egress::record::RecordSink::from_env(
         &store::DefaultSecretResolver,
         &config.cli.stream_data_dir,
         record_metrics,
-    ) {
-        Ok(sink) => Some(Arc::new(sink)),
+    );
+    let (record, record_readiness) = match record_result {
+        Ok(sink) => (Some(Arc::new(sink)), http::RecordReadiness::Enabled),
         Err(err) => {
             tracing::warn!(error = %err, "recording disabled: S3_ENDPOINT/RECORDINGS_BUCKET/S3_ACCESS_KEY/S3_SECRET_KEY not fully configured");
-            None
+            (None, http::RecordReadiness::Disabled(format!("{err:#}")))
         }
     };
 
     let mut state = state;
+    state.record = record_readiness;
     state.engine = engine;
     state.hls_router_state = hls_router_state;
 
