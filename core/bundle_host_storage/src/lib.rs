@@ -20,6 +20,7 @@ pub mod tags;
 
 pub use audit::{AuditEvent, AuditOutcome, AuditSink, TracingAuditSink};
 pub use backend::{MemoryBackend, ObjectBackend, ObjectMeta, StoredObject};
+pub use bytes::Bytes;
 pub use error::StorageError;
 pub use host::{StorageHost, StorageScope};
 pub use pg_audit::PgAuditSink;

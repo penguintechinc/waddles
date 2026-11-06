@@ -89,11 +89,21 @@ impl StorageHost {
     ) -> Self {
         Self {
             backend,
-            denials: DenialQueue::new(audit.clone(), DENIAL_QUEUE_CAPACITY),
+            denials: DenialQueue::new(audit.clone()),
             audit,
             rate: Mutex::new(HashMap::new()),
             rate_limit,
         }
+    }
+
+    /// Fail CLOSED for a principal whose denial records overflowed and are not yet
+    /// durably recorded (see `denial_queue`): refuse before any other work.
+    fn audit_backlog_check(&self, s: &StorageScope) -> Result<(), StorageError> {
+        if self.denials.is_blocked(&s.app_id, s.tenant) {
+            metrics::denied("audit_backlog");
+            return Err(StorageError::RateLimited);
+        }
+        Ok(())
     }
 
     fn rate_check(&self, s: &StorageScope) -> Result<(), StorageError> {
@@ -184,6 +194,7 @@ impl StorageHost {
         validate_owner(&owner)?;
         validate_key(key).inspect_err(|_| metrics::denied("invalid_key"))?;
         // Rate-limit BEFORE authorize/denial-audit: denied calls cost budget too.
+        self.audit_backlog_check(s)?;
         self.rate_check(s)?;
         let cross = match authorize(&s.app_id, &owner, op, &s.grants) {
             Ok(c) => c,
@@ -447,6 +458,7 @@ impl StorageHost {
         validate_key_prefix(key_prefix)?;
         let owner_s = owner.unwrap_or(&s.app_id).to_string();
         validate_owner(&owner_s)?;
+        self.audit_backlog_check(s)?;
         self.rate_check(s)?;
         let cross = match authorize(&s.app_id, &owner_s, Op::List, &s.grants) {
             Ok(c) => c,
@@ -612,6 +624,7 @@ impl StorageHost {
         let owner_s = owner.unwrap_or(&s.app_id);
         // Parity with resolve/list: the audited owner string is always validated first.
         validate_owner(owner_s)?;
+        self.audit_backlog_check(s)?;
         self.rate_check(s)?;
         if owner_s != s.app_id {
             metrics::denied("tag_not_owner");

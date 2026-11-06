@@ -361,6 +361,31 @@ impl FeatureGate for BundlePlatformTableCapabilityGate {
     }
 }
 
+/// Gates the bundle `object-storage` host capability (`crate::capabilities::
+/// StageCapabilities::handle_object_storage`) -- plain opt-in flag; unseen/OFF/
+/// license-server-unreachable means every `object_storage.*` call is denied
+/// `feature_disabled`.
+pub const BUNDLE_OBJECT_STORAGE_CAPABILITY_FLAG: &str = "waddles.bundle-object-storage";
+
+/// Production [`FeatureGate`] for [`BUNDLE_OBJECT_STORAGE_CAPABILITY_FLAG`].
+pub struct BundleObjectStorageCapabilityGate(Arc<LicenseClient>);
+
+impl BundleObjectStorageCapabilityGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for BundleObjectStorageCapabilityGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            self.0
+                .flag_enabled(BUNDLE_OBJECT_STORAGE_CAPABILITY_FLAG)
+                .await
+        })
+    }
+}
+
 /// Gates the bundle `identity` host capability (`crate::capabilities::
 /// StageCapabilities::handle_identity`) -- a plain opt-in flag, same shape as
 /// [`BUNDLE_ECONOMY_CAPABILITY_FLAG`]: unseen/OFF/license-server-unreachable

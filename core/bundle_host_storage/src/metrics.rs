@@ -46,8 +46,15 @@ pub fn denied(reason: &'static str) {
 pub fn bytes(dir: &'static str, n: u64) {
     i().bytes.add(n, &[KeyValue::new("dir", dir)]);
 }
-pub fn audit_dropped() {
-    i().audit_dropped.add(1, &[]);
+/// Counted per principal so the alert names the flooder (see `denial_queue` docs).
+pub fn audit_dropped(app: &str, tenant: u64) {
+    i().audit_dropped.add(
+        1,
+        &[
+            KeyValue::new("app", app.to_string()),
+            KeyValue::new("tenant", tenant.to_string()),
+        ],
+    );
 }
 pub fn quota_rejected(kind: &'static str) {
     i().quota.add(1, &[KeyValue::new("kind", kind)]);

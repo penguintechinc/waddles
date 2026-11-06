@@ -834,26 +834,131 @@ async fn list_and_tag_denials_are_rate_limited_first_too() {
 }
 
 #[tokio::test]
-async fn stuck_audit_sink_cannot_block_or_unbound_denials() {
+async fn stuck_audit_sink_cannot_block_denials_and_the_flooder_fails_closed() {
     let h = StorageHost::with_rate_limit(
         Arc::new(MemoryBackend::new()),
         Arc::new(StuckSink),
         1_000_000,
     );
     let s = scope(CONSUMER, 1, 7, &[]);
-    // Far more denials than the queue holds: every call still returns promptly
-    // (records are dropped + counted, never awaited).
     let run = async {
+        let mut refused = 0;
         for _ in 0..2000 {
-            assert!(matches!(
-                h.get(&s, Some(OWNER), "k.mp4").await,
-                Err(StorageError::NotGranted(_))
-            ));
+            match h.get(&s, Some(OWNER), "k.mp4").await {
+                Err(StorageError::NotGranted(_)) => {}
+                Err(StorageError::RateLimited) => refused += 1,
+                other => panic!("{other:?}"),
+            }
         }
+        refused
     };
-    tokio::time::timeout(std::time::Duration::from_secs(10), run)
+    let refused = tokio::time::timeout(std::time::Duration::from_secs(10), run)
         .await
         .expect("denials must never wait on the audit sink");
+    assert!(
+        refused > 1900,
+        "flooder must be refused once over quota: {refused}"
+    );
+}
+
+/// Sink that holds every write until opened (models a slow/saturated audit DB).
+struct GateSink {
+    open: Arc<tokio::sync::Semaphore>,
+    rec: Arc<Rec>,
+}
+#[async_trait::async_trait]
+impl AuditSink for GateSink {
+    async fn record(&self, e: AuditEvent) -> Result<(), StorageError> {
+        let _permit = self.open.acquire().await.expect("semaphore open");
+        self.rec.record(e).await
+    }
+}
+
+const FLOODER: &str = "waddles.app.flood";
+const VICTIM: &str = "waddles.app.victim";
+
+#[tokio::test]
+async fn flooder_cannot_drop_other_principals_records_and_is_refused_then_summarised() {
+    let open = Arc::new(tokio::sync::Semaphore::new(0));
+    let rec = Arc::new(Rec::default());
+    let h = StorageHost::with_rate_limit(
+        Arc::new(MemoryBackend::new()),
+        Arc::new(GateSink {
+            open: open.clone(),
+            rec: rec.clone(),
+        }),
+        1_000_000,
+    );
+    let flood = scope(FLOODER, 1, 7, &[]);
+    let (mut denied, mut refused) = (0, 0);
+    for _ in 0..200 {
+        match h.get(&flood, Some(OWNER), "k.mp4").await {
+            Err(StorageError::NotGranted(_)) => denied += 1,
+            Err(StorageError::RateLimited) => refused += 1,
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(
+        denied >= 16 && denied <= 18,
+        "per-principal quota bounds queued denials: {denied}"
+    );
+    assert_eq!(denied + refused, 200);
+    assert!(
+        refused > 150,
+        "the flooder is refused (fail closed): {refused}"
+    );
+
+    // Other principals (another app; the SAME app on another tenant) are untouched:
+    // their denials are accepted (NotGranted, not RateLimited) and will be recorded.
+    let victim = scope(VICTIM, 1, 7, &[]);
+    assert!(matches!(
+        h.get(&victim, Some(OWNER), "v.mp4").await,
+        Err(StorageError::NotGranted(_))
+    ));
+    let mut flood_t2 = scope(FLOODER, 2, 7, &[]);
+    flood_t2.tenant = 2;
+    assert!(matches!(
+        h.get(&flood_t2, Some(OWNER), "t2.mp4").await,
+        Err(StorageError::NotGranted(_))
+    ));
+
+    // Drain: the victim's records are present; the flooder's overflow is ONE summary row.
+    open.add_permits(1_000_000);
+    h.flush_denials().await;
+    {
+        let ev = rec.0.lock().unwrap();
+        assert!(
+            ev.iter().any(|e| e.caller == VICTIM && e.key == "v.mp4"),
+            "victim record kept"
+        );
+        assert!(ev
+            .iter()
+            .any(|e| e.caller == FLOODER && e.tenant == 2 && e.key == "t2.mp4"));
+        let summaries: Vec<_> = ev.iter().filter(|e| e.op == "denials_dropped").collect();
+        assert_eq!(
+            summaries.len(),
+            1,
+            "overflow is coalesced into a single summary row"
+        );
+        let r = &summaries[0].reason;
+        assert!(
+            r.starts_with("1 denials dropped for app")
+                && r.contains(&format!("for app {FLOODER} / tenant 1, window")),
+            "{r}"
+        );
+        // flooder's own queued records are all there too (nothing lost silently):
+        let own = ev
+            .iter()
+            .filter(|e| e.caller == FLOODER && e.tenant == 1 && e.op == "read")
+            .count();
+        // every accepted denial but the single coalesced overflow one is on the ledger
+        assert_eq!(own as i32, denied - 1);
+    }
+    // Once its denials are recorded the flooder is unblocked again.
+    assert!(matches!(
+        h.get(&flood, Some(OWNER), "k.mp4").await,
+        Err(StorageError::NotGranted(_))
+    ));
 }
 
 #[tokio::test]

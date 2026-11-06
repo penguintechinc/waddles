@@ -8,8 +8,6 @@ pub const MAX_LIST_LIMIT: u32 = 100;
 /// Hard cap on backend entries examined by one `list` (tag-hidden ones count).
 pub const MAX_LIST_SCAN: usize = 1000;
 pub const RATE_OPS_PER_SEC: u32 = 20;
-/// Pending denial-audit records before new ones are dropped (+ counted).
-pub const DENIAL_QUEUE_CAPACITY: usize = 256;
 
 /// Content types a bundle may store (everything else is refused).
 pub const ALLOWED_CONTENT_TYPES: &[&str] = &[
