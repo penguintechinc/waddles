@@ -31,6 +31,7 @@ use prometheus::IntGauge;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn, Instrument};
 
+use super::handshake_gate::{GateCtx, GateError, HandshakeGate, NoopGate};
 use super::invoker::{ConnectorInvokeError, ConnectorInvoker};
 use super::metrics::ConnectorMetrics;
 use super::ratelimit::{Admit, PumpLogs};
@@ -163,6 +164,9 @@ pub struct ConnectionReport {
     pub established: bool,
     /// Frames the connector processed successfully on this connection.
     pub frames_ok: u64,
+    /// A floor for the next reconnect delay (a [`super::HandshakeGate`]
+    /// refused with `retry_after`): the run loop waits at least this long.
+    pub retry_after: Option<Duration>,
 }
 
 /// Whether a finished connection has earned a backoff reset.
@@ -215,6 +219,7 @@ pub struct ConnectorDriver<I: ConnectorInvoker, S: EventSink> {
     backoff_cap: Duration,
     heartbeat_enabled: bool,
     heartbeat_send_timeout: Duration,
+    gate: Arc<dyn HandshakeGate>,
 }
 
 impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
@@ -234,7 +239,18 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
             backoff_cap: Duration::from_secs(30),
             heartbeat_enabled: false,
             heartbeat_send_timeout: DEFAULT_HEARTBEAT_SEND_TIMEOUT,
+            gate: Arc::new(NoopGate),
         }
+    }
+
+    /// Installs the pre-handshake admission gate (e.g. the Discord IDENTIFY
+    /// budget). Awaited after `on-connect` and before the handshake is sent;
+    /// the default [`NoopGate`] admits instantly, so a driver without a gate
+    /// behaves exactly as before.
+    #[must_use]
+    pub fn with_handshake_gate(mut self, gate: Arc<dyn HandshakeGate>) -> Self {
+        self.gate = gate;
+        self
     }
 
     /// Opts the driver in to heartbeat scheduling. The caller resolves the
@@ -287,7 +303,9 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
             if should_reset_backoff(&report, started.elapsed()) {
                 backoff.reset();
             }
-            let delay = backoff.delay();
+            let delay = backoff
+                .delay()
+                .max(report.retry_after.unwrap_or(Duration::ZERO));
             tokio::select! {
                 _ = &mut shutdown => return Ok(RunEnd::Shutdown),
                 _ = tokio::time::sleep(delay) => {}
@@ -362,6 +380,37 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                 return Ok(report(end, false, 0));
             }
         };
+        // Admission gate (Discord IDENTIFY budget): awaited BEFORE any
+        // handshake bytes leave the process. A RESUME needs no budget and the
+        // gate decides that from the host session token. Refused => the
+        // handshake is never sent, never "identify anyway".
+        let gate_ctx = GateCtx::from_connection(&ctx);
+        let admitted = tokio::select! {
+            _ = &mut *shutdown => {
+                transport.close("shutdown").await;
+                return Ok(report(ConnectionEnd::Shutdown, false, 0));
+            }
+            r = self.gate.acquire(&gate_ctx) => r,
+        };
+        if let Err(e) = admitted {
+            self.metrics
+                .connects_total
+                .with_label_values(&[&platform, "gate_denied"])
+                .inc();
+            warn!(platform = %platform, kind = e.kind(), "handshake gate refused; handshake not sent");
+            debug!(platform = %platform, reason = %e, "handshake gate refusal reason");
+            if matches!(e, GateError::Fatal { .. }) {
+                self.park(&platform);
+                transport.close("parked").await;
+                return Ok(report(ConnectionEnd::Parked, false, 0));
+            }
+            transport.close("handshake_gate_denied").await;
+            let mut r = report(ConnectionEnd::HandshakeFailed, false, 0);
+            if let GateError::Exhausted { retry_after } = e {
+                r.retry_after = Some(retry_after);
+            }
+            return Ok(r);
+        }
         // Gateway ordering (HELLO -> IDENTIFY/RESUME): when the transport asks
         // for it, read ONE frame first (its captures, e.g. the heartbeat
         // interval, are applied by the transport), then send the handshake,
@@ -986,6 +1035,7 @@ fn report(end: ConnectionEnd, established: bool, frames_ok: u64) -> ConnectionRe
         end,
         established,
         frames_ok,
+        retry_after: None,
     }
 }
 
