@@ -59,6 +59,12 @@ class ProviderUnavailable(ProviderConnectionError):
     code = "provider_unavailable"
 
 
+class ProviderQuotaExceeded(ProviderConnectionError):
+    """The provider's API quota (or our own per-connection call budget) is spent; retry later."""
+
+    code = "provider_quota_exceeded"
+
+
 class RefreshRejected(ProviderConnectionError):
     """The provider refused the refresh token: the credential chain is dead and needs a re-auth."""
 
