@@ -132,6 +132,8 @@ class DataPlaneBinding:
     updated_at: datetime | None
     metadata: dict[str, Any]
     kind: int = int(ConnectionKind.PLATFORM_OAUTH)
+    #: Credential-rotation counter (never the secret): a change means "restart this connection".
+    secret_version: int = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -658,12 +660,22 @@ class ProviderConnectionService:
             )
             items: list[DataPlaneBinding] = []
             for row in rows:
-                capabilities = _capabilities_of(row.connection.resource_metadata)
+                if row.community_tenant_id != row.binding.connection.tenant_id:
+                    # Tenant isolation: the community's tenant is authoritative; a link stored
+                    # under another tenant is never served (fail closed, ids only in the log).
+                    logger.error(
+                        "provider_connections.dataplane_tenant_mismatch connection_id=%d "
+                        "community_id=%d",
+                        row.binding.connection.id,
+                        row.binding.grant.community_id,
+                    )
+                    continue
+                capabilities = _effective_capabilities(adapter, row.binding.connection)
                 if capability is not None and capability not in capabilities:
                     continue
-                items.append(self._dataplane_item(adapter.spec, row))
+                items.append(self._dataplane_item(adapter.spec, row, capabilities))
             dataplane_list_size.record(len(items), {"provider": provider})
-            next_after = rows[-1].grant.id if len(rows) == limit else None
+            next_after = rows[-1].binding.grant.id if len(rows) == limit else None
             logger.debug(
                 "provider_connections.dataplane_listed provider=%s returned=%d scanned=%d",
                 provider,
@@ -1047,22 +1059,43 @@ class ProviderConnectionService:
         )
 
     @staticmethod
-    def _dataplane_item(spec: AdapterSpec, row: Binding) -> DataPlaneBinding:
-        meta = row.connection.resource_metadata
+    def _dataplane_item(
+        spec: AdapterSpec, row: store.DataPlaneRow, capabilities: list[str]
+    ) -> DataPlaneBinding:
+        """Shape one usable row; ``tenant_id`` is the community's own tenant (server-derived)."""
+        conn = row.binding.connection
         return DataPlaneBinding(
-            grant_id=row.grant.id,
-            connection_id=row.connection.id,
-            community_id=row.grant.community_id,
-            tenant_id=row.connection.tenant_id,
-            provider=spec.provider,
-            resource_type=row.connection.resource_type,
-            resource_id=row.connection.resource_id,
-            capabilities=_capabilities_of(meta),
-            expires_at=row.connection.expires_at,
-            updated_at=row.connection.updated_at,
-            metadata={k: v for k, v in meta.items() if k in spec.runtime_metadata_keys},
-            kind=row.connection.connection_kind,
+            grant_id=row.binding.grant.id,
+            connection_id=conn.id,
+            community_id=row.binding.grant.community_id,
+            tenant_id=row.community_tenant_id,
+            provider=conn.platform,
+            resource_type=conn.resource_type,
+            resource_id=conn.resource_id,
+            capabilities=capabilities,
+            expires_at=conn.expires_at,
+            updated_at=conn.updated_at,
+            metadata={
+                k: v for k, v in conn.resource_metadata.items() if k in spec.runtime_metadata_keys
+            },
+            kind=conn.connection_kind,
+            secret_version=conn.secret_version,
         )
+
+
+def _effective_capabilities(adapter: ProviderAdapter, conn: store.ConnectionRow) -> list[str]:
+    """Capabilities a binding grants *now*: the stored set plus what the adapter derives today.
+
+    A row connected before an adapter learned a capability (Discord gained ``chat_ingest``) still
+    carries the old stored list; unioning the adapter's current view of the stored scopes serves it
+    without a data migration. Sorted for a stable wire order.
+    """
+    stored = _capabilities_of(conn.resource_metadata)
+    scopes = conn.resource_metadata.get("scopes")
+    granted = adapter.granted_capabilities(
+        [str(x) for x in scopes] if isinstance(scopes, list) else []
+    )
+    return sorted({*stored, *granted})
 
 
 def _capabilities_of(metadata: Mapping[str, Any]) -> list[str]:

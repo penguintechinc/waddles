@@ -53,6 +53,7 @@ _REQUIRED_CONNECTION_COLUMNS: Final = (
     "seal_version",
     "connection_kind",
     "sealed_secret",
+    "secret_version",
 )
 
 
@@ -92,6 +93,8 @@ class ConnectionRow:
     updated_at: datetime | None
     #: ``ConnectionKind`` int code; 1 (platform OAuth) unless a static-secret row.
     connection_kind: int = 1
+    #: Credential-rotation counter (migration 0074): bumped when an admin replaces the credential.
+    secret_version: int = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -114,6 +117,18 @@ class Binding:
     connection: ConnectionRow
     grant: GrantRow
     shared_with: int
+
+
+@dataclass(slots=True, frozen=True)
+class DataPlaneRow:
+    """A usable binding plus the tenant of the *community* it is granted to.
+
+    ``community_tenant_id`` comes from the ``communities`` row via the grant's FK -- the server's
+    own relation -- not from the connection's stored tenant or any editable metadata.
+    """
+
+    binding: Binding
+    community_tenant_id: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -195,6 +210,7 @@ def _connection_columns(t: _Tables) -> list[Any]:
         c.created_at,
         c.updated_at,
         c.connection_kind,
+        c.secret_version,
     ]
 
 
@@ -231,6 +247,7 @@ def _connection_from(row: Any) -> ConnectionRow:
         created_at=_aware(row.created_at),
         updated_at=_aware(row.updated_at),
         connection_kind=int(row.connection_kind),
+        secret_version=int(row.secret_version),
     )
 
 
@@ -463,6 +480,18 @@ async def set_enabled(
         )
 
 
+def _with_rotation(t: _Tables, values: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy ``values``, adding an atomic ``secret_version + 1`` when the access token is replaced.
+
+    Only an admin credential replacement reaches ``update_link`` with ``access_token``; an OAuth
+    refresh writes through ``lock_for_refresh`` and deliberately does not bump the counter.
+    """
+    out = dict(values)
+    if "access_token" in out:
+        out["secret_version"] = t.connections.c.secret_version + 1
+    return out
+
+
 async def update_link(
     db: Any,
     *,
@@ -500,7 +529,7 @@ async def update_link(
                     t.connections.c.id == connection_id,
                     t.connections.c.tenant_id == tenant_id,
                 )
-                .values(**dict(values), updated_at=now)
+                .values(**_with_rotation(t, values), updated_at=now)
             )
         except IntegrityError as exc:
             raise ConnectionConflict("that resource is already connected for this tenant") from exc
@@ -584,14 +613,25 @@ async def delete_for_community(
 
 async def list_dataplane(
     db: Any, *, platform: str, after_grant_id: int, limit: int
-) -> list[Binding]:
+) -> list[DataPlaneRow]:
     """Usable bindings for ``platform`` across all tenants (operator plane), keyed by grant id.
 
     "Usable" = the grant is approved **and** enabled and the link is active. No tokens are loaded.
+    The tenant of each row is read from the ``communities`` row the grant points at (inner join: a
+    grant whose community is gone is not served), so the data plane never has to trust metadata.
     """
     t = _tables(db)
     stmt = (
-        _joined(t, [*_connection_columns(t), *_grant_columns(t)])
+        select(
+            *_connection_columns(t),
+            *_grant_columns(t),
+            t.communities.c.tenant_id.label("community_tenant_id"),
+        )
+        .select_from(
+            t.grants.join(t.connections, t.connections.c.id == t.grants.c.connection_id).join(
+                t.communities, t.communities.c.id == t.grants.c.community_id
+            )
+        )
         .where(
             t.connections.c.platform == platform,
             t.connections.c.status == STATUS_ACTIVE,
@@ -604,7 +644,10 @@ async def list_dataplane(
     )
     async with db.engine.connect() as conn:
         rows = (await conn.execute(stmt)).all()
-    return [Binding(_connection_from(r), _grant_from(r), 0) for r in rows]
+    return [
+        DataPlaneRow(Binding(_connection_from(r), _grant_from(r), 0), int(r.community_tenant_id))
+        for r in rows
+    ]
 
 
 def _resolve_columns(t: _Tables) -> list[Any]:
