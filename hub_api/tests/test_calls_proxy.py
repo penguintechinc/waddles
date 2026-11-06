@@ -21,6 +21,7 @@ from services.calls_proxy import (
     CallsProxyConfig,
     StreamingUrlNotConfiguredError,
 )
+from services.errors import ApiError
 from services.event_calendar_proxy import ProxyResult
 
 _CONFIG = CallsProxyConfig(base_url="http://svc-streaming:8093", timeout_seconds=1.0)
@@ -151,23 +152,36 @@ class TestCallsProxyClientRequest:
         assert result.status_code == 404
         assert result.body == {"error": "room not found"}
 
-    async def test_non_json_response_body_is_none_not_a_crash(
-        self, monkeypatch: pytest.MonkeyPatch
+    async def test_non_json_response_body_raises_502_and_logs(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=b"not json")
 
         _patch_transport(monkeypatch, handler)
         client = CallsProxyClient(_CONFIG)
-        result = await client.request("GET", "/api/v1/rooms", authorization="Bearer t")
-        assert result.ok is True
-        assert result.body is None
+        with caplog.at_level("ERROR"), pytest.raises(ApiError) as exc_info:
+            await client.request("GET", "/api/v1/rooms", authorization="Bearer t")
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.code == "STREAMING_BAD_RESPONSE"
+        assert "non-JSON" in caplog.text
 
-    async def test_transport_error_is_masked_as_502(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_empty_body_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_transport(monkeypatch, lambda request: httpx.Response(204))
+        client = CallsProxyClient(_CONFIG)
+        result = await client.request("DELETE", "/api/v1/rooms/1", authorization="Bearer t")
+        assert result == ProxyResult(ok=True, status_code=204, body=None)
+
+    async def test_transport_error_raises_502_and_logs_type_and_message(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectTimeout("connection timed out", request=request)
 
         _patch_transport(monkeypatch, handler)
         client = CallsProxyClient(_CONFIG)
-        result = await client.request("GET", "/api/v1/rooms", authorization="Bearer t")
-        assert result == ProxyResult(ok=False, status_code=502, body=None)
+        with caplog.at_level("ERROR"), pytest.raises(ApiError) as exc_info:
+            await client.request("GET", "/api/v1/rooms", authorization="Bearer t")
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.code == "STREAMING_UNAVAILABLE"
+        assert "ConnectTimeout" in caplog.text and "connection timed out" in caplog.text

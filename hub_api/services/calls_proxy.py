@@ -25,13 +25,17 @@ with).
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
+from services.errors import ApiError
 from services.event_calendar_proxy import ProxyResult
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 
@@ -121,13 +125,37 @@ class CallsProxyClient:
                 response = await client.request(
                     method, url, params=params, json=json_body, headers=headers
                 )
-        except httpx.HTTPError:
-            return ProxyResult(ok=False, status_code=502, body=None)
+        except httpx.HTTPError as exc:
+            logger.error(
+                "svc-streaming call failed: %s %s -> %s: %s",
+                method,
+                path,
+                type(exc).__name__,
+                exc,
+            )
+            raise ApiError(
+                message="Streaming service unavailable",
+                status_code=502,
+                code="STREAMING_UNAVAILABLE",
+            ) from exc
 
-        try:
-            data: Any = response.json()
-        except ValueError:
-            data = None
+        data: Any = None
+        if response.content:
+            try:
+                data = response.json()
+            except ValueError as exc:
+                logger.error(
+                    "svc-streaming returned a non-JSON body: %s %s -> HTTP %s (%s)",
+                    method,
+                    path,
+                    response.status_code,
+                    type(exc).__name__,
+                )
+                raise ApiError(
+                    message="Streaming service returned an invalid response",
+                    status_code=502,
+                    code="STREAMING_BAD_RESPONSE",
+                ) from exc
 
         if response.is_success:
             return ProxyResult(ok=True, status_code=response.status_code, body=data)
