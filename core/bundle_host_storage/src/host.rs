@@ -13,6 +13,7 @@ use bytes::Bytes;
 
 use crate::audit::{AuditEvent, AuditOutcome, AuditSink};
 use crate::backend::{ObjectBackend, ObjectMeta};
+use crate::denial_queue::DenialQueue;
 use crate::error::StorageError;
 use crate::key::{object_key, scope_prefix, validate_key, validate_key_prefix, validate_owner};
 use crate::limits::*;
@@ -63,6 +64,7 @@ struct Resolved {
 pub struct StorageHost {
     backend: Arc<dyn ObjectBackend>,
     audit: Arc<dyn AuditSink>,
+    denials: DenialQueue,
     rate: Mutex<HashMap<RateKey, (Instant, u32)>>,
     rate_limit: u32,
 }
@@ -87,6 +89,7 @@ impl StorageHost {
     ) -> Self {
         Self {
             backend,
+            denials: DenialQueue::new(audit.clone(), DENIAL_QUEUE_CAPACITY),
             audit,
             rate: Mutex::new(HashMap::new()),
             rate_limit,
@@ -136,8 +139,8 @@ impl StorageHost {
             .await
     }
 
-    /// Denials are audited too; the denial itself is the safe outcome, so a sink
-    /// failure here is logged loudly (never swallowed) but does not change it.
+    /// Denials are audited too -- via the bounded drop-on-full queue so attacker-
+    /// triggered denials can never starve the fail-closed allowed-path audits.
     async fn audit_denied(
         &self,
         s: &StorageScope,
@@ -147,9 +150,22 @@ impl StorageHost {
         outcome: AuditOutcome,
         reason: &str,
     ) {
-        if let Err(e) = self.audit_raw(s, owner, op, key, outcome, reason).await {
-            tracing::error!(error = %e, op, "bundle storage audit write failed for a denial");
-        }
+        self.denials.enqueue(AuditEvent {
+            caller: s.app_id.clone(),
+            owner: owner.to_string(),
+            tenant: s.tenant,
+            community: s.community,
+            op,
+            key: key.to_string(),
+            outcome,
+            reason: reason.to_string(),
+            request_id: s.request_id.clone(),
+        });
+    }
+
+    /// Waits until every denial record enqueued so far has been written.
+    pub async fn flush_denials(&self) {
+        self.denials.flush().await;
     }
 
     /// Flag, owner/key validation, grant, rate limit; builds the host-scoped key.
@@ -167,6 +183,8 @@ impl StorageHost {
         let owner = owner.unwrap_or(&s.app_id).to_string();
         validate_owner(&owner)?;
         validate_key(key).inspect_err(|_| metrics::denied("invalid_key"))?;
+        // Rate-limit BEFORE authorize/denial-audit: denied calls cost budget too.
+        self.rate_check(s)?;
         let cross = match authorize(&s.app_id, &owner, op, &s.grants) {
             Ok(c) => c,
             Err(e) => {
@@ -183,7 +201,6 @@ impl StorageHost {
                 return Err(e);
             }
         };
-        self.rate_check(s)?;
         let full_key = object_key(&owner, s.tenant, s.community, key);
         Ok(Resolved {
             owner,
@@ -430,6 +447,7 @@ impl StorageHost {
         validate_key_prefix(key_prefix)?;
         let owner_s = owner.unwrap_or(&s.app_id).to_string();
         validate_owner(&owner_s)?;
+        self.rate_check(s)?;
         let cross = match authorize(&s.app_id, &owner_s, Op::List, &s.grants) {
             Ok(c) => c,
             Err(e) => {
@@ -446,7 +464,6 @@ impl StorageHost {
                 return Err(e);
             }
         };
-        self.rate_check(s)?;
         let scope = scope_prefix(&owner_s, s.tenant, s.community);
         let rel_prefix = key_prefix.strip_suffix('/').unwrap_or(key_prefix);
         let full_prefix = if rel_prefix.is_empty() {
@@ -593,6 +610,9 @@ impl StorageHost {
         validate_key(key)?;
         validate_owner(consumer)?;
         let owner_s = owner.unwrap_or(&s.app_id);
+        // Parity with resolve/list: the audited owner string is always validated first.
+        validate_owner(owner_s)?;
+        self.rate_check(s)?;
         if owner_s != s.app_id {
             metrics::denied("tag_not_owner");
             self.audit_denied(
@@ -608,7 +628,6 @@ impl StorageHost {
                 "tag operations are owner-only".into(),
             ));
         }
-        self.rate_check(s)?;
         let full = object_key(&s.app_id, s.tenant, s.community, key);
         let meta = self
             .backend

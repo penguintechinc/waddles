@@ -55,6 +55,7 @@ world stage-tools {
   import identity;
   import ai;
   import platform-table;
+  import object-storage;
   import tool;
 
   export tool-provider;

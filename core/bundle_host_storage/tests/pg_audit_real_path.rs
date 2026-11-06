@@ -96,11 +96,13 @@ async fn audit_rows_land_in_postgres_and_role_is_insert_only() {
         h.get(&consumer, Some(OWNER), "k.mp4").await.unwrap_err(),
         StorageError::NotFound
     );
+    h.flush_denials().await; // denials are written asynchronously; keep ledger order deterministic
     h.tag_add(&owner, None, "k.mp4", CONSUMER).await.unwrap();
     assert!(h.get(&consumer, Some(OWNER), "k.mp4").await.is_ok());
     let nogrant = scope(CONSUMER, &[]);
     assert!(h.get(&nogrant, Some(OWNER), "k.mp4").await.is_err());
 
+    h.flush_denials().await;
     let rows = su
         .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
@@ -134,6 +136,33 @@ async fn audit_rows_land_in_postgres_and_role_is_insert_only() {
     assert_eq!(first.try_get_by_index::<i64>(4).unwrap(), 1);
     assert_eq!(first.try_get_by_index::<i64>(5).unwrap(), 7);
     assert_eq!(first.try_get_by_index::<String>(6).unwrap(), "req-pg-1");
+
+    // Guest-influenced strings with NUL/control chars: the row is STILL written, field -> <invalid>.
+    use bundle_host_storage::{AuditEvent, AuditOutcome, AuditSink};
+    PgAuditSink::new(role_db.clone())
+        .record(AuditEvent {
+            caller: CONSUMER.into(),
+            owner: "bad\0owner".into(),
+            tenant: 1,
+            community: 7,
+            op: "tag_add",
+            key: "k\u{1}".into(),
+            outcome: AuditOutcome::Denied,
+            reason: "tag ops are owner-only".into(),
+            request_id: "req-pg-2".into(),
+        })
+        .await
+        .expect("a hostile field must not fail the insert");
+    let hostile = su
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT owner_app_id, object_key FROM bundle_storage_audit WHERE request_id = 'req-pg-2'",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(hostile.try_get_by_index::<String>(0).unwrap(), "<invalid>");
+    assert_eq!(hostile.try_get_by_index::<String>(1).unwrap(), "<invalid>");
 
     // Privilege boundary: INSERT-only (no read-back, no tamper, no delete).
     for sql in [

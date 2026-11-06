@@ -7,6 +7,7 @@
 
 pub mod audit;
 pub mod backend;
+pub mod denial_queue;
 pub mod error;
 pub mod host;
 pub mod key;

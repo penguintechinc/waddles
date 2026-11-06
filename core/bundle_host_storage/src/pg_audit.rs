@@ -52,7 +52,16 @@ impl PgAuditSink {
     }
 }
 
-fn clip(s: &str, max: usize) -> String {
+/// Placeholder recorded instead of a field that carries NUL/control characters.
+pub const INVALID_FIELD: &str = "<invalid>";
+
+/// Clips to `max` chars; a value with NUL/control characters (guest-influenced
+/// strings such as an owner or key) is recorded as `<invalid>` so the row is ALWAYS
+/// written (Postgres rejects NUL in text, which would otherwise drop a denial row).
+pub fn clip(s: &str, max: usize) -> String {
+    if s.chars().any(char::is_control) {
+        return INVALID_FIELD.to_string();
+    }
     s.chars().take(max).collect()
 }
 

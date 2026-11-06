@@ -133,6 +133,7 @@ async fn other_prefix_denied_without_approval_and_audited() {
     ] {
         assert!(matches!(r, Err(StorageError::NotGranted(_))), "{r:?}");
     }
+    h.flush_denials().await;
     let ev = rec.0.lock().unwrap();
     assert!(ev.len() >= 6 && ev.iter().all(|e| e.outcome == AuditOutcome::Denied));
 }
@@ -473,6 +474,7 @@ async fn owner_can_tag_untag_audited_non_owner_cannot() {
         h.tag_add(&c, None, "k.mp4", CONSUMER).await.unwrap_err(),
         StorageError::NotFound
     ); // own (empty) prefix
+    h.flush_denials().await;
     let ev = rec.0.lock().unwrap();
     let ops: Vec<(&str, AuditOutcome)> = ev
         .iter()
@@ -753,6 +755,7 @@ async fn audit_events_carry_request_id_and_cover_tag_ops_and_list() {
     h.list(&consumer_scope(), Some(OWNER), "", None, 5)
         .await
         .unwrap();
+    h.flush_denials().await;
     let ev = rec.0.lock().unwrap();
     assert!(ev.iter().all(|e| e.request_id == "req-1"));
     assert!(ev
@@ -761,4 +764,113 @@ async fn audit_events_carry_request_id_and_cover_tag_ops_and_list() {
     assert!(ev
         .iter()
         .any(|e| e.op == "list" && e.outcome == AuditOutcome::Allowed));
+}
+
+/// Sink whose `record` never completes: models a saturated/stuck audit DB.
+struct StuckSink;
+#[async_trait::async_trait]
+impl AuditSink for StuckSink {
+    async fn record(&self, _e: AuditEvent) -> Result<(), StorageError> {
+        std::future::pending::<()>().await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn denied_call_spam_is_rate_limited_before_any_audit_work() {
+    let rec = Arc::new(Rec::default());
+    let h = StorageHost::with_rate_limit(Arc::new(MemoryBackend::new()), rec.clone(), 3);
+    let s = scope(CONSUMER, 1, 7, &[]); // no grants: every cross-prefix call is a denial
+    let mut denied = 0;
+    let mut limited = 0;
+    for _ in 0..20 {
+        match h.get(&s, Some(OWNER), "k.mp4").await {
+            Err(StorageError::NotGranted(_)) => denied += 1,
+            Err(StorageError::RateLimited) => limited += 1,
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!((denied, limited), (3, 17));
+    // list + tag paths too
+    assert!(matches!(
+        h.list(&s, Some(OWNER), "", None, 5).await,
+        Err(StorageError::RateLimited)
+    ));
+    assert!(matches!(
+        h.tag_add(&s, Some(OWNER), "k.mp4", OTHER).await,
+        Err(StorageError::RateLimited)
+    ));
+    h.flush_denials().await;
+    assert_eq!(
+        rec.0.lock().unwrap().len(),
+        3,
+        "only budgeted denials are audited"
+    );
+}
+
+#[tokio::test]
+async fn list_and_tag_denials_are_rate_limited_first_too() {
+    let h =
+        StorageHost::with_rate_limit(Arc::new(MemoryBackend::new()), Arc::new(Rec::default()), 1);
+    let s = scope(CONSUMER, 1, 7, &[]);
+    assert!(matches!(
+        h.list(&s, Some(OWNER), "", None, 5).await,
+        Err(StorageError::NotGranted(_))
+    ));
+    assert!(matches!(
+        h.list(&s, Some(OWNER), "", None, 5).await,
+        Err(StorageError::RateLimited)
+    ));
+    let h2 =
+        StorageHost::with_rate_limit(Arc::new(MemoryBackend::new()), Arc::new(Rec::default()), 1);
+    assert!(matches!(
+        h2.tag_add(&s, Some(OWNER), "k", OTHER).await,
+        Err(StorageError::NotGranted(_))
+    ));
+    assert!(matches!(
+        h2.tag_add(&s, Some(OWNER), "k", OTHER).await,
+        Err(StorageError::RateLimited)
+    ));
+}
+
+#[tokio::test]
+async fn stuck_audit_sink_cannot_block_or_unbound_denials() {
+    let h = StorageHost::with_rate_limit(
+        Arc::new(MemoryBackend::new()),
+        Arc::new(StuckSink),
+        1_000_000,
+    );
+    let s = scope(CONSUMER, 1, 7, &[]);
+    // Far more denials than the queue holds: every call still returns promptly
+    // (records are dropped + counted, never awaited).
+    let run = async {
+        for _ in 0..2000 {
+            assert!(matches!(
+                h.get(&s, Some(OWNER), "k.mp4").await,
+                Err(StorageError::NotGranted(_))
+            ));
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("denials must never wait on the audit sink");
+}
+
+#[tokio::test]
+async fn tag_ops_validate_the_audited_owner_string() {
+    let (h, _, rec) = rig();
+    seed(&h, "k.mp4", &[]).await;
+    let c = consumer_scope();
+    for bad in ["../x", "A B", "a\0b", "x/y", ""] {
+        let r = h.tag_add(&c, Some(bad), "k.mp4", CONSUMER).await;
+        assert!(
+            matches!(r, Err(StorageError::Invalid(_))),
+            "{bad:?} -> {r:?}"
+        );
+    }
+    h.flush_denials().await;
+    assert!(
+        rec.0.lock().unwrap().is_empty(),
+        "invalid owners never reach the ledger"
+    );
 }
