@@ -17,6 +17,7 @@ pub mod lease;
 pub mod metrics;
 pub mod observed;
 pub mod plan;
+pub mod profiles;
 pub mod ready;
 pub mod supervisor;
 #[cfg(test)]

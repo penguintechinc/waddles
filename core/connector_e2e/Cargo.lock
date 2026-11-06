@@ -602,12 +602,15 @@ version = "0.1.0"
 dependencies = [
  "bundle-executor",
  "clap",
+ "connection_resolver",
+ "futures-util",
  "penguin-spine",
  "prometheus",
  "serde_json",
  "sha2",
  "svc-ingest",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
