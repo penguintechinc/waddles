@@ -5,7 +5,7 @@
 //! reconciler tear down healthy connections. Mirrors the legacy
 //! `twitch_sessions::spec::discover` (paging, stuck-cursor check, fail-closed
 //! on a resource claimed by several communities), generalized over a
-//! platform [`OverlayProfile`].
+//! platform [`ConnectorProfile`].
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -18,7 +18,7 @@ use connection_resolver::{ConnectionResolve, ResolveError};
 use sha2::{Digest, Sha256};
 
 use super::metrics::{saturating_u32, RuntimeMetrics, SkipReason};
-use super::plan::{OverlayProfile, RuntimeEnv};
+use super::plan::{ConnectorProfile, RuntimeEnv};
 use crate::connector::webhook::WebhookRoute;
 use crate::connector::{PollConfig, WsConfig};
 
@@ -191,7 +191,7 @@ fn dedup(all: Vec<DesiredConnection>) -> (Vec<DesiredConnection>, DedupReport) {
 }
 
 /// [`BindingFeed`] over hub-api's binding list for one platform profile.
-pub struct HubBindingFeed<R: ConnectionResolve, P: OverlayProfile> {
+pub struct HubBindingFeed<R: ConnectionResolve, P: ConnectorProfile> {
     resolver: Arc<R>,
     profile: P,
     env: RuntimeEnv,
@@ -199,7 +199,7 @@ pub struct HubBindingFeed<R: ConnectionResolve, P: OverlayProfile> {
     metrics: Option<RuntimeMetrics>,
 }
 
-impl<R: ConnectionResolve, P: OverlayProfile> HubBindingFeed<R, P> {
+impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
     /// Builds a feed; each binding-list call is bounded by `call_timeout`.
     pub fn new(resolver: Arc<R>, profile: P, env: RuntimeEnv, call_timeout: Duration) -> Self {
         Self {
@@ -286,7 +286,7 @@ impl<R: ConnectionResolve, P: OverlayProfile> HubBindingFeed<R, P> {
     }
 }
 
-impl<R: ConnectionResolve, P: OverlayProfile> BindingFeed for HubBindingFeed<R, P> {
+impl<R: ConnectionResolve, P: ConnectorProfile> BindingFeed for HubBindingFeed<R, P> {
     async fn desired(&self, platform: &'static str) -> Result<Vec<DesiredConnection>, FeedError> {
         if platform != self.profile.platform() {
             return Err(FeedError::UnknownPlatform(platform.to_owned()));

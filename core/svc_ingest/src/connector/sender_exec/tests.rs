@@ -3,7 +3,7 @@
 //! Discord / YouTube behind an egress allowlist (the policy's host list +
 //! the guarded client's exact-ip allowance), the production verifier,
 //! substituter and `GuardedClient` run unmodified, and the templates are the
-//! overlay-accurate fixtures from `verify::tests`. Only the component loader
+//! connector-accurate fixtures from `verify::tests`. Only the component loader
 //! ([`TemplateBuilder`]) is a double -- see the module doc for why.
 
 use std::collections::HashMap;

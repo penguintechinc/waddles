@@ -1,4 +1,4 @@
 # PR-H -- render-time validation for the connector runtime (see templates/_connector_runtime.tpl).
-# Emits no manifest: `fail`s the whole render on a half-configured ON (discord overlay before the
+# Emits no manifest: `fail`s the whole render on a half-configured ON (discord connector before the
 # identify budget lands, missing digest / connectorTools / route-key Secret, ...).
 {{- include "waddlebot.connectorRuntimeValidate" . -}}

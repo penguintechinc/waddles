@@ -333,7 +333,7 @@ pub struct CliConfig {
     #[arg(long, env = "EXECUTOR_CONNECTOR_CONNECTIONS", default_value_t = 1)]
     pub executor_connector_connections: u32,
 
-    /// `sha256:<64 lowercase hex>` of the Twitch overlay to pin at startup
+    /// `sha256:<64 lowercase hex>` of the Twitch connector to pin at startup
     /// (`connectors/twitch/<digest>.wasm`). Empty/unset = not pinned.
     #[arg(long, env = "CONNECTOR_PIN_DIGEST_TWITCH")]
     pub connector_pin_digest_twitch: Option<String>,

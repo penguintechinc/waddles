@@ -1,4 +1,4 @@
-# Twitch platform overlay (`waddles.core.service.twitch`)
+# Twitch platform connector (`waddles.core.service.twitch`)
 
 P6b Task 1. A `kind: service` Rust WASM component on `world connector-tools`
 that moves Twitch specifics out of `core/svc_ingest/src/ingest/twitch*.rs`.
@@ -16,7 +16,7 @@ tool-provider: get_chatters | get_followers | get_subscriptions
 
 ## Cutover
 
-PostHog flag `waddles.overlay-twitch`, default OFF. The host selects the path;
+PostHog flag `waddles.connector-twitch`, default OFF. The host selects the path;
 the guest additionally refuses every entry point (`frame-error::unsupported`)
 while the flag is OFF. While OFF the hardcoded path runs unchanged. Nothing
 hardcoded is deleted here (that is T4).
@@ -24,7 +24,7 @@ hardcoded is deleted here (that is T4).
 ## Parity
 
 `tests/parity.rs` runs all 23 `tests/data_plane_parity/corpus/twitch/*.json`
-vectors through the overlay logic and compares event type, actor and payload
+vectors through the connector logic and compares event type, actor and payload
 with the hardcoded golden (`source` is host-derived from the pinned connection;
 `occurred_at` is the host-stamped `received_at`). Run `cargo test --locked`.
 
@@ -38,7 +38,7 @@ with the hardcoded golden (`source` is host-derived from the pinned connection;
 | Webhook route | `Scheme::twitch_eventsub()` + `secret_ref`, owner `twitch` |
 | Outbound (T6d) slots | exact set below |
 
-### Slot set for T6d (substituted by the host, never by the overlay)
+### Slot set for T6d (substituted by the host, never by the connector)
 
 | Slot | Handle | Where it appears | Host binds from |
 |---|---|---|---|
@@ -63,20 +63,20 @@ keyed only by `to_broadcaster_user_id` yields that id (the hardcoded path publis
 
 ## Security properties (each has a test)
 
-- Overlay-supplied channel/broadcaster/sender/moderator fields in an action payload are never read; the template is identical with or without them.
+- Connector-supplied channel/broadcaster/sender/moderator fields in an action payload are never read; the template is identical with or without them.
 - Every guest/user-derived string that reaches a template goes through `sender::reject_unsafe`: control and invisible format characters (NUL, U+200B-200F, U+2028-202E, U+2060-206F, U+FEFF, tag chars) are REJECTED (never stripped), then `{{` and `}}` are rejected, so no transformation can assemble a live slot. `verify_slots` re-checks the finished template: the only brace pairs present must be declared slots.
 - Reconnect re-sends one `JOIN` and one `CAP REQ` regardless of session token (no stacked subscriptions); EventSub dedup stays host-side.
-- Read tools return canonical UUIDs only (`identity.lookup`); no handle or numeric Twitch id leaves the overlay.
+- Read tools return canonical UUIDs only (`identity.lookup`); no handle or numeric Twitch id leaves the connector.
 - Logs carry `op` + counts only. No kv is used.
 
 ## Known gaps (need host/WIT work, outside this bundle's allowed edit set)
 
-1. **IRC `PING` -> `PONG`**: `on-frame` can only return events, so the guest cannot answer a server `PING`. `ws.rs` (or a WIT reply channel) must auto-`PONG`. The overlay sends a client `PING` on every heartbeat to keep the idle timer fed.
-2. **Self-echo filter (enabling the overlay REQUIRES the host self-filter or a `self-nick` in `connection-ctx`)**: the guest has no self identity (`irc::GUEST_SELF_NICK = None`), so it cannot drop the bot's own `PRIVMSG` (vector `irc_self_message_dropped`). Pinned by `guest_path_without_self_nick_differs_only_on_self_echo` and `self_echo_gap_is_pinned_until_host_filter_lands`, which fail on purpose once the gap closes. Until then `waddles.overlay-twitch` stays OFF (default; `common::gate_decision` refuses every entry point while OFF, tested).
+1. **IRC `PING` -> `PONG`**: `on-frame` can only return events, so the guest cannot answer a server `PING`. `ws.rs` (or a WIT reply channel) must auto-`PONG`. The connector sends a client `PING` on every heartbeat to keep the idle timer fed.
+2. **Self-echo filter (enabling the connector REQUIRES the host self-filter or a `self-nick` in `connection-ctx`)**: the guest has no self identity (`irc::GUEST_SELF_NICK = None`), so it cannot drop the bot's own `PRIVMSG` (vector `irc_self_message_dropped`). Pinned by `guest_path_without_self_nick_differs_only_on_self_echo` and `self_echo_gap_is_pinned_until_host_filter_lands`, which fail on purpose once the gap closes. Until then `waddles.connector-twitch` stays OFF (default; `common::gate_decision` refuses every entry point while OFF, tested).
 3. **`RECONNECT`/login failure** surface as `frame-error` (counted, connection stays); the host should treat `backend("irc login rejected")` as park-worthy.
 4. **Actor = `identity.lookup` UUID, no raw-handle fallback.** Key = platform user id (IRC `user-id` tag; EventSub `user_id`, else `broadcaster_id`), else the login when the wire carries no id. A failed lookup drops the event and is counted (`actor_lookup_dropped`, no key logged); a frame with nothing left returns `frame-error::backend`. Requires the `connector.pii.read` grant, which is declared in `hub-manifest.yaml` (catalog id: dangerous, core-only; pre-granted by the core seeder). Without the grant lookups are denied and every actor-bearing event fails loud. Payload fields (`author`, `user_login`, ...) still match the hardcoded golden and are tokenized downstream by `pii_tokenize`. Declared divergence: `tests/data_plane_parity/expected/twitch/divergences.json` (self-echo).
 5. **Outbound slot semantics (Part B)** follow the handshake-slot convention; reconcile with T6d once specified. Read tools use the host-pinned slots above.
-6. The overlay needs the connector `identity.lookup` import for read tools.
+6. The connector needs the connector `identity.lookup` import for read tools.
 
 ## Build / test
 

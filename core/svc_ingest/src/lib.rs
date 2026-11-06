@@ -149,22 +149,22 @@ pub struct ReceiverReadiness {
     pub twitch_irc: ReceiverFlag,
     pub discord: ReceiverFlag,
     pub twitch_outbound: ReceiverFlag,
-    /// Overlay-runtime platforms and the runtime's readiness handle; set
-    /// once at boot by [`ReceiverReadiness::set_overlay`].
-    overlay: std::sync::OnceLock<OverlayReadiness>,
+    /// Connector-runtime platforms and the runtime's readiness handle; set
+    /// once at boot by [`ReceiverReadiness::set_connector`].
+    connector: std::sync::OnceLock<ConnectorReadiness>,
 }
 
-/// The overlay-ON platforms and, once the runtime is built, its readiness
+/// The connector-ON platforms and, once the runtime is built, its readiness
 /// handle. `handle: None` with platforms listed means the runtime is not
 /// wired -- reported not-ready, never silently nothing.
-struct OverlayReadiness {
+struct ConnectorReadiness {
     platforms: Vec<&'static str>,
     handle: Option<Arc<dyn connector_runtime::RuntimeReady>>,
 }
 
-/// One overlay platform's `/readyz` line.
+/// One connector platform's `/readyz` line.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OverlayStatus {
+pub struct ConnectorStatus {
     pub platform: &'static str,
     pub readiness: connector_runtime::Readiness,
 }
@@ -181,37 +181,37 @@ impl ReceiverReadiness {
             && self.discord.ok()
             && self.twitch_outbound.ok()
             && self
-                .overlay_status()
+                .connector_status()
                 .iter()
                 .all(|s| !matches!(s.readiness, connector_runtime::Readiness::NotReady(_)))
     }
 
-    /// Records the overlay-ON platforms and the runtime's readiness handle.
+    /// Records the connector-ON platforms and the runtime's readiness handle.
     /// Set once; a second call is ignored (boot runs once).
-    pub fn set_overlay(
+    pub fn set_connector(
         &self,
         platforms: Vec<&'static str>,
         handle: Option<Arc<dyn connector_runtime::RuntimeReady>>,
     ) {
         // A second set is a no-op by contract (boot runs once).
         if self
-            .overlay
-            .set(OverlayReadiness { platforms, handle })
+            .connector
+            .set(ConnectorReadiness { platforms, handle })
             .is_err()
         {
-            tracing::warn!("overlay readiness already set; ignoring");
+            tracing::warn!("connector readiness already set; ignoring");
         }
     }
 
-    /// Per overlay-ON platform readiness. A platform whose runtime is not
+    /// Per connector-ON platform readiness. A platform whose runtime is not
     /// wired reports `NotReady("runtime_not_wired")`.
-    pub fn overlay_status(&self) -> Vec<OverlayStatus> {
-        let Some(o) = self.overlay.get() else {
+    pub fn connector_status(&self) -> Vec<ConnectorStatus> {
+        let Some(o) = self.connector.get() else {
             return Vec::new();
         };
         o.platforms
             .iter()
-            .map(|p| OverlayStatus {
+            .map(|p| ConnectorStatus {
                 platform: p,
                 readiness: match &o.handle {
                     Some(h) => h.ready(p),
@@ -339,7 +339,7 @@ where
     // Host selector (spec 2026-11-05 s5): env baselines only, never the flag
     // client. Validated BEFORE any receiver starts; fatal and loud.
     let env_lookup = |k: &str| std::env::var(k).ok();
-    let selector = connector_runtime::selector::OverlaySelector::from_env(&env_lookup)?;
+    let selector = connector_runtime::selector::ConnectorSelector::from_env(&env_lookup)?;
     let webhook_platforms = connector_runtime::selector::parse_webhook_platforms(
         &config.cli.connector_runtime_webhook_platforms,
     )?;
@@ -358,8 +358,8 @@ where
         &env_lookup,
     )?);
     // The runtime's readiness handle, once (and only if) it is built below.
-    // With every overlay OFF nothing is built, bound or spawned.
-    let mut overlay_ready: Option<Arc<dyn connector_runtime::RuntimeReady>> = None;
+    // With every connector OFF nothing is built, bound or spawned.
+    let mut connector_ready: Option<Arc<dyn connector_runtime::RuntimeReady>> = None;
     let license_client = license::build_license_client();
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
         // Schema-v3 producer: resolver is installed BEFORE any receiver can
@@ -379,12 +379,12 @@ where
         // onto the same underlying TTL cache / HTTP client.
         let dek_provider = build_dek_provider(&config, reqwest::Client::new());
 
-        // Connector overlay runtime (spec 2026-11-05 PR-E): only when an
-        // `OVERLAY_<P>_ENABLED` baseline is ON. It owns the single executor
+        // Connector service bundle runtime (spec 2026-11-05 PR-E): only when an
+        // `CONNECTOR_<P>_ENABLED` baseline is ON. It owns the single executor
         // link + listener; the outbound executor path rides the same link.
         let mut shared_link = None;
-        if selector.any_overlay() {
-            let started = connector_runtime::boot::start_overlay(
+        if selector.any_connector() {
+            let started = connector_runtime::boot::start_connector(
                 &config,
                 &selector,
                 &webhook_env,
@@ -394,7 +394,7 @@ where
             )
             .await?;
             shared_link = Some(Arc::clone(&started.link));
-            overlay_ready = Some(started.ready);
+            connector_ready = Some(started.ready);
         }
 
         // Outbound drains are owned by `start_outbound` (the
@@ -410,8 +410,8 @@ where
         };
         connector_runtime::selector::start_legacy(&legacy_plan, &mut legacy).await?;
     } else {
-        if selector.any_overlay() {
-            // Overlay ON but the data plane is OFF: the runtime can never run.
+        if selector.any_connector() {
+            // Connector ON but the data plane is OFF: the runtime can never run.
             // Fatal and named, never a silent fallback to nothing.
             return Err(connector_runtime::selector::BootError::Prerequisite(
                 license::RUST_DATA_PLANE_FLAG,
@@ -427,10 +427,10 @@ where
         );
     }
 
-    // `/readyz` reports every overlay-ON platform (none by default).
+    // `/readyz` reports every connector-ON platform (none by default).
     state
         .receiver_readiness
-        .set_overlay(selector.enabled_platforms(), overlay_ready);
+        .set_connector(selector.enabled_platforms(), connector_ready);
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);

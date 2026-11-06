@@ -2,11 +2,11 @@
 //!
 //! The connector contract gives the guest no way to ask the host to reconnect,
 //! to persist a session, or to track heartbeat ACKs, and a component holds no
-//! state between calls. These read-only tools expose the overlay's gateway
+//! state between calls. These read-only tools expose the connector's gateway
 //! knowledge (the same `classify` / `classify_close_code` the receiver uses) so
 //! the host's WS transport can drive RESUME/IDENTIFY decisions from the
-//! overlay instead of re-implementing Discord opcodes -- which is the point of
-//! the overlay model. They hold no credential and touch no network.
+//! connector instead of re-implementing Discord opcodes -- which is the point of
+//! the connector model. They hold no credential and touch no network.
 
 use serde_json::{Value, json};
 

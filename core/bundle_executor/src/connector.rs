@@ -582,7 +582,7 @@ impl ConnectorHost {
         )
     }
 
-    /// `tool-provider.call` (P6a T4): run one of the connector overlay's own
+    /// `tool-provider.call` (P6a T4): run one of the connector service bundle's own
     /// exported tools (`get_chatters`, `send_chat`, ...). `args` and the
     /// result are canonical JSON bytes. Fails loud with
     /// [`ConnectorCallError::NoToolProvider`] on a plain-`connector` component
@@ -1128,7 +1128,7 @@ mod tests {
             Some(HostBridge::new(connection)),
         )
         .await
-        .expect("tools overlay loads");
+        .expect("tools connector loads");
         let before = host.available_tool_slots();
 
         let started = Instant::now();

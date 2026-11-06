@@ -50,8 +50,8 @@ async fn readyz() -> (StatusCode, serde_json::Value) {
 #[tokio::test]
 async fn an_installed_runtime_that_is_not_ready_degrades_readyz_with_per_platform_fields() {
     let (code, body) = readyz().await;
-    assert_eq!(code, StatusCode::OK, "no overlay installed yet");
-    assert!(body.get("overlays").is_none());
+    assert_eq!(code, StatusCode::OK, "no connector installed yet");
+    assert!(body.get("connectors").is_none());
 
     let status = Arc::new(RuntimeStatus::new(
         &["twitch", "youtube"],
@@ -64,9 +64,9 @@ async fn an_installed_runtime_that_is_not_ready_degrades_readyz_with_per_platfor
     let (code, body) = readyz().await;
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["status"], "degraded");
-    let overlays = body["overlays"].as_array().expect("overlays");
-    assert_eq!(overlays.len(), 2, "denominator: both platforms reported");
-    for o in overlays {
+    let connectors = body["connectors"].as_array().expect("connectors");
+    assert_eq!(connectors.len(), 2, "denominator: both platforms reported");
+    for o in connectors {
         assert_eq!(o["enabled"], true);
         assert_eq!(o["executor_attached"], false);
         assert_eq!(o["pinned_ok"], false);

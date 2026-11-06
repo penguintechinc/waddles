@@ -1,6 +1,6 @@
 //! Generic, platform-agnostic WebSocket [`Transport`]. URL, handshake slots,
 //! secret handles, resume token and limits all come from [`WsConfig`] (the
-//! overlay's config); nothing here names a platform. The connector-built
+//! connector's config); nothing here names a platform. The connector-built
 //! handshake is sent on every (re)connect with secret slots substituted per
 //! call via the injected [`TransportSecretSource`] (`connection_resolver` in
 //! production): the resolved value lives only in a zeroizing buffer for the
@@ -51,12 +51,12 @@ pub const MAX_DEDUP_WINDOW: usize = 65_536;
 
 type Stream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Overlay-supplied configuration for one WebSocket source.
+/// Connector-supplied configuration for one WebSocket source.
 #[derive(Debug, Clone)]
 pub struct WsConfig {
     /// Platform slug (must have a pinned connector).
     pub platform: String,
-    /// `wss://` endpoint from the overlay config.
+    /// `wss://` endpoint from the connector config.
     pub url: String,
     /// Host-side key hashed into the opaque `source_id` (never exposed).
     pub source_key: String,
@@ -1084,7 +1084,7 @@ mod tests {
     /// Real-path: the server PINGs, the transport answers PONG with the
     /// echoed token, and the connector-facing stream never sees the PING.
     #[tokio::test]
-    async fn server_ping_is_ponged_and_hidden_from_the_overlay() {
+    async fn server_ping_is_ponged_and_hidden_from_the_connector() {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1107,7 +1107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forward_to_guest_config_lets_the_overlay_see_the_ping() {
+    async fn forward_to_guest_config_lets_the_connector_see_the_ping() {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

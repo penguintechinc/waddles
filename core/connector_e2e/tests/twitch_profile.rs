@@ -1,7 +1,7 @@
-//! Real-path proof of the Twitch `OverlayProfile` (PR-F1): the `WsConfig` the
+//! Real-path proof of the Twitch `ConnectorProfile` (PR-F1): the `WsConfig` the
 //! profile derives from a hub-api binding drives a REAL `WsTransport` against a
-//! local fake IRC server, with the REAL compiled Twitch overlay component
-//! (`fixtures/twitch_overlay.wasm`) running in a real bundle executor behind
+//! local fake IRC server, with the REAL compiled Twitch connector component
+//! (`fixtures/twitch_connector.wasm`) running in a real bundle executor behind
 //! svc_ingest's production wire invoker. Nothing between the socket and the
 //! recorded event is mocked except the fake IRC peer, the scripted identity stage
 //! (`scripted_bridge`, a fake identity), and the credential source.
@@ -15,7 +15,7 @@
 //! hosts); the stand-in records every ref it is asked for, proving nick and
 //! channel never reach the credential source.
 //!
-//! `fixtures/twitch_overlay.wasm` is a build output of `bundles/rust/twitch`;
+//! `fixtures/twitch_connector.wasm` is a build output of `bundles/rust/twitch`;
 //! see `fixtures/README.md`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -46,12 +46,12 @@ use svc_ingest::connector::{
 use svc_ingest::connector_runtime::profiles::twitch::{
     TwitchFieldSecrets, TwitchProfile, APP_ID, IRC_URL,
 };
-use svc_ingest::connector_runtime::{OverlayProfile, RuntimeEnv, TransportPlan};
+use svc_ingest::connector_runtime::{ConnectorProfile, RuntimeEnv, TransportPlan};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
-const WASM: &[u8] = include_bytes!("fixtures/twitch_overlay.wasm");
+const WASM: &[u8] = include_bytes!("fixtures/twitch_connector.wasm");
 
 const TOKEN: &str = "tok_FAKE_0123456789";
 const BOT: &str = "waddlebot";
@@ -178,7 +178,7 @@ async fn rig() -> Rig {
             Some(bridge),
         )
         .await
-        .expect("the real twitch overlay pins");
+        .expect("the real twitch connector pins");
     let mut registry = ConnectorRegistry::new();
     registry
         .register(PinnedConnector::new("twitch", APP_ID, digest, MAX_FRAME))

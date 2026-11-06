@@ -1,18 +1,18 @@
 //! Discord host duties for the generic outbound executor (P6a T6d-2): the
 //! [`DutyHook`] behind `dm.send`, `role.add` and `role.remove`.
 //!
-//! The Discord overlay shapes requests but cannot enforce any of this, so the
-//! HOST does (overlay README "Host duties"):
+//! The Discord connector shapes requests but cannot enforce any of this, so the
+//! HOST does (connector README "Host duties"):
 //!
 //! | duty | enforcement |
 //! |---|---|
 //! | `{user:<uuid>}` recipient | the queue entry's user is a tokenized UUID; [`PlatformUserResolver`] maps it to the raw Discord id ONLY inside this module, scoped to the stamp's community. A UUID of another community, an unknown one, or a raw snowflake is refused. The raw id lives in zeroizing values, never logged or stored |
 //! | `send_dm_in_community` gate | BEFORE anything is built: the stamp-pinned channel must belong to the community's guild and the recipient must be a member of it (same membership interpretation as the legacy client, [`crate::discord_rest`]); non-member / foreign channel -> `Slot(Refused("not_in_community"))`, lookup failure -> refused, nothing sent |
 //! | `{dm.channel_id}` | the host runs `POST /users/@me/channels` for THIS operation's recipient through the guarded client and fills the slot only from that reply; no state survives the call, so another dm.send's channel can never be reused. There is no `dm.post` kind |
-//! | managed roles | the overlay emits a KEY; the host maps it through the binding's allowlist to a snowflake, REFUSES any role whose permissions include `ADMINISTRATOR`, `MANAGE_ROLES` or `MANAGE_GUILD` (guild role list fetched through the guarded client, short-TTL bounded cache keyed by numeric guild id, fail closed), and pins the guild from the binding (`{target.guild_id}`); a guild/role in the payload is not expressible |
+//! | managed roles | the connector emits a KEY; the host maps it through the binding's allowlist to a snowflake, REFUSES any role whose permissions include `ADMINISTRATOR`, `MANAGE_ROLES` or `MANAGE_GUILD` (guild role list fetched through the guarded client, short-TTL bounded cache keyed by numeric guild id, fail closed), and pins the guild from the binding (`{target.guild_id}`); a guild/role in the payload is not expressible |
 //! | `Authorization` | the executor's [`super::discord_slots::DiscordSlots`] (per community, per call) |
 //!
-//! **Template normalization** ([`DutyHook::bind_template`]): the overlay
+//! **Template normalization** ([`DutyHook::bind_template`]): the connector
 //! spells the recipient and role as `{user:<uuid>}` / `{target.role.<key>}`.
 //! The hook rewrites EXACTLY the strings it put into the payload to the fixed
 //! duty slots (`{target.user}`, `{target.role}`) and consumes the
@@ -50,7 +50,7 @@ const PERM_MANAGE_ROLES: u64 = 1 << 28;
 /// Permissions no managed role may carry, even if allowlisted.
 pub const FORBIDDEN_ROLE_PERMS: u64 = PERM_ADMINISTRATOR | PERM_MANAGE_GUILD | PERM_MANAGE_ROLES;
 
-/// The pseudo-header the overlay puts a `dm.send` recipient in (lowercase).
+/// The pseudo-header the connector puts a `dm.send` recipient in (lowercase).
 const DM_RECIPIENT_HEADER: &str = "x-waddle-host-dm-recipient";
 /// How long a guild's role-permission list is trusted.
 pub const ROLE_CACHE_TTL: Duration = Duration::from_secs(30);

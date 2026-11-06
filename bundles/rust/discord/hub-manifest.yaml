@@ -1,13 +1,13 @@
-# hub-api install-pipeline manifest (schema_version 2) for the Discord platform OVERLAY.
+# hub-api install-pipeline manifest (schema_version 2) for the Discord platform CONNECTOR.
 # NOT the app bundle bundles/python/discord (waddles.core.example.discord) -- this is the
-# connector-tools `kind: service` overlay (P6b T2). Cutover flag: waddles.overlay-discord
+# connector-tools `kind: service` connector (P6b T2). Cutover flag: waddles.connector-discord
 # (PostHog, default OFF); while OFF the hardcoded svc_ingest Discord path runs unchanged.
 # No secrets here: the bot token is a host-side connection resolved by opaque handle
 # `discord-bot` (see README "Secrets"). Transports (Gateway WS, interactions webhook route +
 # Ed25519 verify) are HOST configuration, not manifest fields.
 schema_version: 2
 app_id: waddles.core.service.discord
-name: Discord Platform Overlay (Rust)
+name: Discord Platform Connector (Rust)
 version: 1.0.1
 feature: waddles.core.service
 module: core
@@ -37,7 +37,7 @@ permissions:
     params:
       methods: ["GET"]
   - id: net.http.fqdn:gateway.discord.gg
-    justification: "declares the Gateway WebSocket upgrade host the HOST transport connects to for this overlay; the guest never calls it"
+    justification: "declares the Gateway WebSocket upgrade host the HOST transport connects to for this connector; the guest never calls it"
     params:
       methods: ["GET"]
   - id: connector.pii.read

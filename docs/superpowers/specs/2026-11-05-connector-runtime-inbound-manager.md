@@ -10,14 +10,14 @@ Verified facts on origin/release/v3.0.X (537c9026):
 - `WireConnectorInvoker` answers EVERY executor `host-call` with `HOST_CALL_DENIED` (wire_invoker.rs:417).
 - `AppState::new` sets `webhook: None`, so `/intake/webhook/{route_key}` always answers 503.
 - The legacy Twitch path discovers bindings with `twitch_sessions::spec::discover(r, timeout)` over `ConnectionResolve::list_bindings(PROVIDER, Some("chat_ingest"), after, PAGE_LIMIT=200)`. It has `MAX_PAGES=100`, a stuck-cursor check, a fail-closed rule for a channel claimed by several communities, a `SessionLease`, and `RECONCILE_INTERVAL=60s`.
-- Overlay manifests import `identity`, `http`, `log`, `clock` and `flags`. Their `receiver` (`on-connect`/`on-frame`/`on-heartbeat-due`/`on-disconnect`) and `sender.build-request` are exports. The overlays are `world connector-tools`, so they also import `tool`.
-- Overlay flags are read only inside the guests via `flags.enabled`.
-- PR #1009 (`outbound_boot.rs`): the executor DIALS svc-ingest (`HostApiTls{server_cert,server_key,client_ca}`, port 8301, `SENDER_EXEC_DIGEST_<P>`, `CONNECTOR_TOOLS_ENABLED`, `CachedFlagGate`, `OVERLAY_FLAGS`). The production executor pins nothing and dials only `STAGE_HOST_API_ADDR`.
+- Connector manifests import `identity`, `http`, `log`, `clock` and `flags`. Their `receiver` (`on-connect`/`on-frame`/`on-heartbeat-due`/`on-disconnect`) and `sender.build-request` are exports. The connectors are `world connector-tools`, so they also import `tool`.
+- Connector flags are read only inside the guests via `flags.enabled`.
+- PR #1009 (`outbound_boot.rs`): the executor DIALS svc-ingest (`HostApiTls{server_cert,server_key,client_ca}`, port 8301, `SENDER_EXEC_DIGEST_<P>`, `CONNECTOR_TOOLS_ENABLED`, `CachedFlagGate`, `CONNECTOR_FLAGS`). The production executor pins nothing and dials only `STAGE_HOST_API_ADDR`.
 - `SpineEventSink::new(appender, metrics, keyring, kid, scope, dek_provider, identity_metrics)` takes ONE fixed `Scope`. A per-community runtime therefore needs one sink per connection.
 
 ## 1. Config model
 
-**Decision 1.1. Source of "run overlay X for connection Y" is the hub-api binding feed. A platform-static `OverlayProfile` is compiled into svc-ingest.**
+**Decision 1.1. Source of "run connector X for connection Y" is the hub-api binding feed. A platform-static `ConnectorProfile` is compiled into svc-ingest.**
 - Why: mirrors `twitch_sessions::discover`. URLs, slot prefixes, gateway rules and so on are security-relevant host constants and must never come from guest or binding data.
 - No env override of gateway URLs in prod. Tests use `allow_loopback_insecure` + `egress_allow`.
 
@@ -38,12 +38,12 @@ pub trait BindingFeed: Send + Sync {
     /// fail-closed on cross-community claims. Err means "keep current set" (never "stop all").
     async fn desired(&self, platform: &'static str) -> Result<Vec<DesiredConnection>, FeedError>;
 }
-pub struct HubBindingFeed<R: ConnectionResolve, P: OverlayProfile> { /* resolver, profile */ }
+pub struct HubBindingFeed<R: ConnectionResolve, P: ConnectorProfile> { /* resolver, profile */ }
 ```
 
 ```rust
 // connector_runtime/plan.rs
-pub trait OverlayProfile: Send + Sync {
+pub trait ConnectorProfile: Send + Sync {
     fn platform(&self) -> &'static str;                 // "twitch" | "discord" | "youtube"
     fn app_id(&self) -> &'static str;                   // waddles.core.service.<p>
     fn provider(&self) -> &'static str;                 // hub-api provider name
@@ -77,8 +77,8 @@ pub struct RuntimeEnv { pub environment: String, pub max_frame_bytes: usize, pub
 
 | Env (svc-ingest) | Default | Meaning |
 |---|---|---|
-| `CONNECTOR_RUNTIME_ENABLED` | false | master switch (also implied per platform by overlay baselines) |
-| `OVERLAY_TWITCH_ENABLED`, `OVERLAY_DISCORD_ENABLED`, `OVERLAY_YOUTUBE_ENABLED` | false | env baseline for `waddles.overlay-<p>` (section 5) |
+| `CONNECTOR_RUNTIME_ENABLED` | false | master switch (also implied per platform by connector baselines) |
+| `CONNECTOR_TWITCH_ENABLED`, `CONNECTOR_DISCORD_ENABLED`, `CONNECTOR_YOUTUBE_ENABLED` | false | env baseline for `waddles.connector-<p>` (section 5) |
 | `SENDER_EXEC_DIGEST_<P>` | none | pinned digest, shared with outbound (#1009); required per enabled platform |
 | `CONNECTOR_RECONCILE_INTERVAL_SECS` | 60 | poll hub-api every N s, plus 0-20% jitter |
 | `CONNECTOR_MAX_CONNECTIONS` | 500 | hard cap on supervised connections per replica |
@@ -126,11 +126,11 @@ pub trait HostCallHandler: Send + Sync {
 
 | Capability / op | Behavior |
 |---|---|
-| `Flags.enabled` | key must be one of the three `waddles.overlay-<p>` flags and must match the scope's platform. The answer is the env baseline (`OVERLAY_<P>_ENABLED`), never a network flag lookup. Others get false (the default). |
-| `Flags.tier` | `"free"`; overlays do not depend on it. |
+| `Flags.enabled` | key must be one of the three `waddles.connector-<p>` flags and must match the scope's platform. The answer is the env baseline (`CONNECTOR_<P>_ENABLED`), never a network flag lookup. Others get false (the default). |
+| `Flags.tier` | `"free"`; connectors do not depend on it. |
 | `Db identity.lookup` | Accept only `op = identity.lookup`. Require `args.tenant == scope.tenant_id` (executor cross-check, per connector_imports.rs layer 2). Set `waddles.tenant_id` from the scope, never from args. Echo `tenant` in the reply. Rate limit per digest: 200/s. |
 | `Context get-context` | Return the host-derived tenant and community from `CallScope`. |
-| `Http send` | Overlays use it for Discord guild/member permission lookups and YouTube/Twitch reads. Use `bundle_host_http::GuardedClient` (SSRF-guarded egress, #989). Allowed hosts per platform come from `approved_hosts(provider)`. Credentials are injected by slot via `connection_resolver`. Response body cap 256 KiB. |
+| `Http send` | Connectors use it for Discord guild/member permission lookups and YouTube/Twitch reads. Use `bundle_host_http::GuardedClient` (SSRF-guarded egress, #989). Allowed hosts per platform come from `approved_hosts(provider)`. Credentials are injected by slot via `connection_resolver`. Response body cap 256 KiB. |
 | `Log` / `Clock` | Pass through, scrubbed (PII-free). Clock is `now`. |
 | Everything else (kv, db, relay, ...) | denied; counted in `connector_host_call_total{capability,outcome="denied"}`. |
 
@@ -152,7 +152,7 @@ impl ConnectorRuntime { pub async fn run(self, shutdown: oneshot::Receiver<()>);
 - Per-community isolation: each connection has its own `TransportSecrets` bound to `community_id`, its own `SpineEventSink` (scope from the resolved numeric `community_id`/`tenant_id` via `scope_resolver`), its own backoff and its own task. A panic or error stays inside its task (`catch_unwind`/JoinHandle), counted and restarted after `RESTART_COOLDOWN 120 s`. Fatal `DriverError` and `RunEnd::Parked` go to a "parked" state until the fingerprint changes. Per-community rate caps live in `connector/ratelimit.rs`.
 - Shutdown: send every `shutdown_rx`, join with a 10 s `STOP_TIMEOUT`, then abort. The lease is released.
 - Metrics (bounded labels only: `platform` ∈ 3, `outcome` ∈ fixed enum; NEVER community or connection ids): `connector_runtime_desired{platform}`, `connector_runtime_live{platform}`, `connector_runtime_reconcile_total{platform,outcome}`, `connector_runtime_restarts_total{platform,reason}`, and the existing `ConnectorMetrics`. Logs and traces carry numeric ids only (community_id, connection_id), never raw handles.
-- Readiness: `/readyz` (http/health.rs, `ReceiverReadiness`) adds fields per overlay platform: `enabled`, `executor_attached` (`ExecutorLink::is_attached`), `pinned_ok`, `desired`, `live`, `discovery_failed`. A platform is Ready when it is enabled, the executor is attached, the digest has answered at least one call, and the first reconcile has succeeded. `live` below `desired` for more than 5 minutes degrades to not-ready.
+- Readiness: `/readyz` (http/health.rs, `ReceiverReadiness`) adds fields per connector platform: `enabled`, `executor_attached` (`ExecutorLink::is_attached`), `pinned_ok`, `desired`, `live`, `discovery_failed`. A platform is Ready when it is enabled, the executor is attached, the digest has answered at least one call, and the first reconcile has succeeded. `live` below `desired` for more than 5 minutes degrades to not-ready.
 - Resource caps: max frame bytes (registry), an event-per-frame cap (`MAX_EVENTS_PER_FRAME`), an in-flight cap on `WireConnectorInvoker`, and a per-digest host-call semaphore (2.4).
 
 ## 4. Webhook route activation
@@ -161,7 +161,7 @@ impl ConnectorRuntime { pub async fn run(self, shutdown: oneshot::Receiver<()>);
 - Registry of trusted bindings (host-owned): for each `TransportPlan::Webhook`, `WebhookIngress::register(route, authorized_community)` and `bind_transport(route_key, owner)` so frames reach the driver through `WebhookTransport`. `register` is already fail-closed on community mismatch and cross-community takeover.
 - `route_key = base64url(HMAC-SHA256(CONNECTOR_ROUTE_KEY_SECRET, "wh:v1:{platform}:{connection_id}"))` (43 chars, within 8-128). It is stable, unguessable, and carries no ids in the URL. hub-api (or the subscription creator) obtains the URL from svc-ingest by the same derivation. EventSub subscription creation is owned by svc-gateway (decision 1, resolved; see Scope above).
 - Schemes: Twitch EventSub uses `Scheme::twitch_eventsub()` (HMAC, secret from the connection via `secret_ref`). Discord interactions use the Ed25519 `Ed25519Spec` (public key from the connection). The secret/public key stays inside `connection_resolver`; the guest never receives it.
-- Scope (decision 1, resolved): Twitch EventSub subscription ownership belongs to svc-gateway (edge-reshape, `docs/superpowers/specs/2026-10-23-edge-reshape-gateway-dispatcher-design.md`). Until it exists, legacy keeps owning EventSub subscriptions and the Twitch overlay is IRC-only. `twitch` is NOT added to `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`. PR-D still builds the generic webhook activation (Discord interactions and future platforms).
+- Scope (decision 1, resolved): Twitch EventSub subscription ownership belongs to svc-gateway (edge-reshape, `docs/superpowers/specs/2026-10-23-edge-reshape-gateway-dispatcher-design.md`). Until it exists, legacy keeps owning EventSub subscriptions and the Twitch connector is IRC-only. `twitch` is NOT added to `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`. PR-D still builds the generic webhook activation (Discord interactions and future platforms).
 - Dedup/replay: `replay_window <= DEDUP_TTL`, the Valkey dedup token store, the existing pre-auth/failure budgets (`MAX_FAILURES_PER_SOURCE`), and body caps (`HARD_MAX_BODY_BYTES 1 MiB`).
 - Discord 3-second deadline: the route answers type-1 PING with `{"type":1}` itself and acks within the deadline (host-side, per README "Host-only concerns"). This is part of PR-D and needs an explicit test.
 - 503 to live: `/intake/webhook/{route_key}` stays 503 (fail loud) while `state.webhook` is `None`; an unknown route key is a uniform 404/403 with no oracle. Rollout flag: `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS=<csv>`. A platform not listed registers no routes, so a Twitch EventSub callback keeps its legacy handler and there is no doubling.
@@ -173,31 +173,31 @@ impl ConnectorRuntime { pub async fn run(self, shutdown: oneshot::Receiver<()>);
 - New `core/svc_ingest/src/connector_runtime/selector.rs`:
 
 ```rust
-pub struct OverlaySelector { twitch: bool, discord: bool, youtube: bool }
-impl OverlaySelector {
+pub struct ConnectorSelector { twitch: bool, discord: bool, youtube: bool }
+impl ConnectorSelector {
     pub fn from_env(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Self, BootError>;
-    pub fn overlay(&self, platform: &str) -> bool;      // overlay path active
-    pub fn legacy(&self, platform: &str) -> bool { !self.overlay(platform) }
+    pub fn connector(&self, platform: &str) -> bool;      // connector path active
+    pub fn legacy(&self, platform: &str) -> bool { !self.connector(platform) }
 }
 ```
 
-- Env names: `OVERLAY_TWITCH_ENABLED`, `OVERLAY_DISCORD_ENABLED`, `OVERLAY_YOUTUBE_ENABLED` (parsed strictly; a malformed value is fatal).
+- Env names: `CONNECTOR_TWITCH_ENABLED`, `CONNECTOR_DISCORD_ENABLED`, `CONNECTOR_YOUTUBE_ENABLED` (parsed strictly; a malformed value is fatal).
 
-**Decision 5.2. Suppression, in `lib.rs run_with_shutdown`.** For each platform with the overlay ON, the legacy receivers and outbound drains for that platform are not started:
+**Decision 5.2. Suppression, in `lib.rs run_with_shutdown`.** For each platform with the connector ON, the legacy receivers and outbound drains for that platform are not started:
 
-| Overlay ON for | Suppresses |
+| Connector ON for | Suppresses |
 |---|---|
 | twitch | `start_twitch_inbound` (static and dynamic `twitch_sessions`), `try_build_eventsub_state` only if `twitch` is in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`, `try_start_twitch_outbound[_percommunity]` when `CONNECTOR_TOOLS_ENABLED` is ON |
 | discord | `try_start_discord` (the external `penguin_connector_discord` path), `try_start_discord_outbound` when tools are ON |
 | youtube | the Python `youtube_live_poll` receiver and legacy YouTube outbound |
 
-- Python svc-ingest (`core/svc_ingest/app.py`): the Python receivers (`discord_gateway`, `twitch_irc`, `youtube_live_poll`) register on a `ReceiverSupervisor`. Add the same env baselines to the Python deployment (`OVERLAY_<P>_ENABLED`) and skip `supervisor.register` for that platform with one INFO line. Both services read the same helm value, so they cannot disagree. This is a small PR-E change in `app.py`.
-- The outbound and inbound selectors are independent: `CONNECTOR_TOOLS_ENABLED` still governs the outbound drains (#1009); the overlay flag governs inbound. The README's outbound mode must remain consistent with `OVERLAY_FLAGS` (the executor path already answers the overlay flags true).
+- Python svc-ingest (`core/svc_ingest/app.py`): the Python receivers (`discord_gateway`, `twitch_irc`, `youtube_live_poll`) register on a `ReceiverSupervisor`. Add the same env baselines to the Python deployment (`CONNECTOR_<P>_ENABLED`) and skip `supervisor.register` for that platform with one INFO line. Both services read the same helm value, so they cannot disagree. This is a small PR-E change in `app.py`.
+- The outbound and inbound selectors are independent: `CONNECTOR_TOOLS_ENABLED` still governs the outbound drains (#1009); the connector flag governs inbound. The README's outbound mode must remain consistent with `CONNECTOR_FLAGS` (the executor path already answers the connector flags true).
 
-**Decision 5.3. Fail loud.** If any overlay is ON, startup validates, in a fixed order and naming the item but never a value: `INGEST_DYNAMIC_CONNECTIONS`, `HUB_API_GRPC_ENDPOINT`, `SERVICE_JWT_TOKEN_ENDPOINT`, `SENDER_EXEC_DIGEST_<P>` for each ON platform, host-API TLS files and `HOST_API_CLIENT_IDENTITY`, the spine config, and `CONNECTOR_ROUTE_KEY_SECRET` when any webhook platform is listed. A missing item is a startup error (`BootError`), like #1009. After boot, an unready runtime reports `/readyz` false with the platform and reason. It never silently falls back to legacy (the legacy path is already off) and never silently drops to nothing.
+**Decision 5.3. Fail loud.** If any connector is ON, startup validates, in a fixed order and naming the item but never a value: `INGEST_DYNAMIC_CONNECTIONS`, `HUB_API_GRPC_ENDPOINT`, `SERVICE_JWT_TOKEN_ENDPOINT`, `SENDER_EXEC_DIGEST_<P>` for each ON platform, host-API TLS files and `HOST_API_CLIENT_IDENTITY`, the spine config, and `CONNECTOR_ROUTE_KEY_SECRET` when any webhook platform is listed. A missing item is a startup error (`BootError`), like #1009. After boot, an unready runtime reports `/readyz` false with the platform and reason. It never silently falls back to legacy (the legacy path is already off) and never silently drops to nothing.
 
 **Decision 5.4. Discord is blocked until the identify budget is ported (decision 5, resolved).**
-- `OVERLAY_DISCORD_ENABLED=true` is a fatal boot error, naming item `I` (section 8), until the `IDENTIFY_BUDGET_READY` const/feature is true.
+- `CONNECTOR_DISCORD_ENABLED=true` is a fatal boot error, naming item `I` (section 8), until the `IDENTIFY_BUDGET_READY` const/feature is true.
 - Port: `core/svc_ingest/src/connector/identify_budget.rs` (see row I). `HandshakeGate` is awaited before IDENTIFY (not RESUME) in the WS driver.
 - The start-pacing semaphore stays as defense in depth; it does not replace the budget.
 
@@ -210,25 +210,25 @@ impl OverlaySelector {
 - Non-zero denominators: every parity test asserts `count > 0` of vectors, events, platforms and connections before comparing. A zero-input pass is a failure.
 - Isolation tests: two communities, one failing, the other unaffected (events and backoff).
 - Host-call tests: allowlist (denied capability gets `HOST_CALL_DENIED`), tenant echo mismatch, forged `_scope`.
-- Suppression tests: with overlay ON the legacy starters are not called (a counting fake), and with it OFF the runtime is not built.
-- Beta-critical trio as overlay-path acceptance, each run flag-ON against the real wasm: role sync (Discord role events to hub-api role sync), event sync Waddles to Discord (the outbound `outbound_exec.rs` path), and reputation (the `message` events driving P5 reputation). Each asserts a non-zero count and end-state.
+- Suppression tests: with connector ON the legacy starters are not called (a counting fake), and with it OFF the runtime is not built.
+- Beta-critical trio as connector-path acceptance, each run flag-ON against the real wasm: role sync (Discord role events to hub-api role sync), event sync Waddles to Discord (the outbound `outbound_exec.rs` path), and reputation (the `message` events driving P5 reputation). Each asserts a non-zero count and end-state.
 - Gate: PR-G blocks T4 deletion and the alpha-to-beta flip.
 
 ## 7. Rollout
 
-1. Deploy order: hub-api (feed fields) first, then svc-action (pin_sig v2 first, per the rollout note), then bundle-executor (pins, second dial), then svc-ingest (runtime plus selector). All overlay flags stay OFF at this point, which is a no-op.
+1. Deploy order: hub-api (feed fields) first, then svc-action (pin_sig v2 first, per the rollout note), then bundle-executor (pins, second dial), then svc-ingest (runtime plus selector). All connector flags stay OFF at this point, which is a no-op.
 2. Alpha OFF: verify `/readyz` unchanged and `connector_runtime_*` series are present at 0.
-3. Alpha ON per platform, one at a time and in this order: youtube (poll, lowest blast radius), discord (single guild), twitch. Set `OVERLAY_<P>_ENABLED=true` in both svc-ingest deployments, then redeploy.
+3. Alpha ON per platform, one at a time and in this order: youtube (poll, lowest blast radius), discord (single guild), twitch. Set `CONNECTOR_<P>_ENABLED=true` in both svc-ingest deployments, then redeploy.
 4. Alpha smoke proves: executor attached and `pinned_ok`; `desired == live` for the platform; a real message produces a spine event with a UUID actor and no doubling (compare against `svc_ingest_outbound_path` and legacy counters, which must be 0); webhook route 200 with a valid signature and 403 with a bad one; the trio passes.
 5. Beta after a clean 48 h alpha soak.
-6. Rollback: set `OVERLAY_<P>_ENABLED=false` in both deployments and redeploy. The legacy path restarts. Events in flight may be lost (acceptable on alpha).
+6. Rollback: set `CONNECTOR_<P>_ENABLED=false` in both deployments and redeploy. The legacy path restarts. Events in flight may be lost (acceptable on alpha).
 - Per-environment env (helm): alpha ON per platform; beta and prod OFF until the trio passes there.
 
 ## 8. Task breakdown (file-disjoint)
 
 Interfaces frozen so work can start now. All names below are normative.
-- Env names: `CONNECTOR_HOST_API_ADDR`, `CONNECTOR_HOST_API_IDENTITY`, `EXECUTOR_CONNECTOR_CONNECTIONS` (must equal 1), `CONNECTOR_PIN_DIGEST_<P>`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_CLIENT_IDENTITY`, `OVERLAY_<P>_ENABLED`, and the table in 1.3.
-- Types: `ConnKey`, `DesiredConnection`, `TransportPlan`, `BindingFeed`, `OverlayProfile`, `RuntimeEnv`, `RuntimeReady`/`Readiness`, `HostCallHandler`/`CallScope`, `OverlaySelector`.
+- Env names: `CONNECTOR_HOST_API_ADDR`, `CONNECTOR_HOST_API_IDENTITY`, `EXECUTOR_CONNECTOR_CONNECTIONS` (must equal 1), `CONNECTOR_PIN_DIGEST_<P>`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_CLIENT_IDENTITY`, `CONNECTOR_<P>_ENABLED`, and the table in 1.3.
+- Types: `ConnKey`, `DesiredConnection`, `TransportPlan`, `BindingFeed`, `ConnectorProfile`, `RuntimeEnv`, `RuntimeReady`/`Readiness`, `HostCallHandler`/`CallScope`, `ConnectorSelector`.
 
 | PR | Owner files | Notes |
 |---|---|---|
@@ -238,10 +238,10 @@ Interfaces frozen so work can start now. All names below are normative.
 | C | new `core/svc_ingest/src/connector_runtime/{mod,feed,plan,supervisor,metrics,ready}.rs` | no edits to existing files except `pub mod connector_runtime;` in `lib.rs` (a single line; coordinate with E, who owns the rest of `lib.rs`) |
 | D | `connector_runtime/webhook_boot.rs`, `http/webhook.rs`, `http/mod.rs` | needs `WebhookPlan` from C |
 | E | `core/svc_ingest/src/{lib.rs,config.rs}`, `connector_runtime/selector.rs`, `core/svc_ingest/app.py` | needs `RuntimeReady` from C; owns `lib.rs` (the `mod` line from C goes through E) |
-| F1/F2/F3 | `connector_runtime/profiles/{twitch,discord,youtube}.rs` | each implements `OverlayProfile`; no shared file |
+| F1/F2/F3 | `connector_runtime/profiles/{twitch,discord,youtube}.rs` | each implements `ConnectorProfile`; no shared file |
 | G | `core/connector_e2e/**`, `tests/data_plane_parity/**` | after A1, A2, C, D, F* |
 | H | helm templates and `values.yaml`; dedicated executor client cert (section 2.2) | names only; independent |
-| I | new `core/svc_ingest/src/connector/identify_budget.rs`; port of `core/svc_ingest/src/ingest/discord_identify_budget.rs` (~1000 lines) | Valkey-backed global budget honoring `session_start_limit`/`max_concurrency`; `HandshakeGate` awaited before IDENTIFY (not RESUME) in the WS driver; host selector refuses `OVERLAY_DISCORD_ENABLED=true` until `IDENTIFY_BUDGET_READY` is true (section 5.4) |
+| I | new `core/svc_ingest/src/connector/identify_budget.rs`; port of `core/svc_ingest/src/ingest/discord_identify_budget.rs` (~1000 lines) | Valkey-backed global budget honoring `session_start_limit`/`max_concurrency`; `HandshakeGate` awaited before IDENTIFY (not RESUME) in the WS driver; host selector refuses `CONNECTOR_DISCORD_ENABLED=true` until `IDENTIFY_BUDGET_READY` is true (section 5.4) |
 
 Start now (against current release): A1, B, C, D, E, F1-F3, H, I. A2 starts now but rebases onto #1009. G waits.
 
@@ -255,18 +255,18 @@ Start now (against current release): A1, B, C, D, E, F1-F3, H, I. A2 starts now 
 - Secret handling: no secret reaches the guest, logs, labels or `Debug` (`Secret`/`SecretString` redaction); route-key secret and `CONNECTOR_ROUTE_KEY_SECRET` are env-only.
 - SSRF: the dial address is config-only; `GuardedClient` plus egress allowlist for the `http` host-call; the WS and poll URLs are profile constants; redirects are not followed off-host.
 - PII in logs, metrics and traces: no handles (use fingerprints), numeric ids only, no ids as metric labels, actor is a UUID.
-- Fail-loud: overlay ON with a missing item is fatal; an unready runtime reports false and is never silent.
+- Fail-loud: connector ON with a missing item is fatal; an unready runtime reports false and is never silent.
 - Resource exhaustion: connection cap, start concurrency, frame and event caps, host-call semaphores.
 
 ## 10. Non-goals and deferrals
 
-Sharding; the svc-gateway rename; removing the Python svc-ingest (only its overlay-platform receivers are suppressed); T4 deletion of the legacy code; Twitch EventSub subscription management in svc-ingest (owned by svc-gateway, decision 1); Slack/Kick/Spectrum overlays; multi-executor load balancing (one executor connection per svc-ingest replica for now); any new `penguin-libs` capability kind.
+Sharding; the svc-gateway rename; removing the Python svc-ingest (only its connector-platform receivers are suppressed); T4 deletion of the legacy code; Twitch EventSub subscription management in svc-ingest (owned by svc-gateway, decision 1); Slack/Kick/Spectrum connectors; multi-executor load balancing (one executor connection per svc-ingest replica for now); any new `penguin-libs` capability kind.
 
 ## Needs user decision (with recommendation)
 
-1. **RESOLVED (user): svc-gateway owns EventSub subscriptions.** Legacy keeps ownership until svc-gateway exists; Twitch overlay is IRC-only; `twitch` NOT in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`. See section 4 Scope. Original question: who creates Twitch EventSub subscriptions pointing at the generic route? Recommendation: keep legacy ownership for alpha, and make the overlay IRC-only until a hub-api subscription step exists. List `twitch` in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` only once it does.
+1. **RESOLVED (user): svc-gateway owns EventSub subscriptions.** Legacy keeps ownership until svc-gateway exists; Twitch connector is IRC-only; `twitch` NOT in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`. See section 4 Scope. Original question: who creates Twitch EventSub subscriptions pointing at the generic route? Recommendation: keep legacy ownership for alpha, and make the connector IRC-only until a hub-api subscription step exists. List `twitch` in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` only once it does.
 2. **Python suppression mechanism.** Env baseline in both services (recommended, simple, symmetric) versus a hub-api flag read.
-3. **Overlay ON with an unready runtime.** Fatal at boot (recommended for alpha and beta, matches #1009) versus serve `/readyz`=false only.
+3. **Connector ON with an unready runtime.** Fatal at boot (recommended for alpha and beta, matches #1009) versus serve `/readyz`=false only.
 4. **Executor pairing.** One executor per svc-ingest replica (sidecar-like, recommended because `ExecutorLink` is single-session) versus a shared executor pool, which needs `ExecutorLink` multi-session support.
 5. **RESOLVED (user): block Discord ON until the identify budget is ported** (section 5.4, task I). Original options: accept start pacing plus lease on alpha with the Valkey budget deferred (recommended), or block Discord ON until the budget is ported.
 
@@ -285,6 +285,6 @@ Sharding; the svc-gateway rename; removing the Python svc-ingest (only its overl
 |---|---|---|
 | 1 | EventSub subscription ownership | RESOLVED by user: svc-gateway owns it; legacy keeps it until then; Twitch IRC-only; not in webhook platforms |
 | 2 | Python suppression mechanism | ADOPTED per recommendation: env baseline in both services |
-| 3 | Overlay ON with unready runtime | ADOPTED per recommendation: fatal at boot |
+| 3 | Connector ON with unready runtime | ADOPTED per recommendation: fatal at boot |
 | 4 | Executor pairing | ADOPTED per recommendation: 1:1 executor per svc-ingest replica |
 | 5 | Discord identify risk | RESOLVED by user: block Discord ON until identify budget is ported (task I) |

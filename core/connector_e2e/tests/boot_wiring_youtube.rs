@@ -2,7 +2,7 @@
 //! a YouTube binding whose community is valid resolves its tenant (hub-api's
 //! reserved `community` scope lookup, cross-checked against the server-derived
 //! feed tenant -- never metadata), starts, polls a fake YouTube API through the
-//! REAL compiled overlay in a REAL executor over the connector link, and
+//! REAL compiled connector in a REAL executor over the connector link, and
 //! publishes onto a REAL Valkey spine. A second binding whose community resolves
 //! to a different community is refused (parked, never polled, never active).
 //! Needs `VALKEY_URL` (unset FAILS).
@@ -44,7 +44,7 @@ use tokio::sync::oneshot;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const WASM: &[u8] = include_bytes!("../../bundle_executor/tests/fixtures/youtube_overlay.wasm");
+const WASM: &[u8] = include_bytes!("../../bundle_executor/tests/fixtures/youtube_connector.wasm");
 const APP: &str = "waddles.core.service.youtube";
 const CHAT: &str = "Cg0KC-abc_123";
 const OTHER_CHAT: &str = "OtherChat_9";
@@ -266,7 +266,7 @@ async fn a_youtube_binding_resolves_its_tenant_and_publishes_while_a_mismatch_is
         .await;
     let api_hits = || async { api.received_requests().await.unwrap_or_default().len() };
 
-    // Real executor + REAL youtube overlay pinned as the production boot does.
+    // Real executor + REAL youtube connector pinned as the production boot does.
     let cfg = CliConfig::try_parse_from([
         "bundle-executor",
         "--stage-host-api-addr",
@@ -298,7 +298,7 @@ async fn a_youtube_binding_resolves_its_tenant_and_publishes_while_a_mismatch_is
             None,
         )
         .await
-        .expect("the real youtube overlay pins");
+        .expect("the real youtube connector pins");
 
     let tok = Arc::new(FakeTok::default());
     let bridge = HostBridge::new(tok.clone(), &["youtube"]).unwrap();

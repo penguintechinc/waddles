@@ -160,9 +160,9 @@ spec:
           value: {{ .Values.pipeline.svcIngest.socketLease.renewSeconds | quote }}
         - name: SOCKET_LEASE_KEY_PREFIX
           value: {{ .Values.pipeline.svcIngest.socketLease.keyPrefix | quote }}
-        {{- /* PR-H: overlay baselines from the SAME value the Rust svc-ingest reads (cannot disagree). */}}
+        {{- /* PR-H: connector baselines from the SAME value the Rust svc-ingest reads (cannot disagree). */}}
         {{- if include "waddlebot.connectorRuntimeActive" . }}
-        {{- include "waddlebot.connectorOverlayEnv" . | nindent 8 }}
+        {{- include "waddlebot.connectorConnectorEnv" . | nindent 8 }}
         {{- end }}
         {{- if .Values.modules.bot.enabled }}
         - name: MODULE_LOAD_BOT

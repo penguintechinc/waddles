@@ -114,6 +114,7 @@ from builtin_handlers.youtube_live_ingest import (
     register_default_bundles as register_youtube_bundles,
 )
 from config import Config
+from connector_selector import ConnectorSelector
 from eventsub import TwitchEventSubHandler
 from fanout import fan_out_event
 from identity_crypto import (
@@ -123,7 +124,6 @@ from identity_crypto import (
     TtlCachedDekProvider,
 )
 from outbound_drain import DRAIN_SOCKET_TIMEOUT_S, TwitchOutboundDrain
-from overlay_selector import OverlaySelector
 from receivers.discord_gateway import CONSUMES_TAG as DISCORD_CONSUMES_TAG
 from receivers.discord_gateway import DiscordGatewayReceiver
 from receivers.kick_pusher import CONSUMES_TAG as KICK_CONSUMES_TAG
@@ -683,8 +683,8 @@ def _register_twitch_receivers(
 ) -> None:
     """Build + lease-guard + supervise one Twitch IRC receiver per channel, if configured.
 
-    `register_inbound`/`register_outbound` are the overlay-selector suppression
-    switches: the overlay runtime owns inbound when OVERLAY_TWITCH_ENABLED, and
+    `register_inbound`/`register_outbound` are the connector-selector suppression
+    switches: the connector runtime owns inbound when CONNECTOR_TWITCH_ENABLED, and
     the outbound drain only when the executor path (CONNECTOR_TOOLS_ENABLED) does.
     """
     if not (Config.TWITCH_BOT_TOKEN_REF and Config.TWITCH_CHANNELS):
@@ -805,19 +805,19 @@ def _register_twitch_eventsub(*, redis_client: Any, registry: AppRegistry) -> No
     logger.system("svc-ingest registered Twitch EventSub handler", action="startup")
 
 
-def _log_overlay_skips(selector: OverlaySelector) -> None:
-    """One INFO line per Python receiver set the overlay runtime now owns."""
+def _log_connector_skips(selector: ConnectorSelector) -> None:
+    """One INFO line per Python receiver set the connector runtime now owns."""
     for platform in ("twitch", "discord", "youtube"):
-        if selector.overlay(platform):
+        if selector.connector(platform):
             logger.system(
-                f"svc-ingest overlay ON for {platform}; python receivers not registered",
+                f"svc-ingest connector ON for {platform}; python receivers not registered",
                 action="startup",
                 result="SKIPPED",
                 platform=platform,
             )
     if selector.twitch and not selector.twitch_outbound_legacy:
         logger.system(
-            "svc-ingest overlay+tools ON for twitch; python outbound drain not registered",
+            "svc-ingest connector+tools ON for twitch; python outbound drain not registered",
             action="startup",
             result="SKIPPED",
         )
@@ -903,9 +903,9 @@ async def startup() -> None:
     try:
         # Same env baselines as the Rust svc-ingest (one helm value feeds
         # both); never the flag client. Malformed/blocked is fatal.
-        selector = OverlaySelector.from_env(os.environ)
-        app.config["overlay_selector"] = selector
-        _log_overlay_skips(selector)
+        selector = ConnectorSelector.from_env(os.environ)
+        app.config["connector_selector"] = selector
+        _log_connector_skips(selector)
         if selector.legacy("discord"):
             _register_discord_receiver(supervisor, redis_client=redis_client, registry=registry)
         _register_slack_receiver(supervisor, redis_client=redis_client, registry=registry)

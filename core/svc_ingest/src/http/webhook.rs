@@ -53,7 +53,7 @@ pub const DISCORD_ACK_DEADLINE: Duration = Duration::from_millis(2500);
 const DISCORD: &str = "discord";
 
 /// Host-side interaction response for a VERIFIED Discord interaction body:
-/// PING -> PONG, commands/modals/components -> deferred ack (the overlay does
+/// PING -> PONG, commands/modals/components -> deferred ack (the connector does
 /// the real work asynchronously). `None` for an unsupported type (loud 400).
 fn discord_ack(body: &[u8]) -> Option<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;

@@ -74,7 +74,7 @@ pub enum RuntimeError {
 /// Tunables of the runtime (spec 1.3 env table plus lifecycle constants).
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
-    /// Enabled overlay platforms; each must be a supported platform slug.
+    /// Enabled connector platforms; each must be a supported platform slug.
     pub platforms: Vec<&'static str>,
     /// `CONNECTOR_RECONCILE_INTERVAL_SECS` (a 0-20% jitter is added).
     pub reconcile_interval: Duration,

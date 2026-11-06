@@ -1,8 +1,8 @@
 //! The connector runtime boot is strictly opt-in: with `CONNECTOR_RUNTIME_ENABLED`
-//! unset and no `OVERLAY_<P>_ENABLED` baseline, `run_with_shutdown` starts
-//! NOTHING new (no runtime, no `connector_runtime_*` series, no overlay in
-//! `/readyz`, webhook ingress stays 503). The overlay-ON failure is in
-//! `connector_runtime_overlay_boot_fail.rs` (telemetry init is once per process).
+//! unset and no `CONNECTOR_<P>_ENABLED` baseline, `run_with_shutdown` starts
+//! NOTHING new (no runtime, no `connector_runtime_*` series, no connector in
+//! `/readyz`, webhook ingress stays 503). The connector-ON failure is in
+//! `connector_runtime_boot_fail.rs` (telemetry init is once per process).
 //!
 //! One test fn: it mutates process env, so it must be the only test in this binary.
 
@@ -36,9 +36,9 @@ fn config(http: u16, metrics: u16) -> Config {
 #[tokio::test]
 async fn default_boot_starts_nothing_new() {
     for name in [
-        "OVERLAY_TWITCH_ENABLED",
-        "OVERLAY_DISCORD_ENABLED",
-        "OVERLAY_YOUTUBE_ENABLED",
+        "CONNECTOR_TWITCH_ENABLED",
+        "CONNECTOR_DISCORD_ENABLED",
+        "CONNECTOR_YOUTUBE_ENABLED",
         "CONNECTOR_RUNTIME_ENABLED",
         "CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS",
         "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -76,11 +76,11 @@ async fn default_boot_starts_nothing_new() {
     let readyz: serde_json::Value = serde_json::from_str(&body.expect("service came up")).unwrap();
     assert!(
         readyz
-            .get("overlays")
+            .get("connectors")
             .is_none_or(|o| o.as_array().is_some_and(Vec::is_empty)),
-        "no overlay platform reported by default: {readyz}"
+        "no connector platform reported by default: {readyz}"
     );
-    assert_eq!(readyz["overlay"].as_array().map(Vec::len), Some(0));
+    assert_eq!(readyz["connector"].as_array().map(Vec::len), Some(0));
     assert!(
         svc_ingest::connector_runtime::ready::installed().is_none(),
         "no runtime status installed by default"

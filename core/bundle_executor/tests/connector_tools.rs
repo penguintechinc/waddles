@@ -1,4 +1,4 @@
-//! Real-path proof of P6a Task 4: a connector overlay on `world connector-tools`
+//! Real-path proof of P6a Task 4: a connector service bundle on `world connector-tools`
 //! can EXPOSE tools (`tool-provider.call`) and link the P3b `tool` import,
 //! while the frozen `connector` world is untouched and every misuse fails loud.
 //!
@@ -330,7 +330,7 @@ async fn a_digest_mismatch_is_refused() {
     );
 }
 
-// ---- over the host-API wire: `ExportKind::ToolCall` reaches a pinned overlay ----
+// ---- over the host-API wire: `ExportKind::ToolCall` reaches a pinned connector ----
 
 struct NoSource;
 

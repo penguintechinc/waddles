@@ -1,7 +1,7 @@
 //! Template verification: everything a connector-built `http-request-tpl`
 //! must satisfy BEFORE the host substitutes a single slot or opens a socket.
 //!
-//! The overlay is a guest: its output is untrusted input, exactly like a
+//! The connector is a guest: its output is untrusted input, exactly like a
 //! queue entry. [`verify`] therefore checks the template against the
 //! per-platform/per-kind [`PlatformPolicy`] and returns a
 //! [`VerifiedTemplate`] -- the ONLY type the substituter accepts, so an
@@ -700,7 +700,7 @@ fn verify_secret_refs(
         }
         declared.insert(idx);
     }
-    // Every used non-stamp slot must have been declared by the overlay.
+    // Every used non-stamp slot must have been declared by the connector.
     for idx in &cx.used {
         let d = &policy.slots[*idx];
         if d.origin == SlotOrigin::Resolver && !declared.contains(idx) {

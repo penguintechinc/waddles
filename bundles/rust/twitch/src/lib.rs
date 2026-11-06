@@ -1,7 +1,7 @@
-//! Twitch platform overlay (bundle-MCP-tools P6b T1) on the `connector-tools`
+//! Twitch platform connector (bundle-MCP-tools P6b T1) on the `connector-tools`
 //! world. Pure, host-testable logic lives in the modules below; the wasm
 //! component glue at the bottom only maps it onto the generated WIT types.
-//! The overlay holds no secret, no raw target and no transport code.
+//! The connector holds no secret, no raw target and no transport code.
 pub mod common;
 pub mod eventsub;
 pub mod irc;
@@ -28,7 +28,7 @@ mod component {
         ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
     };
     use super::common::{
-        FrameErr, OVERLAY_FLAG, OVERLAY_FLAG_DEFAULT, PLATFORM, gate_decision, resolve_actors,
+        CONNECTOR_FLAG, CONNECTOR_FLAG_DEFAULT, FrameErr, PLATFORM, gate_decision, resolve_actors,
     };
     use super::tools::{HelixHost, IdentityHost, SECRET_REFS, build_registry};
     use super::{eventsub, irc, sender};
@@ -45,15 +45,15 @@ mod component {
     }
 
     /// Defence in depth behind the host's own cutover: flag OFF (default) =
-    /// the overlay refuses to run.
+    /// the connector refuses to run.
     fn gate() -> Result<(), FrameError> {
-        gate_decision(flags::enabled(OVERLAY_FLAG, OVERLAY_FLAG_DEFAULT)).map_err(fe)
+        gate_decision(flags::enabled(CONNECTOR_FLAG, CONNECTOR_FLAG_DEFAULT)).map_err(fe)
     }
 
     /// One PII-free line: op + counts only.
     fn log_op(op: &str, count: usize) {
         let f = serde_json::json!({ "op": op, "count": count }).to_string();
-        log::write(log::Level::Debug, "twitch overlay", &f);
+        log::write(log::Level::Debug, "twitch connector", &f);
     }
 
     /// Resolves actors through `identity.lookup`; fail closed (drop + count,

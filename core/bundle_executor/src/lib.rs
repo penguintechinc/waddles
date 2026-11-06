@@ -247,11 +247,11 @@ pub async fn run() -> Result<(), ExecutorError> {
     let mut signals = ShutdownSignals::install()?;
     let source = BucketComponentSource::from_cli(&cfg)?;
     let executor = Arc::new(Executor::new(&cfg, source)?);
-    // Pin the configured connector overlays BEFORE any link is dialed. Any
+    // Pin the configured connector service bundles BEFORE any link is dialed. Any
     // failure (missing object, digest mismatch, bad signature, malformed
     // digest) aborts startup loudly, naming the platform.
     match connector_boot::pin_configured(&executor, &cfg).await {
-        Ok(pinned) => info!(pinned, "connector overlays pinned"),
+        Ok(pinned) => info!(pinned, "connector service bundles pinned"),
         Err(e) => {
             error!(error = %e, "connector pinning failed; refusing to start");
             return Err(e);

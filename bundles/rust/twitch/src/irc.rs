@@ -2,7 +2,7 @@
 //! Parsing is a byte-exact port of `penguin_connector_twitch::irc::
 //! parse_privmsg_line` and `svc_ingest::normalize::normalize_twitch_irc`.
 //!
-//! The overlay never names a channel, nick or password: the handshake carries
+//! The connector never names a channel, nick or password: the handshake carries
 //! opaque slots the host substitutes from its pinned connection config.
 
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use crate::common::{FrameErr, NormEvent};
 pub const SLOT_PASS: &str = "{{TWITCH_PASS}}";
 /// Slot for the bot nick.
 pub const SLOT_NICK: &str = "{{TWITCH_NICK}}";
-/// Slot for the channel, host-pinned (never overlay-chosen).
+/// Slot for the channel, host-pinned (never connector-chosen).
 pub const SLOT_CHANNEL: &str = "{{TWITCH_CHANNEL}}";
 /// Host handle names the slots resolve through.
 pub const HANDLE_PASS: &str = "pass";
@@ -308,7 +308,7 @@ mod tests {
 
 /// Self nick the guest passes to [`normalize_frame`]. `None` until the host
 /// self-filter (or a `self-nick` in `connection-ctx`) lands; enabling the
-/// overlay REQUIRES that host-side filter.
+/// connector REQUIRES that host-side filter.
 pub const GUEST_SELF_NICK: Option<&str> = None;
 
 #[cfg(test)]

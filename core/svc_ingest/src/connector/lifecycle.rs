@@ -1,7 +1,7 @@
 //! Host-owned, declarative session-lifecycle rules for the generic WebSocket
 //! and poll transports (P6b session lifecycle). Same pattern as
 //! `AutoReplyRule`: the rules are HOST CONFIG, never supplied by a guest, and
-//! no platform is named here -- a Discord overlay and an IRC overlay differ
+//! no platform is named here -- a Discord connector and an IRC connector differ
 //! only in the rule values their host config carries. The frozen `connector`
 //! WIT world is untouched: the guest still only sees `receiver` calls, and the
 //! host feeds session state back to it through the existing opaque

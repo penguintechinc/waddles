@@ -1,4 +1,4 @@
-//! Startup pinning of the platform connector overlays and the request handler
+//! Startup pinning of the platform connector service bundles and the request handler
 //! for the dedicated connector link (connector runtime spec
 //! `docs/superpowers/specs/2026-11-05-connector-runtime-inbound-manager.md`
 //! S2.1-S2.4).
@@ -14,7 +14,7 @@
 //! no "verification off" for a connector), checks `sha256(bytes) == digest`,
 //! and pins the component under the host-constant `app_id`
 //! (`waddles.core.service.<p>`), the `connector-tools` world and a grant set
-//! that is a subset of the overlay's own `hub-manifest.yaml` permissions
+//! that is a subset of the connector's own `hub-manifest.yaml` permissions
 //! (never broader -- see [`ConnectorPlatform::grants`]).
 //!
 //! ANY failure aborts startup loudly, naming the platform; never a skipped or
@@ -46,7 +46,7 @@ use crate::manifest::{VerifiedManifest, WitWorld, PERM_CONNECTOR_PII_READ};
 use crate::signing::SignedSidecar;
 use crate::wire::{Connection, RequestHandler};
 
-/// One platform overlay the executor can pin: its host-constant identity and
+/// One platform connector the executor can pin: its host-constant identity and
 /// the exact grants it is pinned with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectorPlatform {
@@ -55,13 +55,13 @@ pub struct ConnectorPlatform {
     /// The host-constant core `app_id` (`waddles.core.service.<p>`); never
     /// read from a bucket object or a wire frame.
     pub app_id: &'static str,
-    /// The permissions this overlay is pinned with: ONLY those its own
+    /// The permissions this connector is pinned with: ONLY those its own
     /// `hub-manifest.yaml` declares AND the executor acts on. A test pins this
     /// to be a subset of the manifest, so it can never grow past it.
     pub grants: &'static [&'static str],
 }
 
-/// Every overlay this executor can pin.
+/// Every connector this executor can pin.
 pub const CONNECTOR_PLATFORMS: [ConnectorPlatform; 3] = [
     ConnectorPlatform {
         platform: "twitch",
@@ -83,19 +83,19 @@ pub const CONNECTOR_PLATFORMS: [ConnectorPlatform; 3] = [
 /// A platform to pin and the digest it must hash to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PinTarget {
-    /// The overlay.
+    /// The connector.
     pub platform: ConnectorPlatform,
     /// `sha256:<64 lowercase hex>`.
     pub digest: String,
 }
 
-/// Bucket key of the overlay component.
+/// Bucket key of the connector component.
 #[must_use]
 pub fn component_key(platform: &str, digest: &str) -> String {
     format!("connectors/{platform}/{digest}.wasm")
 }
 
-/// Bucket key of the overlay's signed sidecar.
+/// Bucket key of the connector's signed sidecar.
 #[must_use]
 pub fn sidecar_key(platform: &str, digest: &str) -> String {
     format!("connectors/{platform}/{digest}.json")
@@ -137,13 +137,13 @@ pub async fn pin_configured<S: ComponentSource>(
         info!(
             platform = target.platform.platform,
             digest = %target.digest,
-            "connector overlay pinned"
+            "connector service bundle pinned"
         );
     }
     Ok(targets.len())
 }
 
-/// Fetch, verify and pin one overlay.
+/// Fetch, verify and pin one connector.
 async fn pin_one<S: ComponentSource>(
     executor: &Executor<S>,
     target: &PinTarget,
@@ -340,9 +340,9 @@ mod tests {
     }
 
     /// "NEVER broader": every grant a platform is pinned with is declared in
-    /// that overlay's own hub manifest.
+    /// that connector's own hub manifest.
     #[test]
-    fn grants_are_a_subset_of_each_overlay_manifest() {
+    fn grants_are_a_subset_of_each_connector_manifest() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bundles/rust");
         for p in CONNECTOR_PLATFORMS {
             let path = root.join(p.platform).join("hub-manifest.yaml");

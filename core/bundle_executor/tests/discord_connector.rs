@@ -1,13 +1,13 @@
-//! Real-path proof of the Discord platform overlay (P6b T2): the REAL compiled
+//! Real-path proof of the Discord platform connector (P6b T2): the REAL compiled
 //! `bundles/rust/discord` component, loaded through the production
 //! `build_engine` / `LinkerCache` / `ConnectorHost::load` path on the
 //! `connector-tools` world, driven through every receiver export plus the tool
 //! provider. Nothing here is mocked; the only absent piece is the stage bridge
-//! (no host `http`), which the overlay must survive by failing closed.
+//! (no host `http`), which the connector must survive by failing closed.
 //!
-//! `fixtures/discord_overlay.wasm` is a build output of `bundles/rust/discord`
+//! `fixtures/discord_connector.wasm` is a build output of `bundles/rust/discord`
 //! (`cargo component build --release --target wasm32-wasip2 --locked`); rebuild
-//! it with `fixtures/README.md` "discord_overlay.wasm" whenever that crate changes.
+//! it with `fixtures/README.md` "discord_connector.wasm" whenever that crate changes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -23,7 +23,7 @@ use bundle_executor::engine::{build_engine, spawn_epoch_ticker, LinkerCache};
 use bundle_executor::manifest::{VerifiedManifest, WitWorld, PERM_CONNECTOR_PII_READ};
 use sha2::{Digest, Sha256};
 
-const WASM: &[u8] = include_bytes!("fixtures/discord_overlay.wasm");
+const WASM: &[u8] = include_bytes!("fixtures/discord_connector.wasm");
 const APP: &str = "waddles.core.service.discord";
 
 fn digest_of(bytes: &[u8]) -> String {
@@ -60,7 +60,7 @@ async fn host() -> (ConnectorHost, tokio::task::JoinHandle<()>) {
     );
     let host = ConnectorHost::load(&engine, &linkers, &m, WASM.to_vec(), limits, None)
         .await
-        .expect("the real discord overlay must load on the production linker");
+        .expect("the real discord connector must load on the production linker");
     (host, ticker)
 }
 
@@ -121,7 +121,7 @@ async fn on_connect_identifies_with_a_slot_and_an_opaque_handle_never_a_token() 
 async fn message_create_without_an_identity_bridge_fails_loud_never_a_raw_handle() {
     // Pinned connectors have no identity/host-call bridge in this rig (the full
     // success path with a scripted identity bridge is the shared parity harness,
-    // `make test-connector-parity PLATFORM=discord`). The overlay must refuse to
+    // `make test-connector-parity PLATFORM=discord`). The connector must refuse to
     // emit the raw handle: the frame fails with a typed guest error, not a trap.
     let (host, _t) = host().await;
     for guild in [None, Some("111")] {

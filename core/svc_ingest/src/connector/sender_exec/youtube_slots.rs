@@ -22,9 +22,9 @@ use super::twitch_slots::map_cred;
 use super::{SlotError, SlotRequest, SlotSource};
 use crate::outbound_creds_youtube::YoutubeCredentialSource;
 
-/// Overlay handle for the OAuth token.
+/// Connector handle for the OAuth token.
 pub const OAUTH_HANDLE: &str = "youtube.oauth";
-/// Overlay handle for the pinned live chat.
+/// Connector handle for the pinned live chat.
 pub const LIVE_CHAT_HANDLE: &str = "youtube.live_chat_id";
 
 /// Per-community YouTube slot resolution over a [`YoutubeCredentialSource`].
