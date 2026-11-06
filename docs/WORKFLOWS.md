@@ -509,6 +509,16 @@ verify-then-merge procedure for feature/fix/chore PRs into `release/v*.X`.
 - `DRY=1` runs all checks without merging; release -> `main` is never done with this tool
 - Self-test: `make test-scripts` (also part of `make test`)
 
+### Auto-merge watcher
+
+`make release-auto-merge PRS="1038@<full-sha> 1037 ..." [DRY=1]` (`PR@SHA` pins the reviewed head; a moved head is skipped, never merged) (wraps `scripts/release-auto-merge.sh`) polls an
+ordered PR list every 60s (`--interval`, stops after `--max-hours`, default 6) and calls `release-merge.sh` on each PR whose `ci-gate` is SUCCESS on its current head.
+
+- Reruns failed jobs whose log contains `timed out after 10 minutes` (apt-mirror flake), max 2 per run id; reruns `ci-gate` if it failed only because it ran before reruns finished
+- DIRTY or real failures are logged once and skipped; conflicts are never resolved; non-`release/*` bases are refused
+- A PR based on an earlier listed PR's branch waits for it; after any merge the tick restarts
+- `DRY=1` prints actions only (one tick); state lives in a private 0700 dir `${XDG_STATE_HOME:-~/.local/state}/release-auto-merge/<repo>/` (symlink/foreign-owner refused); flakes are classified per failed job
+
 ---
 
 ## Version Management
