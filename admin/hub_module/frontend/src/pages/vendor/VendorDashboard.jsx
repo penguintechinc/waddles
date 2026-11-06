@@ -12,7 +12,7 @@ import {
   CurrencyDollarIcon,
   PlusIcon,
 } from '@heroicons/react/24/outline';
-import api from '../../services/api';
+import { vendorApi } from '../../services/api';
 
 function VendorDashboard() {
   const { user } = useAuth();
@@ -29,7 +29,7 @@ function VendorDashboard() {
     try {
       setLoading(true);
       // Fetch vendor dashboard data
-      const response = await api.get('/vendor/dashboard');
+      const response = await vendorApi.getDashboard();
       setDashboard(response.data);
       setError(null);
     } catch (err) {

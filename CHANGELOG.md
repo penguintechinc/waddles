@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- hub-api AI-knowledge sources (`/api/v1/admin/ai-knowledge/sources*`): update/delete/reindex now authorize against the source's community (tenant-checked) / vendor owner and answer 404 for foreign ids (cross-community IDOR); list requires `communityId` for non-super-admins; access tokens are encrypted at rest (AES-256-GCM, `GITHUB_SYNC_ENCRYPTION_KEY`) and decrypted only in `index_source`. Request field renamed `token` (`encrypted_token` accepted as a DEPRECATED plaintext alias). Migration `0075_ai_knowledge_token_enc` seals existing plaintext rows (needs `GITHUB_SYNC_ENCRYPTION_KEY` when any exist). See `docs/ai-knowledge-sources.md`.
+
 ### Added
 - svc-ingest connector runtime boot wiring (PR-E): `connector_runtime/{boot,scoped}.rs`, `lib.rs` starts the runtime only when an `OVERLAY_<P>_ENABLED` baseline is ON (default path unchanged, pinned by test); scope-resolved tenant refusal and per-connection scoped sink; Twitch secrets wrapper; supervisor `ConnectionActivator` (compare-and-remove, conflicting activation refused); `build-request` flag read served via the link-recorded `CallOrigin::BuildRequest`; `BindingSummary.{tenant_id,secret_version}` adopted (secretVersion in every fingerprint); transports report the hub connection id as `ConnectionCtx.connection_id`; outbound executor shares the single host-API link/listener. Real-path e2e: `core/connector_e2e/tests/boot_wiring.rs`.
 - svc-ingest connector host-call bridge (connector runtime PR-A2): `connector/host_calls.rs` `HostCallHandler`/`OverlayHostCalls`/`CallScope`/`ActiveConnections`/`HubIdentityTokenizer`, plugged in via `ExecutorLink::with_host_calls`. Scope-validated (unscoped calls denied, fail closed), per-overlay grants subset of `hub-manifest.yaml`, PII-free identity tokenization, `connector_host_call_total` metrics. Not yet wired into boot.

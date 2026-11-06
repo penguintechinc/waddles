@@ -458,6 +458,9 @@ class KnowledgeSourceCreateRequest:
     branch: str = "main"
     docs_path: str = "/"
     refresh_interval: str = "weekly"
+    #: Plaintext access token -- encrypted server-side before storage, never returned.
+    token: str | None = None
+    #: DEPRECATED alias of `token` (legacy clients); also treated as plaintext.
     encrypted_token: str | None = None
 
 
@@ -478,6 +481,9 @@ class KnowledgeSourceUpdateRequest:
     branch: str | None = None
     docs_path: str | None = None
     refresh_interval: str | None = None
+    #: Plaintext access token -- encrypted server-side before storage, never returned.
+    token: str | None = None
+    #: DEPRECATED alias of `token` (legacy clients); also treated as plaintext.
     encrypted_token: str | None = None
     is_active: bool | None = None
 
@@ -591,16 +597,85 @@ async def _check_optional_community(community_id: int | None) -> tuple[dict[str,
     return await _require_community(community_id)
 
 
+def _is_super_admin_sync(dal: Any, user_id: int) -> bool:
+    """DB-authoritative `hub_users.is_super_admin` lookup (never the JWT `roles` claim)."""
+    if user_id <= 0:
+        return False
+    row = dal(dal.hub_users.id == user_id).select().first()
+    return bool(row is not None and row.is_super_admin)
+
+
+async def _caller_is_super_admin() -> bool:
+    """True when the authenticated caller is a global super admin."""
+    return await asyncio.to_thread(_is_super_admin_sync, _dal(), _user_id())
+
+
+async def _scope_allowed(community_id: int | None, vendor_id: int | None) -> bool:
+    """Can the caller act on a knowledge source with this (community, vendor) scope?
+
+    Community-scoped: the community must belong to the caller's tenant.
+    Vendor-scoped (no community): the caller must be that vendor. Global
+    (neither): super admin only. Super admins pass every scope.
+    """
+    if await _caller_is_super_admin():
+        return True
+    if community_id is not None:
+        ctx = get_tenant_context(request)
+        assert ctx is not None  # nosec B101 - tenant_middleware already enforced this
+        return bool(
+            await asyncio.to_thread(
+                community_belongs_to_tenant, _dal(), community_id, ctx.tenant_id
+            )
+        )
+    uid = _user_id()
+    return vendor_id is not None and uid > 0 and vendor_id == uid
+
+
+_SOURCE_NOT_FOUND = "Knowledge source not found"
+
+
+async def _load_authorized_source(source_id: int) -> bool:
+    """True iff the source exists AND the caller may act on it.
+
+    Callers answer 404 (never 403) on False so a foreign source id is
+    indistinguishable from a missing one -- no cross-tenant existence oracle.
+    """
+    row = await asyncio.to_thread(lambda: _dal().ai_knowledge_sources[source_id])
+    if row is None:
+        return False
+    return await _scope_allowed(row.community_id, row.vendor_id)
+
+
+async def _require_query_scope(community_id: int | None) -> tuple[dict[str, Any], int] | None:
+    """Scope gate for search/suggest: tenant-checked `community_id`, or super admin if omitted.
+
+    Without it a tenant admin could vector-search every community's knowledge chunks.
+    """
+    if community_id is not None:
+        return await _require_community(community_id)
+    if not await _caller_is_super_admin():
+        return _error("communityId is required", 400, "BAD_REQUEST")
+    return None
+
+
 @bot_bp.route("/ai-knowledge/sources", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_KNOWLEDGE_READ)  # type: ignore[misc]
 @validate_response(KnowledgeSourcesResponse)
 async def list_knowledge_sources() -> Any:
-    """`aiKnowledgeController.listSources` -- `GET .../ai-knowledge/sources?communityId=`."""
-    community_id = _int_arg("communityId", 0) or None
-    denied = await _check_optional_community(community_id)
-    if denied:
-        return denied
+    """`aiKnowledgeController.listSources` -- `GET .../ai-knowledge/sources?communityId=`.
+
+    `communityId` (legacy `community_id` accepted) is REQUIRED for non-super-admins;
+    only a global super admin may list unfiltered.
+    """
+    community_id = _int_arg("communityId", 0) or _int_arg("community_id", 0) or None
+    if community_id is None:
+        if not await _caller_is_super_admin():
+            return _error("communityId is required", 400, "BAD_REQUEST")
+    else:
+        denied = await _require_community(community_id)
+        if denied:
+            return denied
     sources = await asyncio.to_thread(bot_ai_knowledge.list_knowledge_sources, _dal(), community_id)
     return KnowledgeSourcesResponse(success=True, sources=sources)
 
@@ -615,6 +690,12 @@ async def create_knowledge_source(data: KnowledgeSourceCreateRequest) -> Any:
     denied = await _check_optional_community(data.community_id)
     if denied:
         return denied
+    if not await _scope_allowed(data.community_id, data.vendor_id) or (
+        data.community_id is not None
+        and data.vendor_id is not None
+        and not await _scope_allowed(None, data.vendor_id)
+    ):
+        return _error("Not permitted for this knowledge source scope", 403, "FORBIDDEN")
     payload = bot_ai_knowledge.KnowledgeSourceCreate(
         source_name=data.source_name,
         source_type=data.source_type,
@@ -625,7 +706,7 @@ async def create_knowledge_source(data: KnowledgeSourceCreateRequest) -> Any:
         branch=data.branch,
         docs_path=data.docs_path,
         refresh_interval=data.refresh_interval,
-        encrypted_token=data.encrypted_token,
+        token=data.token or data.encrypted_token,
     )
     dal = _dal()
     try:
@@ -658,12 +739,16 @@ async def _index_source_background(dal: Any, source_id: int) -> None:
 @validate_response(KnowledgeSourceResponse)
 async def update_knowledge_source(data: KnowledgeSourceUpdateRequest, source_id: int) -> Any:
     """`aiKnowledgeController.updateSource` -- `PUT /api/v1/admin/ai-knowledge/sources/:id`."""
+    if not await _load_authorized_source(source_id):
+        return _error(_SOURCE_NOT_FOUND, 404, "NOT_FOUND")
     # `data` is a `slots=True` dataclass -- no `__dict__` -- `dataclasses.fields()` instead.
     updates = {
         f.name: getattr(data, f.name)
         for f in dataclasses.fields(data)
-        if getattr(data, f.name) is not None
+        if f.name != "encrypted_token" and getattr(data, f.name) is not None
     }
+    if "token" not in updates and data.encrypted_token is not None:
+        updates["token"] = data.encrypted_token  # deprecated alias
     try:
         source = await asyncio.to_thread(
             bot_ai_knowledge.update_knowledge_source, _dal(), source_id, updates
@@ -679,6 +764,8 @@ async def update_knowledge_source(data: KnowledgeSourceUpdateRequest, source_id:
 @validate_response(SimpleSuccessResponse)
 async def delete_knowledge_source(source_id: int) -> Any:
     """`aiKnowledgeController.deleteSource` -- `DELETE /api/v1/admin/ai-knowledge/sources/:id`."""
+    if not await _load_authorized_source(source_id):
+        return _error(_SOURCE_NOT_FOUND, 404, "NOT_FOUND")
     try:
         await asyncio.to_thread(bot_ai_knowledge.delete_knowledge_source, _dal(), source_id)
     except bot_ai_knowledge.KnowledgeServiceError as exc:
@@ -692,6 +779,8 @@ async def delete_knowledge_source(source_id: int) -> Any:
 @validate_response(ReindexResponse)
 async def reindex_source(source_id: int) -> Any:
     """`aiKnowledgeController.reindexSource` -- responds immediately, indexes async."""
+    if not await _load_authorized_source(source_id):
+        return _error(_SOURCE_NOT_FOUND, 404, "NOT_FOUND")
     asyncio.create_task(_index_source_background(_dal(), source_id))
     return ReindexResponse(success=True, message="Reindex started", sourceId=source_id)
 
@@ -718,7 +807,7 @@ async def search_knowledge_base(data: KnowledgeSearchRequest) -> Any:
     """`aiKnowledgeController.searchKnowledgeBase` -- `POST /api/v1/admin/ai-knowledge/search`."""
     if not data.query or not data.query.strip():
         return _error("query is required", 400, "BAD_REQUEST")
-    denied = await _check_optional_community(data.communityId)
+    denied = await _require_query_scope(data.communityId)
     if denied:
         return denied
     try:
@@ -761,7 +850,7 @@ async def suggest_for_ticket(data: SuggestRequest) -> Any:
     """`aiKnowledgeController.suggestForTicket` -- `POST /api/v1/admin/ai-knowledge/suggest`."""
     if not data.ticketId or not data.ticketText or not data.ticketText.strip():
         return _error("ticketId and ticketText are required", 400, "BAD_REQUEST")
-    denied = await _check_optional_community(data.communityId)
+    denied = await _require_query_scope(data.communityId)
     if denied:
         return denied
     try:

@@ -6005,7 +6005,11 @@ paths:
       summary: '`aiKnowledgeController.searchKnowledgeBase` -- `POST /api/v1/admin/ai-knowledge/search`.'
   /api/v1/admin/ai-knowledge/sources:
     get:
-      description: ''
+      description: '
+
+        `communityId` (legacy `community_id` accepted) is REQUIRED for non-super-admins;
+
+        only a global super admin may list unfiltered.'
       operationId: get_list_knowledge_sources
       parameters: []
       responses:
@@ -6082,6 +6086,12 @@ paths:
                   - type: 'null'
                   default: null
                   title: Source Url
+                token:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Token
                 vendor_id:
                   anyOf:
                   - type: integer
@@ -6195,6 +6205,12 @@ paths:
                   - type: 'null'
                   default: null
                   title: Source Url
+                token:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Token
               title: KnowledgeSourceUpdateRequest
               type: object
       responses:

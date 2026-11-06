@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { analyticsApi } from '../../services/api';
-import { superAdminApi } from '../../services/api';
 import PlatformSummaryCards from '../../components/analytics/PlatformSummaryCards';
 import ReputationTierChart from '../../components/analytics/ReputationTierChart';
 import PlatformGrowthChart from '../../components/analytics/PlatformGrowthChart';
@@ -30,7 +29,6 @@ function SuperAdminAnalytics() {
       setLoading(true);
       setError(null);
 
-      // Try new analyticsApi first; fall back to superAdminApi for backwards compat
       const results = await Promise.allSettled([
         analyticsApi.getPlatformOverview(),
         analyticsApi.getPlatformReputation(),
@@ -40,49 +38,17 @@ function SuperAdminAnalytics() {
       ]);
 
       const [overviewRes, repRes, growthRes, activityRes, healthRes] = results;
+      if (overviewRes.status === 'fulfilled') setOverview(overviewRes.value.data);
+      if (repRes.status === 'fulfilled') setRepData(repRes.value.data);
+      if (growthRes.status === 'fulfilled') setGrowthData(growthRes.value.data);
+      if (activityRes.status === 'fulfilled') setActivityData(activityRes.value.data);
+      if (healthRes.status === 'fulfilled') setHealthData(healthRes.value.data);
 
-      if (overviewRes.status === 'fulfilled') {
-        setOverview(overviewRes.value.data);
-      } else {
-        // Fall back to legacy superAdminApi
-        try {
-          const legacyRes = await superAdminApi.getAnalytics();
-          if (legacyRes.data.success) setOverview(legacyRes.data);
-        } catch { /* ignore */ }
+      // Never fail silently: surface the first rejected platform-analytics call.
+      const failed = results.find((r) => r.status === 'rejected');
+      if (failed && failed.status === 'rejected') {
+        setError(failed.reason?.response?.data?.error?.message || 'Failed to load analytics');
       }
-
-      if (repRes.status === 'fulfilled') {
-        setRepData(repRes.value.data);
-      } else {
-        try {
-          const legacyRes = await superAdminApi.getReputationDistribution();
-          if (legacyRes.data.success) setRepData(legacyRes.data);
-        } catch { /* ignore */ }
-      }
-
-      if (growthRes.status === 'fulfilled') {
-        setGrowthData(growthRes.value.data);
-      } else {
-        try {
-          const legacyRes = await superAdminApi.getGrowthTrends({ period: growthPeriod });
-          if (legacyRes.data.success) setGrowthData(legacyRes.data);
-        } catch { /* ignore */ }
-      }
-
-      if (activityRes.status === 'fulfilled') {
-        setActivityData(activityRes.value.data);
-      } else {
-        try {
-          const legacyRes = await superAdminApi.getActivityBreakdown();
-          if (legacyRes.data.success) setActivityData(legacyRes.data);
-        } catch { /* ignore */ }
-      }
-
-      if (healthRes.status === 'fulfilled') {
-        setHealthData(healthRes.value.data);
-      }
-    } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to load analytics');
     } finally {
       setLoading(false);
     }
@@ -93,11 +59,8 @@ function SuperAdminAnalytics() {
     try {
       const res = await analyticsApi.getPlatformGrowth(growthPeriod);
       setGrowthData(res.data);
-    } catch {
-      try {
-        const legacyRes = await superAdminApi.getGrowthTrends({ period: growthPeriod });
-        if (legacyRes.data.success) setGrowthData(legacyRes.data);
-      } catch { /* ignore */ }
+    } catch (err) {
+      setError(err.response?.data?.error?.message || 'Failed to load growth analytics');
     }
   };
 

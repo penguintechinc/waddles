@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
+import { NotAvailableYet } from '../../components/ui';
+import { isFeatureServed } from '../../lib/unservedFeatures';
 import {
   MusicalNoteIcon,
   PlusIcon,
@@ -20,6 +22,9 @@ const PROVIDER_TYPES = [
   { value: 'tidal', label: 'Tidal' },
   { value: 'custom', label: 'Custom Stream URL' },
 ];
+
+/** hub-api has no radio-station `/test` or `/default` routes yet. */
+const RADIO_ACTIONS_FEATURE = 'radio-station-actions';
 
 const PROVIDERS_WITH_API_KEY = ['spotify', 'soundcloud', 'apple_music', 'tidal'];
 
@@ -188,6 +193,8 @@ function AdminRadioStations() {
           <span>Add Station</span>
         </button>
       </div>
+
+      {!isFeatureServed(RADIO_ACTIONS_FEATURE) && <NotAvailableYet feature={RADIO_ACTIONS_FEATURE} />}
 
       {/* Messages */}
       {error && (
@@ -395,7 +402,7 @@ function AdminRadioStations() {
 
               {/* Actions */}
               <div className="flex items-center space-x-2">
-                {!station.isDefault && (
+                {!station.isDefault && isFeatureServed(RADIO_ACTIONS_FEATURE) && (
                   <button
                     onClick={() => handleSetDefault(station.id)}
                     disabled={setting[station.id]}
@@ -406,6 +413,7 @@ function AdminRadioStations() {
                   </button>
                 )}
 
+                {isFeatureServed(RADIO_ACTIONS_FEATURE) && (
                 <button
                   onClick={() => handleTestStream(station.id)}
                   disabled={testing[station.id]}
@@ -414,6 +422,7 @@ function AdminRadioStations() {
                   <SignalIcon className={`w-4 h-4 ${testing[station.id] ? 'animate-pulse' : ''}`} />
                   <span>{testing[station.id] ? 'Testing...' : 'Test Stream'}</span>
                 </button>
+                )}
 
                 <button
                   onClick={() => setDeleteConfirm(station)}

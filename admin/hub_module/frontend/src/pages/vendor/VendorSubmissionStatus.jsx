@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
+import { vendorPublicApi } from '../../services/api';
 import './VendorSubmissionStatus.css';
 
 export default function VendorSubmissionStatus() {
@@ -27,19 +28,10 @@ export default function VendorSubmissionStatus() {
         throw new Error('Please provide both email and submission ID');
       }
 
-      const response = await fetch(
-        `/api/v1/vendor/submissions/${submissionId}?email=${encodeURIComponent(email)}`
-      );
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.message || 'Failed to fetch submission status');
-      }
-
-      const data = await response.json();
-      setSubmission(data.submission);
+      const response = await vendorPublicApi.getSubmissionStatus(submissionId, email);
+      setSubmission(response.data.submission);
     } catch (err) {
-      setError(err.message);
+      setError(err.response?.data?.message || err.message || 'Failed to fetch submission status');
       setSubmission(null);
     } finally {
       setLoading(false);
