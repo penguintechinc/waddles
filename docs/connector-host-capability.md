@@ -259,6 +259,35 @@ shard, Discord's default), so `shard_id % max_concurrency` identify buckets and 
 fleet concerns that stay with the IDENTIFY budget. Multi-shard operation would need a per-shard host config (one `WsConfig`
 per shard + a shard slot in the IDENTIFY template) -- not required for the current single-bot deployment.
 
+### IDENTIFY budget + `HandshakeGate` (connector runtime row I)
+
+`connector/identify_budget.rs` is the host-module port of the legacy `ingest::discord_identify_budget` (the legacy file
+stays until T4). `connector/handshake_gate.rs` is the driver hook.
+
+```text
+connect -> on-connect -> HandshakeGate::acquire -> [first frame (HELLO)] -> send_handshake -> pump
+                          |- session token has session_id  => RESUME: skip budget (metric resume_skipped)
+                          '- else IDENTIFY: Valkey budget (seed from GET /gateway/bot if unseeded; wait+jitter <= max_wait)
+refusal: Exhausted{retry_after} -> close, reconnect delay floored at retry_after (ConnectionReport.retry_after)
+         Retryable (store outage / limit fetch failed) -> close, normal backoff; handshake NEVER sent
+         Fatal (bot credential rejected 401/403/missing secret) -> source PARKED
+```
+
+| Piece | Behaviour |
+|---|---|
+| `HandshakeGate::acquire(&GateCtx) -> Result<GatePermit, GateError>` | dyn-compatible (boxed future); installed with `ConnectorDriver::with_handshake_gate`; default `NoopGate` => zero behaviour change (Twitch IRC etc.). Raced against shutdown. |
+| IDENTIFY vs RESUME | `session_token_is_resumable`: host session-token JSON has a non-empty `session_id`. Missing / non-JSON token = IDENTIFY (conservative). |
+| Valkey state | `waddles:connector:identify-budget:{scope}:{sha256(token)}:limit` (hash: total/remaining/max_concurrency, TTL = `reset_after`) + `...:b{shard % max_concurrency}` (5s window). Hash of the bot token only; no raw ids. One Lua script per acquire = atomic across replicas. |
+| Limit source | `GatewayBotSource`: `GET {api}/gateway/bot` through `GuardedClient` (#989), bot token resolved per use via the connection resolver (`TransportSecretSource`, never held/logged). `with_config_fallback(SessionStartLimit)` = explicit host config used ONLY when the fetch fails (ERROR log + `limit_fallback`); never for a dead credential. No fallback configured => retryable `LimitUnavailable` (fail loud). |
+| Metric | `connector_identify_budget_total{outcome}`: `granted waited exhausted store_error limit_unavailable limit_fallback low_headroom resume_skipped credential_rejected`; plus `svc_ingest_connector_connects_total{outcome="gate_denied"}`. |
+| Fail-closed | Valkey outage/stall (2s deadline) => `GateError::Retryable`; an unseeded counter is refused until seeded. |
+
+Wiring (Discord, single shard): build one `DiscordIdentifyGate` per bot connection from a `RedisIdentifyBudget` (shared
+Valkey connection), a `GatewayBotSource` and `IdentifyBudgetMetrics::register`, and pass it to the driver. The flag-flip
+that lets the host selector accept `OVERLAY_DISCORD_ENABLED=true` is NOT in this module: after this PR merges and the
+flag-on Discord e2e passes, set `IDENTIFY_BUDGET_READY = true` (connector_runtime selector) and the helm value
+`identifyBudgetReady`.
+
 ### Poll: `PollConfig.lifecycle: PollLifecycle`
 
 | Field | Behaviour |
