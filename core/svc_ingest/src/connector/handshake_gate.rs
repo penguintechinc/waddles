@@ -26,17 +26,22 @@ pub struct GateCtx<'a> {
     /// The host-maintained session token (opaque JSON for gateway platforms).
     /// `None` = no resumable session exists.
     pub session_token: Option<&'a str>,
+    /// The handshake bytes the guest rendered (handles still in place) -- the
+    /// exact frame that leaves the process once the gate admits it. A gate
+    /// must decide from THESE bytes, never from the session token alone.
+    pub handshake: &'a [u8],
 }
 
 impl<'a> GateCtx<'a> {
     /// Builds the gate context from the connection context.
     #[must_use]
-    pub fn from_connection(ctx: &'a ConnectionCtx) -> Self {
+    pub fn from_connection(ctx: &'a ConnectionCtx, handshake: &'a [u8]) -> Self {
         Self {
             platform: &ctx.platform,
             source_id: &ctx.source_id,
             connection_id: &ctx.connection_id,
             session_token: ctx.session_token.as_deref(),
+            handshake,
         }
     }
 }
@@ -134,7 +139,7 @@ mod tests {
     #[tokio::test]
     async fn noop_gate_admits_without_consuming() {
         let c = conn(None);
-        let g = GateCtx::from_connection(&c);
+        let g = GateCtx::from_connection(&c, b"");
         let permit = NoopGate.acquire(&g).await.unwrap();
         assert_eq!(permit, GatePermit::not_required());
         assert!(!permit.consumed);
@@ -143,7 +148,7 @@ mod tests {
     #[test]
     fn gate_ctx_mirrors_the_connection() {
         let c = conn(Some("{}"));
-        let g = GateCtx::from_connection(&c);
+        let g = GateCtx::from_connection(&c, b"");
         assert_eq!(
             (g.platform, g.source_id, g.connection_id, g.session_token),
             ("p", "s", "c", Some("{}"))

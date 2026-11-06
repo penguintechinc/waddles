@@ -408,7 +408,7 @@ impl IdentifyBudget for RedisIdentifyBudget {
 
 /// `connector_identify_budget_total{outcome}` -- bounded `outcome` labels:
 /// `granted`, `waited`, `exhausted`, `store_error`, `limit_unavailable`,
-/// `limit_fallback`, `low_headroom`, `resume_skipped`, `credential_rejected`.
+/// `limit_fallback`, `low_headroom`, `resume_skipped`, `resume_mismatch`, `credential_rejected`.
 #[derive(Clone)]
 pub struct IdentifyBudgetMetrics {
     total: IntCounterVec,
@@ -607,6 +607,10 @@ pub fn session_token_is_resumable(token: Option<&str>) -> bool {
     }
 }
 
+/// Host-anchored prefix of a Discord RESUME frame (`op` 6, token first). The
+/// budget exemption applies ONLY to a handshake starting with exactly this.
+pub const RESUME_PREFIX: &[u8] = br#"{"op":6,"d":{"token":""#;
+
 /// The Discord [`HandshakeGate`]: RESUME skips the budget; IDENTIFY acquires
 /// a slot (seeding the counter from `/gateway/bot` when needed), waiting with
 /// jitter up to `max_wait`.
@@ -735,9 +739,19 @@ where
 {
     fn acquire<'a>(&'a self, ctx: &'a GateCtx<'a>) -> BoxFut<'a, Result<GatePermit, GateError>> {
         Box::pin(async move {
-            if session_token_is_resumable(ctx.session_token) {
+            // The decision is bound to the bytes that will be sent: only a frame
+            // that starts with the host-anchored RESUME prefix is budget-exempt.
+            // A guest-rendered IDENTIFY (or anything else) takes a slot even when
+            // the host session looks resumable -- fail closed.
+            let is_resume = ctx.handshake.starts_with(RESUME_PREFIX);
+            if is_resume && session_token_is_resumable(ctx.session_token) {
                 self.metrics.inc("resume_skipped");
                 return Ok(GatePermit::not_required());
+            }
+            if session_token_is_resumable(ctx.session_token) {
+                self.metrics.inc("resume_mismatch");
+                tracing::warn!(platform = %ctx.platform,
+                    "resumable session but the rendered handshake is not a RESUME; taking an IDENTIFY slot");
             }
             match self.acquire_slot().await {
                 Ok(waited) => Ok(GatePermit {
@@ -904,12 +918,30 @@ mod tests {
             .map_or(0, |m| m.get_counter().value() as u64)
     }
 
+    const RESUME_FRAME: &[u8] =
+        br#"{"op":6,"d":{"token":"{{discord-bot}}","session_id":"s","seq":1}}"#;
+    const IDENTIFY_FRAME: &[u8] = br#"{"op":2,"d":{"token":"{{discord-bot}}","intents":1}}"#;
+
+    /// A session token present means the host expects a RESUME; the frame the
+    /// helper pairs with it is the matching RESUME, otherwise an IDENTIFY.
     fn cx(token: Option<&str>) -> GateCtx<'_> {
+        cx_with(
+            token,
+            if token.is_some() {
+                RESUME_FRAME
+            } else {
+                IDENTIFY_FRAME
+            },
+        )
+    }
+
+    fn cx_with<'a>(token: Option<&'a str>, handshake: &'a [u8]) -> GateCtx<'a> {
         GateCtx {
             platform: "discord",
             source_id: "s",
             connection_id: "c",
             session_token: token,
+            handshake,
         }
     }
 
@@ -920,6 +952,53 @@ mod tests {
         assert!(!p.consumed);
         assert_eq!(*b.acquires.lock().unwrap(), 0);
         assert_eq!(count(&reg, "resume_skipped"), 1);
+    }
+
+    /// Security regression: the exemption is bound to the bytes SENT. A guest
+    /// that renders an IDENTIFY (op 2) while the host session looks resumable
+    /// must still take a slot; a RESUME (op 6) must not; an anything-else frame
+    /// or a RESUME with no resumable session is not exempt either.
+    #[tokio::test]
+    async fn the_budget_decision_follows_the_rendered_frame_not_the_session_token() {
+        let tok = Some(r#"{"session_id":"x"}"#);
+        // guest renders op 2 although a session exists -> slot acquired
+        let (g, b, reg) = gate(vec![Ok(AcquireOutcome::Granted)], false, lim());
+        let p = g.acquire(&cx_with(tok, IDENTIFY_FRAME)).await.unwrap();
+        assert!(
+            p.consumed,
+            "an IDENTIFY consumes a slot even with a session"
+        );
+        assert_eq!(*b.acquires.lock().unwrap(), 1);
+        assert_eq!(count(&reg, "resume_mismatch"), 1);
+        assert_eq!(count(&reg, "resume_skipped"), 0);
+        // op 6 + resumable session -> no slot
+        let (g, b, reg) = gate(vec![], false, lim());
+        let p = g.acquire(&cx_with(tok, RESUME_FRAME)).await.unwrap();
+        assert!(!p.consumed);
+        assert_eq!(*b.acquires.lock().unwrap(), 0);
+        assert_eq!(count(&reg, "resume_skipped"), 1);
+        // an unrecognised frame (not the anchored prefix) is never exempt
+        for odd in [
+            &b""[..],
+            br#" {"op":6,"d":{"token":"x"}}"#,
+            br#"{"d":{"token":"x"},"op":6}"#,
+        ] {
+            let (g, b, _) = gate(vec![Ok(AcquireOutcome::Granted)], false, lim());
+            assert!(g.acquire(&cx_with(tok, odd)).await.unwrap().consumed);
+            assert_eq!(*b.acquires.lock().unwrap(), 1);
+        }
+        // exhausted budget refuses the guest IDENTIFY: nothing may be sent
+        let (g, _, _) = gate(
+            vec![Ok(AcquireOutcome::Exhausted {
+                retry_after: Duration::from_secs(9),
+            })],
+            false,
+            lim(),
+        );
+        assert!(matches!(
+            g.acquire(&cx_with(tok, IDENTIFY_FRAME)).await,
+            Err(GateError::Exhausted { .. })
+        ));
     }
 
     #[tokio::test]

@@ -382,9 +382,10 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         };
         // Admission gate (Discord IDENTIFY budget): awaited BEFORE any
         // handshake bytes leave the process. A RESUME needs no budget and the
-        // gate decides that from the host session token. Refused => the
+        // gate decides that from the rendered handshake bytes (the frame that
+        // is actually sent), never from the host session token alone. Refused => the
         // handshake is never sent, never "identify anyway".
-        let gate_ctx = GateCtx::from_connection(&ctx);
+        let gate_ctx = GateCtx::from_connection(&ctx, &handshake.bytes);
         let admitted = tokio::select! {
             _ = &mut *shutdown => {
                 transport.close("shutdown").await;
