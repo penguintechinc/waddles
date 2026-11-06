@@ -32,7 +32,13 @@ import httpx
 from config import HubAPIConfig
 from services import ban_suppression, session_service
 from services.auth_service import SessionUser, create_session_token
-from services.errors import bad_request, conflict
+from services.errors import ApiError, bad_request, conflict
+from services.install_state_binding import (
+    ERR_STATE,
+    InstallStateError,
+    bound_state,
+    verify_state_binding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -486,11 +492,20 @@ async def redeem_oauth_exchange_code(async_dal: Any, dal: Any, *, code: str) -> 
 
 
 async def start_link(
-    async_dal: Any, dal: Any, *, platform: str, user_id: int, callback_base_url: str
+    async_dal: Any,
+    dal: Any,
+    *,
+    platform: str,
+    user_id: int,
+    callback_base_url: str,
+    binding_nonce: str,
 ) -> tuple[str, str]:
-    """Start linking `platform` to the currently-authenticated user."""
+    """Start linking `platform` to the currently-authenticated user.
+
+    `binding_nonce` is the initiating browser's cookie nonce; the state embeds only its hash.
+    """
     _require_valid_platform(platform)
-    state = secrets.token_hex(16)
+    state = bound_state(secrets.token_hex(16), binding_nonce)
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/link-callback"
 
     await async_dal.insert_async(
@@ -510,9 +525,24 @@ async def start_link(
 
 
 async def link_callback(
-    async_dal: Any, dal: Any, *, platform: str, code: str, state: str, callback_base_url: str
+    async_dal: Any,
+    dal: Any,
+    *,
+    platform: str,
+    code: str,
+    state: str,
+    callback_base_url: str,
+    binding_nonce: str | None,
 ) -> None:
-    """Complete an OAuth account-link flow for an already-authenticated user."""
+    """Complete an OAuth account-link flow for an already-authenticated user.
+
+    Refuses (typed `ApiError`, code `state_binding_mismatch`) any browser that cannot present the
+    nonce the state was bound to, BEFORE the state is consumed.
+    """
+    try:
+        verify_state_binding(state, binding_nonce)
+    except InstallStateError as exc:
+        raise ApiError("OAuth state is not bound to this browser", 400, exc.code) from exc
     state_rows = await async_dal.select_async(
         dal(
             (dal.hub_oauth_states.state == state)
@@ -522,7 +552,7 @@ async def link_callback(
         )
     )
     if not state_rows:
-        raise bad_request("Invalid or expired OAuth state")
+        raise ApiError("Invalid or expired OAuth state", 400, ERR_STATE)
     user_id = state_rows.first().user_id
     await async_dal.delete_async(dal.hub_oauth_states.state == state)
 

@@ -17,15 +17,20 @@ from typing import Any, cast
 
 from flask_core.api_utils import error_response
 from flask_core.tenancy import tenant_middleware
-from quart import Blueprint, current_app, redirect, request
+from quart import Blueprint, after_this_request, current_app, redirect, request
 from quart_schema import validate_request, validate_response
 
 from config import HubAPIConfig
 from services import identity_service
+from services import install_state_binding as binding
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 
 identity_bp = Blueprint("v1_user_identities", __name__, url_prefix="/api/v1/user/identities")
+
+#: ``__Host-`` cookie binding an identity-link `state` to the initiating browser.
+IDENTITY_BINDING_COOKIE = binding.cookie_name("identity_link")
+LINK_STATE_TTL_S = binding.LINK_STATE_TTL_S
 
 
 def _cfg() -> HubAPIConfig:
@@ -168,15 +173,24 @@ async def start_identity_link(platform: str) -> LinkStartResponse | tuple[dict[s
     async_dal, dal = _dal()
     try:
         user_id = get_current_user_id(request)
+        nonce = binding.new_nonce()
         authorize_url, state = await identity_service.start_identity_link(
             async_dal,
             dal,
             user_id=user_id,
             platform=platform,
             callback_base_url=_cfg().identity_callback_base_url,
+            binding_nonce=nonce,
         )
     except ApiError as exc:
         return _err(exc)
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Bind the link state to THIS browser (``__Host-`` HttpOnly Secure SameSite=Lax)."""
+        binding.set_binding_cookie(response, IDENTITY_BINDING_COOKIE, nonce, LINK_STATE_TTL_S)
+        return response
+
     return LinkStartResponse(success=True, authorizeUrl=authorize_url, state=state)
 
 
@@ -198,10 +212,16 @@ async def identity_link_callback(platform: str):  # type: ignore[no-untyped-def]
             code=code,
             state=state,
             callback_base_url=_cfg().identity_callback_base_url,
+            binding_nonce=request.cookies.get(IDENTITY_BINDING_COOKIE),
         )
-    except ApiError:
-        return redirect(f"{frontend_origin}/settings/identities?error=linking_failed")
-    return redirect(f"{frontend_origin}/settings/identities?success=linked&platform={platform}")
+    except ApiError as exc:
+        error = (
+            exc.code if exc.code in (binding.ERR_BINDING, binding.ERR_STATE) else "linking_failed"
+        )
+        return redirect(f"{frontend_origin}/settings/identities?error={error}")
+    page = redirect(f"{frontend_origin}/settings/identities?success=linked&platform={platform}")
+    binding.clear_binding_cookie(page, IDENTITY_BINDING_COOKIE)
+    return page
 
 
 @identity_bp.route("/<platform>", methods=["DELETE"])

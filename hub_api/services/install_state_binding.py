@@ -28,6 +28,9 @@ ERR_STATE: Final = "invalid_or_expired_state"
 #: Raised when the browser cannot present the nonce minted for this state (missing/foreign cookie).
 ERR_BINDING: Final = "state_binding_mismatch"
 
+#: Lifetime (seconds) of a DB-backed link state and its binding cookie (10 minutes).
+LINK_STATE_TTL_S: Final = 600
+
 _MAX_LEN: Final = 128
 _COOKIE_NAME_RE: Final = re.compile(r"__Host-[a-z0-9_]{1,40}")
 
@@ -69,6 +72,31 @@ def set_binding_cookie(response: Response, name: str, nonce: str, max_age: int) 
 def clear_binding_cookie(response: Response, name: str) -> None:
     """Expire the binding cookie on ``response``."""
     response.delete_cookie(name, path="/", secure=True, httponly=True, samesite="Lax")
+
+
+def bound_state(token: str, nonce: str) -> str:
+    """State for DB-backed flows with no spare column: ``<token>.<sha256(nonce)>``.
+
+    The hash is not reversible to the 256-bit nonce, so the visible state reveals nothing a
+    third party can replay; the browser must still present the nonce cookie.
+    """
+    return f"{token}.{nonce_hash(nonce)}"
+
+
+def verify_state_binding(state: str, nonce: str | None) -> None:
+    """Constant-time check that ``nonce`` is the one :func:`bound_state` embedded in ``state``.
+
+    Raises :class:`InstallStateError` ``ERR_BINDING`` for a missing/foreign nonce and
+    ``ERR_STATE`` for a state that does not have the bound shape. Call BEFORE consuming the
+    state so a foreign browser cannot burn the victim's pending flow.
+    """
+    _token, sep, embedded = state.partition(".")
+    if not sep or len(state) > 255:
+        raise InstallStateError(ERR_STATE)
+    if not nonce or len(nonce) > _MAX_LEN:
+        raise InstallStateError(ERR_BINDING)
+    if not hmac.compare_digest(embedded, nonce_hash(nonce)):
+        raise InstallStateError(ERR_BINDING)
 
 
 async def consume_bound(client: Any, key: str, nonce: str | None) -> str:

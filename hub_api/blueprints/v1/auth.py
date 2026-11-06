@@ -27,11 +27,12 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
-from quart import Blueprint, current_app, redirect, request
+from quart import Blueprint, after_this_request, current_app, redirect, request
 from quart_schema import validate_request, validate_response
 
 from config import HubAPIConfig
 from services import auth_service, branding_service, oauth_service, passkey_service
+from services import install_state_binding as binding
 from services.current_user import (
     get_current_session_id,
     get_current_user_id,
@@ -48,6 +49,10 @@ from services.session_cookie import (
 )
 
 auth_bp = Blueprint("v1_auth", __name__, url_prefix="/api/v1/auth")
+
+#: ``__Host-`` cookie binding an account-link `state` to the initiating browser.
+LINK_BINDING_COOKIE = binding.cookie_name("oauth_link")
+LINK_STATE_TTL_S = binding.LINK_STATE_TTL_S
 
 logger = logging.getLogger(__name__)
 
@@ -848,15 +853,24 @@ async def oauth_link_start(platform: str) -> OAuthStartResponse | tuple[dict[str
     async_dal, dal = _dal()
     try:
         user_id = get_current_user_id(request)
+        nonce = binding.new_nonce()
         authorize_url, state = await oauth_service.start_link(
             async_dal,
             dal,
             platform=platform,
             user_id=user_id,
             callback_base_url=_callback_base_url(),
+            binding_nonce=nonce,
         )
     except ApiError as exc:
         return _err(exc)
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Bind the link state to THIS browser (``__Host-`` HttpOnly Secure SameSite=Lax)."""
+        binding.set_binding_cookie(response, LINK_BINDING_COOKIE, nonce, LINK_STATE_TTL_S)
+        return response
+
     return OAuthStartResponse(success=True, authorizeUrl=authorize_url, state=state)
 
 
@@ -879,10 +893,14 @@ async def oauth_link_callback(platform: str):  # type: ignore[no-untyped-def]
             code=code or "",
             state=state or "",
             callback_base_url=_callback_base_url(),
+            binding_nonce=request.cookies.get(LINK_BINDING_COOKIE),
         )
-    except ApiError:
-        return redirect(f"{frontend_origin}/dashboard/settings?error=link_failed")
-    return redirect(f"{frontend_origin}/dashboard/settings?linked={platform}")
+    except ApiError as exc:
+        error = exc.code if exc.code in (binding.ERR_BINDING, binding.ERR_STATE) else "link_failed"
+        return redirect(f"{frontend_origin}/dashboard/settings?error={error}")
+    page = redirect(f"{frontend_origin}/dashboard/settings?linked={platform}")
+    binding.clear_binding_cookie(page, LINK_BINDING_COOKIE)
+    return page
 
 
 @auth_bp.route("/oauth/<platform>", methods=["DELETE"])
