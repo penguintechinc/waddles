@@ -16,15 +16,15 @@ artifact: component
 execution_model: wasi-component
 is_default: false
 kind: service
-egress:
-  - host: robertsspaceindustries.com
-    methods: ["POST"]
+# Guest egress is EMPTY by design: the RSI poll host allowlist + session credential live in the
+# host-side poll transport config (svc_ingest Spectrum profile), exactly as for YouTube.
+egress: []
 data:
   tables: []
 limits:
   timeout_ms: 2000
   memory_mb: 64
-  egress_rps: 1
+  egress_rps: 0
 permissions:
   - id: connector.pii.read
     justification: "gates identity.lookup, used to tokenize each Spectrum member to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw member id or handle leaves the connector)"
