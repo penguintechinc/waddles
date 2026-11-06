@@ -64,6 +64,7 @@
 
 pub mod config;
 pub mod connector;
+pub mod connector_runtime;
 pub mod crypto;
 pub mod discord_rest;
 pub mod error;
@@ -275,6 +276,28 @@ where
     // A contradictory Twitch config (dynamic flag ON + a static identity, or
     // bad timing) fails loudly even when the data plane below is OFF.
     config::validate_twitch_mode(&config)?;
+    // Host selector (spec 2026-11-05 s5): env baselines only, never the flag
+    // client. Validated BEFORE any receiver starts; fatal and loud.
+    let env_lookup = |k: &str| std::env::var(k).ok();
+    let selector = connector_runtime::selector::OverlaySelector::from_env(&env_lookup)?;
+    let webhook_platforms = connector_runtime::selector::parse_webhook_platforms(
+        &config.cli.connector_runtime_webhook_platforms,
+    )?;
+    connector_runtime::selector::validate(&connector_runtime::selector::BootInputs {
+        cli: &config.cli,
+        selector: &selector,
+        webhook_platforms: &webhook_platforms,
+        spine_configured: penguin_spine::SpineConfig::from_env().is_ok(),
+        lookup: &env_lookup,
+    })?;
+    let tools_enabled = connector_runtime::selector::tools_enabled(&env_lookup)?;
+    let legacy_plan =
+        connector_runtime::selector::LegacyPlan::new(&selector, &webhook_platforms, tools_enabled);
+    // SEAM (PR-C/PR-D): when `selector.any_overlay()` the ConnectorRuntime is
+    // built and spawned here, `webhook_boot::build_ingress` is called and its
+    // result set on `state.webhook` BEFORE `http::router(state)`, and
+    // `ConnectorRuntime::ready_handle()` is stored on `receiver_readiness`.
+    // With every overlay OFF nothing is built.
     let license_client = license::build_license_client();
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
         // Schema-v3 producer: resolver is installed BEFORE any receiver can
@@ -294,27 +317,14 @@ where
         // onto the same underlying TTL cache / HTTP client.
         let dek_provider = build_dek_provider(&config, reqwest::Client::new());
 
-        start_twitch_inbound(
-            &config,
-            ingest_metrics.clone(),
-            Arc::clone(&receiver_readiness),
-            dek_provider.clone(),
-        )?;
-        try_start_discord(
-            &config,
-            ingest_metrics.clone(),
-            Arc::clone(&receiver_readiness),
-            dek_provider.clone(),
-        );
-        if config.cli.dynamic_connections {
-            // Per-community credentials: never the process-wide identity.
-            try_start_twitch_outbound_percommunity(&config)?;
-        } else {
-            try_start_twitch_outbound(&config);
-        }
-        try_start_discord_outbound(&config);
-        state.eventsub =
-            try_build_eventsub_state(&config, ingest_metrics.clone(), dek_provider).await;
+        let mut legacy = RealLegacy {
+            config: &config,
+            metrics: ingest_metrics.clone(),
+            readiness: Arc::clone(&receiver_readiness),
+            dek_provider,
+            state: &mut state,
+        };
+        connector_runtime::selector::start_legacy(&legacy_plan, &mut legacy).await?;
     } else {
         // WARN, not INFO: with the flag OFF no outbound drain runs, so
         // `svc_action` refuses every Discord chat.delete/dm.send (no
@@ -344,6 +354,57 @@ where
     )?;
 
     Ok(())
+}
+
+/// The real legacy starters, driven by
+/// [`connector_runtime::selector::start_legacy`].
+struct RealLegacy<'a> {
+    config: &'a config::Config,
+    metrics: Arc<telemetry::IngestMetrics>,
+    readiness: Arc<ReceiverReadiness>,
+    dek_provider:
+        identity_crypto::ConfiguredDekProvider<identity_crypto::UnimplementedMachineJwtProvider>,
+    state: &'a mut http::AppState,
+}
+
+impl connector_runtime::selector::LegacyStarters for RealLegacy<'_> {
+    fn twitch_inbound(&mut self) -> anyhow::Result<()> {
+        start_twitch_inbound(
+            self.config,
+            self.metrics.clone(),
+            Arc::clone(&self.readiness),
+            self.dek_provider.clone(),
+        )
+    }
+
+    fn discord_inbound(&mut self) {
+        try_start_discord(
+            self.config,
+            self.metrics.clone(),
+            Arc::clone(&self.readiness),
+            self.dek_provider.clone(),
+        );
+    }
+
+    fn twitch_outbound(&mut self) -> anyhow::Result<()> {
+        if self.config.cli.dynamic_connections {
+            // Per-community credentials: never the process-wide identity.
+            try_start_twitch_outbound_percommunity(self.config)
+        } else {
+            try_start_twitch_outbound(self.config);
+            Ok(())
+        }
+    }
+
+    fn discord_outbound(&mut self) {
+        try_start_discord_outbound(self.config);
+    }
+
+    async fn twitch_eventsub(&mut self) {
+        self.state.eventsub =
+            try_build_eventsub_state(self.config, self.metrics.clone(), self.dek_provider.clone())
+                .await;
+    }
 }
 
 /// Installs the dataplane scope resolver when
