@@ -34,6 +34,7 @@ import pytest
 from config import HubAPIConfig
 from services import identity_service, oauth_service
 from services.errors import ApiError
+from services.install_state_binding import bound_state
 
 
 def _cfg() -> HubAPIConfig:
@@ -89,6 +90,7 @@ class TestIdentityLinkStateIsServerSide:
                 code="irrelevant-attacker-code",
                 state=forged_state,
                 callback_base_url="http://localhost",
+                binding_nonce="n",
             )
         assert exc_info.value.status_code == 400
 
@@ -102,13 +104,14 @@ class TestIdentityLinkStateIsServerSide:
                 code="x",
                 state="0123456789abcdef0123456789abcdef",
                 callback_base_url="http://localhost",
+                binding_nonce="n",
             )
         assert exc_info.value.status_code == 400
 
     async def test_expired_link_state_is_rejected(self, auth_db: Any) -> None:
         """A real, server-issued state past `expires_at` is rejected -- not replayable forever."""
         user_id = _seed_user(auth_db, email="alice@example.com")
-        state = "expired-state-token"
+        state = bound_state("expired-state-token", "n")
         auth_db.dal.hub_oauth_states.insert(
             state=state,
             mode="link",
@@ -127,6 +130,7 @@ class TestIdentityLinkStateIsServerSide:
                 code="x",
                 state=state,
                 callback_base_url="http://localhost",
+                binding_nonce="n",
             )
         assert exc_info.value.status_code == 400
 
@@ -143,6 +147,7 @@ class TestIdentityLinkStateIsServerSide:
             user_id=user_id,
             platform="discord",
             callback_base_url="http://localhost",
+            binding_nonce="n",
         )
 
         # Query via async_dal.select_async (same executor thread/connection
@@ -156,7 +161,9 @@ class TestIdentityLinkStateIsServerSide:
         assert row.user_id == user_id
         assert row.mode == "link"
         # The state token itself carries no decodable user id -- opaque hex.
-        assert str(user_id) not in state or len(state) == 32  # hex token, coincidental digits only
+        assert (
+            str(user_id) not in state or len(state.partition(".")[0]) == 32
+        )  # hex token, coincidental digits only
         assert "discord" in authorize_url
 
 

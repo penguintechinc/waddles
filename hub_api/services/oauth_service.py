@@ -141,9 +141,17 @@ async def exchange_code(
 
 
 async def start_oauth(
-    async_dal: Any, dal: Any, *, platform: str, mode: str, callback_base_url: str
+    async_dal: Any,
+    dal: Any,
+    *,
+    platform: str,
+    mode: str,
+    callback_base_url: str,
+    binding_nonce: str,
 ) -> tuple[str, str]:
     """Start an OAuth login/link flow. Returns `(authorize_url, state)`.
+
+    The state embeds the SHA-256 of `binding_nonce` (the initiating browser's cookie).
 
     `hub_oauth_states` has no `metadata` column (see `schema.py`'s module
     docstring gap 2) -- the tenant-scoped `metadata` insert Node performs
@@ -153,7 +161,7 @@ async def start_oauth(
     the real schema.
     """
     _require_valid_platform(platform)
-    state = secrets.token_hex(16)
+    state = bound_state(secrets.token_hex(16), binding_nonce)
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/callback"
 
     await async_dal.insert_async(
@@ -410,8 +418,18 @@ async def oauth_callback(
     code: str,
     state: str,
     callback_base_url: str,
+    binding_nonce: str | None,
 ) -> str:
-    """Complete an OAuth login. Returns a minted session JWT."""
+    """Complete an OAuth login. Returns a minted session JWT.
+
+    A browser that cannot present the nonce the state was bound to is refused (typed `ApiError`
+    code `state_binding_mismatch`) BEFORE the state is consumed; absent/expired/replayed state
+    raises code `invalid_or_expired_state`.
+    """
+    try:
+        verify_state_binding(state, binding_nonce)
+    except InstallStateError as exc:
+        raise ApiError("OAuth state is not bound to this browser", 400, exc.code) from exc
     state_rows = await async_dal.select_async(
         dal(
             (dal.hub_oauth_states.state == state)
@@ -420,7 +438,7 @@ async def oauth_callback(
         )
     )
     if not state_rows:
-        raise bad_request("Invalid or expired OAuth state")
+        raise ApiError("Invalid or expired OAuth state", 400, ERR_STATE)
     await async_dal.delete_async(dal.hub_oauth_states.state == state)
 
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/callback"

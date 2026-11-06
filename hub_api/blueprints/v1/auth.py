@@ -53,6 +53,8 @@ auth_bp = Blueprint("v1_auth", __name__, url_prefix="/api/v1/auth")
 #: ``__Host-`` cookie binding an account-link `state` to the initiating browser.
 LINK_BINDING_COOKIE = binding.cookie_name("oauth_link")
 LINK_STATE_TTL_S = binding.LINK_STATE_TTL_S
+#: ``__Host-`` cookie binding a social-login `state` to the initiating browser.
+LOGIN_BINDING_COOKIE = binding.cookie_name("oauth_login")
 
 logger = logging.getLogger(__name__)
 
@@ -773,11 +775,24 @@ async def oauth_start(platform: str) -> OAuthStartResponse | tuple[dict[str, obj
     async_dal, dal = _dal()
     mode = request.args.get("mode", "login")
     try:
+        nonce = binding.new_nonce()
         authorize_url, state = await oauth_service.start_oauth(
-            async_dal, dal, platform=platform, mode=mode, callback_base_url=_callback_base_url()
+            async_dal,
+            dal,
+            platform=platform,
+            mode=mode,
+            callback_base_url=_callback_base_url(),
+            binding_nonce=nonce,
         )
     except ApiError as exc:
         return _err(exc)
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Bind the login state to THIS browser (``__Host-`` HttpOnly Secure SameSite=Lax)."""
+        binding.set_binding_cookie(response, LOGIN_BINDING_COOKIE, nonce, LINK_STATE_TTL_S)
+        return response
+
     return OAuthStartResponse(success=True, authorizeUrl=authorize_url, state=state)
 
 
@@ -814,14 +829,18 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
             code=code,
             state=state,
             callback_base_url=_callback_base_url(),
+            binding_nonce=request.cookies.get(LOGIN_BINDING_COOKIE),
         )
-    except ApiError:
-        return redirect(f"{frontend_origin}/login?error=oauth_failed")
+    except ApiError as exc:
+        error = exc.code if exc.code in (binding.ERR_BINDING, binding.ERR_STATE) else "oauth_failed"
+        return redirect(f"{frontend_origin}/login?error={error}")
 
     exchange_code = await oauth_service.create_oauth_exchange_code(
         async_dal, dal, token=token, platform=platform
     )
-    return redirect(f"{frontend_origin}/auth/callback?code={exchange_code}")
+    page = redirect(f"{frontend_origin}/auth/callback?code={exchange_code}")
+    binding.clear_binding_cookie(page, LOGIN_BINDING_COOKIE)
+    return page
 
 
 @auth_bp.route("/exchange", methods=["POST"])

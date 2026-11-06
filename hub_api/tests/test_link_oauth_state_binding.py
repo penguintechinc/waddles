@@ -1,7 +1,8 @@
 """Browser binding of account/identity-link OAuth `state` (hub_oauth_states, DB-backed).
 
 Drives the real start -> callback round trip of both link flows
-(`/api/v1/user/identities/link/<p>` and `/api/v1/auth/oauth/<p>/link`) on the seeded auth DB. Only
+(`/api/v1/user/identities/link/<p>`, `/api/v1/auth/oauth/<p>/link`) and the social-login flow
+(`/api/v1/auth/oauth/<p>`) on the seeded auth DB. Only
 the provider token exchange is mocked, so each refusal asserts no identity row was ever written.
 Matrix: happy, missing cookie, other user's browser (victim can still finish), replay, expired,
 forged, state/cookie pair from different flows.
@@ -28,6 +29,12 @@ from services.install_state_binding import ERR_BINDING, ERR_STATE
 from tests.conftest import TENANT_SLUG, make_user_token
 
 FLOWS = {
+    "login": (
+        "/api/v1/auth/oauth/twitch",
+        "get",
+        "/api/v1/auth/oauth/twitch/callback",
+        auth_module.LOGIN_BINDING_COOKIE,
+    ),
     "identity": (
         "/api/v1/user/identities/link/twitch",
         "post",
@@ -79,6 +86,18 @@ def app(auth_db: Any) -> Quart:
 
 
 @pytest.fixture(autouse=True)
+def sessions(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Mock the login session mint (counted: a refused login must never mint one)."""
+    minted = AsyncMock(return_value="jwt")
+    monkeypatch.setattr(oauth_service, "create_session_token", minted)
+    monkeypatch.setattr(
+        oauth_service, "_find_or_create_user_from_oauth", AsyncMock(return_value=object())
+    )
+    monkeypatch.setattr(oauth_service, "create_oauth_exchange_code", AsyncMock(return_value="xc"))
+    return minted
+
+
+@pytest.fixture(autouse=True)
 def _provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         oauth_service,
@@ -105,8 +124,10 @@ def _hdr(uid: int) -> dict[str, str]:
 class Harness:
     """Start/finish helper for one flow, plus an identity-row counter."""
 
-    def __init__(self, app: Quart, auth_db: Any, flow: str) -> None:
+    def __init__(self, app: Quart, auth_db: Any, flow: str, sessions: AsyncMock) -> None:
         """Bind the flow's routes; cookies are passed by hand (no jar)."""
+        self.flow = flow
+        self.sessions = sessions
         self.client = app.test_client(use_cookies=False)
         self.auth_db = auth_db
         self.start_path, self.method, self.cb_path, self.cookie = FLOWS[flow]
@@ -128,14 +149,16 @@ class Harness:
         return await self.client.get(f"{self.cb_path}?state={state}&code=c", headers=headers)
 
     def linked(self) -> int:
+        if self.flow == "login":
+            return int(self.sessions.await_count)
         return int(
             self.auth_db.dal(self.auth_db.dal.hub_user_identities.platform == "twitch").count()
         )
 
 
 @pytest.fixture(params=sorted(FLOWS))
-def h(request: pytest.FixtureRequest, app: Quart, auth_db: Any) -> Harness:
-    return Harness(app, auth_db, request.param)
+def h(request: pytest.FixtureRequest, app: Quart, auth_db: Any, sessions: AsyncMock) -> Harness:
+    return Harness(app, auth_db, request.param, sessions)
 
 
 def _loc(resp: Any) -> str:

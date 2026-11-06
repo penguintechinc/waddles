@@ -438,6 +438,7 @@ def _patch_oauth_callback(monkeypatch: Any, token: str) -> None:
         code: str,
         state: str,
         callback_base_url: str,
+        binding_nonce: str | None = None,
     ) -> str:
         return token
 
