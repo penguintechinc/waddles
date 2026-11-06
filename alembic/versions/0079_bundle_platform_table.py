@@ -9,8 +9,8 @@ columns, look up `communities.tenant_id`, and INSERT the audit row. LOGIN only w
 `DB_PLATFORM_TABLE_PASSWORD` is set; otherwise NOLOGIN (inert, capability unwired,
 fail-closed). DDL: `scripts/db/bundle_platform_table.sql`.
 
-Revision ID: 0078_bundle_platform_table
-Revises: 0077_stream_keys_destinations
+Revision ID: 0079_bundle_platform_table
+Revises: 0078_wix_connection_resource
 Create Date: 2026-11-06
 """
 
@@ -23,8 +23,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0078_bundle_platform_table"
-down_revision = "0077_stream_keys_destinations"
+revision = "0079_bundle_platform_table"
+down_revision = "0078_wix_connection_resource"
 branch_labels = None
 depends_on = None
 
