@@ -296,6 +296,55 @@ pub struct CliConfig {
     /// never falls through to SIGKILL.
     #[arg(long, env = "EXECUTOR_SHUTDOWN_DRAIN_SECONDS", default_value_t = 25)]
     pub executor_shutdown_drain_secs: u64,
+
+    /// The connector host-API listener (svc-ingest) this executor DIALS a
+    /// SECOND link to, `host:port` with `host` a service DNS name (IP
+    /// literals are refused at config load). Unset/empty = no connector
+    /// link is dialed. The address comes from config ONLY -- nothing read off
+    /// a wire frame ever selects a dial target (SSRF). `validate()` refuses a
+    /// value without at least one `CONNECTOR_PIN_DIGEST_<P>`
+    /// (connector runtime spec S2.1/S2.2).
+    #[arg(long, env = "CONNECTOR_HOST_API_ADDR")]
+    pub connector_host_api_addr: Option<String>,
+
+    /// The connector listener's expected server identity (URI/DNS SAN, else
+    /// CN), pinned through the same `crate::tls` path as
+    /// `HOST_API_STAGE_IDENTITY`. Must differ from the stage identity so
+    /// svc-action/svc-process can never stand in for svc-ingest.
+    #[arg(long, env = "CONNECTOR_HOST_API_IDENTITY")]
+    pub connector_host_api_identity: Option<String>,
+
+    /// PEM client certificate presented on the connector link. A DISTINCT
+    /// identity from `HOST_API_CLIENT_CERT_FILE`: the stage client cert's SANs
+    /// name the stages, so a listener pinning the executor identity by SAN
+    /// would otherwise accept a stage certificate. This one's SAN must be ONLY
+    /// the executor identity.
+    #[arg(long, env = "CONNECTOR_HOST_API_CLIENT_CERT_FILE")]
+    pub connector_host_api_client_cert_file: Option<PathBuf>,
+
+    /// PEM private key for [`Self::connector_host_api_client_cert_file`],
+    /// file-only per Token & Secret Hygiene.
+    #[arg(long, env = "CONNECTOR_HOST_API_CLIENT_KEY_FILE")]
+    pub connector_host_api_client_key_file: Option<PathBuf>,
+
+    /// Connections held to the connector listener. MUST be 1: the listener's
+    /// `ExecutorLink::attach` REPLACES the previous session, so a second
+    /// connection would silently kill the first (validated in `validate()`).
+    #[arg(long, env = "EXECUTOR_CONNECTOR_CONNECTIONS", default_value_t = 1)]
+    pub executor_connector_connections: u32,
+
+    /// `sha256:<64 lowercase hex>` of the Twitch overlay to pin at startup
+    /// (`connectors/twitch/<digest>.wasm`). Empty/unset = not pinned.
+    #[arg(long, env = "CONNECTOR_PIN_DIGEST_TWITCH")]
+    pub connector_pin_digest_twitch: Option<String>,
+
+    /// Same as [`Self::connector_pin_digest_twitch`] for Discord.
+    #[arg(long, env = "CONNECTOR_PIN_DIGEST_DISCORD")]
+    pub connector_pin_digest_discord: Option<String>,
+
+    /// Same as [`Self::connector_pin_digest_twitch`] for YouTube.
+    #[arg(long, env = "CONNECTOR_PIN_DIGEST_YOUTUBE")]
+    pub connector_pin_digest_youtube: Option<String>,
 }
 
 impl CliConfig {
@@ -342,6 +391,14 @@ impl CliConfig {
             executor_grace_secs: 60,
             executor_max_concurrent_compiles: 2,
             executor_shutdown_drain_secs: 25,
+            connector_host_api_addr: None,
+            connector_host_api_identity: None,
+            connector_host_api_client_cert_file: None,
+            connector_host_api_client_key_file: None,
+            executor_connector_connections: 1,
+            connector_pin_digest_twitch: None,
+            connector_pin_digest_discord: None,
+            connector_pin_digest_youtube: None,
         }
     }
 
@@ -410,7 +467,78 @@ impl CliConfig {
                 self.executor_wasm_collector
             )));
         }
+        self.validate_connector_link()
+    }
+
+    /// The configured connector listener address, `None` when unset/empty
+    /// (no connector link is dialed).
+    #[must_use]
+    pub fn connector_dial_addr(&self) -> Option<&str> {
+        self.connector_host_api_addr
+            .as_deref()
+            .filter(|a| !a.is_empty())
+    }
+
+    /// Validates the connector-runtime settings (spec S2.1-S2.3): exactly one
+    /// connector connection, well-formed pin digests, and -- when a connector
+    /// listener is configured -- a DNS-name address, a pinned server
+    /// identity, and at least one connector to serve over the link.
+    fn validate_connector_link(&self) -> Result<(), ExecutorError> {
+        if self.executor_connector_connections != 1 {
+            return Err(ExecutorError::Config(format!(
+                "EXECUTOR_CONNECTOR_CONNECTIONS ({}) must be exactly 1: the connector listener \
+                 replaces the previous session on every attach, so a second connection would \
+                 kill the first",
+                self.executor_connector_connections
+            )));
+        }
+        let mut pinned = 0usize;
+        for (var, value) in self.connector_pin_digest_vars() {
+            if parse_pin_digest(var, value)?.is_some() {
+                pinned += 1;
+            }
+        }
+        let Some(addr) = self.connector_dial_addr() else {
+            return Ok(());
+        };
+        validate_service_dns_addr("CONNECTOR_HOST_API_ADDR", addr)?;
+        if pinned == 0 {
+            return Err(ExecutorError::Config(
+                "CONNECTOR_HOST_API_ADDR requires at least one CONNECTOR_PIN_DIGEST_<P>: \
+                 dialing a connector listener with nothing pinned would serve nothing"
+                    .to_string(),
+            ));
+        }
+        if self
+            .connector_host_api_identity
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            return Err(ExecutorError::Config(
+                "CONNECTOR_HOST_API_IDENTITY is required with CONNECTOR_HOST_API_ADDR: the \
+                 listener's certificate must be pinned to an explicit identity"
+                    .to_string(),
+            ));
+        }
         Ok(())
+    }
+
+    /// `(env var, raw value)` for every `CONNECTOR_PIN_DIGEST_<P>` field.
+    pub(crate) fn connector_pin_digest_vars(&self) -> [(&'static str, Option<&str>); 3] {
+        [
+            (
+                "CONNECTOR_PIN_DIGEST_TWITCH",
+                self.connector_pin_digest_twitch.as_deref(),
+            ),
+            (
+                "CONNECTOR_PIN_DIGEST_DISCORD",
+                self.connector_pin_digest_discord.as_deref(),
+            ),
+            (
+                "CONNECTOR_PIN_DIGEST_YOUTUBE",
+                self.connector_pin_digest_youtube.as_deref(),
+            ),
+        ]
     }
 
     /// Validates that the host-API mutual-TLS material is fully configured
@@ -451,12 +579,108 @@ impl CliConfig {
                     .to_string(),
             ));
         }
+        if self.connector_dial_addr().is_some() {
+            self.validate_connector_tls()?;
+        }
+        Ok(())
+    }
+
+    /// The connector link's mTLS material: its OWN client cert/key (never the
+    /// stage's -- a stage certificate's SANs name the stages, so reusing it
+    /// would let a SAN-pinning listener accept a stage as the executor) and a
+    /// server identity distinct from the stage's.
+    fn validate_connector_tls(&self) -> Result<(), ExecutorError> {
+        let (Some(cert), Some(key)) = (
+            self.connector_host_api_client_cert_file.as_ref(),
+            self.connector_host_api_client_key_file.as_ref(),
+        ) else {
+            return Err(ExecutorError::Config(
+                "CONNECTOR_HOST_API_CLIENT_CERT_FILE and CONNECTOR_HOST_API_CLIENT_KEY_FILE are \
+                 both required with CONNECTOR_HOST_API_ADDR -- the connector link needs its own \
+                 executor client identity"
+                    .to_string(),
+            ));
+        };
+        if Some(cert) == self.host_api_client_cert_file.as_ref()
+            || Some(key) == self.host_api_client_key_file.as_ref()
+        {
+            return Err(ExecutorError::Config(
+                "the connector client cert/key must be distinct files from \
+                 HOST_API_CLIENT_CERT_FILE/HOST_API_CLIENT_KEY_FILE: the stage certificate must \
+                 never be presented as the executor identity"
+                    .to_string(),
+            ));
+        }
+        if self.connector_host_api_identity == self.host_api_stage_identity {
+            return Err(ExecutorError::Config(
+                "CONNECTOR_HOST_API_IDENTITY must differ from HOST_API_STAGE_IDENTITY so a stage \
+                 can never impersonate the connector listener"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 }
 
+/// Parses one `CONNECTOR_PIN_DIGEST_<P>` value: unset or empty is `None` (not
+/// pinned); anything else must be `sha256:` plus exactly 64 lowercase hex
+/// digits. The error names the variable, never the value.
+pub(crate) fn parse_pin_digest(
+    var: &'static str,
+    value: Option<&str>,
+) -> Result<Option<String>, ExecutorError> {
+    let Some(value) = value.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let well_formed = value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    });
+    if well_formed {
+        Ok(Some(value.to_string()))
+    } else {
+        Err(ExecutorError::Config(format!(
+            "{var} must be `sha256:` followed by 64 lowercase hex digits"
+        )))
+    }
+}
+
+/// Validates a `host:port` dial address whose host is a service DNS name: a
+/// non-zero port, RFC 1035-shaped labels, and never an IP literal (a service
+/// is addressed by name, and a literal would be an SSRF-shaped dial target).
+pub(crate) fn validate_service_dns_addr(
+    var: &'static str,
+    addr: &str,
+) -> Result<(), ExecutorError> {
+    let bad = |why: &str| ExecutorError::Config(format!("{var} {why}"));
+    let (host, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| bad("must be host:port"))?;
+    match port.parse::<u16>() {
+        Ok(p) if p != 0 => {}
+        _ => return Err(bad("has an invalid port")),
+    }
+    if host.is_empty() || host.len() > 253 {
+        return Err(bad("has an empty or over-long host"));
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() || host.contains(['[', ']']) {
+        return Err(bad("must name a service by DNS name, not an IP literal"));
+    }
+    let label_ok = |l: &str| {
+        !l.is_empty()
+            && l.len() <= 63
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    };
+    if !host.split('.').all(label_ok) {
+        return Err(bad("host is not a valid DNS name"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use clap::Parser;
 
@@ -573,6 +797,157 @@ mod tests {
         assert_eq!(cfg.executor_max_concurrent_compiles, 2);
         assert_eq!(cfg.executor_shutdown_drain_secs, 25);
         Ok(())
+    }
+
+    const PIN: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+    fn connector_cfg(extra: &[&str]) -> Result<CliConfig, clap::Error> {
+        let mut args = base_args();
+        args.extend_from_slice(extra);
+        CliConfig::try_parse_from(args)
+    }
+
+    #[test]
+    fn connector_defaults_dial_nothing_and_validate() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = connector_cfg(&[])?;
+        cfg.validate()?;
+        assert_eq!(cfg.executor_connector_connections, 1);
+        assert!(cfg.connector_dial_addr().is_none());
+        // An empty (helm-rendered-but-unset) address is "no dial", not an error.
+        let cfg = connector_cfg(&["--connector-host-api-addr", ""])?;
+        cfg.validate()?;
+        assert!(cfg.connector_dial_addr().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn more_than_one_connector_connection_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        for n in ["0", "2", "4"] {
+            let cfg = connector_cfg(&["--executor-connector-connections", n])?;
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("EXECUTOR_CONNECTOR_CONNECTIONS"), "{err}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn connector_addr_without_a_pin_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = connector_cfg(&[
+            "--connector-host-api-addr",
+            "svc-ingest:8301",
+            "--connector-host-api-identity",
+            "spiffe://x/ingest",
+        ])?;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("CONNECTOR_PIN_DIGEST"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn connector_addr_requires_an_identity_and_accepts_a_full_set(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let no_identity = connector_cfg(&[
+            "--connector-host-api-addr",
+            "svc-ingest:8301",
+            "--connector-pin-digest-twitch",
+            PIN,
+        ])?;
+        let err = no_identity.validate().unwrap_err().to_string();
+        assert!(err.contains("CONNECTOR_HOST_API_IDENTITY"), "{err}");
+        let ok = connector_cfg(&[
+            "--connector-host-api-addr",
+            "svc-ingest.waddlebot.svc.cluster.local:8301",
+            "--connector-host-api-identity",
+            "spiffe://x/ingest",
+            "--connector-pin-digest-twitch",
+            PIN,
+        ])?;
+        ok.validate()?;
+        assert_eq!(
+            ok.connector_dial_addr(),
+            Some("svc-ingest.waddlebot.svc.cluster.local:8301")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn connector_addr_must_be_a_dns_name_with_a_valid_port() {
+        for bad in [
+            "127.0.0.1:8301",
+            "[::1]:8301",
+            "svc-ingest",
+            "svc-ingest:0",
+            "svc-ingest:70000",
+            "svc-ingest:abc",
+            ":8301",
+            "-bad.svc:8301",
+            "bad_label.svc:8301",
+            "a..b:8301",
+            "user@svc-ingest:8301",
+        ] {
+            assert!(
+                validate_service_dns_addr("CONNECTOR_HOST_API_ADDR", bad).is_err(),
+                "{bad} must be refused"
+            );
+        }
+        for good in [
+            "svc-ingest:8301",
+            "svc-ingest.ns.svc.cluster.local:8301",
+            "localhost:1",
+        ] {
+            validate_service_dns_addr("CONNECTOR_HOST_API_ADDR", good).unwrap();
+        }
+        let long = format!("{}:1", "a".repeat(254));
+        assert!(validate_service_dns_addr("X", &long).is_err());
+    }
+
+    #[test]
+    fn malformed_pin_digest_fails_validate() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = connector_cfg(&["--connector-pin-digest-youtube", "sha256:zz"])?;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("CONNECTOR_PIN_DIGEST_YOUTUBE"), "{err}");
+        Ok(())
+    }
+
+    fn tls_ready(extra: &[&str]) -> CliConfig {
+        let mut base = vec![
+            "--connector-host-api-addr",
+            "svc-ingest:8301",
+            "--connector-host-api-identity",
+            "spiffe://x/ingest",
+            "--connector-pin-digest-twitch",
+            PIN,
+        ];
+        base.extend_from_slice(extra);
+        let mut cfg = connector_cfg(&base).unwrap();
+        cfg.host_api_ca_file = Some(PathBuf::from("/tls/ca.pem"));
+        cfg.host_api_client_cert_file = Some(PathBuf::from("/tls/stage.pem"));
+        cfg.host_api_client_key_file = Some(PathBuf::from("/tls/stage.key"));
+        cfg.host_api_stage_identity = Some("spiffe://x/stage".to_string());
+        cfg
+    }
+
+    #[test]
+    fn connector_link_needs_its_own_distinct_client_identity() {
+        // Missing cert/key.
+        assert!(tls_ready(&[]).validate_host_api_tls().is_err());
+        // The stage cert reused as the executor identity.
+        let mut reuse = tls_ready(&[]);
+        reuse.connector_host_api_client_cert_file = Some(PathBuf::from("/tls/stage.pem"));
+        reuse.connector_host_api_client_key_file = Some(PathBuf::from("/tls/exec.key"));
+        let err = reuse.validate_host_api_tls().unwrap_err().to_string();
+        assert!(err.contains("distinct"), "{err}");
+        // Same server identity as the stage.
+        let mut same_id = tls_ready(&[]);
+        same_id.connector_host_api_client_cert_file = Some(PathBuf::from("/tls/exec.pem"));
+        same_id.connector_host_api_client_key_file = Some(PathBuf::from("/tls/exec.key"));
+        same_id.connector_host_api_identity = same_id.host_api_stage_identity.clone();
+        assert!(same_id.validate_host_api_tls().is_err());
+        // A complete, distinct set passes.
+        let mut ok = tls_ready(&[]);
+        ok.connector_host_api_client_cert_file = Some(PathBuf::from("/tls/exec.pem"));
+        ok.connector_host_api_client_key_file = Some(PathBuf::from("/tls/exec.key"));
+        ok.validate_host_api_tls().unwrap();
     }
 
     #[test]
