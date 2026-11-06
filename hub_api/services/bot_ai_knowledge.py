@@ -626,6 +626,12 @@ def update_knowledge_source(dal: Any, source_id: int, updates: dict[str, Any]) -
     row = dal.ai_knowledge_sources[source_id]
     if row is None:
         raise KnowledgeServiceError("Knowledge source not found", status=404)
+    redirected = any(
+        k in fields and fields[k] != row[k] for k in ("source_url", "branch", "docs_path")
+    )
+    if redirected and "encrypted_token" not in fields:
+        # A stored credential must never be replayed against a new target.
+        fields["encrypted_token"] = None
     dal(dal.ai_knowledge_sources.id == source_id).update(**fields)
     dal.commit()
     return _to_source(dal.ai_knowledge_sources[source_id])
@@ -902,6 +908,7 @@ async def generate_suggestion(
 
     new_id = dal.ai_ticket_suggestions.insert(
         ticket_id=ticket_id,
+        community_id=community_id,
         suggestion_text=suggestion_text,
         confidence_score=round(confidence_score, 3),
         cited_chunks=cited_chunk_ids,
@@ -921,16 +928,40 @@ async def generate_suggestion(
     )
 
 
-def record_feedback(dal: Any, suggestion_id: int, feedback: str) -> TicketSuggestion:
-    """`POST .../ai-knowledge/suggestions/:id/feedback`."""
+def validate_feedback(feedback: str) -> None:
+    """Raise a 400 `KnowledgeServiceError` unless `feedback` is an allowed value."""
     if feedback not in _VALID_FEEDBACK:
         raise KnowledgeServiceError(
             f"feedback must be one of: {', '.join(sorted(_VALID_FEEDBACK))}", status=400
         )
+
+
+def get_suggestion_scope(dal: Any, suggestion_id: int) -> tuple[bool, int | None]:
+    """Return `(exists, owning community_id)` for a suggestion; NULL owner = super-admin only."""
     row = dal.ai_ticket_suggestions[suggestion_id]
     if row is None:
+        return False, None
+    return True, row.community_id
+
+
+def record_feedback(
+    dal: Any, suggestion_id: int, feedback: str, *, community_id: int | None
+) -> TicketSuggestion:
+    """`POST .../ai-knowledge/suggestions/:id/feedback`.
+
+    The write is filtered by the suggestion's owning `community_id` (the caller has already
+    authorized it); a mismatch is indistinguishable from a missing row (404).
+    """
+    validate_feedback(feedback)
+    tbl = dal.ai_ticket_suggestions
+    if community_id is None:
+        owner = tbl.community_id == None  # noqa: E711 - pydal IS NULL
+    else:
+        owner = tbl.community_id == community_id
+    scoped = dal((tbl.id == suggestion_id) & owner)
+    if scoped.select().first() is None:
         raise KnowledgeServiceError("Suggestion not found", status=404)
-    dal(dal.ai_ticket_suggestions.id == suggestion_id).update(feedback=feedback)
+    scoped.update(feedback=feedback)
     dal.commit()
     row = dal.ai_ticket_suggestions[suggestion_id]
     return TicketSuggestion(
