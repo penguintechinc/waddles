@@ -912,7 +912,7 @@ async def submit_suggestion_feedback(data: SuggestionFeedbackRequest, suggestion
     try:
         bot_ai_knowledge.validate_feedback(data.feedback)
     except bot_ai_knowledge.KnowledgeServiceError as exc:
-        return _error(str(exc), exc.status, "BAD_REQUEST")
+        raise ApiError(str(exc), exc.status, "BAD_REQUEST") from exc
     exists, owner = await asyncio.to_thread(
         bot_ai_knowledge.get_suggestion_scope, _dal(), suggestion_id
     )
@@ -929,7 +929,8 @@ async def submit_suggestion_feedback(data: SuggestionFeedbackRequest, suggestion
             )
         )
     except bot_ai_knowledge.KnowledgeServiceError as exc:
-        return _error(str(exc), exc.status, "NOT_FOUND" if exc.status == 404 else "BAD_REQUEST")
+        code = "NOT_FOUND" if exc.status == 404 else "BAD_REQUEST"
+        raise ApiError(str(exc), exc.status, code) from exc
     return SuggestionFeedbackResponse(success=True, suggestion=_suggestion_dto(suggestion))
 
 
