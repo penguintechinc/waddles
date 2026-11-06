@@ -468,6 +468,20 @@ async fn an_ended_live_chat_waits_then_rediscovers_the_new_stream_of_the_same_ch
     })
     .await;
     assert_eq!(metric("connector_runtime_parked_total", "fatal"), 0.0);
+    // Quota burn is visible: one counted discovery call per outcome.
+    let discovery = |outcome: &str| {
+        counter(
+            &registry,
+            "svc_ingest_transport_frame_rules_total",
+            &[
+                ("platform", "youtube"),
+                ("rule", "poll_rediscover"),
+                ("outcome", outcome),
+            ],
+        )
+    };
+    assert!(discovery("waiting_for_live") >= 2.0);
+    assert_eq!(discovery("rediscovered"), 0.0);
     assert_eq!(polled(CHAT_B), 0, "B is not live yet");
     assert_eq!(
         polled(CHAT_DECOY),
@@ -483,6 +497,7 @@ async fn an_ended_live_chat_waits_then_rediscovers_the_new_stream_of_the_same_ch
     })
     .await;
     assert!(metric("connector_runtime_restarts_total", "fingerprint") >= 1.0);
+    assert_eq!(discovery("rediscovered"), 1.0);
     assert_eq!(
         polled(CHAT_DECOY),
         0,

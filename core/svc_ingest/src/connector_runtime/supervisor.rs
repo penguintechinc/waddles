@@ -733,6 +733,10 @@ where
     make: M,
     tasks: FuturesUnordered<Fut>,
     slots: HashMap<ConnKey, Slot>,
+    /// Consecutive `waiting_for_live` ends per connection (backoff exponent);
+    /// cleared by any other end, a found broadcast, a fingerprint change or
+    /// the connection no longer being desired.
+    wait_streaks: HashMap<ConnKey, u32>,
     sh: Arc<Shared<I, S, L>>,
     status: Arc<RuntimeStatus>,
     config: RuntimeConfig,
@@ -749,6 +753,10 @@ where
     fn start(&mut self, desired: Arc<DesiredConnection>, reason: Option<RestartReason>) {
         if let Some(r) = reason {
             self.sh.metrics.restart(desired.key.platform, r);
+        }
+        // A changed target restarts the schedule; a plain re-check keeps it.
+        if !matches!(reason, Some(RestartReason::WaitingForLive)) {
+            self.wait_streaks.remove(&desired.key);
         }
         let (tx, rx) = oneshot::channel();
         self.tasks.push((self.make)(desired.clone(), rx));
@@ -792,6 +800,9 @@ where
         let Some(slot) = self.slots.remove(&key) else {
             return;
         };
+        if slot.pending.is_some() || !matches!(end, TaskEnd::WaitingForLive) {
+            self.wait_streaks.remove(&key);
+        }
         tracing::info!(
             platform = key.platform,
             community_id = key.community_id,
@@ -845,8 +856,20 @@ where
                 self.sh
                     .metrics
                     .parked(key.platform, ParkReason::WaitingForLive);
+                let streak = self.wait_streaks.entry(key.clone()).or_insert(0);
+                *streak = streak.saturating_add(1);
+                let wait = waiting_delay(self.config.reconcile_interval, *streak);
+                let wait = wait.saturating_add(jitter(wait));
+                tracing::debug!(
+                    platform = key.platform,
+                    community_id = key.community_id,
+                    connection_id = key.connection_id,
+                    streak = *streak,
+                    wait_secs = wait.as_secs(),
+                    "no live broadcast; backing off the next re-check"
+                );
                 slot.state = SlotState::Cooldown {
-                    until: Instant::now(),
+                    until: Instant::now() + wait,
                     reason: RestartReason::WaitingForLive,
                 };
             }
@@ -908,6 +931,7 @@ where
             if remove_now {
                 self.slots.remove(&k);
             }
+            self.wait_streaks.remove(&k);
         }
 
         let mut capped = 0u64;
@@ -1029,6 +1053,19 @@ where
     }
 }
 
+/// Longest `waiting_for_live` re-check gap, as a multiple of the reconcile
+/// interval (60 s reconcile -> 1 min doubling to a 15 min cap).
+const WAITING_CAP_FACTOR: u32 = 15;
+
+/// Un-jittered `waiting_for_live` gap after `streak` consecutive empty
+/// discoveries (`streak >= 1`): `base`, doubling, capped at
+/// `base * WAITING_CAP_FACTOR`. Bounds the YouTube quota an idle channel burns.
+fn waiting_delay(base: Duration, streak: u32) -> Duration {
+    let cap = base.saturating_mul(WAITING_CAP_FACTOR);
+    let doublings = streak.saturating_sub(1).min(16);
+    base.saturating_mul(1u32 << doublings).min(cap)
+}
+
 /// 0-20% of `base`, drawn from a fresh random UUID.
 fn jitter(base: Duration) -> Duration {
     let r = uuid::Uuid::new_v4().as_u128();
@@ -1132,6 +1169,7 @@ impl<
             make,
             tasks: FuturesUnordered::new(),
             slots: HashMap::new(),
+            wait_streaks: HashMap::new(),
             sh: self.sh.clone(),
             status: self.status.clone(),
             config: self.config.clone(),
