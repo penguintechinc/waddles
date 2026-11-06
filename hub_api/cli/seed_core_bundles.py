@@ -81,9 +81,11 @@ from services.bundle_approval_service import (
 from services.bundle_install_dal import build_install_dal, raw_sql_rows, raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, parse_bundle_manifest_v2
 from services.bundle_permission_service import (
+    get_community_granted_ids,
     grant_community_permissions,
     seed_core_permission_requests,
 )
+from services.bundle_table_access import is_table_access_id
 from services.bundle_telemetry import get_meter
 from services.bundle_version_service import (
     STATUS_ADDRESSING,
@@ -1216,12 +1218,23 @@ async def _grant_core_bundle_permissions(
     core bundle must not abort the whole seeder run (every other install/activation this
     run already committed) -- logged loud instead, so an operator notices and reruns.
     """
-    required = frozenset(d.id for d in manifest.permission_declarations)
+    # `platform.table.*` is never auto-granted (spec 2026-11-06 Sec3): a human
+    # global admin must approve it, so the seeder neither approves nor grants it.
+    required = frozenset(
+        d.id for d in manifest.permission_declarations if not is_table_access_id(d.id)
+    )
     if not required:
         return
     try:
         if community_id == TENANT_WIDE_COMMUNITY_SENTINEL:
             await _ensure_sentinel_community(install_dal, tenant_id=tenant_id)
+        held_table_access = frozenset(
+            pid
+            for pid in await get_community_granted_ids(
+                install_dal, community_id=community_id, app_id=app_id
+            )
+            if is_table_access_id(pid)
+        )
         await grant_community_permissions(
             install_dal,
             tenant_id=tenant_id,
@@ -1229,7 +1242,9 @@ async def _grant_core_bundle_permissions(
             app_id=app_id,
             version=version,
             manifest=manifest,
-            granted_permission_ids=required,
+            # Re-assert (never create) table-access grants a human admin already
+            # made, so this idempotent DELETE-then-INSERT cannot wipe them.
+            granted_permission_ids=required | held_table_access,
             params_by_id=_declared_bound_params(manifest) or None,
             granted_by=None,
             valkey_client=valkey_client,

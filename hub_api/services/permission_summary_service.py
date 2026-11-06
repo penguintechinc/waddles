@@ -71,6 +71,23 @@ def build_permission_summary(
             ),
             key=lambda t: (t["target"], t["tool"]),
         )
+    # Platform-table access is the MOST consent-relevant block (it lets a bundle
+    # touch tables it does not own): rendered in bold red by the webui, and part
+    # of the hashed summary so widening it forces re-approval. Present-only, so
+    # pre-existing bundles' hashes are unchanged.
+    if manifest.table_access:
+        summary["tableAccess"] = sorted(
+            (
+                {
+                    "table": t.table,
+                    "columns": list(t.columns),
+                    "ops": list(t.ops),
+                    "reason": t.reason,
+                }
+                for t in manifest.table_access
+            ),
+            key=lambda t: t["table"],
+        )
     return summary
 
 

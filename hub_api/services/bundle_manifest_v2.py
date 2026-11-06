@@ -37,6 +37,13 @@ from services.bundle_permission_catalog import (
     is_valid_egress_host,
     resolve_risk,
 )
+from services.bundle_table_access import (
+    TableAccessError,
+    TableAccessRequest,
+    is_table_access_id,
+    parse_table_access,
+    table_access_permission_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +244,11 @@ class BundleManifestV2:
     # manifest): True only for the core seeder / trusted reparse. Gates the
     # service-only `mcp.tools` capability.
     trusted_source: bool = False
+    # Platform-table access requests (spec 2026-11-06-bundle-table-access-grants):
+    # each (op, table, column) is ALSO folded into `permission_declarations`
+    # as a dangerous `platform.table.*` id; this keeps the consent-screen shape
+    # (table/columns/ops/reason). Defaulted last for hand-built fixtures.
+    table_access: tuple[TableAccessRequest, ...] = ()
 
     def supports_platform(self, platform: str) -> bool:
         """Return True when this bundle may run on `platform` (absent field = every platform)."""
@@ -676,6 +688,11 @@ def parse_permission_declarations(
     declarations: list[PermissionDeclaration] = []
     for entry in raw_entries:
         permission_id = entry.get("id", "")
+        _require(
+            not is_table_access_id(str(permission_id)),
+            "use_table_access_block",
+            f"{permission_id!r}: declare platform-table access via the table_access block",
+        )
         risk = resolve_risk(permission_id)
         _require(risk is not None, "unknown_permission", f"{permission_id!r}")
         assert risk is not None  # nosec B101 -- _require already raised above otherwise
@@ -1037,6 +1054,23 @@ def parse_bundle_manifest_v2(
         d for d in requested_tool_declarations(requested_tools) if d.id not in declared_ids
     )
 
+    try:
+        table_access = parse_table_access(raw.get("table_access"))
+    except TableAccessError as exc:
+        raise ManifestV2Error(exc.reason, exc.detail) from exc
+    _require(
+        not table_access or kind != "service",
+        "table_access_app_only",
+        "table_access is for app bundles; a service bundle exposes platform behaviour as tools",
+    )
+    declared_ids = {d.id for d in permission_declarations}
+    permission_declarations = permission_declarations + tuple(
+        PermissionDeclaration(id=pid, risk="dangerous", justification=req.reason)
+        for req in table_access
+        for pid in table_access_permission_ids((req,))
+        if pid not in declared_ids
+    )
+
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -1071,4 +1105,5 @@ def parse_bundle_manifest_v2(
         exported_tools=exported_tools,
         requested_tools=requested_tools,
         trusted_source=trusted_source,
+        table_access=table_access,
     )

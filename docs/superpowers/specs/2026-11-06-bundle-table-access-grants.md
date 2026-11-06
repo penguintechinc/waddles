@@ -6,6 +6,16 @@ app writing `community_members.role` -- with a prominent BOLD RED warning to the
 global admin (approval) and the community admin (activation). This REPLACES
 one-off host imports such as a `community.role.set`.
 
+## 0. Service vs app split
+
+- **Service bundles** (`kind: service`) own platform definitions and tools (e.g. the
+  Discord role tools) and expose them via `exported_tools`; **app bundles** invoke
+  those through `tool.call`/`tool.invoke` (bundle-MCP-tools framework).
+- **`table_access` is for APP bundles only**, touching Waddles platform tables
+  (e.g. `role_sync` writing `community_members.role`). A `kind: service` manifest
+  that declares `table_access` is rejected (`table_access_app_only`): platform-side
+  behaviour belongs in a service tool, not in a raw table grant.
+
 ## 1. Manifest (schema v2, additive)
 
 ```yaml

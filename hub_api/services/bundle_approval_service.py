@@ -117,6 +117,7 @@ from services.bundle_manifest_v2 import (
     ConsumeRule,
     EgressRule,
     Limits,
+    PermissionDeclaration,
     _infer_kind,
     parse_command_declarations,
     parse_exported_tools,
@@ -124,6 +125,7 @@ from services.bundle_manifest_v2 import (
     parse_requested_tools,
     requested_tool_declarations,
 )
+from services.bundle_table_access import parse_table_access, table_access_permission_ids
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, conflict, not_found
 from services.permission_summary_service import build_permission_summary, permission_hash
@@ -187,6 +189,12 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
     permission_declarations = permission_declarations + tuple(
         d for d in requested_tool_declarations(requested_tools) if d.id not in declared_ids
     )
+    table_access = parse_table_access(raw.get("table_access"))
+    permission_declarations = permission_declarations + tuple(
+        PermissionDeclaration(id=pid, risk="dangerous", justification=req.reason)
+        for req in table_access
+        for pid in table_access_permission_ids((req,))
+    )
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -229,6 +237,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         # Already-ingested, already-validated blob (see docstring) -- it passed
         # the trusted-source gate at ingest, so keep its service capability.
         trusted_source=True,
+        table_access=table_access,
     )
 
 
@@ -547,6 +556,12 @@ def classify_diff(new_summary: dict[str, Any], previous_summary: dict[str, Any] 
         parts |= {
             f"calls:{t['target']}:{t['tool']}:{t['access']}"
             for t in summary.get("requestedTools", [])
+        }
+        parts |= {
+            f"tableaccess:{op}:{t['table']}.{col}"
+            for t in summary.get("tableAccess", [])
+            for col in t["columns"]
+            for op in t["ops"]
         }
         return parts
 
