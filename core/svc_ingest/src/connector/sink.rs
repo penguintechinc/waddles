@@ -132,9 +132,8 @@ pub fn to_platform_event(
             "event platform differs from the connection's platform",
         ));
     }
-    if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_err() {
-        return Err(SinkError::Invalid("occurred_at is not RFC 3339"));
-    }
+    let occurred_at = normalize_utc(&event.occurred_at)
+        .ok_or(SinkError::Invalid("occurred_at is not RFC 3339"))?;
     let payload: serde_json::Value = serde_json::from_str(&event.payload_json)
         .map_err(|_| SinkError::Invalid("payload is not valid JSON"))?;
     if !payload.is_object() {
@@ -145,7 +144,7 @@ pub fn to_platform_event(
         "event_type": event.event_type,
         "actor": event.actor,
         "payload": payload,
-        "occurred_at": event.occurred_at,
+        "occurred_at": occurred_at,
         "source": {
             "platform": ctx.platform,
             "account_id": ctx.source_id,
@@ -154,6 +153,23 @@ pub fn to_platform_event(
     });
     serde_json::from_value::<PlatformEvent>(candidate)
         .map_err(|_| SinkError::Invalid("event does not satisfy the platform-event contract"))
+}
+
+/// The spine contract wants RFC 3339 UTC with a `Z` suffix. A connector that
+/// formats UTC as `+00:00` (Python `isoformat` parity: Spectrum) or any other
+/// offset still names the same instant, so the host rewrites it to `Z`; a
+/// value already ending in `Z` is passed through untouched. `None` when the
+/// value is not RFC 3339 at all.
+fn normalize_utc(s: &str) -> Option<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(s).ok()?;
+    if s.ends_with('Z') {
+        return Some(s.to_owned());
+    }
+    Some(
+        parsed
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+    )
 }
 
 /// The production sink: publishes onto the spine via `publish_event`.
@@ -263,6 +279,24 @@ mod tests {
                 matches!(to_platform_event(&ctx(), e), Err(SinkError::Invalid(_))),
                 "payload {bad:?} must be refused"
             );
+        }
+    }
+
+    #[test]
+    fn utc_offsets_are_normalized_to_z_and_z_is_untouched() {
+        for (given, want) in [
+            ("2026-10-12T00:00:00+00:00", "2026-10-12T00:00:00Z"),
+            (
+                "2026-10-12T00:00:00.250000+00:00",
+                "2026-10-12T00:00:00.250Z",
+            ),
+            ("2026-10-12T02:00:00+02:00", "2026-10-12T00:00:00Z"),
+            ("2026-10-12T00:00:00.123456Z", "2026-10-12T00:00:00.123456Z"),
+        ] {
+            let mut e = event();
+            e.occurred_at = given.to_owned();
+            let p = to_platform_event(&ctx(), e).unwrap();
+            assert_eq!(p.occurred_at, want, "{given}");
         }
     }
 

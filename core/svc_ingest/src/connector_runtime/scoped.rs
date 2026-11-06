@@ -69,7 +69,7 @@ pub fn scope_source(platform: &str, source_key: &str) -> Option<String> {
 pub const COMMUNITY_PLATFORM: &str = "community";
 
 /// What to ask the scope authority for `desired`: the upstream resource for
-/// twitch/discord, else (youtube, whose live chats have no `community_servers`
+/// twitch/discord, else (youtube/spectrum, whose sources have no `community_servers`
 /// link) the connection's own numeric community from the server-derived feed.
 /// Never read from binding metadata. `None` for a webhook plan or an unknown platform.
 #[must_use]
@@ -78,7 +78,9 @@ pub fn lookup_target(desired: &DesiredConnection) -> Option<(&'static str, Strin
     let key = source_key_of(desired)?;
     match platform {
         "twitch" | "discord" => scope_source(platform, key).map(|s| (platform, s)),
-        "youtube" | "wix" => Some((COMMUNITY_PLATFORM, desired.key.community_id.to_string())),
+        "youtube" | "spectrum" | "wix" => {
+            Some((COMMUNITY_PLATFORM, desired.key.community_id.to_string()))
+        }
         _ => None,
     }
 }
@@ -454,6 +456,13 @@ mod tests {
             f.build(&yt, 6).await.is_err(),
             "tenant disagreement refused"
         );
+        // Spectrum resolves through its community scope exactly like YouTube.
+        let sp = desired_ws("spectrum", 7, 9, 1, "spectrum:roster:555", 1);
+        assert_eq!(
+            lookup_target(&sp),
+            Some((COMMUNITY_PLATFORM, "7".to_owned()))
+        );
+        assert!(f.build(&sp, 5).await.is_ok());
         // ... and an unmapped platform is refused.
         let slack = desired_ws("slack", 7, 9, 1, "slack:x", 1);
         assert!(f.build(&slack, 5).await.is_err());
