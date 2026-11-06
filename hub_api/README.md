@@ -25,6 +25,7 @@ hub_api/
       compliance_audit.py      v1 `compliance audit` group: Enterprise read/verify/export of the audit chain
       sso.py                    v1 enterprise SSO: public login flows (SAML/OIDC/Google) + tenant-admin connection CRUD
       provider_connections.py    v1 provider connections: per-community CRUD + data-plane list/resolve (machine JWT)
+      youtube_connections.py     v1 YouTube connect: OAuth authorize/callback (code+PKCE) + live-chat discovery
     v2/
       platform.py          example v2 group: tenant -> scope -> DTO chain, exposes BLUEPRINTS
   routers/
@@ -43,7 +44,8 @@ hub_api/
     sso_service.py           enterprise SSO orchestration: entitlement-gated connection CRUD, login start/complete, JIT provisioning
     sso_oidc.py / sso_saml.py  protocol layers: OIDC code+PKCE with local ID-token validation; SAML 2.0 SP (XSW/replay/XXE defences)
     sso_http.py / sso_state.py / sso_crypto.py / sso_settings.py / sso_telemetry.py / sso_types.py  SSRF-guarded IdP HTTP, Redis single-use state, AES-GCM secrets, operator settings, OTel + PII-safe logging, shared types
-    provider_connections/   standard provider/connection framework: adapter contract, Twitch adapter, registry, vault, store, service
+    provider_connections/   standard provider/connection framework: adapter contract, Twitch/Discord/YouTube adapters, registry, vault, store, service
+    youtube_install.py      YouTube OAuth connect flow: state + PKCE, code exchange, per-tenant Google app, reconnect
     current_user.py         resolve the caller's user id from the bearer JWT
     audit_chain.py          tamper-evident audit hash chain: canonical form, seal, verify (stdlib only)
     audit_events.py         audit vocabulary, PII-free event validation, request classification

@@ -7,19 +7,32 @@
 //! | [`feed`] | desired-set types and the [`BindingFeed`] over hub-api bindings |
 //! | [`plan`] | the platform-static [`OverlayProfile`] seam and [`RuntimeEnv`] |
 //! | [`supervisor`] | the reconcile loop and per-connection supervision |
+//! | [`lease`] | the per-connection Valkey lease (`connector:<platform>:<id>`) |
+//! | [`observed`] | delegating wrappers recording readiness facts |
 //! | [`ready`] | [`RuntimeReady`] / [`Readiness`] and the `/readyz` status |
 //! | [`metrics`] | bounded-label Prometheus series (no community/connection ids) |
 
 pub mod feed;
+pub mod lease;
 pub mod metrics;
+pub mod observed;
 pub mod plan;
 pub mod ready;
 pub mod supervisor;
+pub mod tenant;
+#[cfg(test)]
+pub(crate) mod testkit;
 pub mod webhook_boot;
 
 pub use feed::{
-    BindingFeed, ConnKey, DesiredConnection, FeedError, HubBindingFeed, TransportPlan, WebhookPlan,
+    BindingFeed, ConnKey, DesiredConnection, DynFeed, FeedError, FeedSet, HubBindingFeed,
+    TransportPlan, WebhookPlan,
 };
+pub use lease::ConnectorValkeyLease;
 pub use plan::{OverlayProfile, PlanError, RuntimeEnv};
 pub use ready::{Readiness, RuntimeReady};
-pub use supervisor::ConnectorRuntime;
+pub use supervisor::{
+    ConnectorRuntime, ResolverSecrets, RuntimeConfig, RuntimeDeps, RuntimeError, SecretsFactory,
+    SinkBuildError, SinkFactory, WebhookAttach,
+};
+pub use tenant::{TenantError, TenantResolve, TENANT_UNRESOLVED};

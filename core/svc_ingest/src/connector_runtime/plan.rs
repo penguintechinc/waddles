@@ -24,6 +24,10 @@ pub enum PlanError {
     /// A metadata value failed validation (the value is never echoed).
     #[error("binding metadata key `{0}` is invalid")]
     InvalidValue(&'static str),
+    /// The platform cannot run yet: its fleet-wide identify budget is not
+    /// wired (Discord). Skipped loudly, never run unbudgeted.
+    #[error("identify budget is not ready")]
+    IdentifyBudgetNotReady,
     /// The derived configuration was rejected (fixed reason, no values).
     #[error("derived connector config rejected: {0}")]
     Config(&'static str),

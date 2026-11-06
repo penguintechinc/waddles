@@ -17,13 +17,24 @@ from services.provider_connections.static_secret import (
     GcpFunctionAdapter,
 )
 from services.provider_connections.twitch import TwitchAdapter
+from services.provider_connections.youtube import AppCredentials, YoutubeAdapter
 
 
-def build_default_registry(*, transport: httpx.AsyncBaseTransport | None = None) -> AdapterRegistry:
-    """Registry holding every provider this build supports (``transport`` is for tests)."""
+def build_default_registry(
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    youtube_app_credentials: AppCredentials | None = None,
+) -> AdapterRegistry:
+    """Registry holding every provider this build supports (``transport`` is for tests).
+
+    ``youtube_app_credentials`` resolves a tenant's own Google OAuth application for token
+    refresh (per-tenant bot credentials); without it a YouTube refresh fails loudly as
+    ``refresh_not_configured`` instead of guessing a global app.
+    """
     registry = AdapterRegistry()
     registry.register(TwitchAdapter(transport=transport))
     registry.register(DiscordAdapter(transport=transport))
+    registry.register(YoutubeAdapter(transport=transport, app_credentials=youtube_app_credentials))
     registry.register(ExternalHttpAdapter())
     registry.register(AwsLambdaAdapter())
     registry.register(GcpFunctionAdapter())
