@@ -701,6 +701,18 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # Bar Citizen full module (#485): `!bcm` Wix membership status + announcements. Wix REST only
+  # (net.http.fqdn:www.wixapis.com GET; keys via secret-refs WIX_API_KEY / WIX_SITE_ID).
+  - app_id: waddles.core.barcitizen.full
+    version: "1.0.0"
+    language: python
+    wit_world: stage-next
+    source_dir: python/barcitizen_full
+    manifest_path: barcitizen-full.manifest.yaml
+    artifact_path: barcitizen-full.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
   - app_id: waddles.core.example.echo
     version: "1.0.2"
     language: python
