@@ -25,17 +25,29 @@ with).
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
+from services.errors import ApiError
 from services.event_calendar_proxy import ProxyResult
 
-#: Matches `callsController.js`'s own `MODULE_RTC_URL` env var + default.
-_DEFAULT_BASE_URL = "http://svc-streaming:8093"
+logger = logging.getLogger(__name__)
+
 _DEFAULT_TIMEOUT_SECONDS = 10.0
+
+
+class StreamingUrlNotConfiguredError(RuntimeError):
+    """Neither `STREAMING_RTC_URL` nor `MODULE_RTC_URL` is set.
+
+    The svc-streaming address is deployment-specific (the Helm Service name carries
+    the release prefix; the port is `pipeline.svcStreaming.port`), so there is no
+    in-code default -- a guessed host/port (this module once defaulted to
+    `svc-streaming:8093` while the chart serves 8208) silently 502s every call.
+    """
 
 
 @dataclass(slots=True, frozen=True)
@@ -47,9 +59,21 @@ class CallsProxyConfig:
 
     @classmethod
     def from_env(cls) -> CallsProxyConfig:
-        """Build from `STREAMING_RTC_URL` (falls back to `MODULE_RTC_URL`) / `_TIMEOUT_SECONDS`."""
+        """Build from `STREAMING_RTC_URL` (falls back to `MODULE_RTC_URL`) / `_TIMEOUT_SECONDS`.
+
+        Raises `StreamingUrlNotConfiguredError` when neither URL variable is set --
+        Helm renders `STREAMING_RTC_URL` into the hub-api Deployment.
+        """
+        base_url = (
+            os.getenv("STREAMING_RTC_URL", "").strip() or os.getenv("MODULE_RTC_URL", "").strip()
+        )
+        if not base_url:
+            raise StreamingUrlNotConfiguredError(
+                "STREAMING_RTC_URL is not set (svc-streaming base URL, rendered by the "
+                "Helm chart into the hub-api Deployment); refusing to guess a host/port"
+            )
         return cls(
-            base_url=os.getenv("STREAMING_RTC_URL", os.getenv("MODULE_RTC_URL", _DEFAULT_BASE_URL)),
+            base_url=base_url.rstrip("/"),
             timeout_seconds=float(
                 os.getenv("STREAMING_RTC_TIMEOUT_SECONDS", str(_DEFAULT_TIMEOUT_SECONDS))
             ),
@@ -69,8 +93,17 @@ class CallsProxyClient:
     """
 
     def __init__(self, config: CallsProxyConfig | None = None) -> None:
-        """Build the client; `config` defaults to `CallsProxyConfig.from_env()`."""
-        self._config = config or CallsProxyConfig.from_env()
+        """Build the client; `config` defaults to `CallsProxyConfig.from_env()` on first use.
+
+        Resolution is lazy so importing the blueprint never needs the env; a missing
+        URL fails loudly (`StreamingUrlNotConfiguredError`) on the first forwarded call.
+        """
+        self._explicit_config = config
+
+    @property
+    def _config(self) -> CallsProxyConfig:
+        """The explicit config, else one freshly read from the environment."""
+        return self._explicit_config or CallsProxyConfig.from_env()
 
     async def request(
         self,
@@ -82,22 +115,47 @@ class CallsProxyClient:
         json_body: dict[str, Any] | None = None,
     ) -> ProxyResult:
         """Forward `method path` to the RTC control plane, query/body passed through as-is."""
-        url = f"{self._config.base_url}{path}"
+        config = self._config
+        url = f"{config.base_url}{path}"
         headers = {"Content-Type": "application/json"}
         if authorization:
             headers["Authorization"] = authorization
         try:
-            async with httpx.AsyncClient(timeout=self._config.timeout_seconds) as client:
+            async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
                 response = await client.request(
                     method, url, params=params, json=json_body, headers=headers
                 )
-        except httpx.HTTPError:
-            return ProxyResult(ok=False, status_code=502, body=None)
+        except httpx.HTTPError as exc:
+            logger.error(
+                "svc-streaming call failed: %s %s -> %s: %s",
+                method,
+                path,
+                type(exc).__name__,
+                exc,
+            )
+            raise ApiError(
+                message="Streaming service unavailable",
+                status_code=502,
+                code="STREAMING_UNAVAILABLE",
+            ) from exc
 
-        try:
-            data: Any = response.json()
-        except ValueError:
-            data = None
+        data: Any = None
+        if response.content:
+            try:
+                data = response.json()
+            except ValueError as exc:
+                logger.error(
+                    "svc-streaming returned a non-JSON body: %s %s -> HTTP %s (%s)",
+                    method,
+                    path,
+                    response.status_code,
+                    type(exc).__name__,
+                )
+                raise ApiError(
+                    message="Streaming service returned an invalid response",
+                    status_code=502,
+                    code="STREAMING_BAD_RESPONSE",
+                ) from exc
 
         if response.is_success:
             return ProxyResult(ok=True, status_code=response.status_code, body=data)

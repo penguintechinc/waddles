@@ -37,6 +37,7 @@ import asyncio
 import dataclasses
 import logging
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from flask_core.authz import require_scope
@@ -46,6 +47,7 @@ from quart_schema import validate_request, validate_response
 
 from services import bot_ai_chatter, bot_ai_knowledge, bot_rcon, bot_shoutout
 from services.bot_tables import bind_bot_tables, community_belongs_to_tenant
+from services.errors import ApiError
 
 bot_bp = Blueprint("v1_bot", __name__, url_prefix="/api/v1/admin")
 
@@ -80,6 +82,32 @@ async def _require_community(community_id: int) -> tuple[dict[str, Any], int] | 
     if not ok:
         return _error("Community not found for this tenant", 403, "FORBIDDEN")
     return None
+
+
+async def _require_server(community_id: int, server_id: int) -> None:
+    """404 unless `server_id` is an active server of `community_id` (no cross-community ids).
+
+    Run after `_require_community` on every `<server_id>` route so a foreign server id is
+    indistinguishable from a missing one, independent of the downstream module's own checks.
+    """
+    try:
+        await asyncio.to_thread(bot_rcon.get_active_server, _dal(), community_id, server_id)
+    except bot_rcon.RconNotFoundError as exc:
+        raise ApiError(str(exc), 404, "NOT_FOUND") from exc
+
+
+@bot_bp.errorhandler(ApiError)
+async def _handle_api_error(exc: ApiError) -> tuple[dict[str, Any], int]:
+    """Convert a raised `ApiError` into the Bot JSON error shape, logging type + message."""
+    logging.getLogger(__name__).warning(
+        "bot_api_error",
+        extra={
+            "error_type": type(exc).__name__,
+            "status": exc.status_code,
+            "error_message": exc.message,
+        },
+    )
+    return _error(exc.message, exc.status_code, exc.code)
 
 
 def _dal() -> Any:
@@ -643,7 +671,11 @@ async def _load_authorized_source(source_id: int) -> bool:
     row = await asyncio.to_thread(lambda: _dal().ai_knowledge_sources[source_id])
     if row is None:
         return False
-    return await _scope_allowed(row.community_id, row.vendor_id)
+    if not await _scope_allowed(row.community_id, row.vendor_id):
+        return False
+    # Vendor-owned sources stay vendor-controlled even when also community-scoped
+    # (confused deputy: a community admin must not drive the vendor's stored credential).
+    return row.vendor_id is None or await _scope_allowed(None, row.vendor_id)
 
 
 async def _require_query_scope(community_id: int | None) -> tuple[dict[str, Any], int] | None:
@@ -878,11 +910,27 @@ async def submit_suggestion_feedback(data: SuggestionFeedbackRequest, suggestion
     if not data.feedback:
         return _error("feedback is required", 400, "BAD_REQUEST")
     try:
+        bot_ai_knowledge.validate_feedback(data.feedback)
+    except bot_ai_knowledge.KnowledgeServiceError as exc:
+        raise ApiError(str(exc), exc.status, "BAD_REQUEST") from exc
+    exists, owner = await asyncio.to_thread(
+        bot_ai_knowledge.get_suggestion_scope, _dal(), suggestion_id
+    )
+    if not exists or not await _scope_allowed(owner, None):
+        return _error("Suggestion not found", 404, "NOT_FOUND")
+    try:
         suggestion = await asyncio.to_thread(
-            bot_ai_knowledge.record_feedback, _dal(), suggestion_id, data.feedback
+            partial(
+                bot_ai_knowledge.record_feedback,
+                _dal(),
+                suggestion_id,
+                data.feedback,
+                community_id=owner,
+            )
         )
     except bot_ai_knowledge.KnowledgeServiceError as exc:
-        return _error(str(exc), exc.status, "NOT_FOUND" if exc.status == 404 else "BAD_REQUEST")
+        code = "NOT_FOUND" if exc.status == 404 else "BAD_REQUEST"
+        raise ApiError(str(exc), exc.status, code) from exc
     return SuggestionFeedbackResponse(success=True, suggestion=_suggestion_dto(suggestion))
 
 
@@ -1137,6 +1185,7 @@ async def execute_rcon_command(
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     try:
         return await bot_rcon.execute_command(
             _dal(), community_id, server_id, command=data.command, user_id=_user_id()
@@ -1154,6 +1203,7 @@ async def kick_rcon_player(data: KickPlayerRequest, community_id: int, server_id
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     try:
         return await bot_rcon.kick_player(
             _dal(),
@@ -1176,6 +1226,7 @@ async def ban_rcon_player(data: BanPlayerRequest, community_id: int, server_id: 
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     try:
         return await bot_rcon.ban_player(
             _dal(),
@@ -1198,6 +1249,7 @@ async def get_rcon_channels(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     return await bot_rcon.get_channels(_dal(), community_id, server_id)
 
 
@@ -1210,6 +1262,7 @@ async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: in
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     try:
         return await bot_rcon.move_user(
             _dal(), community_id, server_id, target_user_id=data.user_id, channel_id=data.channel_id
@@ -1227,6 +1280,7 @@ async def send_rcon_message(data: SendMessageRequest, community_id: int, server_
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     try:
         return await bot_rcon.send_message(
             _dal(),
@@ -1271,6 +1325,7 @@ async def get_rcon_access_policy(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     return await bot_rcon.get_access_policy(_dal(), community_id, server_id)
 
 
@@ -1287,6 +1342,7 @@ async def update_rcon_access_policy(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     policy = await request.get_json(force=True, silent=True) or {}
     return await bot_rcon.update_access_policy(_dal(), community_id, server_id, policy)
 
@@ -1299,6 +1355,7 @@ async def trigger_rcon_enforcement(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     return await bot_rcon.trigger_enforcement(_dal(), community_id, server_id)
 
 
@@ -1310,6 +1367,7 @@ async def get_rcon_access_log(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     limit = min(200, max(1, _int_arg("limit", 50)))
     offset = max(0, _int_arg("offset", 0))
     return await bot_rcon.get_access_log(
@@ -1341,6 +1399,7 @@ async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     return await bot_rcon.get_server_status(_dal(), community_id, server_id)
 
 
@@ -1352,6 +1411,7 @@ async def get_rcon_player_list(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
+    await _require_server(community_id, server_id)
     return await bot_rcon.get_player_list(_dal(), community_id, server_id)
 
 

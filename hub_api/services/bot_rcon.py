@@ -296,7 +296,8 @@ def delete_server(dal: Any, community_id: int, server_id: int) -> None:
     dal.commit()
 
 
-def _get_active_server(dal: Any, community_id: int, server_id: int) -> Any:
+def get_active_server(dal: Any, community_id: int, server_id: int) -> Any:
+    """Active (not soft-deleted) server of this community, else `RconNotFoundError`."""
     row = (
         dal(
             (dal.server_status_configs.id == server_id)
@@ -318,7 +319,7 @@ async def test_connection(
     dal: Any, community_id: int, server_id: int, *, password: str | None = None
 ) -> Any:
     """`POST .../rcon/servers/:id/test`."""
-    server = _get_active_server(dal, community_id, server_id)
+    server = get_active_server(dal, community_id, server_id)
     body: dict[str, Any] = {
         "server_type": server.server_type,
         "host": server.host,

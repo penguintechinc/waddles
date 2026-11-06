@@ -24,8 +24,10 @@ from flask_core.service_jwt import (
     BOUND_TOKEN_TTL_SECONDS,
     COMMUNITY_BOUND_SCOPES,
     DEFAULT_TOKEN_TTL_SECONDS,
+    SCOPE_OVERLAY_PUSH,
     BootstrapRejected,
     ServiceJwtIssuer,
+    overlay_push_scope,
     verify_service_account_token,
 )
 from quart import Blueprint, Response, current_app, jsonify, request
@@ -44,8 +46,9 @@ K8S_CA_CERT_PATH = os.getenv(
 def _binding_claims(scope: str, body: dict[str, Any]) -> dict[str, int] | None:
     """Translate the request's binding fields into issuer ``extra_claims``.
 
-    ``connections:resolve`` / ``connections:resolve:static`` REQUIRE ``community_id`` (non-negative
-    int; ``connection_id`` optional) -- a resolve token is always community-bound. Every other
+    ``connections:resolve`` / ``:resolve:static`` / ``presentation.overlay:push`` REQUIRE
+    ``community_id`` (non-negative int; ``connection_id`` optional, never for push) -- these
+    tokens are always community-bound. Every other
     scope (``connections:list`` included, which is unbound) must not carry the fields.
     Raises ``ValueError`` on any violation.
     """
@@ -131,10 +134,18 @@ async def issue_service_token() -> tuple[Response, int]:
         )
         return jsonify({"error": "unauthorized"}), 401
 
+    # An overlay PUSH request names the BASE scope; the token carries the per-community scope
+    # svc-presentation's verifier requires (`overlay_auth::push_scope`). Never a connection id.
+    minted_scope = scope
+    if scope == SCOPE_OVERLAY_PUSH:
+        if extra_claims is None or "conn" in extra_claims:
+            return jsonify({"error": "invalid request"}), 400
+        minted_scope = overlay_push_scope(extra_claims["community"])
+
     try:
         token, claims = issuer.issue_with_claims(
             matched.service_id,
-            scope,
+            minted_scope,
             ttl_seconds=BOUND_TOKEN_TTL_SECONDS if extra_claims else DEFAULT_TOKEN_TTL_SECONDS,
             extra_claims=extra_claims,
         )

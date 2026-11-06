@@ -365,6 +365,35 @@ class TestOverlayCode:
         await client.post(f"/api/v1/admin/{community_id}/overlay/rotate", headers=headers)
         assert len(_overlay_code(overlay_db, community_id)) == 16
 
+    async def test_overlay_url_is_a_route_the_rust_router_serves_on_every_endpoint(
+        self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
+    ) -> None:
+        headers, community_id = owner
+        _add_overlay_code_column(overlay_db)
+        overlay_db.dal.executesql(
+            f"UPDATE communities SET overlay_code = 'a1b2c3d4e5f60718' WHERE id = {community_id}"  # noqa: S608
+        )
+        overlay_db.dal.commit()
+        base = f"/api/v1/admin/{community_id}/overlay"
+        responses = [
+            await client.get(base, headers=headers),
+            await client.put(base, headers=headers, json={"isActive": True}),
+            await client.post(f"{base}/rotate", headers=headers),
+        ]
+        for response in responses:
+            assert response.status_code == 200
+            overlay = (await response.get_json())["overlay"]
+            assert overlay["overlayUrl"] == (
+                f"https://overlay.example.test/a1b2c3d4e5f60718/alert_box?key={overlay['overlay_key']}"
+            )
+
+    async def test_overlay_url_is_null_not_a_dead_url_when_the_code_is_unavailable(
+        self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
+    ) -> None:
+        headers, community_id = owner  # pre-0057: column deliberately NOT added
+        response = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        assert (await response.get_json())["overlay"]["overlayUrl"] is None
+
     async def test_missing_overlay_code_column_does_not_break_mint(
         self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
     ) -> None:
