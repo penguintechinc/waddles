@@ -41,6 +41,9 @@ jobs:
       python: ${{ steps.paths.outputs.python }}
       node: ${{ steps.paths.outputs.node }}
       go: ${{ steps.paths.outputs.go }}
+      helm: ${{ steps.paths.outputs.helm }}
+      docker: ${{ steps.paths.outputs.docker }}
+      any_code: ${{ steps.paths.outputs.any_code }}
     steps:
       - name: Checkout (change classifier only)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -59,6 +62,8 @@ jobs:
   # This is the check that matters for day-to-day development velocity.
   security-fast:
     name: Security & Code Quality
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.any_code == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -93,7 +98,7 @@ jobs:
   node-audit:
     name: Node audit (${{ matrix.name }})
     needs: changes
-    if: needs.changes.outputs.node == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node == 'true') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -145,7 +150,7 @@ jobs:
   python-audit:
     name: Python security checks
     needs: changes
-    if: needs.changes.outputs.python == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.python == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

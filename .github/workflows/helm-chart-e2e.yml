@@ -10,16 +10,6 @@ name: Helm Chart Kind E2E
 
 on:
   pull_request:
-    paths:
-      - "k8s/helm/**"
-      - "hub_api/Dockerfile"
-      - "migrations/Dockerfile"
-      - "bundles/Dockerfile.core-bundles"
-      - "core/svc_ingest/Dockerfile.rust"
-      - "core/svc_process/Dockerfile.rust"
-      - "core/svc_action/Dockerfile.rust"
-      - "scripts/alpha-deploy.sh"
-      - ".github/workflows/helm-chart-e2e.yml"
   workflow_dispatch: {}
 
 permissions:
@@ -50,7 +40,44 @@ env:
   CILIUM_CRD_SHA256: "60606cb4060a25a2131461773939714d1c0dbd910273449e68d0caf39927249c"
 
 jobs:
+  # Path gate (release PRs only): shared detector, fails closed. A job skipped
+  # here means "not affected"; main PRs / pushes / dispatch run everything.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      match: ${{ steps.paths.outputs.match }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+        with:
+          area: none
+          globs: |
+            k8s/helm/**
+            hub_api/Dockerfile
+            migrations/Dockerfile
+            bundles/Dockerfile.core-bundles
+            core/svc_ingest/Dockerfile.rust
+            core/svc_process/Dockerfile.rust
+            core/svc_action/Dockerfile.rust
+            scripts/alpha-deploy.sh
+            .github/workflows/helm-chart-e2e.yml
+
   lint-workflow:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
     name: zizmor + actionlint
     runs-on: ubuntu-latest
     steps:

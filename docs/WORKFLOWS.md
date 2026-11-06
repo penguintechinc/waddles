@@ -518,6 +518,49 @@ login, single amd64 build, gated Trivy scan on the local image):
   (snapshot: main drops nothing; release drops exactly the main-only set).
 - Known limit: the full Python suite is still area-scoped (`changes` job), not split by tier.
 
+## Release-PR Path Gating (one shared detector)
+
+On **PRs into `release/**`** (and merge-queue groups for it) every check runs only if the diff
+touches its target. **PRs into `main`, pushes, dispatch and schedule are NEVER gated** -- the
+detector short-circuits to "everything affected" for any base that is not `release/**` (empty,
+unknown, `main`), even for an empty or docs-only diff.
+
+Mechanism: `scripts/ci/changed-paths.sh` via `.github/actions/changed-paths` (inputs `area`,
+`globs`; outputs the areas plus `match`). Each gated workflow has a `changes` job named
+**`Detect changed areas`** and puts a job-level `if:` on its jobs:
+
+```yaml
+needs: changes
+if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
+```
+
+Job-level `if:` (not workflow `paths:`) because a path-filtered workflow reports no status and
+ci-gate could not tell "not affected" from "missing"; a skipped job still reports `skipped`.
+
+| Always-on (closure) trigger | Effect |
+|---|---|
+| `.github/workflows/**`, `.github/actions/**`, `.github/scripts/**`, `scripts/ci/**` (incl. the detector) | every area + every `match` on |
+| `Cargo.lock`, `rust-toolchain*`, `.cargo/`, `deny.toml` | every `area: rust` workflow runs |
+| `requirements*`, `constraints*`, `pyproject.toml`, lockfiles | every `area: python` workflow runs |
+| `package.json` / `package-lock.json` | every `area: node` workflow runs |
+| diff cannot be computed / detector errors / empty change set | everything runs (fail closed) |
+
+Per-workflow dependency closure = the `globs:` list (the former `pull_request.paths`, which includes
+path-dependency crates, e.g. `core/hub_client/**`, `proto/**`). Add a path dependency -> add its glob.
+
+| Workflow | Gate |
+|---|---|
+| `rust-*.yml` per crate, `core-bundles-reproducible`, `data-plane-parity`, `python-waddle-sdk`, `node-waddle-sdk-js`, `go-gates`, `helm-chart-e2e`, `builtin-handler-inventory`, `bundle-hygiene` | own `changes` job + `globs` |
+| `rust-build-all`, `security`, `pr-validation` | shared area outputs (`rust/python/node/go/helm/docker/any_code`) |
+| `gate-integrity`, `ci-gate` | always run (gate self-tests / the gate) |
+| `build-*.yml`, `containers.yml` image builds | NOT changed here: main-tier only (not examined on release PRs) and already path-filtered by their own `detect-changes` |
+
+ci-gate (`scripts/ci/ci-gate-tier.py skips`): on the release tier a `skipped` job is satisfied
+("not affected") only while a successful `Detect changed areas` is on the head; a missing/failed/
+cancelled required job still fails, and zero checks examined or zero that actually ran fails.
+The main tier is unchanged: every check is examined. Self-tests: `scripts/ci/tests/test_changed_paths.sh`
+(table of release/main/Cargo.lock/workflow/fail-open cases) and `scripts/ci/tests/test_ci_gate_tier.py`.
+
 ## Merging a PR into a Release Branch
 
 `make release-merge PR=<n> [HEAD=<sha-prefix>] [DRY=1]` (wraps `scripts/release-merge.sh`) is the

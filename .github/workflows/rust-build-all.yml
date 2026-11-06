@@ -58,7 +58,7 @@ jobs:
     # Skipped (reports "skipped", which ci-gate treats as non-failing) when no
     # Rust-affecting file changed, e.g. docs-only or Python-only PRs. Real
     # `if:` on the job, so no runner is allocated for the 24-crate matrix.
-    if: needs.changes.outputs.rust == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:

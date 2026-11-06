@@ -223,6 +223,15 @@ jobs:
               continue
             fi
 
+            # Path-gating verdict: a skipped job is "not affected" (satisfied) only
+            # while a successful detector is on this head; zero jobs that actually ran
+            # is a FAIL (zero examined/ran never passes). See ci-gate-tier.py.
+            if ! skip_summary=$(python3 "${tier_py}" skips --tier "${tier}" <<<"${combined}"); then
+              echo "::error::ci-gate FAIL - untrusted skip or nothing ran: ${skip_summary}"
+              exit 1
+            fi
+            echo "path-gating summary (tier ${tier}): ${skip_summary}"
+
             signature=$(jq -Sc 'map({name, conclusion}) | sort_by(.name)' <<<"${combined}")
             if [ "${signature}" = "${prev_signature}" ]; then
               stable_count=$((stable_count + 1))

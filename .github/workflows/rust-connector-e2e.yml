@@ -23,16 +23,6 @@ on:
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
-    paths:
-      - 'core/connector_e2e/**'
-      - 'core/svc_process/runner.py'
-      - 'core/svc_process/tests/test_connector_event_accrual_contract.py'
-      - 'core/svc_ingest/**'
-      - 'core/discord_mentions/**'
-      - 'core/hub_client/**'
-      - 'proto/**'
-      - 'core/bundle_executor/**'
-      - 'wit/waddle-connector/**'
   workflow_dispatch:
 
 permissions:
@@ -43,9 +33,45 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Path gate (release PRs only): shared detector, fails closed. A job skipped
+  # here means "not affected"; main PRs / pushes / dispatch run everything.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      match: ${{ steps.paths.outputs.match }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+        with:
+          area: rust
+          globs: |
+            core/connector_e2e/**
+            core/svc_process/runner.py
+            core/svc_process/tests/test_connector_event_accrual_contract.py
+            core/svc_ingest/**
+            core/discord_mentions/**
+            core/hub_client/**
+            proto/**
+            core/bundle_executor/**
+            wit/waddle-connector/**
+
   lint-test:
+    needs: changes
     # Main-only tier: skipped on PRs into release/** (see scripts/ci/ci-gate-tier.py)
-    if: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}
+    if: ${{ (github.event_name != 'pull_request' || github.base_ref == 'main') && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
     name: fmt + clippy + deny + coverage
     uses: ./.github/workflows/rust-crate-ci.yml
     with:
@@ -62,6 +88,8 @@ jobs:
   # (tests/fixtures/accrual_contract.json, byte-compared by connector_acceptance.rs)
   # must drive svc_process's ordinary-activity accrual. A zero-test run FAILS.
   accrual-contract:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
     name: connector event -> reputation accrual contract (svc_process)
     runs-on: ubuntu-latest
     steps:
