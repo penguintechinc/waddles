@@ -1,6 +1,6 @@
-"""v1 `tenant.twitch_install` group -- per-tenant Twitch bot-install OAuth flow (Bar Citizen).
+"""v1 `tenant.twitch_install` group -- per-tenant Twitch bot-install OAuth flow.
 
-**Net-new, Twitch-only half of the Bar Citizen OAuth bot-install work** --
+**Net-new, Twitch-only half of the OAuth bot-install work** --
 the sibling unit building the Discord half (`tenant_discord_install.py`,
 if/when it lands) is a separate file; this module never imports it and
 never shares a blueprint object with it, avoiding any merge collision
@@ -9,7 +9,7 @@ between the two stacked PRs.
 Each tenant beyond tenant 0 brings its OWN Twitch application (client
 id/secret, registered by the tenant admin in the Twitch developer
 console) and authorizes a bot account for the exact Helix scopes the
-Bar Citizen role-sync worker needs
+role-sync worker needs
 (`services.twitch_install_oauth.ROLE_SYNC_SCOPES`) -- tenant 0 keeps using
 the SaaS-wide Twitch app via `services.credential_resolver`'s existing
 `is_global_tenant` lane and is explicitly rejected here (`tenant:admin`
@@ -38,7 +38,7 @@ docstring for the precedent this mirrors):
 
 Feature-gated behind `waddles.community.guild_pairing` (same flag the
 guild-pairing CRUD group uses -- this is the install-time half of the
-same Professional+ Bar Citizen feature, not a second gate to keep in
+same Professional+ role-sync feature, not a second gate to keep in
 sync).
 
 Never logs a token, code, `client_id`, or `client_secret` anywhere in this

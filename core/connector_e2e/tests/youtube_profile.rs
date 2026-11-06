@@ -231,6 +231,12 @@ fn derived(api: &FakeApi, chat: &str) -> (PollConfig, u64) {
         .expect("the profile's host constant");
     cfg.url = format!("http://127.0.0.1:{}{rest}", api.addr.port());
     cfg.allow_loopback_insecure = true;
+    let rd = cfg.rediscover.as_mut().expect("youtube plans rediscover");
+    let rest = rd
+        .url
+        .strip_prefix("https://www.googleapis.com")
+        .expect("the profile's discovery host constant");
+    rd.url = format!("http://127.0.0.1:{}{rest}", api.addr.port());
     (*cfg, fp)
 }
 
@@ -373,6 +379,12 @@ async fn youtube_profile_polls_normalizes_backs_off_parks_and_rediscovers() {
         forbidden("quotaExceeded", Some("2")),
         page("NP3", 3000, vec![item(CHAT, "m4", "UCauthorB", "back")]),
         forbidden("liveChatEnded", None),
+        // The host's rediscovery request: the channel has no live stream.
+        Scripted {
+            status: 200,
+            retry_after: None,
+            body: serde_json::json!({"items": []}),
+        },
     ])
     .await;
     let rig = rig().await;
@@ -389,12 +401,26 @@ async fn youtube_profile_polls_normalizes_backs_off_parks_and_rediscovers() {
     .await
     .expect("driver must finish (park) in time")
     .expect("driver run");
-    assert_eq!(end, RunEnd::Parked, "liveChatEnded must park, not retry");
+    assert_eq!(
+        end,
+        RunEnd::Parked,
+        "liveChatEnded ends the run (rediscovery decides what next), no retry"
+    );
 
     {
         let seen = api.seen.lock().unwrap();
-        assert_eq!(seen.len(), 5, "five polls, then parked (no hammering)");
-        for s in seen.iter() {
+        assert_eq!(
+            seen.len(),
+            6,
+            "five polls + one rediscovery request, then the run ends (no hammering)"
+        );
+        assert_eq!(seen[5].path, "/youtube/v3/liveBroadcasts");
+        assert_eq!(seen[5].auth.as_deref(), Some(&*format!("Bearer {TOKEN}")));
+        assert_eq!(
+            param(&seen[5].query, "broadcastStatus").as_deref(),
+            Some("active")
+        );
+        for s in seen.iter().take(5) {
             assert_eq!(s.path.as_str(), "/youtube/v3/liveChat/messages");
             assert_eq!(s.auth.as_deref(), Some(&*format!("Bearer {TOKEN}")));
             assert_eq!(param(&s.query, "liveChatId").as_deref(), Some(CHAT));
@@ -404,7 +430,11 @@ async fn youtube_profile_polls_normalizes_backs_off_parks_and_rediscovers() {
             );
             assert_eq!(param(&s.query, "maxResults").as_deref(), Some("200"));
         }
-        let tokens: Vec<_> = seen.iter().map(|s| param(&s.query, "pageToken")).collect();
+        let tokens: Vec<_> = seen
+            .iter()
+            .take(5)
+            .map(|s| param(&s.query, "pageToken"))
+            .collect();
         assert_eq!(
             tokens,
             vec![
@@ -487,7 +517,7 @@ async fn youtube_profile_polls_normalizes_backs_off_parks_and_rediscovers() {
     stop.send(()).unwrap();
     assert_eq!(run.await.unwrap().unwrap(), RunEnd::Shutdown);
     let seen = api.seen.lock().unwrap();
-    let first_new = &seen[5];
+    let first_new = &seen[6];
     assert_eq!(
         param(&first_new.query, "liveChatId").as_deref(),
         Some(CHAT2)

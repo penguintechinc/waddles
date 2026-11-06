@@ -30,6 +30,15 @@ const APP_ID: &str = "waddles.ai.e2e";
 /// A prompt secret that must appear in NO label, metric line or log-bound string.
 const SECRET_PROMPT_WORD: &str = "zebrafish-tango-7731";
 
+/// Always-Professional tier source (production reads the license client).
+struct ProTier;
+
+impl svc_process::ai::TierSource for ProTier {
+    fn tier<'a>(&'a self) -> svc_process::ai::BoxFuture<'a, Option<penguin_licensing::Tier>> {
+        Box::pin(async { Some(penguin_licensing::Tier::Professional) })
+    }
+}
+
 /// Always-ON feature gate (the production gate is a license-client read).
 struct On;
 
@@ -130,7 +139,13 @@ fn caps(base: &str) -> StageCapabilities {
         gate,
     )
     .with_ai(
-        AiWiring::new(Arc::new(backend), Arc::new(On), Duration::from_secs(5), 4),
+        AiWiring::new(
+            Arc::new(backend),
+            Arc::new(On),
+            Arc::new(ProTier),
+            Duration::from_secs(5),
+            4,
+        ),
         std::time::Instant::now() + Duration::from_secs(30),
     )
 }

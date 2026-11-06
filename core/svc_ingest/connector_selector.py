@@ -1,7 +1,7 @@
 """Connector host selector for the Python svc-ingest (spec 2026-11-05 section 5).
 
 Mirror of the Rust `connector_runtime::selector`: both services read the SAME
-env baselines (`CONNECTOR_{TWITCH,DISCORD,YOUTUBE}_ENABLED`, set from one helm
+env baselines (`CONNECTOR_{TWITCH,DISCORD,YOUTUBE,WIX}_ENABLED`, set from one helm
 value) so they cannot disagree about which implementation owns a platform.
 
 Never reads the PostHog / licensing flag client: the `*.waddles.app` domain
@@ -19,8 +19,8 @@ from dataclasses import dataclass
 # a Discord connector ON is fatal.
 IDENTIFY_BUDGET_READY = True
 
-PLATFORMS = ("twitch", "discord", "youtube")
-WEBHOOK_CAPABLE = ("twitch", "discord")
+PLATFORMS = ("twitch", "discord", "youtube", "wix")
+WEBHOOK_CAPABLE = ("twitch", "discord", "wix")
 
 
 class ConnectorConfigError(Exception):
@@ -60,6 +60,7 @@ class ConnectorSelector:
     twitch: bool = False
     discord: bool = False
     youtube: bool = False
+    wix: bool = False
     tools_enabled: bool = False
     webhook_platforms: tuple[str, ...] = ()
 
@@ -76,6 +77,7 @@ class ConnectorSelector:
             twitch=_parse_bool(environ, "CONNECTOR_TWITCH_ENABLED"),
             discord=_parse_bool(environ, "CONNECTOR_DISCORD_ENABLED"),
             youtube=_parse_bool(environ, "CONNECTOR_YOUTUBE_ENABLED"),
+            wix=_parse_bool(environ, "CONNECTOR_WIX_ENABLED"),
             tools_enabled=_parse_bool(environ, "CONNECTOR_TOOLS_ENABLED"),
             webhook_platforms=parse_webhook_platforms(
                 environ.get("CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS", "")

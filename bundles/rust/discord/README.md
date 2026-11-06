@@ -125,6 +125,15 @@ harness does not bridge the guest `http` lookup).
 | `chat.delete` | `DELETE /channels/{target.channel_id}/messages/{message_id}` | `{message_id}` (snowflake) — channel-scoped, never from the id alone |
 | `dm.send` | `POST /channels/{dm.channel_id}/messages` (host opens the DM first) | `{recipient_id, content}` — `recipient_id` ONLY a `{user:<uuid>}` placeholder (raw snowflake refused); recipient rides in pseudo-header `X-Waddle-Host-Dm-Recipient` |
 | `role.add` / `role.remove` | `PUT` / `DELETE /guilds/{target.guild_id}/members/{user:<uuid>}/roles/{target.role.<key>}` | `{user_id, role}` — `user_id` ONLY a `{user:<uuid>}` placeholder; `role` is a managed-role KEY `[a-z][a-z0-9_-]{0,31}`, never a snowflake |
+| `event.create` / `event.update` / `event.cancel` / `event.delete` | `POST /guilds/{target.guild_id}/scheduled-events`, `PATCH .../{id}` (full field set), `PATCH .../{id}` `{"status":4}` (history kept), `DELETE .../{id}` | `{name, description?, scheduled_start_time, scheduled_end_time, location}` (+ `event_id` snowflake for update/cancel/delete). Fixed `EXTERNAL` / guild-only body. A `guild_id` / `channel_id` / unknown field is REFUSED; the guild is always the host's `{target.guild_id}` binding slot |
+
+**Scheduled-event tools (host-mediated).** The service bundle declares `discord.scheduled_event.create|update|cancel|delete`
+(`access: write`, `risk: dangerous`) in `exported_tools`; the guest only validates arguments through the same template
+builder. The HOST executes them (svc-action `tool.invoke` -> signed `event.*` outbound entry -> svc-ingest executor ->
+this connector's template; guild + credential from the community binding). App bundles call them with a manifest
+`requested_tools: [{tool: discord.scheduled_event.create, access: write, target_app_id: waddles.core.service.discord}]`
+and the approved grant `tool.call:waddles.core.service.discord:discord.scheduled_event.create` (`params: {write: true}`).
+
 
 * The connector never holds a token (`secret-refs: [("Authorization","discord-bot")]`) and never chooses the
   destination: a payload naming `channel_id`/`guild_id` is refused. Every message body carries

@@ -559,8 +559,8 @@ grants:
     table: bundle_reputation_adjustments
     privileges: [SELECT, INSERT, UPDATE, DELETE]
 
-  # Bar Citizen guild-pairing + role-sync schema (migration
-  # 0034_bar_citizen_guild_pairing). hub_api is the sole writer -- these
+  # guild-pairing + role-sync schema (migration
+  # 0034). hub_api is the sole writer -- these
   # are hub-api-owned control-plane tables; no data-plane service reads
   # them directly yet.
   #
@@ -672,7 +672,7 @@ grants:
 
   # Three-layer platform-connection model (migration
   # 0035_connection_model_layers). hub_api is the sole writer -- same
-  # control-plane convention as the Bar Citizen tables above.
+  # control-plane convention as the guild-pairing tables above.
   - role: hub_api
     table: tenant_platform_apps
     privileges: [SELECT, INSERT, UPDATE, DELETE]
