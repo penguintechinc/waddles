@@ -50,7 +50,7 @@ use crate::wire::{Connection, RequestHandler};
 /// the exact grants it is pinned with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectorPlatform {
-    /// `twitch` | `discord` | `youtube` -- the bucket path segment.
+    /// `twitch` | `discord` | `youtube` | `spectrum` -- the bucket path segment.
     pub platform: &'static str,
     /// The host-constant core `app_id` (`waddles.core.service.<p>`); never
     /// read from a bucket object or a wire frame.
@@ -62,7 +62,7 @@ pub struct ConnectorPlatform {
 }
 
 /// Every connector this executor can pin.
-pub const CONNECTOR_PLATFORMS: [ConnectorPlatform; 3] = [
+pub const CONNECTOR_PLATFORMS: [ConnectorPlatform; 4] = [
     ConnectorPlatform {
         platform: "twitch",
         app_id: "waddles.core.service.twitch",
@@ -76,6 +76,11 @@ pub const CONNECTOR_PLATFORMS: [ConnectorPlatform; 3] = [
     ConnectorPlatform {
         platform: "youtube",
         app_id: "waddles.core.service.youtube",
+        grants: &[PERM_CONNECTOR_PII_READ],
+    },
+    ConnectorPlatform {
+        platform: "spectrum",
+        app_id: "waddles.core.service.spectrum",
         grants: &[PERM_CONNECTOR_PII_READ],
     },
 ];
@@ -283,6 +288,28 @@ mod tests {
             .collect();
         assert_eq!(got, vec![("twitch", D1), ("youtube", D2)]);
         assert!(pin_targets(&cfg(&[])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn spectrum_is_pinned_last_when_its_variable_is_set() {
+        let t = pin_targets(&cfg(&[
+            "--connector-pin-digest-spectrum",
+            D2,
+            "--connector-pin-digest-twitch",
+            D1,
+        ]))
+        .unwrap();
+        let got: Vec<_> = t
+            .iter()
+            .map(|x| (x.platform.platform, x.platform.app_id, x.digest.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("twitch", "waddles.core.service.twitch", D1),
+                ("spectrum", "waddles.core.service.spectrum", D2)
+            ]
+        );
     }
 
     #[test]
