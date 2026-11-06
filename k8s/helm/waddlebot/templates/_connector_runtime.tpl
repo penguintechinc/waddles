@@ -112,3 +112,65 @@ Emits nothing while the runtime is inactive.
 {{- end -}}
 {{- end -}}
 {{- end }}
+
+{{/* True when host-api-tls-secret.yaml will (re)generate the stage Secret this render (alpha/local,
+no kept-current Secret, no supplied material, not external) -- the one moment its CA is in hand to
+also sign the connector server + executor client certs. Mirrors that template's branch order. */}}
+{{- define "waddlebot.stageHostApiGenerates" -}}
+{{- $ht := .Values.global.hostApiTls -}}
+{{- $tier := .Values.global.deploymentTier -}}
+{{- $ct := .Values.pipeline.rustDataPlane.svcIngest.connectorTools | default dict -}}
+{{- $cht := $ct.hostApiTls | default dict -}}
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcIngest.enabled $ct.enabled (not .Values.global.hostApiTls.certManager.enabled) (or (eq $tier "alpha") (eq $tier "local")) (not $cht.externalSecret) (not $ht.externalSecret) (not (and $ht.ca.crt $ht.tls.crt $ht.tls.key)) -}}
+{{- $existing := lookup "v1" "Secret" .Values.namespace (printf "%s-host-api-tls" (include "waddlebot.fullname" .)) -}}
+{{- $current := include "waddlebot.tlsSecretIdentityMatches" (dict "existing" $existing "identity" (include "waddlebot.hostApiStageIdentity" .) "sansSha256" (include "waddlebot.hostApiTlsSansSha256" .)) -}}
+{{- if not $current -}}true{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/* Emits the svc-ingest connector server Secret + the executor-only client Secret, both signed by
+the CA passed in (the stage host-api CA). Called from host-api-tls-secret.yaml's generate branch. */}}
+{{- define "waddlebot.connectorHostApiTlsSecrets" -}}
+{{- $ := .root -}}
+{{- $ca := .ca -}}
+{{- $fullname := include "waddlebot.fullname" $ }}
+{{- $srvName := include "waddlebot.svcIngestHostApiTlsSecretName" $ }}
+{{- $cliName := include "waddlebot.ingestExecutorTlsSecretName" $ }}
+{{- $clientId := include "waddlebot.svcIngestHostApiClientIdentity" $ }}
+{{- $ns := $.Values.namespace }}
+{{- $svc := printf "%s-svc-ingest-rust" $fullname }}
+{{- $srv := genSignedCert $svc nil (list $svc (printf "%s.%s.svc" $svc $ns) (printf "%s.%s.svc.cluster.local" $svc $ns)) 365 $ca }}
+{{- $cli := genSignedCert $clientId nil (list $clientId) 365 $ca }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $srvName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: svc-ingest-host-api-tls
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+stringData:
+  ca.crt: {{ $ca.Cert | quote }}
+  tls.crt: {{ $srv.Cert | quote }}
+  tls.key: {{ $srv.Key | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $cliName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: ingest-executor-tls
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+stringData:
+  ca.crt: {{ $ca.Cert | quote }}
+  tls.crt: {{ $cli.Cert | quote }}
+  tls.key: {{ $cli.Key | quote }}
+{{- end }}

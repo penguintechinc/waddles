@@ -236,3 +236,36 @@ def test_helm_lint_clean(values: str) -> None:
     )
     assert res.returncode == 0, res.stdout[-600:] + res.stderr[-300:]
     assert "0 chart(s) failed" in res.stdout
+
+
+def _ca_of(docs: list[dict[str, Any]], suffix: str) -> Any:
+    """Return the parsed ca.crt x509 of the Secret whose name ends with `suffix`."""
+    crypto = pytest.importorskip("cryptography.x509")
+    sec = next(d for d in docs if d.get("kind") == "Secret" and d["metadata"]["name"].endswith(suffix)
+               and (suffix != "-host-api-tls" or "ingest" not in d["metadata"]["name"]))
+    return crypto.load_pem_x509_certificate(sec["stringData"]["ca.crt"].encode()), sec
+
+
+def test_alpha_connector_certs_share_the_stage_ca() -> None:
+    """One trust root: stage, svc-ingest server and executor client Secrets carry the same CA and
+    their leaf certs are signed by it (executor trusts only HOST_API_CA_FILE)."""
+    crypto = pytest.importorskip("cryptography.x509")
+    hashes = pytest.importorskip("cryptography.hazmat.primitives.hashes")
+    docs = _docs(_yt())
+    stage, _ = _ca_of(docs, "-host-api-tls")
+    srv_ca, srv = _ca_of(docs, "-svc-ingest-host-api-tls")
+    cli_ca, cli = _ca_of(docs, "-ingest-executor-tls")
+    assert stage.fingerprint(hashes.SHA256()) == srv_ca.fingerprint(hashes.SHA256()) \
+        == cli_ca.fingerprint(hashes.SHA256())
+    for sec in (srv, cli):
+        leaf = crypto.load_pem_x509_certificate(sec["stringData"]["tls.crt"].encode())
+        assert leaf.issuer == stage.subject
+    assert srv["stringData"]["tls.crt"] != cli["stringData"]["tls.crt"]
+
+
+def test_external_connector_secrets_require_shared_ca_attestation() -> None:
+    ext = ["--set", f"{_CT}.hostApiTls.externalSecret=true"]
+    res = _render(*_yt(*ext))
+    assert res.returncode != 0 and "sharedCa" in res.stderr
+    ok = _render(*_yt(*ext, "--set", f"{_CT}.hostApiTls.sharedCa=true"))
+    assert ok.returncode == 0, ok.stderr[-600:]
