@@ -645,6 +645,13 @@ spire:
 tetragon:
   enabled: false
 
+# Discord connector service bundle: the Valkey IDENTIFY budget is wired (see values.yaml).
+pipeline:
+  rustDataPlane:
+    svcIngest:
+      connectorRuntime:
+        identifyBudgetReady: true
+
 # chore/presentation-beta-slice -- local/MicroK8s runs the Rust svc-presentation (the overlay
 # beta path), exactly like alpha/dal2alpha. templates/svc-presentation-rust.yaml renders INSTEAD
 # of the Python templates/svc-presentation.yaml (mutually exclusive, same Deployment/Service

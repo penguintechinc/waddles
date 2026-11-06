@@ -1599,27 +1599,29 @@ pipeline:
         # `pipeline.connectors.digests` (also feeds the executor's CONNECTOR_PIN_DIGEST_<P>).
         # Setting a non-empty `digests.*` here fails the render.
       # PR-H (connector runtime, docs/superpowers/specs/2026-11-05-connector-runtime-inbound-manager.md
-      # SS1.3/SS5/SS7) -- inbound connector runtime + per-platform overlay baselines. ALL OFF by
-      # default (beta/gamma/prod inherit OFF; nothing below renders while OFF). Each overlay ON
+      # SS1.3/SS5/SS7) -- inbound connector runtime + per-platform connector baselines. ALL OFF by
+      # default (beta/gamma/prod inherit OFF; nothing below renders while OFF). Each connector ON
       # flips BOTH svc-ingest deployments (Rust + Python) from this ONE value, so they cannot
       # disagree. Prerequisites (render-time `fail` otherwise): connectorTools.enabled,
       # pipeline.connectors.digests.<p>, the host-api TLS Secrets, and routeKeySecret when
       # webhookPlatforms is non-empty. Per-platform ON procedure (alpha, one at a time, SS7):
       #   1. youtube (poll, lowest blast radius)  2. discord (single guild)  3. twitch
-      #   set overlay.<p>.enabled: true (+ connectorTools.enabled + the digest), redeploy; smoke;
-      #   rollback = overlay.<p>.enabled: false + redeploy (legacy path restarts).
+      #   set connector.<p>.enabled: true (+ connectorTools.enabled + the digest), redeploy; smoke;
+      #   rollback = connector.<p>.enabled: false + redeploy (legacy path restarts).
       # Beta only after a clean 48h alpha soak.
       connectorRuntime:
         enabled: false
-        overlay:
+        connector:
           twitch:
             enabled: false
-          # REJECTED at render until the identify budget is ported (flip identifyBudgetReady).
+          # REJECTED at render unless identifyBudgetReady is true (alpha/dal2alpha/local only).
           discord:
             enabled: false
           youtube:
             enabled: false
-        # Flipped to true ONLY by the identify-budget PR (spec SS5.4 / row I).
+        # The Valkey IDENTIFY budget is wired in the binary; the chart default stays false so beta/
+        # gamma/production REJECT discord until it is deliberately enabled there (values-alpha,
+        # values-dal2alpha and values-local set true).
         identifyBudgetReady: false
         reconcileIntervalSecs: 60
         maxConnections: 500

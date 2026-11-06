@@ -47,8 +47,8 @@ use crate::connector::webhook::WebhookTransport;
 use crate::connector::ConnectorInvoker;
 use crate::connector::{
     ConnectorDriver, ConnectorMetrics, ConnectorRegistry, EventSink, FrameRuleMetrics,
-    PollTransport, RunEnd, Transport, TransportError, TransportSecretSource, TransportSecrets,
-    WsTransport,
+    HandshakeGate, PollTransport, RunEnd, Transport, TransportError, TransportSecretSource,
+    TransportSecrets, WsTransport,
 };
 use crate::twitch_sessions::SessionLease;
 
@@ -242,6 +242,24 @@ impl<R: ConnectionResolve + 'static> SecretsFactory for ResolverSecrets<R> {
     }
 }
 
+/// Builds the pre-handshake admission gate of one connection (Discord: the
+/// fleet-wide IDENTIFY budget). The gate is awaited by the driver before an
+/// on-connect handshake is sent, so a refusal sends nothing upstream.
+pub trait HandshakeGateFactory: Send + Sync {
+    /// The gate for `desired`, built over the connection's own community-bound
+    /// `secrets`; `Ok(None)` for a platform with no gate. An `Err` refuses the
+    /// connection (it parks as `transport_build`): a platform that needs a
+    /// gate never runs without one.
+    ///
+    /// # Errors
+    /// [`TransportError`] when the gate cannot be built.
+    fn for_connection(
+        &self,
+        desired: &DesiredConnection,
+        secrets: Arc<dyn TransportSecretSource>,
+    ) -> Result<Option<Arc<dyn HandshakeGate>>, TransportError>;
+}
+
 /// Publishes a running connection to the host-owned table the host-call bridge
 /// scopes by (`connection_id -> platform/community/tenant`). The supervisor
 /// `activate`s once the tenant is resolved and BEFORE any frame is driven, and
@@ -300,6 +318,9 @@ where
     pub lease: Arc<L>,
     /// Per-connection credential source.
     pub secrets: Arc<dyn SecretsFactory>,
+    /// Pre-handshake admission gates (Discord IDENTIFY budget); `None` = no
+    /// platform in this runtime needs one.
+    pub gates: Option<Arc<dyn HandshakeGateFactory>>,
     /// Resolves each connection's tenant from its community (never from
     /// binding metadata).
     pub tenants: Arc<dyn TenantResolve>,
@@ -340,6 +361,7 @@ struct Shared<I: ConnectorInvoker, S: EventSink, L: SessionLease> {
     sinks: Arc<dyn SinkFactory<S>>,
     lease: Arc<L>,
     secrets: Arc<dyn SecretsFactory>,
+    gates: Option<Arc<dyn HandshakeGateFactory>>,
     tenants: Arc<dyn TenantResolve>,
     status: Arc<RuntimeStatus>,
     connector_metrics: ConnectorMetrics,
@@ -564,7 +586,7 @@ where
         },
         None => None,
     };
-    let driver = ConnectorDriver::new(
+    let mut driver = ConnectorDriver::new(
         sh.registry.clone(),
         sh.invoker.clone(),
         Arc::new(sink),
@@ -572,6 +594,22 @@ where
     )
     .with_heartbeat_enabled(sh.heartbeat_enabled)
     .with_backoff_cap(sh.backoff_cap);
+    if let Some(gates) = &sh.gates {
+        match gates.for_connection(&desired, Arc::clone(&secrets.0)) {
+            Ok(Some(gate)) => driver = driver.with_handshake_gate(gate),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    platform = key.platform,
+                    community_id = key.community_id,
+                    connection_id = key.connection_id,
+                    kind = e.kind(),
+                    "could not build the handshake gate; parking the connection"
+                );
+                return TaskEnd::Parked(ParkReason::TransportBuild);
+            }
+        }
+    }
     let build_failed = |kind: &'static str| {
         tracing::warn!(
             platform = key.platform,
@@ -1001,6 +1039,7 @@ impl<
             sinks: deps.sinks,
             lease: deps.lease,
             secrets: deps.secrets,
+            gates: deps.gates,
             tenants: deps.tenants,
             status: status.clone(),
             connector_metrics: deps.connector_metrics,

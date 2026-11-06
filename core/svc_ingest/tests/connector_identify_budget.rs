@@ -343,6 +343,7 @@ async fn a_valkey_outage_fails_closed_with_a_typed_retryable_error() {
         source_id: "s",
         connection_id: "c",
         session_token: None,
+        handshake: br#"{"op":2,"d":{"token":"x"}}"#,
     };
     assert_eq!(
         gate.acquire(&ctx).await.unwrap_err(),
@@ -601,6 +602,11 @@ fn ctx(token: Option<&str>) -> GateCtx<'_> {
         source_id: "s",
         connection_id: "c",
         session_token: token,
+        handshake: if token.is_some() {
+            br#"{"op":6,"d":{"token":"x","session_id":"s-1","seq":9}}"#
+        } else {
+            br#"{"op":2,"d":{"token":"x"}}"#
+        },
     }
 }
 

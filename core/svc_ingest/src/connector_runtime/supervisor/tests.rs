@@ -544,6 +544,7 @@ fn start(sh: &Shared3, cfg: RuntimeConfig, owner: &str, opts: Opts) -> Running {
     let executor = Arc::new(Attached(AtomicBool::new(opts.executor_attached)));
     let rt = ConnectorRuntime::new(
         RuntimeDeps {
+            gates: None,
             activator: opts.activator.clone(),
             feed: FakeFeed(sh.feed.clone()),
             invoker: Arc::new(FakeInvoker),
@@ -1121,6 +1122,7 @@ async fn construction_rejects_an_invalid_config() {
     let metrics = RuntimeMetrics::register(&reg).expect("m");
     let res = ConnectorRuntime::new(
         RuntimeDeps {
+            gates: None,
             activator: None,
             feed: FakeFeed(sh.feed.clone()),
             invoker: Arc::new(FakeInvoker),
@@ -1171,6 +1173,7 @@ fn core_rig(cfg: RuntimeConfig) -> (TestCore, Arc<LeaseStore>, RuntimeMetrics) {
     let metrics = RuntimeMetrics::register(&reg).expect("m");
     let rt = ConnectorRuntime::new(
         RuntimeDeps {
+            gates: None,
             activator: None,
             feed: FakeFeed(sh3.feed.clone()),
             invoker: Arc::new(FakeInvoker),

@@ -52,11 +52,8 @@ class TestSelectorParsing:
 
     def test_discord_on_follows_the_module_const(self) -> None:
         env = {"CONNECTOR_DISCORD_ENABLED": "true"}
-        if connector_selector.IDENTIFY_BUDGET_READY:
-            assert ConnectorSelector.from_env(env).discord
-        else:
-            with pytest.raises(ConnectorConfigError):
-                ConnectorSelector.from_env(env)
+        assert connector_selector.IDENTIFY_BUDGET_READY
+        assert ConnectorSelector.from_env(env).discord
 
     def test_webhook_platforms(self) -> None:
         assert parse_webhook_platforms("") == ()
@@ -173,9 +170,20 @@ class TestAppSuppression:
             assert not any(r.startswith("youtube") for r in reg)
             assert "twitch_irc:somechannel" in reg
 
-    async def test_discord_connector_on_is_fatal_at_startup(
+    async def test_discord_connector_on_starts_with_the_identify_budget_wired(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Spec change (Discord flag-on): Discord ON used to be fatal at startup
+        # while IDENTIFY_BUDGET_READY was False; it now starts.
+        assert connector_selector.IDENTIFY_BUDGET_READY
+        monkeypatch.setenv("CONNECTOR_DISCORD_ENABLED", "true")
+        async with quart_app.test_app():
+            assert quart_app.config["connector_selector"].discord
+
+    async def test_discord_connector_on_is_fatal_when_the_budget_is_not_ready(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(connector_selector, "IDENTIFY_BUDGET_READY", False)
         monkeypatch.setenv("CONNECTOR_DISCORD_ENABLED", "true")
         with pytest.raises(LifespanError):
             async with quart_app.test_app():
