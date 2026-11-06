@@ -1,5 +1,5 @@
 //! The runtime's startup functions (`start_bridge_with`, `connect_tokenizer`,
-//! `start_runtime`, `start_overlay_with`) against REAL mTLS material, a REAL
+//! `start_runtime`, `start_connector_with`) against REAL mTLS material, a REAL
 //! Valkey and spine, with fakes only for hub-api (resolver, scope authority,
 //! identity tokenizer). Success and failure paths; the failure paths prove a
 //! missing prerequisite is a named fatal error and nothing is half-started.
@@ -23,11 +23,11 @@ use svc_ingest::connector::host_api_listener::HostApiTls;
 use svc_ingest::connector::host_calls::{CallScope, IdentityTokenizer, TokenizeError};
 use svc_ingest::connector::webhook::BoxFut;
 use svc_ingest::connector_runtime::boot::{
-    connect_tokenizer, start_bridge, start_bridge_with, start_overlay_with, start_runtime,
-    HostBridge, OverlayDeps, RuntimeSettings,
+    connect_tokenizer, start_bridge, start_bridge_with, start_connector_with, start_runtime,
+    ConnectorDeps, HostBridge, RuntimeSettings,
 };
 use svc_ingest::connector_runtime::scoped::ScopeLookup;
-use svc_ingest::connector_runtime::selector::OverlaySelector;
+use svc_ingest::connector_runtime::selector::ConnectorSelector;
 use svc_ingest::connector_runtime::webhook_boot::WebhookEnv;
 use svc_ingest::connector_runtime::Readiness;
 use svc_ingest::identity_crypto::{
@@ -229,17 +229,17 @@ async fn startup_functions_succeed_with_real_dependencies_and_fail_loud_without(
         .expect("no hub endpoint");
     assert!(err.to_string().contains("HUB_API_GRPC_ENDPOINT"), "{err}");
 
-    // ---- start_overlay: the real wrapper refuses without the installed scope resolver ----
+    // ---- start_connector: the real wrapper refuses without the installed scope resolver ----
     let mut st0 = svc_ingest::http::AppState::new(config(true), prometheus::Registry::new());
     let m0 = Arc::new(svc_ingest::telemetry::register_ingest_metrics(
         &prometheus::Registry::new(),
     ));
-    let sel0 = OverlaySelector::from_env(&|k: &str| {
-        (k == "OVERLAY_TWITCH_ENABLED").then(|| "true".to_owned())
+    let sel0 = ConnectorSelector::from_env(&|k: &str| {
+        (k == "CONNECTOR_TWITCH_ENABLED").then(|| "true".to_owned())
     })
     .unwrap();
     let w0 = Arc::new(WebhookEnv::from_lookup(&|_: &str| None).unwrap());
-    let err = svc_ingest::connector_runtime::boot::start_overlay(
+    let err = svc_ingest::connector_runtime::boot::start_connector(
         &config(true),
         &sel0,
         &w0,
@@ -255,9 +255,9 @@ async fn startup_functions_succeed_with_real_dependencies_and_fail_loud_without(
         "{err}"
     );
 
-    // ---- start_overlay_with: failures before any side effect that matters ----
-    let sel = OverlaySelector::from_env(&|k: &str| {
-        (k == "OVERLAY_TWITCH_ENABLED").then(|| "true".to_owned())
+    // ---- start_connector_with: failures before any side effect that matters ----
+    let sel = ConnectorSelector::from_env(&|k: &str| {
+        (k == "CONNECTOR_TWITCH_ENABLED").then(|| "true".to_owned())
     })
     .unwrap();
     let wenv = Arc::new(
@@ -275,14 +275,14 @@ async fn startup_functions_succeed_with_real_dependencies_and_fail_loud_without(
     ));
     let mut full = host_api.clone();
     full.insert("SENDER_EXEC_DIGEST_TWITCH".into(), "sha256:twitch".into());
-    let deps = |m: HashMap<String, String>| OverlayDeps {
+    let deps = |m: HashMap<String, String>| ConnectorDeps {
         resolver: Arc::new(EmptyHub),
         scope: Arc::new(NoScope) as Arc<dyn ScopeLookup>,
         tokenizer: Arc::new(NoTok) as Arc<dyn IdentityTokenizer>,
         lookup: Box::leak(Box::new(lookup(m))),
     };
     // Missing digest: named, nothing registered.
-    let err = start_overlay_with(
+    let err = start_connector_with(
         &config(true),
         &sel,
         &wenv,
@@ -302,7 +302,7 @@ async fn startup_functions_succeed_with_real_dependencies_and_fail_loud_without(
     // Spine config absent (VALKEY_URL unset): named failure, still no ingress.
     // SAFETY: as above.
     unsafe { std::env::remove_var("VALKEY_URL") };
-    let err = start_overlay_with(
+    let err = start_connector_with(
         &config(true),
         &sel,
         &wenv,
@@ -318,14 +318,14 @@ async fn startup_functions_succeed_with_real_dependencies_and_fail_loud_without(
     unsafe { std::env::set_var("VALKEY_URL", &valkey) };
     assert!(state.webhook.is_none());
 
-    // ---- start_overlay_with: success ----
+    // ---- start_connector_with: success ----
     // Without a binding keyring the runtime refuses (named), AFTER the ingress
     // and listener exist -- so give it a fresh registry/state per attempt.
     let mut state_nokey =
         svc_ingest::http::AppState::new(config(false), prometheus::Registry::new());
     let mut nokey_env = full.clone();
     nokey_env.insert("SENDER_EXEC_HOST_API_PORT".into(), free_port().to_string());
-    let err = start_overlay_with(
+    let err = start_connector_with(
         &config(false),
         &sel,
         &wenv,
@@ -343,7 +343,7 @@ async fn startup_functions_succeed_with_real_dependencies_and_fail_loud_without(
     ok_env.insert("SENDER_EXEC_HOST_API_PORT".into(), free_port().to_string());
     // Fresh registry: the failed attempts above already registered their series.
     let mut state = svc_ingest::http::AppState::new(config(true), prometheus::Registry::new());
-    let started = start_overlay_with(
+    let started = start_connector_with(
         &config(true),
         &sel,
         &wenv,
@@ -353,7 +353,7 @@ async fn startup_functions_succeed_with_real_dependencies_and_fail_loud_without(
         deps(ok_env),
     )
     .await
-    .expect("overlay boot succeeds with real dependencies");
+    .expect("connector boot succeeds with real dependencies");
     assert!(state.webhook.is_some(), "ingress stored for the router");
     assert!(!started.link.is_attached());
     // The runtime reconciles (empty feed): after the first pass the platform reports

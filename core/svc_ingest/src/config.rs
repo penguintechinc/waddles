@@ -202,9 +202,9 @@ pub struct CliConfig {
     pub twitch_resolve_timeout_secs: u64,
 
     /// Master switch for the connector runtime. The per-platform
-    /// `OVERLAY_<P>_ENABLED` baselines (read by
+    /// `CONNECTOR_<P>_ENABLED` baselines (read by
     /// `connector_runtime::selector`, never via the flag client) decide which
-    /// platforms run on it; this ON with every overlay OFF is a boot error.
+    /// platforms run on it; this ON with every connector OFF is a boot error.
     #[arg(long, env = "CONNECTOR_RUNTIME_ENABLED", default_value_t = false)]
     pub connector_runtime_enabled: bool,
 

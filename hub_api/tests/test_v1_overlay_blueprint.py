@@ -174,13 +174,21 @@ class TestGetOverlay:
         self, client: Any, overlay_db: Any
     ) -> None:
         headers, community_id, _ = _owner_headers(overlay_db)
+        overlay_db.dal.executesql("ALTER TABLE communities ADD COLUMN overlay_code VARCHAR(16)")
+        overlay_db.dal.commit()
         first = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
         assert first.status_code == 200
         first_body = await first.get_json()
         assert first_body["success"] is True
         overlay = first_body["overlay"]
         assert len(overlay["overlay_key"]) == 64
-        assert overlay["overlayUrl"] == f"https://overlay.example.test/{overlay['overlay_key']}"
+        code = overlay_db.dal.executesql(
+            f"SELECT overlay_code FROM communities WHERE id = {community_id}"  # noqa: S608
+        )[0][0]
+        # The Rust router serves only `/{overlay_code}/{surface}?key=`; never the legacy `/{key}`.
+        assert overlay["overlayUrl"] == (
+            f"https://overlay.example.test/{code}/alert_box?key={overlay['overlay_key']}"
+        )
         assert overlay["is_active"] is True
         assert overlay["enabled_sources"] == ["alerts", "chat", "goals", "ticker"]
 

@@ -1,4 +1,4 @@
-//! The platform-static overlay profile seam (spec 1.1/1.2). A profile is
+//! The platform-static connector profile seam (spec 1.1/1.2). A profile is
 //! compiled into svc-ingest: URLs, slot prefixes and gateway rules are host
 //! constants and never come from guest or binding data.
 
@@ -47,12 +47,12 @@ pub struct RuntimeEnv {
 }
 
 /// One platform's static derivation from a hub-api binding to desired
-/// connections. Implemented once per overlay platform (twitch/discord/youtube).
+/// connections. Implemented once per connector platform (twitch/discord/youtube).
 ///
 /// `source_key` of any derived `WsConfig`/`PollConfig` MUST identify the
 /// upstream resource (Twitch channel, Discord guild, YouTube chat): the feed
 /// uses it to fail closed when two communities claim one resource.
-pub trait OverlayProfile: Send + Sync {
+pub trait ConnectorProfile: Send + Sync {
     /// Platform slug: `twitch` | `discord` | `youtube`.
     fn platform(&self) -> &'static str;
     /// The connector bundle `app_id` (`waddles.core.service.<p>`).

@@ -1,5 +1,5 @@
 //! The Twitch [`SlotSource`]: turns the per-community credential seam
-//! (`crate::outbound_creds`, P6a T6b) into the four Helix slots the overlay
+//! (`crate::outbound_creds`, P6a T6b) into the four Helix slots the connector
 //! templates carry (`token`, `client_id`, `broadcaster_id`, `sender_id`).
 //!
 //! * `token` -- the community's own OAuth access token, resolved by

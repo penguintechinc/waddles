@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds the YouTube overlay component and runs its real-path executor tests
-# (core/bundle_executor/tests/youtube_overlay.rs) against the compiled wasm.
+# Builds the YouTube connector component and runs its real-path executor tests
+# (core/bundle_executor/tests/youtube_connector.rs) against the compiled wasm.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,6 +13,6 @@ WASM="$(find "$TARGET_DIR" -maxdepth 3 -path "$TARGET_DIR/wasm32-wasip*/release/
 [ -s "$WASM" ] || { echo "FAIL: youtube wasm not built" >&2; exit 1; }
 
 cd "$ROOT/core/bundle_executor"
-YOUTUBE_OVERLAY_WASM="$WASM" cargo test --locked --test youtube_overlay -- --ignored --nocapture 2>&1 | tee /dev/stderr | grep -E "test result: ok\. [1-9][0-9]* passed" >/dev/null \
+YOUTUBE_CONNECTOR_WASM="$WASM" cargo test --locked --test youtube_connector -- --ignored --nocapture 2>&1 | tee /dev/stderr | grep -E "test result: ok\. [1-9][0-9]* passed" >/dev/null \
   || { echo "FAIL: zero real-path tests passed" >&2; exit 1; }
-echo "OK: youtube overlay real-path tests passed"
+echo "OK: youtube connector real-path tests passed"

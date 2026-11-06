@@ -336,6 +336,7 @@ async fn rtmp_publish_starts_a_transcoded_pipeline_and_hls_lists_it() {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             community_id INTEGER NOT NULL UNIQUE,
             source_url TEXT NOT NULL,
+            stream_key_hash TEXT,
             source_type TEXT NOT NULL DEFAULT 'rtmp',
             enabled INTEGER NOT NULL DEFAULT 1,
             record_enabled INTEGER NOT NULL DEFAULT 0,
@@ -362,6 +363,7 @@ async fn rtmp_publish_starts_a_transcoded_pipeline_and_hls_lists_it() {
     ))
     .await
     .expect("seed schema");
+    svc_streaming::stream_key::backfill_hashes_from_source_url_for_tests(&db).await;
 
     let prom_registry = prometheus::Registry::new();
     let supervisor = Arc::new(FfmpegSupervisor::new(
@@ -380,7 +382,10 @@ async fn rtmp_publish_starts_a_transcoded_pipeline_and_hls_lists_it() {
         svc_streaming::egress::hls::DEFAULT_CLEANUP_DELAY,
     ));
     let registry = Arc::new(PipelineRegistry::new());
-    let relay = Arc::new(RelaySink::new());
+    let relay = Arc::new(
+        RelaySink::new()
+            .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled()),
+    );
     let whip_state = unused_whip_state(&config);
     let _whep_state = WhepState::new(
         Arc::new(PeerConnectionFactory::new(RtcConfig::from_config(&config).unwrap()).unwrap()),

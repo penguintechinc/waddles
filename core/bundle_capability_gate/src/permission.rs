@@ -803,7 +803,7 @@ impl PermissionFamily {
                      views, counts-only audit",
                 ),
                 notes: "connector world only; returns raw PII (handle, display name) to a \
-                        first-party core connector/overlay -- never grantable to a vendor \
+                        first-party core connector -- never grantable to a vendor \
                         bundle (spec connector-bundles SS3.1/3.3); op `identity.lookup`",
             },
             Self::FlagsRead => CatalogEntry {
@@ -1269,7 +1269,7 @@ mod tests {
         );
     }
 
-    /// regression: p6b -- the Twitch overlay's read tools call `identity.lookup`
+    /// regression: p6b -- the Twitch connector's read tools call `identity.lookup`
     /// but the catalog had no id for its gate.
     #[test]
     fn connector_pii_read_is_dangerous_and_round_trips() {

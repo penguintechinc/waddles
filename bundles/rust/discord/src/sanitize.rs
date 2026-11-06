@@ -9,7 +9,7 @@
 //! on both the raw string and a whitespace-collapsed copy (so `{\n{` and
 //! `{ {` cannot hide a slot from a downstream that trims).
 
-use crate::error::{OverlayError, Result};
+use crate::error::{ConnectorError, Result};
 
 /// True for zero-width, soft-hyphen, bidi-control, invisible-operator and BOM
 /// characters, and for brace lookalikes (fullwidth, ornamental, math).
@@ -35,12 +35,12 @@ fn is_forbidden_format(c: char) -> bool {
 /// rejected.
 ///
 /// # Errors
-/// [`OverlayError::Malformed`] naming the field and the rule (never the value).
+/// [`ConnectorError::Malformed`] naming the field and the rule (never the value).
 pub fn guard_text(field: &str, s: &str, allow_newlines: bool) -> Result<()> {
     for c in s.chars() {
         let newline_ok = allow_newlines && (c == '\n' || c == '\t');
         if (c.is_control() && !newline_ok) || is_forbidden_format(c) {
-            return Err(OverlayError::Malformed(format!(
+            return Err(ConnectorError::Malformed(format!(
                 "`{field}` contains a control, invisible or lookalike character"
             )));
         }
@@ -48,7 +48,7 @@ pub fn guard_text(field: &str, s: &str, allow_newlines: bool) -> Result<()> {
     let collapsed: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     for candidate in [s, collapsed.as_str()] {
         if candidate.contains("{{") || candidate.contains("}}") {
-            return Err(OverlayError::Malformed(format!(
+            return Err(ConnectorError::Malformed(format!(
                 "`{field}` contains a credential-slot delimiter"
             )));
         }
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn a_control_char_between_braces_is_rejected_not_stripped() {
-        // regression: the Twitch overlay HIGH -- `{<ctrl>{SECRET}}` after strip-then-check.
+        // regression: the Twitch connector HIGH -- `{<ctrl>{SECRET}}` after strip-then-check.
         for c in [
             '\u{0}', '\u{1}', '\u{7}', '\u{1B}', '\u{7F}', '\u{85}', '\r',
         ] {

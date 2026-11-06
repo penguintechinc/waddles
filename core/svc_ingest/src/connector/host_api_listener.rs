@@ -403,11 +403,11 @@ mod tests {
     }
 
     /// Real path end to end: a CA-signed executor over real mTLS reaches the
-    /// real [`OverlayHostCalls`]: an unscoped call is denied, a scoped one served.
+    /// real [`ConnectorHostCalls`]: an unscoped call is denied, a scoped one served.
     #[tokio::test]
     async fn host_calls_are_scope_checked_over_the_real_mtls_listener() {
         use crate::connector::host_calls::{
-            ActiveConnections, CallScope, HostCallConfig, IdentityTokenizer, OverlayHostCalls,
+            ActiveConnections, CallScope, ConnectorHostCalls, HostCallConfig, IdentityTokenizer,
             TokenizeError,
         };
         use crate::connector::webhook::BoxFut;
@@ -432,7 +432,7 @@ mod tests {
                 connection_id: 11,
             })
             .unwrap();
-        let handler = OverlayHostCalls::new(
+        let handler = ConnectorHostCalls::new(
             table,
             Arc::new(Fixed),
             HostCallConfig::new(["twitch"]).unwrap(),

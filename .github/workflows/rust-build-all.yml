@@ -98,27 +98,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # Union of the apt deps the per-crate workflows need (ring/aws-lc-sys
-      # C toolchain, cmake, protoc for hub_client's build.rs). Bounded retry,
-      # fails loudly -- same pattern as rust-crate-ci.yml.
-      - name: Install build deps (C toolchain, cmake, protoc)
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          for i in 1 2 3; do
-            if timeout 180 sudo -E apt-get -y -o Dpkg::Use-Pty=0 update \
-               && timeout 300 sudo -E apt-get -y -o Dpkg::Use-Pty=0 install --no-install-recommends build-essential cmake protobuf-compiler; then
-              break
-            fi
-            echo "apt attempt $i failed/timed out" >&2
-            if [ "$i" -eq 3 ]; then
-              echo "all 3 apt attempts failed/timed out -- failing loudly" >&2
-              exit 1
-            fi
-            sleep 10
-          done
-
+      - name: Setup build deps (C toolchain, cmake, protoc)
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages: 'cmake build-essential protobuf-compiler'
       - name: Install Rust 1.97.1
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
         with:

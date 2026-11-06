@@ -1,11 +1,11 @@
-//! Shared plain-Rust types for the host-testable overlay logic. The wasm glue
+//! Shared plain-Rust types for the host-testable connector logic. The wasm glue
 //! in `lib.rs` maps these onto the generated WIT records.
 
 use serde_json::{Map, Value};
 
-/// The PostHog flag gating the whole overlay cutover (default OFF; while OFF
+/// The PostHog flag gating the whole connector cutover (default OFF; while OFF
 /// the hardcoded `svc_ingest` Twitch path runs unchanged).
-pub const OVERLAY_FLAG: &str = "waddles.overlay-twitch";
+pub const CONNECTOR_FLAG: &str = "waddles.connector-twitch";
 
 /// Platform slug every emitted event carries (the host rejects any other).
 pub const PLATFORM: &str = "twitch";
@@ -13,7 +13,7 @@ pub const PLATFORM: &str = "twitch";
 /// A connector-reported frame failure (mirrors WIT `frame-error`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameErr {
-    /// The overlay does not handle this input kind.
+    /// The connector does not handle this input kind.
     Unsupported(String),
     /// The input is structurally invalid.
     Malformed(String),
@@ -22,7 +22,7 @@ pub enum FrameErr {
 }
 
 /// One normalized event (mirrors WIT `normalized-event`). `source` is NOT
-/// carried: the host derives it from the pinned connection (never the overlay).
+/// carried: the host derives it from the pinned connection (never the connector).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormEvent {
     /// Dotted lowercase event type (`message`, `channel.follow`, ...).
@@ -97,19 +97,19 @@ pub fn resolve_actors(
 
 /// Cutover gate decision, split out of the wasm glue so it is host-testable:
 /// flag OFF (the default; an unseen/unreachable flag reads OFF) refuses every
-/// overlay entry point so the hardcoded path stays the only live one.
+/// connector entry point so the hardcoded path stays the only live one.
 pub fn gate_decision(flag_enabled: bool) -> Result<(), FrameErr> {
     if flag_enabled {
         Ok(())
     } else {
         Err(FrameErr::Unsupported(
-            "overlay-twitch flag is off".to_string(),
+            "connector-twitch flag is off".to_string(),
         ))
     }
 }
 
-/// Default the glue passes to `flags::enabled(OVERLAY_FLAG, ..)`: OFF.
-pub const OVERLAY_FLAG_DEFAULT: bool = false;
+/// Default the glue passes to `flags::enabled(CONNECTOR_FLAG, ..)`: OFF.
+pub const CONNECTOR_FLAG_DEFAULT: bool = false;
 
 #[cfg(test)]
 mod tests {
@@ -117,10 +117,10 @@ mod tests {
 
     #[test]
     fn flag_off_refuses_and_default_is_off() {
-        assert_eq!(OVERLAY_FLAG, "waddles.overlay-twitch");
-        assert!(!std::hint::black_box(OVERLAY_FLAG_DEFAULT));
+        assert_eq!(CONNECTOR_FLAG, "waddles.connector-twitch");
+        assert!(!std::hint::black_box(CONNECTOR_FLAG_DEFAULT));
         assert!(matches!(
-            gate_decision(OVERLAY_FLAG_DEFAULT),
+            gate_decision(CONNECTOR_FLAG_DEFAULT),
             Err(FrameErr::Unsupported(_))
         ));
         assert!(gate_decision(true).is_ok());

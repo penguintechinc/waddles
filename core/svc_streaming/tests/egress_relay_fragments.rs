@@ -54,7 +54,8 @@ async fn single_rtmp_target_returns_flv_output_args() {
         "SVC_STREAMING_RELAY_FRAG_RTMP",
         "rtmp://ingest.example.com/app/sk_abc",
     );
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     sink.start(pipeline_id, rtmp_spec("SVC_STREAMING_RELAY_FRAG_RTMP"))
         .await
@@ -77,7 +78,8 @@ async fn single_srt_target_returns_mpegts_output_args() {
         "SVC_STREAMING_RELAY_FRAG_SRT",
         "srt://ingest.example.com:9000?streamid=sk_abc&latency=120",
     );
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     sink.start(pipeline_id, srt_spec("SVC_STREAMING_RELAY_FRAG_SRT"))
         .await
@@ -94,7 +96,8 @@ async fn single_srt_target_returns_mpegts_output_args() {
 
 #[tokio::test]
 async fn no_active_targets_errors_instead_of_returning_empty_args() {
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let err = sink.ffmpeg_output_args(Uuid::new_v4()).await.unwrap_err();
     assert!(matches!(err, RelayError::NoActiveTargets(_)));
 }
@@ -110,7 +113,8 @@ async fn two_targets_sharing_a_pipeline_group_into_ordered_tee_slaves() {
         "srt://b.example.com:9000?streamid=k2",
     );
 
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     sink.start(pipeline_id, rtmp_spec("SVC_STREAMING_RELAY_FRAG_TEE_A"))
         .await
@@ -143,7 +147,8 @@ async fn two_targets_sharing_a_pipeline_group_into_ordered_tee_slaves() {
 
 #[tokio::test]
 async fn tee_slaves_is_empty_for_an_untracked_pipeline() {
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     assert!(sink.tee_slaves(Uuid::new_v4()).await.is_empty());
 }
 
@@ -153,7 +158,8 @@ async fn stop_clears_active_targets_so_fragments_and_slaves_reset() {
         "SVC_STREAMING_RELAY_FRAG_STOP",
         "rtmp://a.example.com/app/k1",
     );
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     sink.start(pipeline_id, rtmp_spec("SVC_STREAMING_RELAY_FRAG_STOP"))
         .await

@@ -1599,19 +1599,19 @@ pipeline:
         # `pipeline.connectors.digests` (also feeds the executor's CONNECTOR_PIN_DIGEST_<P>).
         # Setting a non-empty `digests.*` here fails the render.
       # PR-H (connector runtime, docs/superpowers/specs/2026-11-05-connector-runtime-inbound-manager.md
-      # SS1.3/SS5/SS7) -- inbound connector runtime + per-platform overlay baselines. ALL OFF by
-      # default (beta/gamma/prod inherit OFF; nothing below renders while OFF). Each overlay ON
+      # SS1.3/SS5/SS7) -- inbound connector runtime + per-platform connector baselines. ALL OFF by
+      # default (beta/gamma/prod inherit OFF; nothing below renders while OFF). Each connector ON
       # flips BOTH svc-ingest deployments (Rust + Python) from this ONE value, so they cannot
       # disagree. Prerequisites (render-time `fail` otherwise): connectorTools.enabled,
       # pipeline.connectors.digests.<p>, the host-api TLS Secrets, and routeKeySecret when
       # webhookPlatforms is non-empty. Per-platform ON procedure (alpha, one at a time, SS7):
       #   1. youtube (poll, lowest blast radius)  2. discord (single guild)  3. twitch
-      #   set overlay.<p>.enabled: true (+ connectorTools.enabled + the digest), redeploy; smoke;
-      #   rollback = overlay.<p>.enabled: false + redeploy (legacy path restarts).
+      #   set connector.<p>.enabled: true (+ connectorTools.enabled + the digest), redeploy; smoke;
+      #   rollback = connector.<p>.enabled: false + redeploy (legacy path restarts).
       # Beta only after a clean 48h alpha soak.
       connectorRuntime:
         enabled: false
-        overlay:
+        connector:
           twitch:
             enabled: false
           # REJECTED at render unless identifyBudgetReady is true (alpha/dal2alpha/local only).
@@ -3460,6 +3460,12 @@ serviceJwt:
         # pipeline.rustDataPlane.svcAction.dynamicConnections.enabled (default false).
         - "connections:resolve"
         - "connections:resolve:static"
+        # chore/presentation-beta-slice -- svc-action's builtin handlers (twitch_shoutout) push to the
+        # Rust svc-presentation's `POST /{overlay_code}/{surface}/push`, which needs a hub-api-minted
+        # PUSH JWT. hub-api stamps the per-community form `presentation.overlay:push:<community_id>`
+        # (never wider). Filtered out of the rendered allow-list unless presentation.rust.enabled
+        # (waddlebot.svcActionOverlayPush) -- base/beta/prod keep the Python svc-presentation.
+        - "presentation.overlay:push"
     # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
     # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints
     # pseudonyms or calls egress, so exactly one scope.

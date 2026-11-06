@@ -1,12 +1,12 @@
 //! Per-platform, per-kind template policy for the generic outbound executor
 //! (P6a T6d-1): which hosts a template may name, which slots may appear and
 //! where, which headers are tolerated, and the request shape of every
-//! supported action kind. The data is the contract the platform overlays
+//! supported action kind. The data is the contract the platform connectors
 //! (`bundles/rust/{twitch,discord,youtube}` READMEs, "host-config" + "slot"
 //! tables) are written against; the verifier in [`super::verify`] enforces it
 //! and the substituter in [`super::subst`] fills it.
 
-/// How a platform's overlay spells a slot.
+/// How a platform's connector spells a slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotSyntax {
     /// `{{NAME}}` (Twitch, YouTube).
@@ -58,7 +58,7 @@ pub enum Position {
 pub struct SlotDecl {
     /// Token text between the braces (`TWITCH_TOKEN`, `target.channel_id`).
     pub name: &'static str,
-    /// The overlay's `secret-refs` handle for this slot (`""` for a
+    /// The connector's `secret-refs` handle for this slot (`""` for a
     /// [`SlotOrigin::Stamp`] / [`SlotOrigin::Duty`] placeholder).
     pub handle: &'static str,
     /// Value source.
@@ -76,7 +76,7 @@ pub struct SlotDecl {
 pub struct HeaderCred {
     /// Lowercase header name.
     pub header: &'static str,
-    /// Handle the overlay pairs with it.
+    /// Handle the connector pairs with it.
     pub handle: &'static str,
     /// Literal scheme prefix (`"Bot "`).
     pub prefix: &'static str,
@@ -111,7 +111,7 @@ pub struct KindPolicy {
     /// `Some(max)` = a JSON object body is required and bounded; `None` = no
     /// body is allowed.
     pub max_body: Option<usize>,
-    /// Payload key the queued text is handed to the overlay under.
+    /// Payload key the queued text is handed to the connector under.
     pub text_key: &'static str,
     /// `true` = the kind needs a [`super::DutyHook`] host duty (T6d-2); with
     /// none claiming it the executor refuses before building anything.
@@ -214,7 +214,7 @@ impl PlatformPolicy {
         self
     }
 
-    /// Twitch Helix policy (overlay README "Slot set for T6d").
+    /// Twitch Helix policy (connector README "Slot set for T6d").
     #[must_use]
     pub fn twitch() -> Self {
         let all = vec![
@@ -311,7 +311,7 @@ impl PlatformPolicy {
         }
     }
 
-    /// Discord REST policy (overlay README "Outbound (T6d)"). Only
+    /// Discord REST policy (connector README "Outbound (T6d)"). Only
     /// `{target.channel_id}` is a stamp slot; `dm.send` needs a host duty
     /// and `role.*` are host duties (`discord_duties`): their
     /// placeholders are normalized by the hook, then filled by it.
@@ -399,7 +399,7 @@ impl PlatformPolicy {
         }
     }
 
-    /// YouTube Data API policy (overlay README "Host config"): `chat.send`
+    /// YouTube Data API policy (connector README "Host config"): `chat.send`
     /// only; the channel/video id slots are declared for the read path and
     /// are not permitted in any outbound kind.
     #[must_use]

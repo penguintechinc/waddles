@@ -13,7 +13,7 @@ use svc_ingest::connector::secrets::{Destination, ResolvedAuth, TransportSecretS
 use svc_ingest::connector::webhook::{BoxFut, SecretError};
 use svc_ingest::connector::{FrameOutcome, PollConfig, PollTransport, Transport, TransportError};
 use svc_ingest::connector_runtime::feed::TransportPlan;
-use svc_ingest::connector_runtime::plan::{OverlayProfile, RuntimeEnv};
+use svc_ingest::connector_runtime::plan::{ConnectorProfile, RuntimeEnv};
 use svc_ingest::connector_runtime::profiles::youtube::YoutubeProfile;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};

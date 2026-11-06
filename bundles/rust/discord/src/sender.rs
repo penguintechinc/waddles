@@ -1,6 +1,6 @@
 //! `sender.build-request`: Discord REST request TEMPLATES (part B).
 //!
-//! The overlay never holds a token and never picks a destination:
+//! The connector never holds a token and never picks a destination:
 //!
 //! * the credential is a `secret-refs` entry (`Authorization` -> opaque handle);
 //!   the host substitutes the real `Bot ...` value at send time;
@@ -17,7 +17,7 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::error::{OverlayError, Result};
+use crate::error::{ConnectorError, Result};
 use crate::sanitize::guard_text;
 use crate::session::is_snowflake;
 
@@ -68,13 +68,13 @@ pub struct HttpTpl {
 /// Parses the payload as an object whose keys are exactly within `allowed`.
 fn object(payload: &str, allowed: &[&str]) -> Result<Map<String, Value>> {
     let v: Value = serde_json::from_str(payload)
-        .map_err(|_| OverlayError::Malformed("payload is not JSON".into()))?;
+        .map_err(|_| ConnectorError::Malformed("payload is not JSON".into()))?;
     let Value::Object(map) = v else {
-        return Err(OverlayError::Malformed("payload is not an object".into()));
+        return Err(ConnectorError::Malformed("payload is not an object".into()));
     };
     if let Some(k) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
         // Includes any attempt to supply channel_id / guild_id.
-        return Err(OverlayError::Malformed(format!(
+        return Err(ConnectorError::Malformed(format!(
             "payload field `{k}` is not accepted for this action"
         )));
     }
@@ -84,7 +84,7 @@ fn object(payload: &str, allowed: &[&str]) -> Result<Map<String, Value>> {
 fn str_field<'a>(map: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
     map.get(key)
         .and_then(Value::as_str)
-        .ok_or_else(|| OverlayError::Malformed(format!("missing string `{key}`")))
+        .ok_or_else(|| ConnectorError::Malformed(format!("missing string `{key}`")))
 }
 
 fn snowflake(map: &Map<String, Value>, key: &str) -> Result<String> {
@@ -92,7 +92,7 @@ fn snowflake(map: &Map<String, Value>, key: &str) -> Result<String> {
     if is_snowflake(s) {
         Ok(s.to_string())
     } else {
-        Err(OverlayError::Malformed(format!(
+        Err(ConnectorError::Malformed(format!(
             "`{key}` is not a snowflake"
         )))
     }
@@ -111,7 +111,7 @@ fn user_ref(map: &Map<String, Value>, key: &str) -> Result<String> {
     if placeholder {
         Ok(s.to_string())
     } else {
-        Err(OverlayError::Malformed(format!(
+        Err(ConnectorError::Malformed(format!(
             "`{key}` must be a {{user:<uuid>}} placeholder"
         )))
     }
@@ -129,7 +129,7 @@ fn role_key(map: &Map<String, Value>) -> Result<String> {
     if ok {
         Ok(s.to_string())
     } else {
-        Err(OverlayError::Malformed(
+        Err(ConnectorError::Malformed(
             "`role` must be a managed-role key ([a-z][a-z0-9_-]{0,31})".into(),
         ))
     }
@@ -139,10 +139,10 @@ fn content(map: &Map<String, Value>) -> Result<&str> {
     let c = str_field(map, "content")?;
     guard_text("content", c, true)?;
     if c.is_empty() {
-        return Err(OverlayError::Malformed("content is empty".into()));
+        return Err(ConnectorError::Malformed("content is empty".into()));
     }
     if c.chars().count() > MAX_CONTENT_CHARS {
-        return Err(OverlayError::Malformed(
+        return Err(ConnectorError::Malformed(
             "content exceeds 2000 characters".into(),
         ));
     }
@@ -154,7 +154,7 @@ fn message_body(text: &str) -> Result<Vec<u8>> {
         "content": text,
         "allowed_mentions": { "parse": ["users"] },
     }))
-    .map_err(|e| OverlayError::Backend(e.to_string()))
+    .map_err(|e| ConnectorError::Backend(e.to_string()))
 }
 
 fn tpl(method: &str, path: String, body: Option<Vec<u8>>) -> HttpTpl {
@@ -177,16 +177,16 @@ fn tpl(method: &str, path: String, body: Option<Vec<u8>>) -> HttpTpl {
 /// `dm.send` returns the MESSAGE request against `{dm.channel_id}`; the HOST opens
 /// the DM channel for the `{user:<uuid>}` recipient itself and fills the
 /// placeholder only from Discord's reply to that call. The host MUST also enforce
-/// the `send_dm_in_community` gate and managed-role allowlist -- the overlay
+/// the `send_dm_in_community` gate and managed-role allowlist -- the connector
 /// cannot (see README "Host duties").
 ///
 /// # Errors
-/// [`OverlayError::Unsupported`] for an unknown kind; [`OverlayError::Malformed`]
+/// [`ConnectorError::Unsupported`] for an unknown kind; [`ConnectorError::Malformed`]
 /// for an empty target, a non-object payload, a field outside the kind's
 /// allow-list (notably any destination), a bad snowflake, or bad content.
 pub fn build_request(action: &Action) -> Result<HttpTpl> {
     if action.target_source_id.is_empty() || action.target_source_id.len() > 128 {
-        return Err(OverlayError::Malformed("target-source-id invalid".into()));
+        return Err(ConnectorError::Malformed("target-source-id invalid".into()));
     }
     guard_text("target-source-id", &action.target_source_id, false)?;
     let p = action.payload_json.as_str();
@@ -236,7 +236,9 @@ pub fn build_request(action: &Action) -> Result<HttpTpl> {
                 None,
             ))
         }
-        other => Err(OverlayError::Unsupported(format!("action kind `{other}`"))),
+        other => Err(ConnectorError::Unsupported(format!(
+            "action kind `{other}`"
+        ))),
     }
 }
 
@@ -314,14 +316,17 @@ mod tests {
         ];
         for (k, p) in cases {
             assert!(
-                matches!(build_request(&act(k, &p)), Err(OverlayError::Malformed(_))),
+                matches!(
+                    build_request(&act(k, &p)),
+                    Err(ConnectorError::Malformed(_))
+                ),
                 "{k} {p}"
             );
         }
         // dm.post no longer exists: the host runs the whole two-step from dm.send.
         assert!(matches!(
             build_request(&act("dm.post", r#"{"dm_channel_id":"88","content":"hi"}"#)),
-            Err(OverlayError::Unsupported(_))
+            Err(ConnectorError::Unsupported(_))
         ));
     }
 
@@ -426,7 +431,7 @@ mod tests {
         assert!(build_request(&act("chat.send", r#"{}"#)).is_err());
         assert!(matches!(
             build_request(&act("moderation.ban", "{}")),
-            Err(OverlayError::Unsupported(_))
+            Err(ConnectorError::Unsupported(_))
         ));
         let mut a = act("chat.send", r#"{"content":"x"}"#);
         a.target_source_id.clear();
@@ -437,7 +442,7 @@ mod tests {
 
     #[test]
     fn slot_smuggling_in_any_templated_string_is_rejected() {
-        // regression (Twitch overlay HIGH): control/zero-width/lookalike chars around braces.
+        // regression (Twitch connector HIGH): control/zero-width/lookalike chars around braces.
         for evil in [
             "{\\u0001{SECRET}}",
             "{\\u200B{SECRET}}",

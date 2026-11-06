@@ -1,5 +1,5 @@
 //! Real-path e2e of the connector runtime executor side (PR-A1): boot pinning
-//! of a REAL overlay component through a signed bucket source, the second dial
+//! of a REAL connector component through a signed bucket source, the second dial
 //! loop over REAL mutual TLS with SAN pinning in both directions, and the
 //! host-derived `_scope` stamp on every guest host-call.
 //!
@@ -8,7 +8,7 @@
 //! `host_api_listener`); everything on the executor side is the production
 //! code path (`connector_boot::pin_configured`, `tls::dial_connector`,
 //! `serve_connector_link_once`, `ConnectorLinkHandler`, wasmtime, the real
-//! discord overlay).
+//! discord connector).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -41,7 +41,7 @@ use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
-const DISCORD_WASM: &[u8] = include_bytes!("fixtures/discord_overlay.wasm");
+const DISCORD_WASM: &[u8] = include_bytes!("fixtures/discord_connector.wasm");
 const DISCORD_APP: &str = "waddles.core.service.discord";
 const SERVER_ID: &str = "spiffe://waddlebot/svc-ingest-hostapi";
 const EXECUTOR_ID: &str = "spiffe://waddlebot/executor-connector";
@@ -265,7 +265,7 @@ fn boot_cfg() -> CliConfig {
 // ------------------------------------------------------------ boot pin
 
 #[tokio::test]
-async fn boot_pins_the_real_overlay_through_the_signed_bucket() {
+async fn boot_pins_the_real_connector_through_the_signed_bucket() {
     let cfg = boot_cfg();
     let exec = Executor::new(
         &cfg,
@@ -273,7 +273,7 @@ async fn boot_pins_the_real_overlay_through_the_signed_bucket() {
     )
     .unwrap();
     let pinned = pin_configured(&exec, &cfg).await.unwrap();
-    assert_eq!(pinned, 1, "denominator: exactly one overlay configured");
+    assert_eq!(pinned, 1, "denominator: exactly one connector configured");
     assert_eq!(exec.pinned_connectors().await, 1);
 }
 
@@ -382,7 +382,7 @@ struct Rig {
     listener: TcpListener,
 }
 
-/// Executor with the discord overlay pinned, plus certs on disk and a bound
+/// Executor with the discord connector pinned, plus certs on disk and a bound
 /// listener port. `client_uri` is the SAN of the cert the executor presents.
 async fn rig(tag: &str, ca: &Ca, client_uri: &str) -> Rig {
     let dir = Scratch::new(tag);
@@ -554,7 +554,7 @@ async fn guest_host_calls_cross_the_pinned_mtls_link_stamped_with_the_host_scope
 
     assert!(
         seen.host_calls.len() >= 2,
-        "denominator: the overlay must have made host-calls, saw {}",
+        "denominator: the connector must have made host-calls, saw {}",
         seen.host_calls.len()
     );
     let mut by_invoke: HashMap<u64, Vec<&HostCallBody>> = HashMap::new();

@@ -146,20 +146,20 @@ Economy (`core/bundle_host_economy`) and reputation (`core/bundle_host_reputatio
 |---|---|---|
 | **Economy** | verbs (`!give`/`!points[ set/view/leaders]`), exchange-rate (1000:500), per-community alias, rep-filter-at-draw, exported tools | atomic balance/ledger primitives via `economy` cap |
 | **Reputation** | score policy, admin-override logic, exported tools | atomic score primitives via `reputation` cap |
-| **Connectors (Twitch/YouTube/Discord)** | the **platform OVERLAY** (subscription semantics, payload parsing, normalization, which verify-scheme to invoke, exported `get_chatters`/`send_chat` tools) → a service-bundle overlay | **GENERIC transport primitives only** — generic webhook ingress, generic WS subscription, generic poller, generic outbound HTTP, generic signature-verify (scheme parameterized), secret storage. No platform knowledge in the dataplane |
+| **Connectors (Twitch/YouTube/Discord)** | the **platform CONNECTOR** (subscription semantics, payload parsing, normalization, which verify-scheme to invoke, exported `get_chatters`/`send_chat` tools) → a service-bundle connector | **GENERIC transport primitives only** — generic webhook ingress, generic WS subscription, generic poller, generic outbound HTTP, generic signature-verify (scheme parameterized), secret storage. No platform knowledge in the dataplane |
 
-⇒ **Two WASM logic-bundle migrations (economy, reputation)** + **connectors split into a generic dataplane transport layer + per-platform service-bundle overlays** — not three monolithic bundle migrations.
+⇒ **Two WASM logic-bundle migrations (economy, reputation)** + **connectors split into a generic dataplane transport layer + per-platform service-bundle connectors** — not three monolithic bundle migrations.
 
-### 10a. Generic transports + platform overlays (owner 2026-10-30)
+### 10a. Generic transports + platform connectors (owner 2026-10-30)
 
-**The dataplane must not know what "Twitch" is.** It exposes **platform-agnostic transport primitives**; service bundles supply the **platform overlay** on top. Adding a platform (Slack, Mastodon, a donation provider) = a new bundle overlay, **not new dataplane code**.
+**The dataplane must not know what "Twitch" is.** It exposes **platform-agnostic transport primitives**; service bundles supply the **platform connector** on top. Adding a platform (Slack, Mastodon, a donation provider) = a new bundle connector, **not new dataplane code**.
 
 Three tiers:
 - **Core Rust dataplane (generic):** transport mechanism + sensitive primitives — sockets, routing, TLS, connection pooling, a **generic registered-webhook HTTP ingress**, a **generic WS subscription**, a **generic poller**, a **generic outbound HTTP call**, and a **generic signature-verify where the scheme (HMAC-SHA256 / Ed25519 / …) and secret ref are parameters**. Secrets live host-side; the bundle drives verification without ever holding the secret (token hygiene preserved).
-- **Service-bundle overlay (WASM logic):** the platform spec — e.g. Twitch EventSub decides which subscriptions to register, asks the host to HMAC-SHA256-verify the inbound body against the configured secret, and parses `channel.follow` into a normalized event; Discord supplies Ed25519 + interaction shape; YouTube supplies PubSubHubbub lease + Atom parse. Exposes normalized tools (`get_chatters`, `send_chat`) to app bundles.
+- **Service-bundle connector (WASM logic):** the platform spec — e.g. Twitch EventSub decides which subscriptions to register, asks the host to HMAC-SHA256-verify the inbound body against the configured secret, and parses `channel.follow` into a normalized event; Discord supplies Ed25519 + interaction shape; YouTube supplies PubSubHubbub lease + Atom parse. Exposes normalized tools (`get_chatters`, `send_chat`) to app bundles.
 - **App bundle:** consumes the normalized event / calls the tools (computes *what*, e.g. loot amount → `economy.adjust_balance`).
 
-**Webhook ingress (refined):** the generic host webhook receiver routes an inbound POST to the owning connector overlay bundle by its manifest `ingress` declaration (path/route is generic; the bundle declares which route it owns + the verify scheme/secret-ref the host should apply before delivery). The overlay never sees unverified traffic and never holds the secret.
+**Webhook ingress (refined):** the generic host webhook receiver routes an inbound POST to the owning connector service bundle bundle by its manifest `ingress` declaration (path/route is generic; the bundle declares which route it owns + the verify scheme/secret-ref the host should apply before delivery). The connector never sees unverified traffic and never holds the secret.
 
 **Design requirement (feasibility, not a blocker):** every must-be-atomic operation is a **single compound host-capability call** (`transfer(from,to,amt)`, `conditional_debit(user,amt,min)`) so the bundle never does multi-call read-modify-write on a balance (TOCTOU). The bundle orchestrates; each atomic unit = one WIT call.
 
@@ -171,7 +171,7 @@ Three tiers:
 - **P4 economy migration** — logic → WASM bundle calling the `economy` cap (compound atomic ops added as needed).
 - **P5 reputation migration** — same shape via `reputation` cap.
 - **P6a generic transport layer** — generalize dataplane transports into platform-agnostic primitives (generic webhook ingress + generic WS/poll/outbound-HTTP + parameterized signature-verify + secret-ref delivery).
-- **P6b platform overlays** — move Twitch/YouTube/Discord specifics into per-platform service-bundle overlays driving the P6a generics; expose normalized tools.
+- **P6b platform connectors** — move Twitch/YouTube/Discord specifics into per-platform service-bundle connectors driving the P6a generics; expose normalized tools.
 
 ---
 

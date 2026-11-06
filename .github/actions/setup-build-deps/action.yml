@@ -1,0 +1,74 @@
+name: Setup build deps (no apt)
+description: >-
+  Verifies the C/C++ toolchain + cmake already preinstalled on GitHub-hosted
+  ubuntu runners (needed by ring / aws-lc-sys) and optionally installs a
+  sha256-pinned protoc (needed by hub_client's build.rs). Replaces the old
+  apt-get install steps, which flaked on mirror timeouts. Fails loudly.
+
+inputs:
+  packages:
+    description: >-
+      Space-separated legacy apt package names. Only cmake, build-essential and
+      protobuf-compiler are known; any other name FAILS the step (never ignored).
+    required: false
+    default: 'cmake build-essential protobuf-compiler'
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve requested packages and verify preinstalled tools
+      id: resolve
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        tools=""
+        protoc=false
+        for p in $PACKAGES; do
+          case "$p" in
+            cmake) tools="$tools cmake" ;;
+            build-essential) tools="$tools gcc g++ make" ;;
+            protobuf-compiler) protoc=true ;;
+            *) echo "setup-build-deps: unknown package '$p' -- add explicit support (verified preinstalled tool or sha256-pinned download); refusing to ignore it" >&2; exit 1 ;;
+          esac
+        done
+        echo "protoc=$protoc" >> "$GITHUB_OUTPUT"
+        missing=0
+        for t in $tools; do
+          if command -v "$t" >/dev/null 2>&1; then
+            echo "found $t: $(command -v "$t")"
+          else
+            echo "MISSING required build tool: $t" >&2
+            missing=1
+          fi
+        done
+        exit "$missing"
+
+    - name: Install pinned protoc (sha256-verified)
+      if: steps.resolve.outputs.protoc == 'true'
+      shell: bash
+      env:
+        PROTOC_VERSION: '31.1'
+        PROTOC_SHA256_X86_64: 96553041f1a91ea0efee963cb16f462f5985b4d65365f3907414c360044d8065
+        PROTOC_SHA256_AARCH64: 6c554de11cea04c56ebf8e45b54434019b1cd85223d4bbd25c282425e306ecc2
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64)  arch=linux-x86_64;  sha="$PROTOC_SHA256_X86_64" ;;
+          aarch64) arch=linux-aarch_64; sha="$PROTOC_SHA256_AARCH64" ;;
+          *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;;
+        esac
+        dest="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}"
+        mkdir -p "$dest"
+        zip="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}.zip"
+        curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+          --connect-timeout 15 --max-time 120 -o "$zip" \
+          "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-${arch}.zip"
+        echo "${sha}  ${zip}" | sha256sum --check --strict -
+        unzip -q -o "$zip" -d "$dest"
+        chmod +x "$dest/bin/protoc"
+        "$dest/bin/protoc" --version
+        echo "$dest/bin" >> "$GITHUB_PATH"
+        echo "PROTOC=$dest/bin/protoc" >> "$GITHUB_ENV"
+        echo "PROTOC_INCLUDE=$dest/include" >> "$GITHUB_ENV"

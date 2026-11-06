@@ -17,7 +17,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::feed::{ConnKey, DesiredConnection, TransportPlan, WebhookPlan};
-use super::plan::{OverlayProfile, PlanError, RuntimeEnv};
+use super::plan::{ConnectorProfile, PlanError, RuntimeEnv};
 use crate::connector::webhook::{RateLimit, WebhookRoute};
 use crate::connector::webhook_verify::Scheme;
 use crate::connector::{SessionRules, WsConfig};
@@ -129,7 +129,7 @@ pub(crate) fn binding(community: i64, conn: i64, meta: &[(&str, &str)]) -> Bindi
 /// and a webhook connection; `webhook` -> a webhook route keyed by `route`.
 pub(crate) struct TestProfile;
 
-impl OverlayProfile for TestProfile {
+impl ConnectorProfile for TestProfile {
     fn platform(&self) -> &'static str {
         "twitch"
     }

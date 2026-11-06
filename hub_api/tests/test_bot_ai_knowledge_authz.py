@@ -485,3 +485,96 @@ class TestSearchSuggestScope:
         await bot_ai_knowledge.search_knowledge(_Dal(), "q", community_id=42, vendor_id=7)
         assert "ks.community_id = %s" in captured["sql"]
         assert 42 in captured["ph"] and 7 in captured["ph"]
+
+
+class TestVendorOwnedConfusedDeputy:
+    """A community admin must not drive a vendor-owned source, nor redirect its credential."""
+
+    async def test_community_admin_vendor_owned_source_404_all_verbs(
+        self, client: Any, auth_headers: Any, dal: Any, community_id: int,
+        users: dict[str, int], monkeypatch: Any,
+    ) -> None:  # fmt: skip
+        sid = _src(dal, community_id=community_id, vendor_id=users["vendor"], source_name="v")
+        called: list[int] = []
+
+        async def fake(_d: Any, s: int) -> None:
+            called.append(s)
+
+        monkeypatch.setattr(bot_ai_knowledge, "index_source", fake)
+        h = auth_headers(scope=WRITE)
+        assert (
+            await client.put(f"{BASE}/{sid}", headers=h, json={"source_name": "x"})
+        ).status_code == 404
+        assert (await client.post(f"{BASE}/{sid}/reindex", headers=h)).status_code == 404
+        assert (await client.delete(f"{BASE}/{sid}", headers=h)).status_code == 404
+        await asyncio.sleep(0)
+        assert called == []
+        assert _name(dal, sid) == "v"
+
+    async def test_super_admin_may_manage_vendor_owned_source(
+        self, client: Any, auth_headers: Any, dal: Any, community_id: int,
+        users: dict[str, int], monkeypatch: Any,
+    ) -> None:  # fmt: skip
+        monkeypatch.setattr(bot_blueprint, "_is_super_admin_sync", lambda _d, _u: True)
+        sid = _src(dal, community_id=community_id, vendor_id=users["vendor"])
+        r = await client.put(
+            f"{BASE}/{sid}", headers=auth_headers(scope=WRITE), json={"source_name": "ok"}
+        )
+        assert r.status_code == 200
+
+    @pytest.fixture(autouse=True)
+    def _no_dns(self, monkeypatch: Any) -> None:
+        """SSRF DNS resolution is covered elsewhere; here only token handling is under test."""
+        monkeypatch.setattr(bot_ai_knowledge, "_validate_source_url", lambda _u: None)
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"source_url": "https://docs.example.com/evil"},
+            {"branch": "attacker"},
+            {"docs_path": "/other"},
+        ],
+    )
+    async def test_target_change_without_token_clears_stored_token(
+        self, client: Any, auth_headers: Any, dal: Any, community_id: int, change: dict[str, str]
+    ) -> None:
+        sid = _src(
+            dal, community_id=community_id, source_url="https://docs.example.com/a",
+            branch="main", docs_path="/docs", encrypted_token="sealed-ciphertext",
+        )  # fmt: skip
+        r = await client.put(f"{BASE}/{sid}", headers=auth_headers(scope=WRITE), json=change)
+        assert r.status_code == 200
+        dal.commit()
+        assert dal.ai_knowledge_sources[sid].encrypted_token is None
+
+    async def test_target_change_with_new_token_stores_new_token(
+        self, client: Any, auth_headers: Any, dal: Any, community_id: int
+    ) -> None:
+        sid = _src(
+            dal, community_id=community_id, source_url="https://docs.example.com/a",
+            encrypted_token="old",
+        )  # fmt: skip
+        r = await client.put(
+            f"{BASE}/{sid}",
+            headers=auth_headers(scope=WRITE),
+            json={"source_url": "https://docs.example.com/b", "token": PLAINTEXT},
+        )
+        assert r.status_code == 200
+        dal.commit()
+        assert decrypt_token(dal.ai_knowledge_sources[sid].encrypted_token) == PLAINTEXT
+
+    async def test_unchanged_target_or_rename_keeps_token(
+        self, client: Any, auth_headers: Any, dal: Any, community_id: int
+    ) -> None:
+        sid = _src(
+            dal, community_id=community_id, source_url="https://docs.example.com/a",
+            encrypted_token="keep",
+        )  # fmt: skip
+        r = await client.put(
+            f"{BASE}/{sid}",
+            headers=auth_headers(scope=WRITE),
+            json={"source_name": "n", "source_url": "https://docs.example.com/a"},
+        )
+        assert r.status_code == 200
+        dal.commit()
+        assert dal.ai_knowledge_sources[sid].encrypted_token == "keep"

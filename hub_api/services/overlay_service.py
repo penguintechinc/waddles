@@ -120,7 +120,7 @@ class OverlayRecord:
     created_at: str | None
     updated_at: str | None
     rotated_at: str | None
-    overlayUrl: str
+    overlayUrl: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -141,12 +141,34 @@ class OverlayStats:
     daily: list[OverlayDailyStat] = field(default_factory=list)
 
 
-def _overlay_url(cfg: HubAPIConfig, overlay_key: str) -> str:
-    """Port of `${baseUrl}/${overlay.overlay_key}` -- `OVERLAY_BASE_URL` env var, see config.py."""
-    return f"{cfg.overlay_base_url}/{overlay_key}"
+#: Surface the all-in-one `overlayUrl` points at: the alert overlay, the primary beta surface.
+#: The Rust svc-presentation router has no `/{key}` route -- it serves only
+#: `/{overlay_code}/{surface}?key=` -- so the legacy bare-key form would 404.
+OVERLAY_URL_SURFACE = "alert_box"
 
 
-def _to_record(row: Any, cfg: HubAPIConfig) -> OverlayRecord:
+def _browser_source_url(cfg: HubAPIConfig, code: str, surface: str, overlay_key: str) -> str:
+    """Build `{base}/{overlay_code}/{surface}?key={key}` (the only form svc-presentation serves).
+
+    Single builder shared by the all-in-one `overlayUrl` (alert_box surface) and the
+    browser-sources listing (one URL per `BROWSER_SOURCE_SURFACES` entry).
+    """
+    return f"{cfg.overlay_base_url}/{code}/{surface}?key={overlay_key}"
+
+
+def _overlay_url(cfg: HubAPIConfig, code: str | None, overlay_key: str) -> str | None:
+    """`overlayUrl` for the all-in-one record; the overlay code is resolved server-side.
+
+    `None` (never a URL the Rust router cannot serve) when the code is unavailable -- only a
+    pre-0057 database, already logged at WARNING by `_ensure_overlay_code_sync`. Key minting and
+    rotation stay usable there; the dedicated browser-source listing fails loud (503) instead.
+    """
+    if code is None:
+        return None
+    return _browser_source_url(cfg, code, OVERLAY_URL_SURFACE, overlay_key)
+
+
+def _to_record(row: Any, cfg: HubAPIConfig, code: str | None) -> OverlayRecord:
     """Build an `OverlayRecord` from a freshly-selected `community_overlay_tokens` row."""
     return OverlayRecord(
         id=row.id,
@@ -161,7 +183,7 @@ def _to_record(row: Any, cfg: HubAPIConfig) -> OverlayRecord:
         created_at=_iso(row.created_at),
         updated_at=_iso(row.updated_at),
         rotated_at=_iso(row.rotated_at),
-        overlayUrl=_overlay_url(cfg, row.overlay_key),
+        overlayUrl=_overlay_url(cfg, code, row.overlay_key),
     )
 
 
@@ -350,7 +372,7 @@ async def get_or_create_overlay(
     `SELECT ... ; if no rows, INSERT ... RETURNING`.
     """
     _bind(dal)
-    await _ensure_overlay_code(async_dal, dal, community_id)
+    code = await _ensure_overlay_code(async_dal, dal, community_id)
     rows = await async_dal.select_async(
         dal(dal.community_overlay_tokens.community_id == community_id)
     )
@@ -366,7 +388,7 @@ async def get_or_create_overlay(
                 is_active=bool(existing.is_active),
             ),
         )
-        return _to_record(existing, cfg)
+        return _to_record(existing, cfg, code)
 
     overlay_key = secrets.token_hex(32)
     now = datetime.now(UTC)
@@ -408,7 +430,7 @@ async def get_or_create_overlay(
         created_at=_iso(now),
         updated_at=_iso(now),
         rotated_at=None,
-        overlayUrl=_overlay_url(cfg, overlay_key),
+        overlayUrl=_overlay_url(cfg, code, overlay_key),
     )
 
 
@@ -424,6 +446,7 @@ async def update_overlay(
 ) -> OverlayRecord:
     """Update overlay settings. Port of `updateOverlay` (`PUT /:communityId/overlay`)."""
     _bind(dal)
+    code = await _ensure_overlay_code(async_dal, dal, community_id)
     rows = await async_dal.select_async(
         dal(dal.community_overlay_tokens.community_id == community_id)
     )
@@ -470,7 +493,7 @@ async def update_overlay(
         created_at=_iso(existing.created_at),
         updated_at=_iso(updates["updated_at"]),
         rotated_at=_iso(existing.rotated_at),
-        overlayUrl=_overlay_url(cfg, existing.overlay_key),
+        overlayUrl=_overlay_url(cfg, code, existing.overlay_key),
     )
 
 
@@ -491,7 +514,7 @@ async def rotate_overlay_key(
     only validates against that table, accepts the new key and honours the grace window.
     """
     _bind(dal)
-    await _ensure_overlay_code(async_dal, dal, community_id)
+    code = await _ensure_overlay_code(async_dal, dal, community_id)
     rows = await async_dal.select_async(
         dal(dal.community_overlay_tokens.community_id == community_id)
     )
@@ -538,7 +561,7 @@ async def rotate_overlay_key(
         created_at=_iso(existing.created_at),
         updated_at=_iso(now),
         rotated_at=_iso(now),
-        overlayUrl=_overlay_url(cfg, new_key),
+        overlayUrl=_overlay_url(cfg, code, new_key),
     )
 
 
@@ -562,11 +585,6 @@ class BrowserSourceRecord:
     url: str
     isActive: bool
     createdAt: str | None
-
-
-def _browser_source_url(cfg: HubAPIConfig, code: str, surface: str, overlay_key: str) -> str:
-    """Build `{base}/{overlay_code}/{surface}?key={key}` for svc-presentation."""
-    return f"{cfg.overlay_base_url}/{code}/{surface}?key={overlay_key}"
 
 
 async def get_browser_sources(

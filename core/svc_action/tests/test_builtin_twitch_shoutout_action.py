@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,9 +27,12 @@ from builtin_handlers.twitch_shoutout_action import (
     _render_template,
     shoutout,
 )
+from services import overlay_push
 from services.twitch_helix import TwitchHelixError
 
 _COMMUNITY_ID = 1
+_OVERLAY_CODE = "a1b2c3d4e5f60718"
+_PUSH_JWT = "header.payload.sig"  # opaque to svc-action -- only svc-presentation verifies it
 
 
 def _envelope(
@@ -125,7 +129,12 @@ async def dal(tmp_path: Path) -> AsyncIterator[AsyncDAL]:
     async_dal = AsyncDAL(f"sqlite://{tmp_path}/shoutout_test.db", pool_size=1, migrate=True)
     d = async_dal.dal
     d.define_table("tenants", migrate=True)
-    d.define_table("communities", d.Field("tenant_id", "reference tenants"), migrate=True)
+    d.define_table(
+        "communities",
+        d.Field("tenant_id", "reference tenants"),
+        d.Field("overlay_code", "string"),
+        migrate=True,
+    )
     d.define_table(
         "shoutout_config",
         d.Field("community_id", "reference communities", notnull=True),
@@ -144,7 +153,7 @@ async def dal(tmp_path: Path) -> AsyncIterator[AsyncDAL]:
         migrate=True,
     )
     d.tenants.insert()
-    d.communities.insert(tenant_id=1)
+    d.communities.insert(tenant_id=1, overlay_code=_OVERLAY_CODE)
     d.commit()
     set_bundle_dal(async_dal)
     try:
@@ -181,6 +190,35 @@ def _patch_redis_client(monkeypatch: pytest.MonkeyPatch, fake_redis: Any) -> Non
 
 def _patch_helix(monkeypatch: pytest.MonkeyPatch, fake: _FakeHelix) -> None:
     monkeypatch.setattr(shoutout_bundle, "_get_helix_client", lambda http_client: fake)
+
+
+@pytest.fixture(autouse=True)
+def _overlay_push_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Wire the deployment env `services.overlay_push` requires (helm sets these in-cluster)."""
+    sa_token = tmp_path / "sa-token"
+    sa_token.write_text("projected-sa-token\n")
+    monkeypatch.setenv("PRESENTATION_URL", "http://presentation.test:8207")
+    monkeypatch.setenv("SERVICE_JWT_TOKEN_ENDPOINT", "http://hub-api.test/internal/service-token")
+    monkeypatch.setenv("SERVICE_JWT_SA_TOKEN_PATH", str(sa_token))
+    overlay_push.reset_cache_for_tests()
+
+
+def _push_router(
+    captured: dict[str, Any], *, push_status: int = 200
+) -> Callable[..., httpx.Response]:
+    """MockTransport handler answering hub-api's mint endpoint and svc-presentation's push route."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/service-token":
+            captured["mint_body"] = json.loads(request.content)
+            captured["mint_auth"] = request.headers["Authorization"]
+            return httpx.Response(200, json={"token": _PUSH_JWT, "expires_in": 300})
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("Authorization")
+        captured["body"] = request.content
+        return httpx.Response(push_status, json={"status": "published"})
+
+    return _handler
 
 
 def _noop_http_client() -> httpx.AsyncClient:
@@ -298,7 +336,6 @@ class TestVideoShoutout:
     async def test_video_with_clip_pushes_media_overlay(
         self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("PRESENTATION_URL", "http://8.8.8.8:8207")
         fake = _FakeHelix(
             channel={"game_name": "Chess"},
             clip={
@@ -312,17 +349,18 @@ class TestVideoShoutout:
 
         captured: dict[str, Any] = {}
 
-        def _handler(request: httpx.Request) -> httpx.Response:
-            captured["url"] = str(request.url)
-            captured["body"] = request.content
-            return httpx.Response(200, json={"status": "published"})
-
-        async with _mock_client(_handler) as client:
+        async with _mock_client(_push_router(captured)) as client:
             await shoutout(_envelope({"kind": "video"}), _config(), http_client=client)
 
-        import json
-
-        assert captured["url"] == f"http://8.8.8.8:8207/overlay/{_COMMUNITY_ID}/media/push"
+        # Real router route: unguessable overlay code, never the integer id / retired path.
+        assert captured["url"] == f"http://presentation.test:8207/{_OVERLAY_CODE}/media/push"
+        assert "/overlay/" not in captured["url"]
+        assert captured["auth"] == f"Bearer {_PUSH_JWT}"
+        assert captured["mint_body"] == {
+            "scope": "presentation.overlay:push",
+            "community_id": _COMMUNITY_ID,
+        }
+        assert captured["mint_auth"] == "Bearer projected-sa-token"
         body = json.loads(captured["body"])
         assert body["title"] == "Shoutout: Shroud"
         assert body["image_url"] == "https://img.example.test/thumb.jpg"
@@ -335,23 +373,16 @@ class TestVideoShoutout:
     async def test_video_duration_s_config_override(
         self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("PRESENTATION_URL", "http://8.8.8.8:8207")
         clip = {"id": "c1", "thumbnail_url": None, "embed_url": None, "url": "https://x"}
         fake = _FakeHelix(channel={}, clip=clip)
         _patch_helix(monkeypatch, fake)
 
         captured: dict[str, Any] = {}
 
-        def _handler(request: httpx.Request) -> httpx.Response:
-            captured["body"] = request.content
-            return httpx.Response(200, json={"status": "published"})
-
-        async with _mock_client(_handler) as client:
+        async with _mock_client(_push_router(captured)) as client:
             await shoutout(
                 _envelope({"kind": "video"}), _config(video_duration_s=15), http_client=client
             )
-
-        import json
 
         assert json.loads(captured["body"])["duration_s"] == 15
         assert json.loads(captured["body"])["video_url"] == "https://x"
@@ -375,10 +406,9 @@ class TestVideoShoutout:
         assert result.transport == "irc_relay"
         assert push_called is False
 
-    async def test_overlay_push_failure_does_not_fail_the_shoutout(
-        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
+    async def test_overlay_push_failure_is_loud_but_chat_reply_and_history_survive(
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch, fake_redis: Any
     ) -> None:
-        monkeypatch.setenv("PRESENTATION_URL", "http://8.8.8.8:8207")
         fake = _FakeHelix(
             channel={"game_name": "Chess"},
             clip={
@@ -390,15 +420,34 @@ class TestVideoShoutout:
         )
         _patch_helix(monkeypatch, fake)
 
-        def _handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(500, text="presentation is down")
+        captured: dict[str, Any] = {}
+        async with _mock_client(_push_router(captured, push_status=500)) as client:
+            with pytest.raises(NonRetryableTransportError, match="video overlay push failed"):
+                await shoutout(_envelope({"kind": "video"}), _config(), http_client=client)
 
-        async with _mock_client(_handler) as client:
-            result = await shoutout(_envelope({"kind": "video"}), _config(), http_client=client)
-
-        assert result.transport == "irc_relay"
+        # Chat reply was already sent (and is not duplicated: the error is non-retryable) ...
+        assert await fake_redis.llen(outbound_queue_key("twitch")) == 1
+        # ... and the history row is still written.
         history_rows = dal.dal(dal.dal.shoutout_history.target_username == "shroud").select()
         assert len(history_rows) == 1
+
+    async def test_unresolvable_overlay_code_fails_loud_without_pushing(
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal.dal(dal.dal.communities.id == _COMMUNITY_ID).update(overlay_code=None)
+        dal.dal.commit()
+        fake = _FakeHelix(
+            channel={},
+            clip={"id": "c1", "thumbnail_url": None, "embed_url": None, "url": "https://z"},
+        )
+        _patch_helix(monkeypatch, fake)
+
+        captured: dict[str, Any] = {}
+        async with _mock_client(_push_router(captured)) as client:
+            with pytest.raises(NonRetryableTransportError, match="no valid overlay_code"):
+                await shoutout(_envelope({"kind": "video"}), _config(), http_client=client)
+
+        assert "url" not in captured, "must not push to any guessed/legacy route"
 
 
 class TestCooldown:

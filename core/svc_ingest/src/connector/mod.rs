@@ -68,7 +68,7 @@ pub use driver::{
 pub use gateway_rules::{HandshakeAfter, HeartbeatAck, ReconnectUrlCapture};
 pub use handshake_gate::{GateCtx, GateError, GatePermit, HandshakeGate, NoopGate};
 pub use host_calls::{
-    ActiveConnections, CallScope, HostCallError, HostCallHandler, OverlayHostCalls,
+    ActiveConnections, CallScope, ConnectorHostCalls, HostCallError, HostCallHandler,
 };
 pub use identify_budget::{
     BotIdentity, BudgetError, DiscordIdentifyGate, GatewayBotSource, GatewayInfoSource,

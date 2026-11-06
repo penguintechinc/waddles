@@ -13,7 +13,9 @@ name: CI Gate
 
 on:
   pull_request:
-    branches: ['release/**']
+    # main is included so the release->main PR runs the FULL tier (see
+    # scripts/ci/ci-gate-tier.py); release/** PRs run the fast tier.
+    branches: ['main', 'release/**']
   merge_group:
     branches: ['release/**']
 
@@ -121,6 +123,11 @@ jobs:
           else
             is_main_target="false"
           fi
+          # Tier policy (scripts/ci/ci-gate-tier.py): release/** = fast tier +
+          # coverage (main-only checks are not examined); main/unknown = full.
+          tier=$(python3 "${GITHUB_WORKSPACE}/scripts/ci/ci-gate-tier.py" tier_for_base "${target_branch}")
+          tier_py="${GITHUB_WORKSPACE}/scripts/ci/ci-gate-tier.py"
+          echo "ci-gate tier = ${tier}"
           echo "ci-gate policy: target branch = '${target_branch:-<unknown>}', strict-everything = ${is_main_target}"
           if [ "${is_main_target}" = "true" ]; then
             echo "  -> main target: container build + smoke-test checks are FATAL, same as every other check."
@@ -142,11 +149,27 @@ jobs:
               --jq '[.statuses[] | select(.context != env.IGNORE_CONTEXT) | {name: .context, status: (if .state == "pending" then "in_progress" else "completed" end), conclusion: (if .state == "success" then "success" elif (.state == "failure" or .state == "error") then "failure" else .state end)}]' \
               | "${merge_pages}")
 
-            combined=$(jq -n --argjson a "${runs_json}" --argjson b "${statuses_json}" '$a + $b')
+            combined_all=$(jq -n --argjson a "${runs_json}" --argjson b "${statuses_json}" '$a + $b')
+            combined=$(python3 "${tier_py}" filter --tier "${tier}" <<<"${combined_all}")
             examined=$(jq 'length' <<<"${combined}")
+            excluded=$(( $(jq 'length' <<<"${combined_all}") - examined ))
+            if [ "${excluded}" -gt 0 ]; then
+              echo "tier ${tier}: ${excluded} main-only check(s) not examined"
+            fi
 
             if [ "${examined}" -eq 0 ]; then
               echo "[attempt ${attempt}/${MAX_POLLS}] no other checks reported yet for ${HEAD_SHA} - waiting"
+              stable_count=0
+              prev_signature=""
+              sleep "${POLL_INTERVAL_SECONDS}"
+              continue
+            fi
+
+            # A required always-reporting check that never appeared is a FAIL,
+            # not a pass (zero/short denominator must not go green).
+            if ! missing_names=$(python3 "${tier_py}" missing --tier "${tier}" <<<"${combined_all}"); then
+              echo "[attempt ${attempt}/${MAX_POLLS}] required check(s) not yet reported for tier ${tier} - waiting:"
+              while IFS= read -r n; do echo "  - missing: ${n}"; done <<<"${missing_names}"
               stable_count=0
               prev_signature=""
               sleep "${POLL_INTERVAL_SECONDS}"

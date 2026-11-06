@@ -2962,3 +2962,62 @@ def bind_calendar_sync_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("updated_at", "datetime"),
         migrate=migrate,
     )
+
+
+def bind_stream_keys_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind the stream-key/destination tables (svc-streaming `streaming_configs` + 0077).
+
+    `streaming_configs` is svc-streaming's table (legacy SQL 079/103) plus the 0077 key-hash
+    columns; `streaming_destinations` is hub-api-owned (0077); `streaming_sessions` is read-only
+    here (status). Idempotent per-DAL via the `streaming_destinations` guard.
+    """
+    if "streaming_destinations" in dal.tables:
+        return
+    if "streaming_configs" not in dal.tables:
+        dal.define_table(
+            "streaming_configs",
+            Field("community_id", "integer", notnull=True, unique=True),
+            Field("source_url", "string", length=1024, notnull=True),
+            Field("source_type", "string", length=20, notnull=True, default="rtmp"),
+            Field("enabled", "boolean", notnull=True, default=True),
+            Field("record_enabled", "boolean", notnull=True, default=False),
+            Field("transcode_enabled", "boolean", notnull=True, default=False),
+            Field("transcode_bitrate_kbps", "integer", notnull=True, default=4000),
+            Field("video_codec", "string", length=8, notnull=True, default="h264"),
+            Field("audio_codec", "string", length=8, notnull=True, default="copy"),
+            Field("stream_key_hash", "string", length=64),
+            Field("stream_key_fingerprint", "string", length=8),
+            Field("stream_key_rotated_at", "datetime"),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+    if "streaming_sessions" not in dal.tables:
+        dal.define_table(
+            "streaming_sessions",
+            Field("config_id", "integer", notnull=True),
+            Field("pid", "integer"),
+            Field("status", "string", length=20, notnull=True, default="stopped"),
+            Field("transcode_applied", "boolean", notnull=True, default=False),
+            Field("fallback_reason", "string", length=100),
+            Field("started_at", "datetime"),
+            Field("ended_at", "datetime"),
+            Field("created_at", "datetime"),
+            migrate=migrate,
+        )
+    dal.define_table(
+        "streaming_destinations",
+        Field("public_id", "string", length=36, notnull=True, unique=True),
+        Field("config_id", "integer", notnull=True),
+        Field("platform", "string", length=20, notnull=True),
+        Field("display_url", "string", length=300, notnull=True),
+        Field("rtmp_url_enc", "text", notnull=True),
+        Field("stream_key_enc", "text", notnull=True),
+        Field("max_resolution", "string", length=8, notnull=True, default="1080p"),
+        Field("video_codec", "string", length=8, notnull=True, default="h264"),
+        Field("enabled", "boolean", notnull=True, default=True),
+        Field("force_cut", "boolean", notnull=True, default=False),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )

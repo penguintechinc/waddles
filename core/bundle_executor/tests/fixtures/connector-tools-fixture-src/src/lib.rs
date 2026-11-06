@@ -1,4 +1,4 @@
-//! P6a T4 real-path fixture: a connector overlay on `world connector-tools`.
+//! P6a T4 real-path fixture: a connector service bundle on `world connector-tools`.
 //! `receiver.on-frame` still normalizes frames (the connector contract is
 //! unchanged), while `tool-provider.call` serves platform tools through the
 //! REAL `waddle-sdk-rs` `ToolRegistry`, and the `tool` import is adapted to the

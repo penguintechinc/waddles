@@ -57,10 +57,10 @@ impl TransportSecretSource for Tok {
     }
 }
 
-/// Overlay stand-in: IDENTIFY, or RESUME when the host handed it a session.
-struct Overlay;
+/// Connector stand-in: IDENTIFY, or RESUME when the host handed it a session.
+struct Connector;
 
-impl ConnectorInvoker for Overlay {
+impl ConnectorInvoker for Connector {
     async fn on_connect(
         &self,
         _p: &str,
@@ -219,12 +219,12 @@ async fn drain_to_close(
     }
 }
 
-fn driver(metrics: &prometheus::Registry) -> ConnectorDriver<Overlay, Null> {
+fn driver(metrics: &prometheus::Registry) -> ConnectorDriver<Connector, Null> {
     let mut r = ConnectorRegistry::new();
     r.register(PinnedConnector::new(PLATFORM, "id", "sha256:aa", 4096))
         .unwrap();
     let m = register_connector_metrics(metrics).unwrap();
-    ConnectorDriver::new(Arc::new(r), Arc::new(Overlay), Arc::new(Null), m)
+    ConnectorDriver::new(Arc::new(r), Arc::new(Connector), Arc::new(Null), m)
         .with_heartbeat_enabled(true)
         .with_backoff_cap(Duration::from_millis(20))
 }

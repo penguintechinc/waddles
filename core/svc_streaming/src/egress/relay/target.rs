@@ -118,6 +118,15 @@ impl ResolvedRelayTarget {
         ]
     }
 
+    /// Replaces the dial URL (the egress guard's IP-pinned form); the redacted display form keeps
+    /// the original hostname.
+    pub(crate) fn with_dial_url(self, dial_url: String) -> Self {
+        Self {
+            url: Secret::new(dial_url),
+            ..self
+        }
+    }
+
     /// The raw resolved URL. Named loudly -- callers MUST NOT log this;
     /// use [`Self::url_redacted`] for any tracing/log/metric-label output.
     pub fn raw_url_unredacted(&self) -> &str {

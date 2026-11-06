@@ -3,8 +3,8 @@
 //! decision 2.4, PR-A2).
 //!
 //! The executor dials svc-ingest's host API and every host-call a connector
-//! overlay makes (`identity.lookup`, `get-context`, `flags`, `log`, `clock`)
-//! arrives here as a `host-call` frame. [`OverlayHostCalls`] is the explicit
+//! connector makes (`identity.lookup`, `get-context`, `flags`, `log`, `clock`)
+//! arrives here as a `host-call` frame. [`ConnectorHostCalls`] is the explicit
 //! allowlist that services them; everything it does not name is refused with a
 //! typed `denied` result. The link's default (no handler) stays "deny all".
 //!
@@ -20,13 +20,13 @@
 //! |---|---|
 //! | no / malformed `_scope` | `denied` (`unscoped_call`) |
 //! | `connection_id` not active (unknown, stale) | `denied` (`unknown_connection`) |
-//! | `app_id` is not a known overlay | `denied` (`unknown_overlay`) |
-//! | overlay's platform differs from the connection's | `denied` (`platform_mismatch`) |
-//! | op needs a grant the overlay's manifest lacks | `denied` (`grant_missing`) |
+//! | `app_id` is not a known connector | `denied` (`unknown_connector`) |
+//! | connector's platform differs from the connection's | `denied` (`platform_mismatch`) |
+//! | op needs a grant the connector's manifest lacks | `denied` (`grant_missing`) |
 //!
 //! There is no fallback to a default scope, a guessed community, or a guest
 //! supplied value: the community, tenant and platform come from the
-//! [`CallScope`] only. Grants per overlay are a strict subset of the overlay's
+//! [`CallScope`] only. Grants per connector are a strict subset of the connector's
 //! `bundles/rust/<platform>/hub-manifest.yaml` permissions (a unit test parses
 //! the real manifests and asserts it).
 //!
@@ -51,18 +51,18 @@ use super::webhook::BoxFut;
 pub const SCOPE_KEY: &str = "_scope";
 /// Per-host-call wall-clock deadline (`EXECUTOR_CALL_TIMEOUT_MS` default).
 pub const HOST_CALL_DEADLINE: Duration = Duration::from_secs(2);
-/// In-flight host-calls allowed per overlay.
-pub const MAX_IN_FLIGHT_PER_OVERLAY: usize = 16;
+/// In-flight host-calls allowed per connector.
+pub const MAX_IN_FLIGHT_PER_CONNECTOR: usize = 16;
 /// In-flight host-calls allowed per connection (per-scope fairness).
 pub const MAX_IN_FLIGHT_PER_CONNECTION: usize = 4;
-/// `identity.lookup` calls per second allowed per overlay.
+/// `identity.lookup` calls per second allowed per connector.
 pub const IDENTITY_RATE_PER_SEC: u32 = 200;
 /// Longest accepted platform user id (bytes).
 pub const MAX_PLATFORM_USER_ID_LEN: usize = 128;
 /// Machine-JWT scope hub-api requires for `MintEphemeralPseudonyms`.
 pub const IDENTITY_MINT_SCOPE: &str = "identity:ephemeral:mint";
 
-/// A permission an overlay's `hub-manifest.yaml` declares and the host honors.
+/// A permission an connector's `hub-manifest.yaml` declares and the host honors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Grant {
     /// `connector.pii.read`: gates `identity.lookup` and `get-context`.
@@ -85,54 +85,54 @@ impl Grant {
     }
 }
 
-/// One platform overlay the host services: its identity and its grants.
+/// One platform connector the host services: its identity and its grants.
 #[derive(Debug, Clone, Copy)]
-pub struct Overlay {
-    /// Platform slug, the only platform this overlay may act on.
+pub struct Connector {
+    /// Platform slug, the only platform this connector may act on.
     pub platform: &'static str,
-    /// The overlay's `app_id` (set by the executor, never the guest).
+    /// The connector's `app_id` (set by the executor, never the guest).
     pub app_id: &'static str,
-    /// The grants the host honors for this overlay (subset of its manifest).
+    /// The grants the host honors for this connector (subset of its manifest).
     pub grants: &'static [Grant],
 }
 
-impl Overlay {
-    /// True when this overlay holds `grant`.
+impl Connector {
+    /// True when this connector holds `grant`.
     #[must_use]
     pub fn has(&self, grant: Grant) -> bool {
         self.grants.contains(&grant)
     }
 }
 
-/// Every overlay the host-call bridge knows, with its manifest-derived grants.
-pub const OVERLAYS: &[Overlay] = &[
-    Overlay {
+/// Every connector the host-call bridge knows, with its manifest-derived grants.
+pub const CONNECTORS: &[Connector] = &[
+    Connector {
         platform: "twitch",
         app_id: "waddles.core.service.twitch",
         grants: &[Grant::PiiRead, Grant::FlagsRead, Grant::PlatformLog],
     },
-    Overlay {
+    Connector {
         platform: "discord",
         app_id: "waddles.core.service.discord",
         grants: &[Grant::PiiRead, Grant::PlatformLog],
     },
-    Overlay {
+    Connector {
         platform: "youtube",
         app_id: "waddles.core.service.youtube",
         grants: &[Grant::PiiRead],
     },
 ];
 
-/// The overlay registered for `app_id`, if any.
+/// The connector registered for `app_id`, if any.
 #[must_use]
-pub fn overlay_for(app_id: &str) -> Option<&'static Overlay> {
-    OVERLAYS.iter().find(|o| o.app_id == app_id)
+pub fn connector_for(app_id: &str) -> Option<&'static Connector> {
+    CONNECTORS.iter().find(|o| o.app_id == app_id)
 }
 
-/// The overlay registered for `platform`, if any.
+/// The connector registered for `platform`, if any.
 #[must_use]
 pub fn platform_slug(platform: &str) -> Option<&'static str> {
-    OVERLAYS
+    CONNECTORS
         .iter()
         .find(|o| o.platform == platform)
         .map(|o| o.platform)
@@ -159,11 +159,11 @@ pub enum DenyReason {
     UnscopedCall,
     /// The stamped `connection_id` is not an active connection.
     UnknownConnection,
-    /// The call's `app_id` is not a known overlay.
-    UnknownOverlay,
-    /// The overlay is not the one serving this connection's platform.
+    /// The call's `app_id` is not a known connector.
+    UnknownConnector,
+    /// The connector is not the one serving this connection's platform.
     PlatformMismatch,
-    /// The overlay's manifest lacks the grant the op needs.
+    /// The connector's manifest lacks the grant the op needs.
     GrantMissing,
     /// The capability or op is not on the allowlist.
     NotServiced,
@@ -182,7 +182,7 @@ impl DenyReason {
         match self {
             Self::UnscopedCall => "unscoped_call",
             Self::UnknownConnection => "unknown_connection",
-            Self::UnknownOverlay => "unknown_overlay",
+            Self::UnknownConnector => "unknown_connector",
             Self::PlatformMismatch => "platform_mismatch",
             Self::GrantMissing => "grant_missing",
             Self::NotServiced => "not_serviced",
@@ -205,7 +205,7 @@ pub enum HostCallError {
     /// The identity does not exist (erased / never minted).
     #[error("host-call target not found")]
     NotFound,
-    /// Over the per-overlay rate; retry after this many seconds.
+    /// Over the per-connector rate; retry after this many seconds.
     #[error("host-call rate limited")]
     RateLimited(u32),
     /// Over an in-flight cap; not queued.
@@ -265,7 +265,7 @@ pub enum ActivateError {
     #[error("scope ids must be positive")]
     InvalidId,
     /// The platform is not one the host-call bridge serves.
-    #[error("platform has no host-call overlay")]
+    #[error("platform has no host-call connector")]
     UnknownPlatform,
     /// The table's lock was poisoned; nothing can be trusted.
     #[error("active-connection table is unusable")]
@@ -300,7 +300,7 @@ impl ActiveConnections {
     ///
     /// # Errors
     /// [`ActivateError`] when an id is not positive, the platform has no
-    /// overlay, the table is poisoned, or the id is active under another scope.
+    /// connector, the table is poisoned, or the id is active under another scope.
     pub fn activate(&self, scope: CallScope) -> Result<(), ActivateError> {
         if scope.community_id < 1 || scope.tenant_id < 1 || scope.connection_id < 1 {
             return Err(ActivateError::InvalidId);
@@ -426,7 +426,7 @@ fn classify(e: &HubClientError) -> TokenizeError {
 }
 
 /// The hub-api backed [`IdentityTokenizer`]: `MintEphemeralPseudonyms` with
-/// svc-ingest's machine JWT. The handle is never sent (the overlay only hands
+/// svc-ingest's machine JWT. The handle is never sent (the connector only hands
 /// over the platform user id), so hub-api records no display handle.
 pub struct HubIdentityTokenizer {
     client: HubClient,
@@ -504,9 +504,9 @@ pub enum CallOrigin {
     /// UNSCOPED and denied.
     Other,
     /// During a `sender.build-request` invocation this host sent for the
-    /// pinned overlay `app_id`. `build-request` carries no `ConnectionCtx`, so
+    /// pinned connector `app_id`. `build-request` carries no `ConnectionCtx`, so
     /// its calls have no connection scope; the ONLY thing this origin unlocks is
-    /// the overlay's own cutover-flag read (see [`OverlayHostCalls`]).
+    /// the connector's own cutover-flag read (see [`ConnectorHostCalls`]).
     BuildRequest {
         /// The `app_id` the host invoked (host constant, from the registry).
         app_id: String,
@@ -600,43 +600,43 @@ const fn capability_label(c: CapabilityKind) -> &'static str {
 /// Tunables; the defaults are the spec's numbers.
 #[derive(Debug, Clone)]
 pub struct HostCallConfig {
-    /// Platforms whose overlay cutover flag is ON by env baseline.
-    pub overlay_enabled: HashSet<&'static str>,
+    /// Platforms whose connector cutover flag is ON by env baseline.
+    pub connector_enabled: HashSet<&'static str>,
     /// Per-call deadline.
     pub deadline: Duration,
-    /// In-flight cap per overlay.
-    pub max_per_overlay: usize,
+    /// In-flight cap per connector.
+    pub max_per_connector: usize,
     /// In-flight cap per connection.
     pub max_per_connection: usize,
-    /// `identity.lookup` per-second budget per overlay.
+    /// `identity.lookup` per-second budget per connector.
     pub identity_rate_per_sec: u32,
 }
 
-/// An unknown platform in the enabled-overlay baseline.
+/// An unknown platform in the enabled-connector baseline.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("platform `{0}` has no host-call overlay")]
+#[error("platform `{0}` has no host-call connector")]
 pub struct UnknownPlatform(pub String);
 
 impl HostCallConfig {
-    /// The spec defaults with the given overlays' cutover flags ON.
+    /// The spec defaults with the given connectors' cutover flags ON.
     ///
     /// # Errors
-    /// [`UnknownPlatform`] for a name that is not a known overlay platform.
+    /// [`UnknownPlatform`] for a name that is not a known connector platform.
     pub fn new<I, S>(enabled_platforms: I) -> Result<Self, UnknownPlatform>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let mut overlay_enabled = HashSet::new();
+        let mut connector_enabled = HashSet::new();
         for p in enabled_platforms {
             let slug =
                 platform_slug(p.as_ref()).ok_or_else(|| UnknownPlatform(p.as_ref().to_string()))?;
-            overlay_enabled.insert(slug);
+            connector_enabled.insert(slug);
         }
         Ok(Self {
-            overlay_enabled,
+            connector_enabled,
             deadline: HOST_CALL_DEADLINE,
-            max_per_overlay: MAX_IN_FLIGHT_PER_OVERLAY,
+            max_per_connector: MAX_IN_FLIGHT_PER_CONNECTOR,
             max_per_connection: MAX_IN_FLIGHT_PER_CONNECTION,
             identity_rate_per_sec: IDENTITY_RATE_PER_SEC,
         })
@@ -649,10 +649,10 @@ struct Bucket {
     last: Instant,
 }
 
-/// In-flight counters per overlay and per connection.
+/// In-flight counters per connector and per connection.
 #[derive(Default)]
 struct Inflight {
-    overlay: HashMap<&'static str, usize>,
+    connector: HashMap<&'static str, usize>,
     connection: HashMap<i64, usize>,
 }
 
@@ -669,7 +669,7 @@ impl Drop for Permit {
             error!("in-flight table poisoned; a permit could not be released");
             return;
         };
-        release(&mut state.overlay, self.app_id);
+        release(&mut state.connector, self.app_id);
         release(&mut state.connection, self.connection_id);
     }
 }
@@ -684,8 +684,8 @@ fn release<K: std::hash::Hash + Eq>(map: &mut HashMap<K, usize>, key: K) {
     }
 }
 
-/// The production [`HostCallHandler`]: the explicit overlay allowlist.
-pub struct OverlayHostCalls {
+/// The production [`HostCallHandler`]: the explicit connector allowlist.
+pub struct ConnectorHostCalls {
     scopes: Arc<dyn ScopeSource>,
     tokenizer: Arc<dyn IdentityTokenizer>,
     config: HostCallConfig,
@@ -694,15 +694,15 @@ pub struct OverlayHostCalls {
     monotonic_origin: Instant,
 }
 
-impl fmt::Debug for OverlayHostCalls {
+impl fmt::Debug for ConnectorHostCalls {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OverlayHostCalls")
+        f.debug_struct("ConnectorHostCalls")
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
 }
 
-impl OverlayHostCalls {
+impl ConnectorHostCalls {
     /// Builds the handler over the active-connection table and tokenizer.
     #[must_use]
     pub fn new(
@@ -732,62 +732,66 @@ impl OverlayHostCalls {
         id.ok_or(HostCallError::Denied(DenyReason::UnscopedCall))
     }
 
-    /// Resolves the scope and overlay for `call`, or denies. The platform on
-    /// the scope must be the overlay's own platform.
+    /// Resolves the scope and connector for `call`, or denies. The platform on
+    /// the scope must be the connector's own platform.
     fn authorize(
         &self,
         call: &HostCallBody,
-    ) -> Result<(CallScope, &'static Overlay), HostCallError> {
+    ) -> Result<(CallScope, &'static Connector), HostCallError> {
         let connection_id = Self::stamped_connection_id(call)?;
         let scope = self
             .scopes
             .scope_of(connection_id)
             .ok_or(HostCallError::Denied(DenyReason::UnknownConnection))?;
-        let overlay =
-            overlay_for(&call.app_id).ok_or(HostCallError::Denied(DenyReason::UnknownOverlay))?;
-        if overlay.platform != scope.platform {
+        let connector = connector_for(&call.app_id)
+            .ok_or(HostCallError::Denied(DenyReason::UnknownConnector))?;
+        if connector.platform != scope.platform {
             return Err(HostCallError::Denied(DenyReason::PlatformMismatch));
         }
-        Ok((scope, overlay))
+        Ok((scope, connector))
     }
 
-    /// Admission: per-overlay then per-connection in-flight caps.
-    fn admit(&self, overlay: &'static Overlay, scope: &CallScope) -> Result<Permit, HostCallError> {
+    /// Admission: per-connector then per-connection in-flight caps.
+    fn admit(
+        &self,
+        connector: &'static Connector,
+        scope: &CallScope,
+    ) -> Result<Permit, HostCallError> {
         let mut state = self
             .inflight
             .lock()
             .map_err(|_| HostCallError::Unavailable)?;
-        let over_overlay = state
-            .overlay
-            .get(overlay.app_id)
+        let over_connector = state
+            .connector
+            .get(connector.app_id)
             .copied()
-            .is_some_and(|n| n >= self.config.max_per_overlay);
+            .is_some_and(|n| n >= self.config.max_per_connector);
         let over_connection = state
             .connection
             .get(&scope.connection_id)
             .copied()
             .is_some_and(|n| n >= self.config.max_per_connection);
-        if over_overlay || over_connection {
+        if over_connector || over_connection {
             return Err(HostCallError::QuotaExceeded);
         }
-        *state.overlay.entry(overlay.app_id).or_insert(0) += 1;
+        *state.connector.entry(connector.app_id).or_insert(0) += 1;
         *state.connection.entry(scope.connection_id).or_insert(0) += 1;
         Ok(Permit {
             inflight: Arc::clone(&self.inflight),
-            app_id: overlay.app_id,
+            app_id: connector.app_id,
             connection_id: scope.connection_id,
         })
     }
 
-    /// Takes one `identity.lookup` token for `overlay`.
-    fn take_identity_token(&self, overlay: &'static Overlay) -> Result<(), HostCallError> {
+    /// Takes one `identity.lookup` token for `connector`.
+    fn take_identity_token(&self, connector: &'static Connector) -> Result<(), HostCallError> {
         let rate = f64::from(self.config.identity_rate_per_sec);
         let mut buckets = self
             .buckets
             .lock()
             .map_err(|_| HostCallError::Unavailable)?;
         let now = Instant::now();
-        let bucket = buckets.entry(overlay.app_id).or_insert(Bucket {
+        let bucket = buckets.entry(connector.app_id).or_insert(Bucket {
             tokens: rate,
             last: now,
         });
@@ -801,9 +805,9 @@ impl OverlayHostCalls {
         Ok(())
     }
 
-    /// Requires `grant` for the overlay.
-    fn require(overlay: &Overlay, grant: Grant) -> Result<(), HostCallError> {
-        if overlay.has(grant) {
+    /// Requires `grant` for the connector.
+    fn require(connector: &Connector, grant: Grant) -> Result<(), HostCallError> {
+        if connector.has(grant) {
             Ok(())
         } else {
             Err(HostCallError::Denied(DenyReason::GrantMissing))
@@ -814,40 +818,40 @@ impl OverlayHostCalls {
     async fn dispatch(
         &self,
         scope: &CallScope,
-        overlay: &'static Overlay,
+        connector: &'static Connector,
         call: &HostCallBody,
     ) -> Result<serde_json::Value, HostCallError> {
         match (call.capability, call.op.as_str()) {
             (CapabilityKind::Context, "get-context") => {
-                Self::require(overlay, Grant::PiiRead)?;
+                Self::require(connector, Grant::PiiRead)?;
                 Ok(serde_json::json!({
                     "tenant": scope.tenant_id.to_string(),
                     "community": scope.community_id.to_string(),
-                    "app_id": overlay.app_id,
+                    "app_id": connector.app_id,
                 }))
             }
             (CapabilityKind::Db, "identity.lookup") => {
-                Self::require(overlay, Grant::PiiRead)?;
-                self.identity_lookup(scope, overlay, &call.args).await
+                Self::require(connector, Grant::PiiRead)?;
+                self.identity_lookup(scope, connector, &call.args).await
             }
             (CapabilityKind::Flags, "enabled") => {
-                Self::require(overlay, Grant::FlagsRead)?;
+                Self::require(connector, Grant::FlagsRead)?;
                 let key = call
                     .args
                     .get("key")
                     .and_then(serde_json::Value::as_str)
                     .ok_or(HostCallError::Invalid("flags.enabled requires a key"))?;
-                let own_flag = format!("waddles.overlay-{}", scope.platform);
-                let on = key == own_flag && self.config.overlay_enabled.contains(scope.platform);
+                let own_flag = format!("waddles.connector-{}", scope.platform);
+                let on = key == own_flag && self.config.connector_enabled.contains(scope.platform);
                 Ok(serde_json::json!({ "enabled": on }))
             }
             (CapabilityKind::Flags, "tier") => {
-                Self::require(overlay, Grant::FlagsRead)?;
+                Self::require(connector, Grant::FlagsRead)?;
                 Ok(serde_json::json!({ "tier": "free" }))
             }
             (CapabilityKind::Log, "write") => {
-                Self::require(overlay, Grant::PlatformLog)?;
-                Self::log_write(scope, overlay, &call.args)
+                Self::require(connector, Grant::PlatformLog)?;
+                Self::log_write(scope, connector, &call.args)
             }
             (CapabilityKind::Clock, "now-millis") => {
                 let now = chrono::Utc::now().timestamp_millis();
@@ -871,7 +875,7 @@ impl OverlayHostCalls {
     async fn identity_lookup(
         &self,
         scope: &CallScope,
-        overlay: &'static Overlay,
+        connector: &'static Connector,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, HostCallError> {
         let kind = args.get("kind").and_then(serde_json::Value::as_str);
@@ -901,7 +905,7 @@ impl OverlayHostCalls {
                     && !s.chars().any(char::is_control)
             })
             .ok_or(HostCallError::Invalid("identity.lookup platform_user_id"))?;
-        self.take_identity_token(overlay)?;
+        self.take_identity_token(connector)?;
         let uuid = self.tokenizer.tokenize(scope, id).await?;
         Ok(serde_json::json!({
             "uuid": uuid,
@@ -916,7 +920,7 @@ impl OverlayHostCalls {
     /// are dropped on purpose (only level and size are kept).
     fn log_write(
         scope: &CallScope,
-        overlay: &Overlay,
+        connector: &Connector,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, HostCallError> {
         let level = args
@@ -929,28 +933,28 @@ impl OverlayHostCalls {
             .map_or(0, str::len);
         match level {
             "trace" | "debug" => debug!(
-                app_id = overlay.app_id,
+                app_id = connector.app_id,
                 community_id = scope.community_id,
                 message_len,
-                "connector overlay log"
+                "connector log"
             ),
             "info" => tracing::info!(
-                app_id = overlay.app_id,
+                app_id = connector.app_id,
                 community_id = scope.community_id,
                 message_len,
-                "connector overlay log"
+                "connector log"
             ),
             "warn" => warn!(
-                app_id = overlay.app_id,
+                app_id = connector.app_id,
                 community_id = scope.community_id,
                 message_len,
-                "connector overlay log"
+                "connector log"
             ),
             "error" => error!(
-                app_id = overlay.app_id,
+                app_id = connector.app_id,
                 community_id = scope.community_id,
                 message_len,
-                "connector overlay log"
+                "connector log"
             ),
             _ => return Err(HostCallError::Invalid("log.write level")),
         }
@@ -963,8 +967,8 @@ impl OverlayHostCalls {
     /// `_scope`. The scope here is the HOST's own bookkeeping instead: the link
     /// matched the call's `call_id` to a build-request invocation it sent for
     /// `invoked_app_id`. Unscoped calls with any other origin stay denied, and
-    /// even from this origin only the overlay's own cutover flag
-    /// (`waddles.overlay-<platform>`, answered from the env baseline) is served:
+    /// even from this origin only the connector's own cutover flag
+    /// (`waddles.connector-<platform>`, answered from the env baseline) is served:
     /// no identity, context, log or any other capability.
     fn build_request_flag(
         &self,
@@ -973,15 +977,15 @@ impl OverlayHostCalls {
     ) -> Result<serde_json::Value, HostCallError> {
         let unscoped = HostCallError::Denied(DenyReason::UnscopedCall);
         if call.app_id != invoked_app_id {
-            return Err(HostCallError::Denied(DenyReason::UnknownOverlay));
+            return Err(HostCallError::Denied(DenyReason::UnknownConnector));
         }
-        let overlay =
-            overlay_for(&call.app_id).ok_or(HostCallError::Denied(DenyReason::UnknownOverlay))?;
+        let connector = connector_for(&call.app_id)
+            .ok_or(HostCallError::Denied(DenyReason::UnknownConnector))?;
         if call.capability != CapabilityKind::Flags {
             return Err(unscoped);
         }
-        Self::require(overlay, Grant::FlagsRead)?;
-        let _permit = self.admit_overlay(overlay)?;
+        Self::require(connector, Grant::FlagsRead)?;
+        let _permit = self.admit_connector(connector)?;
         match call.op.as_str() {
             "enabled" => {
                 let key = call
@@ -989,8 +993,9 @@ impl OverlayHostCalls {
                     .get("key")
                     .and_then(serde_json::Value::as_str)
                     .ok_or(HostCallError::Invalid("flags.enabled requires a key"))?;
-                let own_flag = format!("waddles.overlay-{}", overlay.platform);
-                let on = key == own_flag && self.config.overlay_enabled.contains(overlay.platform);
+                let own_flag = format!("waddles.connector-{}", connector.platform);
+                let on =
+                    key == own_flag && self.config.connector_enabled.contains(connector.platform);
                 Ok(serde_json::json!({ "enabled": on }))
             }
             "tier" => Ok(serde_json::json!({ "tier": "free" })),
@@ -998,24 +1003,24 @@ impl OverlayHostCalls {
         }
     }
 
-    /// Per-overlay admission only (a build-request call has no connection).
-    fn admit_overlay(&self, overlay: &'static Overlay) -> Result<Permit, HostCallError> {
+    /// Per-connector admission only (a build-request call has no connection).
+    fn admit_connector(&self, connector: &'static Connector) -> Result<Permit, HostCallError> {
         let mut state = self
             .inflight
             .lock()
             .map_err(|_| HostCallError::Unavailable)?;
         let over = state
-            .overlay
-            .get(overlay.app_id)
+            .connector
+            .get(connector.app_id)
             .copied()
-            .is_some_and(|n| n >= self.config.max_per_overlay);
+            .is_some_and(|n| n >= self.config.max_per_connector);
         if over {
             return Err(HostCallError::QuotaExceeded);
         }
-        *state.overlay.entry(overlay.app_id).or_insert(0) += 1;
+        *state.connector.entry(connector.app_id).or_insert(0) += 1;
         Ok(Permit {
             inflight: Arc::clone(&self.inflight),
-            app_id: overlay.app_id,
+            app_id: connector.app_id,
             // Never a real id (those are >= 1): `release` is then a no-op.
             connection_id: 0,
         })
@@ -1027,7 +1032,7 @@ impl OverlayHostCalls {
         call: &HostCallBody,
         origin: &CallOrigin,
     ) -> Result<serde_json::Value, HostCallError> {
-        let (scope, overlay) = match self.authorize(call) {
+        let (scope, connector) = match self.authorize(call) {
             Ok(ok) => ok,
             // Unscoped: only a host-recorded build-request origin may proceed,
             // and only to the flag read. Everything else keeps the denial.
@@ -1039,8 +1044,9 @@ impl OverlayHostCalls {
             }
             Err(e) => return Err(e),
         };
-        let _permit = self.admit(overlay, &scope)?;
-        match tokio::time::timeout(self.config.deadline, self.dispatch(&scope, overlay, call)).await
+        let _permit = self.admit(connector, &scope)?;
+        match tokio::time::timeout(self.config.deadline, self.dispatch(&scope, connector, call))
+            .await
         {
             Ok(result) => result,
             Err(_elapsed) => Err(HostCallError::Unavailable),
@@ -1048,7 +1054,7 @@ impl OverlayHostCalls {
     }
 }
 
-impl HostCallHandler for OverlayHostCalls {
+impl HostCallHandler for ConnectorHostCalls {
     fn handle<'a>(
         &'a self,
         call: &'a HostCallBody,
@@ -1169,13 +1175,13 @@ mod tests {
     fn handler_with(
         tok: Arc<Scripted>,
         edit: impl FnOnce(&mut HostCallConfig),
-    ) -> OverlayHostCalls {
+    ) -> ConnectorHostCalls {
         let mut cfg = HostCallConfig::new(["twitch"]).unwrap();
         edit(&mut cfg);
-        OverlayHostCalls::new(table(), tok, cfg)
+        ConnectorHostCalls::new(table(), tok, cfg)
     }
 
-    fn handler(tok: Arc<Scripted>) -> OverlayHostCalls {
+    fn handler(tok: Arc<Scripted>) -> ConnectorHostCalls {
         handler_with(tok, |_| {})
     }
 
@@ -1238,7 +1244,7 @@ mod tests {
                 CapabilityKind::Flags,
                 "enabled",
                 None,
-                serde_json::json!({"key": "waddles.overlay-twitch"}),
+                serde_json::json!({"key": "waddles.connector-twitch"}),
             ),
             call(
                 DISCORD,
@@ -1294,7 +1300,7 @@ mod tests {
     async fn an_unknown_or_deactivated_connection_is_denied() {
         let tok = Scripted::ok();
         let t = table();
-        let h = OverlayHostCalls::new(
+        let h = ConnectorHostCalls::new(
             t.clone(),
             tok.clone(),
             HostCallConfig::new(["twitch"]).unwrap(),
@@ -1369,10 +1375,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_overlay_cannot_act_on_another_platforms_connection() {
+    async fn an_connector_cannot_act_on_another_platforms_connection() {
         let tok = Scripted::ok();
         let h = handler(tok.clone());
-        // discord overlay naming the twitch connection (and vice versa).
+        // discord connector naming the twitch connection (and vice versa).
         assert_eq!(
             h.handle(&lookup(DISCORD, Some("11"), "9", "twitch")).await,
             Err(denied(DenyReason::PlatformMismatch))
@@ -1389,7 +1395,7 @@ mod tests {
                 "twitch"
             ))
             .await,
-            Err(denied(DenyReason::UnknownOverlay))
+            Err(denied(DenyReason::UnknownConnector))
         );
         assert_eq!(tok.calls(), 0);
     }
@@ -1403,7 +1409,7 @@ mod tests {
                 CapabilityKind::Flags,
                 "enabled",
                 Some(conn),
-                serde_json::json!({"key": "waddles.overlay-x"}),
+                serde_json::json!({"key": "waddles.connector-x"}),
             )
         };
         let tier = |app, conn| {
@@ -1560,7 +1566,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn identity_lookups_are_rate_limited_per_overlay() {
+    async fn identity_lookups_are_rate_limited_per_connector() {
         let tok = Scripted::ok();
         let h = handler_with(tok.clone(), |c| c.identity_rate_per_sec = 2);
         assert!(h
@@ -1575,7 +1581,7 @@ mod tests {
             h.handle(&lookup(TWITCH, Some("11"), "9", "twitch")).await,
             Err(HostCallError::RateLimited(1))
         );
-        // Another overlay has its own budget.
+        // Another connector has its own budget.
         assert!(h
             .handle(&lookup(DISCORD, Some("12"), "9", "discord"))
             .await
@@ -1588,7 +1594,7 @@ mod tests {
         let tok = Scripted::with(Ok(UUID_A.to_string()), Duration::from_millis(300));
         let h = Arc::new(handler_with(tok, |c| {
             c.max_per_connection = 1;
-            c.max_per_overlay = 2;
+            c.max_per_connector = 2;
             c.deadline = Duration::from_secs(5);
         }));
         let first = {
@@ -1601,7 +1607,7 @@ mod tests {
             h.handle(&lookup(TWITCH, Some("11"), "9", "twitch")).await,
             Err(HostCallError::QuotaExceeded)
         );
-        // A second connection of the same overlay fits the overlay cap.
+        // A second connection of the same connector fits the connector cap.
         let second = {
             let h = h.clone();
             tokio::spawn(
@@ -1618,14 +1624,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_overlay_cap_applies_across_connections() {
+    async fn the_connector_cap_applies_across_connections() {
         let tok = Scripted::with(Ok(UUID_A.to_string()), Duration::from_millis(300));
         let t = table();
         t.activate(scope("twitch", 8, 9, 21)).unwrap();
         let mut cfg = HostCallConfig::new(["twitch"]).unwrap();
-        cfg.max_per_overlay = 1;
+        cfg.max_per_connector = 1;
         cfg.deadline = Duration::from_secs(5);
-        let h = Arc::new(OverlayHostCalls::new(t, tok, cfg));
+        let h = Arc::new(ConnectorHostCalls::new(t, tok, cfg));
         let first = {
             let h = h.clone();
             tokio::spawn(async move { h.handle(&lookup(TWITCH, Some("11"), "9", "twitch")).await })
@@ -1649,7 +1655,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flags_answer_the_env_baseline_for_the_overlays_own_flag_only() {
+    async fn flags_answer_the_env_baseline_for_the_connectors_own_flag_only() {
         let h = handler(Scripted::ok());
         let enabled = |key: serde_json::Value| {
             call(
@@ -1661,12 +1667,12 @@ mod tests {
             )
         };
         assert_eq!(
-            h.handle(&enabled("waddles.overlay-twitch".into()))
+            h.handle(&enabled("waddles.connector-twitch".into()))
                 .await
                 .unwrap(),
             serde_json::json!({"enabled": true})
         );
-        for other in ["waddles.overlay-discord", "waddles.something-else", ""] {
+        for other in ["waddles.connector-discord", "waddles.something-else", ""] {
             assert_eq!(
                 h.handle(&enabled(other.into())).await.unwrap(),
                 serde_json::json!({"enabled": false})
@@ -1677,13 +1683,13 @@ mod tests {
             Err(HostCallError::Invalid(_))
         ));
         // Baseline OFF for twitch -> its own flag reads false.
-        let off = OverlayHostCalls::new(
+        let off = ConnectorHostCalls::new(
             table(),
             Scripted::ok(),
             HostCallConfig::new(Vec::<&str>::new()).unwrap(),
         );
         assert_eq!(
-            off.handle(&enabled("waddles.overlay-twitch".into()))
+            off.handle(&enabled("waddles.connector-twitch".into()))
                 .await
                 .unwrap(),
             serde_json::json!({"enabled": false})
@@ -1766,7 +1772,7 @@ mod tests {
         for r in [
             DenyReason::UnscopedCall,
             DenyReason::UnknownConnection,
-            DenyReason::UnknownOverlay,
+            DenyReason::UnknownConnector,
             DenyReason::PlatformMismatch,
             DenyReason::GrantMissing,
             DenyReason::NotServiced,
@@ -1865,8 +1871,8 @@ mod tests {
             UnknownPlatform("slack".to_string())
         );
         let c = HostCallConfig::new(["twitch", "discord"]).unwrap();
-        assert_eq!(c.overlay_enabled.len(), 2);
-        assert_eq!(c.max_per_overlay, MAX_IN_FLIGHT_PER_OVERLAY);
+        assert_eq!(c.connector_enabled.len(), 2);
+        assert_eq!(c.max_per_connector, MAX_IN_FLIGHT_PER_CONNECTOR);
     }
 
     #[test]
@@ -1876,7 +1882,7 @@ mod tests {
             .map(|g| g.manifest_id())
             .collect();
         let mut examined = 0;
-        for o in OVERLAYS {
+        for o in CONNECTORS {
             let p = format!(
                 "{}/../../bundles/rust/{}/hub-manifest.yaml",
                 env!("CARGO_MANIFEST_DIR"),
@@ -1915,13 +1921,13 @@ mod tests {
     }
 
     #[test]
-    fn the_overlay_lookups_resolve() {
-        assert_eq!(overlay_for(TWITCH).unwrap().platform, "twitch");
-        assert!(overlay_for("nope").is_none());
+    fn the_connector_lookups_resolve() {
+        assert_eq!(connector_for(TWITCH).unwrap().platform, "twitch");
+        assert!(connector_for("nope").is_none());
         assert_eq!(platform_slug("youtube"), Some("youtube"));
         assert_eq!(platform_slug("nope"), None);
         let h = handler(Scripted::ok());
-        assert!(format!("{h:?}").contains("OverlayHostCalls"));
+        assert!(format!("{h:?}").contains("ConnectorHostCalls"));
     }
 
     // ---- the real hub-api backed tokenizer, over a real tonic server ----
@@ -2206,7 +2212,7 @@ mod tests {
             CapabilityKind::Flags,
             "enabled",
             None,
-            serde_json::json!({"key": "waddles.overlay-twitch", "default_value": true}),
+            serde_json::json!({"key": "waddles.connector-twitch", "default_value": true}),
         );
         assert_eq!(
             roundtrip(&mut io, 51, flags).await.error.unwrap().code,
@@ -2294,21 +2300,21 @@ mod tests {
     }
 
     /// The A2 open issue: with a handler installed, a `build-request` flag read
-    /// (no `ConnectionCtx`, so no `_scope`) was denied and the Twitch overlay
+    /// (no `ConnectionCtx`, so no `_scope`) was denied and the Twitch connector
     /// refused to build. The host-recorded build-request origin serves it.
     #[tokio::test]
-    async fn a_build_request_origin_serves_the_overlays_own_cutover_flag() {
+    async fn a_build_request_origin_serves_the_connectors_own_cutover_flag() {
         let h = handler(Scripted::ok());
         let on = h
             .handle_from(
-                &flag_call(TWITCH, "enabled", "waddles.overlay-twitch"),
+                &flag_call(TWITCH, "enabled", "waddles.connector-twitch"),
                 &build_origin(TWITCH),
             )
             .await
             .unwrap();
-        assert_eq!(on["enabled"], true, "twitch overlay is ON by baseline");
+        assert_eq!(on["enabled"], true, "twitch connector is ON by baseline");
         // Another platform's flag, and an unknown key, read OFF (never ON).
-        for key in ["waddles.overlay-discord", "waddles.connector-tools", ""] {
+        for key in ["waddles.connector-discord", "waddles.connector-tools", ""] {
             let v = h
                 .handle_from(&flag_call(TWITCH, "enabled", key), &build_origin(TWITCH))
                 .await
@@ -2322,17 +2328,17 @@ mod tests {
         assert_eq!(tier["tier"], "free");
     }
 
-    /// An overlay whose baseline is OFF reads OFF from a build-request origin.
+    /// An connector whose baseline is OFF reads OFF from a build-request origin.
     #[tokio::test]
     async fn a_build_request_flag_read_honors_the_env_baseline_off() {
-        let h = OverlayHostCalls::new(
+        let h = ConnectorHostCalls::new(
             table(),
             Scripted::ok(),
             HostCallConfig::new(Vec::<&str>::new()).unwrap(),
         );
         let v = h
             .handle_from(
-                &flag_call(TWITCH, "enabled", "waddles.overlay-twitch"),
+                &flag_call(TWITCH, "enabled", "waddles.connector-twitch"),
                 &build_origin(TWITCH),
             )
             .await
@@ -2347,7 +2353,7 @@ mod tests {
     async fn unscoped_calls_stay_denied_without_the_build_request_origin() {
         let tok = Scripted::ok();
         let h = handler(tok.clone());
-        let flag = flag_call(TWITCH, "enabled", "waddles.overlay-twitch");
+        let flag = flag_call(TWITCH, "enabled", "waddles.connector-twitch");
         // No origin (`handle`), `Other`: denied, unscoped.
         assert_eq!(
             h.handle(&flag).await.unwrap_err(),
@@ -2395,7 +2401,7 @@ mod tests {
                 None,
                 serde_json::json!({}),
             ),
-            flag_call(TWITCH, "set", "waddles.overlay-twitch"),
+            flag_call(TWITCH, "set", "waddles.connector-twitch"),
         ];
         for c in &others {
             assert_eq!(
@@ -2410,18 +2416,18 @@ mod tests {
     }
 
     /// The origin names the invoked connector: a call whose `app_id` is a
-    /// different overlay (or unknown) is refused even from a build-request origin.
+    /// different connector (or unknown) is refused even from a build-request origin.
     #[tokio::test]
-    async fn a_build_request_origin_cannot_be_used_by_another_overlay() {
+    async fn a_build_request_origin_cannot_be_used_by_another_connector() {
         let h = handler(Scripted::ok());
         assert_eq!(
             h.handle_from(
-                &flag_call(DISCORD, "enabled", "waddles.overlay-discord"),
+                &flag_call(DISCORD, "enabled", "waddles.connector-discord"),
                 &build_origin(TWITCH),
             )
             .await
             .unwrap_err(),
-            denied(DenyReason::UnknownOverlay)
+            denied(DenyReason::UnknownConnector)
         );
         assert_eq!(
             h.handle_from(
@@ -2430,12 +2436,12 @@ mod tests {
             )
             .await
             .unwrap_err(),
-            denied(DenyReason::UnknownOverlay)
+            denied(DenyReason::UnknownConnector)
         );
-        // The discord overlay's manifest has no `flags.read`: grant missing.
+        // The discord connector's manifest has no `flags.read`: grant missing.
         assert_eq!(
             h.handle_from(
-                &flag_call(DISCORD, "enabled", "waddles.overlay-discord"),
+                &flag_call(DISCORD, "enabled", "waddles.connector-discord"),
                 &build_origin(DISCORD),
             )
             .await
@@ -2454,7 +2460,7 @@ mod tests {
             CapabilityKind::Flags,
             "enabled",
             Some("999"),
-            serde_json::json!({"key": "waddles.overlay-twitch"}),
+            serde_json::json!({"key": "waddles.connector-twitch"}),
         );
         assert_eq!(
             h.handle_from(&forged, &build_origin(TWITCH))
@@ -2465,13 +2471,13 @@ mod tests {
     }
 
     /// The build-request path is admission-controlled like every other call:
-    /// at the per-overlay cap it is refused (never queued), and the slot frees.
+    /// at the per-connector cap it is refused (never queued), and the slot frees.
     #[tokio::test]
-    async fn build_request_flag_reads_respect_the_per_overlay_in_flight_cap() {
-        let h = handler_with(Scripted::ok(), |c| c.max_per_overlay = 1);
-        let overlay = overlay_for(TWITCH).unwrap();
-        let held = h.admit_overlay(overlay).unwrap();
-        let call = flag_call(TWITCH, "enabled", "waddles.overlay-twitch");
+    async fn build_request_flag_reads_respect_the_per_connector_in_flight_cap() {
+        let h = handler_with(Scripted::ok(), |c| c.max_per_connector = 1);
+        let connector = connector_for(TWITCH).unwrap();
+        let held = h.admit_connector(connector).unwrap();
+        let call = flag_call(TWITCH, "enabled", "waddles.connector-twitch");
         assert_eq!(
             h.handle_from(&call, &build_origin(TWITCH))
                 .await

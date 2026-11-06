@@ -1,23 +1,23 @@
 {{/*
 PR-H -- connector runtime (inbound manager) helpers. Spec:
 docs/superpowers/specs/2026-11-05-connector-runtime-inbound-manager.md SS1.3/SS2/SS5/SS7/SS8.
-Env names are NORMATIVE (spec SS8). Everything here is inert while every overlay and
+Env names are NORMATIVE (spec SS8). Everything here is inert while every connector and
 svcIngest.connectorRuntime.enabled are false: no helper emits output, so an all-OFF render is
 byte-identical to a render without this feature.
 */}}
 
-{{/* "true" when overlay <platform> is ON (dict "root" . "platform" "twitch"); empty otherwise. */}}
-{{- define "waddlebot.connectorOverlayOn" -}}
+{{/* "true" when connector <platform> is ON (dict "root" . "platform" "twitch"); empty otherwise. */}}
+{{- define "waddlebot.connectorPlatformOn" -}}
 {{- $cr := .root.Values.pipeline.rustDataPlane.svcIngest.connectorRuntime | default dict -}}
-{{- $ov := $cr.overlay | default dict -}}
+{{- $ov := $cr.connector | default dict -}}
 {{- $p := index $ov .platform | default dict -}}
 {{- if $p.enabled -}}true{{- end -}}
 {{- end }}
 
-{{/* "true" when the runtime is active: master switch OR any platform overlay ON. */}}
+{{/* "true" when the runtime is active: master switch OR any platform connector ON. */}}
 {{- define "waddlebot.connectorRuntimeActive" -}}
 {{- $cr := .Values.pipeline.rustDataPlane.svcIngest.connectorRuntime | default dict -}}
-{{- if or $cr.enabled (include "waddlebot.connectorOverlayOn" (dict "root" . "platform" "twitch")) (include "waddlebot.connectorOverlayOn" (dict "root" . "platform" "discord")) (include "waddlebot.connectorOverlayOn" (dict "root" . "platform" "youtube")) -}}true{{- end -}}
+{{- if or $cr.enabled (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "twitch")) (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "discord")) (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "youtube")) -}}true{{- end -}}
 {{- end }}
 
 {{/* Single source of truth for connector digests (dict "root" . "platform" "twitch"). */}}
@@ -43,19 +43,19 @@ byte-identical to a render without this feature.
 {{- end }}
 
 {{/*
-OVERLAY_<P>_ENABLED + CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS env list items. Included by BOTH the
+CONNECTOR_<P>_ENABLED + CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS env list items. Included by BOTH the
 Rust and the Python svc-ingest deployments so the two read ONE helm value and cannot disagree.
 Emits nothing while the runtime is inactive.
 */}}
-{{- define "waddlebot.connectorOverlayEnv" -}}
+{{- define "waddlebot.connectorPlatformEnv" -}}
 {{- if include "waddlebot.connectorRuntimeActive" . -}}
 {{- $cr := .Values.pipeline.rustDataPlane.svcIngest.connectorRuntime | default dict }}
-- name: OVERLAY_TWITCH_ENABLED
-  value: {{ ternary "true" "false" (eq (include "waddlebot.connectorOverlayOn" (dict "root" . "platform" "twitch")) "true") | quote }}
-- name: OVERLAY_DISCORD_ENABLED
-  value: {{ ternary "true" "false" (eq (include "waddlebot.connectorOverlayOn" (dict "root" . "platform" "discord")) "true") | quote }}
-- name: OVERLAY_YOUTUBE_ENABLED
-  value: {{ ternary "true" "false" (eq (include "waddlebot.connectorOverlayOn" (dict "root" . "platform" "youtube")) "true") | quote }}
+- name: CONNECTOR_TWITCH_ENABLED
+  value: {{ ternary "true" "false" (eq (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "twitch")) "true") | quote }}
+- name: CONNECTOR_DISCORD_ENABLED
+  value: {{ ternary "true" "false" (eq (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "discord")) "true") | quote }}
+- name: CONNECTOR_YOUTUBE_ENABLED
+  value: {{ ternary "true" "false" (eq (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "youtube")) "true") | quote }}
 - name: CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS
   value: {{ join "," ($cr.webhookPlatforms | default list) | quote }}
 {{- end -}}
@@ -73,20 +73,20 @@ Emits nothing while the runtime is inactive.
 {{- end -}}
 {{- end -}}
 {{- if include "waddlebot.connectorRuntimeActive" . -}}
-{{- if and (include "waddlebot.connectorOverlayOn" (dict "root" . "platform" "discord")) (not $cr.identifyBudgetReady) -}}
-{{- fail "discord overlay requires the identify budget (not yet ported)" -}}
+{{- if and (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "discord")) (not $cr.identifyBudgetReady) -}}
+{{- fail "discord connector requires the identify budget (not yet ported)" -}}
 {{- end -}}
 {{- if not (and $rdp.enabled $si.enabled) -}}
 {{- fail "svcIngest.connectorRuntime requires pipeline.rustDataPlane.enabled and pipeline.rustDataPlane.svcIngest.enabled (the runtime lives in the Rust svc-ingest)" -}}
 {{- end -}}
 {{- if not $ct.enabled -}}
-{{- fail "svcIngest.connectorRuntime (any overlay ON) requires svcIngest.connectorTools.enabled (host-api listener, TLS secrets, hub-api resolver)" -}}
+{{- fail "svcIngest.connectorRuntime (any connector ON) requires svcIngest.connectorTools.enabled (host-api listener, TLS secrets, hub-api resolver)" -}}
 {{- end -}}
 {{- range $p := list "twitch" "discord" "youtube" -}}
-{{- if include "waddlebot.connectorOverlayOn" (dict "root" $ "platform" $p) -}}
+{{- if include "waddlebot.connectorPlatformOn" (dict "root" $ "platform" $p) -}}
 {{- $d := include "waddlebot.connectorDigest" (dict "root" $ "platform" $p) -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $d) -}}
-{{- fail (printf "svcIngest.connectorRuntime.overlay.%s.enabled requires pipeline.connectors.digests.%s = sha256:<64 lowercase hex> (got %q)" $p $p $d) -}}
+{{- fail (printf "svcIngest.connectorRuntime.connector.%s.enabled requires pipeline.connectors.digests.%s = sha256:<64 lowercase hex> (got %q)" $p $p $d) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

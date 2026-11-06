@@ -2,7 +2,7 @@
 //! `svc_ingest::connector_runtime::boot::assemble` composes in production --
 //! feed, per-platform profile, secrets wrapper, scope tenant refusal, scoped
 //! sink, active-connection table, host-call allowlist -- driving the REAL
-//! compiled Twitch overlay in a REAL bundle executor over the host-API wire
+//! compiled Twitch connector in a REAL bundle executor over the host-API wire
 //! (`ConnectorLinkHandler`, the connector link's production handler), against a
 //! fake IRC server, a fake hub-api resolver and a REAL Valkey (lease + spine).
 //!
@@ -53,7 +53,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
-const WASM: &[u8] = include_bytes!("fixtures/twitch_overlay.wasm");
+const WASM: &[u8] = include_bytes!("fixtures/twitch_connector.wasm");
 const TWITCH_APP: &str = "waddles.core.service.twitch";
 const CHANNEL: &str = "somechannel";
 const OTHER_CHANNEL: &str = "otherchannel";
@@ -286,7 +286,7 @@ async fn boot_wiring_publishes_scoped_events_and_refuses_the_mismatched_tenant()
     let slug = format!("bootwire{run}");
     let conn = 10_000 + i64::from(run % 50_000) * 2;
 
-    // Real executor with the REAL twitch overlay pinned the way the production
+    // Real executor with the REAL twitch connector pinned the way the production
     // boot pins it (host-constant app_id, the platform's exact grants, no bridge).
     let cfg = CliConfig::try_parse_from([
         "bundle-executor",
@@ -319,7 +319,7 @@ async fn boot_wiring_publishes_scoped_events_and_refuses_the_mismatched_tenant()
             None,
         )
         .await
-        .expect("the real twitch overlay pins");
+        .expect("the real twitch connector pins");
 
     // Fake IRC.
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();

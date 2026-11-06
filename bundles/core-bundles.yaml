@@ -1472,10 +1472,10 @@ bundles:
       - tenant_slug: global
         community_id: null
 
-  # bundle-MCP-tools P6b: twitch platform OVERLAY (Rust `kind: service`, `connector-tools` world).
-  # Built by rust-bundle-builder; the cutover flag waddles.overlay-twitch defaults OFF.
+  # bundle-MCP-tools P6b: twitch platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
+  # Built by rust-bundle-builder; the cutover flag waddles.connector-twitch defaults OFF.
   - app_id: waddles.core.service.twitch
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1486,24 +1486,24 @@ bundles:
       - tenant_slug: global
         community_id: null
 
-  # bundle-MCP-tools P6b: discord platform OVERLAY (Rust `kind: service`, `connector-tools` world).
-  # Built by rust-bundle-builder; the cutover flag waddles.overlay-discord defaults OFF.
+  # bundle-MCP-tools P6b: discord platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
+  # Built by rust-bundle-builder; the cutover flag waddles.connector-discord defaults OFF.
   - app_id: waddles.core.service.discord
-    version: "1.0.1"
+    version: "1.0.2"
     language: rust
     wit_world: connector-tools
     kind: service
     source_dir: rust/discord
-    manifest_path: discord-overlay.manifest.yaml
-    artifact_path: discord-overlay.wasm
+    manifest_path: discord-connector.manifest.yaml
+    artifact_path: discord-connector.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null
 
-  # bundle-MCP-tools P6b: youtube platform OVERLAY (Rust `kind: service`, `connector-tools` world).
-  # Built by rust-bundle-builder; the cutover flag waddles.overlay-youtube defaults OFF.
+  # bundle-MCP-tools P6b: youtube platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
+  # Built by rust-bundle-builder; the cutover flag waddles.connector-youtube defaults OFF.
   - app_id: waddles.core.service.youtube
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: connector-tools
     kind: service

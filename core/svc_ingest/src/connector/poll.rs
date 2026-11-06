@@ -1,6 +1,6 @@
 //! Generic, platform-agnostic polling [`Transport`]. URL, auth header, cursor
 //! query parameter / response pointer and interval all come from
-//! [`PollConfig`] (the overlay's config). One poll = one frame (the response
+//! [`PollConfig`] (the connector's config). One poll = one frame (the response
 //! body). The cursor only advances when the driver reports the frame
 //! `Published` via [`Transport::on_frame_outcome`]; a dropped frame holds the
 //! cursor so the same window is re-fetched, up to
@@ -52,12 +52,12 @@ pub struct PollAuth {
     pub handle: String,
 }
 
-/// Overlay-supplied configuration for one polled source.
+/// Connector-supplied configuration for one polled source.
 #[derive(Debug, Clone)]
 pub struct PollConfig {
     /// Platform slug (must have a pinned connector).
     pub platform: String,
-    /// `https://` endpoint from the overlay config.
+    /// `https://` endpoint from the connector config.
     pub url: String,
     /// Host-side key hashed into the opaque `source_id` (never exposed).
     pub source_key: String,
@@ -241,7 +241,7 @@ impl<S: TransportSecretSource> PollTransport<S> {
                 .ok_or_else(|| TransportError::Fatal("secret unavailable for handle".into()))?;
             let auth = resolve_handle(&self.secrets, &self.cfg.handles, &a.handle, &dest).await?;
             // API-key rows use the STORED header name and a raw value; only
-            // bearer/OAuth rows use the overlay's header + prefix.
+            // bearer/OAuth rows use the connector's header + prefix.
             let (hname, prefix) = match &auth.header {
                 Some(stored) => (stored.as_str(), ""),
                 None => (a.header.as_str(), a.prefix.as_str()),

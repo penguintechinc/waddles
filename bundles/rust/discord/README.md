@@ -1,10 +1,10 @@
-# Discord platform overlay (`waddles.core.service.discord`)
+# Discord platform connector (`waddles.core.service.discord`)
 
 P6b Task 2. A core `kind: service` WASM component on `world connector-tools` that supplies **only the
 Discord wire spec** on top of the generic host transports. It is **not** the Discord app bundle
 (`bundles/python/discord`, `waddles.core.example.discord`).
 
-Cutover: PostHog flag `waddles.overlay-discord`, **default OFF**. While OFF the hardcoded path
+Cutover: PostHog flag `waddles.connector-discord`, **default OFF**. While OFF the hardcoded path
 (`core/svc_ingest/src/ingest/discord.rs`, `discord_identify_budget.rs`, `discord_rest.rs`) runs unchanged
 and nothing here is exercised. The hardcoded code is deleted only in P6b T4.
 
@@ -15,7 +15,7 @@ and nothing here is exercised. The hardcoded code is deleted only in P6b T4.
  Discord interactions --POST--> host webhook route --Ed25519 (webhook_verify.rs) BEFORE the guest
                               |  verified body
                               v
-        +---------------- overlay component (this crate) ----------------+
+        +---------------- connector component (this crate) ----------------+
         | receiver.on-connect / on-frame / on-heartbeat-due / on-disconnect |
         | sender.build-request     tool-provider (classify_frame, classify_close_code) |
         +-------------------------------------------------------------------+
@@ -30,7 +30,7 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
 `ingest/discord_identify_budget.rs` (budget + session store), `discord_rest.rs` (outbound), and the pinned
 `penguin-connector-discord` crate (`gateway.rs`, rev `ecf906a`) the supervisor drives.
 
-| Concern | Hardcoded path | Overlay / host split |
+| Concern | Hardcoded path | Connector / host split |
 |---|---|---|
 | Opcodes handled | 0 DISPATCH, 1 HEARTBEAT (answer immediately), 2 IDENTIFY (send), 6 RESUME (send), 7 RECONNECT, 9 INVALID_SESSION (`d` = resumable flag, never collapsed), 10 HELLO, 11 HEARTBEAT_ACK | `gateway.rs` builds IDENTIFY/RESUME/HEARTBEAT and `classify`es 1/7/9/10/11/READY/RESUMED. Acting on them is the host's job (see Host duties) |
 | Intents | `GUILDS \| GUILD_MESSAGES \| MESSAGE_CONTENT` = 33281, nothing else | identical (`DEFAULT_INTENTS`); no extra privileged intent is requested |
@@ -48,15 +48,15 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
 | Identify budget / sharding | Valkey token bucket per `sha256(token)`, `max_concurrency` buckets (`shard_id % max_concurrency`), 5s window, rolling 24h `session_start_limit` + 20% low-headroom alert, fail-open on store outage | **HOST ONLY** — a stateless guest cannot and must not enforce a fleet-wide budget. Not reimplemented |
 | Outbound | `discord_rest.rs`: `chat.send`, `chat.delete` (channel-scoped), `dm.send` (membership-gated, two calls), `allowed_mentions {"parse":["users"]}` on every message POST, 429 `Retry-After` handling | `sender.rs` templates (below); rate-limit handling = host |
 
-### Host-only concerns (an overlay cannot enforce these — documented, not reimplemented)
+### Host-only concerns (an connector cannot enforce these — documented, not reimplemented)
 
 * **Interaction 3-second deadline.** Discord requires a response to a webhook interaction within 3 s.
-  The overlay only normalizes; the host route must answer type-1 PING with `{"type":1}` itself and ack
+  The connector only normalizes; the host route must answer type-1 PING with `{"type":1}` itself and ack
   commands within the deadline (deferred response) independent of `on-frame` latency.
 * **Ed25519 verification.** Done by the host (`webhook_verify.rs` `Ed25519Spec`; headers
   `X-Signature-Ed25519` / `X-Signature-Timestamp`, signed string `timestamp + body`, hex, the app public
   key as the route's secret-ref). A forged interaction is rejected with a uniform 403 **before** `on-frame`; the
-  overlay never sees unverified traffic and never holds the key.
+  connector never sees unverified traffic and never holds the key.
 * **IDENTIFY budget / `session_start_limit` / shard buckets / fail-open policy** — see table.
 * **Heartbeat timer and ACK-timeout reconnect** -- built host-side (`SessionRules.heartbeat_ack`, metric `svc_ingest_transport_heartbeat_ack_timeout_total`); see `docs/connector-host-capability.md` "Gateway gaps closed".
 
@@ -68,7 +68,7 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
 1b. **Gateway rules (host).** Add `reconnect_url` (READY `/d/resume_gateway_url`, `allowed_hosts: ["*.discord.gg"]`,
    `query: "v=10&encoding=json"`), `heartbeat_ack` (op 11, `max_unacked: 1`), `handshake_after: FirstFrame` (HELLO before
    IDENTIFY/RESUME) and `jitter_first_heartbeat` to the session rules -- full example in `docs/connector-host-capability.md`.
-   The host (not the overlay) captures and validates the resume URL; the overlay's `resume_gateway_url` session-token field is
+   The host (not the connector) captures and validates the resume URL; the connector's `resume_gateway_url` session-token field is
    no longer needed for dialling. **Intents** stay `33281` (identical to the hardcoded path, no extra privileged intent);
    **sharding** is single-shard (no `shard` field), identify buckets / `session_start_limit` remain host-only.
 2. **Session token.** `ctx.session-token` MUST be the JSON in `session.rs` (`{"session_id","seq",
@@ -86,7 +86,7 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
    (`is_mod`/`is_broadcaster` = false, WARN, verified through the real engine) — safe but degraded.
    Consider host-side permission resolution + cache to restore the 60s TTL/breaker behavior.
 5. **Webhook route** for interactions with `Ed25519Spec` (above) and the 3 s answer path.
-6. **Outbound (T6d) — exact placeholder set and host responsibilities.** The overlay emits ONLY these
+6. **Outbound (T6d) — exact placeholder set and host responsibilities.** The connector emits ONLY these
    host-filled placeholders; the host MUST substitute each from the source stated, and REJECT (fail the
    action) any template that still contains an unresolved `{...}` placeholder or any value from another source:
 
@@ -102,7 +102,7 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
    **strip** the pseudo-header `X-Waddle-Host-Dm-Recipient` (the `{user:<uuid>}` recipient; never sent to
    Discord), open the DM channel (`POST /users/@me/channels {"recipient_id": <resolved>}`), then run the
    message request against the channel from that reply; enforce the **`send_dm_in_community` gate** BEFORE
-   executing (the recipient must be a member of the guild of the triggering channel — the overlay cannot);
+   executing (the recipient must be a member of the guild of the triggering channel — the connector cannot);
    **refuse any managed role carrying `ADMINISTRATOR`, `MANAGE_ROLES` or `MANAGE_GUILD`** even if allowlisted;
    honour `429` `Retry-After`.
 7. **Actor tokenization needs `connector.pii.read`.** `on-frame` calls
@@ -126,7 +126,7 @@ harness does not bridge the guest `http` lookup).
 | `dm.send` | `POST /channels/{dm.channel_id}/messages` (host opens the DM first) | `{recipient_id, content}` — `recipient_id` ONLY a `{user:<uuid>}` placeholder (raw snowflake refused); recipient rides in pseudo-header `X-Waddle-Host-Dm-Recipient` |
 | `role.add` / `role.remove` | `PUT` / `DELETE /guilds/{target.guild_id}/members/{user:<uuid>}/roles/{target.role.<key>}` | `{user_id, role}` — `user_id` ONLY a `{user:<uuid>}` placeholder; `role` is a managed-role KEY `[a-z][a-z0-9_-]{0,31}`, never a snowflake |
 
-* The overlay never holds a token (`secret-refs: [("Authorization","discord-bot")]`) and never chooses the
+* The connector never holds a token (`secret-refs: [("Authorization","discord-bot")]`) and never chooses the
   destination: a payload naming `channel_id`/`guild_id` is refused. Every message body carries
   `allowed_mentions {"parse":["users"]}` (`@everyone`/`@here`/role pings never notify).
 * There is no `dm.post` kind and no payload field can name a DM channel, role snowflake, recipient snowflake,
@@ -171,12 +171,12 @@ a host-pinned `{target.*}` slot with the `discord-bot` handle, all listed in "Ho
 None in this repo. Token = host connection resolved by opaque handle `discord-bot`; interactions public key =
 the webhook route's secret-ref (host-side). Per-tenant bot credentials
 (`docs/superpowers/specs/2026-11-02-per-tenant-bot-credentials.md`) are a host/connection-resolver concern:
-the overlay is credential-agnostic and one component serves every tenant; the host binds the handle to the
+the connector is credential-agnostic and one component serves every tenant; the host binds the handle to the
 tenant's connection (`TransportSecrets::new(resolver, community_id)`), never to a tenant named by the guest.
 
 ## Logging / keys
 
-Logs carry op/class/mode/gateway-op only — never usernames, content, ids, tokens (tests assert it). The overlay
+Logs carry op/class/mode/gateway-op only — never usernames, content, ids, tokens (tests assert it). The connector
 uses no kv. Tenant/community identity is never read by the guest.
 
 ## Build / test
@@ -187,8 +187,8 @@ cargo clippy --all-targets --locked -- -D warnings && cargo fmt --check && cargo
 cargo llvm-cov --locked --summary-only               # >= 90% lines
 cargo component build --release --target wasm32-wasip2 --locked
 # real engine path (production linker, compiled component):
-cargo test --manifest-path ../../../core/bundle_executor/Cargo.toml --test discord_overlay
+cargo test --manifest-path ../../../core/bundle_executor/Cargo.toml --test discord_connector
 ```
 
 Rebuild the executor fixture after any change here:
-`cp target/wasm32-wasip2/release/waddle_bundle_discord_overlay.wasm ../../../core/bundle_executor/tests/fixtures/discord_overlay.wasm`.
+`cp target/wasm32-wasip2/release/waddle_bundle_discord_overlay.wasm ../../../core/bundle_executor/tests/fixtures/discord_connector.wasm`.

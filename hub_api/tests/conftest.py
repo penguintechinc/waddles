@@ -101,6 +101,7 @@ from services.schema import (
     bind_overlay_tables,
     bind_platform_tables,
     bind_privacy_tables,
+    bind_stream_keys_tables,
     bind_streaming_tables,
     bind_superadmin_tenant_fields,
     bind_tenant_tables,
@@ -358,6 +359,7 @@ def streaming_db(tmp_path: Any) -> Any:
     )
     bind_auth_tables(dal, migrate=True)
     bind_streaming_tables(dal, migrate=True)
+    bind_stream_keys_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
     # See auth_db's own docstring -- forces lazy-table DDL to run on the

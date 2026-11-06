@@ -1,7 +1,7 @@
 //! Golden-payload parity: every `tests/data_plane_parity/corpus/discord/*.json`
 //! vector (the committed oracle of the hardcoded `ingest/discord.rs` +
 //! `normalize_discord` path) must produce the SAME normalized event through the
-//! overlay's `on-frame`, with the vector's resolver context behind the `Host`
+//! connector's `on-frame`, with the vector's resolver context behind the `Host`
 //! port. Prints `parity n/total`; a zero-vector run FAILS.
 
 use std::cell::RefCell;
@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use waddle_bundle_discord_overlay::error::{OverlayError, Result};
+use waddle_bundle_discord_overlay::error::{ConnectorError, Result};
 use waddle_bundle_discord_overlay::perms::GuildInfo;
 use waddle_bundle_discord_overlay::receiver::{ConnCtx, Host, Level, on_frame};
 
@@ -115,7 +115,7 @@ fn every_discord_corpus_vector_matches_the_hardcoded_golden() {
                 let g = &v["golden"];
                 assert_eq!(e.platform, g["platform"], "{id} platform");
                 assert_eq!(e.event_type, g["event_type"], "{id} event_type");
-                // The golden actor is the RAW handle (pre-tokenization); the overlay must emit the
+                // The golden actor is the RAW handle (pre-tokenization); the connector must emit the
                 // tokenized UUID instead and never leak the handle.
                 assert_eq!(
                     e.actor.as_deref(),
@@ -158,14 +158,14 @@ fn every_discord_corpus_vector_matches_the_hardcoded_golden() {
 #[test]
 fn a_lookup_failure_diverges_from_the_golden_only_by_failing_closed() {
     // administrator_role normally yields is_mod=true; with the REST lookup down the
-    // overlay must degrade to false/false (the hardcoded resolver's fail-closed rule).
+    // connector must degrade to false/false (the hardcoded resolver's fail-closed rule).
     struct Down;
     impl Host for Down {
         fn guild(&self, _: &str) -> Result<GuildInfo> {
-            Err(OverlayError::Backend("http timeout".into()))
+            Err(ConnectorError::Backend("http timeout".into()))
         }
         fn member_roles(&self, _: &str, _: &str) -> Result<Vec<String>> {
-            Err(OverlayError::Backend("http timeout".into()))
+            Err(ConnectorError::Backend("http timeout".into()))
         }
         fn identity(&self, id: &str) -> Result<String> {
             Ok(format!("uuid-of-{id}"))

@@ -1085,7 +1085,7 @@ impl<S: ComponentSource> Executor<S> {
     }
 
     /// `invoke` arriving on the CONNECTOR link: connector exports (and a
-    /// pinned overlay's `tool-call`) only, with the guest's host-calls routed
+    /// pinned connector's `tool-call`) only, with the guest's host-calls routed
     /// back over `connection` carrying the call's `_scope`.
     pub(crate) async fn on_connector_invoke(
         &self,
@@ -1202,7 +1202,7 @@ impl<S: ComponentSource> Executor<S> {
         if body.export.is_connector() {
             return self.connectors.invoke_bound(body, binding).await;
         }
-        // A `tool-call` for a pinned `connector-tools` overlay (P6a T4) rides
+        // A `tool-call` for a pinned `connector-tools` connector (P6a T4) rides
         // the connector registry too: connectors are never in `bundles`.
         //
         // Authorization is upstream, not here: only the mTLS-pinned stage

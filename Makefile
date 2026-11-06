@@ -122,9 +122,9 @@ check-builtin-handler-inventory:
 test-data-plane-parity:
 	@bash scripts/ci/data-plane-parity.sh
 
-# Connector-overlay golden-payload parity (P6b):
-#   PARITY_OVERLAY_WASM=<built .wasm> make test-connector-parity PLATFORM=<twitch|discord|youtube>
-# (no PARITY_OVERLAY_WASM => fixture harness self-check; a set-but-missing path fails). docs/connector-parity-harness.md
+# Connector-connector golden-payload parity (P6b):
+#   PARITY_CONNECTOR_WASM=<built .wasm> make test-connector-parity PLATFORM=<twitch|discord|youtube>
+# (no PARITY_CONNECTOR_WASM => fixture harness self-check; a set-but-missing path fails). docs/connector-parity-harness.md
 test-connector-parity:
 	@bash scripts/ci/connector-parity.sh
 
@@ -137,14 +137,20 @@ test:
 	@$(MAKE) test-scripts
 
 # Self-tests for repo helper scripts (gh stubbed via PATH shim; no network).
-.PHONY: test-scripts release-merge
+.PHONY: test-scripts release-merge release-auto-merge
 test-scripts:
 	@bash scripts/tests/test_release_merge.sh
+	@bash scripts/tests/test_release_auto_merge.sh
 
 # Verify + merge a PR into release/*: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]
 release-merge:
 	@test -n "$(PR)" || { echo "usage: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]" >&2; exit 2; }
 	@bash scripts/release-merge.sh "$(PR)" $(if $(HEAD),--expect-head "$(HEAD)") $(if $(DRY),--dry-run)
+
+# Watch ordered PRs and merge each when green: make release-auto-merge PRS="1038 1037" [DRY=1]
+release-auto-merge:
+	@test -n "$(PRS)" || { echo 'usage: make release-auto-merge PRS="<n> <n> ..." [DRY=1]' >&2; exit 2; }
+	@bash scripts/release-auto-merge.sh $(if $(DRY),--dry-run) $(PRS)
 
 test-unit:
 	@echo "Running unit tests..."

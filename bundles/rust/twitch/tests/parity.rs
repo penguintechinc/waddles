@@ -1,5 +1,5 @@
 //! Golden parity: every `tests/data_plane_parity/corpus/twitch/*.json` vector
-//! through the overlay's logic must equal the hardcoded path's golden
+//! through the connector's logic must equal the hardcoded path's golden
 //! (event_type, actor, payload). `source` is host-derived and not compared.
 //! `occurred_at` is host-stamped and passed through.
 
@@ -79,7 +79,7 @@ fn expected_actor_key(v: &Value) -> Value {
 }
 
 /// Declared divergences applied to the golden payload: `(vector id, payload
-/// field, expected overlay value)`. Mirrors tests/data_plane_parity/expected/
+/// field, expected connector value)`. Mirrors tests/data_plane_parity/expected/
 /// twitch/divergences.json; each must actually differ from the golden (a stale
 /// declaration fails). The hardcoded path published an EMPTY broadcaster id for
 /// a raid whose channel is only in `to_broadcaster_user_id`.
@@ -137,7 +137,7 @@ fn check(v: &Value, self_nick_known: bool) -> Result<(), String> {
 }
 
 #[test]
-fn overlay_matches_every_twitch_golden_vector() {
+fn connector_matches_every_twitch_golden_vector() {
     let vs = vectors();
     assert_eq!(
         vs.len(),

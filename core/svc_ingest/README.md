@@ -202,7 +202,7 @@ Tests: `cargo test --locked --test connector_heartbeat`.
 ## Connector session lifecycle (P6b)
 
 Host-owned declarative rules (`WsConfig.session`, `PollConfig.lifecycle`; `connector/lifecycle.rs`) give platform
-overlays what a stateless guest cannot: captured session state fed back through `session-token`/handshake slots, a
+connectors what a stateless guest cannot: captured session state fed back through `session-token`/handshake slots, a
 frame-announced heartbeat interval, reconnect/park directives and WS close-code classification, poll interval hints,
 403-reason back-off vs park, and a percent-encoded API-key query slot. No WIT change. Config examples (Discord,
 YouTube), limits, metrics: `docs/connector-host-capability.md` "Session lifecycle". Tests:
@@ -235,7 +235,7 @@ through the guard.
 
 ## Generic outbound executor (P6a T6d-1, `src/connector/sender_exec/`)
 
-The host half of `sender.build-request`. A platform overlay (`bundles/rust/{twitch,discord,youtube}`, `world connector-tools`)
+The host half of `sender.build-request`. A platform connector (`bundles/rust/{twitch,discord,youtube}`, `world connector-tools`)
 returns an `http-request-tpl` made of SLOTS; this module verifies it, fills the slots from HOST state, and sends it through
 `bundle_host_http::guarded::GuardedClient` only.
 
@@ -262,7 +262,7 @@ queue entry --(drain: pin_sig HMAC + expiry, FIRST gate)--> ActionExecutor::exec
 `DiscordDuties` is registered (`SenderExecutor::with_duties`). With no hook (`NoDuties`) a duty kind returns `ExecError::HostDutyMissing`
 (`SenderError::Unsupported`).
 
-**Slot table** (token = exact text between the braces; handle = the overlay's `secret-refs` handle):
+**Slot table** (token = exact text between the braces; handle = the connector's `secret-refs` handle):
 
 | Platform | Slot | Handle | Source | Positions | Shape |
 |---|---|---|---|---|---|
@@ -351,7 +351,7 @@ real `dm.send` path (`/api/v10/channels/{dm.channel_id}/messages`) and `role.add
 | `{user:<uuid>}` recipient | entry `user_id` must be a UUID (bare or `{user:..}`); `PlatformUserResolver` maps it to the raw Discord id inside the executor only, scoped to the stamp's tenant + community (`tenant_id` rides in the MAC-bound stamp; absent -> refused); raw id lives in zeroizing values, never logged/stored; a raw snowflake is refused | `user_not_tokenized`, `no_tenant_scope`, `user_not_in_community`, `tokenization_denied`, `tokenization_bad_request`, `tokenization_bad_answer`; retryable: `tokenization_unavailable`, `tokenization_rate_limited` |
 | `send_dm_in_community` gate | before any template: pinned channel is in the binding's guild AND the recipient is a member (`discord_rest::classify_membership`, shared with the legacy client) | `not_in_community`; lookup failure `membership_lookup_failed` (nothing sent) |
 | `{dm.channel_id}` | host `POST /users/@me/channels {recipient_id}` per operation; slot filled only from that reply; no state kept, so another dm.send's channel is never reused; no `dm.post` kind | `dm_open_failed` |
-| Managed roles | overlay emits a KEY; host maps it through the binding's `managed_roles`, refuses roles whose permissions include ADMINISTRATOR / MANAGE_ROLES / MANAGE_GUILD (role list via guarded client, 30s TTL cache keyed by numeric guild id, <=256 guilds), pins the guild from the binding | `role_not_managed`, `role_privileged`, `role_not_found`, `role_lookup_failed` (fail closed) |
+| Managed roles | connector emits a KEY; host maps it through the binding's `managed_roles`, refuses roles whose permissions include ADMINISTRATOR / MANAGE_ROLES / MANAGE_GUILD (role list via guarded client, 30s TTL cache keyed by numeric guild id, <=256 guilds), pins the guild from the binding | `role_not_managed`, `role_privileged`, `role_not_found`, `role_lookup_failed` (fail closed) |
 | Credential | `DiscordSlots`: per community, per call, uncached `Authorization: Bot <token>`; the channel must be in the binding's guild | `channel_not_owned`, `connection_not_usable`, `ambiguous_binding`, `no_connection` |
 
 `X-Waddle-Host-Dm-Recipient`: the contract does not need it (the recipient is the entry's own, already host-known). The policy keeps
@@ -384,20 +384,20 @@ accepts a `{user:<uuid>}` recipient, the only form this executor's duty accepts.
 provider adapter (see "YouTube slot source"); (2) the executor and `HubPlatformUserResolver::connect` are not wired at boot (T6d-1 status above);
 the default `NoUserResolver` refuses every DM/role op loudly until it is.
 
-## Overlay host selector (connector runtime)
+## Connector host selector (connector runtime)
 
 Env baselines, default OFF, strict booleans, read identically by the Rust and Python svc-ingest (never the PostHog client: the `*.waddles.app` bypass would read every flag ON).
 
 | Env | Effect when ON |
 |---|---|
-| `OVERLAY_TWITCH_ENABLED` | legacy Twitch IRC inbound off; Twitch outbound drains off only if `CONNECTOR_TOOLS_ENABLED`; legacy EventSub stays unless `twitch` in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` |
-| `OVERLAY_DISCORD_ENABLED` | legacy Discord inbound off; needs the Valkey IDENTIFY budget (`IDENTIFY_BUDGET_READY`, wired via `boot::DiscordGateFactory`; `assemble` refuses Discord without it) and `CONNECTOR_HEARTBEAT_ENABLED=true` |
-| `OVERLAY_YOUTUBE_ENABLED` | Python `youtube_live_poll` off |
+| `CONNECTOR_TWITCH_ENABLED` | legacy Twitch IRC inbound off; Twitch outbound drains off only if `CONNECTOR_TOOLS_ENABLED`; legacy EventSub stays unless `twitch` in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` |
+| `CONNECTOR_DISCORD_ENABLED` | legacy Discord inbound off; needs the Valkey IDENTIFY budget (`IDENTIFY_BUDGET_READY`, wired via `boot::DiscordGateFactory`; `assemble` refuses Discord without it) and `CONNECTOR_HEARTBEAT_ENABLED=true` |
+| `CONNECTOR_YOUTUBE_ENABLED` | Python `youtube_live_poll` off |
 | `CONNECTOR_RUNTIME_ENABLED`, `CONNECTOR_RECONCILE_INTERVAL_SECS` (60), `CONNECTOR_MAX_CONNECTIONS` (500), `CONNECTOR_START_CONCURRENCY` (8), `CONNECTOR_DISCORD_START_PACE_MS` (5500), `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` | see spec 2026-11-05 section 1.3 |
 
-**Legacy suppression (Python svc-ingest).** The per-platform overlay baseline alone decides: overlay ON means that platform's Python receiver factory is never called (one INFO line, platform only). `CONNECTOR_RUNTIME_ENABLED` is not an input (Rust treats it as a consistency check only), and there is deliberately no `waddles.overlay-<platform>` flag fetch: the env baseline IS that flag's value (spec section 5), so there is no flag-fetch failure mode, unset means legacy keeps running, and Rust and Python cannot both own a platform. Discord overlay ON is fatal in both services until `IDENTIFY_BUDGET_READY`, so Python never parks Discord and keeps running alongside the overlay. Parity: `tests/fixtures/overlay_selector_table.json` is one decision table asserted by `tests/test_overlay_selector.py` and the Rust `shared_decision_table_parity`.
+**Legacy suppression (Python svc-ingest).** The per-platform connector baseline alone decides: connector ON means that platform's Python receiver factory is never called (one INFO line, platform only). `CONNECTOR_RUNTIME_ENABLED` is not an input (Rust treats it as a consistency check only), and there is deliberately no `waddles.connector-<platform>` flag fetch: the env baseline IS that flag's value (spec section 5), so there is no flag-fetch failure mode, unset means legacy keeps running, and Rust and Python cannot both own a platform. Discord connector ON is fatal in both services until `IDENTIFY_BUDGET_READY`, so Python never parks Discord and keeps running alongside the connector runtime. Parity: `tests/fixtures/connector_selector_table.json` is one decision table asserted by `tests/test_connector_selector.py` and the Rust `shared_decision_table_parity`.
 
-Any overlay ON validates, in order and naming the item: `INGEST_DYNAMIC_CONNECTIONS`, `HUB_API_GRPC_ENDPOINT`, `SERVICE_JWT_TOKEN_ENDPOINT`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_SERVER_CERT_FILE`/`_KEY_FILE`/`HOST_API_CLIENT_CA_FILE`/`HOST_API_CLIENT_IDENTITY`, spine config, `CONNECTOR_ROUTE_KEY_SECRET` (when webhooks listed). `/readyz` reports each overlay platform (`overlay[]`, reason while not ready).
+Any connector ON validates, in order and naming the item: `INGEST_DYNAMIC_CONNECTIONS`, `HUB_API_GRPC_ENDPOINT`, `SERVICE_JWT_TOKEN_ENDPOINT`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_SERVER_CERT_FILE`/`_KEY_FILE`/`HOST_API_CLIENT_CA_FILE`/`HOST_API_CLIENT_IDENTITY`, spine config, `CONNECTOR_ROUTE_KEY_SECRET` (when webhooks listed). `/readyz` reports each connector platform (`connector[]`, reason while not ready).
 
 ## Outbound executor — boot wiring & rollout order (P6a, `src/outbound_boot.rs`)
 
@@ -426,8 +426,8 @@ Wiring: `PlatformSlotRouter` (twitch/discord/youtube slot sources; unknown platf
 `slot_platform_unknown`) + `DiscordDuties` + `WireTemplateBuilder` over the `ExecutorLink`; the drains are
 `run_exec` (twitch), `run_discord_exec`, `run_youtube_exec` (queue
 `waddles:transport:irc:youtube:outbound`, executor-only). Shutdown uses the same per-drain SIGINT/SIGTERM
-receivers as the legacy drains. The link answers the overlay cutover flags
-(`waddles.overlay-{twitch,discord,youtube}`) `true` to `flags.enabled` host-calls; every other host-call is
+receivers as the legacy drains. The link answers the connector cutover flags
+(`waddles.connector-{twitch,discord,youtube}`) `true` to `flags.enabled` host-calls; every other host-call is
 refused.
 
 **Rollout order:** (1) deploy `svc_action` first (pin_sig v2; v1-signed entries are refused
@@ -436,48 +436,48 @@ refused.
 entries are consumed by whichever path is running).
 
 **Connector host-call bridge (`connector/host_calls.rs`, runtime spec decision 2.4).** `ExecutorLink::with_host_calls(Arc<dyn
-HostCallHandler>)` plugs in `OverlayHostCalls`, the explicit allowlist for the host-calls an overlay makes (default stays deny-all).
+HostCallHandler>)` plugs in `ConnectorHostCalls`, the explicit allowlist for the host-calls an connector makes (default stays deny-all).
 The executor stamps `args._scope = {connection_id}` after guest code for every export that carries a `ConnectionCtx`; the handler
 maps it through the host-owned `ActiveConnections` table (`connection_id -> platform/community/tenant`) to a `CallScope`.
 `tool-call` exports carry no ctx, so their host-calls are UNSCOPED and **denied** (`build-request` only gets its own flag read, see below) (typed `denied`/`unscoped_call`,
-counted, no fallback). Also denied: unknown/stale connection, unknown overlay, an overlay acting on another platform's
-connection, and any op needing a grant the overlay's `hub-manifest.yaml` lacks (twitch: `connector.pii.read`, `flags.read`;
+counted, no fallback). Also denied: unknown/stale connection, unknown connector, an connector acting on another platform's
+connection, and any op needing a grant the connector's `hub-manifest.yaml` lacks (twitch: `connector.pii.read`, `flags.read`;
 discord: `connector.pii.read`, `platform.log`; youtube: `connector.pii.read`; a unit test parses the real manifests).
 
 | Capability / op | Behavior |
 |---|---|
 | `context get-context` | tenant + community from the `CallScope` (needs `connector.pii.read`) |
-| `db identity.lookup` | `platform-identity` only; `args.tenant`/`platform` cross-checked against the scope; returns `{uuid, linked:false, handle:null, display_name:null, tenant}` via `HubIdentityTokenizer` (`MintEphemeralPseudonyms`, scope `identity:ephemeral:mint`, no handle sent); 200/s per overlay; uuid-kind (detokenize) denied |
-| `flags enabled/tier` | own `waddles.overlay-<platform>` key only, answered from the env baseline (needs `flags.read`) |
+| `db identity.lookup` | `platform-identity` only; `args.tenant`/`platform` cross-checked against the scope; returns `{uuid, linked:false, handle:null, display_name:null, tenant}` via `HubIdentityTokenizer` (`MintEphemeralPseudonyms`, scope `identity:ephemeral:mint`, no handle sent); 200/s per connector; uuid-kind (detokenize) denied |
+| `flags enabled/tier` | own `waddles.connector-<platform>` key only, answered from the env baseline (needs `flags.read`) |
 | `log write` | fixed-field PII-free line, guest text dropped (needs `platform.log`) |
 | `clock now-millis/now-rfc3339/monotonic-nanos` | served |
 | everything else (http, kv, relay, other db ops) | `denied` / `not_serviced` |
 
-Limits: 2 s deadline, 16 in flight per overlay, 4 per connection (over cap = `quota_exceeded`, never queued). Metrics:
+Limits: 2 s deadline, 16 in flight per connector, 4 per connection (over cap = `quota_exceeded`, never queued). Metrics:
 `connector_host_call_total{capability,outcome}`, `connector_host_call_denied_total{reason}` (bounded labels, no ids). Wired at boot
 by the connector runtime (below): the supervisor `activate`s/`deactivate`s each connection, and `build-request` flag reads are served through the
-host-recorded `CallOrigin::BuildRequest` (the link matches the call's `call_id` to the build-request invocation IT sent; only the invoked overlay's
-own `waddles.overlay-<p>` flag is answered, every other unscoped call stays `unscoped_call`-denied).
+host-recorded `CallOrigin::BuildRequest` (the link matches the call's `call_id` to the build-request invocation IT sent; only the invoked connector's
+own `waddles.connector-<p>` flag is answered, every other unscoped call stays `unscoped_call`-denied).
 
 **Known prerequisite outside this crate:** a `bundle-executor` must dial this pod's host-api port with the
-three connectors pinned (`Executor::pin_connector`) and a host-call bridge so the twitch overlay's
-`waddles.overlay-twitch` gate can read the flag. Neither exists in the production executor yet
+three connectors pinned (`Executor::pin_connector`) and a host-call bridge so the twitch connector's
+`waddles.connector-twitch` gate can read the flag. Neither exists in the production executor yet
 (`connector_wire` doc: "no host-call bridge today"); until then every build-request is a typed, counted
 `build_unavailable` (nothing is sent). The real-path proof is `core/connector_e2e/tests/outbound_exec.rs`.
 
 
 ## Connector runtime boot (PR-E, spec `2026-11-05-connector-runtime-inbound-manager.md`)
 
-Opt-in per platform by the env baselines `OVERLAY_{TWITCH,DISCORD,YOUTUBE}_ENABLED` (default OFF, strict bool; Discord is a fatal boot error only if
-`IDENTIFY_BUDGET_READY` is `false`, which it no longer is). With every overlay OFF (and `CONNECTOR_RUNTIME_ENABLED` unset) nothing below is built, bound or spawned --
-`tests/connector_runtime_default_boot.rs` pins it (no `connector_runtime_*`/host-call series, no overlay in `/readyz`, webhook ingress stays 503).
+Opt-in per platform by the env baselines `CONNECTOR_{TWITCH,DISCORD,YOUTUBE}_ENABLED` (default OFF, strict bool; Discord is a fatal boot error only if
+`IDENTIFY_BUDGET_READY` is `false`, which it no longer is). With every connector OFF (and `CONNECTOR_RUNTIME_ENABLED` unset) nothing below is built, bound or spawned --
+`tests/connector_runtime_default_boot.rs` pins it (no `connector_runtime_*`/host-call series, no connector in `/readyz`, webhook ingress stays 503).
 
 ```text
- lib.rs run_with_shutdown (data-plane flag ON, any overlay ON)
-   connector_runtime::boot::start_overlay
+ lib.rs run_with_shutdown (data-plane flag ON, any connector ON)
+   connector_runtime::boot::start_connector
      RuntimeSettings (digests SENDER_EXEC_DIGEST_<P>, CONNECTOR_* knobs, CONNECTOR_HEARTBEAT_ENABLED)
      webhook ingress (WebhookEnv::from_lookup -> build_ingress)  ──> state.webhook   BEFORE http::router
-     start_bridge: HubIdentityTokenizer + HostBridge{ExecutorLink+OverlayHostCalls, ActiveConnections} + mTLS listener (8301)
+     start_bridge: HubIdentityTokenizer + HostBridge{ExecutorLink+ConnectorHostCalls, ActiveConnections} + mTLS listener (8301)
      start_runtime: spine + Valkey lease -> assemble -> spawn ConnectorRuntime::run ; ready handle -> /readyz
    start_outbound(shared link)      outbound executor rides the SAME link/listener (no second bind)
 ```
@@ -490,9 +490,9 @@ Opt-in per platform by the env baselines `OVERLAY_{TWITCH,DISCORD,YOUTUBE}_ENABL
 | Host calls | `ConnectionCtx.connection_id` is pinned to the hub connection row id (what the executor stamps into `_scope`); `TableActivator` registers `(platform, community, tenant, connection)`. A different scope for a live id is refused (`activation_failed` park) and `deactivate` is compare-and-remove (refcounted per exact scope), so a stale guard never removes a newer registration. |
 | Rotation | `BindingSummary.secret_version` (hub-api `secretVersion`, >= 1) is in every fingerprint; a bump restarts the connection. |
 | Webhooks | `IngressAttach`: `activate_plan` for Webhook plans, `deactivate_route` on end; listed by `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`. |
-| Readiness | `/readyz` per platform: enabled, executor attached, pinned ok, desired/live, discovery failed. Overlay ON with the data plane OFF or a prerequisite missing is a fatal named boot error. |
+| Readiness | `/readyz` per platform: enabled, executor attached, pinned ok, desired/live, discovery failed. Connector ON with the data plane OFF or a prerequisite missing is a fatal named boot error. |
 
-Env (helm #1012 names): `OVERLAY_<P>_ENABLED`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_{SERVER_CERT,SERVER_KEY,CLIENT_CA}_FILE`, `HOST_API_CLIENT_IDENTITY`,
+Env (helm #1012 names): `CONNECTOR_<P>_ENABLED`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_{SERVER_CERT,SERVER_KEY,CLIENT_CA}_FILE`, `HOST_API_CLIENT_IDENTITY`,
 `SENDER_EXEC_HOST_API_PORT`, `HUB_API_GRPC_ENDPOINT`/`HUB_API_GRPC_CA_FILE`, `CONNECTOR_RECONCILE_INTERVAL_SECS`, `CONNECTOR_MAX_CONNECTIONS`,
 `CONNECTOR_START_CONCURRENCY`, `CONNECTOR_DISCORD_START_PACE_MS`, `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`, `CONNECTOR_ROUTE_KEY_SECRET`,
-`CONNECTOR_HEARTBEAT_ENABLED` (new, default false). Twitch overlay now declares `platform.log` (manifest + host-call grants + executor pin grants, subset-of-manifest tests) for its debug-level, PII-free lifecycle log.
+`CONNECTOR_HEARTBEAT_ENABLED` (new, default false). Twitch connector now declares `platform.log` (manifest + host-call grants + executor pin grants, subset-of-manifest tests) for its debug-level, PII-free lifecycle log.

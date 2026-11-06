@@ -22,12 +22,17 @@ function AdminLiveStreams() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [message, setMessage] = useState(null);
+  const [revealedKey, setRevealedKey] = useState(null);
   const [showKey, setShowKey] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
 
   useEffect(() => {
+    setRevealedKey(null);
     loadStreamConfig();
   }, [communityId]);
+
+  // hub-api error envelope is { error: { code, message } } -- never render the object itself.
+  const errorText = (err, fallback) => err.response?.data?.error?.message || fallback;
 
   const loadStreamConfig = async () => {
     try {
@@ -50,11 +55,13 @@ function AdminLiveStreams() {
   const createConfig = async () => {
     try {
       setLoading(true);
-      await adminApi.createStreamConfig(communityId);
+      const res = await adminApi.createStreamConfig(communityId);
+      setRevealedKey(res.data?.streamKey || null);
+      setShowKey(true);
       setMessage({ type: 'success', text: 'Stream configuration created' });
       loadStreamConfig();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to create configuration');
+      setError(errorText(err, 'Failed to create configuration'));
     } finally {
       setLoading(false);
     }
@@ -63,11 +70,13 @@ function AdminLiveStreams() {
   const regenerateKey = async () => {
     if (!window.confirm('Regenerating will invalidate the current key. Continue?')) return;
     try {
-      await adminApi.regenerateStreamKey(communityId);
+      const res = await adminApi.regenerateStreamKey(communityId);
+      setRevealedKey(res.data?.streamKey || null);
+      setShowKey(true);
       setMessage({ type: 'success', text: 'Stream key regenerated' });
       loadStreamConfig();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to regenerate key');
+      setError(errorText(err, 'Failed to regenerate key'));
     }
   };
 
@@ -88,7 +97,7 @@ function AdminLiveStreams() {
       setShowAddModal(false);
       loadStreamConfig();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to add destination');
+      setError(errorText(err, 'Failed to add destination'));
       throw err;
     }
   };
@@ -144,7 +153,7 @@ function AdminLiveStreams() {
       setMessage({ type: 'success', text: 'Destination removed' });
       loadStreamConfig();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to remove destination');
+      setError(errorText(err, 'Failed to remove destination'));
     }
   };
 
@@ -154,7 +163,7 @@ function AdminLiveStreams() {
       setMessage({ type: 'success', text: 'Force cut toggled' });
       loadStreamConfig();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to toggle force cut');
+      setError(errorText(err, 'Failed to toggle force cut'));
     }
   };
 
@@ -228,24 +237,45 @@ function AdminLiveStreams() {
               </div>
               <div>
                 <label htmlFor="admin-live-streams-stream-key" className="block text-sm text-fg-muted mb-1">Stream Key</label>
-                <div className="flex gap-2">
-                  <input
-                    id="admin-live-streams-stream-key"
-                    type={showKey ? 'text' : 'password'}
-                    value={config.stream_key || ''}
-                    readOnly
-                    className="input flex-1 bg-surface-raised"
-                  />
-                  <button aria-label={showKey ? 'Hide stream key' : 'Show stream key'} onClick={() => setShowKey(!showKey)} className="btn btn-secondary">
-                    <EyeIcon className="h-5 w-5" />
-                  </button>
-                  <button aria-label="Copy stream key" onClick={() => copyToClipboard(config.stream_key)} className="btn btn-secondary">
-                    <ClipboardIcon className="h-5 w-5" />
-                  </button>
-                  <button aria-label="Regenerate stream key" onClick={regenerateKey} className="btn btn-warning">
-                    <ArrowPathIcon className="h-5 w-5" />
-                  </button>
-                </div>
+                {revealedKey ? (
+                  <>
+                    <div className="flex gap-2">
+                      <input
+                        id="admin-live-streams-stream-key"
+                        type={showKey ? 'text' : 'password'}
+                        value={revealedKey}
+                        readOnly
+                        className="input flex-1 bg-surface-raised"
+                      />
+                      <button aria-label={showKey ? 'Hide stream key' : 'Show stream key'} onClick={() => setShowKey(!showKey)} className="btn btn-secondary">
+                        <EyeIcon className="h-5 w-5" />
+                      </button>
+                      <button aria-label="Copy stream key" onClick={() => copyToClipboard(revealedKey)} className="btn btn-secondary">
+                        <ClipboardIcon className="h-5 w-5" />
+                      </button>
+                      <button aria-label="Regenerate stream key" onClick={regenerateKey} className="btn btn-warning">
+                        <ArrowPathIcon className="h-5 w-5" />
+                      </button>
+                    </div>
+                    <p className="text-yellow-400 text-xs mt-2">
+                      Copy this key now. It is shown only once and cannot be retrieved again.
+                      <button onClick={() => setRevealedKey(null)} className="underline ml-2">Hide</button>
+                    </p>
+                  </>
+                ) : (
+                  <div className="flex gap-2 items-center">
+                    <input
+                      id="admin-live-streams-stream-key"
+                      type="text"
+                      value={config.stream_key_set ? `Hidden (fingerprint ${config.stream_key_fingerprint || 'n/a'})` : 'No key set'}
+                      readOnly
+                      className="input flex-1 bg-surface-raised"
+                    />
+                    <button aria-label="Regenerate stream key" onClick={regenerateKey} className="btn btn-warning">
+                      <ArrowPathIcon className="h-5 w-5" />
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>

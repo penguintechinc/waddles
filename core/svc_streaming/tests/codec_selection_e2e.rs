@@ -131,7 +131,10 @@ fn harness(config: &Config, data_dir: &Path, encoders: EncoderSelection) -> Harn
         config.clone(),
         supervisor.clone(),
         Arc::new(HlsSink::new(data_dir.to_path_buf(), &prom)),
-        Arc::new(RelaySink::new()),
+        Arc::new(
+            RelaySink::new()
+                .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled()),
+        ),
         None,
         Arc::new(PipelineRegistry::new()),
         whip_state(config),
@@ -223,6 +226,7 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             community_id INTEGER NOT NULL UNIQUE,
             source_url TEXT NOT NULL,
+            stream_key_hash TEXT,
             source_type TEXT NOT NULL DEFAULT 'rtmp',
             enabled INTEGER NOT NULL DEFAULT 1,
             record_enabled INTEGER NOT NULL DEFAULT 0,
@@ -247,21 +251,21 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
         -- 1: H.265 + AAC. HLS and the SRT target share the H.265 encode; the
         --    RTMP target (rtmps://) cannot carry HEVC so it rides an H.264 rung.
         INSERT INTO streaming_configs (id, community_id, source_url, transcode_enabled, video_codec, audio_codec)
-            VALUES (1, 101, 'key_h265', 1, 'h265', 'aac');
+            VALUES (1, 101, 'key_h265_0123456789abcdef', 1, 'h265', 'aac');
         INSERT INTO streaming_targets (config_id, platform, forward_url, protocol) VALUES (1, 'custom', '{rtmp}', 'rtmp');
         INSERT INTO streaming_targets (config_id, platform, forward_url, protocol) VALUES (1, 'custom', '{srt}', 'srt');
 
         -- 2: AV1 HLS only, no push targets.
         INSERT INTO streaming_configs (id, community_id, source_url, transcode_enabled, video_codec)
-            VALUES (2, 102, 'key_av1', 1, 'av1');
+            VALUES (2, 102, 'key_av1_0123456789abcdef', 1, 'av1');
 
         -- 3: AV1 + an SRT target that inherits it: MPEG-TS cannot carry AV1.
         INSERT INTO streaming_configs (id, community_id, source_url, transcode_enabled, video_codec)
-            VALUES (3, 103, 'key_av1_srt', 1, 'av1');
+            VALUES (3, 103, 'key_av1_srt_0123456789abcdef', 1, 'av1');
         INSERT INTO streaming_targets (config_id, platform, forward_url, protocol) VALUES (3, 'custom', '{srt}', 'srt');
 
         -- 4: five destinations -- over the Free-tier cap of three.
-        INSERT INTO streaming_configs (id, community_id, source_url) VALUES (4, 104, 'key_fanout');
+        INSERT INTO streaming_configs (id, community_id, source_url) VALUES (4, 104, 'key_fanout_0123456789abcdef');
         INSERT INTO streaming_targets (config_id, platform, forward_url) VALUES (4, 'custom', '{rtmp}');
         INSERT INTO streaming_targets (config_id, platform, forward_url) VALUES (4, 'custom', '{rtmp}');
         INSERT INTO streaming_targets (config_id, platform, forward_url, protocol) VALUES (4, 'custom', '{srt}', 'srt');
@@ -271,6 +275,7 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
     ))
     .await
     .expect("seed database");
+    svc_streaming::stream_key::backfill_hashes_from_source_url_for_tests(&db).await;
 
     // Every fake-ffmpeg script is written before the first process spawns:
     // writing an executable and exec'ing it while another thread forks
@@ -288,7 +293,7 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
     let fanout = harness(&config, &data_dir, EncoderSelection::software());
 
     // --- 1. H.265 + SRT + an H.264 RTMP rung, on the CPU encoders --------
-    let _publisher = cpu.publish("key_h265").await;
+    let _publisher = cpu.publish("key_h265_0123456789abcdef").await;
     let argv = wait_for_file(&cpu.argv_capture).await;
     assert!(
         argv_has(&argv, "libx265"),
@@ -319,7 +324,7 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
     cpu.orchestrator.stop_pipeline(Uuid::from_u128(1)).await;
 
     // --- 1b. same rows, but the host proved NVENC for H.264/H.265 --------
-    let _publisher = gpu.publish("key_h265").await;
+    let _publisher = gpu.publish("key_h265_0123456789abcdef").await;
     let argv = wait_for_file(&gpu.argv_capture).await;
     assert!(argv_has(&argv, "hevc_nvenc"), "GPU H.265 missing: {argv}");
     assert!(
@@ -333,14 +338,14 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
     gpu.orchestrator.stop_pipeline(Uuid::from_u128(1)).await;
 
     // --- 2. AV1 HLS -------------------------------------------------------
-    let _publisher = av1.publish("key_av1").await;
+    let _publisher = av1.publish("key_av1_0123456789abcdef").await;
     let argv = wait_for_file(&av1.argv_capture).await;
     assert!(argv_has(&argv, "libsvtav1"), "AV1 HLS missing: {argv}");
     assert!(argv_has(&argv, "hls"), "{argv}");
     av1.orchestrator.stop_pipeline(Uuid::from_u128(2)).await;
 
     // --- 3. AV1 inherited by an SRT target: refused, ffmpeg never spawns --
-    let _publisher = bad.publish("key_av1_srt").await;
+    let _publisher = bad.publish("key_av1_srt_0123456789abcdef").await;
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(
         !bad.argv_capture.exists(),
@@ -352,7 +357,7 @@ async fn codec_selection_reaches_the_ffmpeg_command_line_and_bad_choices_never_s
     ));
 
     // --- 4. Over the destination cap: refused in the argv path ------------
-    let _publisher = fanout.publish("key_fanout").await;
+    let _publisher = fanout.publish("key_fanout_0123456789abcdef").await;
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(
         !fanout.argv_capture.exists(),

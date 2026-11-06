@@ -34,7 +34,7 @@ pub enum WitWorld {
     StageTools,
     Connector,
     /// `world connector-tools` (P6a T4): `connector` plus the `tool` import and
-    /// the `tool-provider` export, so a connector overlay can expose and call
+    /// the `tool-provider` export, so a connector service bundle can expose and call
     /// tools. Same core-only trust gate as `Connector`.
     ConnectorTools,
 }

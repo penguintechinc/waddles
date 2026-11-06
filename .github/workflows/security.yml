@@ -244,7 +244,8 @@ jobs:
     name: CodeQL Analysis
     needs: changes
     # CodeQL here analyzes go, javascript and python only.
-    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || needs.changes.outputs.go == 'true'
+    # Main-only tier: skipped on PRs into release/** (see scripts/ci/ci-gate-tier.py)
+    if: (github.event_name != 'pull_request' || github.base_ref == 'main') && (needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || needs.changes.outputs.go == 'true')
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:

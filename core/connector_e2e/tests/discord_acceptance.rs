@@ -54,7 +54,7 @@ use svc_ingest::connector_runtime::feed::{DesiredConnection, DynFeed, FeedError,
 use svc_ingest::connector_runtime::profiles::discord::GATEWAY_URL;
 use svc_ingest::connector_runtime::scoped::ScopeLookup;
 use svc_ingest::connector_runtime::selector::{
-    start_legacy, LegacyPlan, LegacyStarters, OverlaySelector, IDENTIFY_BUDGET_READY,
+    start_legacy, ConnectorSelector, LegacyPlan, LegacyStarters, IDENTIFY_BUDGET_READY,
 };
 use svc_ingest::identity_crypto::{
     decrypt_identity_value, DekProvider, JsonEnvelope, LocalDevDekProvider,
@@ -69,7 +69,7 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const DISCORD_WASM: &[u8] =
-    include_bytes!("../../bundle_executor/tests/fixtures/discord_overlay.wasm");
+    include_bytes!("../../bundle_executor/tests/fixtures/discord_connector.wasm");
 const KEK_ENV: &str = "DISCORD_ACCEPTANCE_KEK";
 const GUILD: &str = "123456789012345678";
 const GUILD_2: &str = "223456789012345678";
@@ -167,7 +167,7 @@ impl ConnectionResolve for FakeHub {
         after: i64,
         _limit: u32,
     ) -> Result<BindingPage, ResolveError> {
-        assert_eq!(provider, "discord", "only the discord overlay is ON");
+        assert_eq!(provider, "discord", "only the discord connector is ON");
         assert_eq!(capability, Some("chat_ingest"));
         let items = if after == 0 {
             self.binds
@@ -708,7 +708,7 @@ async fn pin(executor: &Executor<NoSource>, cfg: &CliConfig) -> String {
 /// The production env lookup for Discord ON (heartbeat baseline included).
 fn discord_env(digest: &str) -> BTreeMap<&'static str, String> {
     [
-        ("OVERLAY_DISCORD_ENABLED", "true".to_owned()),
+        ("CONNECTOR_DISCORD_ENABLED", "true".to_owned()),
         ("CONNECTOR_HEARTBEAT_ENABLED", "true".to_owned()),
         ("SENDER_EXEC_DIGEST_DISCORD", digest.to_owned()),
     ]
@@ -735,7 +735,7 @@ impl Rig {
 
         let env = discord_env(&digest);
         let lookup = |k: &str| env.get(k).cloned();
-        let selector = OverlaySelector::from_env(&lookup)
+        let selector = ConnectorSelector::from_env(&lookup)
             .expect("Discord ON is accepted now the identify budget is wired");
         let ingest_cli = svc_ingest::config::CliConfig::parse_from(["svc-ingest"]);
         let mut settings = RuntimeSettings::from_inputs(&ingest_cli, &selector, &lookup)
@@ -998,10 +998,10 @@ async fn discord_on_is_accepted_and_the_legacy_receiver_is_suppressed() {
         std::hint::black_box(IDENTIFY_BUDGET_READY),
         "the acceptance suite runs with the identify budget wired"
     );
-    let env = |k: &str| (k == "OVERLAY_DISCORD_ENABLED").then(|| "true".to_owned());
-    let sel = OverlaySelector::from_env(&env).expect("Discord ON is accepted");
+    let env = |k: &str| (k == "CONNECTOR_DISCORD_ENABLED").then(|| "true".to_owned());
+    let sel = ConnectorSelector::from_env(&env).expect("Discord ON is accepted");
     assert_eq!(sel.enabled_platforms(), vec!["discord"]);
-    assert!(sel.overlay("discord") && !sel.overlay("twitch") && !sel.overlay("youtube"));
+    assert!(sel.connector("discord") && !sel.connector("twitch") && !sel.connector("youtube"));
 
     let mut starters = Counting::default();
     start_legacy(&LegacyPlan::new(&sel, &[], false), &mut starters)
@@ -1020,7 +1020,7 @@ async fn discord_on_is_accepted_and_the_legacy_receiver_is_suppressed() {
         "Discord outbound is governed by CONNECTOR_TOOLS_ENABLED, not the selector"
     );
 
-    let off = OverlaySelector::from_env(&|_: &str| None).expect("default OFF");
+    let off = ConnectorSelector::from_env(&|_: &str| None).expect("default OFF");
     let mut legacy = Counting::default();
     start_legacy(&LegacyPlan::new(&off, &[], false), &mut legacy)
         .await

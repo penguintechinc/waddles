@@ -350,18 +350,18 @@ pipeline:
       # digests exist and a bundle-executor dials the host-api port (core/svc_ingest/README.md).
       connectorTools:
         enabled: false
-      # PR-H inbound connector runtime: EVERY overlay stays OFF by default (spec SS7). Per-platform
+      # PR-H inbound connector runtime: EVERY connector stays OFF by default (spec SS7). Per-platform
       # ON procedure on alpha, ONE at a time, in this order (youtube -> discord -> twitch):
       #   1. connectorTools.enabled: true and set pipeline.connectors.digests.<p> (sha256:<hex>)
-      #   2. overlay.<p>.enabled: true (flips BOTH svc-ingest deployments), redeploy, smoke
+      #   2. connector.<p>.enabled: true (flips BOTH svc-ingest deployments), redeploy, smoke
       #   3. discord additionally needs identifyBudgetReady (true here: the Valkey IDENTIFY budget is wired;
       #      base/beta/gamma/production keep false and REJECT discord at render)
       #   4. webhookPlatforms needs routeKeySecret.existingSecret (operator-managed, never a literal)
-      # Rollback: overlay.<p>.enabled: false + redeploy. Beta/gamma/prod inherit OFF.
+      # Rollback: connector.<p>.enabled: false + redeploy. Beta/gamma/prod inherit OFF.
       connectorRuntime:
         enabled: false
         identifyBudgetReady: true
-        overlay:
+        connector:
           twitch: { enabled: false }
           discord: { enabled: false }
           youtube: { enabled: false }

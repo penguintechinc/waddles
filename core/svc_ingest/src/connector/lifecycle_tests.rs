@@ -111,7 +111,7 @@ fn op(n: i64) -> (String, Scalar) {
     ("/op".into(), Scalar::Int(n))
 }
 
-/// The host config an Discord overlay would ship (also the docs example).
+/// The host config an Discord connector would ship (also the docs example).
 fn discord_rules() -> SessionRules {
     let close = |from, to, action| CloseCodeRule { from, to, action };
     SessionRules {

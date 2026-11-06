@@ -1,4 +1,4 @@
-//! YouTube platform overlay (bundle-MCP-tools P6b T3): a `kind: service`
+//! YouTube platform connector (bundle-MCP-tools P6b T3): a `kind: service`
 //! connector on the `connector-tools` world. The host owns the poll transport
 //! and every credential; this component supplies the platform knowledge:
 //! frame -> normalized events (`receiver`), chat-send request template
@@ -29,7 +29,7 @@ mod component {
     /// PII-free log line: operation + counts only, never frame content.
     fn log_counts(level: log::Level, op: &str, events: usize, skipped: usize) {
         let fields = serde_json::json!({"op": op, "events": events, "skipped": skipped});
-        log::write(level, "youtube overlay", &fields.to_string());
+        log::write(level, "youtube connector", &fields.to_string());
     }
 
     fn frame_err(e: LogicError) -> FrameError {

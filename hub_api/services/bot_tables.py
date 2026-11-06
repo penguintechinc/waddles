@@ -182,6 +182,7 @@ def bind_bot_tables(dal: Any) -> None:
     dal.define_table(
         "ai_ticket_suggestions",
         dal.Field("ticket_id", "integer", notnull=True),
+        dal.Field("community_id", "integer"),
         dal.Field("suggestion_text", "text", notnull=True),
         dal.Field("confidence_score", "double", notnull=True),
         dal.Field("cited_chunks", "list:integer", default=[]),

@@ -44,6 +44,7 @@ async fn seed_db_singleton(config: &Config) {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             community_id INTEGER NOT NULL UNIQUE,
             source_url TEXT NOT NULL,
+            stream_key_hash TEXT,
             source_type TEXT NOT NULL DEFAULT 'rtmp',
             enabled INTEGER NOT NULL DEFAULT 1,
             record_enabled INTEGER NOT NULL DEFAULT 0,

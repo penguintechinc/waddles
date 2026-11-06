@@ -49,7 +49,7 @@ use svc_ingest::connector_runtime::boot::{
 use svc_ingest::connector_runtime::feed::{DesiredConnection, DynFeed, FeedError, TransportPlan};
 use svc_ingest::connector_runtime::scoped::ScopeLookup;
 use svc_ingest::connector_runtime::selector::{
-    start_legacy, BootError, LegacyPlan, LegacyStarters, OverlaySelector, IDENTIFY_BUDGET_READY,
+    start_legacy, BootError, ConnectorSelector, LegacyPlan, LegacyStarters, IDENTIFY_BUDGET_READY,
 };
 use svc_ingest::connector_runtime::Readiness;
 use svc_ingest::identity_crypto::{
@@ -62,8 +62,8 @@ use tokio_tungstenite::tungstenite::Message;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const TWITCH_WASM: &[u8] = include_bytes!("fixtures/twitch_overlay.wasm");
-const YOUTUBE_WASM: &[u8] = include_bytes!("fixtures/youtube_overlay.wasm");
+const TWITCH_WASM: &[u8] = include_bytes!("fixtures/twitch_connector.wasm");
+const YOUTUBE_WASM: &[u8] = include_bytes!("fixtures/youtube_connector.wasm");
 const KEK_ENV: &str = "CONNECTOR_ACCEPTANCE_KEK";
 const TW_CHANNEL: &str = "acceptancechan";
 const TW_OTHER_CHANNEL: &str = "otheracceptancechan";
@@ -602,15 +602,16 @@ impl Rig {
 
         // The production selector + settings builder, fed by an env lookup.
         let env: BTreeMap<&str, String> = [
-            ("OVERLAY_TWITCH_ENABLED", "true".to_owned()),
-            ("OVERLAY_YOUTUBE_ENABLED", "true".to_owned()),
+            ("CONNECTOR_TWITCH_ENABLED", "true".to_owned()),
+            ("CONNECTOR_YOUTUBE_ENABLED", "true".to_owned()),
             ("SENDER_EXEC_DIGEST_TWITCH", tw_digest),
             ("SENDER_EXEC_DIGEST_YOUTUBE", yt_digest),
         ]
         .into_iter()
         .collect();
         let lookup = |k: &str| env.get(k).cloned();
-        let selector = OverlaySelector::from_env(&lookup).expect("twitch + youtube ON is accepted");
+        let selector =
+            ConnectorSelector::from_env(&lookup).expect("twitch + youtube ON is accepted");
         let ingest_cli = svc_ingest::config::CliConfig::parse_from(["svc-ingest"]);
         let mut settings = RuntimeSettings::from_inputs(&ingest_cli, &selector, &lookup)
             .expect("production settings build from the env lookup");
@@ -980,31 +981,31 @@ async fn discord_is_accepted_and_legacy_is_suppressed_for_the_on_platforms() {
                 .map(|(_, v)| (*v).to_owned())
         }
     };
-    let discord = OverlaySelector::from_env(&env(&[
-        ("OVERLAY_TWITCH_ENABLED", "true"),
-        ("OVERLAY_YOUTUBE_ENABLED", "true"),
-        ("OVERLAY_DISCORD_ENABLED", "true"),
+    let discord = ConnectorSelector::from_env(&env(&[
+        ("CONNECTOR_TWITCH_ENABLED", "true"),
+        ("CONNECTOR_YOUTUBE_ENABLED", "true"),
+        ("CONNECTOR_DISCORD_ENABLED", "true"),
     ]));
     // Spec change (Discord flag-on): Discord ON is accepted now the identify
     // budget is wired; it was refused while IDENTIFY_BUDGET_READY was false.
     assert!(std::hint::black_box(IDENTIFY_BUDGET_READY));
     assert!(
-        discord.is_ok_and(|s| s.overlay("discord")),
+        discord.is_ok_and(|s| s.connector("discord")),
         "Discord ON must be accepted with the identify budget wired"
     );
-    let malformed = OverlaySelector::from_env(&env(&[("OVERLAY_TWITCH_ENABLED", "yes")]));
+    let malformed = ConnectorSelector::from_env(&env(&[("CONNECTOR_TWITCH_ENABLED", "yes")]));
     assert_eq!(
         malformed,
-        Err(BootError::Malformed("OVERLAY_TWITCH_ENABLED"))
+        Err(BootError::Malformed("CONNECTOR_TWITCH_ENABLED"))
     );
 
-    let sel = OverlaySelector::from_env(&env(&[
-        ("OVERLAY_TWITCH_ENABLED", "true"),
-        ("OVERLAY_YOUTUBE_ENABLED", "true"),
+    let sel = ConnectorSelector::from_env(&env(&[
+        ("CONNECTOR_TWITCH_ENABLED", "true"),
+        ("CONNECTOR_YOUTUBE_ENABLED", "true"),
     ]))
     .expect("twitch + youtube ON is accepted");
     assert_eq!(sel.enabled_platforms(), vec!["twitch", "youtube"]);
-    assert!(sel.overlay("twitch") && sel.overlay("youtube") && !sel.overlay("discord"));
+    assert!(sel.connector("twitch") && sel.connector("youtube") && !sel.connector("discord"));
     let mut starters = Counting::default();
     start_legacy(&LegacyPlan::new(&sel, &[], false), &mut starters)
         .await
@@ -1027,7 +1028,7 @@ async fn discord_is_accepted_and_legacy_is_suppressed_for_the_on_platforms() {
         "EventSub stays legacy without a runtime webhook"
     );
 
-    let off = OverlaySelector::from_env(&env(&[])).expect("default OFF");
+    let off = ConnectorSelector::from_env(&env(&[])).expect("default OFF");
     let mut legacy = Counting::default();
     start_legacy(&LegacyPlan::new(&off, &[], false), &mut legacy)
         .await

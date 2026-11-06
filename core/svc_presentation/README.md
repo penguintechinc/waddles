@@ -165,6 +165,21 @@ because per-service role names are provisioned outside Alembic) -- and
 `overlay_code` grant fails every overlay request with a `500` (logged
 `overlay code lookup failed`), never a silent 404.
 
+### Callers and deployment
+
+- **Callers.** svc-action's built-in `twitch_shoutout` handler (`!vso`) pushes through
+  `core/svc_action/services/overlay_push.py`: overlay code from `communities.overlay_code`, PUSH JWT
+  minted by hub-api -- see `docs/guides/overlay-browser-source.md`. The retired
+  `/overlay/{community_id}/media/push` route no longer has any caller.
+- **Runtime.** This is the deployed overlay runtime on alpha/dal2alpha/local
+  (`presentation.rust.enabled`); the Python build is not rendered there (same names, mutually
+  exclusive templates). Production values are unchanged (Python).
+- **Required DB grant.** `waddles_svc_presentation` needs `SELECT` on `communities`
+  (`config/postgres/service-roles.yaml`); without it every overlay route 500s.
+- **Real-path e2e.** `tests/overlay_e2e_tcp.rs` serves the real router on a bound TCP port and
+  drives it with a real HTTP client: signed PUSH JWT -> SSE viewer receives the detokenized,
+  escaped alert; another community's viewer receives nothing.
+
 ## Scope history
 
 P1 delivered config, telemetry, the database connection, the SeaORM

@@ -286,15 +286,15 @@ cp "${CARGO_TARGET_DIR:-target}/wasm32-wasip1/release/connector_tools_fixture.wa
 rm -f src/bindings.rs   # generated, not committed
 ```
 
-## `discord_overlay.wasm`
+## `discord_connector.wasm`
 
-The REAL Discord platform overlay (`bundles/rust/discord`, P6b T2) compiled on `world connector-tools`; used by
-`tests/discord_overlay.rs` to prove it loads on the production linker and behaves through every receiver
+The REAL Discord platform connector (`bundles/rust/discord`, P6b T2) compiled on `world connector-tools`; used by
+`tests/discord_connector.rs` to prove it loads on the production linker and behaves through every receiver
 export + the tool provider. Not a synthetic fixture: rebuild after ANY change to that crate:
 
 ```bash
 cd bundles/rust/discord
 cargo component build --release --target wasm32-wasip2 --locked
 cp target/wasm32-wasip2/release/waddle_bundle_discord_overlay.wasm \
-   ../../../core/bundle_executor/tests/fixtures/discord_overlay.wasm
+   ../../../core/bundle_executor/tests/fixtures/discord_connector.wasm
 ```

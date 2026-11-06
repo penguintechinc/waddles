@@ -27,6 +27,9 @@ pub struct Model {
     /// Audio handling (`copy`/`aac`/`opus`,
     /// `crate::pipeline::codec::AudioChoice`).
     pub audio_codec: String,
+    /// Lowercase hex SHA-256 of the stream key (alembic 0076). The ONLY ingest-auth credential
+    /// column; NULL = no key minted, so nothing can authenticate against the row.
+    pub stream_key_hash: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
