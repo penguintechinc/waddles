@@ -1,0 +1,38 @@
+{
+  "twitch": {
+    "actor": "05a2aa14-23c9-5e79-a448-9566eba7484d",
+    "event_type": "message",
+    "payload": {
+      "author": "acceptviewer1",
+      "author_id": "7340512",
+      "badges": [],
+      "channel_name": "acceptancechan",
+      "display_name": "acceptviewer1",
+      "is_broadcaster": false,
+      "is_mod": false,
+      "is_subscriber": false,
+      "is_vip": false,
+      "message_id": "m-1",
+      "room_id": "555",
+      "text": "hello acceptance chat",
+      "user_id": "7340512"
+    },
+    "platform": "twitch"
+  },
+  "youtube": {
+    "actor": "930a4c4e-cbc4-5b80-927d-d8dbaca15c2c",
+    "event_type": "message",
+    "payload": {
+      "author_id": "UCacceptanceviewerone",
+      "display_name": "AcceptViewer",
+      "is_mod": false,
+      "is_owner": false,
+      "is_sponsor": false,
+      "live_chat_id": "Cg0KC-acceptance",
+      "message_id": "yt-m-1",
+      "text": "hello acceptance chat",
+      "video_id": null
+    },
+    "platform": "youtube"
+  }
+}

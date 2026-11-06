@@ -35,6 +35,11 @@ penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", re
 # local fake platform endpoints, the SSRF-guarded client and per-community slot sources.
 redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"] }
 wiremock = "=0.6.5"
+# Captures the process's tracing output so the acceptance suite can assert no raw
+# platform handle ever reaches a log line (`tests/connector_acceptance.rs`).
+anyhow = "=1.0.104"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 
 [lints.clippy]
