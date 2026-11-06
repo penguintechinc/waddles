@@ -81,7 +81,7 @@ pub use lifecycle::{
     Scalar, SessionEngine, SessionRules,
 };
 pub use metrics::{register_connector_metrics, ConnectorMetrics};
-pub use poll::{PollAuth, PollConfig, PollTransport};
+pub use poll::{PollAuth, PollConfig, PollRequest, PollTransport};
 pub use registry::{
     ConnectorRegistry, EventLimits, PinnedConnector, RegistryError, MAX_EVENTS_PER_FRAME,
 };

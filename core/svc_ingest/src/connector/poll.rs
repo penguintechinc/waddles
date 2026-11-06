@@ -52,6 +52,58 @@ pub struct PollAuth {
     pub handle: String,
 }
 
+/// Largest JSON request body a host profile may configure.
+pub const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024;
+
+/// Header names a profile may never set: the transport owns them.
+const RESERVED_HEADERS: [&str; 6] = [
+    "host",
+    "content-length",
+    "content-type",
+    "transfer-encoding",
+    "connection",
+    "accept-encoding",
+];
+
+/// Host-owned shape of the poll request beyond the default `GET`. Every field
+/// is a profile constant (never guest- or metadata-controlled): the JSON body
+/// and the credential-bearing headers. `Default` = plain `GET`, one `auth`.
+#[derive(Debug, Clone, Default)]
+pub struct PollRequest {
+    /// `Some(json)` switches the poll to `POST` with
+    /// `Content-Type: application/json`; must be valid JSON,
+    /// <= [`MAX_REQUEST_BODY_BYTES`]. `None` = `GET` (unchanged behaviour).
+    pub json_body: Option<Vec<u8>>,
+    /// Further credential headers, each resolved per request from its own
+    /// anchored handle (`PollConfig::handles`) and placed as a sensitive
+    /// header with the configured literal prefix (e.g. `Cookie: Rsi-Token=`).
+    pub extra_auth: Vec<PollAuth>,
+}
+
+impl PollRequest {
+    /// Validates the request shape against the transport's handle set.
+    fn validate(&self, handles: &HashMap<String, ConnectionRef>) -> Result<(), TransportError> {
+        if let Some(b) = &self.json_body {
+            if b.len() > MAX_REQUEST_BODY_BYTES {
+                return Err(TransportError::Connect("request body too large".into()));
+            }
+            serde_json::from_slice::<serde_json::Value>(b)
+                .map_err(|_| TransportError::Connect("request body is not JSON".into()))?;
+        }
+        for a in &self.extra_auth {
+            let name = HeaderName::from_bytes(a.header.as_bytes())
+                .map_err(|_| TransportError::Connect("invalid auth header name".into()))?;
+            if RESERVED_HEADERS.contains(&name.as_str()) {
+                return Err(TransportError::Connect("reserved auth header name".into()));
+            }
+            if !handles.contains_key(&a.handle) {
+                return Err(TransportError::Connect("auth handle not configured".into()));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Connector-supplied configuration for one polled source.
 #[derive(Debug, Clone)]
 pub struct PollConfig {
@@ -88,6 +140,8 @@ pub struct PollConfig {
     /// Host-owned poll lifecycle (interval hint, HTTP error classification,
     /// API-key query slot); `PollLifecycle::default()` = none.
     pub lifecycle: PollLifecycle,
+    /// Host-owned request shape (method/body/extra credential headers).
+    pub request: PollRequest,
 }
 
 /// Polling transport over reqwest (rustls, redirects disabled).
@@ -140,6 +194,7 @@ impl<S: TransportSecretSource> PollTransport<S> {
         cfg.lifecycle
             .validate(&cfg.handles, cfg.cursor_param.as_deref(), &url)
             .map_err(|e| TransportError::Connect(e.to_string()))?;
+        cfg.request.validate(&cfg.handles)?;
         if let Some(a) = &cfg.auth {
             HeaderName::from_bytes(a.header.as_bytes())
                 .map_err(|_| TransportError::Connect("invalid auth header name".into()))?;
@@ -235,7 +290,13 @@ impl<S: TransportSecretSource> PollTransport<S> {
             // `Url` owns a non-zeroizing copy until it drops after the send.
             url.query_pairs_mut().append_pair(&q.param, secret.expose());
         }
-        let mut req = client.get(url);
+        let mut req = match &self.cfg.request.json_body {
+            Some(body) => client
+                .post(url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone()),
+            None => client.get(url),
+        };
         if let Some(a) = &self.cfg.auth {
             let dest = Destination::from_url(&self.url)
                 .ok_or_else(|| TransportError::Fatal("secret unavailable for handle".into()))?;
@@ -251,6 +312,18 @@ impl<S: TransportSecretSource> PollTransport<S> {
                 .map_err(|_| TransportError::Fatal("secret not usable as header".into()))?;
             v.set_sensitive(true);
             let name = HeaderName::from_bytes(hname.as_bytes())
+                .map_err(|_| TransportError::Fatal("invalid auth header name".into()))?;
+            req = req.header(name, v);
+        }
+        for a in &self.cfg.request.extra_auth {
+            let dest = Destination::from_url(&self.url)
+                .ok_or_else(|| TransportError::Fatal("secret unavailable for handle".into()))?;
+            let auth = resolve_handle(&self.secrets, &self.cfg.handles, &a.handle, &dest).await?;
+            let joined = Zeroizing::new(format!("{}{}", a.prefix, auth.secret.expose()));
+            let mut v = HeaderValue::from_str(&joined)
+                .map_err(|_| TransportError::Fatal("secret not usable as header".into()))?;
+            v.set_sensitive(true);
+            let name = HeaderName::from_bytes(a.header.as_bytes())
                 .map_err(|_| TransportError::Fatal("invalid auth header name".into()))?;
             req = req.header(name, v);
         }
@@ -623,6 +696,7 @@ mod tests {
             egress_allow: vec!["127.0.0.1".parse().unwrap()],
             allow_loopback_insecure: true,
             lifecycle: PollLifecycle::default(),
+            request: PollRequest::default(),
         }
     }
 
@@ -844,5 +918,137 @@ mod tests {
                 "{u}"
             );
         }
+    }
+
+    /// Records method, content-type, body and credential headers of one request.
+    /// (method, content-type, body, cookie, x-rsi-token)
+    type PostSeen = (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+
+    #[derive(Clone, Default)]
+    struct PostSrv {
+        seen: Arc<Mutex<Vec<PostSeen>>>,
+    }
+
+    async fn post_handler(
+        State(s): State<PostSrv>,
+        method: axum::http::Method,
+        h: HeaderMap,
+        body: String,
+    ) -> (StatusCode, String) {
+        let hv = |n: &str| h.get(n).map(|v| v.to_str().unwrap().to_string());
+        s.seen.lock().unwrap().push((
+            method.to_string(),
+            hv("content-type"),
+            body,
+            hv("cookie"),
+            hv("x-rsi-token"),
+        ));
+        (StatusCode::OK, r#"{"success":1,"data":[1]}"#.into())
+    }
+
+    async fn start_post() -> (std::net::SocketAddr, PostSrv) {
+        let srv = PostSrv::default();
+        let app = Router::new()
+            .route("/poll", axum::routing::any(post_handler))
+            .with_state(srv.clone());
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (addr, srv)
+    }
+
+    fn post_cfg(addr: std::net::SocketAddr) -> PollConfig {
+        let mut c = cfg(addr);
+        c.cursor_param = None;
+        c.cursor_pointer = None;
+        c.auth = Some(PollAuth {
+            header: "X-Rsi-Token".into(),
+            prefix: String::new(),
+            handle: "h1".into(),
+        });
+        c.request = PollRequest {
+            json_body: Some(br#"{"channel_id":"7"}"#.to_vec()),
+            extra_auth: vec![PollAuth {
+                header: "Cookie".into(),
+                prefix: "Rsi-Token=".into(),
+                handle: "h1".into(),
+            }],
+        };
+        c
+    }
+
+    #[tokio::test]
+    async fn post_json_body_with_host_owned_credential_headers() {
+        let (addr, srv) = start_post().await;
+        let n = Arc::new(AtomicUsize::new(0));
+        let mut t = PollTransport::new(post_cfg(addr), CountingSecrets(n.clone())).unwrap();
+        assert!(t.next_frame().await.unwrap().is_some());
+        let seen = srv.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        let (m, ct, body, cookie, tok) = &seen[0];
+        assert_eq!(m, "POST");
+        assert_eq!(ct.as_deref(), Some("application/json"));
+        assert_eq!(body, r#"{"channel_id":"7"}"#);
+        assert_eq!(cookie.as_deref(), Some("Rsi-Token=tok123"));
+        assert_eq!(tok.as_deref(), Some("tok123"));
+        assert_eq!(
+            n.load(Ordering::SeqCst),
+            2,
+            "one resolve per credential header"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_request_stays_get_without_body() {
+        let (addr, srv) = start_post().await;
+        let mut c = post_cfg(addr);
+        c.request = PollRequest::default();
+        let mut t = PollTransport::new(c, CountingSecrets(Arc::new(AtomicUsize::new(0)))).unwrap();
+        t.next_frame().await.unwrap().unwrap();
+        let seen = srv.seen.lock().unwrap().clone();
+        assert_eq!(seen[0].0, "GET");
+        assert_eq!(seen[0].1, None);
+        assert_eq!(seen[0].3, None, "no extra credential header on plain GET");
+    }
+
+    type Mutator = Box<dyn Fn(&mut PollRequest)>;
+
+    #[tokio::test]
+    async fn request_shape_is_validated_fail_loud() {
+        let (addr, _s) = start_post().await;
+        let s = || CountingSecrets(Arc::new(AtomicUsize::new(0)));
+        let bad: Vec<Mutator> = vec![
+            Box::new(|r| r.json_body = Some(b"not json".to_vec())),
+            Box::new(|r| r.json_body = Some(vec![b' '; MAX_REQUEST_BODY_BYTES + 1])),
+            Box::new(|r| r.extra_auth[0].header = "bad header".into()),
+            Box::new(|r| r.extra_auth[0].header = "Content-Type".into()),
+            Box::new(|r| r.extra_auth[0].header = "Host".into()),
+            Box::new(|r| r.extra_auth[0].handle = "nope".into()),
+        ];
+        for (i, f) in bad.iter().enumerate() {
+            let mut c = post_cfg(addr);
+            f(&mut c.request);
+            assert!(PollTransport::new(c, s()).is_err(), "case {i}");
+        }
+    }
+
+    #[tokio::test]
+    async fn post_stateless_identical_window_not_republished() {
+        let (addr, _srv) = start_post().await;
+        let mut t = PollTransport::new(
+            post_cfg(addr),
+            CountingSecrets(Arc::new(AtomicUsize::new(0))),
+        )
+        .unwrap();
+        t.next_frame().await.unwrap().unwrap();
+        t.on_frame_outcome(FrameOutcome::Published).await;
+        let again = tokio::time::timeout(Duration::from_millis(120), t.next_frame()).await;
+        assert!(again.is_err(), "identical POST window re-published");
     }
 }

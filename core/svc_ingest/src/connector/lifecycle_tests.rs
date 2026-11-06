@@ -621,6 +621,7 @@ fn poll_cfg(addr: SocketAddr, lifecycle: PollLifecycle) -> PollConfig {
         egress_allow: vec!["127.0.0.1".parse().unwrap()],
         allow_loopback_insecure: true,
         lifecycle,
+        request: Default::default(),
     }
 }
 

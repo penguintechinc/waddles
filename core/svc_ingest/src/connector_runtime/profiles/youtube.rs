@@ -265,6 +265,7 @@ impl ConnectorProfile for YoutubeProfile {
             egress_allow: env.egress_allow.clone(),
             allow_loopback_insecure: false,
             lifecycle: lifecycle(),
+            request: Default::default(),
         };
         let url = reqwest::Url::parse(&cfg.url)
             .map_err(|_| PlanError::Config("derived poll url is invalid"))?;
