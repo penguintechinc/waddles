@@ -28,6 +28,7 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+use super::feed::WebhookPlan;
 use crate::connector::webhook::{
     ConnectionResolverSecrets, RateLimit, RedisWebhookDedup, RegistryError, WebhookIngress,
     WebhookRoute, WebhookTransport, HARD_MAX_BODY_BYTES,
@@ -295,6 +296,16 @@ pub fn activate_route(
     Ok(transport)
 }
 
+/// Activates a runtime [`WebhookPlan`] (the `TransportPlan::Webhook` payload):
+/// [`activate_route`] with the plan's authorized community.
+pub fn activate_plan(
+    ingress: &WebhookIngress,
+    env: &WebhookEnv,
+    plan: WebhookPlan,
+) -> Result<WebhookTransport, BootError> {
+    activate_route(ingress, env, plan.route, plan.authorized_community)
+}
+
 /// Removes a route (owning community only).
 pub fn deactivate_route(
     ingress: &WebhookIngress,
@@ -498,6 +509,29 @@ mod tests {
         assert!(matches!(
             deactivate_route(&ing, &key, 1),
             Err(BootError::Registry(RegistryError::Unknown))
+        ));
+    }
+
+    #[test]
+    fn activate_plan_uses_the_plans_authorized_community() {
+        let env = env_discord();
+        let ing = ingress();
+        let r = ConnectionRef {
+            community_id: 3,
+            connection_id: 4,
+        };
+        let ok = WebhookPlan {
+            route: build_route(&env, "discord", r).unwrap(),
+            authorized_community: 3,
+        };
+        activate_plan(&ing, &env, ok).unwrap();
+        let bad = WebhookPlan {
+            route: build_route(&env, "discord", r).unwrap(),
+            authorized_community: 4,
+        };
+        assert!(matches!(
+            activate_plan(&ing, &env, bad),
+            Err(BootError::Registry(RegistryError::CommunityMismatch))
         ));
     }
 
