@@ -304,7 +304,7 @@ spec:
               protocol: TCP
 {{- end }}
 ---
-{{- if .Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled }}
+{{- if or .Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled (include "waddlebot.svcActionOverlayPush" .) }}
 # hub-api HTTP egress for svc-action ONLY: its per-send community credential resolution
 # (connections:resolve via /internal/service-token + the provider-connections routes) calls
 # hub-api's HTTP port. Own policy, not dataplane-wide -- see the svc-ingest policy above.
@@ -330,4 +330,31 @@ spec:
             - port: {{ .Values.pipeline.hubApi.port | quote }}
               protocol: TCP
 {{- end }}
+{{- end }}
+{{- if include "waddlebot.svcActionOverlayPush" . }}
+---
+# svc-action -> svc-presentation (Rust) push egress ONLY: the builtin overlay pushes
+# (services/overlay_push.py) POST to the presentation HTTP port. Own policy so no other
+# workload gains a path to the push route; rendered only while the Rust runtime is deployed.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-action-presentation-egress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-action
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: svc-presentation
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.svcPresentation.port | quote }}
+              protocol: TCP
 {{- end }}

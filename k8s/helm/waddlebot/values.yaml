@@ -3458,6 +3458,12 @@ serviceJwt:
         # pipeline.rustDataPlane.svcAction.dynamicConnections.enabled (default false).
         - "connections:resolve"
         - "connections:resolve:static"
+        # chore/presentation-beta-slice -- svc-action's builtin handlers (twitch_shoutout) push to the
+        # Rust svc-presentation's `POST /{overlay_code}/{surface}/push`, which needs a hub-api-minted
+        # PUSH JWT. hub-api stamps the per-community form `presentation.overlay:push:<community_id>`
+        # (never wider). Filtered out of the rendered allow-list unless presentation.rust.enabled
+        # (waddlebot.svcActionOverlayPush) -- base/beta/prod keep the Python svc-presentation.
+        - "presentation.overlay:push"
     # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
     # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints
     # pseudonyms or calls egress, so exactly one scope.

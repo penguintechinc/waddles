@@ -216,6 +216,9 @@ def test_scoped_hub_api_egress_follows_each_flag_independently(
         "values-alpha.yaml",
         f"{_INGEST_FLAG}={str(ingest_on).lower()}",
         f"{_ACTION_FLAG}={str(action_on).lower()}",
+        # The Rust overlay push (waddlebot.svcActionOverlayPush) also needs svc-action -> hub-api
+        # (PUSH JWT mint); off here so this test isolates the connections flag.
+        "presentation.rust.enabled=false",
     )
     found = _scoped_cnps(docs)
     assert ("ingest" in found) is ingest_on

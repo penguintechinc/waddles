@@ -86,8 +86,13 @@ def enabled() -> list[dict[str, Any]]:
 
 @pytest.fixture(scope="module")
 def disabled() -> list[dict[str, Any]]:
-    """Both dynamicConnections flags off (the beta/prod default)."""
+    """Both dynamicConnections flags off + Rust presentation off (the beta/prod default).
+
+    `presentation.rust.enabled=false` too: the overlay PUSH grant (waddlebot.svcActionOverlayPush)
+    also renders SERVICE_JWT_* on svc-action, which this "no mint env" baseline must not see.
+    """
     return _render(
+        "presentation.rust.enabled=false",
         "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false",
         "pipeline.rustDataPlane.svcAction.dynamicConnections.enabled=false",
     )

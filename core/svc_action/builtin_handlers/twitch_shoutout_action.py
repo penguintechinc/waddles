@@ -36,10 +36,12 @@ chat reply (`shoutout failed: <cause>` / `!so <login> is on cooldown for
 `NonRetryableTransportError`, and a config/payload validation error
 (missing community, bad `kind`, empty `target`) raises immediately --
 both exactly matching every sibling action handler's own contract. The
-video-overlay media push (`kind == "video"`) and the history-log write are
-both best-effort past that point: neither failure undoes or fails the
-chat reply already sent, matching `community_announcements_action.py`'s
-own "log but don't fail" precedent for its audit writes.
+history-log write is best-effort past that point (`community_announcements_action.py`'s
+"log but don't fail" precedent). The video-overlay media push (`kind == "video"`) goes to the
+Rust svc-presentation router via `services.overlay_push` and fails LOUD: an unresolvable
+overlay code / PUSH token or a rejected push is logged at ERROR, the history row is still
+written, and a `NonRetryableTransportError` is raised at the very end (non-retryable so the
+already-sent chat reply is never duplicated).
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ from waddle_transports.signing import SecretResolutionError, resolve_secret
 from waddle_transports.transports.irc_relay import RelayOutboundIrcTransport
 from waddle_transports.url_guard import SSRFError, guarded_request
 
+from services.overlay_push import OverlayPushError, push_overlay
 from services.twitch_helix import TwitchHelixClient, TwitchHelixError
 
 logger = logging.getLogger(__name__)
@@ -308,6 +311,7 @@ async def _send_reply(
 
 async def _push_video_overlay(
     http_client: httpx.AsyncClient,
+    dal: Any,
     *,
     community_id: int,
     title: str,
@@ -316,58 +320,25 @@ async def _push_video_overlay(
     video_url: str | None,
     duration_s: int,
 ) -> None:
-    """Best-effort `POST /overlay/<community>/media/push` on svc-presentation; never raises.
+    """Push the video shoutout card to the Rust svc-presentation `media` surface.
 
-    A push failure (unreachable svc-presentation, SSRF-guard rejection, a
-    non-2xx response) only drops the video overlay enhancement -- the chat
-    reply (already sent by the caller) is the user-visible part of a
-    shoutout and must never be undone by this failing, matching
-    `community_announcements_action.py`'s own "log but don't fail"
-    precedent for its own best-effort audit writes.
+    Delegates to `services.overlay_push.push_overlay` (overlay code resolved server-side from
+    the envelope's own community, PUSH JWT minted by hub-api). Raises `OverlayPushError` on any
+    failure -- the caller decides how to surface it without undoing the chat reply already sent.
     """
-    presentation_base = os.getenv("PRESENTATION_URL", "http://waddlebot-svc-presentation:8207")
-    url = f"{presentation_base}/overlay/{community_id}/media/push"
-    push_body: dict[str, object] = {
-        "title": title,
-        "body": body_text,
-        "image_url": image_url,
-        "video_url": video_url,
-        "duration_s": duration_s,
-    }
-    headers: dict[str, str] = {}
-    push_token = os.environ.get("PRESENTATION_PUSH_TOKEN", "")
-    if push_token:
-        headers["Authorization"] = f"Bearer {push_token}"
-
-    try:
-        response = await guarded_request(http_client, "POST", url, headers=headers, json=push_body)
-    except SSRFError as exc:
-        logger.warning(
-            "twitch_shoutout_action.overlay_push_ssrf_rejected community_id=%s error=%s",
-            community_id,
-            exc,
-        )
-        return
-    except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
-        logger.warning(
-            "twitch_shoutout_action.overlay_push_failed community_id=%s error=%s",
-            community_id,
-            exc,
-        )
-        return
-
-    if response.status_code >= 400:
-        logger.warning(
-            "twitch_shoutout_action.overlay_push_rejected community_id=%s status=%s",
-            community_id,
-            response.status_code,
-        )
-    else:
-        logger.debug(
-            "twitch_shoutout_action.overlay_push_sent community_id=%s status=%s",
-            community_id,
-            response.status_code,
-        )
+    await push_overlay(
+        http_client,
+        dal,
+        community_id=community_id,
+        surface="media",
+        body={
+            "title": title,
+            "body": body_text,
+            "image_url": image_url,
+            "video_url": video_url,
+            "duration_s": duration_s,
+        },
+    )
 
 
 async def shoutout(
@@ -526,20 +497,32 @@ async def shoutout(
         http_client=http_client,
     )
 
+    overlay_failure: OverlayPushError | None = None
     if kind == "video":
         if clip is not None:
             duration_s = config.get("video_duration_s", _DEFAULT_VIDEO_DURATION_S)
             if not isinstance(duration_s, int) or duration_s <= 0:
                 duration_s = _DEFAULT_VIDEO_DURATION_S
-            await _push_video_overlay(
-                http_client,
-                community_id=community_id,
-                title=f"Shoutout: {display_name}",
-                body_text=text,
-                image_url=clip.get("thumbnail_url"),
-                video_url=clip.get("embed_url") or clip.get("url"),
-                duration_s=duration_s,
-            )
+            try:
+                await _push_video_overlay(
+                    http_client,
+                    dal,
+                    community_id=community_id,
+                    title=f"Shoutout: {display_name}",
+                    body_text=text,
+                    image_url=clip.get("thumbnail_url"),
+                    video_url=clip.get("embed_url") or clip.get("url"),
+                    duration_s=duration_s,
+                )
+            except OverlayPushError as exc:
+                # Fail loud, but only after the history write below: the chat reply is already
+                # sent, so raising a retryable error here would duplicate it.
+                overlay_failure = exc
+                logger.error(
+                    "twitch_shoutout_action.overlay_push_failed community_id=%s error=%s",
+                    community_id,
+                    exc,
+                )
         else:
             logger.debug(
                 "twitch_shoutout_action.no_clip_for_video community_id=%s target=%s",
@@ -572,4 +555,8 @@ async def shoutout(
         kind,
         is_live,
     )
+    if overlay_failure is not None:
+        raise NonRetryableTransportError(
+            f"twitch shoutout reply sent but the video overlay push failed: {overlay_failure}"
+        ) from overlay_failure
     return result
