@@ -158,7 +158,7 @@ infrastructure:
 # skeleton) and svcRtc is additionally gated on modules.social.enabled; neither
 # is part of this fix's scope.
 pipeline:
-  # Monday-demo (881ac8dd): Bar Citizen role-sync reconcile CronJob ON, 1-min cadence.
+  # Monday-demo (881ac8dd): role-sync reconcile CronJob ON, 1-min cadence.
   # demotePairingIds left empty (grant-only); demoteBaselineRole = member fallback.
   roleSync:
     enabled: true
@@ -853,6 +853,6 @@ podSecurity:
 config:
   eventDiscordSyncEnabled: true
   communityConnectionsEnabled: true
-  # Monday-demo: ENV baseline for waddles.bar_citizen.role_sync -> FLAG_WADDLES_BAR_CITIZEN_ROLE_SYNC
+  # Monday-demo: ENV baseline for waddles.role_sync -> FLAG_WADDLES_ROLE_SYNC
   # (read by hub-api + the role-sync CronJob via envFrom waddlebot-config; PostHog still overrides).
-  barCitizenRoleSyncEnabled: true
+  roleSyncEnabled: true

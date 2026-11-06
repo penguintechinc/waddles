@@ -4,7 +4,7 @@ The fake Odoo is an `httpx.MockTransport` implementing the real `/jsonrpc`
 wire contract (`common.authenticate`, `object.execute_kw` search_read/
 create/write), so `OdooClient`, retry/backoff, upsert and PII-boundary code
 all run for real -- only the network socket is replaced. DB state uses the
-`bar_citizen_db` fixture (real pydal sqlite).
+`guild_pairing_db` fixture (real pydal sqlite).
 """
 
 from __future__ import annotations
@@ -232,8 +232,8 @@ class TestClient:
 class TestSync:
     """End-to-end sync_community / batch against fake Odoo + real DB."""
 
-    async def test_create_then_idempotent_update(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _, _ = bar_citizen_db
+    async def test_create_then_idempotent_update(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _, _ = guild_pairing_db
         _add_member(dal, community_id, "1", "admin", 900)
         _add_member(dal, community_id, "2")
         fake = FakeOdoo()
@@ -249,8 +249,8 @@ class TestSync:
         assert sorted(r["x_waddles_reputation"] for r in fake.records.values()) == [777, 900]
         assert {r["x_waddles_role"] for r in fake.records.values()} == {"admin", "member"}
 
-    async def test_no_pii_crosses_to_odoo(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _, _ = bar_citizen_db
+    async def test_no_pii_crosses_to_odoo(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _, _ = guild_pairing_db
         _add_member(dal, community_id, "55")
         fake = FakeOdoo()
         client, cfg = _client(fake)
@@ -269,8 +269,10 @@ class TestSync:
         }
         assert rec["name"].startswith("Waddles member ")
 
-    async def test_inactive_members_excluded_and_empty_community(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _, _ = bar_citizen_db
+    async def test_inactive_members_excluded_and_empty_community(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, community_id, _, _ = guild_pairing_db
         _add_member(dal, community_id, "9")
         dal(dal.community_members.user_id == "9").update(is_active=False)
         dal.commit()
@@ -280,9 +282,9 @@ class TestSync:
         assert fake.requests == []
 
     async def test_flag_off_by_default(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, community_id, _, _ = bar_citizen_db
+        dal, community_id, _, _ = guild_pairing_db
         _add_member(dal, community_id, "1")
         monkeypatch.delenv(svc.ENV_BASELINE_VAR, raising=False)
         monkeypatch.setattr(svc, "feature_enabled", _flag(False))
@@ -294,9 +296,9 @@ class TestSync:
         assert summary.communities_synced == 0 and fake.requests == []
 
     async def test_posthog_flag_on(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, community_id, _, _ = bar_citizen_db
+        dal, community_id, _, _ = guild_pairing_db
         _add_member(dal, community_id, "1")
         monkeypatch.delenv(svc.ENV_BASELINE_VAR, raising=False)
         monkeypatch.setattr(svc, "feature_enabled", _flag(True))
@@ -307,9 +309,9 @@ class TestSync:
         assert (summary.members_examined, summary.records_created) == (1, 1)
 
     async def test_env_baseline_enables_without_posthog(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, community_id, _, _ = bar_citizen_db
+        dal, community_id, _, _ = guild_pairing_db
         _add_member(dal, community_id, "1")
         monkeypatch.setenv(svc.ENV_BASELINE_VAR, "true")
         monkeypatch.setattr(svc, "feature_enabled", None)
@@ -320,11 +322,11 @@ class TestSync:
 
     async def test_community_failure_isolated_and_logged(
         self,
-        bar_citizen_db: Any,
+        guild_pairing_db: Any,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        dal, community_id, tenant_id, _ = bar_citizen_db
+        dal, community_id, tenant_id, _ = guild_pairing_db
         other = dal.communities.insert(name="second", tenant_id=tenant_id)
         dal.commit()
         _add_member(dal, community_id, "1")
@@ -340,9 +342,9 @@ class TestSync:
         assert "odoo-api-key-test" not in caplog.text and "RealName" not in caplog.text
 
     async def test_community_without_tenant(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, _, _, _ = bar_citizen_db
+        dal, _, _, _ = guild_pairing_db
         dal.communities.insert(name="orphan")
         dal.commit()
         monkeypatch.delenv(svc.ENV_BASELINE_VAR, raising=False)
@@ -354,7 +356,7 @@ class TestSync:
 
 def _flag(value: bool) -> Any:
     async def fake(flag: str, *, tenant: str, **_: Any) -> bool:
-        assert flag == svc.FEATURE_BAR_CITIZEN_ODOO_SYNC
+        assert flag == svc.FEATURE_ODOO_SYNC
         return value
 
     return fake
@@ -407,7 +409,7 @@ class TestMain:
 
     async def test_main_runs_on_a_real_pydal_dal_not_an_asyncdb_attribute(
         self,
-        bar_citizen_db: Any,
+        guild_pairing_db: Any,
         tmp_path: Any,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
@@ -418,12 +420,12 @@ class TestMain:
         the real `init_database` seam, binds its own tables on that fresh DAL, and the real batch
         reads communities/members with raw pydal. Only the Odoo socket is replaced.
         """
-        dal, community_id, _t, _g = bar_citizen_db
+        dal, community_id, _t, _g = guild_pairing_db
         _add_member(dal, community_id, "1")
         dal.commit()
         for k, v in {
             **_ENV,
-            "DATABASE_URL": f"sqlite://{tmp_path / 'bar_citizen_test.db'}",
+            "DATABASE_URL": f"sqlite://{tmp_path / 'guild_pairing_test.db'}",
         }.items():
             monkeypatch.setenv(k, v)
         monkeypatch.setenv(svc.ENV_BASELINE_VAR, "1")

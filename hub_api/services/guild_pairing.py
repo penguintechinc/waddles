@@ -1,7 +1,7 @@
-"""Service layer for Bar Citizen's guild<->tenant pairing + role-sync bindings (migration 0034).
+"""Service layer for the guild<->tenant pairing + role-sync bindings (migration 0034).
 
-**Foundation module** -- the pairing/binding CRUD other Bar Citizen units
-build on. Tables are bound lazily via `services.schema.bind_bar_citizen_tables()`,
+**Foundation module** -- the pairing/binding CRUD other units
+build on. Tables are bound lazily via `services.schema.bind_guild_pairing_tables()`,
 the same idempotent guarded-membership-check pattern every other hub_api
 service module in this port follows (see `community_connections.py`'s own
 module docstring).
@@ -14,7 +14,7 @@ handlers, every write is followed by an explicit `dal.commit()` (no
 autocommit), and uniqueness is enforced by a select-then-insert check in
 this layer (mirroring `community_connections.py::_sync_upsert`) rather
 than catching a DB-level `IntegrityError` -- the partial unique indexes
-`0034_bar_citizen_guild_pairing.py` creates are production's second,
+`0034_guild_pairing.py` creates are production's second,
 belt-and-suspenders guard, not the only one.
 
 Every function is tenant-scoped by `community_id` alone -- the caller
@@ -32,7 +32,7 @@ from typing import Any
 
 from services.admin_service import VALID_MEMBER_ROLES
 from services.errors import bad_request, conflict, not_found
-from services.schema import bind_bar_citizen_tables
+from services.schema import bind_guild_pairing_tables
 
 #: `guild_tenant_pairings.direction` -- migration 0034's own CHECK constraint values.
 #: `discord_to_twitch` is the Discord -> platform direction's historical name (kept
@@ -105,7 +105,7 @@ class RoleSyncBinding:
 
 
 def _ensure_tables(dal: Any) -> None:
-    bind_bar_citizen_tables(dal)
+    bind_guild_pairing_tables(dal)
 
 
 def _validate_discord_guild_id(value: str) -> str:

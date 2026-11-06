@@ -49,8 +49,8 @@ def _test_hub_config() -> HubAPIConfig:
 
 
 @pytest.fixture
-def app(bar_citizen_db: Any) -> Quart:
-    dal, _community_id, _tenant_id, _global_id = bar_citizen_db
+def app(guild_pairing_db: Any) -> Quart:
+    dal, _community_id, _tenant_id, _global_id = guild_pairing_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     quart_app.register_blueprint(tenant_discord_install_bp)

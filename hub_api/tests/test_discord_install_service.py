@@ -152,9 +152,9 @@ class TestCompleteInstall:
         assert exc_info.value.status_code == 400
 
     async def test_replayed_state_is_rejected(
-        self, fake_redis: FakeRedis, bar_citizen_db: Any
+        self, fake_redis: FakeRedis, guild_pairing_db: Any
     ) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         state = await state_module.create_state(
             tenant_id=tenant_id,
             admin_user_id=1,
@@ -173,9 +173,9 @@ class TestCompleteInstall:
             await complete_install(dal, code="auth-code", state=state)
 
     async def test_happy_path_stores_verified_credentials(
-        self, fake_redis: FakeRedis, bar_citizen_db: Any
+        self, fake_redis: FakeRedis, guild_pairing_db: Any
     ) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         state = await state_module.create_state(
             tenant_id=tenant_id,
             admin_user_id=7,
@@ -206,9 +206,9 @@ class TestCompleteInstall:
         }
 
     async def test_exchange_failure_never_persists_credentials(
-        self, fake_redis: FakeRedis, bar_citizen_db: Any
+        self, fake_redis: FakeRedis, guild_pairing_db: Any
     ) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         state = await state_module.create_state(
             tenant_id=tenant_id,
             admin_user_id=7,
@@ -234,11 +234,11 @@ class TestCompleteInstall:
             )
 
     async def test_exchange_network_error_raises_and_never_persists(
-        self, fake_redis: FakeRedis, bar_citizen_db: Any
+        self, fake_redis: FakeRedis, guild_pairing_db: Any
     ) -> None:
         import httpx
 
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         state = await state_module.create_state(
             tenant_id=tenant_id,
             admin_user_id=7,
@@ -256,9 +256,9 @@ class TestCompleteInstall:
                 await complete_install(dal, code="auth-code", state=state)
 
     async def test_exchange_non_2xx_raises(
-        self, fake_redis: FakeRedis, bar_citizen_db: Any
+        self, fake_redis: FakeRedis, guild_pairing_db: Any
     ) -> None:
-        dal, _community_id, tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, tenant_id, _global_id = guild_pairing_db
         state = await state_module.create_state(
             tenant_id=tenant_id,
             admin_user_id=7,
@@ -284,10 +284,10 @@ class TestCompleteInstall:
         assert "secret-bad" not in exc_info.value.message
 
     async def test_store_tenant_credentials_write_side_still_rejects_global_tenant(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
         """Defense-in-depth: `store_tenant_credentials` itself fails closed for tenant 0."""
-        dal, _community_id, _tenant_id, global_tenant_id = bar_citizen_db
+        dal, _community_id, _tenant_id, global_tenant_id = guild_pairing_db
         with pytest.raises(ApiError) as exc_info:
             store_tenant_credentials(
                 dal,

@@ -1,7 +1,7 @@
-# Odoo / external-WaddleDB connector (hub_api/services/odoo_sync_service.py, Bar Citizen #15).
+# Odoo / external-WaddleDB connector (hub_api/services/odoo_sync_service.py, #15).
 # CronJob reusing the hub-api image with an overridden command. Disabled by default
 # (`pipeline.odooSync.enabled: false`) -- deploy-time kill switch; the per-tenant PostHog flag
-# waddles.bar_citizen.odoo_sync (default OFF) / WADDLES_ODOO_SYNC_ENABLED env baseline is the runtime gate.
+# waddles.odoo_sync (default OFF) / WADDLES_ODOO_SYNC_ENABLED env baseline is the runtime gate.
 {{- if .Values.pipeline.odooSync.enabled }}
 apiVersion: batch/v1
 kind: CronJob
@@ -57,7 +57,7 @@ spec:
                 name: {{ include "waddlebot.fullname" . }}-secrets
             # feature/alpha-localized-posthog -- POSTHOG_API_KEY/POSTHOG_KEY auto-provisioned
             # once posthog.enabled=true (alpha); this worker's own `_flag_enabled()` resolves
-            # FEATURE_BAR_CITIZEN_ROLE_SYNC through the same entitlement client hub-api uses.
+            # FEATURE_ROLE_SYNC through the same entitlement client hub-api uses.
             # `optional: true`: safe before the bootstrap Job has run, or when disabled.
             - secretRef:
                 name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}

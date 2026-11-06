@@ -7,7 +7,7 @@ engine's job is purely to mirror an `approved` event onto every Discord
 guild its community has opted into via `guild_tenant_pairings.
 event_sync_enabled` (migration 0039_event_sync_enabled -- a SECOND,
 independent opt-in from 0034's `sync_enabled`, which gates the unrelated
-Bar Citizen role-sync engine in `services/role_sync_service.py`). This
+role-sync engine in `services/role_sync_service.py`). This
 module mirrors that module's own shape closely (same `CredentialResolver`
 + `guild_pairing` + reconcile-CronJob precedent) -- see its docstring for
 the design rationale this one inherits wholesale.
