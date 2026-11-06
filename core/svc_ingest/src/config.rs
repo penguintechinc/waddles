@@ -601,7 +601,8 @@ mod tests {
     #[test]
     fn connector_runtime_bounds_are_enforced() {
         let ok = CliConfig::parse_from(["svc-ingest"]);
-        let cases: [(&str, fn(&mut CliConfig)); 5] = [
+        type Mutation = fn(&mut CliConfig);
+        let cases: [(&str, Mutation); 5] = [
             ("CONNECTOR_RECONCILE_INTERVAL_SECS", |c| {
                 c.connector_reconcile_interval_secs = 9
             }),

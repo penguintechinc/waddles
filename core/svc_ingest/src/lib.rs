@@ -148,6 +148,24 @@ pub struct ReceiverReadiness {
     pub twitch_irc: ReceiverFlag,
     pub discord: ReceiverFlag,
     pub twitch_outbound: ReceiverFlag,
+    /// Overlay-runtime platforms and the runtime's readiness handle; set
+    /// once at boot by [`ReceiverReadiness::set_overlay`].
+    overlay: std::sync::OnceLock<OverlayReadiness>,
+}
+
+/// The overlay-ON platforms and, once the runtime is built, its readiness
+/// handle. `handle: None` with platforms listed means the runtime is not
+/// wired -- reported not-ready, never silently nothing.
+struct OverlayReadiness {
+    platforms: Vec<&'static str>,
+    handle: Option<Arc<dyn connector_runtime::RuntimeReady>>,
+}
+
+/// One overlay platform's `/readyz` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayStatus {
+    pub platform: &'static str,
+    pub readiness: connector_runtime::Readiness,
 }
 
 impl ReceiverReadiness {
@@ -158,7 +176,48 @@ impl ReceiverReadiness {
     /// `true` only when every *enabled* receiver is also connected --
     /// `GET /readyz`'s overall status.
     pub fn all_ready(&self) -> bool {
-        self.twitch_irc.ok() && self.discord.ok() && self.twitch_outbound.ok()
+        self.twitch_irc.ok()
+            && self.discord.ok()
+            && self.twitch_outbound.ok()
+            && self
+                .overlay_status()
+                .iter()
+                .all(|s| !matches!(s.readiness, connector_runtime::Readiness::NotReady(_)))
+    }
+
+    /// Records the overlay-ON platforms and the runtime's readiness handle.
+    /// Set once; a second call is ignored (boot runs once).
+    pub fn set_overlay(
+        &self,
+        platforms: Vec<&'static str>,
+        handle: Option<Arc<dyn connector_runtime::RuntimeReady>>,
+    ) {
+        // A second set is a no-op by contract (boot runs once).
+        if self
+            .overlay
+            .set(OverlayReadiness { platforms, handle })
+            .is_err()
+        {
+            tracing::warn!("overlay readiness already set; ignoring");
+        }
+    }
+
+    /// Per overlay-ON platform readiness. A platform whose runtime is not
+    /// wired reports `NotReady("runtime_not_wired")`.
+    pub fn overlay_status(&self) -> Vec<OverlayStatus> {
+        let Some(o) = self.overlay.get() else {
+            return Vec::new();
+        };
+        o.platforms
+            .iter()
+            .map(|p| OverlayStatus {
+                platform: p,
+                readiness: match &o.handle {
+                    Some(h) => h.ready(p),
+                    None => connector_runtime::Readiness::NotReady("runtime_not_wired"),
+                },
+            })
+            .collect()
     }
 }
 
@@ -293,6 +352,11 @@ where
     let tools_enabled = connector_runtime::selector::tools_enabled(&env_lookup)?;
     let legacy_plan =
         connector_runtime::selector::LegacyPlan::new(&selector, &webhook_platforms, tools_enabled);
+    // `/readyz` reports every overlay-ON platform; until the runtime handle is
+    // wired below it is NotReady("runtime_not_wired") -- loud, never silent.
+    state
+        .receiver_readiness
+        .set_overlay(selector.enabled_platforms(), None);
     // SEAM (PR-C/PR-D): when `selector.any_overlay()` the ConnectorRuntime is
     // built and spawned here, `webhook_boot::build_ingress` is called and its
     // result set on `state.webhook` BEFORE `http::router(state)`, and

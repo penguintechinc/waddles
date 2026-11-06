@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn outbound_suppressed_only_with_tools() {
-        assert!(LegacyPlan::new(&twitch_on(), &[], true).twitch_outbound == false);
+        assert!(!LegacyPlan::new(&twitch_on(), &[], true).twitch_outbound);
         assert!(LegacyPlan::new(&twitch_on(), &[], false).twitch_outbound);
     }
 
