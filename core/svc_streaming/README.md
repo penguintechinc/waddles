@@ -187,6 +187,33 @@ the raw path or an ingest credential.
 
 All secrets are env-only, never accepted as a CLI flag (`config.rs`).
 
+### Recording sink (S3 / SeaweedFS)
+
+Recording (`streaming_configs.record_enabled`) uploads finished segments to an
+S3-compatible bucket. **All four** variables are required; if any is missing the
+sink is disabled at startup (a stream with `record_enabled` then records nothing):
+
+| Var | Notes |
+|---|---|
+| `S3_ENDPOINT` | e.g. `http://waddlebot-seaweedfs:8333` (chart: `infrastructure.seaweedfs.service`) |
+| `RECORDINGS_BUCKET` | chart: `recordings` |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | env-only. Chart: `secretKeyRef` to `<release>-secrets` keys `STREAMING_S3_ACCESS_KEY_ID` / `STREAMING_S3_SECRET_ACCESS_KEY` (the dedicated, bucket-scoped `svc-streaming` SeaweedFS identity). Those keys are reused from the existing Secret on upgrade (`waddlebot.autoSecretValue` lookup) and must be supplied explicitly outside alpha/local -- the chart never invents them. |
+
+A disabled sink is **not** only a startup warn log: `GET /readyz` reports a `record`
+dependency with `configured: false` and the reason (naming the missing variable, never a
+value), and the overall `status` becomes `degraded` (still HTTP 200 -- recording is
+optional, and failing readiness would pull live ingest out of service).
+
+## Real-media end-to-end test
+
+`tests/e2e_real_media.rs` (cargo feature `real-media-e2e`) publishes genuine H.264/AAC over
+RTMP into a real listener + orchestrator + a REAL ffmpeg, then asserts the HLS playlist
+lists >= 2 segments, the router serves them, `ffprobe` sees h264+aac with the expected
+duration, a full decode is clean, and the stream key is in no log line. Run it with
+`tests/real_media/run.sh` (needs docker only: ffmpeg 5.1.9 runs in a container built from
+the same digest-pinned base + ffmpeg version as `Dockerfile.rust`). CI job: `real-media` in
+`.github/workflows/rust-svc-streaming.yml`.
+
 ## Make Targets
 
 ```

@@ -30,3 +30,63 @@ jobs:
       # aws-lc-sys needs cmake plus a C/C++ toolchain to build.
       extra_apt_packages: 'cmake build-essential'
       extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain)'
+
+  # Real-media proof: RTMP publish of genuine H.264/AAC -> real ffmpeg -> HLS playlist
+  # + segments, asserted with ffprobe. ffmpeg runs in a container built FROM the same
+  # sha256-pinned debian:bookworm-slim digest + ffmpeg=7:5.1.9-0+deb12u1 as
+  # Dockerfile.rust's runtime image (tests/real_media/Dockerfile.ffmpeg), so the test
+  # exercises the ffmpeg that ships. A missing docker/ffmpeg fails the job (the test
+  # never skips with the feature on).
+  real-media:
+    name: real-media e2e (RTMP -> real ffmpeg -> HLS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: core/svc_streaming
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install build deps (for aws-lc-sys (cmake, C/C++ toolchain))
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          for i in 1 2 3; do
+            if timeout 180 sudo -E apt-get -y -o Dpkg::Use-Pty=0 update \
+               && timeout 300 sudo -E apt-get -y -o Dpkg::Use-Pty=0 install --no-install-recommends cmake build-essential; then
+              break
+            fi
+            echo "apt attempt $i failed/timed out" >&2
+            if [ "$i" -eq 3 ]; then
+              echo "all 3 apt attempts failed/timed out -- failing loudly" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache cargo registry + git + target
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/svc_streaming/target
+          key: cargo-svc-streaming-real-media-1.97.1-${{ runner.os }}-${{ hashFiles('core/svc_streaming/Cargo.lock') }}
+          restore-keys: |
+            cargo-svc-streaming-real-media-1.97.1-${{ runner.os }}-
+
+      # Builds the pinned ffmpeg image, runs the feature-gated test with
+      # SVC_STREAMING_REAL_FFMPEG/_FFPROBE/_WORKDIR provisioned, and removes the
+      # containers/image afterwards (set -euo pipefail inside; exit status propagates).
+      - name: Real-media e2e (cargo test --features real-media-e2e)
+        run: tests/real_media/run.sh
