@@ -19,19 +19,6 @@ on:
       - '.github/workflows/python-waddle-sdk.yml'
   pull_request:
     branches: [main, 'release/**']
-    paths:
-      - 'sdk/waddle-sdk/**'
-      - 'core/svc_process/builtin_handlers/social_alias_process.py'
-      - 'core/svc_process/services/command_alias_store.py'
-      - 'wit/waddle-bundle/**'
-      - 'core/bundle_host_reputation/src/lib.rs'
-      - 'core/bundle_host_economy/src/lib.rs'
-      - 'core/bundle_executor/src/host/stage_next_economy.rs'
-      - 'core/bundle_executor/src/host/stage_next_identity.rs'
-      - 'core/bundle_executor/src/host/stage_next_ai.rs'
-      - 'core/svc_process/src/capabilities.rs'
-      - 'core/svc_process/src/identity.rs'
-      - 'core/svc_process/src/ai.rs'
   workflow_dispatch:
 
 permissions:
@@ -42,7 +29,47 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Path gate (release PRs only): shared detector, fails closed. A job skipped
+  # here means "not affected"; main PRs / pushes / dispatch run everything.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      match: ${{ steps.paths.outputs.match }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+        with:
+          area: python
+          globs: |
+            sdk/waddle-sdk/**
+            core/svc_process/builtin_handlers/social_alias_process.py
+            core/svc_process/services/command_alias_store.py
+            wit/waddle-bundle/**
+            core/bundle_host_reputation/src/lib.rs
+            core/bundle_host_economy/src/lib.rs
+            core/bundle_executor/src/host/stage_next_economy.rs
+            core/bundle_executor/src/host/stage_next_identity.rs
+            core/bundle_executor/src/host/stage_next_ai.rs
+            core/svc_process/src/capabilities.rs
+            core/svc_process/src/identity.rs
+            core/svc_process/src/ai.rs
+
   lint-type-test:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
     name: ruff + mypy --strict + pytest --cov + WIT binding-shape check
     runs-on: ubuntu-latest
     defaults:

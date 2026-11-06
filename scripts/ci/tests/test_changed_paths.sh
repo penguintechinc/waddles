@@ -134,6 +134,51 @@ expect_out "git diff docs-only" "docs_only=true rust=false python=false any_code
 out="$(cd "${tmp}/repo" && env -u GITHUB_OUTPUT "${script}" --base HEAD~1 --head HEAD 2>/dev/null)"
 expect_out "git diff rust" "rust=true python=false docs_only=false" "${out}"
 
+
+# ---- release-PR path gating: match output + main short-circuit ----------------
+# gate_case <desc> <expected match> <tier-base|-> <area> <glob-file-content> <paths...>
+# Table-driven: every row states whether a workflow with those globs/area runs.
+printf '%s\n' 'core/svc_ingest/**' 'proto/**' >"${tmp}/globs"
+gate_case() {
+  local desc="$1" want="$2" tb="$3" ar="$4"; shift 4
+  printf '%s\n' "$@" >"${tmp}/files"
+  local args=(--files "${tmp}/files" --globs "${tmp}/globs" --area "${ar}")
+  if [ "${tb}" != "-" ]; then args+=(--tier-base "${tb}"); fi
+  local out
+  out="$(env -u GITHUB_OUTPUT "${script}" "${args[@]}" 2>/dev/null)"
+  expect_out "${desc}" "match=${want}" "${out}"
+}
+#          desc                              match base               area   paths
+gate_case "python-only diff skips rust job"   false release/v3.0.X      rust   hub_api/services/foo.py
+gate_case "own-crate diff runs rust job"      true  release/v3.0.X      rust   core/svc_ingest/src/lib.rs
+gate_case "path-dep (proto) diff runs job"    true  release/v3.0.X      rust   proto/hub.proto
+gate_case "Cargo.lock runs ALL rust jobs"     true  release/v3.0.X      rust   Cargo.lock
+gate_case "crate Cargo.lock runs rust job"    true  refs/heads/release/v3.0.X rust core/other/Cargo.lock
+gate_case "rust-toolchain runs rust job"      true  release/v3.0.X      rust   rust-toolchain.toml
+gate_case "Cargo.lock does NOT run py job"    false release/v3.0.X      python Cargo.lock
+gate_case "requirements runs python job"      true  release/v3.0.X      python hub_api/requirements.txt
+gate_case "workflow diff runs everything"     true  release/v3.0.X      rust   .github/workflows/anything.yml
+gate_case "action diff runs everything"       true  release/v3.0.X      none   .github/actions/changed-paths/action.yml
+gate_case "scripts/ci diff runs everything"   true  release/v3.0.X      none   scripts/ci/changed-paths.sh
+gate_case "docs-only on release skips"        false release/v3.0.X      rust   docs/a.md
+# main (and anything not release/**) is NEVER gated, even for docs-only/unrelated diffs.
+gate_case "main PR docs-only runs everything" true  main                rust   docs/a.md
+gate_case "main PR unrelated runs everything" true  main                python core/zzz/x.rs
+gate_case "refs/heads/main runs everything"   true  refs/heads/main     none   README.md
+gate_case "empty base runs everything"        true  ""                  rust   docs/a.md
+gate_case "unknown base runs everything"      true  feature/x           rust   docs/a.md
+# main with an EMPTY diff: all areas + match on, docs_only off.
+: >"${tmp}/files"
+out="$(env -u GITHUB_OUTPUT "${script}" --files "${tmp}/files" --globs "${tmp}/globs" --area rust --tier-base main 2>/dev/null)"
+expect_out "main PR empty diff -> all on" "match=true ${ALL_ON}" "${out}"
+out="$(env -u GITHUB_OUTPUT "${script}" --files "${tmp}/files" --globs "${tmp}/globs" --area rust --tier-base release/v3.0.X 2>/dev/null)"
+expect_out "release PR empty diff fails open" "match=true ${ALL_ON}" "${out}"
+# Detector failure (bad base ref) on a release PR -> everything runs.
+out="$(cd "${tmp}/repo" && env -u GITHUB_OUTPUT "${script}" --base deadbeefdeadbeef --head HEAD --globs "${tmp}/globs" --area rust --tier-base release/v3.0.X 2>/dev/null)"
+expect_out "release PR undiffable base -> fail open" "match=true ${ALL_ON}" "${out}"
+# openapi/ change counts as python (spec drift job).
+run_files "python=true" openapi/v1.yaml
+
 # GITHUB_OUTPUT is written in name=value form.
 printf '%s\n' docs/a.md >"${tmp}/files"
 : >"${tmp}/gh_out"

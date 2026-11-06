@@ -32,6 +32,9 @@ jobs:
       python: ${{ steps.paths.outputs.python }}
       node: ${{ steps.paths.outputs.node }}
       go: ${{ steps.paths.outputs.go }}
+      helm: ${{ steps.paths.outputs.helm }}
+      docker: ${{ steps.paths.outputs.docker }}
+      any_code: ${{ steps.paths.outputs.any_code }}
     steps:
       - name: Checkout (change classifier only)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -93,10 +96,13 @@ jobs:
     # is neither "failure" nor "pending" to ci-gate's poller, so it never
     # blocks that merge; the check still runs for real the moment the PR
     # (or the stack) targets release/* or main.
+    needs: changes
     if: >-
-      github.event_name == 'merge_group' ||
+      !cancelled() &&
+      (github.event_name == 'merge_group' ||
       github.base_ref == 'main' ||
-      startsWith(github.base_ref, 'release/')
+      startsWith(github.base_ref, 'release/')) &&
+      (needs.changes.result != 'success' || needs.changes.outputs.any_code == 'true')
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -135,7 +141,7 @@ jobs:
   python-unit:
     name: Python unit tests
     needs: changes
-    if: needs.changes.outputs.python == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.python == 'true') }}
     runs-on: ubuntu-latest
     # A REAL Valkey for libs/flask_core/tests/test_token_revocation_valkey.py (JWT revocation
     # store: Lua put_max, MGET, TTL expiry, cross-replica visibility). Same image + digest the
@@ -222,7 +228,7 @@ jobs:
     # no equivalent single "pre-PR tree" to diff, and this gate's whole job
     # is proving one PR's new migration(s) apply/rollback/reapply cleanly).
     # Also skipped when no Python/alembic file changed (see changes job).
-    if: github.event_name == 'pull_request' && needs.changes.outputs.python == 'true'
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.python == 'true') }}
     # Narrower than the workflow-level default (contents: read + packages:
     # read) -- this job only checks out the repo and talks to its own
     # Postgres service container, no package-registry access needed.
@@ -660,6 +666,8 @@ jobs:
 
   marketplace-refunds:
     name: Marketplace refund authorization tests
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node == 'true') }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -684,7 +692,7 @@ jobs:
   web-builds:
     name: Build ${{ matrix.name }}
     needs: changes
-    if: needs.changes.outputs.node == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node == 'true') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -727,6 +735,8 @@ jobs:
 
   helm-chart-lint:
     name: Helm chart lint + hook dependency ordering
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.helm == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -952,6 +962,8 @@ jobs:
 
   dockerfile-rust-path-deps:
     name: Dockerfile.rust path-dependency coverage
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     # Static analysis of the current tree only (no diff needed) -- narrower
     # than the workflow-level default, matching alembic-migration-chain's
@@ -980,6 +992,8 @@ jobs:
 
   alembic-single-head:
     name: Alembic single-head invariant (static, no DB)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.python == 'true') }}
     runs-on: ubuntu-latest
     # Pure revision-graph walk over alembic/versions/*.py source text -- no
     # DB, no alembic package import -- so this runs on every PR regardless
@@ -1007,6 +1021,8 @@ jobs:
 
   openapi-drift:
     name: OpenAPI spec drift (openapi/v1.yaml matches generated)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.python == 'true') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1040,7 +1056,8 @@ jobs:
 
   lockfile-no-downgrades:
     name: Lockfile additions-only (no silent version changes)
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.any_code == 'true') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

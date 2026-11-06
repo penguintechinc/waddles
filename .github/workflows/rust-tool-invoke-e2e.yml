@@ -23,16 +23,6 @@ on:
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
-    paths:
-      - 'core/tool_invoke_e2e/**'
-      - 'core/test_support/**'
-      - 'core/svc_process/**'
-      - 'core/bundle_tool_call/**'
-      - 'core/bundle_active_set/**'
-      - 'core/bundle_capability_gate/**'
-      - 'wit/waddle-bundle/**'
-      - 'sdk/waddle-sdk-rs/**'
-      - 'core/bundle_executor/**'
   workflow_dispatch:
 
 permissions:
@@ -43,9 +33,45 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Path gate (release PRs only): shared detector, fails closed. A job skipped
+  # here means "not affected"; main PRs / pushes / dispatch run everything.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      match: ${{ steps.paths.outputs.match }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+        with:
+          area: rust
+          globs: |
+            core/tool_invoke_e2e/**
+            core/test_support/**
+            core/svc_process/**
+            core/bundle_tool_call/**
+            core/bundle_active_set/**
+            core/bundle_capability_gate/**
+            wit/waddle-bundle/**
+            sdk/waddle-sdk-rs/**
+            core/bundle_executor/**
+
   lint-test:
+    needs: changes
     # Main-only tier: skipped on PRs into release/** (see scripts/ci/ci-gate-tier.py)
-    if: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}
+    if: ${{ (github.event_name != 'pull_request' || github.base_ref == 'main') && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
     name: fmt + clippy + deny + coverage
     uses: ./.github/workflows/rust-crate-ci.yml
     with:

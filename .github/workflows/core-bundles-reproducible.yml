@@ -33,18 +33,6 @@ on:
       - '.github/workflows/core-bundles-reproducible.yml'
   pull_request:
     branches: [main, 'release/**']
-    paths:
-      - 'bundles/Dockerfile.core-bundles'
-      - 'bundles/core-bundles.yaml'
-      - 'bundles/rust/ping/**'
-      - 'bundles/rust/twitch/**'
-      - 'bundles/rust/discord/**'
-      - 'bundles/rust/youtube/**'
-      - 'bundles/python/pyping/**'
-      - 'sdk/waddle-sdk-rs/**'
-      - 'sdk/waddle-sdk/src/**'
-      - 'wit/waddle-bundle/**'
-      - 'scripts/verify-core-bundles-reproducible.sh'
   workflow_dispatch:
 
 permissions:
@@ -55,9 +43,47 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Path gate (release PRs only): shared detector, fails closed. A job skipped
+  # here means "not affected"; main PRs / pushes / dispatch run everything.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      match: ${{ steps.paths.outputs.match }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+        with:
+          area: rust
+          globs: |
+            bundles/Dockerfile.core-bundles
+            bundles/core-bundles.yaml
+            bundles/rust/ping/**
+            bundles/rust/twitch/**
+            bundles/rust/discord/**
+            bundles/rust/youtube/**
+            bundles/python/pyping/**
+            sdk/waddle-sdk-rs/**
+            sdk/waddle-sdk/src/**
+            wit/waddle-bundle/**
+            scripts/verify-core-bundles-reproducible.sh
+
   reproducible-build:
+    needs: changes
     name: two independent --no-cache builds must be byte-identical
-    if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
