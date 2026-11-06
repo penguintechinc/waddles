@@ -152,6 +152,15 @@ impl SignedTemplate {
         Self(vec![Part::Id, Part::Ts, Part::Body])
     }
 
+    /// True for exactly `{ts}{body}` -- Discord's interaction signing form
+    /// (`timestamp + body`, no separator). Only [`Scheme::validate`]'s Ed25519
+    /// arm may accept it, and only with strict decimal timestamps and a JSON
+    /// object body (see `Scheme::prepare`), so no byte can migrate between the
+    /// two fields.
+    fn is_ts_body_concat(&self) -> bool {
+        self.0 == [Part::Ts, Part::Body]
+    }
+
     fn needs_id(&self) -> bool {
         self.0.contains(&Part::Id)
     }
@@ -304,7 +313,19 @@ impl Scheme {
     pub fn validate(&self) -> Result<(), String> {
         let (template, id_header) = match self {
             Self::HmacSha256(s) => (&s.template, &s.id_header),
-            Self::Ed25519(s) => (&s.template, &s.id_header),
+            Self::Ed25519(s) => {
+                // Discord signs `timestamp + body` with no separator: allowed
+                // ONLY for strict unix-seconds timestamps (enforced again in
+                // `prepare`: digits-only ts, body must open with `{`).
+                if s.template.is_ts_body_concat() {
+                    return if s.timestamp_format == TimestampFormat::UnixSeconds {
+                        Ok(())
+                    } else {
+                        Err("{ts}{body} template requires unix-seconds timestamps".into())
+                    };
+                }
+                (&s.template, &s.id_header)
+            }
             Self::Stripe(_) => return Ok(()),
             // Fixed, known-good preset; the only adjacency exemption.
             Self::TwitchEventSub => return Ok(()),
@@ -349,6 +370,20 @@ impl Scheme {
             }
             Self::Ed25519(s) => {
                 let ts_raw = header_str(headers, &s.timestamp_header)?;
+                if s.template.is_ts_body_concat() {
+                    // No separator in the signed string: pin the boundary so
+                    // `ts|body` cannot be re-split (digits-only ts, body opens
+                    // with the JSON object brace, which is not a digit).
+                    if ts_raw.is_empty()
+                        || ts_raw.len() > 12
+                        || !ts_raw.bytes().all(|b| b.is_ascii_digit())
+                    {
+                        return Err(VerifyError::BadTimestamp);
+                    }
+                    if body.first() != Some(&b'{') {
+                        return Err(VerifyError::BadSignature);
+                    }
+                }
                 check_window(s.timestamp_format.to_unix(ts_raw)?, now_unix, window_secs)?;
                 let sig_raw = header_str(headers, &s.signature_header)?;
                 let id = match &s.id_header {
@@ -829,6 +864,94 @@ mod tests {
             // HeaderValue trims nothing itself; either parse or header rule
             // must reject.
             assert!(s.prepare(&h, b"x", WINDOW, NOW).is_err(), "{pad:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod ts_body_concat_tests {
+    use super::*;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn scheme(fmt: TimestampFormat) -> Scheme {
+        Scheme::Ed25519(Ed25519Spec {
+            signature_header: HeaderName::from_static("x-sig"),
+            timestamp_header: HeaderName::from_static("x-ts"),
+            id_header: None,
+            template: SignedTemplate::parse("{ts}{body}").unwrap(),
+            encoding: Encoding::Hex,
+            timestamp_format: fmt,
+        })
+    }
+
+    fn headers(ts: &str, sig: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(HeaderName::from_static("x-ts"), ts.parse().unwrap());
+        h.insert(HeaderName::from_static("x-sig"), sig.parse().unwrap());
+        h
+    }
+
+    fn sign(ts: &str, body: &[u8]) -> (String, String) {
+        let kp = Ed25519KeyPair::from_seed_unchecked(&[3u8; 32]).unwrap();
+        let mut msg = ts.as_bytes().to_vec();
+        msg.extend_from_slice(body);
+        (
+            hex_encode(kp.public_key().as_ref()),
+            hex_encode(kp.sign(&msg).as_ref()),
+        )
+    }
+
+    #[test]
+    fn concat_template_is_accepted_only_for_unix_seconds() {
+        scheme(TimestampFormat::UnixSeconds).validate().unwrap();
+        assert!(scheme(TimestampFormat::Rfc3339).validate().is_err());
+    }
+
+    #[test]
+    fn other_adjacent_templates_still_rejected() {
+        let s = Scheme::Ed25519(Ed25519Spec {
+            signature_header: HeaderName::from_static("x-sig"),
+            timestamp_header: HeaderName::from_static("x-ts"),
+            id_header: Some(HeaderName::from_static("x-id")),
+            template: SignedTemplate::parse("{id}{ts}{body}").unwrap(),
+            encoding: Encoding::Hex,
+            timestamp_format: TimestampFormat::UnixSeconds,
+        });
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn valid_concat_signature_verifies() {
+        let ts = NOW.to_string();
+        let body = br#"{"type":1}"#;
+        let (pk, sig) = sign(&ts, body);
+        let p = scheme(TimestampFormat::UnixSeconds)
+            .prepare(&headers(&ts, &sig), body, 300, NOW)
+            .unwrap();
+        p.check(&pk).unwrap();
+        let (_, other) = sign(&ts, br#"{"type":2}"#);
+        let bad = scheme(TimestampFormat::UnixSeconds)
+            .prepare(&headers(&ts, &other), body, 300, NOW)
+            .unwrap();
+        assert!(bad.check(&pk).is_err());
+    }
+
+    #[test]
+    fn boundary_shifting_inputs_are_refused_before_the_crypto() {
+        let s = scheme(TimestampFormat::UnixSeconds);
+        let body = br#"{"type":1}"#;
+        for ts in ["", "1800000000x", "-1", "1_800", "1234567890123"] {
+            assert!(
+                s.prepare(&headers(ts, "00"), body, 300, NOW).is_err(),
+                "ts {ts:?}"
+            );
+        }
+        // Body that does not open with `{` (could absorb timestamp digits).
+        let ts = NOW.to_string();
+        for b in [&b"7{\"a\":1}"[..], b"", b"[1]"] {
+            assert!(s.prepare(&headers(&ts, "00"), b, 300, NOW).is_err());
         }
     }
 }
