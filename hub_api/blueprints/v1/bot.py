@@ -646,6 +646,18 @@ async def _load_authorized_source(source_id: int) -> bool:
     return await _scope_allowed(row.community_id, row.vendor_id)
 
 
+async def _require_query_scope(community_id: int | None) -> tuple[dict[str, Any], int] | None:
+    """Scope gate for search/suggest: tenant-checked `community_id`, or super admin if omitted.
+
+    Without it a tenant admin could vector-search every community's knowledge chunks.
+    """
+    if community_id is not None:
+        return await _require_community(community_id)
+    if not await _caller_is_super_admin():
+        return _error("communityId is required", 400, "BAD_REQUEST")
+    return None
+
+
 @bot_bp.route("/ai-knowledge/sources", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_KNOWLEDGE_READ)  # type: ignore[misc]
@@ -795,7 +807,7 @@ async def search_knowledge_base(data: KnowledgeSearchRequest) -> Any:
     """`aiKnowledgeController.searchKnowledgeBase` -- `POST /api/v1/admin/ai-knowledge/search`."""
     if not data.query or not data.query.strip():
         return _error("query is required", 400, "BAD_REQUEST")
-    denied = await _check_optional_community(data.communityId)
+    denied = await _require_query_scope(data.communityId)
     if denied:
         return denied
     try:
@@ -838,7 +850,7 @@ async def suggest_for_ticket(data: SuggestRequest) -> Any:
     """`aiKnowledgeController.suggestForTicket` -- `POST /api/v1/admin/ai-knowledge/suggest`."""
     if not data.ticketId or not data.ticketText or not data.ticketText.strip():
         return _error("ticketId and ticketText are required", 400, "BAD_REQUEST")
-    denied = await _check_optional_community(data.communityId)
+    denied = await _require_query_scope(data.communityId)
     if denied:
         return denied
     try:

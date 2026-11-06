@@ -22,4 +22,14 @@ Routes: `/api/v1/admin/ai-knowledge/sources` (list/create) and `/sources/<id>` (
 
 ## Migration
 
-`0074_ai_knowledge_token_enc` encrypts rows that still hold plaintext (written by the Node-era code and the first Python port). Idempotent; needs `GITHUB_SYNC_ENCRYPTION_KEY` only when such rows exist; downgrade is a no-op by design.
+`0075_ai_knowledge_token_enc` encrypts rows that still hold plaintext (written by the Node-era code and the first Python port). Idempotent; needs `GITHUB_SYNC_ENCRYPTION_KEY` only when such rows exist; downgrade is a no-op by design.
+
+## Required environment
+
+`GITHUB_SYNC_ENCRYPTION_KEY` -- 64-char hex (`openssl rand -hex 32`), same key `github_sync_service` uses. Required by hub-api for token writes (500 without it) and by migration `0075` **only if** plaintext token rows exist; with none (or no table) the migration is a no-op. If rows exist and the key is missing/invalid, hub-api's startup migration aborts with: `GITHUB_SYNC_ENCRYPTION_KEY must be a 64-char hex string: ai_knowledge_sources holds plaintext tokens that must be encrypted before this migration can complete` -- set the key and restart.
+
+As of this change the Helm chart (`k8s/helm/waddlebot`) does not define this variable for hub-api; supply it via the hub-api Secret/env before deploying to any environment with existing token rows.
+
+## Search / suggest scoping
+
+`POST .../ai-knowledge/search` and `/suggest` require `communityId` (tenant-checked, 403 otherwise) unless the caller is a super admin; results are filtered to that community in SQL.

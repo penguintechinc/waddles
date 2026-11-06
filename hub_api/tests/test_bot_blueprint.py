@@ -699,6 +699,11 @@ class TestAIKnowledgeSourceSSRFGuard:
 
 
 class TestAIKnowledgeSearchAndSuggest:
+    @pytest.fixture(autouse=True)
+    def _caller_is_super_admin(self, monkeypatch: Any) -> None:
+        """Scope-agnostic contract tests; scoping is covered in `TestAIKnowledgeAuthz`."""
+        monkeypatch.setattr(bot_blueprint, "_is_super_admin_sync", lambda _dal, _uid: True)
+
     async def test_search_missing_query_is_400(self, client: Any, auth_headers: Any) -> None:
         response = await client.post(
             "/api/v1/admin/ai-knowledge/search",

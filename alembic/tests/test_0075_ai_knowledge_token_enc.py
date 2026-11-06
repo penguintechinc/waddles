@@ -1,4 +1,4 @@
-"""0074: plaintext ai_knowledge_sources tokens are sealed; idempotent; fails loud without key.
+"""0075: plaintext ai_knowledge_sources tokens are sealed; idempotent; fails loud without key.
 
 Runs the real `upgrade()` against a real (sqlite) database through alembic's own
 `Operations` context -- no mocked `op`.
@@ -14,13 +14,13 @@ import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
-_PATH = Path(__file__).resolve().parent.parent / "versions" / "0074_ai_knowledge_token_enc.py"
+_PATH = Path(__file__).resolve().parent.parent / "versions" / "0075_ai_knowledge_token_enc.py"
 KEY = "ab" * 32
 PLAIN = "ghp_PLAINTEXT_SENTINEL_0123456789"
 
 
 def _mod():
-    spec = importlib.util.spec_from_file_location("migration_0074", _PATH)
+    spec = importlib.util.spec_from_file_location("migration_0075", _PATH)
     assert spec and spec.loader
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
@@ -56,8 +56,8 @@ def _tokens(eng) -> dict[int, str | None]:
 def test_metadata_single_head_chain() -> None:
     m = _mod()
     assert (m.revision, m.down_revision) == (
-        "0074_ai_knowledge_token_enc",
-        "0073_youtube_connection_resource",
+        "0075_ai_knowledge_token_enc",
+        "0074_connection_secret_version",
     )
     assert len(m.revision) <= 32
 
@@ -110,3 +110,20 @@ def test_downgrade_is_noop(engine, monkeypatch) -> None:
         c.execute(sa.text("INSERT INTO ai_knowledge_sources VALUES (1, 'x')"))
     _run(engine, "downgrade")
     assert _tokens(engine)[1] == "x"
+
+
+def test_single_head_and_upgrade_chain_reaches_0075() -> None:
+    """The real revision graph has exactly one head and 0075 descends from 0074."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    root = Path(__file__).resolve().parents[2]
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "alembic"))
+    script = ScriptDirectory.from_config(cfg)
+    assert len(script.get_heads()) == 1
+    ancestors = {r.revision for r in script.walk_revisions("base", "heads")}
+    assert {"0074_connection_secret_version", "0075_ai_knowledge_token_enc"} <= ancestors
+    assert script.get_revision("0075_ai_knowledge_token_enc").down_revision == (
+        "0074_connection_secret_version"
+    )

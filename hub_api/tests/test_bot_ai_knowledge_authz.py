@@ -381,3 +381,107 @@ def test_super_admin_lookup_guards(dal: Any, users: dict[str, int]) -> None:
     assert bot_blueprint._is_super_admin_sync(dal, 999999) is False
     assert bot_blueprint._is_super_admin_sync(dal, users["vendor"]) is False
     assert bot_blueprint._is_super_admin_sync(dal, users["root"]) is True
+
+
+_SCOPE = {"search": READ, "suggest": WRITE}
+
+
+class TestSearchSuggestScope:
+    """`/search` and `/suggest` must not read across communities."""
+
+    @pytest.fixture
+    def spy(self, monkeypatch: Any) -> list[tuple[str, int | None]]:
+        calls: list[tuple[str, int | None]] = []
+
+        async def fake_search(
+            _d: Any, _q: str, *, community_id: int | None = None, **_k: Any
+        ) -> list[Any]:
+            calls.append(("search", community_id))
+            return []
+
+        async def fake_gen(_d: Any, _t: int, _x: str, *, community_id: int | None = None) -> None:
+            calls.append(("suggest", community_id))
+
+        monkeypatch.setattr(bot_ai_knowledge, "search_knowledge", fake_search)
+        monkeypatch.setattr(bot_ai_knowledge, "generate_suggestion", fake_gen)
+        return calls
+
+    @pytest.mark.parametrize(
+        ("path", "body"),
+        [
+            ("search", {"query": "q"}),
+            ("suggest", {"ticketId": 1, "ticketText": "t"}),
+        ],
+    )
+    async def test_missing_community_refused_non_superadmin(
+        self, client: Any, auth_headers: Any, spy: Any, path: str, body: dict[str, Any]
+    ) -> None:
+        r = await client.post(
+            f"/api/v1/admin/ai-knowledge/{path}",
+            headers=auth_headers(scope=_SCOPE[path]),
+            json=body,
+        )
+        assert r.status_code == 400
+        assert spy == []
+
+    @pytest.mark.parametrize(
+        ("path", "body"),
+        [
+            ("search", {"query": "q"}),
+            ("suggest", {"ticketId": 1, "ticketText": "t"}),
+        ],
+    )
+    async def test_foreign_community_refused(
+        self, client: Any, auth_headers: Any, spy: Any, other_tenant_community_id: int,
+        path: str, body: dict[str, Any],
+    ) -> None:  # fmt: skip
+        r = await client.post(
+            f"/api/v1/admin/ai-knowledge/{path}",
+            headers=auth_headers(scope=_SCOPE[path]),
+            json={**body, "communityId": int(other_tenant_community_id)},
+        )
+        assert r.status_code == 403
+        assert spy == []
+
+    async def test_own_community_passes_scope_through(
+        self, client: Any, auth_headers: Any, spy: Any, community_id: int
+    ) -> None:
+        cid = int(community_id)
+        for path, body in (
+            ("search", {"query": "q"}),
+            ("suggest", {"ticketId": 1, "ticketText": "t"}),
+        ):
+            r = await client.post(
+                f"/api/v1/admin/ai-knowledge/{path}",
+                headers=auth_headers(scope=_SCOPE[path]),
+                json={**body, "communityId": cid},
+            )
+            assert r.status_code == 200
+        assert spy == [("search", cid), ("suggest", cid)]
+
+    async def test_superadmin_may_search_unscoped(
+        self, client: Any, auth_headers: Any, spy: Any, users: dict[str, int]
+    ) -> None:
+        r = await client.post(
+            "/api/v1/admin/ai-knowledge/search",
+            headers=auth_headers(scope=READ, user_id=str(users["root"])),
+            json={"query": "q"},
+        )
+        assert r.status_code == 200
+        assert spy == [("search", None)]
+
+    async def test_service_sql_filters_by_community(self, monkeypatch: Any) -> None:
+        captured: dict[str, Any] = {}
+
+        async def emb(_t: str) -> list[float]:
+            return [0.1, 0.2]
+
+        class _Dal:
+            def executesql(self, sql: str, placeholders: list[Any]) -> list[Any]:
+                captured["sql"], captured["ph"] = sql, placeholders
+                return []
+
+        monkeypatch.setattr(bot_ai_knowledge, "_generate_embedding", emb)
+        await bot_ai_knowledge.search_knowledge(_Dal(), "q", community_id=42, vendor_id=7)
+        assert "ks.community_id = %s" in captured["sql"]
+        assert 42 in captured["ph"] and 7 in captured["ph"]

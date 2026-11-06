@@ -11,8 +11,8 @@ written by the new code) are never double-encrypted. Fails loudly if plaintext r
 key is unset/invalid -- never leaves them behind silently. Downgrade is a deliberate no-op:
 plaintext tokens are never restored.
 
-Revision ID: 0074_ai_knowledge_token_enc
-Revises: 0073_youtube_connection_resource
+Revision ID: 0075_ai_knowledge_token_enc
+Revises: 0074_connection_secret_version
 Create Date: 2026-11-05
 """
 
@@ -27,8 +27,8 @@ from alembic import op
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-revision = "0074_ai_knowledge_token_enc"
-down_revision = "0073_youtube_connection_resource"
+revision = "0075_ai_knowledge_token_enc"
+down_revision = "0074_connection_secret_version"
 branch_labels = None
 depends_on = None
 
