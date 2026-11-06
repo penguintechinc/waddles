@@ -11,7 +11,7 @@
 schema_version: 2
 app_id: waddles.core.service.youtube
 name: YouTube Platform Connector (Rust)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.service
 module: core
 provider: builtin
