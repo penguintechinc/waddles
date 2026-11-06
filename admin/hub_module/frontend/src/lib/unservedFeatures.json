@@ -137,5 +137,122 @@
     "endpoints": [
       "POST /api/v1/communities/create"
     ]
+  },
+  "browser-sources": {
+    "label": "Browser sources",
+    "endpoints": [
+      "GET /api/v1/admin/:communityId/browser-sources",
+      "POST /api/v1/admin/:communityId/browser-sources/regenerate"
+    ]
+  },
+  "community-oauth-credentials": {
+    "label": "Community OAuth credentials",
+    "endpoints": [
+      "GET /api/v1/admin/:communityId/oauth/credentials",
+      "POST /api/v1/admin/:communityId/oauth/credentials",
+      "PUT /api/v1/admin/:communityId/oauth/credentials/:id",
+      "DELETE /api/v1/admin/:communityId/oauth/credentials/:id",
+      "POST /api/v1/admin/:communityId/oauth/credentials/:id/test"
+    ]
+  },
+  "user-oauth-credentials": {
+    "label": "Personal OAuth credentials",
+    "endpoints": [
+      "GET /api/v1/user/oauth/credentials",
+      "POST /api/v1/user/oauth/credentials",
+      "PUT /api/v1/user/oauth/credentials/:id",
+      "DELETE /api/v1/user/oauth/credentials/:id",
+      "POST /api/v1/user/oauth/credentials/:id/test"
+    ]
+  },
+  "community-marketplace-modules": {
+    "label": "Community marketplace modules",
+    "endpoints": [
+      "GET /api/v1/admin/:communityId/marketplace/modules",
+      "GET /api/v1/admin/:communityId/marketplace/modules/:moduleId",
+      "POST /api/v1/admin/:communityId/marketplace/modules/:moduleId/install",
+      "DELETE /api/v1/admin/:communityId/marketplace/modules/:moduleId",
+      "PUT /api/v1/admin/:communityId/marketplace/modules/:moduleId/config",
+      "POST /api/v1/admin/:communityId/marketplace/modules/:moduleId/review"
+    ]
+  },
+  "community-marketplace-install": {
+    "label": "Marketplace module install",
+    "endpoints": [
+      "GET /api/v1/marketplace/communities/:communityId/installed",
+      "POST /api/v1/marketplace/communities/:communityId/install",
+      "DELETE /api/v1/marketplace/communities/:communityId/install/:moduleId",
+      "PUT /api/v1/marketplace/communities/:communityId/install/:moduleId"
+    ]
+  },
+  "community-security": {
+    "label": "Community security",
+    "endpoints": [
+      "GET /api/v1/admin/:communityId/security/config",
+      "PUT /api/v1/admin/:communityId/security/config",
+      "GET /api/v1/admin/:communityId/security/blocked-words",
+      "POST /api/v1/admin/:communityId/security/blocked-words",
+      "PUT /api/v1/admin/:communityId/security/blocked-words/:wordId",
+      "DELETE /api/v1/admin/:communityId/security/blocked-words/:wordId",
+      "GET /api/v1/admin/:communityId/security/warnings",
+      "GET /api/v1/admin/:communityId/security/moderation-log"
+    ]
+  },
+  "music-playback": {
+    "label": "Music dashboard and playback",
+    "endpoints": [
+      "GET /api/v1/admin/:communityId/music/dashboard",
+      "POST /api/v1/admin/:communityId/music/playback/control"
+    ]
+  },
+  "music-provider-config": {
+    "label": "Music provider settings",
+    "endpoints": [
+      "PUT /api/v1/admin/:communityId/music/providers/:provider/config"
+    ]
+  },
+  "radio-station-actions": {
+    "label": "Radio station test and default",
+    "endpoints": [
+      "POST /api/v1/admin/:communityId/music/radio-stations/:stationId/test",
+      "PUT /api/v1/admin/:communityId/music/radio-stations/:stationId/default"
+    ]
+  },
+  "member-server-link-requests": {
+    "label": "Community link requests",
+    "endpoints": [
+      "GET /api/v1/communities/server-link-requests",
+      "POST /api/v1/communities/server-link-requests",
+      "DELETE /api/v1/communities/server-link-requests/:requestId"
+    ]
+  },
+  "ai-knowledge-settings": {
+    "label": "AI assistant settings",
+    "endpoints": [
+      "GET /api/v1/admin/ai-knowledge/settings/:communityId",
+      "PUT /api/v1/admin/ai-knowledge/settings/:communityId"
+    ]
+  },
+  "ai-knowledge-health": {
+    "label": "AI knowledge health",
+    "endpoints": [
+      "GET /api/v1/admin/ai-knowledge/health/:communityId"
+    ]
+  },
+  "vendor-submissions": {
+    "label": "Vendor submissions",
+    "endpoints": [
+      "GET /api/v1/marketplace/vendor/submissions"
+    ]
+  },
+  "vendor-github-sync": {
+    "label": "Vendor GitHub sync",
+    "endpoints": [
+      "GET /api/v1/marketplace/vendor/github-sync/connections",
+      "POST /api/v1/marketplace/vendor/github-sync/connections",
+      "PUT /api/v1/marketplace/vendor/github-sync/connections/:id",
+      "DELETE /api/v1/marketplace/vendor/github-sync/connections/:id",
+      "POST /api/v1/marketplace/vendor/github-sync/connections/:id/test"
+    ]
   }
 }

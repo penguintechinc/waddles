@@ -9,15 +9,17 @@
  *            `/api/v1` prefix (so can never reach hub-api), and every UI-less blueprint
  *   --pages  per routed page: how many of its endpoints hub-api does not serve
  *   --full   with --pages, list every unserved endpoint instead of a two-endpoint sample
- * Exits non-zero when zero frontend calls or zero backend routes were found
- * (a scanner pointed at the wrong root must never report clean).
+ * Exits 2 when zero frontend calls or zero backend routes were found (a scanner pointed at
+ * the wrong root must never report clean), and 1 when ANY call path is not under `/api/v1/`
+ * (health/static excepted) -- a hard gate, never masked.
  */
 import { readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { routeSurvey } from './lib/routes.mjs';
 import { FRONTEND_ROOT as ROOT, backendRoutes, buildIsServed, norm, walk } from './lib/backend-routes.mjs';
 
-const SRC = join(ROOT, 'src');
+// `API_GAP_SRC` points the scan at another source tree (used by the script's own tests).
+const SRC = process.env.API_GAP_SRC ?? join(ROOT, 'src');
 const REGISTRY_FILE = /unservedFeatures\.(ts|json)$/;
 const REGISTRY = JSON.parse(readFileSync(join(SRC, 'lib/unservedFeatures.json'), 'utf8'));
 
@@ -44,7 +46,7 @@ function frontendCalls() {
     if (REGISTRY_FILE.test(f)) continue; // documents missing endpoints; not a call site
     const lines = readFileSync(f, 'utf8').split('\n');
     lines.forEach((text, i) => {
-      for (const m of text.matchAll(/(?:\b(?:api|apiClient|axios)\.(get|post|put|patch|delete)\(|\b(get|post|put|patch|delete)<[^>]*>\()?\s*[`'"](\/api\/v1\/[^`'"]*)[`'"]/g)) {
+      for (const m of text.matchAll(/(?:\b(?:api|apiClient|axios)\.(get|post|put|patch|delete)(?:<[^>]*>)?\(|\b(get|post|put|patch|delete)<[^>]*>\()?\s*[`'"](\/api\/v1\/[^`'"]*)[`'"]/g)) {
         calls.push({ method: (m[1] ?? m[2] ?? '').toUpperCase(), path: norm(m[3]), raw: m[3], file: relative(ROOT, f), line: i + 1 });
       }
     });
@@ -52,19 +54,28 @@ function frontendCalls() {
   return calls;
 }
 
+/** Paths legitimately served by the SPA host / infra rather than hub-api. */
+const NON_API_ALLOWED = /^\/(?:api\/)?(?:health|healthz|static|assets)(?:[/?]|$)/;
+
 /**
- * Calls whose path does not start with `/api/` (e.g. `api.get('/vendor/modules')`). The
- * shared axios instance has an empty baseURL, so these hit the SPA host itself and are
- * answered by the index.html fallback -- they can never reach hub-api, and the
- * `/api/v1`-only scan above is blind to them.
+ * Every HTTP call (`api|apiClient|axios.<verb>(...)`, bare `<verb><T>(...)` wrappers and
+ * `fetch(...)`, in pages, components AND `services/*`) whose literal path is NOT under
+ * `/api/v1/` -- e.g. `api.get('/vendor/modules')`, `/admin/vendor/...`, `/ai-knowledge/...`.
+ * The shared axios instance has an empty baseURL, so these hit the SPA host and are answered
+ * by the index.html fallback: they can never reach hub-api. Health/static paths are allowed.
+ * The scan is call-shaped (not any string) so SPA route literals like `navigate('/vendor/x')`
+ * are never mistaken for API calls.
  */
 function unprefixedCalls() {
   const calls = [];
+  const callRe = /(?:\b(?:api|apiClient|axios)\.(get|post|put|patch|delete|head)(?:<[^>]*>)?\(|\b(fetch)\(|\b(get|post|put|patch|delete)<[^>]*>\()\s*[`'"](\/[^`'"]*)[`'"]/g;
   for (const f of walk(SRC, /\.(jsx?|tsx?)$/)) {
     const lines = readFileSync(f, 'utf8').split('\n');
     lines.forEach((text, i) => {
-      for (const m of text.matchAll(/\b(?:api|apiClient|axios)\.(get|post|put|patch|delete)(?:<[^>]*>)?\(\s*[`'"](\/(?!api\/)[^`'"]*)[`'"]/g)) {
-        calls.push({ method: m[1].toUpperCase(), raw: m[2], file: relative(ROOT, f), line: i + 1 });
+      for (const m of text.matchAll(callRe)) {
+        const raw = m[4];
+        if (raw.startsWith('/api/v1/') || NON_API_ALLOWED.test(raw)) continue;
+        calls.push({ method: (m[1] ?? m[3] ?? 'FETCH').toUpperCase(), raw, file: relative(ROOT, f), line: i + 1 });
       }
     });
   }
@@ -170,4 +181,8 @@ if (byPage) {
   for (const r of gated.sort((a, b) => a.path.localeCompare(b.path))) {
     console.log(`${String(r.unserved).padStart(2)}/${String(r.endpoints).padEnd(2)} ${r.path.padEnd(58)} feature=${r.gate}`);
   }
+}
+if (unprefixed.length > 0) {
+  console.error(`FAIL: ${unprefixed.length} call(s) do not start with /api/v1/ and can never reach hub-api (run with --list)`);
+  process.exit(1);
 }

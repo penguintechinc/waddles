@@ -42,6 +42,10 @@ export default defineConfig({
         'src/pages/dashboard/{DashboardHome,CommunityDashboard,CommunityLeaderboard,CommunityMembers,CreateCommunity}.tsx',
         'src/pages/community/LiveActivity.tsx',
         'src/pages/admin/AdminJoinRequests.tsx',
+        // Contract re-points: typed AI-knowledge client, the gap-check route matcher, gated/re-pointed pages.
+        'src/services/aiKnowledgeApi.ts',
+        'scripts/lib/backend-routes.mjs',
+        'src/pages/admin/AdminHome.jsx',
       ],
       exclude: ['src/components/ui/index.ts', 'src/components/ui/**/__tests__/**', 'src/components/**/__tests__/**'],
       thresholds: {

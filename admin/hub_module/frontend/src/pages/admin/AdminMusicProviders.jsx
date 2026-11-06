@@ -10,6 +10,11 @@ import {
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import { adminApi } from '../../services/api';
+import { NotAvailableYet } from '../../components/ui';
+import { isFeatureServed } from '../../lib/unservedFeatures';
+
+/** hub-api has no `PUT .../music/providers/:provider/config` route yet. */
+const PROVIDER_CONFIG_FEATURE = 'music-provider-config';
 
 const MUSIC_PROVIDERS = {
   spotify: {
@@ -201,6 +206,7 @@ function AdminMusicProviders() {
           Connect and manage music streaming services for your community
         </p>
       </div>
+      {!isFeatureServed(PROVIDER_CONFIG_FEATURE) && <NotAvailableYet feature={PROVIDER_CONFIG_FEATURE} />}
 
       {message && (
         <div
@@ -277,7 +283,7 @@ function AdminMusicProviders() {
               </div>
 
               {/* Enable/Disable Toggle (only if connected) */}
-              {provider?.connected && (
+              {provider?.connected && isFeatureServed(PROVIDER_CONFIG_FEATURE) && (
                 <label className="flex items-center justify-between p-3 bg-navy-900 rounded-lg cursor-pointer mb-4 border border-navy-700">
                   <span className="text-sm font-medium text-sky-100">Enable Provider</span>
                   <input

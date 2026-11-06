@@ -18,9 +18,15 @@ import {
   GlobeAltIcon,
   CodeBracketIcon,
   DocumentTextIcon,
-  SparklesIcon,
 } from '@heroicons/react/24/outline';
-import api from '../../services/api';
+import { NotAvailableYet } from '../../components/ui';
+import {
+  createKnowledgeSource,
+  deleteKnowledgeSource,
+  fetchKnowledgeSources,
+  reindexKnowledgeSource,
+  updateKnowledgeSource,
+} from '../../services/aiKnowledgeApi';
 
 const SOURCE_TYPES = [
   { value: 'github_wiki', label: 'GitHub Wiki', icon: CodeBracketIcon },
@@ -146,7 +152,19 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
 
   useEffect(() => {
     if (open) {
-      setForm(editTarget ? { ...EMPTY_FORM, ...editTarget, token: '' } : { ...EMPTY_FORM });
+      setForm(
+        editTarget
+          ? {
+              ...EMPTY_FORM,
+              name: editTarget.name,
+              sourceType: editTarget.sourceType,
+              url: editTarget.url ?? '',
+              branch: editTarget.branch ?? '',
+              docsPath: editTarget.docsPath ?? '',
+              refreshInterval: editTarget.refreshInterval,
+            }
+          : { ...EMPTY_FORM },
+      );
     }
   }, [open, editTarget]);
 
@@ -175,10 +193,10 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
     try {
       setSaving(true);
       if (editTarget?.id) {
-        await api.put(`/ai-knowledge/sources/${editTarget.id}`, { ...form, community_id: communityId });
+        await updateKnowledgeSource(editTarget.id, form);
         showToast('success', 'Source updated');
       } else {
-        await api.post('/ai-knowledge/sources', { ...form, community_id: communityId });
+        await createKnowledgeSource(Number(communityId), form);
         showToast('success', 'Knowledge source added');
       }
       onSaved();
@@ -337,45 +355,12 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
   );
 }
 
-// ─── Score Bar ────────────────────────────────────────────────────────────────
-
-function ScoreBar({ label, value, color = 'sky' }) {
-  const percent = Math.round((value || 0) * 100);
-  const colorMap = {
-    sky: 'bg-sky-500',
-    emerald: 'bg-emerald-500',
-    gold: 'bg-gold-400',
-    orange: 'bg-orange-500',
-  };
-  return (
-    <div>
-      <div className="flex justify-between items-center mb-1">
-        <span className="text-sm text-navy-300">{label}</span>
-        <span className="text-sm font-medium text-white">{percent}%</span>
-      </div>
-      <div className="w-full bg-navy-700 rounded-full h-2">
-        <div
-          className={`h-2 rounded-full transition-all ${colorMap[color] || colorMap.sky}`}
-          style={{ width: `${percent}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 function AdminAIKnowledge() {
   const { communityId } = useParams();
   const [sources, setSources] = useState([]);
-  const [settings, setSettings] = useState({
-    confidenceThreshold: 0.7,
-    autoReply: false,
-    notifyOnNoMatch: true,
-  });
-  const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [savingSettings, setSavingSettings] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState(null);
@@ -393,16 +378,7 @@ function AdminAIKnowledge() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [sourcesRes, settingsRes, healthRes] = await Promise.all([
-        api.get('/ai-knowledge/sources', { params: { community_id: communityId } }),
-        api.get(`/ai-knowledge/settings/${communityId}`).catch(() => ({ data: {} })),
-        api.get(`/ai-knowledge/health/${communityId}`).catch(() => ({ data: null })),
-      ]);
-      setSources(sourcesRes.data?.sources || []);
-      if (settingsRes.data?.settings) {
-        setSettings((prev) => ({ ...prev, ...settingsRes.data.settings }));
-      }
-      setHealth(healthRes.data?.health || null);
+      setSources(await fetchKnowledgeSources(Number(communityId)));
     } catch (err) {
       showToast('error', err.response?.data?.error?.message || 'Failed to load AI knowledge data');
     } finally {
@@ -432,7 +408,7 @@ function AdminAIKnowledge() {
   const handleDelete = async () => {
     if (!confirmDelete) return;
     try {
-      await api.delete(`/ai-knowledge/sources/${confirmDelete.id}`);
+      await deleteKnowledgeSource(confirmDelete.id);
       showToast('success', `Deleted "${confirmDelete.name}"`);
       loadData();
     } catch (err) {
@@ -445,7 +421,7 @@ function AdminAIKnowledge() {
   const handleReindex = async (source) => {
     try {
       setReindexingId(source.id);
-      await api.post(`/ai-knowledge/sources/${source.id}/reindex`);
+      await reindexKnowledgeSource(source.id);
       showToast('success', `Reindex triggered for "${source.name}"`);
       loadData();
     } catch (err) {
@@ -454,21 +430,6 @@ function AdminAIKnowledge() {
       setReindexingId(null);
     }
   };
-
-  const handleSaveSettings = async () => {
-    try {
-      setSavingSettings(true);
-      await api.put(`/ai-knowledge/settings/${communityId}`, settings);
-      showToast('success', 'Settings saved');
-    } catch (err) {
-      showToast('error', err.response?.data?.error?.message || 'Failed to save settings');
-    } finally {
-      setSavingSettings(false);
-    }
-  };
-
-  const setSettingsField = (field, value) =>
-    setSettings((prev) => ({ ...prev, [field]: value }));
 
   const sourceTypeLabel = (val) => SOURCE_TYPES.find((s) => s.value === val)?.label || val;
   const refreshLabel = (val) => REFRESH_INTERVALS.find((r) => r.value === val)?.label || val;
@@ -606,118 +567,9 @@ function AdminAIKnowledge() {
             )}
           </div>
 
-          {/* Settings */}
-          <div className="bg-navy-800 border border-navy-700 rounded-lg p-6 space-y-6">
-            <h2 className="text-lg font-bold text-white border-b border-navy-700 pb-3">
-              Assistant Settings
-            </h2>
-
-            {/* Confidence Threshold */}
-            <div>
-              <div className="flex justify-between items-center mb-2">
-                <label className="block text-sm font-medium text-navy-300">
-                  Confidence Threshold
-                </label>
-                <span className="text-sm font-mono text-white">
-                  {settings.confidenceThreshold.toFixed(2)}
-                </span>
-              </div>
-              <input
-                aria-label="Confidence threshold"
-                type="range"
-                min="0.5"
-                max="1.0"
-                step="0.05"
-                value={settings.confidenceThreshold}
-                onChange={(e) => setSettingsField('confidenceThreshold', parseFloat(e.target.value))}
-                className="w-full accent-sky-500"
-              />
-              <div className="flex justify-between text-xs text-navy-500 mt-1">
-                <span>0.5 — More answers, less accurate</span>
-                <span>1.0 — Fewer answers, highly confident</span>
-              </div>
-            </div>
-
-            {/* Toggles */}
-            <div className="space-y-3">
-              {[
-                {
-                  key: 'autoReply',
-                  label: 'Auto-reply on new tickets',
-                  description: 'AI automatically replies when a match is found above the confidence threshold',
-                },
-                {
-                  key: 'notifyOnNoMatch',
-                  label: 'Notify admin on no match',
-                  description: 'Send an alert when AI cannot find a suitable answer',
-                },
-              ].map(({ key, label, description }) => (
-                <label key={key} className="flex items-start space-x-3 cursor-pointer group">
-                  <div className="pt-0.5">
-                    <input
-                      type="checkbox"
-                      checked={settings[key] ?? false}
-                      onChange={(e) => setSettingsField(key, e.target.checked)}
-                      className="w-4 h-4 rounded border-navy-600 bg-navy-900 text-sky-500 focus:ring-sky-500"
-                    />
-                  </div>
-                  <div>
-                    <p className="text-white text-sm font-medium group-hover:text-sky-300 transition-colors">
-                      {label}
-                    </p>
-                    <p className="text-xs text-navy-400">{description}</p>
-                  </div>
-                </label>
-              ))}
-            </div>
-
-            <div className="flex justify-end">
-              <button
-                onClick={handleSaveSettings}
-                disabled={savingSettings}
-                className="bg-sky-600 hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-5 py-2 rounded-lg text-sm font-medium transition-colors"
-              >
-                {savingSettings ? 'Saving…' : 'Save Settings'}
-              </button>
-            </div>
-          </div>
-
-          {/* Health Dashboard */}
-          <div className="bg-navy-800 border border-navy-700 rounded-lg p-6 space-y-4">
-            <div className="flex items-center space-x-2 border-b border-navy-700 pb-3">
-              <SparklesIcon className="w-5 h-5 text-gold-400" />
-              <h2 className="text-lg font-bold text-white">Health Dashboard</h2>
-            </div>
-
-            {health ? (
-              <div className="space-y-4">
-                <ScoreBar
-                  label="Index Freshness"
-                  value={health.indexFreshness ?? 0}
-                  color="sky"
-                />
-                <ScoreBar
-                  label="Helpfulness Score"
-                  value={health.helpfulnessScore ?? 0}
-                  color="emerald"
-                />
-                <ScoreBar
-                  label="Match Rate (last 30 days)"
-                  value={health.matchRate ?? 0}
-                  color="gold"
-                />
-                {health.noMatchCount != null && (
-                  <p className="text-xs text-navy-400">
-                    {health.noMatchCount} tickets with no match in the last 30 days
-                  </p>
-                )}
-              </div>
-            ) : (
-              <p className="text-navy-400 text-sm">
-                Health data will appear after the AI assistant processes its first ticket.
-              </p>
-            )}
-          </div>
+          {/* hub-api serves no per-community assistant settings or health route yet. */}
+          <NotAvailableYet feature="ai-knowledge-settings" />
+          <NotAvailableYet feature="ai-knowledge-health" />
         </>
       )}
     </div>

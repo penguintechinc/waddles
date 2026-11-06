@@ -62,6 +62,8 @@ export default api;
 // Server-side OAuth login: hub-api owns client_id + redirect and returns the authorize URL.
 export const oauthApi = {
   start: (platform) => api.get(`/api/v1/auth/oauth/${platform}`),
+  // Link a provider to the signed-in account; resolves { authorizeUrl, state } (needs the session cookie).
+  startLink: (platform) => api.get(`/api/v1/auth/oauth/${platform}/link`),
 };
 
 // API helper functions
@@ -566,11 +568,6 @@ export const platformApi = {
 
 export const superAdminApi = {
   getDashboard: () => api.get('/api/v1/superadmin/dashboard'),
-  // Analytics
-  getAnalytics: () => api.get('/api/v1/superadmin/analytics'),
-  getReputationDistribution: () => api.get('/api/v1/superadmin/analytics/reputation'),
-  getGrowthTrends: (params) => api.get('/api/v1/superadmin/analytics/growth', { params }),
-  getActivityBreakdown: () => api.get('/api/v1/superadmin/analytics/activity'),
   getCommunities: (params) => api.get('/api/v1/superadmin/communities', { params }),
   getCommunity: (id) => api.get(`/api/v1/superadmin/communities/${id}`),
   createCommunity: (data) => api.post('/api/v1/superadmin/communities', data),
@@ -665,6 +662,32 @@ export const vendorApi = {
   submitForReview: (id, data) => api.post(`/api/v1/marketplace/vendor/modules/${id}/submit`, data),
   getRequest: () => api.get('/api/v1/marketplace/vendor/request'),
   createRequest: (data) => api.post('/api/v1/marketplace/vendor/request', data),
+  updateProfile: (data) => api.put('/api/v1/marketplace/vendor/profile', data),
+  getDashboard: () => api.get('/api/v1/marketplace/vendor/dashboard'),
+  getAnalyticsSales: (params) => api.get('/api/v1/marketplace/vendor/analytics/sales', { params }),
+  getAnalyticsInstalls: (params) => api.get('/api/v1/marketplace/vendor/analytics/installs', { params }),
+  getAnalyticsDiscountCodes: () => api.get('/api/v1/marketplace/vendor/analytics/discount-codes'),
+  getAnalyticsCommunities: (params) => api.get('/api/v1/marketplace/vendor/analytics/communities', { params }),
+  exportAnalytics: (params) =>
+    api.get('/api/v1/marketplace/vendor/analytics/export', { params, responseType: 'blob' }),
+  getDiscountCodes: (params) => api.get('/api/v1/marketplace/vendor/discount-codes', { params }),
+  createDiscountCode: (data) => api.post('/api/v1/marketplace/vendor/discount-codes', data),
+  updateDiscountCode: (id, data) => api.put(`/api/v1/marketplace/vendor/discount-codes/${id}`, data),
+  deleteDiscountCode: (id) => api.delete(`/api/v1/marketplace/vendor/discount-codes/${id}`),
+  // NOT served by hub-api yet (pages are gated via unservedFeatures.json: vendor-submissions, vendor-github-sync).
+  getSubmissions: (params) => api.get('/api/v1/marketplace/vendor/submissions', { params }),
+  getGithubConnections: () => api.get('/api/v1/marketplace/vendor/github-sync/connections'),
+  createGithubConnection: (data) => api.post('/api/v1/marketplace/vendor/github-sync/connections', data),
+  updateGithubConnection: (id, data) => api.put(`/api/v1/marketplace/vendor/github-sync/connections/${id}`, data),
+  deleteGithubConnection: (id) => api.delete(`/api/v1/marketplace/vendor/github-sync/connections/${id}`),
+  testGithubConnection: (id) => api.post(`/api/v1/marketplace/vendor/github-sync/connections/${id}/test`),
+};
+
+// Unauthenticated vendor-submission pipeline (hub_api marketplace_vendor.py vendor_public_bp).
+export const vendorPublicApi = {
+  submit: (data) => api.post('/api/v1/marketplace/public/vendor/submit', data),
+  getSubmissionStatus: (submissionId, email) =>
+    api.get(`/api/v1/marketplace/public/vendor/submissions/${encodeURIComponent(submissionId)}`, { params: { email } }),
 };
 
 export const marketplaceAdminApi = {
@@ -674,6 +697,13 @@ export const marketplaceAdminApi = {
   getSubmissions: (params) => api.get('/api/v1/marketplace/admin/marketplace/submissions', { params }),
   approveSubmission: (id, data) => api.post(`/api/v1/marketplace/admin/marketplace/submissions/${id}/approve`, data),
   rejectSubmission: (id, data) => api.post(`/api/v1/marketplace/admin/marketplace/submissions/${id}/reject`, data),
+  getVendorSubmission: (id) => api.get(`/api/v1/marketplace/admin/marketplace/vendor-submissions/${id}`),
+  approveVendorSubmission: (id, data) =>
+    api.post(`/api/v1/marketplace/admin/marketplace/vendor-submissions/${id}/approve`, data),
+  rejectVendorSubmission: (id, data) =>
+    api.post(`/api/v1/marketplace/admin/marketplace/vendor-submissions/${id}/reject`, data),
+  requestVendorSubmissionInfo: (id, data) =>
+    api.post(`/api/v1/marketplace/admin/marketplace/vendor-submissions/${id}/request-info`, data),
   getSettings: () => api.get('/api/v1/marketplace/admin/marketplace/settings'),
   updateSettings: (data) => api.put('/api/v1/marketplace/admin/marketplace/settings', data),
 };

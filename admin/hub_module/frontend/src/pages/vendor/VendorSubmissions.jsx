@@ -10,7 +10,7 @@ import {
   XCircleIcon,
   EyeIcon,
 } from '@heroicons/react/24/outline';
-import api from '../../services/api';
+import { vendorApi } from '../../services/api';
 
 function VendorSubmissions() {
   const navigate = useNavigate();
@@ -29,11 +29,10 @@ function VendorSubmissions() {
   const loadSubmissions = async () => {
     try {
       setLoading(true);
-      const params = new URLSearchParams();
-      if (filters.status !== 'all') params.append('status', filters.status);
-      params.append('sortBy', filters.sortBy);
+      const params = { sortBy: filters.sortBy };
+      if (filters.status !== 'all') params.status = filters.status;
 
-      const response = await api.get(`/vendor/submissions?${params.toString()}`);
+      const response = await vendorApi.getSubmissions(params);
       setSubmissions(response.data?.submissions || []);
       setError(null);
     } catch (err) {
