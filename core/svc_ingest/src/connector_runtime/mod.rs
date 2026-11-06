@@ -6,6 +6,7 @@
 //! |---|---|
 //! | [`feed`] | desired-set types and the [`BindingFeed`] over hub-api bindings |
 //! | [`plan`] | the platform-static [`OverlayProfile`] seam and [`RuntimeEnv`] |
+//! | [`profiles`] | the per-platform [`OverlayProfile`] implementations |
 //! | [`supervisor`] | the reconcile loop and per-connection supervision |
 //! | [`ready`] | [`RuntimeReady`] / [`Readiness`] and the `/readyz` status |
 //! | [`metrics`] | bounded-label Prometheus series (no community/connection ids) |
@@ -13,6 +14,7 @@
 pub mod feed;
 pub mod metrics;
 pub mod plan;
+pub mod profiles;
 pub mod ready;
 pub mod supervisor;
 
