@@ -1,12 +1,11 @@
 """Helm render assertions for the bundle platform-table DB role password.
 
-Follows the chart convention (templates/secrets.yaml, like DB_READER_PASSWORD): the value
-comes from `waddlebot.autoSecretValue` -- generated + persisted on alpha/local, explicit
-`infrastructure.postgresql.platformTablePassword` wins, and OUTSIDE alpha/local an unset
-value fails the render (that helper's fail-closed branch; a full prod render trips earlier
-unrelated required-material checks, so the policy hook is asserted from the template).
-The same value must reach the shared Secret (svc-process-rust, via secretKeyRef) and the
-db-migrate hook Secret (role provisioning). Zero documents / matches is a hard failure.
+EXPLICIT OPT-IN (`infrastructure.postgresql.platformTable.enabled`, default false). Disabled:
+no password anywhere (role stays NOLOGIN via alembic 0079) and no svc-process env. Enabled:
+the password lives ONLY in `<release>-db-credentials` (key PW_WADDLES_PLATFORM_TABLE, generated
+on alpha/local via `waddlebot.autoSecretValue`, required elsewhere) and the db-migrate hook
+Secret -- never in the envFrom'd `waddlebot-secrets` -- and only svc-process-rust (secretKeyRef)
+and the migrate Job reference it. Zero documents / matches is a hard failure.
 """
 
 from __future__ import annotations
@@ -20,7 +19,8 @@ import pytest
 import yaml
 
 _CHART = Path(__file__).resolve().parents[1]
-_KEY = "BUNDLE_PLATFORM_TABLE_PASSWORD"
+_KEY = "PW_WADDLES_PLATFORM_TABLE"
+_ENABLE = "infrastructure.postgresql.platformTable.enabled=true"
 
 
 def _render(*sets: str) -> list[dict[str, Any]]:
@@ -63,39 +63,82 @@ def _process_env(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return envs
 
 
+def _workload_refs(docs: list[dict[str, Any]]) -> set[str]:
+    """Names of workloads whose pod spec mentions the platform-table credential at all."""
+    refs: set[str] = set()
+    for d in docs:
+        if d.get("kind") not in {
+            "Deployment",
+            "StatefulSet",
+            "Job",
+            "CronJob",
+            "DaemonSet",
+        }:
+            continue
+        if "PLATFORM_TABLE" in yaml.safe_dump(d) or _KEY in yaml.safe_dump(d):
+            refs.add(d["metadata"]["name"])
+    return refs
+
+
 @pytest.fixture(scope="module")
 def helm_available() -> None:
     if not shutil.which("helm"):
         pytest.skip("helm CLI not available")
 
 
-def test_alpha_generates_one_value_for_shared_and_migrate_secrets(
+def test_disabled_by_default_renders_no_credential_anywhere(
     helm_available: None,
 ) -> None:
     docs = _render()
-    shared = _secret(docs, "-secrets")[_KEY]
-    migrate = _secret(docs, "-db-migrate-secret")["DB_PLATFORM_TABLE_PASSWORD"]
-    assert len(shared) >= 16
-    assert shared == migrate  # role provisioning and the service can never drift apart
+    text = yaml.safe_dump_all(docs)
+    assert "PLATFORM_TABLE" not in text and _KEY not in text
+    assert "DB_PLATFORM_TABLE_PASSWORD" not in _secret(docs, "-db-migrate-secret")
+    assert not [k for k in _process_env(docs) if k.startswith("BUNDLE_PLATFORM_TABLE")]
 
 
-def test_svc_process_reads_it_by_secretkeyref_never_a_literal(
+def test_enabled_alpha_autogenerates_into_db_credentials_only(
     helm_available: None,
 ) -> None:
-    env = _process_env(_render())
-    pw = env[_KEY]
+    docs = _render(_ENABLE)
+    creds = _secret(docs, "-db-credentials")[_KEY]
+    assert len(creds) >= 16
+    assert _KEY not in _secret(
+        docs, "-secrets"
+    ) and "BUNDLE_PLATFORM_TABLE_PASSWORD" not in _secret(docs, "-secrets")
+    assert _secret(docs, "-db-migrate-secret")["DB_PLATFORM_TABLE_PASSWORD"] == creds
+
+
+def test_only_svc_process_and_migrate_reference_it_never_envfrom(
+    helm_available: None,
+) -> None:
+    docs = _render(_ENABLE)
+    refs = _workload_refs(docs)
+    assert refs, "no workload references the credential"
+    assert all("svc-process" in n or "db-migrate" in n for n in refs), refs
+    assert any("svc-process" in n for n in refs) and any(
+        "db-migrate" in n for n in refs
+    )
+    for d in docs:
+        pod = (d.get("spec") or {}).get("template", {}).get("spec", {})
+        for c in pod.get("containers", []) + pod.get("initContainers", []):
+            for ef in c.get("envFrom", []):
+                assert "db-credentials" not in (ef.get("secretRef") or {}).get(
+                    "name", ""
+                )
+    env = _process_env(docs)
+    pw = env["BUNDLE_PLATFORM_TABLE_PASSWORD"]
     assert "value" not in pw
     ref = pw["valueFrom"]["secretKeyRef"]
-    assert ref["key"] == _KEY
-    assert ref["name"].endswith("-secrets")
+    assert ref["key"] == _KEY and ref["name"].endswith("-db-credentials")
     assert env["BUNDLE_PLATFORM_TABLE_USER"]["value"] == "waddles_platform_table"
 
 
 def test_explicit_value_wins(helm_available: None) -> None:
     docs = _render(
-        "infrastructure.postgresql.platformTablePassword=explicit-pt-secret-value-01"
+        _ENABLE,
+        "infrastructure.postgresql.platformTable.password=explicit-pt-secret-value-01",
     )
-    assert _secret(docs, "-secrets")[_KEY] == "explicit-pt-secret-value-01"
+    assert _secret(docs, "-db-credentials")[_KEY] == "explicit-pt-secret-value-01"
     assert (
         _secret(docs, "-db-migrate-secret")["DB_PLATFORM_TABLE_PASSWORD"]
         == "explicit-pt-secret-value-01"

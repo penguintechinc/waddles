@@ -324,10 +324,15 @@ infrastructure:
     # real traffic.
     bundleMigratorPassword: ""
     bundleRuntimePassword: ""
-    # Bundle platform-table capability role password (waddles_platform_table, alembic 0079; column-scoped
-    # to the allowlisted community_members columns + audit INSERT). Empty = auto-generated and persisted
-    # (lookup-KEEP) on alpha/local; REQUIRED (render fails) elsewhere -- same policy as readerPassword.
-    platformTablePassword: ""
+    # Bundle platform-table capability (waddles_platform_table, alembic 0079; column-scoped to the
+    # allowlisted community_members columns + audit INSERT). EXPLICIT OPT-IN, default false: the role
+    # stays NOLOGIN, migrations set no password, svc-process-rust gets no BUNDLE_PLATFORM_TABLE_* env.
+    # enabled=true -> password PW_WADDLES_PLATFORM_TABLE in <release>-db-credentials (never in the
+    # envFrom'd waddlebot-secrets): generated + kept on alpha/local, REQUIRED elsewhere (set `password`
+    # via an out-of-git override or pre-populate serviceRoles.existingSecret with that key).
+    platformTable:
+      enabled: false
+      password: ""
     # ---- Per-service database accounts (security findings H-1 / H-3) -----------------
     # `username`/`password` above are the database OWNER (superuser) credential. It is
     # rendered into <release>-db-admin (consumed ONLY by the Postgres Deployment's
