@@ -181,6 +181,10 @@ spec:
           value: {{ include "waddlebot.connectorDigest" (dict "root" $ "platform" "discord") | quote }}
         - name: SENDER_EXEC_DIGEST_YOUTUBE
           value: {{ include "waddlebot.connectorDigest" (dict "root" $ "platform" "youtube") | quote }}
+        {{- if include "waddlebot.connectorPlatformOn" (dict "root" $ "platform" "wix") }}
+        - name: SENDER_EXEC_DIGEST_WIX
+          value: {{ include "waddlebot.connectorDigest" (dict "root" $ "platform" "wix") | quote }}
+        {{- end }}
         # Public Helix application client id, from the operator-managed platform-credentials Secret.
         - name: TWITCH_CLIENT_ID
           valueFrom:

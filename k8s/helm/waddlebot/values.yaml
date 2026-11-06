@@ -1040,6 +1040,9 @@ pipeline:
       twitch: ""
       discord: ""
       youtube: ""
+      # Wix webhook connector (waddles.core.service.wix); required only when
+      # svcIngest.connectorRuntime.connector.wix.enabled.
+      wix: ""
 
   # T10 (v3 demo) — pre-install/pre-upgrade Helm hook Job (templates/migrations-job.yaml)
   # that applies config/postgres/migrations/*.sql to completion before any pipeline
@@ -1633,6 +1636,10 @@ pipeline:
             enabled: false
           youtube:
             enabled: false
+          # Wix app webhooks (inbound-only, verified RS256 JWT). Needs webhookPlatforms to list "wix"
+          # (+ routeKeySecret) and pipeline.connectors.digests.wix; see docs/connector-wix.md.
+          wix:
+            enabled: false
         # The Valkey IDENTIFY budget is wired in the binary; the chart default stays false so beta/
         # gamma/production REJECT discord until it is deliberately enabled there (values-alpha,
         # values-dal2alpha and values-local set true).
@@ -1644,7 +1651,7 @@ pipeline:
         # CONNECTOR_HEARTBEAT_ENABLED on the Rust svc-ingest (boot.rs ENV_HEARTBEAT, strict bool; the
         # Rust default when unset is false). Driver heartbeat baseline (`ingest.connector-heartbeat`).
         heartbeatEnabled: false
-        # csv-rendered subset of [twitch, discord] whose webhook routes are registered.
+        # csv-rendered subset of [twitch, discord, wix] whose webhook routes are registered.
         webhookPlatforms: []
         # HMAC key deriving webhook route keys: an EXISTING Secret only (never a literal here).
         # Required when webhookPlatforms is non-empty.

@@ -60,6 +60,7 @@ pub mod types;
 pub mod webhook;
 pub mod webhook_verify;
 pub mod wire_invoker;
+pub mod wix_jwt;
 pub mod ws;
 
 pub use driver::{

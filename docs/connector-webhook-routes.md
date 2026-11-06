@@ -6,7 +6,7 @@ Generic signed-webhook intake: `POST /intake/webhook/{route_key}`. Spec: `docs/s
 
 | Env | Default | Meaning |
 |---|---|---|
-| `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` | empty | csv of platforms that register routes (`discord`; `twitch` is supported but NEVER a default) |
+| `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` | empty | csv of platforms that register routes (`discord`, `wix`; `twitch` is supported but NEVER a default) |
 | `CONNECTOR_ROUTE_KEY_SECRET` | none | >= 32 bytes; required when any platform is listed; env/secret only |
 
 - Empty list: `AppState.webhook` stays `None`, the route answers 503 (fail loud).
@@ -26,6 +26,12 @@ Generic signed-webhook intake: `POST /intake/webhook/{route_key}`. Spec: `docs/s
 - Host-side responses (verified requests only): PING -> `{"type":1}`; command -> `{"type":5}`; component/modal -> `{"type":6}`; autocomplete -> type 8 with no choices; other types -> 400.
 - 3 s deadline: the ingress runs detached and the handler waits 2.5 s; a stalled secret/dedup backend answers 503, never hangs.
 - Invalid signature answers 403 (uniform). Discord's endpoint-validation check expects 401 for a bad signature; if the dashboard refuses the URL, switch the Discord route's rejection to 401.
+
+## Wix app webhooks
+
+- Body is the raw RS256 JWT (no signature headers). Key = the connection's bearer secret (Wix app public key), per request via `connection_resolver`; the signed `instanceId` must equal the connection's `instance_id`. Freshness from `iat`/`exp`; replay key = Wix event id. Full contract and event mapping: `docs/connector-wix.md`.
+- Requires `CONNECTOR_WIX_ENABLED=true` (selector) AND `wix` in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`; helm `connectorRuntime.connector.wix.enabled` + `webhookPlatforms: [wix]` + `pipeline.connectors.digests.wix`.
+- Rejections stay uniform 403; the route answers 200 to Wix within its 1250 ms budget (verify + Valkey `SET NX PX`).
 
 ## Replay and abuse limits
 
