@@ -671,7 +671,11 @@ async def _load_authorized_source(source_id: int) -> bool:
     row = await asyncio.to_thread(lambda: _dal().ai_knowledge_sources[source_id])
     if row is None:
         return False
-    return await _scope_allowed(row.community_id, row.vendor_id)
+    if not await _scope_allowed(row.community_id, row.vendor_id):
+        return False
+    # Vendor-owned sources stay vendor-controlled even when also community-scoped
+    # (confused deputy: a community admin must not drive the vendor's stored credential).
+    return row.vendor_id is None or await _scope_allowed(None, row.vendor_id)
 
 
 async def _require_query_scope(community_id: int | None) -> tuple[dict[str, Any], int] | None:
