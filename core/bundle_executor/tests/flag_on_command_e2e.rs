@@ -29,11 +29,10 @@
 //!     flags-env-baseline, alpha 2026-10-04).
 //!
 //! Requires `docker` on PATH (same requirement as
-//! `scripts/verify-core-bundles-reproducible.sh`) -- wired as a FATAL
-//! check into this crate's existing `cargo test` gate
-//! (`.github/workflows/rust-bundle-executor.yml` ->
-//! `rust-crate-ci.yml`, every push/PR touching `core/bundle_executor/**`),
-//! and reachable directly via `make test-bundle-flag-on-command-e2e`.
+//! `scripts/verify-core-bundles-reproducible.sh`). Main tier only: gated
+//! behind the `e2e-main-tier` cargo feature (`[[test]] required-features`),
+//! run FATAL by `.github/workflows/rust-bundle-executor-e2e.yml` (PRs into
+//! main + push to main) and via `make test-bundle-flag-on-command-e2e`.
 //!
 //! **Post-activation-only update:** app bundles no longer gate on feature
 //! flags (Global:INSTALLED -> Tenant:ENABLED -> Community:ACTIVATED is the

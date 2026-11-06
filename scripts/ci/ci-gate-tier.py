@@ -37,6 +37,7 @@ MAIN_ONLY_PATTERNS = [
     r"^kind (install/upgrade|upgrade-path)",
     r"^Rust connector-e2e",
     r"^Rust tool-invoke-e2e",
+    r"^Rust bundle-executor e2e",
 ]
 
 # Always-reporting fast-tier checks (a skipped job still reports); missing = FAIL.
@@ -51,7 +52,10 @@ FAST_REQUIRED_PRESENT = [
     "Security & Code Quality",
 ]
 # Main tier = everything the fast tier requires plus the full-tier extras.
-MAIN_EXTRA_PRESENT: list = []  # reserved: full-tier-only always-reporting checks
+# Full-tier-only always-reporting checks (workflow has no path filter on PRs into main).
+MAIN_EXTRA_PRESENT: list = [
+    "Rust bundle-executor e2e (flag-on command, main tier)",
+]
 
 
 def tier_for_base(base: str) -> str:

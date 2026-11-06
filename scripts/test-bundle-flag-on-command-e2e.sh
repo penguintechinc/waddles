@@ -7,11 +7,10 @@
 #
 # Requires `docker` (to freshly compile bundles/python/eightball to wasm via
 # the exact componentize-py invocation bundles/Dockerfile.core-bundles's
-# python-bundles-builder stage uses) and a Rust 1.97.x toolchain. Already
-# runs as part of this crate's own `cargo test` gate
-# (.github/workflows/rust-bundle-executor.yml -> rust-crate-ci.yml, FATAL on
-# every push/PR touching core/bundle_executor/**) -- this script is a
-# standalone, directly-invocable entry point for local/manual runs.
+# python-bundles-builder stage uses) and a Rust 1.97.x toolchain. Gated
+# behind the `e2e-main-tier` cargo feature: runs in CI only for PRs into main /
+# push to main (.github/workflows/rust-bundle-executor-e2e.yml), not in the
+# release-PR coverage job. This script is the local/manual entry point.
 #
 # Usage: scripts/test-bundle-flag-on-command-e2e.sh   (make test-bundle-flag-on-command-e2e)
 
@@ -25,4 +24,4 @@ fi
 
 cd core/bundle_executor
 echo "test-bundle-flag-on-command-e2e: running flag_on_command_e2e (real wasm + real flags host capability + Docker-ENV baseline)"
-cargo test --locked --test flag_on_command_e2e -- --nocapture
+cargo test --locked --features e2e-main-tier --test flag_on_command_e2e -- --nocapture

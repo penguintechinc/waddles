@@ -376,8 +376,8 @@ verify-core-bundles-reproducible:
 # bundles/python/eightball to wasm, loads it into the real bundle-executor
 # wasmtime host with the real `flags` capability wired, drives it through
 # the Docker-ENV flag baseline -- no mocking at the WIT/flags/wasm boundary.
-# Already FATAL via this crate's own `cargo test` gate
-# (.github/workflows/rust-bundle-executor.yml); this target is the direct
+# Feature `e2e-main-tier`; FATAL in CI for PRs into main / push to main
+# (.github/workflows/rust-bundle-executor-e2e.yml); this target is the direct
 # local/manual entry point.
 test-bundle-flag-on-command-e2e:
 	@bash scripts/test-bundle-flag-on-command-e2e.sh
