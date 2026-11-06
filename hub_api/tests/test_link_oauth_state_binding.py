@@ -93,7 +93,9 @@ def sessions(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     monkeypatch.setattr(
         oauth_service, "_find_or_create_user_from_oauth", AsyncMock(return_value=object())
     )
-    monkeypatch.setattr(oauth_service, "create_oauth_exchange_code", AsyncMock(return_value="xc"))
+    monkeypatch.setattr(
+        oauth_service, "create_oauth_exchange_code", AsyncMock(return_value=("xc", "n"))
+    )
     return minted
 
 
