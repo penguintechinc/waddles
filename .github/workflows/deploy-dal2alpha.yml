@@ -53,15 +53,35 @@ env:
   IMAGE_PREFIX: ghcr.io/penguintechinc/waddles
 
 jobs:
+  # alpha-<epoch64> (five-tier convention), computed ONCE so every matrix leg and
+  # the deploy job share the same tag. No GitHub API call: the stock ARC runner
+  # image ships no `gh`, and a bare GITHUB_TOKEN here has no `actions: read`.
+  # A "re-run failed jobs" keeps this job's output, so the tag stays stable.
+  prepare:
+    name: Compute alpha tag
+    if: github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X'
+    runs-on: dal2-alpha
+    permissions: {}
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Compute alpha tag
+        id: tag
+        run: |
+          set -euo pipefail
+          EPOCH="$(date -u +%s)"
+          [[ "${EPOCH}" =~ ^[0-9]{10,}$ ]] || { echo "::error::could not derive epoch (got '${EPOCH}')" >&2; exit 1; }
+          echo "tag=alpha-${EPOCH}" >> "$GITHUB_OUTPUT"
+          echo "alpha tag: alpha-${EPOCH}"
+
   build:
     name: Build ${{ matrix.service }}
+    needs: prepare
     if: github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X'
     runs-on: dal2-alpha
     permissions:
       contents: read
       packages: write
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
     strategy:
       fail-fast: true
       matrix:
@@ -86,21 +106,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # alpha-<epoch64> (five-tier convention). Derived from the run's own
-      # created-at so every matrix leg and the deploy job agree on ONE tag
-      # without a separate coordinating job.
-      - name: Compute alpha tag
-        id: tag
-        env:
-          RUN_ID: ${{ github.run_id }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # run_id is monotonic per repo; epoch comes from the run's first attempt start
-          EPOCH="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '.run_started_at | fromdateiso8601')"
-          [ -n "${EPOCH}" ] || { echo "::error::could not derive epoch" >&2; exit 1; }
-          echo "tag=alpha-${EPOCH}" >> "$GITHUB_OUTPUT"
-
       - name: Set up Docker Buildx (remote buildkitd)
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
         with:
@@ -123,7 +128,7 @@ jobs:
           build-contexts: ${{ matrix.extra_ctx }}
           platforms: linux/amd64
           push: true
-          tags: ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ steps.tag.outputs.tag }}${{ matrix.suffix }}
+          tags: ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ needs.prepare.outputs.tag }}${{ matrix.suffix }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
           # Registry-backed cache: survives the dal2 runner's docker prune.
           cache-from: type=registry,ref=${{ env.IMAGE_PREFIX }}/buildcache/${{ matrix.service }}:alpha
@@ -131,7 +136,7 @@ jobs:
 
   deploy:
     name: Deploy to dal2-alpha
-    needs: build
+    needs: [prepare, build]
     if: github.repository == 'penguintechinc/waddles' && github.ref == 'refs/heads/release/v3.0.X'
     runs-on: dal2-alpha
     # Creates/updates the GitHub Environment + Deployment; job failure = failure status.
@@ -141,7 +146,7 @@ jobs:
     permissions:
       contents: read
     env:
-      TAG: ${{ needs.build.outputs.tag }}
+      TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE: waddlebot
       NAMESPACE: waddlebot
     steps:
@@ -150,11 +155,30 @@ jobs:
         with:
           persist-credentials: false
 
-      # ARC runner image ships no helm. Pinned v3 (helm v4 breaks fresh installs, helm#31361).
-      - name: Install helm v3.17.3
-        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2  # v5
-        with:
-          version: v3.17.3
+      # The stock ARC runner image (actions-runner) ships NO helm/kubectl/gh. Install
+      # pinned releases into a user-writable dir (no sudo), SHA256 verified against
+      # digests pinned here. helm stays v3 (helm v4 breaks fresh installs, helm#31361);
+      # kubectl tracks the alpha cluster's MicroK8s minor (v1.35).
+      - name: Install helm v3.17.3 and kubectl v1.35.10
+        env:
+          HELM_VERSION: v3.17.3
+          HELM_SHA256: ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd
+          KUBECTL_VERSION: v1.35.10
+          KUBECTL_SHA256: c49a28f1f4efc4d475ed05f47f2ce8e563bf7bef69ed77fe1b924ea6d83b6327
+        run: |
+          set -euo pipefail
+          BIN="${RUNNER_TEMP}/bin"; DL="${RUNNER_TEMP}/dl"
+          mkdir -p "${BIN}" "${DL}"
+          curl -fsSL --retry 3 -o "${DL}/helm.tgz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${DL}/helm.tgz" | sha256sum -c -
+          tar -xzf "${DL}/helm.tgz" -C "${DL}" linux-amd64/helm
+          install -m 0755 "${DL}/linux-amd64/helm" "${BIN}/helm"
+          curl -fsSL --retry 3 -o "${DL}/kubectl" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  ${DL}/kubectl" | sha256sum -c -
+          install -m 0755 "${DL}/kubectl" "${BIN}/kubectl"
+          echo "${BIN}" >> "$GITHUB_PATH"
+          "${BIN}/helm" version --short
+          "${BIN}/kubectl" version --client
 
       - name: Helm upgrade
         run: |
