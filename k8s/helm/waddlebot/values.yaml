@@ -3438,6 +3438,11 @@ serviceJwt:
         # feature/egress-proxy-service -- required to call core/egress_proxy
         # for any bundle net.http/CONNECT egress.
         - "egress:connect"
+        # feature/harness-media-hubapi -- the media stage resolves a community's Gemini BYOK key
+        # (POST /api/v1/internal/media/byok/resolve) and the effective tier (.../effective-tier).
+        # Granted to this identity alone; hub-api additionally allow-lists the caller by name.
+        - "media:byok:resolve"
+        - "media:tier:resolve"
     svc-action:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-action"
       serviceAccount: svc-action

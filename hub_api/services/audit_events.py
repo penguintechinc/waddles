@@ -485,11 +485,14 @@ _APPS = "/api/v1/apps/community/<int:community_id>"
 _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]], ...]] = (
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_BYOK_KEY_SET),
-        (("PUT", f"{_ADM}/ai/byok-keys"),),
+        (("PUT", f"{_ADM}/ai/byok-keys"), ("PUT", f"{_ADM}/media/byok-keys")),
     ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_BYOK_KEY_DELETED),
-        (("DELETE", f"{_ADM}/ai/byok-keys/<provider>"),),
+        (
+            ("DELETE", f"{_ADM}/ai/byok-keys/<provider>"),
+            ("DELETE", f"{_ADM}/media/byok-keys/<provider>"),
+        ),
     ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_STREAM_KEY_REGENERATED),
