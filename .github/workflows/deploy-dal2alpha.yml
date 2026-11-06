@@ -94,9 +94,9 @@ jobs:
           - { service: reputation-module, file: core/reputation_module/Dockerfile, context: ".", extra_ctx: "", target: "", suffix: "" }
           - { service: bundle-executor, file: core/bundle_executor/Dockerfile.rust, context: ".", extra_ctx: "", target: "", suffix: "" }
           - { service: svc-ingest-rust, file: core/svc_ingest/Dockerfile.rust, context: core, extra_ctx: "", target: "", suffix: "" }
-          - { service: svc-process-rust, file: core/svc_process/Dockerfile.rust, context: core, extra_ctx: "proto=proto", target: "", suffix: "" }
-          - { service: svc-action-rust, file: core/svc_action/Dockerfile.rust, context: core, extra_ctx: "proto=proto", target: "", suffix: "" }
-          - { service: svc-presentation-rust, file: core/svc_presentation/Dockerfile.rust, context: core, extra_ctx: "proto=proto", target: "", suffix: "" }
+          - { service: svc-process-rust, file: core/svc_process/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
+          - { service: svc-action-rust, file: core/svc_action/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
+          - { service: svc-presentation-rust, file: core/svc_presentation/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }
           - { service: waddlebot-egress-proxy, file: core/egress_proxy/Dockerfile.rust, context: core, extra_ctx: "", target: "", suffix: "" }
           # svc-streaming: cpu variant only; chart appends -<variant> to the tag.
           - { service: svc-streaming, file: core/svc_streaming/Dockerfile.rust, context: core/svc_streaming, extra_ctx: "", target: cpu, suffix: "-cpu" }
