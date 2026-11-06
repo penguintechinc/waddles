@@ -168,6 +168,9 @@ impl PipelineProgress {
     }
 }
 
+/// Poll interval of [`StdinHandle::wait_attached`].
+const STDIN_ATTACH_POLL: Duration = Duration::from_millis(10);
+
 /// Handle for writing raw ingest bytes (RTMP/SRT listener output) into a
 /// running pipeline's `ffmpeg` stdin. `ffmpeg-sidecar`'s
 /// `FfmpegChild::take_stdin()` permanently takes ownership of the stdin
@@ -182,6 +185,32 @@ pub struct StdinHandle {
 }
 
 impl StdinHandle {
+    /// Waits until the supervisor has spawned ffmpeg and attached its stdin.
+    ///
+    /// `start()` returns before the monitor task has spawned the child, so a
+    /// pump that begins writing immediately loses the head of the stream --
+    /// the FLV header, `onMetaData` and above all the AVC/AAC sequence
+    /// headers -- and ffmpeg then fails with "No start code is found" for
+    /// the rest of the session (found by `tests/e2e_real_media.rs`, which
+    /// uses a real ffmpeg; a fake ffmpeg never noticed the dropped bytes).
+    /// Polls every [`STDIN_ATTACH_POLL`]; errors when `timeout` elapses
+    /// (spawn failed or is wedged) instead of letting the caller write into
+    /// the void.
+    pub async fn wait_attached(&self, timeout: Duration) -> Result<(), PipelineError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if lock(&self.slot.stdin).is_some() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(PipelineError::Other(anyhow::anyhow!(
+                    "ffmpeg stdin was not attached within {timeout:?} (spawn failed or still pending)"
+                )));
+            }
+            tokio::time::sleep(STDIN_ATTACH_POLL).await;
+        }
+    }
+
     /// Writes `bytes` to the pipeline's ffmpeg stdin. Blocking under the
     /// hood (`std::process::ChildStdin`) -- callers on an async ingest
     /// path should wrap sustained writes in `tokio::task::spawn_blocking`.
@@ -1745,6 +1774,45 @@ mod tests {
             .await
             .expect("try_wait")
             .expect("group SIGKILL must terminate the leader");
+    }
+
+    #[tokio::test]
+    async fn wait_attached_errors_when_stdin_never_attaches() {
+        let handle = StdinHandle {
+            slot: Arc::new(test_slot()),
+        };
+        let err = handle
+            .wait_attached(Duration::from_millis(60))
+            .await
+            .expect_err("no stdin was ever attached");
+        assert!(err.to_string().contains("not attached"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wait_attached_returns_once_stdin_appears_and_write_then_works() {
+        let slot = Arc::new(test_slot());
+        let handle = StdinHandle { slot: slot.clone() };
+        let mut cat = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn cat");
+        let stdin = cat.stdin.take();
+        let attach_slot = slot.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            *lock(&attach_slot.stdin) = stdin;
+        });
+        // Before the fix the first bytes raced this attach and were dropped.
+        assert!(handle.write(b"head").is_err(), "not attached yet");
+        handle
+            .wait_attached(Duration::from_secs(5))
+            .await
+            .expect("attaches within the timeout");
+        handle.write(b"head").expect("write after attach");
+        close_stdin(Uuid::new_v4(), &slot);
+        assert!(cat.wait().expect("cat exits on EOF").success());
     }
 
     #[cfg(unix)]

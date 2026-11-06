@@ -395,6 +395,8 @@ Env baselines, default OFF, strict booleans, read identically by the Rust and Py
 | `OVERLAY_YOUTUBE_ENABLED` | Python `youtube_live_poll` off |
 | `CONNECTOR_RUNTIME_ENABLED`, `CONNECTOR_RECONCILE_INTERVAL_SECS` (60), `CONNECTOR_MAX_CONNECTIONS` (500), `CONNECTOR_START_CONCURRENCY` (8), `CONNECTOR_DISCORD_START_PACE_MS` (5500), `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` | see spec 2026-11-05 section 1.3 |
 
+**Legacy suppression (Python svc-ingest).** The per-platform overlay baseline alone decides: overlay ON means that platform's Python receiver factory is never called (one INFO line, platform only). `CONNECTOR_RUNTIME_ENABLED` is not an input (Rust treats it as a consistency check only), and there is deliberately no `waddles.overlay-<platform>` flag fetch: the env baseline IS that flag's value (spec section 5), so there is no flag-fetch failure mode, unset means legacy keeps running, and Rust and Python cannot both own a platform. Discord overlay ON is fatal in both services until `IDENTIFY_BUDGET_READY`, so Python never parks Discord and keeps running alongside the overlay. Parity: `tests/fixtures/overlay_selector_table.json` is one decision table asserted by `tests/test_overlay_selector.py` and the Rust `shared_decision_table_parity`.
+
 Any overlay ON validates, in order and naming the item: `INGEST_DYNAMIC_CONNECTIONS`, `HUB_API_GRPC_ENDPOINT`, `SERVICE_JWT_TOKEN_ENDPOINT`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_SERVER_CERT_FILE`/`_KEY_FILE`/`HOST_API_CLIENT_CA_FILE`/`HOST_API_CLIENT_IDENTITY`, spine config, `CONNECTOR_ROUTE_KEY_SECRET` (when webhooks listed). `/readyz` reports each overlay platform (`overlay[]`, reason while not ready).
 
 ## Outbound executor — boot wiring & rollout order (P6a, `src/outbound_boot.rs`)
@@ -432,6 +434,28 @@ refused.
 `pin_sig_legacy`), (2) deploy `svc_ingest` with the flag OFF, (3) set `connectorTools.digests.*`, (4) set
 `connectorTools.enabled=true`. **Rollback = flag OFF** (restarts onto the legacy drains; in-flight queue
 entries are consumed by whichever path is running).
+
+**Connector host-call bridge (`connector/host_calls.rs`, runtime spec decision 2.4).** `ExecutorLink::with_host_calls(Arc<dyn
+HostCallHandler>)` plugs in `OverlayHostCalls`, the explicit allowlist for the host-calls an overlay makes (default stays deny-all).
+The executor stamps `args._scope = {connection_id}` after guest code for every export that carries a `ConnectionCtx`; the handler
+maps it through the host-owned `ActiveConnections` table (`connection_id -> platform/community/tenant`) to a `CallScope`.
+`tool-call`/`build-request` exports carry no ctx, so their host-calls are UNSCOPED and **denied** (typed `denied`/`unscoped_call`,
+counted, no fallback). Also denied: unknown/stale connection, unknown overlay, an overlay acting on another platform's
+connection, and any op needing a grant the overlay's `hub-manifest.yaml` lacks (twitch: `connector.pii.read`, `flags.read`;
+discord: `connector.pii.read`, `platform.log`; youtube: `connector.pii.read`; a unit test parses the real manifests).
+
+| Capability / op | Behavior |
+|---|---|
+| `context get-context` | tenant + community from the `CallScope` (needs `connector.pii.read`) |
+| `db identity.lookup` | `platform-identity` only; `args.tenant`/`platform` cross-checked against the scope; returns `{uuid, linked:false, handle:null, display_name:null, tenant}` via `HubIdentityTokenizer` (`MintEphemeralPseudonyms`, scope `identity:ephemeral:mint`, no handle sent); 200/s per overlay; uuid-kind (detokenize) denied |
+| `flags enabled/tier` | own `waddles.overlay-<platform>` key only, answered from the env baseline (needs `flags.read`) |
+| `log write` | fixed-field PII-free line, guest text dropped (needs `platform.log`) |
+| `clock now-millis/now-rfc3339/monotonic-nanos` | served |
+| everything else (http, kv, relay, other db ops) | `denied` / `not_serviced` |
+
+Limits: 2 s deadline, 16 in flight per overlay, 4 per connection (over cap = `quota_exceeded`, never queued). Metrics:
+`connector_host_call_total{capability,outcome}`, `connector_host_call_denied_total{reason}` (bounded labels, no ids). Not yet wired
+at boot: the supervisor must `activate`/`deactivate` each connection, and `build-request` flag reads need a scoped path (see PR notes).
 
 **Known prerequisite outside this crate:** a `bundle-executor` must dial this pod's host-api port with the
 three connectors pinned (`Executor::pin_connector`) and a host-call bridge so the twitch overlay's

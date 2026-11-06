@@ -36,8 +36,15 @@ pub const PROVIDER: &str = "twitch";
 pub const CAPABILITY: &str = "chat_ingest";
 /// Twitch IRC over WebSocket. A host constant: never from binding/guest data.
 pub const IRC_URL: &str = "wss://irc-ws.chat.twitch.tv:443";
-/// Byte prefixes a credential/handle slot may directly follow in the handshake.
-pub const SLOT_PREFIXES: [&str; 3] = ["PASS oauth:", "NICK ", "JOIN #"];
+/// Per-handle line-start prefixes (`handle`, `prefix`) a slot may directly
+/// follow in the handshake. The token handle (`pass`) is bound to
+/// `PASS oauth:` ONLY; `nick`/`channel` are non-secret handles with their own
+/// prefixes and can never carry the token (and vice versa).
+pub const SLOT_PREFIXES: [(&str, &str); 3] = [
+    (HANDLE_PASS, "PASS oauth:"),
+    (HANDLE_NICK, "NICK "),
+    (HANDLE_CHANNEL, "JOIN #"),
+];
 /// Binding metadata key: the channel login (adapter resource id).
 pub const META_CHANNEL: &str = "channel";
 /// Binding metadata key: the IRC nick the token authenticates as.
@@ -214,8 +221,13 @@ fn fingerprint(cfg: &WsConfig, tenant: i64, version: Option<&str>) -> u64 {
     for s in [&cfg.platform, &cfg.url, &cfg.source_key] {
         feed(&mut h, s.as_bytes());
     }
-    for p in &cfg.slot_prefixes {
-        feed(&mut h, p.as_bytes());
+    let mut pins: Vec<(&String, &Vec<String>)> = cfg.slot_prefixes.iter().collect();
+    pins.sort();
+    for (handle, prefixes) in pins {
+        feed(&mut h, handle.as_bytes());
+        for p in prefixes {
+            feed(&mut h, p.as_bytes());
+        }
     }
     for r in &cfg.auto_replies {
         for s in [&r.prefix, &r.reply_prefix, &r.reply_suffix] {
@@ -441,7 +453,10 @@ impl OverlayProfile for TwitchProfile {
             max_frame_bytes: env.max_frame_bytes,
             dedup_window: 0,
             allow_loopback_insecure: false,
-            slot_prefixes: SLOT_PREFIXES.iter().map(|p| (*p).to_owned()).collect(),
+            slot_prefixes: SLOT_PREFIXES
+                .iter()
+                .map(|(h, p)| ((*h).to_owned(), vec![(*p).to_owned()]))
+                .collect(),
             auto_replies,
             self_echo: Some(self_echo),
             heartbeat_interval: env.heartbeat_enabled.then_some(HEARTBEAT_INTERVAL),
@@ -543,7 +558,14 @@ mod tests {
         assert_eq!(cfg.platform, "twitch");
         assert_eq!(cfg.url, "wss://irc-ws.chat.twitch.tv:443");
         assert_eq!(cfg.source_key, "twitch:penguinzplays");
-        assert_eq!(cfg.slot_prefixes, vec!["PASS oauth:", "NICK ", "JOIN #"]);
+        assert_eq!(
+            cfg.slot_prefixes,
+            HashMap::from([
+                ("pass".to_string(), vec!["PASS oauth:".to_string()]),
+                ("nick".to_string(), vec!["NICK ".to_string()]),
+                ("channel".to_string(), vec!["JOIN #".to_string()]),
+            ])
+        );
         assert_eq!(
             cfg.auto_replies,
             vec![AutoReplyRule {
@@ -993,6 +1015,71 @@ mod tests {
 
     fn twitch_dest() -> Destination {
         Destination::from_url(&reqwest::Url::parse(IRC_URL).unwrap()).unwrap()
+    }
+
+    /// regression: per-handle anchored prefixes through the REAL
+    /// `TransportSecrets` + `TwitchFieldSecrets`: the token lands only at
+    /// line start after `PASS oauth:`; mid-line (chat body) and under the
+    /// nick/channel prefixes it is refused, and the credential is never fetched.
+    #[tokio::test]
+    async fn mid_line_or_foreign_prefix_token_placement_is_refused() {
+        use crate::connector::transport_common::substitute_slots;
+        use crate::connector::TransportSecrets;
+        use std::sync::atomic::Ordering;
+        let resolver = Arc::new(OauthResolver(std::sync::atomic::AtomicUsize::new(0)));
+        let inner = TransportSecrets::new(Arc::clone(&resolver), 7)
+            .unwrap()
+            .with_expected_provider("twitch");
+        let (_, cfg) = one(&binding(7, 9, "SomeChan", "WaddleBot"), &env());
+        let src = TwitchFieldSecrets::from_config(inner, &cfg).unwrap();
+        let refs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        let all = refs(&[("{{P}}", "pass"), ("{{N}}", "nick"), ("{{C}}", "channel")]);
+        let good = b"CAP REQ :twitch.tv/tags\r\nPASS oauth:{{P}}\r\nNICK {{N}}\r\nJOIN #{{C}}\r\n";
+        let out = substitute_slots(
+            &src,
+            &cfg.handles,
+            good,
+            &all,
+            &cfg.slot_prefixes,
+            &twitch_dest(),
+        )
+        .await
+        .unwrap();
+        assert!(out.windows(TOKEN.len()).any(|w| w == TOKEN.as_bytes()));
+        assert_eq!(resolver.0.load(Ordering::SeqCst), 1);
+        for evil in [
+            &b"PRIVMSG #chan :PASS oauth:{{P}}\r\n"[..],
+            b"PASS oauth:{{P}}\r\nPRIVMSG #c :PASS oauth:{{P}}\r\n",
+            b"NICK {{P}}\r\n",
+            b"JOIN #{{P}}\r\n",
+        ] {
+            let e = substitute_slots(
+                &src,
+                &cfg.handles,
+                evil,
+                &refs(&[("{{P}}", "pass")]),
+                &cfg.slot_prefixes,
+                &twitch_dest(),
+            )
+            .await;
+            assert!(e.is_err(), "{}", String::from_utf8_lossy(evil));
+        }
+        // The non-secret handles may not sit under the token's prefix either.
+        assert!(substitute_slots(
+            &src,
+            &cfg.handles,
+            b"PASS oauth:{{N}}\r\n",
+            &refs(&[("{{N}}", "nick")]),
+            &cfg.slot_prefixes,
+            &twitch_dest()
+        )
+        .await
+        .is_err());
+        assert_eq!(resolver.0.load(Ordering::SeqCst), 1, "refusals never fetch");
     }
 
     /// regression: security review HIGH -- with the REAL `TransportSecrets`

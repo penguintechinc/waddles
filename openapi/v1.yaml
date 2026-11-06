@@ -7190,6 +7190,49 @@ paths:
                 type: object
           description: Response DTO for banner endpoints.
       summary: Upload a community banner (moderator+).
+  /api/v1/admin/{community_id}/browser-sources:
+    get:
+      description: ''
+      operationId: get_get_browser_sources
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        default:
+          description: Undocumented response
+      summary: List browser-source URLs (ticker/media/general) for a community admin.
+  /api/v1/admin/{community_id}/browser-sources/regenerate:
+    post:
+      description: ''
+      operationId: post_regenerate_browser_sources
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST /:communityId/browser-sources/regenerate`.
+              properties:
+                sourceType:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Sourcetype
+              title: RegenerateBrowserSourcesRequest
+              type: object
+      responses:
+        default:
+          description: Undocumented response
+      summary: Rotate the view key behind every browser-source URL (one credential
+        per community).
   /api/v1/admin/{community_id}/calendar/events:
     get:
       operationId: get_adm_list_events

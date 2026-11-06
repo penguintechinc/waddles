@@ -43,7 +43,7 @@ describe('App.jsx route gates', () => {
   it('wraps every contract-gap page in a registered ServedFeature', () => {
     const byPage = Object.fromEntries(gated.map(([page, feature]) => [page, feature]));
     for (const page of [
-      'AdminModules', 'AdminStreamOverlays', 'AdminConnectedPlatforms', 'AdminSecurity', 'AdminMusicDashboard', 'AdminAIKnowledge',
+      'AdminModules', 'AdminConnectedPlatforms', 'AdminSecurity', 'AdminMusicDashboard', 'AdminAIKnowledge',
       'VendorGithubSync', 'VendorSubmissions', 'AdminMarketplaceModuleDetail',
     ]) {
       expect(byPage[page], `${page} must be gated`).toBeDefined();
@@ -65,16 +65,17 @@ describe('App.jsx route gates', () => {
 });
 
 describe('AdminHome', () => {
-  it('counts members + modules only; browser sources and domains show "not available yet" with no calls', async () => {
+  it('counts members, modules and browser sources; domains show "not available yet" with no call', async () => {
     http = stubHttp([api, apiClient], {
       'GET /api/v1/admin/7/members': { pagination: { total: 12 } },
       'GET /api/v1/admin/7/modules': { modules: [{}, {}, {}] },
+      'GET /api/v1/admin/7/browser-sources': { sources: [{}, {}] },
     });
     at(<AdminHome />, '/admin/7', '/admin/:communityId');
     expect(await screen.findByText('12')).toBeInTheDocument();
     expect(screen.getByText('3')).toBeInTheDocument();
-    expect(screen.getAllByTestId('not-available-yet').map((n) => n.getAttribute('data-feature'))).toEqual(['browser-sources', 'custom-domains']);
-    expect(http.seen.map((r) => r.url).sort()).toEqual(['/api/v1/admin/7/members', '/api/v1/admin/7/modules']);
+    expect(screen.getAllByTestId('not-available-yet').map((n) => n.getAttribute('data-feature'))).toEqual(['custom-domains']);
+    expect(http.seen.map((r) => r.url).sort()).toEqual(['/api/v1/admin/7/browser-sources', '/api/v1/admin/7/members', '/api/v1/admin/7/modules']);
   });
 });
 
@@ -83,6 +84,7 @@ describe('AdminHome resilience', () => {
     http = stubHttp([api, apiClient], {
       'GET /api/v1/admin/7/members': {},
       'GET /api/v1/admin/7/modules': {},
+      'GET /api/v1/admin/7/browser-sources': {},
     });
     at(<AdminHome />, '/admin/7', '/admin/:communityId');
     expect((await screen.findAllByText('0')).length).toBeGreaterThanOrEqual(2);
