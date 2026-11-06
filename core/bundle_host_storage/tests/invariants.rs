@@ -11,9 +11,20 @@ use bytes::Bytes;
 
 #[derive(Default)]
 struct Rec(Mutex<Vec<AuditEvent>>);
+#[async_trait::async_trait]
 impl AuditSink for Rec {
-    fn record(&self, e: AuditEvent) {
+    async fn record(&self, e: AuditEvent) -> Result<(), StorageError> {
         self.0.lock().expect("audit lock").push(e);
+        Ok(())
+    }
+}
+
+/// Sink that always fails -- proves audit-first / fail-closed behaviour.
+struct FailingSink;
+#[async_trait::async_trait]
+impl AuditSink for FailingSink {
+    async fn record(&self, _e: AuditEvent) -> Result<(), StorageError> {
+        Err(StorageError::Backend("audit down".into()))
     }
 }
 
@@ -660,4 +671,94 @@ async fn system_tag_mismatch_hidden_even_with_matching_app_bundle_tag_and_correc
         .unwrap()
         .objects
         .is_empty());
+}
+
+#[tokio::test]
+async fn failed_audit_fails_allowed_cross_prefix_and_tag_ops_without_effect() {
+    let b = Arc::new(MemoryBackend::new());
+    // Seed through a working host, then drive the same backend through a failing-audit host.
+    let ok = StorageHost::with_rate_limit(b.clone(), Arc::new(Rec::default()), 1000);
+    seed(&ok, "k.mp4", &[&format!("app-bundle:{CONSUMER}")]).await;
+    seed(&ok, "own.mp4", &[]).await;
+    let h = StorageHost::with_rate_limit(b.clone(), Arc::new(FailingSink), 1000);
+    let c = consumer_scope();
+    // cross-prefix ALLOWED paths fail when the audit cannot be written
+    assert!(matches!(
+        h.get(&c, Some(OWNER), "k.mp4").await,
+        Err(StorageError::Backend(_))
+    ));
+    assert!(matches!(
+        h.head(&c, Some(OWNER), "k.mp4").await,
+        Err(StorageError::Backend(_))
+    ));
+    assert!(matches!(
+        h.list(&c, Some(OWNER), "", None, 5).await,
+        Err(StorageError::Backend(_))
+    ));
+    assert!(matches!(
+        h.presign_get(&c, Some(OWNER), "k.mp4", 5).await,
+        Err(StorageError::Backend(_))
+    ));
+    // mutations are audit-FIRST: no effect when the audit fails
+    assert!(matches!(
+        h.delete(&c, Some(OWNER), "k.mp4").await,
+        Err(StorageError::Backend(_))
+    ));
+    assert!(b
+        .head(&format!("{OWNER}/1/7/k.mp4"))
+        .await
+        .unwrap()
+        .is_some());
+    let r = h
+        .put(&c, Some(OWNER), "new.png", Bytes::new(), "image/png", &[])
+        .await;
+    assert!(matches!(r, Err(StorageError::Backend(_))));
+    assert!(b
+        .head(&format!("{OWNER}/1/7/new.png"))
+        .await
+        .unwrap()
+        .is_none());
+    let before = b
+        .head(&format!("{OWNER}/1/7/own.mp4"))
+        .await
+        .unwrap()
+        .unwrap()
+        .tags;
+    let r = h.tag_add(&owner_scope(), None, "own.mp4", CONSUMER).await;
+    assert!(matches!(r, Err(StorageError::Backend(_))));
+    assert_eq!(
+        b.head(&format!("{OWNER}/1/7/own.mp4"))
+            .await
+            .unwrap()
+            .unwrap()
+            .tags,
+        before
+    );
+    // own-prefix ops need no audit and still work; denials stay denials (not audit errors)
+    assert!(h.get(&owner_scope(), None, "own.mp4").await.is_ok());
+    let nogrant = scope(CONSUMER, 1, 7, &[]);
+    assert!(matches!(
+        h.get(&nogrant, Some(OWNER), "k.mp4").await,
+        Err(StorageError::NotGranted(_))
+    ));
+}
+
+#[tokio::test]
+async fn audit_events_carry_request_id_and_cover_tag_ops_and_list() {
+    let (h, _, rec) = rig();
+    seed(&h, "k.mp4", &[&format!("app-bundle:{CONSUMER}")]).await;
+    h.tag_add(&owner_scope(), None, "k.mp4", OTHER)
+        .await
+        .unwrap();
+    h.list(&consumer_scope(), Some(OWNER), "", None, 5)
+        .await
+        .unwrap();
+    let ev = rec.0.lock().unwrap();
+    assert!(ev.iter().all(|e| e.request_id == "req-1"));
+    assert!(ev
+        .iter()
+        .any(|e| e.op == "tag_add" && e.reason == format!("consumer={OTHER}")));
+    assert!(ev
+        .iter()
+        .any(|e| e.op == "list" && e.outcome == AuditOutcome::Allowed));
 }

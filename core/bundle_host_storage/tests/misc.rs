@@ -22,18 +22,22 @@ fn every_error_has_a_distinct_wire_code_and_message() {
     assert!(all.iter().all(|e| !e.to_string().is_empty()));
 }
 
-#[test]
-fn tracing_sink_records_without_panicking() {
-    TracingAuditSink.record(AuditEvent {
-        caller: "a".into(),
-        owner: "b".into(),
-        tenant: 1,
-        community: 2,
-        op: "get",
-        key: "k".into(),
-        outcome: AuditOutcome::Allowed,
-        reason: "r".into(),
-    });
+#[tokio::test]
+async fn tracing_sink_records_without_panicking() {
+    TracingAuditSink
+        .record(AuditEvent {
+            caller: "a".into(),
+            owner: "b".into(),
+            tenant: 1,
+            community: 2,
+            op: "get",
+            key: "k".into(),
+            outcome: AuditOutcome::Allowed,
+            reason: "r".into(),
+            request_id: "q".into(),
+        })
+        .await
+        .expect("records");
 }
 
 #[test]

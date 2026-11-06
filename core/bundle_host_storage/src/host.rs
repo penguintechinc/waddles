@@ -112,7 +112,33 @@ impl StorageHost {
         Ok(())
     }
 
-    fn audit(
+    async fn audit_raw(
+        &self,
+        s: &StorageScope,
+        owner: &str,
+        op: &'static str,
+        key: &str,
+        outcome: AuditOutcome,
+        reason: &str,
+    ) -> Result<(), StorageError> {
+        self.audit
+            .record(AuditEvent {
+                caller: s.app_id.clone(),
+                owner: owner.to_string(),
+                tenant: s.tenant,
+                community: s.community,
+                op,
+                key: key.to_string(),
+                outcome,
+                reason: reason.to_string(),
+                request_id: s.request_id.clone(),
+            })
+            .await
+    }
+
+    /// Denials are audited too; the denial itself is the safe outcome, so a sink
+    /// failure here is logged loudly (never swallowed) but does not change it.
+    async fn audit_denied(
         &self,
         s: &StorageScope,
         owner: &str,
@@ -121,20 +147,13 @@ impl StorageHost {
         outcome: AuditOutcome,
         reason: &str,
     ) {
-        self.audit.record(AuditEvent {
-            caller: s.app_id.clone(),
-            owner: owner.to_string(),
-            tenant: s.tenant,
-            community: s.community,
-            op,
-            key: key.to_string(),
-            outcome,
-            reason: reason.to_string(),
-        });
+        if let Err(e) = self.audit_raw(s, owner, op, key, outcome, reason).await {
+            tracing::error!(error = %e, op, "bundle storage audit write failed for a denial");
+        }
     }
 
     /// Flag, owner/key validation, grant, rate limit; builds the host-scoped key.
-    fn resolve(
+    async fn resolve(
         &self,
         s: &StorageScope,
         owner: Option<&str>,
@@ -152,14 +171,15 @@ impl StorageHost {
             Ok(c) => c,
             Err(e) => {
                 metrics::denied("not_granted");
-                self.audit(
+                self.audit_denied(
                     s,
                     &owner,
                     op.as_str(),
                     key,
                     AuditOutcome::Denied,
                     "no approved grant",
-                );
+                )
+                .await;
                 return Err(e);
             }
         };
@@ -199,30 +219,41 @@ impl StorageHost {
             .ok_or(StorageError::NotFound)?;
         if !Self::visible(s, r.cross, &meta.tags) {
             metrics::denied("tag_hidden");
-            self.audit(
+            self.audit_denied(
                 s,
                 &r.owner,
                 op,
                 key,
                 AuditOutcome::Denied,
                 "object not tagged for caller",
-            );
+            )
+            .await;
             return Err(StorageError::NotFound);
         }
         Ok(meta)
     }
 
-    fn audit_allowed(&self, s: &StorageScope, r: &Resolved, op: &'static str, key: &str) {
+    /// Cross-prefix allowed access is audited DURABLY; a sink failure fails the op
+    /// (mutations call this BEFORE the effect, reads before returning data).
+    async fn audit_allowed(
+        &self,
+        s: &StorageScope,
+        r: &Resolved,
+        op: &'static str,
+        key: &str,
+    ) -> Result<(), StorageError> {
         if r.cross {
-            self.audit(
+            self.audit_raw(
                 s,
                 &r.owner,
                 op,
                 key,
                 AuditOutcome::Allowed,
                 "approved grant + tag",
-            );
+            )
+            .await?;
         }
+        Ok(())
     }
 
     /// Scope quota: total bytes/objects under the scope prefix, excluding `except`.
@@ -276,7 +307,7 @@ impl StorageHost {
         tags: &[String],
     ) -> Result<ObjectInfo, StorageError> {
         let t0 = Instant::now();
-        let r = self.resolve(s, owner, Op::Write, key)?;
+        let r = self.resolve(s, owner, Op::Write, key).await?;
         if body.len() as u64 > MAX_OBJECT_BYTES {
             return Err(StorageError::TooLarge(body.len() as u64));
         }
@@ -293,14 +324,15 @@ impl StorageHost {
             if let Some(existing) = self.backend.head(&r.full_key).await? {
                 if !Self::visible(s, true, &existing.tags) {
                     metrics::denied("tag_hidden");
-                    self.audit(
+                    self.audit_denied(
                         s,
                         &r.owner,
                         "put",
                         key,
                         AuditOutcome::Denied,
                         "would overwrite untagged object",
-                    );
+                    )
+                    .await;
                     return Err(StorageError::NotGranted("object not writable".into()));
                 }
             }
@@ -320,12 +352,13 @@ impl StorageHost {
         )
         .await?;
         let size = body.len() as u64;
+        // Audit-first: a cross-prefix write that cannot be recorded does not happen.
+        self.audit_allowed(s, &r, "put", key).await?;
         self.backend
             .put(&r.full_key, body, content_type, &tags)
             .await?;
         metrics::bytes("in", size);
         metrics::op_duration("put", t0.elapsed());
-        self.audit_allowed(s, &r, "put", key);
         Ok(ObjectInfo {
             key: key.into(),
             size,
@@ -341,7 +374,7 @@ impl StorageHost {
         key: &str,
     ) -> Result<(ObjectInfo, Bytes), StorageError> {
         let t0 = Instant::now();
-        let r = self.resolve(s, owner, Op::Read, key)?;
+        let r = self.resolve(s, owner, Op::Read, key).await?;
         // Filter on the FETCHED copy's own tags (no separate head: no head->get race).
         let obj = self
             .backend
@@ -350,19 +383,20 @@ impl StorageHost {
             .ok_or(StorageError::NotFound)?;
         if !Self::visible(s, r.cross, &obj.meta.tags) {
             metrics::denied("tag_hidden");
-            self.audit(
+            self.audit_denied(
                 s,
                 &r.owner,
                 "get",
                 key,
                 AuditOutcome::Denied,
                 "object not tagged for caller",
-            );
+            )
+            .await;
             return Err(StorageError::NotFound);
         }
         metrics::bytes("out", obj.meta.size);
         metrics::op_duration("get", t0.elapsed());
-        self.audit_allowed(s, &r, "get", key);
+        self.audit_allowed(s, &r, "get", key).await?;
         Ok((info(key, &obj.meta), obj.body))
     }
 
@@ -373,9 +407,9 @@ impl StorageHost {
         owner: Option<&str>,
         key: &str,
     ) -> Result<ObjectInfo, StorageError> {
-        let r = self.resolve(s, owner, Op::Read, key)?;
+        let r = self.resolve(s, owner, Op::Read, key).await?;
         let m = self.require_visible(s, &r, "head", key).await?;
-        self.audit_allowed(s, &r, "head", key);
+        self.audit_allowed(s, &r, "head", key).await?;
         Ok(info(key, &m))
     }
 
@@ -400,14 +434,15 @@ impl StorageHost {
             Ok(c) => c,
             Err(e) => {
                 metrics::denied("not_granted");
-                self.audit(
+                self.audit_denied(
                     s,
                     &owner_s,
                     "list",
                     key_prefix,
                     AuditOutcome::Denied,
                     "no approved grant",
-                );
+                )
+                .await;
                 return Err(e);
             }
         };
@@ -466,14 +501,15 @@ impl StorageHost {
             }
         }
         if cross {
-            self.audit(
+            self.audit_raw(
                 s,
                 &owner_s,
                 "list",
                 key_prefix,
                 AuditOutcome::Allowed,
                 "approved grant + tag",
-            );
+            )
+            .await?;
         }
         metrics::op_duration("list", t0.elapsed());
         Ok(ListPage {
@@ -489,10 +525,10 @@ impl StorageHost {
         owner: Option<&str>,
         key: &str,
     ) -> Result<(), StorageError> {
-        let r = self.resolve(s, owner, Op::Delete, key)?;
+        let r = self.resolve(s, owner, Op::Delete, key).await?;
         self.require_visible(s, &r, "delete", key).await?;
+        self.audit_allowed(s, &r, "delete", key).await?;
         self.backend.delete(&r.full_key).await?;
-        self.audit_allowed(s, &r, "delete", key);
         Ok(())
     }
 
@@ -507,7 +543,7 @@ impl StorageHost {
         if ttl_secs == 0 {
             return Err(StorageError::Invalid("ttl must be >= 1".into()));
         }
-        let r = self.resolve(s, owner, Op::Read, key)?;
+        let r = self.resolve(s, owner, Op::Read, key).await?;
         self.require_visible(s, &r, "presign_get", key).await?;
         let url = self
             .backend
@@ -516,7 +552,7 @@ impl StorageHost {
                 Duration::from_secs(ttl_secs.min(MAX_PRESIGN_TTL_SECS) as u64),
             )
             .await?;
-        self.audit_allowed(s, &r, "presign_get", key);
+        self.audit_allowed(s, &r, "presign_get", key).await?;
         Ok(url)
     }
 
@@ -559,14 +595,15 @@ impl StorageHost {
         let owner_s = owner.unwrap_or(&s.app_id);
         if owner_s != s.app_id {
             metrics::denied("tag_not_owner");
-            self.audit(
+            self.audit_denied(
                 s,
                 owner_s,
                 op,
                 key,
                 AuditOutcome::Denied,
                 "tag ops are owner-only",
-            );
+            )
+            .await;
             return Err(StorageError::NotGranted(
                 "tag operations are owner-only".into(),
             ));
@@ -592,17 +629,19 @@ impl StorageHost {
             tags.retain(|t| *t != tag);
         }
         tags.sort();
-        if !self.backend.set_tags(&full, &tags).await? {
-            return Err(StorageError::NotFound);
-        }
-        self.audit(
+        // Audit-first: a tag change that cannot be recorded does not happen.
+        self.audit_raw(
             s,
             &s.app_id,
             op,
             key,
             AuditOutcome::Allowed,
             &format!("consumer={consumer}"),
-        );
+        )
+        .await?;
+        if !self.backend.set_tags(&full, &tags).await? {
+            return Err(StorageError::NotFound);
+        }
         Ok(())
     }
 }
