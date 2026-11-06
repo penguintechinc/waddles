@@ -636,5 +636,9 @@ async fn dialing_without_a_configured_connector_address_is_a_typed_error() {
 #[test]
 fn every_platform_has_a_distinct_host_constant_app_id() {
     let ids: std::collections::HashSet<_> = CONNECTOR_PLATFORMS.iter().map(|p| p.app_id).collect();
-    assert_eq!(ids.len(), 3);
+    // Distinctness: no two platforms may share an app_id (identity confusion).
+    assert_eq!(ids.len(), CONNECTOR_PLATFORMS.len());
+    // Pin the expected platform count so a silently dropped/added connector
+    // forces a deliberate update here (twitch, discord, youtube, spectrum).
+    assert_eq!(CONNECTOR_PLATFORMS.len(), 4);
 }
