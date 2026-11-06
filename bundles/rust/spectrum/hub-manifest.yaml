@@ -1,9 +1,7 @@
-# hub-api install-pipeline manifest for the Spectrum connector (gh #486); identical contract to bundle.yaml,
-# present because svc-ingest's host-call grant table is verified against bundles/rust/<platform>/hub-manifest.yaml.
 # RSI Spectrum platform CONNECTOR (gh #486): one-way INBOUND `kind: service` bundle on the
-# `connector` world. NOT yet registered in bundles/core-bundles.yaml and NOT wired to a
-# svc_ingest profile -- see README "Remaining work". Cutover flag (when wired): PostHog
-# `waddles.connector-spectrum` / env `CONNECTOR_SPECTRUM_ENABLED`, default OFF.
+# `connector` world. hub-api install-pipeline manifest (prebuilt) for the catalog row in
+# bundles/core-bundles.yaml. Cutover flag: PostHog `waddles.connector-spectrum` / env
+# `CONNECTOR_SPECTRUM_ENABLED`, default OFF (the Python receivers run unchanged while OFF).
 # No outbound capability is requested on purpose (#101: writing to RSI's undocumented API
 # risks banning the org). The session credential never enters this component.
 schema_version: 2
@@ -14,8 +12,8 @@ feature: waddles.core.service
 module: core
 provider: builtin
 language: rust
-artifact: component
-execution_model: wasi-component
+artifact: prebuilt
+execution_model: native
 is_default: false
 kind: service
 # Guest egress is EMPTY by design: the RSI poll host allowlist + session credential live in the

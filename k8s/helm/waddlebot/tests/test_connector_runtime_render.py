@@ -352,3 +352,52 @@ def test_heartbeat_env_defaults_false_and_is_settable() -> None:
     assert _env(ing)["CONNECTOR_HEARTBEAT_ENABLED"]["value"] == "false"
     on = _dep(_docs(_yt("--set", f"{_RT}.heartbeatEnabled=true")), "-svc-ingest-rust")
     assert _env(on)["CONNECTOR_HEARTBEAT_ENABLED"]["value"] == "true"
+
+
+_SPECTRUM = "pipeline.connectors.digests.spectrum"
+
+
+def _spectrum(*extra: str) -> list[str]:
+    return [*_BASE, "--set", f"{_SPECTRUM}={_D}", "--set", f"{_RT}.connector.spectrum.enabled=true", *extra]
+
+
+def test_spectrum_on_renders_env_digest_and_pin_from_one_value() -> None:
+    docs = _docs(_spectrum())
+    rust, py, ex = (_dep(docs, "-svc-ingest-rust"), _dep(docs, "-svc-ingest"), _dep(docs, "-bundle-executor"))
+    for dep in (rust, py):
+        env = _env(dep)
+        assert env["CONNECTOR_SPECTRUM_ENABLED"]["value"] == "true"
+        assert env["CONNECTOR_YOUTUBE_ENABLED"]["value"] == "false"
+        assert env["CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS"]["value"] == ""  # Spectrum has no webhook
+    assert _env(rust)["CONNECTOR_RUNTIME_ENABLED"]["value"] == "true"
+    assert _env(rust)["SENDER_EXEC_DIGEST_SPECTRUM"]["value"] == _D
+    assert _env(ex)["CONNECTOR_PIN_DIGEST_SPECTRUM"]["value"] == _D
+
+
+def test_spectrum_off_is_the_default_and_renders_no_spectrum_digest() -> None:
+    docs = _docs(_yt())
+    rust, py = _dep(docs, "-svc-ingest-rust"), _dep(docs, "-svc-ingest")
+    for dep in (rust, py):
+        assert _env(dep)["CONNECTOR_SPECTRUM_ENABLED"]["value"] == "false"
+    assert "SENDER_EXEC_DIGEST_SPECTRUM" not in _env(rust)
+    assert "CONNECTOR_PIN_DIGEST_SPECTRUM" not in _env(_dep(docs, "-bundle-executor"))
+
+
+@pytest.mark.parametrize("values", ["values.yaml", "values-alpha.yaml", "values-dal2alpha.yaml", "values-local.yaml"])
+def test_spectrum_is_off_in_every_values_file(values: str) -> None:
+    chart = yaml.safe_load((_CHART_DIR / values).read_text())
+    rt = chart.get("pipeline", {}).get("rustDataPlane", {}).get("svcIngest", {}).get("connectorRuntime", {})
+    assert rt.get("connector", {}).get("spectrum", {"enabled": False}).get("enabled") is False
+    assert chart.get("pipeline", {}).get("connectors", {}).get("digests", {}).get("spectrum", "") == ""
+
+
+def test_spectrum_on_without_its_digest_fails_render() -> None:
+    res = _render(*_BASE, "--set", f"{_RT}.connector.spectrum.enabled=true")
+    assert res.returncode != 0
+    assert "digests.spectrum" in res.stderr, res.stderr[-500:]
+
+
+def test_spectrum_has_no_webhook_surface() -> None:
+    res = _render(*_spectrum(), "--set", f"{_RT}.webhookPlatforms={{spectrum}}")
+    assert res.returncode != 0
+    assert "webhookPlatforms" in res.stderr, res.stderr[-500:]

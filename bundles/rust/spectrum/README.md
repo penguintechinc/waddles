@@ -32,7 +32,6 @@ sender.build-request --> ALWAYS Unsupported (one-way inbound by design, #101)
 | `identity.lookup` for platform `spectrum` | `connector/host_calls.rs` `CONNECTORS` |
 | Real-path proof (real wasm, fake RSI API, runtime tenant park) | `core/connector_e2e/tests/spectrum_profile.rs` |
 
-## Remaining work (NOT in this slice)
+## Wiring (slices 2c/2d + boot)
 
-1. Selector entry (`CONNECTOR_SPECTRUM_ENABLED`) + boot wiring of the Valkey store (`RuntimeDeps::spectrum`) + legacy-suppression parity fixtures.
-2. helm `connectors.spectrum.*`, hub-api provider (`spectrum`, RSI session token credential), `core-bundles.yaml` entry.
+Selector entry `CONNECTOR_SPECTRUM_ENABLED` (default OFF; suppresses the legacy `spectrum_{poll,org}` receivers), helm `connectors.spectrum.*`, hub-api provider `spectrum`, `core-bundles.yaml` row, executor `CONNECTOR_PIN_DIGEST_SPECTRUM`, and the svc-ingest boot platform (Valkey `SpectrumStore`) are all in place; see `core/connector_e2e/tests/boot_wiring_spectrum.rs`.

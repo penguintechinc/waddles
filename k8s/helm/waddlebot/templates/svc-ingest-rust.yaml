@@ -185,6 +185,12 @@ spec:
         - name: SENDER_EXEC_DIGEST_WIX
           value: {{ include "waddlebot.connectorDigest" (dict "root" $ "platform" "wix") | quote }}
         {{- end }}
+        {{- if include "waddlebot.connectorPlatformOn" (dict "root" $ "platform" "spectrum") }}
+        # Spectrum is inbound-only (no outbound executor slot): its digest is rendered only when the
+        # connector is ON, where the runtime boot requires it (and the render above validated it).
+        - name: SENDER_EXEC_DIGEST_SPECTRUM
+          value: {{ include "waddlebot.connectorDigest" (dict "root" $ "platform" "spectrum") | quote }}
+        {{- end }}
         # Public Helix application client id, from the operator-managed platform-credentials Secret.
         - name: TWITCH_CLIENT_ID
           valueFrom:

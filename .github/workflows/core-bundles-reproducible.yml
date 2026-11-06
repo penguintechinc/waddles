@@ -25,6 +25,7 @@ on:
       - 'bundles/rust/twitch/**'
       - 'bundles/rust/discord/**'
       - 'bundles/rust/youtube/**'
+      - 'bundles/rust/spectrum/**'
       - 'bundles/rust/wix/**'
       - 'bundles/python/pyping/**'
       - 'sdk/waddle-sdk-rs/**'
@@ -75,6 +76,7 @@ jobs:
             bundles/rust/twitch/**
             bundles/rust/discord/**
             bundles/rust/youtube/**
+            bundles/rust/spectrum/**
             bundles/rust/wix/**
             bundles/python/pyping/**
             sdk/waddle-sdk-rs/**
@@ -96,5 +98,5 @@ jobs:
       # Docker Engine + buildx ship preinstalled on ubuntu-latest runners -- no setup-buildx
       # action needed for a plain `docker build` (no multi-platform/cache-export requirement
       # here; the whole point is a from-scratch, uncached build).
-      - name: Verify core bundles are byte-reproducible (ping + twitch/discord/youtube connectors -- pyping tracked at #521)
+      - name: Verify core bundles are byte-reproducible (ping + twitch/discord/youtube/spectrum connectors -- pyping tracked at #521)
         run: bash scripts/verify-core-bundles-reproducible.sh

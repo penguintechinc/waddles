@@ -1551,3 +1551,17 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+
+  # RSI Spectrum platform CONNECTOR (gh #486, Rust `kind: service`, `connector` world, inbound-only).
+  # Built by rust-bundle-builder; the cutover flag waddles.connector-spectrum defaults OFF.
+  - app_id: waddles.core.service.spectrum
+    version: "0.1.0"
+    language: rust
+    wit_world: connector
+    kind: service
+    source_dir: rust/spectrum
+    manifest_path: spectrum.manifest.yaml
+    artifact_path: spectrum.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null

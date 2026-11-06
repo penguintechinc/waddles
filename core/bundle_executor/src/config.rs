@@ -345,6 +345,10 @@ pub struct CliConfig {
     /// Same as [`Self::connector_pin_digest_twitch`] for YouTube.
     #[arg(long, env = "CONNECTOR_PIN_DIGEST_YOUTUBE")]
     pub connector_pin_digest_youtube: Option<String>,
+
+    /// Same as [`Self::connector_pin_digest_twitch`] for the inbound-only RSI Spectrum connector.
+    #[arg(long, env = "CONNECTOR_PIN_DIGEST_SPECTRUM")]
+    pub connector_pin_digest_spectrum: Option<String>,
 }
 
 impl CliConfig {
@@ -399,6 +403,7 @@ impl CliConfig {
             connector_pin_digest_twitch: None,
             connector_pin_digest_discord: None,
             connector_pin_digest_youtube: None,
+            connector_pin_digest_spectrum: None,
         }
     }
 
@@ -524,7 +529,7 @@ impl CliConfig {
     }
 
     /// `(env var, raw value)` for every `CONNECTOR_PIN_DIGEST_<P>` field.
-    pub(crate) fn connector_pin_digest_vars(&self) -> [(&'static str, Option<&str>); 3] {
+    pub(crate) fn connector_pin_digest_vars(&self) -> [(&'static str, Option<&str>); 4] {
         [
             (
                 "CONNECTOR_PIN_DIGEST_TWITCH",
@@ -537,6 +542,10 @@ impl CliConfig {
             (
                 "CONNECTOR_PIN_DIGEST_YOUTUBE",
                 self.connector_pin_digest_youtube.as_deref(),
+            ),
+            (
+                "CONNECTOR_PIN_DIGEST_SPECTRUM",
+                self.connector_pin_digest_spectrum.as_deref(),
             ),
         ]
     }
@@ -906,6 +915,14 @@ mod tests {
         let cfg = connector_cfg(&["--connector-pin-digest-youtube", "sha256:zz"])?;
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("CONNECTOR_PIN_DIGEST_YOUTUBE"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_spectrum_pin_digest_fails_validate() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = connector_cfg(&["--connector-pin-digest-spectrum", "sha256:zz"])?;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("CONNECTOR_PIN_DIGEST_SPECTRUM"), "{err}");
         Ok(())
     }
 

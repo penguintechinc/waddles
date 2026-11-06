@@ -97,6 +97,7 @@ check_artifact "waddles.core.example.ping" "/core-bundles/ping.wasm"
 check_artifact "waddles.core.service.twitch" "/core-bundles/twitch.wasm"
 check_artifact "waddles.core.service.discord" "/core-bundles/discord-connector.wasm"
 check_artifact "waddles.core.service.youtube" "/core-bundles/youtube.wasm"
+check_artifact "waddles.core.service.spectrum" "/core-bundles/spectrum.wasm"
 check_artifact "waddles.core.service.wix" "/core-bundles/wix.wasm"
 
 # critical-rules.md Verification Integrity: zero items examined is a FAILURE, not a pass --

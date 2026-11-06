@@ -807,7 +807,7 @@ def _register_twitch_eventsub(*, redis_client: Any, registry: AppRegistry) -> No
 
 def _log_connector_skips(selector: ConnectorSelector) -> None:
     """One INFO line per Python receiver set the connector runtime now owns."""
-    for platform in ("twitch", "discord", "youtube"):
+    for platform in ("twitch", "discord", "youtube", "spectrum"):
         if selector.connector(platform):
             logger.system(
                 f"svc-ingest connector ON for {platform}; python receivers not registered",
@@ -914,7 +914,8 @@ async def startup() -> None:
                 supervisor, redis_client=redis_client, registry=registry
             )
         _register_kick_receivers(supervisor, redis_client=redis_client, registry=registry)
-        _register_spectrum_receivers(supervisor, redis_client=redis_client, registry=registry)
+        if selector.legacy("spectrum"):
+            _register_spectrum_receivers(supervisor, redis_client=redis_client, registry=registry)
         _register_twitch_receivers(
             supervisor,
             redis_client=redis_client,
