@@ -115,6 +115,15 @@ impl FeatureGate for SpyGate {
     }
 }
 
+/// A tier source returning a fixed tier (`None` = never-seen/unknown).
+struct FixedTier(Option<penguin_licensing::Tier>);
+
+impl crate::ai::TierSource for FixedTier {
+    fn tier<'a>(&'a self) -> crate::ai::BoxFuture<'a, Option<penguin_licensing::Tier>> {
+        Box::pin(async move { self.0 })
+    }
+}
+
 fn grants(ids: &[&str]) -> GrantSet {
     GrantSet {
         permission_snapshot_hash: "test".to_string(),
@@ -196,6 +205,7 @@ fn wiring(backend: &Arc<ScriptedBackend>, flag_on: bool) -> AiWiring {
     AiWiring::new(
         Arc::clone(backend) as Arc<dyn AiBackend>,
         Arc::new(FixedGate(flag_on)),
+        Arc::new(FixedTier(Some(penguin_licensing::Tier::Professional))),
         Duration::from_secs(5),
         4,
     )
@@ -295,6 +305,7 @@ async fn the_gate_authorizes_first_ungranted_is_not_granted_whatever_else_is_wro
     let wired = AiWiring::new(
         Arc::clone(&backend) as Arc<dyn AiBackend>,
         Arc::clone(&flag) as Arc<dyn FeatureGate>,
+        Arc::new(FixedTier(Some(penguin_licensing::Tier::Professional))),
         Duration::from_secs(5),
         4,
     );
@@ -715,6 +726,7 @@ mod real_backend {
                 .unwrap(),
             ),
             Arc::new(FixedGate(true)),
+            Arc::new(FixedTier(Some(penguin_licensing::Tier::Professional))),
             ceiling,
             4,
         )
@@ -781,4 +793,47 @@ mod real_backend {
             started.elapsed()
         );
     }
+}
+
+/// Wiring with a fixed tier source; the host (not any bundle) enforces the tier.
+fn tiered(
+    backend: &Arc<ScriptedBackend>,
+    tier: Option<penguin_licensing::Tier>,
+) -> StageCapabilities {
+    let w = AiWiring::new(
+        Arc::clone(backend) as Arc<dyn AiBackend>,
+        Arc::new(FixedGate(true)),
+        Arc::new(FixedTier(tier)),
+        Duration::from_secs(5),
+        4,
+    );
+    caps_with(&["ai.generate"], Some(w), Duration::from_secs(30))
+}
+
+#[tokio::test]
+async fn ai_tier_gate_free_refused_pro_and_enterprise_allowed_unknown_fails_closed() {
+    use penguin_licensing::Tier;
+    let backend = ScriptedBackend::replying("ok");
+    let free = tiered(&backend, Some(Tier::Free));
+    let err = free.handle(generate("hi")).await.expect_err("free refused");
+    assert_eq!(err.code, "tier_required");
+    assert!(err.message.contains("Professional"), "{}", err.message);
+    // Never-seen / unresolvable tier fails closed too.
+    assert_eq!(
+        code_of(&tiered(&backend, None), generate("hi")).await,
+        "tier_unknown"
+    );
+    assert_eq!(
+        backend.calls(),
+        0,
+        "a refused call must never reach the model"
+    );
+    for t in [Tier::Professional, Tier::Enterprise] {
+        let out = tiered(&backend, Some(t))
+            .handle(generate("hi"))
+            .await
+            .unwrap();
+        assert_eq!(out["text"], "ok");
+    }
+    assert_eq!(backend.calls(), 2);
 }
