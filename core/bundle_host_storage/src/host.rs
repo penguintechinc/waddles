@@ -342,15 +342,22 @@ impl StorageHost {
     ) -> Result<(ObjectInfo, Bytes), StorageError> {
         let t0 = Instant::now();
         let r = self.resolve(s, owner, Op::Read, key)?;
-        self.require_visible(s, &r, "get", key).await?;
+        // Filter on the FETCHED copy's own tags (no separate head: no head->get race).
         let obj = self
             .backend
             .get(&r.full_key)
             .await?
             .ok_or(StorageError::NotFound)?;
-        // Re-check on the fetched copy's own tags (closes the head->get race).
         if !Self::visible(s, r.cross, &obj.meta.tags) {
             metrics::denied("tag_hidden");
+            self.audit(
+                s,
+                &r.owner,
+                "get",
+                key,
+                AuditOutcome::Denied,
+                "object not tagged for caller",
+            );
             return Err(StorageError::NotFound);
         }
         metrics::bytes("out", obj.meta.size);
