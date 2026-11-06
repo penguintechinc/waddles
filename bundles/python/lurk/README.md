@@ -59,7 +59,6 @@ invalid lurk message: unknown placeholder(s): nope (allowed: $(username), $(dura
 | id | Why |
 |---|---|
 | `storage.kv` | Persists per-community lurk state (start timestamps, template, AI toggle). Without it `_derive_capabilities()` never grants `kv` at all. |
-| `flags.read` | Retained for manifest stability; no longer used (no tier check). |
 
 ## Gating
 

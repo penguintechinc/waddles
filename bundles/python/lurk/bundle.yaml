@@ -66,8 +66,6 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-community lurk state"
-  - id: flags.read
-    justification: "gates the command behind its waddles.command-lurk feature flag"
   - id: "chat.send:discord"
     justification: "lurk replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
   - id: "chat.send:twitch"

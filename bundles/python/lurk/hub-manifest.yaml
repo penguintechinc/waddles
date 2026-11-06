@@ -54,8 +54,6 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-community lurk state"
-  - id: flags.read
-    justification: "retained for manifest stability; the bundle performs no license-tier check (the host enforces AI tiers)"
   - id: "chat.send:discord"
     justification: "lurk replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
   - id: "chat.send:twitch"
