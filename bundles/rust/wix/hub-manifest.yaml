@@ -1,0 +1,42 @@
+# hub-api install-pipeline manifest (schema_version 2) for the Wix webhook CONNECTOR.
+# Inbound-only `kind: service` connector on the `connector-tools` world (no tools exported).
+# No egress: the host owns the verified webhook ingress (svc-ingest `Scheme::WixJwt`, RS256 JWT
+# against the connection's Wix app public key). Credentials are never in this file or the
+# component. Cutover flag: PostHog `waddles.connector-wix` (default OFF).
+schema_version: 2
+app_id: waddles.core.service.wix
+name: Wix Webhook Connector (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: service
+stages:
+  action:
+    entry: waddle:bundle/tool-provider#call
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 1
+permissions:
+  - id: connector.pii.read
+    justification: "gates identity.lookup, used to tokenize each Wix member id to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw Wix member id leaves the connector)"
+routes_to: []
+exported_tools: []
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/wix
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: 1.0.0
+  min_version: 1.0.0
+  max_version: null

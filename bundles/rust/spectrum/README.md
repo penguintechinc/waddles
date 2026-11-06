@@ -21,9 +21,17 @@ sender.build-request --> ALWAYS Unsupported (one-way inbound by design, #101)
 | `author_id`/`member_id`/`display_name`/`organizer_id` in payload | present | **removed** (PII boundary); actor is the tokenized UUID |
 | anonymous author | actor `"unknown"` | actor `None` |
 
-## Remaining work (NOT in this crate -- host/runtime, see PR description)
+## Host side (slice 2b, `core/svc_ingest`)
 
-1. svc_ingest `PollTransport` is GET + cursor only; Spectrum needs **POST + JSON body + `Cookie`/`X-Rsi-Token` header** (profile-derived, host-constant).
-2. **Seen-id dedupe + priming** (no backlog flood) and the **roster/events snapshot store + diff** (Valkey) are stateful and must live host-side (guests are stateless; pinned connectors have no host-call bridge).
-3. `SpectrumProfile` + `connector_e2e` against a fake Spectrum API (host-side). DONE in the wiring slice: selector entry (`CONNECTOR_SPECTRUM_ENABLED`, default OFF, suppresses the legacy `spectrum_{poll,org}` receivers) + parity fixtures, helm `connectors.spectrum.*`, hub-api provider `spectrum` (RSI session token sealed at rest, `chat_ingest` only), `core-bundles.yaml` row. Still open: executor `CONNECTOR_PIN_DIGEST_SPECTRUM` field (`core/bundle_executor/src/config.rs`).
-4. Identity: `identity.lookup(("spectrum", member_id))` needs the `spectrum` platform registered with the identity backend.
+| Piece | Where |
+|---|---|
+| POST + JSON body + `Cookie`/`X-Rsi-Token` | `connector/poll.rs` `PollRequest` (slice 2a) |
+| Host-owned page cursor (host writes the integer `page` field; never guest/metadata controlled) | `PollRequest::page_field`, `PollTransport::fetch_page` |
+| Seen-id dedupe + priming (no history flood), roster/org-event snapshot store + diff (Valkey, community-scoped numeric keys, ids/fingerprints only) | `connector/spectrum.rs`, `connector/spectrum_org.rs` |
+| `SpectrumProfile` (RSI host pinned; tenant = feed's server-derived tenant) | `connector_runtime/profiles/spectrum.rs`, `connector/secrets.rs` `approved_hosts("spectrum")` |
+| `identity.lookup` for platform `spectrum` | `connector/host_calls.rs` `CONNECTORS` |
+| Real-path proof (real wasm, fake RSI API, runtime tenant park) | `core/connector_e2e/tests/spectrum_profile.rs` |
+
+## Wiring (slices 2c/2d + boot)
+
+Selector entry `CONNECTOR_SPECTRUM_ENABLED` (default OFF; suppresses the legacy `spectrum_{poll,org}` receivers), helm `connectors.spectrum.*`, hub-api provider `spectrum`, `core-bundles.yaml` row, executor `CONNECTOR_PIN_DIGEST_SPECTRUM`, and the svc-ingest boot platform (Valkey `SpectrumStore`) are all in place; see `core/connector_e2e/tests/boot_wiring_spectrum.rs`.

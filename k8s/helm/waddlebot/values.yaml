@@ -324,6 +324,15 @@ infrastructure:
     # real traffic.
     bundleMigratorPassword: ""
     bundleRuntimePassword: ""
+    # Bundle platform-table capability (waddles_platform_table, alembic 0079; column-scoped to the
+    # allowlisted community_members columns + audit INSERT). EXPLICIT OPT-IN, default false: the role
+    # stays NOLOGIN, migrations set no password, svc-process-rust gets no BUNDLE_PLATFORM_TABLE_* env.
+    # enabled=true -> password PW_WADDLES_PLATFORM_TABLE in <release>-db-credentials (never in the
+    # envFrom'd waddlebot-secrets): generated + kept on alpha/local, REQUIRED elsewhere (set `password`
+    # via an out-of-git override or pre-populate serviceRoles.existingSecret with that key).
+    platformTable:
+      enabled: false
+      password: ""
     # ---- Per-service database accounts (security findings H-1 / H-3) -----------------
     # `username`/`password` above are the database OWNER (superuser) credential. It is
     # rendered into <release>-db-admin (consumed ONLY by the Postgres Deployment's
@@ -665,6 +674,13 @@ infrastructure:
       # Replaces the former "waddlebot" full-admin back-compat identity this
       # was the last consumer of.
       streaming:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # core host stages (svc-process/svc-action `storage` capability, spec
+      # 2026-11-06-bundle-object-storage) -- Read/Write/List/Tagging scoped to
+      # bundleStorage.bucketName ONLY. Never given to a bundle (host-mediated).
+      # Only rendered when bundleStorage.mode=bundled.
+      bundleStorage:
         accessKey: "REPLACE_ME"
         secretKey: "REPLACE_ME"
     service:
@@ -1010,6 +1026,12 @@ outboundPin:
   existingSecret: ""
   activeKid: "k1"
 
+# Event-sync request integrity key (hub-api / event-sync CronJob sign, svc-action verifies); a
+# DEDICATED ring, see templates/event-sync-request-secret.yaml. existingSecret key: EVENT_SYNC_REQUEST_KEYS.
+eventSyncRequest:
+  existingSecret: ""
+  activeKid: "r1"
+
 pipeline:
   pythonBaseImage: "python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb"
   nodeBaseImage: "node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"
@@ -1025,10 +1047,18 @@ pipeline:
   # (sha256:<64 lowercase hex>; empty = unset). Rendered into svc-ingest
   # SENDER_EXEC_DIGEST_<P> AND bundle-executor CONNECTOR_PIN_DIGEST_<P>.
   connectors:
+    # Seeder Job publishes connectors/<p>/<digest>.{wasm,json} (signed with the platform key) from
+    # the reproducibly-built wasm in its image and logs the digests to set below. Digests are
+    # build outputs, NOT committed per-env: copy them from the seeder log or the output of
+    # `make publish-connector-bundles ENV=<env>` (scripts/publish-connector-bundles.sh).
+    publishAtSeed: false
     digests:
       twitch: ""
       discord: ""
       youtube: ""
+      # Wix webhook connector (waddles.core.service.wix); required only when
+      # svcIngest.connectorRuntime.connector.wix.enabled.
+      wix: ""
       # Inbound-only RSI Spectrum connector (gh #486); required only when connector.spectrum is ON.
       spectrum: ""
 
@@ -1123,10 +1153,10 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
-  # Bar Citizen role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
+  # Role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
   # deploy-time kill switch, defaulted OFF (critical-rules.md Feature Flags: every feature
   # flagged OFF until validated) -- see templates/role-sync-cronjob.yaml's own header comment.
-  # The engine's own FEATURE_BAR_CITIZEN_ROLE_SYNC PostHog flag is the separate per-tenant
+  # The engine's own FEATURE_ROLE_SYNC PostHog flag is the separate per-tenant
   # RUNTIME gate; this value controls whether the CronJob is deployed at all.
   roleSync:
     enabled: false
@@ -1137,6 +1167,10 @@ pipeline:
     # Empty = grant-only (default). Baseline role = what a demoted member falls back to.
     demotePairingIds: ""
     demoteBaselineRole: "community-member"
+    # Event-driven fast path (Discord gateway GUILD_MEMBER_UPDATE push); the pass above stays the backstop.
+    inbound:
+      enabled: false
+      schedule: "*/1 * * * *"
     backoffLimit: 2
     activeDeadlineSeconds: 600
     resources:
@@ -1214,6 +1248,9 @@ pipeline:
     enabled: true
     port: 8204
     grpcPort: 50204
+    # ANALYTICS_CORE_API_URL for hub-api's analytics proxy (gh-894). Empty = derive from the
+    # core-data Service ("http://<fullname>-core-data.<namespace>.svc:<modules.coreData.service.port>").
+    analyticsCoreUrl: ""
     # SPIFFE_PEER_TRUST / SPIFFE_PEER_ID_HEADER (hub_api/services/machine_auth.py). Default OFF.
     # Enable ONLY behind an mTLS terminator that strips the header from non-mTLS traffic AND
     # after a per-identity community allow-list exists -- see docs/PROVIDER_CONNECTIONS.md.
@@ -1621,6 +1658,10 @@ pipeline:
             enabled: false
           youtube:
             enabled: false
+          # Wix app webhooks (inbound-only, verified RS256 JWT). Needs webhookPlatforms to list "wix"
+          # (+ routeKeySecret) and pipeline.connectors.digests.wix; see docs/connector-wix.md.
+          wix:
+            enabled: false
           # RSI Spectrum (gh #486): inbound-only; flag waddles.connector-spectrum / env
           # CONNECTOR_SPECTRUM_ENABLED. ON suppresses the legacy spectrum_{poll,org} receivers.
           # No webhook surface (webhookPlatforms stays twitch/discord only).
@@ -1637,7 +1678,7 @@ pipeline:
         # CONNECTOR_HEARTBEAT_ENABLED on the Rust svc-ingest (boot.rs ENV_HEARTBEAT, strict bool; the
         # Rust default when unset is false). Driver heartbeat baseline (`ingest.connector-heartbeat`).
         heartbeatEnabled: false
-        # csv-rendered subset of [twitch, discord] whose webhook routes are registered.
+        # csv-rendered subset of [twitch, discord, wix] whose webhook routes are registered.
         webhookPlatforms: []
         # HMAC key deriving webhook route keys: an EXISTING Secret only (never a literal here).
         # Required when webhookPlatforms is non-empty.
@@ -2922,9 +2963,9 @@ config:
   spectrumOrgSyncEnabled: false
   # ENV baseline for flag waddles.calendar.event_discord_sync (default OFF; PostHog overrides when connected)
   eventDiscordSyncEnabled: false
-  # ENV baseline for flag waddles.bar_citizen.role_sync -> FLAG_WADDLES_BAR_CITIZEN_ROLE_SYNC (default OFF;
+  # ENV baseline for flag waddles.role_sync -> FLAG_WADDLES_ROLE_SYNC (default OFF;
   # PostHog overrides when connected). Also needs pipeline.roleSync.enabled for the reconcile CronJob.
-  barCitizenRoleSyncEnabled: false
+  roleSyncEnabled: false
   spectrumOrgPollIntervalS: 300
   # A roster shrinking by more than this fraction in one poll is held back as an RSI glitch, not emitted
   spectrumRosterMaxDepartureRatio: 0.5
@@ -3445,6 +3486,11 @@ serviceJwt:
         # feature/egress-proxy-service -- required to call core/egress_proxy
         # for any bundle net.http/CONNECT egress.
         - "egress:connect"
+        # feature/harness-media-hubapi -- the media stage resolves a community's Gemini BYOK key
+        # (POST /api/v1/internal/media/byok/resolve) and the effective tier (.../effective-tier).
+        # Granted to this identity alone; hub-api additionally allow-lists the caller by name.
+        - "media:byok:resolve"
+        - "media:tier:resolve"
     svc-action:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-action"
       serviceAccount: svc-action
@@ -3731,3 +3777,29 @@ supplyChain:
     issuer: "https://token.actions.githubusercontent.com"
     # Must match the identity regex in scripts/ci/supply-chain.sh (test enforces parity).
     subjectRegExp: "^https://github\\.com/penguintechinc/waddles/\\.github/workflows/containers\\.yml@refs/(heads|tags)/.+$"
+
+# Bundle object storage (spec docs/superpowers/specs/2026-11-06-bundle-object-storage.md).
+# ONE bucket, one prefix per bundle, host-mediated (bundles never hold S3 creds).
+# Flag: waddles.bundle-object-storage (default OFF) gates the capability itself; this
+# block only decides WHERE the bucket lives.
+bundleStorage:
+  # bundled (default, every environment): the chart's own SeaweedFS (Apache-2.0,
+  # infrastructure.seaweedfs -- MUST stay enabled) holds the bucket; created
+  # idempotently by the seaweedfs-bucket-init hook Job with default SSE-S3 bucket
+  # encryption; credentials from the chart Secret (never literals).
+  # external: opt-in override -- an operator-supplied S3-compatible service; the bundled
+  # bucket is NOT created and the bundle-storage identity is not rendered.
+  mode: bundled
+  bucketName: "waddles-bundle-storage"
+  region: "us-east-1"
+  external:
+    endpoint: ""
+    bucket: ""
+    region: "us-east-1"
+    # Pre-created Secret holding the access/secret keys (never literals in values).
+    existingSecret: ""
+    accessKeyKey: "S3_ACCESS_KEY_ID"
+    secretKeyKey: "S3_SECRET_ACCESS_KEY"
+    # security.md: object storage holding sensitive data needs server-side encryption.
+    # The operator MUST assert the external bucket has it enabled (render fails otherwise).
+    serverSideEncryptionConfirmed: false

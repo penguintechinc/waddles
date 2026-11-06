@@ -99,9 +99,9 @@ class TestOpenWorkerDal:
     """`open_worker_dal` against a real sqlite file -- the real `init_database` + pydal path."""
 
     def test_yields_async_dal_wrapping_a_raw_pydal_dal(
-        self, bar_citizen_db: Any, tmp_path: Any
+        self, guild_pairing_db: Any, tmp_path: Any
     ) -> None:
-        url = f"sqlite://{tmp_path / 'bar_citizen_test.db'}"
+        url = f"sqlite://{tmp_path / 'guild_pairing_test.db'}"
         with swd.open_worker_dal(url) as async_dal:
             assert isinstance(async_dal, AsyncDAL)
             # The engines call `dal(query).select()` / `dal.tables` / `dal.define_table`.
@@ -110,12 +110,12 @@ class TestOpenWorkerDal:
             assert async_dal.dal(async_dal.dal.tenants.id > 0).count() == 2
 
     async def test_async_dal_satisfies_get_decrypted_tokens(
-        self, bar_citizen_db: Any, tmp_path: Any
+        self, guild_pairing_db: Any, tmp_path: Any
     ) -> None:
         """The token lookup (`.dal` + `select_async`) works on the yielded object, for real."""
-        fixture_dal, community_id, _t, _g = bar_citizen_db
+        fixture_dal, community_id, _t, _g = guild_pairing_db
         seed_twitch_connection(fixture_dal, community_id, "tok-real")
-        url = f"sqlite://{tmp_path / 'bar_citizen_test.db'}"
+        url = f"sqlite://{tmp_path / 'guild_pairing_test.db'}"
         with swd.open_worker_dal(url) as async_dal:
             tokens = await get_decrypted_tokens(async_dal, community_id, "twitch", tenant_id=SYSTEM)
             assert tokens is not None and tokens.access_token == "tok-real"  # noqa: S105
@@ -130,12 +130,12 @@ class TestOpenWorkerDal:
             await get_decrypted_tokens(AsyncDBShapedDouble(), 1, "twitch", tenant_id=SYSTEM)
 
     def test_error_rolls_back_uncommitted_work_instead_of_committing_it(
-        self, bar_citizen_db: Any, tmp_path: Any
+        self, guild_pairing_db: Any, tmp_path: Any
     ) -> None:
         """A failed pass must not persist half its writes (pydal `close()` commits)."""
-        fixture_dal, _c, _t, _g = bar_citizen_db
+        fixture_dal, _c, _t, _g = guild_pairing_db
         before = fixture_dal(fixture_dal.tenants.id > 0).count()
-        url = f"sqlite://{tmp_path / 'bar_citizen_test.db'}"
+        url = f"sqlite://{tmp_path / 'guild_pairing_test.db'}"
         with pytest.raises(RuntimeError, match="boom"), swd.open_worker_dal(url) as async_dal:
             swd.bind_reference_tenants(async_dal.dal)
             async_dal.dal.tenants.insert(slug="half-applied")
@@ -143,20 +143,20 @@ class TestOpenWorkerDal:
         fixture_dal.rollback()  # end this connection's snapshot so it re-reads the file
         assert fixture_dal(fixture_dal.tenants.id > 0).count() == before
 
-    def test_executor_is_shut_down_on_exit(self, bar_citizen_db: Any, tmp_path: Any) -> None:
-        url = f"sqlite://{tmp_path / 'bar_citizen_test.db'}"
+    def test_executor_is_shut_down_on_exit(self, guild_pairing_db: Any, tmp_path: Any) -> None:
+        url = f"sqlite://{tmp_path / 'guild_pairing_test.db'}"
         with swd.open_worker_dal(url) as async_dal:
             executor = async_dal.executor
         with pytest.raises(RuntimeError, match="after shutdown"):
             executor.submit(lambda: None)
 
     def test_close_failure_is_logged_not_raised(
-        self, bar_citizen_db: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A failing `close()` must not mask a finished pass, and the executor still shuts down."""
         logged: list[str] = []
         monkeypatch.setattr(swd, "log_db_error", lambda _log, msg, _exc: logged.append(msg))
-        url = f"sqlite://{tmp_path / 'bar_citizen_test.db'}"
+        url = f"sqlite://{tmp_path / 'guild_pairing_test.db'}"
         with swd.open_worker_dal(url) as async_dal:
             executor = async_dal.executor
 
@@ -169,11 +169,11 @@ class TestOpenWorkerDal:
             executor.submit(lambda: None)
 
     def test_rollback_failure_is_logged_and_original_error_still_raised(
-        self, bar_citizen_db: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         logged: list[str] = []
         monkeypatch.setattr(swd, "log_db_error", lambda _log, msg, _exc: logged.append(msg))
-        url = f"sqlite://{tmp_path / 'bar_citizen_test.db'}"
+        url = f"sqlite://{tmp_path / 'guild_pairing_test.db'}"
         with pytest.raises(ValueError, match="original"), swd.open_worker_dal(url) as async_dal:
 
             def _boom() -> None:

@@ -49,16 +49,20 @@ mod lifecycle_tests;
 pub mod metrics;
 pub mod poll;
 pub(crate) mod ratelimit;
+pub mod rediscover;
 pub mod registry;
 pub mod secrets;
 pub mod sender_exec;
 pub mod sink;
+pub mod spectrum;
+pub mod spectrum_org;
 pub mod transport;
 pub(crate) mod transport_common;
 pub mod types;
 pub mod webhook;
 pub mod webhook_verify;
 pub mod wire_invoker;
+pub mod wix_jwt;
 pub mod ws;
 
 pub use driver::{
@@ -82,6 +86,7 @@ pub use lifecycle::{
 };
 pub use metrics::{register_connector_metrics, ConnectorMetrics};
 pub use poll::{PollAuth, PollConfig, PollRequest, PollTransport};
+pub use rediscover::{Rediscover, RediscoverConfig, RediscoverError, RediscoverOutcome};
 pub use registry::{
     ConnectorRegistry, EventLimits, PinnedConnector, RegistryError, MAX_EVENTS_PER_FRAME,
 };

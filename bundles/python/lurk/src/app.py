@@ -40,8 +40,9 @@ this file used to be):
 - Community admin config, broadcaster/moderator only: `!lurk set <message>`
   (per-community lurk-message template; validated against the known
   placeholder set `$(username)`/`$(duration)`, unknown placeholders
-  rejected), `!lurk enable ai` / `!lurk disable ai` (Enterprise-licensed AI
-  response toggle -- see below), `!lurk reset` (restores both to defaults).
+  rejected), `!lurk enable ai` / `!lurk disable ai` (AI response
+  toggle; the host's AI capability enforces the license tier),
+  `!lurk reset` (restores both to defaults).
   All four require `_caller_role_signal()` to read `True` off the
   normalized event's own `is_mod`/`is_broadcaster` badge fields
   (`core/svc_ingest/src/normalize.rs::normalize_twitch_irc`); if *neither*
@@ -70,13 +71,9 @@ actually usable on alpha. `dispatch()` still raises before touching `kv` if
 one, so a string that empty can only be a caller-side bug, never silently
 treated as tenant-wide.
 
-License gating (2026-10-05 addition): `!lurk enable ai` reads the always-
-granted WIT `%flags.tier()` import (`wit/waddle-bundle/stage.wit`) and only
-enables the toggle when the tenant is Enterprise-licensed -- fails CLOSED
-(treats an unavailable/stale binding as "free", never as an implicit
-allow) and is never env-overridable, per `critical-rules.md` Feature Flags
-& License Tiers. `!lurk disable ai` and `!lurk reset` require no license
-check (turning a thing off is always allowed).
+License: this bundle never checks a license tier. AI is a platform harness
+capability -- the host's `ai.generate` enforces the tier itself for every bundle.
+`!lurk disable ai` and `!lurk reset` likewise need no check.
 
 DO NOT BUILD in v1 -- clean extension points, tracked issues, never a
 silent stub:
@@ -136,7 +133,6 @@ _USAGE = (
     "!lurk disable ai | !lurk reset (admin/mod only for set/enable/disable/reset)"
 )
 _PERMISSION_DENIED_MSG = "only moderators/broadcasters can configure !lurk"
-_ENTERPRISE_REQUIRED_MSG = "AI lurk responses require Enterprise"
 
 _CONFIG_COMMANDS = frozenset(
     {"config_set_message", "config_enable_ai", "config_disable_ai", "config_reset"}
@@ -285,31 +281,6 @@ def _format_duration(total_seconds: int) -> str:
     if not nonzero:
         return "0s"
     return " ".join(f"{v}{s}" for v, s in nonzero[:2])
-
-
-def _license_tier() -> str:
-    """Read the tenant's license tier via the always-granted WIT `%flags.tier()` import.
-
-    Fails CLOSED to `"free"` -- never `"enterprise"` -- when the binding is
-    unavailable (host-side tests) or the generated world has no `flags`
-    import (a component wizened against an older world, same defensive
-    shape as `waddle_sdk.flask_core.feature_flags.feature_enabled`'s own
-    stale-world guard). Unlike that PostHog-flag shim, this answers a
-    license-entitlement question, so the fail direction is the opposite:
-    closed, never open, and never overridable by any env var/flag per
-    `critical-rules.md` Feature Flags & License Tiers.
-    """
-    try:
-        import wit_world
-    except ImportError:
-        return "free"
-    flags_mod = getattr(wit_world.imports, "flags", None)
-    if flags_mod is None:
-        return "free"
-    tier_fn = getattr(flags_mod, "tier", None)
-    if tier_fn is None:
-        return "free"
-    return str(tier_fn())
 
 
 def _caller_role_signal(payload: dict[str, Any]) -> bool | None:
@@ -466,10 +437,6 @@ async def _handle_config_command(
         return f"lurk message updated: {message}"
 
     if command == "config_enable_ai":
-        tier = _license_tier()
-        if tier != "enterprise":
-            log.info("lurk.enable_ai_denied", tier=tier)
-            return _ENTERPRISE_REQUIRED_MSG
         await _kv_set(
             _ai_key(community),
             b"1",
@@ -477,7 +444,7 @@ async def _handle_config_command(
             provider=provider,
             channel_id=channel_id,
         )
-        return "AI lurk responses enabled (Enterprise)."
+        return "AI lurk responses enabled."
 
     if command == "config_disable_ai":
         await _kv_delete(_ai_key(community), provider=provider, channel_id=channel_id)

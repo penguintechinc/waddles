@@ -338,6 +338,7 @@ fn scope_for(app: &str, version: i64, chain: &[&str], deadline: Option<Instant>)
         app_id: app.to_string(),
         origin_channel_id: None,
         origin_platform: None,
+        origin_guild_id: None,
         tenant_id: TENANT_ID,
         community_id: COMMUNITY_ID,
         app_version: version,
@@ -881,4 +882,117 @@ async fn scope_restricted_tools_are_refused_on_the_action_stage_with_a_clear_rea
         .await
         .unwrap();
     assert!(recorded(&w)[0].payload["args"].get("__ctx").is_none());
+}
+
+/// The Discord role tools through the REAL `tool.invoke` planner: the manifest request, the
+/// approved `tool.call` grant and the write key are enforced BEFORE the host-mediated producer.
+mod discord_role_tool_invoke {
+    use super::*;
+    use crate::capabilities::discord_role_tools::TOOL_ROLES_ADD;
+    use crate::capabilities::event_sync::DISCORD_SERVICE_APP_ID as DISCORD;
+    use crate::capabilities::tests::{caps, discord_scope};
+
+    const UUID_A: &str = "3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5f";
+
+    fn rows(requested: bool) -> Vec<ActiveBundleRow> {
+        let req: &[(&str, &str, bool)] = if requested {
+            &[(DISCORD, TOOL_ROLES_ADD, true)]
+        } else {
+            &[]
+        };
+        vec![
+            row(APP, APP_VERSION, manifest(false, &[], req)),
+            row(DISCORD, 44, manifest(true, &[(TOOL_ROLES_ADD, true)], &[])),
+        ]
+    }
+
+    fn handler(requested: bool, granted: bool) -> StageCapabilities<FakeRelayQueue> {
+        let snapshot = ActiveVersionSnapshot::new();
+        snapshot.update_scoped_all(
+            &rows(requested)
+                .into_iter()
+                .map(|r| ((TENANT_ID, COMMUNITY_ID, r.app_id.clone()), r))
+                .collect(),
+        );
+        let grants: &[(&str, i64, &str, &str)] = if granted {
+            &[(APP, APP_VERSION, DISCORD, TOOL_ROLES_ADD)]
+        } else {
+            &[]
+        };
+        let mut c = caps(FakeRelayQueue::with_live_drain());
+        c.gate = gate(grants);
+        c.with_tool(ToolWiring {
+            connections: Arc::new(ConnectionRegistry::new()),
+            snapshot,
+        })
+    }
+
+    fn invoke(args: serde_json::Value) -> HostCallBody {
+        HostCallBody {
+            app_id: APP.to_string(),
+            capability: CapabilityKind::Db,
+            op: "tool.invoke".to_string(),
+            args: serde_json::json!({
+                "target": DISCORD, "tool": TOOL_ROLES_ADD, "args": args,
+                "idempotency_key": "k-1"
+            }),
+            call_id: 1,
+        }
+    }
+
+    fn app_scope() -> InvokeScope {
+        let mut s = discord_scope();
+        s.app_id = APP.to_string();
+        s.tenant_id = TENANT_ID;
+        s.community_id = COMMUNITY_ID;
+        s.app_version = APP_VERSION;
+        s
+    }
+
+    #[tokio::test]
+    async fn granted_requested_call_reaches_the_pinned_producer() {
+        let c = handler(true, true);
+        let out = c
+            .handle(
+                &app_scope(),
+                invoke(serde_json::json!({"user": UUID_A, "role_key": "vip"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out, serde_json::json!({"ok": true, "op": "role.add"}));
+        let envs = c.relay_queue.envelopes();
+        assert_eq!((envs.len(), envs[0]["op"].as_str()), (1, Some("role.add")));
+        assert_eq!(envs[0]["text"], "vip");
+    }
+
+    #[tokio::test]
+    async fn ungranted_or_unrequested_calls_queue_nothing() {
+        for (requested, granted, code) in [(true, false, "not_granted"), (false, true, "forbidden")]
+        {
+            let c = handler(requested, granted);
+            let err = c
+                .handle(
+                    &app_scope(),
+                    invoke(serde_json::json!({"user": UUID_A, "role_key": "vip"})),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code);
+            assert!(c.relay_queue.envelopes().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn injection_through_the_planner_is_refused() {
+        let c = handler(true, true);
+        let err = c
+            .handle(
+                &app_scope(),
+                invoke(serde_json::json!({"user": UUID_A, "role_key": "vip", "guild_id": "1"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+        assert!(c.relay_queue.envelopes().is_empty());
+    }
 }

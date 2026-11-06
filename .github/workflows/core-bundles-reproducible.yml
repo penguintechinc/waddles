@@ -26,6 +26,7 @@ on:
       - 'bundles/rust/discord/**'
       - 'bundles/rust/youtube/**'
       - 'bundles/rust/spectrum/**'
+      - 'bundles/rust/wix/**'
       - 'bundles/python/pyping/**'
       - 'sdk/waddle-sdk-rs/**'
       - 'sdk/waddle-sdk/src/**'
@@ -76,6 +77,7 @@ jobs:
             bundles/rust/discord/**
             bundles/rust/youtube/**
             bundles/rust/spectrum/**
+            bundles/rust/wix/**
             bundles/python/pyping/**
             sdk/waddle-sdk-rs/**
             sdk/waddle-sdk/src/**

@@ -901,6 +901,12 @@ pub struct ProcessDeps<S: SpineOps> {
     /// when `BUNDLE_ECONOMY_PASSWORD` is unset or the connection failed
     /// (every `economy.*` call then denies `not_implemented`).
     pub economy_wiring: Option<crate::capabilities::EconomyWiring>,
+    /// The `platform-table` host capability's production wiring
+    /// (`crate::lib::try_build_platform_table_wiring`), cloned into every
+    /// per-invoke `StageCapabilities`. `None` when
+    /// `BUNDLE_PLATFORM_TABLE_PASSWORD` is unset or the connection failed
+    /// (every `platform_table.*` call then denies `not_implemented`).
+    pub platform_table_wiring: Option<crate::capabilities::PlatformTableWiring>,
     /// The `identity` host capability's production wiring
     /// (`crate::lib::try_build_identity_wiring`), cloned into every per-invoke
     /// `StageCapabilities` like [`ProcessDeps::economy_wiring`] -- paired there
@@ -916,6 +922,11 @@ pub struct ProcessDeps<S: SpineOps> {
     /// a valid self-hosted URL or no license client exists (every `ai.generate`
     /// call then denies `not_implemented`).
     pub ai_wiring: Option<crate::ai::AiWiring>,
+    /// The `media` host capability's production wiring
+    /// (`crate::media::build_media_wiring`), cloned into every per-invoke
+    /// `StageCapabilities`. `None` when its config/dependencies are not
+    /// provisioned (every `media.*` call then denies `not_implemented`).
+    pub media_wiring: Option<crate::media::MediaWiring>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -1351,11 +1362,22 @@ async fn handle_delivered_inner<S: SpineOps>(
             Some(eco) => caps.with_economy(eco.clone()),
             None => caps,
         };
+        let caps = match &deps.platform_table_wiring {
+            Some(pt) => caps.with_platform_table(pt.clone()),
+            None => caps,
+        };
         // `ai`: every model call is clamped to what remains of THIS invoke's
         // executor deadline, so the deadline is fixed here, at construction.
         let caps = match &deps.ai_wiring {
             Some(ai) => caps.with_ai(
                 ai.clone(),
+                std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
+            ),
+            None => caps,
+        };
+        let caps = match &deps.media_wiring {
+            Some(media) => caps.with_media(
+                media.clone(),
                 std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
             ),
             None => caps,
@@ -2463,8 +2485,10 @@ mod tests {
             breaker: Arc::new(CircuitBreaker::new(Arc::new(()))),
             reputation_wiring: None,
             economy_wiring: None,
+            platform_table_wiring: None,
             identity_wiring: None,
             ai_wiring: None,
+            media_wiring: None,
         };
         (deps, metrics)
     }

@@ -3,7 +3,7 @@
 Boots one migrated Postgres container (`alembic/tests/pg_docker.py`, the same harness the DSAR /
 identity PG suites use), tops up the legacy-table columns the pydal binders declare but the
 alembic minimal bootstrap omits, creates `community_roles` from the REAL legacy DDL, and hands
-back a pydal `AsyncDAL` with `bind_auth_tables` + `bind_bar_citizen_tables` bound against it.
+back a pydal `AsyncDAL` with `bind_auth_tables` + `bind_guild_pairing_tables` bound against it.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from pg_docker import (  # noqa: E402  # type: ignore[import-not-found]
     migrated_postgres,
 )
 
-from services.schema import bind_auth_tables, bind_bar_citizen_tables  # noqa: E402
+from services.schema import bind_auth_tables, bind_guild_pairing_tables  # noqa: E402
 
 __all__ = [
     "DOCKER_AVAILABLE",
@@ -109,7 +109,7 @@ def fresh_dal(db: PgTestDatabase) -> Iterator[AsyncDAL]:
         migrate=False,
     )
     bind_auth_tables(dal, migrate=False)
-    bind_bar_citizen_tables(dal, migrate=False)
+    bind_guild_pairing_tables(dal, migrate=False)
     dal.executesql(
         "TRUNCATE guild_tenant_pairings, community_role_sync_bindings, community_roles, "
         "community_members, hub_user_identities, hub_users, communities, tenants "

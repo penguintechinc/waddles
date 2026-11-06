@@ -2784,10 +2784,10 @@ def bind_loyalty_tables(dal: Any, *, migrate: bool = False) -> None:
     )
 
 
-def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
-    """Define the Bar Citizen guild-pairing + role-sync group's own tables (migrations 0034/0035).
+def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Define the guild-pairing + role-sync group's own tables (migrations 0034/0035).
 
-    Schema is owned by `alembic/versions/0034_bar_citizen_guild_pairing.py`
+    Schema is owned by `alembic/versions/0034_guild_pairing.py`
     + `0035_connection_model_layers.py` (raw SQL, not this process --
     `backend-database.md`: "NO automatic Alembic migrations on startup")
     -- `migrate=False` in production, this function only maps pydal onto

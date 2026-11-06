@@ -206,4 +206,15 @@ def test_main_pr_every_check_required_and_skip_never_attributed_to_detector():
     assert tier.skip_report("main", tier.filt("main", s))["skipped_not_affected"] == 0
     # A failing main-only check is fatal on main.
     assert not gate_ok("main", c + mk(["CodeQL Analysis"], "failure"))
-    assert tier.missing("main", mk(FAST[1:])) == [DET]
+    # Detector dropped: on main, missing = detector + every main-extra check not supplied.
+    assert tier.missing("main", mk(FAST[1:])) == [DET] + tier.MAIN_EXTRA_PRESENT
+    assert tier.missing("main", mk(FAST[1:] + tier.MAIN_EXTRA_PRESENT)) == [DET]
+
+
+def test_bundle_executor_e2e_required_on_main_not_release():
+    e2e = "Rust bundle-executor e2e (flag-on command, main tier)"
+    assert e2e in tier.MAIN_EXTRA_PRESENT
+    assert e2e in tier.required_present("main")
+    assert e2e not in tier.required_present("release")
+    assert e2e in tier.missing("main", mk(FAST))
+    assert e2e not in tier.missing("release", mk(FAST))

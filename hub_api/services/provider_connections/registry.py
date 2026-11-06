@@ -18,6 +18,7 @@ from services.provider_connections.static_secret import (
     GcpFunctionAdapter,
 )
 from services.provider_connections.twitch import TwitchAdapter
+from services.provider_connections.wix import WixAdapter
 from services.provider_connections.youtube import AppCredentials, YoutubeAdapter
 
 
@@ -37,6 +38,7 @@ def build_default_registry(
     registry.register(DiscordAdapter(transport=transport))
     registry.register(YoutubeAdapter(transport=transport, app_credentials=youtube_app_credentials))
     registry.register(SpectrumAdapter(transport=transport))
+    registry.register(WixAdapter())
     registry.register(ExternalHttpAdapter())
     registry.register(AwsLambdaAdapter())
     registry.register(GcpFunctionAdapter())

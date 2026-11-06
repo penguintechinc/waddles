@@ -42,13 +42,14 @@ use super::metrics::{
 use super::observed::{ObservedInvoker, ObservedTransport, Pacer, SharedSecrets};
 use super::ready::{ExecutorStatus, RuntimeReady, RuntimeStatus};
 use super::tenant::{TenantError, TenantResolve, TENANT_UNRESOLVED};
+use crate::connector::spectrum::{SpectrumStore, SpectrumTransport};
 use crate::connector::webhook::BoxFut;
 use crate::connector::webhook::WebhookTransport;
 use crate::connector::ConnectorInvoker;
 use crate::connector::{
     ConnectorDriver, ConnectorMetrics, ConnectorRegistry, EventSink, FrameRuleMetrics,
-    HandshakeGate, PollTransport, RunEnd, Transport, TransportError, TransportSecretSource,
-    TransportSecrets, WsTransport,
+    HandshakeGate, PollTransport, RediscoverConfig, RediscoverOutcome, RunEnd, Transport,
+    TransportError, TransportSecretSource, TransportSecrets, WsTransport,
 };
 use crate::twitch_sessions::SessionLease;
 
@@ -337,6 +338,8 @@ where
     /// Active-connection table for the host-call bridge; `None` when no host
     /// calls are serviced (the link then denies every call).
     pub activator: Option<Arc<dyn ConnectionActivator>>,
+    /// Dedupe/snapshot state for Spectrum plans; `None` parks them loudly.
+    pub spectrum: Option<Arc<dyn SpectrumStore>>,
 }
 
 /// How one connection future ended.
@@ -352,6 +355,12 @@ enum TaskEnd {
     LeaseDenied,
     /// The lease was lost while running.
     LeaseLost,
+    /// The polled target ended and a new one was recorded; restart at the
+    /// next reconcile on the re-derived plan.
+    Rediscovered,
+    /// The polled target ended and none is live yet; re-check at the next
+    /// reconcile.
+    WaitingForLive,
 }
 
 /// State shared by every connection future.
@@ -369,6 +378,7 @@ struct Shared<I: ConnectorInvoker, S: EventSink, L: SessionLease> {
     frame_metrics: Option<FrameRuleMetrics>,
     webhook: Option<Arc<dyn WebhookAttach>>,
     activator: Option<Arc<dyn ConnectionActivator>>,
+    spectrum: Option<Arc<dyn SpectrumStore>>,
     start_sem: Arc<Semaphore>,
     pacers: BTreeMap<&'static str, Arc<Pacer>>,
     heartbeat_enabled: bool,
@@ -437,6 +447,20 @@ where
             sh.metrics.lease(key.platform, LeaseOutcome::Lost);
             TaskEnd::LeaseLost
         }
+    }
+}
+
+/// Refines a terminal poll end: when the transport ended itself because its
+/// target ended, the rediscovery hook's recorded outcome says whether to
+/// restart on a new target or wait for one. Any other end passes through.
+fn rediscovery_end(end: TaskEnd, rediscover: Option<&RediscoverConfig>) -> TaskEnd {
+    if end != TaskEnd::Parked(ParkReason::Fatal) {
+        return end;
+    }
+    match rediscover.and_then(|r| r.hook.take_outcome()) {
+        Some(RediscoverOutcome::Rediscovered) => TaskEnd::Rediscovered,
+        Some(RediscoverOutcome::WaitingForLive) => TaskEnd::WaitingForLive,
+        None => end,
     }
 }
 
@@ -639,6 +663,21 @@ where
             if let Some(m) = &sh.frame_metrics {
                 t = t.with_metrics(m.clone());
             }
+            let end = drive(&sh, &driver, t, key, tuple, permit, stop_rx).await;
+            rediscovery_end(end, cfg.rediscover.as_ref())
+        }
+        TransportPlan::Spectrum(plan) => {
+            let Some(store) = &sh.spectrum else {
+                return build_failed("spectrum_store_missing");
+            };
+            let poll = match PollTransport::new(plan.poll.clone(), secrets) {
+                Ok(t) => t,
+                Err(e) => return build_failed(e.kind()),
+            };
+            let mut t = SpectrumTransport::new(poll, Arc::clone(store), plan.spec.clone());
+            if let Some(m) = &sh.frame_metrics {
+                t = t.with_metrics(m.clone());
+            }
             drive(&sh, &driver, t, key, tuple, permit, stop_rx).await
         }
         TransportPlan::Webhook(plan) => {
@@ -712,6 +751,10 @@ where
     make: M,
     tasks: FuturesUnordered<Fut>,
     slots: HashMap<ConnKey, Slot>,
+    /// Consecutive `waiting_for_live` ends per connection (backoff exponent);
+    /// cleared by any other end, a found broadcast, a fingerprint change or
+    /// the connection no longer being desired.
+    wait_streaks: HashMap<ConnKey, u32>,
     sh: Arc<Shared<I, S, L>>,
     status: Arc<RuntimeStatus>,
     config: RuntimeConfig,
@@ -728,6 +771,10 @@ where
     fn start(&mut self, desired: Arc<DesiredConnection>, reason: Option<RestartReason>) {
         if let Some(r) = reason {
             self.sh.metrics.restart(desired.key.platform, r);
+        }
+        // A changed target restarts the schedule; a plain re-check keeps it.
+        if !matches!(reason, Some(RestartReason::WaitingForLive)) {
+            self.wait_streaks.remove(&desired.key);
         }
         let (tx, rx) = oneshot::channel();
         self.tasks.push((self.make)(desired.clone(), rx));
@@ -771,6 +818,9 @@ where
         let Some(slot) = self.slots.remove(&key) else {
             return;
         };
+        if slot.pending.is_some() || !matches!(end, TaskEnd::WaitingForLive) {
+            self.wait_streaks.remove(&key);
+        }
         tracing::info!(
             platform = key.platform,
             community_id = key.community_id,
@@ -810,6 +860,35 @@ where
                 slot.state = SlotState::Cooldown {
                     until: Instant::now() + self.config.restart_cooldown,
                     reason: RestartReason::Ended,
+                };
+            }
+            // Not terminal: restart at the next reconcile (immediately due),
+            // on the re-derived plan when the target changed.
+            TaskEnd::Rediscovered => {
+                slot.state = SlotState::Cooldown {
+                    until: Instant::now(),
+                    reason: RestartReason::Rediscovered,
+                };
+            }
+            TaskEnd::WaitingForLive => {
+                self.sh
+                    .metrics
+                    .parked(key.platform, ParkReason::WaitingForLive);
+                let streak = self.wait_streaks.entry(key.clone()).or_insert(0);
+                *streak = streak.saturating_add(1);
+                let wait = waiting_delay(self.config.reconcile_interval, *streak);
+                let wait = wait.saturating_add(jitter(wait));
+                tracing::debug!(
+                    platform = key.platform,
+                    community_id = key.community_id,
+                    connection_id = key.connection_id,
+                    streak = *streak,
+                    wait_secs = wait.as_secs(),
+                    "no live broadcast; backing off the next re-check"
+                );
+                slot.state = SlotState::Cooldown {
+                    until: Instant::now() + wait,
+                    reason: RestartReason::WaitingForLive,
                 };
             }
             // No lease: drop the slot; the next pass re-acquires.
@@ -870,6 +949,7 @@ where
             if remove_now {
                 self.slots.remove(&k);
             }
+            self.wait_streaks.remove(&k);
         }
 
         let mut capped = 0u64;
@@ -991,6 +1071,19 @@ where
     }
 }
 
+/// Longest `waiting_for_live` re-check gap, as a multiple of the reconcile
+/// interval (60 s reconcile -> 1 min doubling to a 15 min cap).
+const WAITING_CAP_FACTOR: u32 = 15;
+
+/// Un-jittered `waiting_for_live` gap after `streak` consecutive empty
+/// discoveries (`streak >= 1`): `base`, doubling, capped at
+/// `base * WAITING_CAP_FACTOR`. Bounds the YouTube quota an idle channel burns.
+fn waiting_delay(base: Duration, streak: u32) -> Duration {
+    let cap = base.saturating_mul(WAITING_CAP_FACTOR);
+    let doublings = streak.saturating_sub(1).min(16);
+    base.saturating_mul(1u32 << doublings).min(cap)
+}
+
 /// 0-20% of `base`, drawn from a fresh random UUID.
 fn jitter(base: Duration) -> Duration {
     let r = uuid::Uuid::new_v4().as_u128();
@@ -1047,6 +1140,7 @@ impl<
             frame_metrics: deps.frame_metrics,
             webhook: deps.webhook,
             activator: deps.activator,
+            spectrum: deps.spectrum,
             start_sem: Arc::new(Semaphore::new(config.start_concurrency)),
             pacers,
             heartbeat_enabled: config.heartbeat_enabled,
@@ -1094,6 +1188,7 @@ impl<
             make,
             tasks: FuturesUnordered::new(),
             slots: HashMap::new(),
+            wait_streaks: HashMap::new(),
             sh: self.sh.clone(),
             status: self.status.clone(),
             config: self.config.clone(),

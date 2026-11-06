@@ -12,6 +12,8 @@ on:
       - 'core/circuit_breaker/**'
       - 'core/bundle_host_reputation/**'
       - 'core/bundle_host_economy/**'
+      - 'core/bundle_host_media/**'
+      - 'core/bundle_host_http/**'
       - 'core/hub_client/**'
       - 'scripts/db/bundle_identity_resolve.sql'
       - 'scripts/db/bundle_economy_store.sql'
@@ -63,6 +65,7 @@ jobs:
             core/circuit_breaker/**
             core/bundle_host_reputation/**
             core/bundle_host_economy/**
+            core/bundle_host_media/**
             core/hub_client/**
             scripts/db/bundle_identity_resolve.sql
             scripts/db/bundle_economy_store.sql

@@ -36,6 +36,12 @@ from typing import Any, cast
 from quart import current_app
 
 from config import HubAPIConfig
+from services.install_state_binding import (
+    ERR_STATE,
+    InstallStateError,
+    consume_bound,
+    nonce_hash,
+)
 from services.platform_integrations_crypto import (
     PlatformCredentialCryptoError,
 )
@@ -93,6 +99,11 @@ def _redis_client() -> Any:
     return client
 
 
+def ttl_seconds() -> int:
+    """State (and binding-cookie) lifetime in seconds, capped at 10 minutes."""
+    return min(_ttl_seconds(), _DEFAULT_TTL_S)
+
+
 def _ttl_seconds() -> int:
     cfg = cast(HubAPIConfig, current_app.config["HUB_API_CONFIG"])
     return cast(int, getattr(cfg, "connections_state_ttl_s", _DEFAULT_TTL_S))
@@ -105,12 +116,16 @@ async def create_state(
     client_id: str,
     client_secret: str,
     redirect_uri: str,
+    binding_nonce: str,
 ) -> str:
     """Mint a fresh single-use `state` token and store its context in Redis.
 
     Returns the opaque token to embed in Twitch's `authorize` URL -- never
     the payload itself. `client_secret` is encrypted before storage; never
-    logged here or by any caller.
+    logged here or by any caller. `binding_nonce` is the initiating
+    browser's cookie nonce (`services.install_state_binding.new_nonce`);
+    only its SHA-256 is stored, and `consume_state` refuses any browser
+    that cannot present it.
     """
     token = secrets.token_urlsafe(32)
     payload = {
@@ -119,34 +134,31 @@ async def create_state(
         "client_id": client_id,
         "client_secret_ciphertext": seal_secret(client_secret),
         "redirect_uri": redirect_uri,
+        "binding": nonce_hash(binding_nonce),
     }
     client = _redis_client()
     await client.set(f"{_STATE_KEY_PREFIX}{token}", json.dumps(payload), ex=_ttl_seconds())
     return token
 
 
-async def consume_state(state: str) -> TwitchInstallStatePayload | None:
-    """Atomically fetch-and-delete `state`'s context.
+async def consume_state(state: str, binding_nonce: str | None) -> TwitchInstallStatePayload:
+    """Verify the browser binding, then atomically fetch-and-delete `state`'s context.
 
-    Returns `None` if absent/expired/already used/malformed.
-
-    `GETDEL` makes this single-use -- a second call with the same token
-    (legitimate retry or replay attempt) always misses, even under
-    concurrent requests. A decrypt failure on the stored `client_secret`
-    (e.g. `CREDENTIAL_ENCRYPTION_KEY` rotated mid-flight) is treated the
-    same as a malformed payload: fail closed, never return a partially
-    decoded result.
+    Raises `InstallStateError`: `invalid_or_expired_state` if absent/expired/
+    already used/malformed, `state_binding_mismatch` if `binding_nonce` is
+    missing or not the one minted for this state (state left untouched).
+    `GETDEL` makes it single-use even under concurrent requests. A decrypt
+    failure on the stored `client_secret` fails closed like a malformed payload.
     """
-    if not state:
-        return None
-    client = _redis_client()
+    if not state or len(state) > 128:
+        raise InstallStateError(ERR_STATE)
     try:
-        raw = await client.getdel(f"{_STATE_KEY_PREFIX}{state}")
-    except Exception:  # noqa: BLE001 - a Redis hiccup must fail the flow, not crash it
+        raw = await consume_bound(_redis_client(), f"{_STATE_KEY_PREFIX}{state}", binding_nonce)
+    except InstallStateError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a Redis hiccup must fail the flow, not crash it
         logger.exception("twitch_install_state.consume_failed")
-        return None
-    if raw is None:
-        return None
+        raise InstallStateError(ERR_STATE) from exc
     try:
         data = json.loads(raw)
         client_secret = open_secret(str(data["client_secret_ciphertext"]))
@@ -159,4 +171,4 @@ async def consume_state(state: str) -> TwitchInstallStatePayload | None:
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError, PlatformCredentialCryptoError):
         logger.warning("twitch_install_state.malformed_payload")
-        return None
+        raise InstallStateError(ERR_STATE) from None

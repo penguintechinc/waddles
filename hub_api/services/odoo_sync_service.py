@@ -1,4 +1,4 @@
-"""Odoo / external-WaddleDB connector -- one-way community-member sync (Bar Citizen #15).
+"""Odoo / external-WaddleDB connector -- one-way community-member sync (#15).
 
 **Scope note.** `docs/plans/2026-08-26-v3-scbm-apps-design.md` has no Odoo /
 WaddleDB data model (it only names Odoo as the "class" of CRM the Customer
@@ -22,7 +22,7 @@ or platform id is sent. Only role, reputation and active flag ride along.
 values raise `OdooConfigError` -- never a silent skip. Logs and spans carry
 IDs and counts only, never the API key, login or any member data.
 
-**Gating.** `waddles.bar_citizen.odoo_sync` (default OFF), evaluated per
+**Gating.** `waddles.odoo_sync` (default OFF), evaluated per
 tenant via `feature_enabled`; `WADDLES_ODOO_SYNC_ENABLED=true` is the Docker
 ENV baseline (alpha has no PostHog). The Helm CronJob is a separate deploy-
 time kill switch (`pipeline.odooSync.enabled`).
@@ -58,7 +58,7 @@ except ImportError:  # pragma: no cover -- only outside a real flask_core instal
 
 logger = logging.getLogger(__name__)
 
-FEATURE_BAR_CITIZEN_ODOO_SYNC = "waddles.bar_citizen.odoo_sync"
+FEATURE_ODOO_SYNC = "waddles.odoo_sync"
 ENV_BASELINE_VAR = "WADDLES_ODOO_SYNC_ENABLED"
 
 _meter = get_meter()
@@ -289,7 +289,7 @@ async def _flag_enabled(tenant_slug: str) -> bool:
         return True
     if feature_enabled is None:  # pragma: no cover
         return False
-    return bool(await feature_enabled(FEATURE_BAR_CITIZEN_ODOO_SYNC, tenant=tenant_slug))
+    return bool(await feature_enabled(FEATURE_ODOO_SYNC, tenant=tenant_slug))
 
 
 async def sync_community(

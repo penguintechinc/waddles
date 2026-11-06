@@ -121,6 +121,16 @@ pub const CONNECTORS: &[Connector] = &[
         app_id: "waddles.core.service.youtube",
         grants: &[Grant::PiiRead],
     },
+    Connector {
+        platform: "wix",
+        app_id: "waddles.core.service.wix",
+        grants: &[Grant::PiiRead],
+    },
+    Connector {
+        platform: "spectrum",
+        app_id: "waddles.core.service.spectrum",
+        grants: &[Grant::PiiRead],
+    },
 ];
 
 /// The connector registered for `app_id`, if any.
@@ -1093,7 +1103,6 @@ impl HostCallHandler for ConnectorHostCalls {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use hub_client::pb::identity_service_server::{IdentityService, IdentityServiceServer};
@@ -1917,7 +1926,7 @@ mod tests {
             }
             examined += 1;
         }
-        assert_eq!(examined, 3);
+        assert_eq!(examined, 5);
     }
 
     #[test]
@@ -2040,15 +2049,19 @@ mod tests {
             calls: calls.clone(),
             seen: seen.clone(),
         };
-        let port = {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
-        let addr = format!("127.0.0.1:{port}").parse().unwrap();
+        // The listener is bound here and handed to the server, never dropped
+        // and re-bound by port: a released ephemeral port can be claimed by a
+        // parallel test, which then answers (or refuses) in this rig's place.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let incoming = futures_util::stream::unfold(listener, |l| async move {
+            let conn = l.accept().await.map(|(s, _)| s);
+            Some((conn, l))
+        });
         tokio::spawn(async move {
             let _ = tonic::transport::Server::builder()
                 .add_service(IdentityServiceServer::new(fake))
-                .serve(addr)
+                .serve_with_incoming(incoming)
                 .await;
         });
         // The mint is never retried: wait until the server accepts first.

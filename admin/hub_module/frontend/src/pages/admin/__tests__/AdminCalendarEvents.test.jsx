@@ -44,7 +44,7 @@ const api = vi.mocked(adminApi);
 
 const EVENT = {
   id: 11,
-  title: 'Bar Citizen Meetup',
+  title: 'Acme Meetup',
   location: 'Discord',
   start_date: '2026-10-20T19:00:00Z',
   status: 'approved',
@@ -70,7 +70,7 @@ beforeEach(() => {
 describe('AdminCalendarEvents', () => {
   it('lists events from the community-scoped endpoint with the sync toggle', async () => {
     mount();
-    expect(await screen.findByText('Bar Citizen Meetup')).toBeInTheDocument();
+    expect(await screen.findByText('Acme Meetup')).toBeInTheDocument();
     expect(api.getCalendarEvents).toHaveBeenCalledWith('1');
     expect(screen.getByText('3 / 10')).toBeInTheDocument();
     expect(screen.getByTestId('sync-toggle-stub')).toBeInTheDocument();
@@ -92,7 +92,7 @@ describe('AdminCalendarEvents', () => {
   it('creates an event with trimmed fields and refreshes the list', async () => {
     api.createCalendarEvent.mockResolvedValue({ data: {} });
     mount();
-    await screen.findByText('Bar Citizen Meetup');
+    await screen.findByText('Acme Meetup');
     fireEvent.click(screen.getByRole('button', { name: /Create Event/ }));
     fireEvent.click(await screen.findByText('submit-stub'));
     await waitFor(() =>
@@ -110,7 +110,7 @@ describe('AdminCalendarEvents', () => {
       response: { data: { success: false, error: { code: 'INTERNAL_ERROR', message: 'calendar down' } } },
     });
     mount();
-    await screen.findByText('Bar Citizen Meetup');
+    await screen.findByText('Acme Meetup');
     fireEvent.click(screen.getByRole('button', { name: /Create Event/ }));
     fireEvent.click(await screen.findByText('submit-stub'));
     expect(await screen.findByText(/calendar down/)).toBeInTheDocument();

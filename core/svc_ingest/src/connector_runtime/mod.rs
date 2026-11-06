@@ -31,7 +31,7 @@ pub mod webhook_boot;
 
 pub use feed::{
     BindingFeed, ConnKey, DesiredConnection, DynFeed, FeedError, FeedSet, HubBindingFeed,
-    TransportPlan, WebhookPlan,
+    SpectrumPlan, TransportPlan, WebhookPlan,
 };
 pub use lease::ConnectorValkeyLease;
 pub use plan::{ConnectorProfile, PlanError, RuntimeEnv};

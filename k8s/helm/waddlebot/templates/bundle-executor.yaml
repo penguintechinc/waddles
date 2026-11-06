@@ -220,7 +220,7 @@ spec:
           value: /etc/waddlebot/connector-host-api-tls/tls.crt
         - name: CONNECTOR_HOST_API_CLIENT_KEY_FILE
           value: /etc/waddlebot/connector-host-api-tls/tls.key
-        {{- range $p := list "twitch" "discord" "youtube" "spectrum" }}
+        {{- range $p := list "twitch" "discord" "youtube" "wix" "spectrum" }}
         {{- $d := include "waddlebot.connectorDigest" (dict "root" $ "platform" $p) }}
         {{- if $d }}
         - name: CONNECTOR_PIN_DIGEST_{{ upper $p }}

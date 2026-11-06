@@ -66,7 +66,7 @@ def _secret_vols(dep: dict[str, Any]) -> set[str]:
 
 _RUNTIME_ENV = (
     "CONNECTOR_RUNTIME_ENABLED", "CONNECTOR_TWITCH_ENABLED", "CONNECTOR_DISCORD_ENABLED",
-    "CONNECTOR_YOUTUBE_ENABLED", "CONNECTOR_RECONCILE_INTERVAL_SECS", "CONNECTOR_HEARTBEAT_ENABLED", "CONNECTOR_MAX_CONNECTIONS",
+    "CONNECTOR_YOUTUBE_ENABLED", "CONNECTOR_WIX_ENABLED", "SENDER_EXEC_DIGEST_WIX", "CONNECTOR_RECONCILE_INTERVAL_SECS", "CONNECTOR_HEARTBEAT_ENABLED", "CONNECTOR_MAX_CONNECTIONS",
     "CONNECTOR_START_CONCURRENCY", "CONNECTOR_DISCORD_START_PACE_MS",
     "CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS", "CONNECTOR_ROUTE_KEY_SECRET",
     "CONNECTOR_HOST_API_ADDR", "CONNECTOR_HOST_API_IDENTITY", "EXECUTOR_CONNECTOR_CONNECTIONS",
@@ -163,10 +163,29 @@ def test_twitch_webhook_route_key_comes_from_existing_secret_only() -> None:
         for c in dep["spec"]["template"]["spec"]["containers"] for e in c.get("env", []))
 
 
+def test_wix_on_renders_env_digest_and_route_key_wiring() -> None:
+    wix = [*_BASE, "--set", f"pipeline.connectors.digests.wix={_D}",
+           "--set", f"{_RT}.connector.wix.enabled=true", "--set", f"{_RT}.webhookPlatforms={{wix}}",
+           "--set", f"{_RT}.routeKeySecret.existingSecret=ops-route-key"]
+    docs = _docs(wix)
+    for suffix in ("-svc-ingest-rust", "-svc-ingest"):
+        env = _env(_dep(docs, suffix))
+        assert env["CONNECTOR_WIX_ENABLED"]["value"] == "true"
+        assert env["CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS"]["value"] == "wix"
+        assert env["CONNECTOR_YOUTUBE_ENABLED"]["value"] == "false"
+    renv = _env(_dep(docs, "-svc-ingest-rust"))
+    assert renv["SENDER_EXEC_DIGEST_WIX"]["value"] == _D
+    assert renv["CONNECTOR_ROUTE_KEY_SECRET"]["valueFrom"]["secretKeyRef"]["name"] == "ops-route-key"
+    off = _docs(_yt())
+    assert _env(_dep(off, "-svc-ingest-rust"))["CONNECTOR_WIX_ENABLED"]["value"] == "false"
+    assert "SENDER_EXEC_DIGEST_WIX" not in _env(_dep(off, "-svc-ingest-rust"))
+
+
 @pytest.mark.parametrize(
     ("bad", "needle"),
     [
         (["--set", f"{_RT}.connector.youtube.enabled=true"], "connectorTools"),
+        ([*_BASE, "--set", f"{_RT}.connector.wix.enabled=true"], "digests.wix"),
         ([*_BASE[:8], "--set", f"{_RT}.connector.youtube.enabled=true"], "digests.youtube"),
         ([*_BASE, "--set", f"{_RT}.connector.twitch.enabled=true", "--set", f"{_RT}.webhookPlatforms={{twitch}}"],
          "routeKeySecret"),
