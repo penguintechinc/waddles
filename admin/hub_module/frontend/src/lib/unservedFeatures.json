@@ -138,13 +138,6 @@
       "POST /api/v1/communities/create"
     ]
   },
-  "browser-sources": {
-    "label": "Browser sources",
-    "endpoints": [
-      "GET /api/v1/admin/:communityId/browser-sources",
-      "POST /api/v1/admin/:communityId/browser-sources/regenerate"
-    ]
-  },
   "community-oauth-credentials": {
     "label": "Community OAuth credentials",
     "endpoints": [

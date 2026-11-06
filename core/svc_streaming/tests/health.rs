@@ -59,12 +59,20 @@ async fn readyz_returns_200_and_reports_dependency_snapshot() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let dependencies = parsed["dependencies"].as_array().unwrap();
-    assert_eq!(dependencies.len(), 3);
+    assert_eq!(dependencies.len(), 4);
     let names: Vec<&str> = dependencies
         .iter()
         .map(|d| d["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["database", "cache", "ffmpeg"]);
+    assert_eq!(names, vec!["database", "cache", "ffmpeg", "record"]);
+    // A freshly-built AppState has no recording sink: readiness must say so.
+    assert_eq!(parsed["status"], "degraded");
+    let record = &dependencies[3];
+    assert_eq!(record["configured"], false);
+    assert!(record["detail"]
+        .as_str()
+        .unwrap()
+        .contains("recording disabled"));
 }
 
 #[tokio::test]
