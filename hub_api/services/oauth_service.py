@@ -30,7 +30,7 @@ from urllib.parse import urlencode
 import httpx
 
 from config import HubAPIConfig
-from services import ban_suppression, session_service
+from services import ban_suppression, login_providers, session_service
 from services.auth_service import SessionUser, create_session_token
 from services.errors import ApiError, bad_request, conflict
 from services.install_state_binding import (
@@ -130,6 +130,7 @@ async def build_authorize_url(
 ) -> str:
     """Public wrapper used by `identity_service.start_identity_link` (its own state scheme)."""
     _require_valid_platform(platform)
+    await login_providers.require_enabled(platform)
     creds = await _get_platform_credentials(async_dal, dal, platform)
     if not creds["client_id"]:
         raise bad_request(f"No OAuth credentials configured for {platform}")
@@ -141,6 +142,7 @@ async def exchange_code(
 ) -> dict[str, Any]:
     """Public wrapper around `_exchange_code` for callers outside this module."""
     _require_valid_platform(platform)
+    await login_providers.require_enabled(platform)
     creds = await _get_platform_credentials(async_dal, dal, platform)
     return await _exchange_code(platform, creds, code, redirect_uri)
 
@@ -166,6 +168,7 @@ async def start_oauth(
     the real schema.
     """
     _require_valid_platform(platform)
+    await login_providers.require_enabled(platform)
     state = bound_state(secrets.token_hex(16), binding_nonce)
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/callback"
 
@@ -431,6 +434,7 @@ async def oauth_callback(
     code `state_binding_mismatch`) BEFORE the state is consumed; absent/expired/replayed state
     raises code `invalid_or_expired_state`.
     """
+    await login_providers.require_enabled(platform)
     try:
         verify_state_binding(state, binding_nonce)
     except InstallStateError as exc:
@@ -543,6 +547,7 @@ async def start_link(
     `binding_nonce` is the initiating browser's cookie nonce; the state embeds only its hash.
     """
     _require_valid_platform(platform)
+    await login_providers.require_enabled(platform)
     state = bound_state(secrets.token_hex(16), binding_nonce)
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/link-callback"
 
@@ -577,6 +582,7 @@ async def link_callback(
     Refuses (typed `ApiError`, code `state_binding_mismatch`) any browser that cannot present the
     nonce the state was bound to, BEFORE the state is consumed.
     """
+    await login_providers.require_enabled(platform)
     try:
         verify_state_binding(state, binding_nonce)
     except InstallStateError as exc:

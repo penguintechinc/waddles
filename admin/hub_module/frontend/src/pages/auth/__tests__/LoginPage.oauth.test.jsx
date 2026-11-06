@@ -12,6 +12,7 @@ import * as AuthContext from '../../../contexts/AuthContext';
 
 const captured = vi.hoisted(() => ({ props: {} }));
 const start = vi.hoisted(() => vi.fn());
+const providers = vi.hoisted(() => vi.fn());
 
 vi.mock('@penguintechinc/react-libs', () => ({
   LoginPageBuilder: (props) => {
@@ -25,7 +26,7 @@ vi.mock('../../../services/api', () => ({
   publicApi: { getSignupSettings: vi.fn().mockResolvedValue({ data: { signupEnabled: false } }) },
   tenantApi: { getLoginInfo: vi.fn() },
   ssoApi: { getOptions: vi.fn().mockResolvedValue({ data: { options: [] } }), start: vi.fn() },
-  oauthApi: { start },
+  oauthApi: { start, providers },
 }));
 
 const assign = vi.fn();
@@ -43,19 +44,30 @@ describe('LoginPage server-side OAuth buttons', () => {
   beforeEach(() => {
     assign.mockReset();
     start.mockReset();
+    providers.mockReset();
+    providers.mockResolvedValue({
+      data: {
+        success: true,
+        providers: [
+          { platform: 'discord', displayName: 'Discord' },
+          { platform: 'twitch', displayName: 'Twitch' },
+          { platform: 'google', displayName: 'Google' },
+        ],
+      },
+    });
     Object.defineProperty(window, 'location', {
       configurable: true,
       value: { ...window.location, assign },
     });
   });
 
-  it.each(['discord', 'twitch', 'google', 'slack'])(
+  it.each(['discord', 'twitch', 'google'])(
     '%s click fetches authorizeUrl from hub-api and redirects to it',
     async (platform) => {
       const url = `https://idp.example/authorize?client_id=REAL&state=s-${platform}`;
       start.mockResolvedValue({ data: { success: true, authorizeUrl: url, state: 's' } });
-      const { getByTestId } = renderPage();
-      fireEvent.click(getByTestId(`oauth-${platform}`));
+      const { findByTestId } = renderPage();
+      fireEvent.click(await findByTestId(`oauth-${platform}`));
       await waitFor(() => expect(assign).toHaveBeenCalledWith(url));
       expect(start).toHaveBeenCalledWith(platform);
     },
@@ -68,8 +80,9 @@ describe('LoginPage server-side OAuth buttons', () => {
     expect(JSON.stringify(captured.props.api)).not.toContain('server-side');
   });
 
-  it('hides youtube and kick (no backend)', () => {
-    const { queryByTestId, queryByText } = renderPage();
+  it('hides youtube and kick (no backend)', async () => {
+    const { queryByTestId, queryByText, findByTestId } = renderPage();
+    await findByTestId('oauth-discord');
     expect(queryByTestId('oauth-youtube')).toBeNull();
     expect(queryByTestId('oauth-kick')).toBeNull();
     expect(queryByText(/YouTube/i)).toBeNull();
@@ -78,8 +91,8 @@ describe('LoginPage server-side OAuth buttons', () => {
 
   it('never constructs a provider URL in the frontend', async () => {
     start.mockResolvedValue({ data: { authorizeUrl: 'https://hub.example/real' } });
-    const { getByTestId } = renderPage();
-    fireEvent.click(getByTestId('oauth-discord'));
+    const { findByTestId } = renderPage();
+    fireEvent.click(await findByTestId('oauth-discord'));
     await waitFor(() => expect(assign).toHaveBeenCalled());
     const target = assign.mock.calls[0][0];
     expect(target).not.toContain('discord.com');
@@ -88,9 +101,32 @@ describe('LoginPage server-side OAuth buttons', () => {
 
   it('shows an error and does not redirect when hub-api fails', async () => {
     start.mockRejectedValue(new Error('boom'));
-    const { getByTestId, findByRole } = renderPage();
-    fireEvent.click(getByTestId('oauth-discord'));
+    const { findByTestId, findByRole } = renderPage();
+    fireEvent.click(await findByTestId('oauth-discord'));
     expect(await findByRole('alert')).toBeTruthy();
     expect(assign).not.toHaveBeenCalled();
+  });
+
+  it('renders only what the providers endpoint returns -- Slack is hidden', async () => {
+    const { findByTestId, queryByTestId, queryByText } = renderPage();
+    await findByTestId('oauth-discord');
+    expect(queryByTestId('oauth-slack')).toBeNull();
+    expect(queryByText(/Slack/i)).toBeNull();
+  });
+
+  it('renders a provider the endpoint adds, with no frontend change', async () => {
+    providers.mockResolvedValue({
+      data: { success: true, providers: [{ platform: 'slack', displayName: 'Slack' }] },
+    });
+    const { findByTestId, queryByTestId } = renderPage();
+    await findByTestId('oauth-slack');
+    expect(queryByTestId('oauth-discord')).toBeNull();
+  });
+
+  it('shows no social buttons when the providers call fails (fails closed)', async () => {
+    providers.mockRejectedValue(new Error('down'));
+    const { queryByTestId } = renderPage();
+    await waitFor(() => expect(providers).toHaveBeenCalled());
+    expect(queryByTestId('social-logins')).toBeNull();
   });
 });
