@@ -3248,6 +3248,112 @@
 "youtube_inbound": false
 },
 "identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_WIX_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"wix_connector": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_WIX_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"wix_connector": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_WIX_ENABLED": "1",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "wix"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"wix_connector": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_WIX_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord,wix"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"wix_connector": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_WIX_ENABLED": "maybe"
+},
+"expect": "error",
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_WIX_ENABLED": ""
+},
+"expect": "error",
+"identify_budget_ready": true
 }
 ]
 }

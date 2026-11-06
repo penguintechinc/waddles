@@ -121,6 +121,11 @@ pub const CONNECTORS: &[Connector] = &[
         app_id: "waddles.core.service.youtube",
         grants: &[Grant::PiiRead],
     },
+    Connector {
+        platform: "wix",
+        app_id: "waddles.core.service.wix",
+        grants: &[Grant::PiiRead],
+    },
 ];
 
 /// The connector registered for `app_id`, if any.
@@ -1917,7 +1922,7 @@ mod tests {
             }
             examined += 1;
         }
-        assert_eq!(examined, 3);
+        assert_eq!(examined, 4);
     }
 
     #[test]

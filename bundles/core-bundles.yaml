@@ -1513,3 +1513,17 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+
+  # Wix webhook connector (Rust `kind: service`, inbound-only, `connector-tools` world, egress []).
+  # Verified by svc-ingest Scheme::WixJwt; the cutover flag waddles.connector-wix defaults OFF.
+  - app_id: waddles.core.service.wix
+    version: "1.0.0"
+    language: rust
+    wit_world: connector-tools
+    kind: service
+    source_dir: rust/wix
+    manifest_path: wix.manifest.yaml
+    artifact_path: wix.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
