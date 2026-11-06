@@ -153,6 +153,7 @@ impl OverlayProfile for TestProfile {
         let ws = |conn| desired_ws("twitch", b.community_id, conn, 1, channel, 7);
         match b.metadata.get("mode").map(String::as_str) {
             Some("bad") => Err(PlanError::MissingKey("channel")),
+            Some("budget") => Err(PlanError::IdentifyBudgetNotReady),
             Some("mismatch") => Ok(vec![ws(b.connection_id + 1)]),
             Some("two") => Ok(vec![
                 ws(b.connection_id),
@@ -378,9 +379,10 @@ impl Capture {
     /// Everything this thread logged so far, joined.
     pub fn text(&self) -> String {
         let g = self.0.buffers.lock().expect("lock");
-        g.get(&std::thread::current().id())
-            .map(|v| v.join(" | "))
-            .unwrap_or_default()
+        match g.get(&std::thread::current().id()) {
+            Some(v) => v.join(" | "),
+            None => String::new(),
+        }
     }
 }
 

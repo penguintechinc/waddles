@@ -45,6 +45,8 @@ pub enum RestartReason {
     SinkBuild,
     /// The connection task ended without being asked to.
     Ended,
+    /// The tenant lookup failed transiently.
+    TenantLookup,
 }
 
 impl RestartReason {
@@ -56,6 +58,7 @@ impl RestartReason {
             Self::Panic => "panic",
             Self::SinkBuild => "sink_build",
             Self::Ended => "ended",
+            Self::TenantLookup => "tenant_lookup",
         }
     }
 }
@@ -71,6 +74,11 @@ pub enum ParkReason {
     TransportBuild,
     /// A webhook plan arrived but no webhook binder is wired.
     WebhookUnavailable,
+    /// The connection's community has no resolvable tenant (or the profile
+    /// supplied the unresolved sentinel and the resolver could not fill it).
+    TenantUnresolved,
+    /// The tenant the profile supplied disagrees with the resolved one.
+    TenantMismatch,
 }
 
 impl ParkReason {
@@ -82,6 +90,8 @@ impl ParkReason {
             Self::DriverError => "driver_error",
             Self::TransportBuild => "transport_build",
             Self::WebhookUnavailable => "webhook_unavailable",
+            Self::TenantUnresolved => "tenant_unresolved",
+            Self::TenantMismatch => "tenant_mismatch",
         }
     }
 }
@@ -289,6 +299,9 @@ mod tests {
             (RestartReason::Panic.as_str(), "panic"),
             (RestartReason::SinkBuild.as_str(), "sink_build"),
             (RestartReason::Ended.as_str(), "ended"),
+            (RestartReason::TenantLookup.as_str(), "tenant_lookup"),
+            (ParkReason::TenantUnresolved.as_str(), "tenant_unresolved"),
+            (ParkReason::TenantMismatch.as_str(), "tenant_mismatch"),
             (ParkReason::Fatal.as_str(), "fatal"),
             (ParkReason::DriverError.as_str(), "driver_error"),
             (ParkReason::TransportBuild.as_str(), "transport_build"),

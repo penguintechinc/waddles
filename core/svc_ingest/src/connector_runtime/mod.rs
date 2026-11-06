@@ -20,6 +20,7 @@ pub mod plan;
 pub mod profiles;
 pub mod ready;
 pub mod supervisor;
+pub mod tenant;
 #[cfg(test)]
 pub(crate) mod testkit;
 
@@ -34,3 +35,4 @@ pub use supervisor::{
     ConnectorRuntime, ResolverSecrets, RuntimeConfig, RuntimeDeps, RuntimeError, SecretsFactory,
     SinkBuildError, SinkFactory, WebhookAttach,
 };
+pub use tenant::{TenantError, TenantResolve, TENANT_UNRESOLVED};
