@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # release-auto-merge.sh - watch an ORDERED list of PRs and merge each into release/* once green.
-# Usage: scripts/release-auto-merge.sh [--dry-run] [--interval S] [--max-hours H] <pr> [<pr> ...]
+# Usage: scripts/release-auto-merge.sh [--dry-run] [--interval S] [--max-hours H] <pr|pr@fullsha> ...
+# PR@SHA pins the reviewed head: if the PR head differs it is skipped (needs human), never merged.
 # Merges via scripts/release-merge.sh (all its guards apply). Reruns apt-mirror flakes
 # ("timed out after 10 minutes") and a ci-gate that ran before reruns finished. Never resolves
 # conflicts, never forces, never touches non-release bases.
@@ -9,9 +10,9 @@ set -euo pipefail
 REPO="${RELEASE_AUTO_MERGE_REPO:-penguintechinc/waddles}"
 IGNORE_CONTEXT="submit-queue"
 MAX_RERUNS=2
-INTERVAL=60; MAX_HOURS=6; DRY=0; PRS=""
+INTERVAL=60; MAX_HOURS=6; DRY=0; PRS=""; PINS=""
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STATE="${TMPDIR:-/tmp}/release-auto-merge-${REPO##*/}"
+STATE="${RELEASE_AUTO_MERGE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/release-auto-merge/${REPO##*/}}"
 
 die() { echo "ERROR: $*" >&2; exit 2; }
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
@@ -22,12 +23,28 @@ while [ $# -gt 0 ]; do
     --interval) [ $# -ge 2 ] || die "--interval needs a value"; INTERVAL="$2"; shift 2 ;;
     --max-hours) [ $# -ge 2 ] || die "--max-hours needs a value"; MAX_HOURS="$2"; shift 2 ;;
     -*) die "unknown flag $1" ;;
-    *) case "$1" in ''|*[!0-9]*) die "bad PR number '$1'" ;; esac; PRS="$PRS $1"; shift ;;
+    *) a_pr="${1%%@*}"; a_sha=""
+       case "$1" in *@*) a_sha="${1#*@}" ;; esac
+       case "$a_pr" in ''|*[!0-9]*) die "bad PR number '$1'" ;; esac
+       if [ -n "$a_sha" ]; then
+         [ "${#a_sha}" -eq 40 ] || die "pin for PR $a_pr must be a full 40-char SHA"
+         case "$a_sha" in *[!0-9a-fA-F]*) die "pin for PR $a_pr is not hex" ;; esac
+         PINS="$PINS $a_pr=$a_sha"
+       fi
+       PRS="$PRS $a_pr"; shift ;;
   esac
 done
 [ -n "$PRS" ] || die "usage: release-auto-merge.sh [--dry-run] [--interval S] [--max-hours H] <pr> ..."
 case "$INTERVAL$MAX_HOURS" in *[!0-9]*) die "interval/max-hours must be integers" ;; esac
-mkdir -p "$STATE"
+# Private state dir: 0700, owned by us, never a symlink (blocks planted-file/symlink attacks).
+if [ -L "$STATE" ]; then die "state dir $STATE is a symlink"; fi
+mkdir -p "$(dirname "$STATE")"
+[ -d "$STATE" ] || mkdir -m 700 "$STATE"
+if [ -L "$STATE" ] || [ ! -d "$STATE" ] || [ ! -O "$STATE" ]; then die "state dir $STATE not a directory owned by current user"; fi
+chmod 700 "$STATE"
+
+# pin_of <pr>: prints the pinned full SHA for a PR, or nothing if unpinned.
+pin_of() { local e; for e in $PINS; do if [ "${e%%=*}" = "$1" ]; then echo "${e#*=}"; return 0; fi; done; return 0; }
 
 # once_flag <key>: returns 0 the first time a key is seen (for log-once), 1 afterwards.
 once_flag() { if [ -e "$STATE/flag-$1" ]; then return 1; fi; : >"$STATE/flag-$1"; }
@@ -48,9 +65,20 @@ try_rerun() {
   gh run rerun "$3" --failed -R "$REPO" >/dev/null
 }
 
+# is_flake_job <jobid>: 0 if the job log shows an apt-mirror timeout/retry-exhaustion (captured, not piped,
+# so grep -q cannot SIGPIPE gh). An unreadable log counts as NOT a flake (fail closed).
+is_flake_job() {
+  local logs
+  if ! logs="$(gh api "repos/$REPO/actions/jobs/$1/logs" 2>/dev/null)"; then
+    if once_flag "logfail-$1"; then log "job=$1 WARN could not fetch job log; treating as real failure"; fi
+    return 1
+  fi
+  grep -Eq 'timed out after 10 minutes|apt attempt .*(failed|timed out)' <<<"$logs"
+}
+
 # eval_pr <pr>: examine one PR; sets RESULT to merged|open|closed|waiting|skipped.
 eval_pr() {
-  local pr="$1" json base head hname state mstate norm name bucket run
+  local pr="$1" json base head hname state mstate norm name bucket run job pin
   RESULT=open
   json="$(gh pr view "$pr" -R "$REPO" --json baseRefName,headRefName,headRefOid,mergeStateStatus,state,statusCheckRollup)"
   state="$(jq -r .state <<<"$json")"; base="$(jq -r .baseRefName <<<"$json")"
@@ -58,6 +86,14 @@ eval_pr() {
   mstate="$(jq -r .mergeStateStatus <<<"$json")"
   case "$state" in MERGED) RESULT=merged; log "pr=$pr MERGED"; return 0 ;; CLOSED) RESULT=closed; log "pr=$pr CLOSED"; return 0 ;; esac
   echo "$hname" >"$STATE/branch-$pr"
+  pin="$(pin_of "$pr")"
+  if [ -n "$pin" ]; then
+    if [ "$pin" != "$head" ]; then
+      RESULT=skipped
+      if once_flag "pinchg-$pr-$head"; then log "pr=$pr head=$head pinned=$pin head changed, needs human (not merging)"; fi
+      return 0
+    fi
+  elif once_flag "unpinned-$pr"; then log "pr=$pr head=$head WARN unpinned: merges whatever head is green (use PR@SHA to pin)"; fi
 
   case "$base" in
     release/*) ;;
@@ -87,10 +123,11 @@ eval_pr() {
        (if .state == "SUCCESS" then "SUCCESS" elif (.state == "PENDING" or .state == "EXPECTED") then "PENDING" else "FAILURE" end)
      elif .status != "COMPLETED" then "PENDING"
      else (.conclusion // "PENDING") end),
-    ((.detailsUrl // "") | capture("/runs/(?<r>[0-9]+)") | .r // "")] | join("|")' <<<"$json")"
+    ((.detailsUrl // "") | capture("/runs/(?<r>[0-9]+)") | .r // ""),
+    ((.detailsUrl // "") | capture("/job/(?<j>[0-9]+)") | .j // "")] | join("|")' <<<"$json")"
 
-  local gate="" gate_run="" n_pending=0 n_bad=0 n_other_ok=0 n_exam=0 bad_runs="" bad_names=""
-  while IFS='|' read -r name bucket run; do
+  local gate="" gate_run="" n_pending=0 n_bad=0 n_other_ok=0 n_exam=0 bad_jobs="" bad_names=""
+  while IFS='|' read -r name bucket run job; do
     [ -n "$name" ] || continue
     [ "$name" = "$IGNORE_CONTEXT" ] && continue
     [ "$bucket" = "SKIPPED" ] && continue
@@ -99,28 +136,35 @@ eval_pr() {
     case "$bucket" in
       SUCCESS|NEUTRAL) n_other_ok=$((n_other_ok + 1)) ;;
       PENDING) n_pending=$((n_pending + 1)) ;;
-      *) n_bad=$((n_bad + 1)); bad_runs="$bad_runs $run"; bad_names="$bad_names [$name]" ;;
+      *) n_bad=$((n_bad + 1)); bad_jobs="$bad_jobs ${run:-none}:${job:-none}"; bad_names="$bad_names [$name]" ;;
     esac
   done <<<"$norm"
   log "pr=$pr head=${head:0:12} mstate=$mstate gate=${gate:-none} checks=$n_exam ok=$n_other_ok pending=$n_pending failed=$n_bad"
 
   if [ "$gate" = "SUCCESS" ]; then
-    if [ "$DRY" = 1 ]; then log "pr=$pr head=${head:0:12} DRY-RUN would merge via release-merge.sh --expect-head ${head:0:12}"; return 0; fi
+    if [ "$DRY" = 1 ]; then log "pr=$pr head=${head:0:12} DRY-RUN would merge via release-merge.sh --expect-head $head"; return 0; fi
     log "pr=$pr head=${head:0:12} MERGE via release-merge.sh"
-    if "$HERE/release-merge.sh" "$pr" --expect-head "${head:0:12}"; then RESULT=merged; log "pr=$pr head=${head:0:12} MERGED"
+    if "$HERE/release-merge.sh" "$pr" --expect-head "$head"; then RESULT=merged; log "pr=$pr head=${head:0:12} MERGED"
     else log "pr=$pr head=${head:0:12} release-merge refused (see above); will retry next tick"; fi
     return 0
   fi
 
   if [ "$n_bad" -gt 0 ]; then
-    local r flake=0 real=0
-    for r in $(printf '%s\n' "$bad_runs" | sort -u); do
-      [ -n "$r" ] || { real=1; continue; }
-      if gh run view "$r" -R "$REPO" --log-failed 2>/dev/null | grep -q 'timed out after 10 minutes'; then
-        flake=1; try_rerun "$pr" "$head" "$r" "apt-mirror timeout"
-      else real=1; fi
+    local rj r jb is_flake runs flake=0 real=0 run_real
+    runs="$(for rj in $bad_jobs; do echo "${rj%%:*}"; done | sort -u)"
+    for r in $runs; do
+      run_real=0
+      for rj in $bad_jobs; do
+        [ "${rj%%:*}" = "$r" ] || continue
+        jb="${rj#*:}"; is_flake=0
+        if [ "$r" != none ] && [ "$jb" != none ]; then
+          if is_flake_job "$jb"; then is_flake=1; fi
+        fi
+        [ "$is_flake" = 1 ] || run_real=1
+      done
+      if [ "$run_real" = 0 ]; then flake=1; try_rerun "$pr" "$head" "$r" "all failed jobs are apt-mirror flakes"; else real=1; fi
     done
-    if [ "$real" = 1 ] && once_flag "real-$pr-$head"; then log "pr=$pr head=${head:0:12} REAL FAILURE:$bad_names (no rerun; needs human)"; fi
+    if [ "$real" = 1 ] && once_flag "real-$pr-$head"; then log "pr=$pr head=${head:0:12} REAL FAILURE:$bad_names (non-flake failed job; no rerun; needs human)"; fi
     [ "$flake" = 1 ] || RESULT=skipped
     return 0
   fi

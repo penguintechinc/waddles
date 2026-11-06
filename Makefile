@@ -140,6 +140,7 @@ test:
 .PHONY: test-scripts release-merge release-auto-merge
 test-scripts:
 	@bash scripts/tests/test_release_merge.sh
+	@bash scripts/tests/test_release_auto_merge.sh
 
 # Verify + merge a PR into release/*: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]
 release-merge:
