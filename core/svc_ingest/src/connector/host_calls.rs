@@ -672,10 +672,7 @@ impl OverlayHostCalls {
             .get(SCOPE_KEY)
             .and_then(|s| s.get("connection_id"))
             .and_then(serde_json::Value::as_str)
-            .and_then(|s| match s.parse::<i64>() {
-                Ok(n) => Some(n),
-                Err(_) => None,
-            })
+            .and_then(|s| s.parse::<i64>().ok())
             .filter(|id| *id >= 1);
         id.ok_or(HostCallError::Denied(DenyReason::UnscopedCall))
     }
@@ -1783,10 +1780,7 @@ mod tests {
             let bearer = req
                 .metadata()
                 .get("authorization")
-                .and_then(|v| match v.to_str() {
-                    Ok(t) => Some(t),
-                    Err(_) => None,
-                })
+                .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
             if bearer.as_deref() != Some("Bearer hub-jwt") {
                 return Err(Status::unauthenticated("bad token"));
