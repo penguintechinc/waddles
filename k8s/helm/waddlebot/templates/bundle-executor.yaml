@@ -88,6 +88,9 @@ spec:
   template:
     metadata:
       annotations:
+        {{- if include "waddlebot.connectorRuntimeActive" . }}
+        checksum/connector-host-api-identity: {{ printf "%s|%s" (include "waddlebot.svcIngestHostApiClientIdentity" .) (include "waddlebot.svcIngestHostApiServerIdentity" .) | sha256sum | quote }}
+        {{- end }}
         # fix/cert-regen-on-identity-change -- rolls every pod when the desired
         # host-api-tls identity/SANs change, even though the Secret object itself is
         # reused by name when kept (see templates/host-api-tls-secret.yaml's policy
@@ -200,6 +203,32 @@ spec:
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
         {{- end }}
+        {{- if include "waddlebot.connectorRuntimeActive" . }}
+        # PR-H connector runtime (spec SS2): the executor DIALS svc-ingest's host-api (ONE connection)
+        # with a DISTINCT client cert (SAN = executor identity only) from its own Secret, mounted
+        # nowhere else. It pins svc-ingest's own server SAN, never the svc-action identity.
+        # NOTE: CONNECTOR_HOST_API_{CA,CLIENT_CERT,CLIENT_KEY}_FILE are the cert-path env names
+        # this chart supplies for the second dial (the spec leaves them to executor PR-A1).
+        - name: CONNECTOR_HOST_API_ADDR
+          value: "{{ include "waddlebot.svcIngestHostApiServiceName" . }}:{{ (.Values.pipeline.rustDataPlane.svcIngest.connectorTools).hostApiPort | default 8301 }}"
+        - name: CONNECTOR_HOST_API_IDENTITY
+          value: {{ include "waddlebot.svcIngestHostApiServerIdentity" . | quote }}
+        - name: EXECUTOR_CONNECTOR_CONNECTIONS
+          value: "1"
+        - name: CONNECTOR_HOST_API_CA_FILE
+          value: /etc/waddlebot/connector-host-api-tls/ca.crt
+        - name: CONNECTOR_HOST_API_CLIENT_CERT_FILE
+          value: /etc/waddlebot/connector-host-api-tls/tls.crt
+        - name: CONNECTOR_HOST_API_CLIENT_KEY_FILE
+          value: /etc/waddlebot/connector-host-api-tls/tls.key
+        {{- range $p := list "twitch" "discord" "youtube" }}
+        {{- $d := include "waddlebot.connectorDigest" (dict "root" $ "platform" $p) }}
+        {{- if $d }}
+        - name: CONNECTOR_PIN_DIGEST_{{ upper $p }}
+          value: {{ $d | quote }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
         startupProbe:
           # fix/alpha-deploy-executor-and-failfast -- failureThreshold bumped from 12
           # (62s total) to 65 (~5.5min total: 5 + 5*65) -- a cold `load` JIT-compiling a
@@ -236,6 +265,11 @@ spec:
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- if include "waddlebot.connectorRuntimeActive" . }}
+        - name: connector-host-api-tls
+          mountPath: /etc/waddlebot/connector-host-api-tls
+          readOnly: true
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
@@ -247,6 +281,12 @@ spec:
         emptyDir: {}
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- end }}
+      {{- if include "waddlebot.connectorRuntimeActive" . }}
+      - name: connector-host-api-tls
+        secret:
+          secretName: {{ include "waddlebot.ingestExecutorTlsSecretName" . }}
+          defaultMode: 0440
       {{- end }}
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
 {{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "bundle-executor" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false) }}
