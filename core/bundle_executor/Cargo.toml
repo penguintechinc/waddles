@@ -177,7 +177,7 @@ tokio = { version = "=1.53.3", features = ["full", "test-util"] }
 rcgen = "=0.14.10"
 
 [features]
-# Main-tier real-path e2e (tests/flag_on_command_e2e.rs): needs docker + a fresh
+# Main-tier docker real-path e2e (flag_on_command_e2e + stage_next_python_*_e2e + stage_v2_python_e2e): needs docker + a fresh
 # componentize-py build (7-9 min, ~35+ min under llvm-cov). Off by default so the
 # release-PR coverage job stays fast; run by .github/workflows/rust-bundle-executor-e2e.yml
 # (PRs into main + push to main) and `make test-bundle-flag-on-command-e2e`.
@@ -185,6 +185,26 @@ e2e-main-tier = []
 
 [[test]]
 name = "flag_on_command_e2e"
+required-features = ["e2e-main-tier"]
+
+[[test]]
+name = "stage_next_python_identity_e2e"
+required-features = ["e2e-main-tier"]
+
+[[test]]
+name = "stage_next_python_ai_e2e"
+required-features = ["e2e-main-tier"]
+
+[[test]]
+name = "stage_next_python_economy_e2e"
+required-features = ["e2e-main-tier"]
+
+[[test]]
+name = "stage_next_python_reputation_e2e"
+required-features = ["e2e-main-tier"]
+
+[[test]]
+name = "stage_v2_python_e2e"
 required-features = ["e2e-main-tier"]
 
 [lints.clippy]

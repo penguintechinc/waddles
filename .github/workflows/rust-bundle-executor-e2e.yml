@@ -55,8 +55,8 @@ jobs:
           restore-keys: |
             cargo-bundle-executor-e2e-1.97.1-${{ runner.os }}-
 
-      - name: flag_on_command_e2e (cargo test --features e2e-main-tier)
+      - name: docker e2e suite (cargo test --features e2e-main-tier)
         run: |
           set -euo pipefail
-          cargo test --locked --features e2e-main-tier --test flag_on_command_e2e -- --nocapture 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          cargo test --locked --features e2e-main-tier --test flag_on_command_e2e --test stage_next_python_identity_e2e --test stage_next_python_ai_e2e --test stage_next_python_economy_e2e --test stage_next_python_reputation_e2e --test stage_v2_python_e2e -- --nocapture 2>&1 | tee "$RUNNER_TEMP/e2e.log"
           grep -qE 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/e2e.log"
