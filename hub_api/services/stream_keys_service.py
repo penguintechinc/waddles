@@ -28,7 +28,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from services.errors import bad_request, conflict, not_found
-from services.platform_integrations_crypto import encrypt_token, stream_destination_aad
+from services.platform_integrations_crypto import stream_destination_aad
+from services.provider_connections.vault import seal_secret
 
 log = logging.getLogger(__name__)
 
@@ -327,8 +328,8 @@ async def add_destination(
         config_id=config.id,
         platform=data.platform,
         display_url=redact_rtmp_url(data.rtmp_url),
-        rtmp_url_enc=encrypt_token(data.rtmp_url, aad=aad),
-        stream_key_enc=encrypt_token(data.stream_key, aad=aad),
+        rtmp_url_enc=seal_secret(data.rtmp_url, aad=aad),
+        stream_key_enc=seal_secret(data.stream_key, aad=aad),
         max_resolution=data.max_resolution,
         video_codec="h264",
         enabled=data.enabled,
