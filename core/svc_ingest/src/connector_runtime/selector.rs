@@ -463,8 +463,10 @@ mod tests {
                 continue;
             }
             let sel = sel.unwrap();
-            let raw = lookup("CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS").unwrap_or_default();
-            let wh = parse_webhook_platforms(&raw).unwrap();
+            let wh = match case["env"].get("CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS") {
+                Some(raw) => parse_webhook_platforms(raw.as_str().unwrap()).unwrap(),
+                None => Vec::new(),
+            };
             let tools = lookup("CONNECTOR_TOOLS_ENABLED").as_deref() == Some("true");
             let plan = LegacyPlan::new(&sel, &wh, tools);
             let e = &case["expect"];
