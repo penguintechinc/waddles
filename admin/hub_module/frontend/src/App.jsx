@@ -370,7 +370,7 @@ function App() {
         <Route path="/admin/:communityId/interaction-channels" element={<AdminInteractionChannels />} />
         <Route path="/admin/:communityId/roles" element={<AdminCommunityRoles />} />
         <Route path="/admin/:communityId/members/:userId/analytics" element={<AdminMemberAnalytics />} />
-        <Route path="/admin/:communityId/ai-knowledge" element={<AdminAIKnowledge />} />
+        <Route path="/admin/:communityId/ai-knowledge" element={<ServedFeature feature="ai-knowledge"><AdminAIKnowledge /></ServedFeature>} />
         {/* Wave-1 stub: community bundles slice */}
         <Route path="/admin/:communityId/bundles" element={<AdminCommunityBundles />} />
         <Route path="/admin/:communityId/role-sync" element={<AdminRoleSyncMapping />} />

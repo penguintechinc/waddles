@@ -43,7 +43,7 @@ describe('App.jsx route gates', () => {
   it('wraps every contract-gap page in a registered ServedFeature', () => {
     const byPage = Object.fromEntries(gated.map(([page, feature]) => [page, feature]));
     for (const page of [
-      'AdminModules', 'AdminStreamOverlays', 'AdminConnectedPlatforms', 'AdminSecurity', 'AdminMusicDashboard',
+      'AdminModules', 'AdminStreamOverlays', 'AdminConnectedPlatforms', 'AdminSecurity', 'AdminMusicDashboard', 'AdminAIKnowledge',
       'VendorGithubSync', 'VendorSubmissions', 'AdminMarketplaceModuleDetail',
     ]) {
       expect(byPage[page], `${page} must be gated`).toBeDefined();

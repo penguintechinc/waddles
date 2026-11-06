@@ -226,19 +226,6 @@
       "DELETE /api/v1/communities/server-link-requests/:requestId"
     ]
   },
-  "ai-knowledge-settings": {
-    "label": "AI assistant settings",
-    "endpoints": [
-      "GET /api/v1/admin/ai-knowledge/settings/:communityId",
-      "PUT /api/v1/admin/ai-knowledge/settings/:communityId"
-    ]
-  },
-  "ai-knowledge-health": {
-    "label": "AI knowledge health",
-    "endpoints": [
-      "GET /api/v1/admin/ai-knowledge/health/:communityId"
-    ]
-  },
   "vendor-submissions": {
     "label": "Vendor submissions",
     "endpoints": [
@@ -253,6 +240,15 @@
       "PUT /api/v1/marketplace/vendor/github-sync/connections/:id",
       "DELETE /api/v1/marketplace/vendor/github-sync/connections/:id",
       "POST /api/v1/marketplace/vendor/github-sync/connections/:id/test"
+    ]
+  },
+  "ai-knowledge": {
+    "label": "AI knowledge sources",
+    "note": "Blocked on hub-api authz/encryption fix: source update/delete/reindex lack a community ownership check, list does not require communityId, and the token is stored as sent. Re-point returns after the hub-api fix.",
+    "endpoints": [
+      "GET /api/v1/admin/ai-knowledge/settings/:communityId",
+      "PUT /api/v1/admin/ai-knowledge/settings/:communityId",
+      "GET /api/v1/admin/ai-knowledge/health/:communityId"
     ]
   }
 }

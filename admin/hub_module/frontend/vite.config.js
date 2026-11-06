@@ -43,7 +43,6 @@ export default defineConfig({
         'src/pages/community/LiveActivity.tsx',
         'src/pages/admin/AdminJoinRequests.tsx',
         // Contract re-points: typed AI-knowledge client, the gap-check route matcher, gated/re-pointed pages.
-        'src/services/aiKnowledgeApi.ts',
         'scripts/lib/backend-routes.mjs',
         'src/pages/admin/AdminHome.jsx',
       ],
