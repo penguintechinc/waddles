@@ -11,6 +11,7 @@ import logging
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 import redis.exceptions
 
@@ -66,13 +67,31 @@ def _seed(dal: Any, community_id: int, role: str = "vip") -> Any:
     return pairing
 
 
+class _Confirm:
+    """Fake Discord confirmation: returns `roles` (or raises / None) and records the calls."""
+
+    def __init__(self, roles: Any, *, raises: Exception | None = None) -> None:
+        self.roles, self.raises, self.calls = roles, raises, []
+
+    async def member_roles(self, dal: Any, **kw: Any) -> Any:
+        self.calls.append(kw)
+        if self.raises:
+            raise self.raises
+        return self.roles
+
+
+async def _apply(dal: Any, ev: Any, confirm: Any = None) -> Any:
+    """Apply with a Discord that agrees with the payload unless a confirm is given."""
+    return await inbound.apply_inbound_event(dal, ev, confirm or _Confirm(set(ev.role_ids)))
+
+
 class TestApply:
     async def test_inbound_change_is_applied_then_idempotent(self, bar_citizen_db: Any) -> None:
         dal, community_id, tenant_id, _ = bar_citizen_db
         _seed(dal, community_id)
         ev = _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD])
-        first = await inbound.apply_inbound_event(dal, ev)
-        again = await inbound.apply_inbound_event(dal, ev)  # redelivery
+        first = await _apply(dal, ev)
+        again = await _apply(dal, ev)  # redelivery
         assert first == inbound.InboundOutcome("applied", "member")
         assert again.outcome == "unchanged"
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
@@ -90,7 +109,7 @@ class TestApply:
         )
         _add_community_role(dal, community_id=community_id, name="member", priority=0)
         _add_community_role(dal, community_id=community_id, name="community-admin", priority=10)
-        out = await inbound.apply_inbound_event(
+        out = await _apply(
             dal, _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD, _COMMUNITY_ADMIN_ROLE])
         )
         assert out.applied_role == "community-admin"
@@ -106,9 +125,7 @@ class TestApply:
             discord_role_id=_TIER1_ROLE,
             subscriber_tier=1,
         )
-        out = await inbound.apply_inbound_event(
-            dal, _member(tenant_id, community_id, [_TIER1_ROLE])
-        )
+        out = await _apply(dal, _member(tenant_id, community_id, [_TIER1_ROLE]))
         assert out.outcome == "echo_ignored"
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
 
@@ -125,7 +142,7 @@ class TestApply:
             discord_role_id=_TIER1_ROLE,
             subscriber_tier=1,
         )
-        out = await inbound.apply_inbound_event(
+        out = await _apply(
             dal, _member(tenant_id, community_id, [_TIER1_ROLE, _MEMBER_ROLE_DISCORD])
         )
         assert out.outcome == "applied"
@@ -133,13 +150,13 @@ class TestApply:
     async def test_cross_community_and_cross_tenant_refused(self, bar_citizen_db: Any) -> None:
         dal, community_id, tenant_id, _ = bar_citizen_db
         _seed(dal, community_id)
-        wrong_guild = await inbound.apply_inbound_event(
+        wrong_guild = await _apply(
             dal, _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD], guild=_OTHER_GUILD)
         )
-        wrong_tenant = await inbound.apply_inbound_event(
+        wrong_tenant = await _apply(
             dal, _member(tenant_id + 100, community_id, [_MEMBER_ROLE_DISCORD])
         )
-        unknown_community = await inbound.apply_inbound_event(
+        unknown_community = await _apply(
             dal, _member(tenant_id, community_id + 500, [_MEMBER_ROLE_DISCORD])
         )
         assert wrong_guild.outcome == "cross_community_refused"
@@ -152,22 +169,22 @@ class TestApply:
         _seed(dal, community_id)
         ev = _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD])
         assert (
-            await inbound.apply_inbound_event(dal, _member(tenant_id, community_id, ["1"]))
+            await _apply(dal, _member(tenant_id, community_id, ["1"]))
         ).outcome == "no_mapped_roles"
         unlinked = _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD], user="1234")
-        assert (await inbound.apply_inbound_event(dal, unlinked)).outcome == "unlinked"
+        assert (await _apply(dal, unlinked)).outcome == "unlinked"
         _flag_on.return_value = False
-        assert (await inbound.apply_inbound_event(dal, ev)).outcome == "flag_off"
+        assert (await _apply(dal, ev)).outcome == "flag_off"
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
 
     async def test_owner_protected_and_not_a_member(self, bar_citizen_db: Any) -> None:
         dal, community_id, tenant_id, _ = bar_citizen_db
         _seed(dal, community_id, role="community-owner")
         ev = _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD])
-        assert (await inbound.apply_inbound_event(dal, ev)).outcome == "owner_protected"
+        assert (await _apply(dal, ev)).outcome == "owner_protected"
         dal(dal.community_members.community_id == community_id).delete()
         dal.commit()
-        assert (await inbound.apply_inbound_event(dal, ev)).outcome == "not_a_member"
+        assert (await _apply(dal, ev)).outcome == "not_a_member"
 
     async def test_defensive_branches_fail_closed(
         self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -184,9 +201,9 @@ class TestApply:
             None,
             frozenset({_MEMBER_ROLE_DISCORD}),
         )
-        assert (await inbound.apply_inbound_event(dal, no_user)).outcome == "malformed"
+        assert (await _apply(dal, no_user)).outcome == "malformed"
         monkeypatch.setattr(inbound, "_resolve_desired_community_role", lambda *_a: None)
-        assert (await inbound.apply_inbound_event(dal, ev)).outcome == "no_mapped_roles"
+        assert (await _apply(dal, ev)).outcome == "no_mapped_roles"
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
 
     async def test_twitch_to_discord_pairing_is_not_inbound(self, bar_citizen_db: Any) -> None:
@@ -200,7 +217,7 @@ class TestApply:
             actor_user_id=None,
         )
         update_pairing(dal, community_id, created.id, sync_enabled=True)
-        out = await inbound.apply_inbound_event(dal, _member(tenant_id, community_id, ["1"]))
+        out = await _apply(dal, _member(tenant_id, community_id, ["1"]))
         assert out.outcome == "direction_not_inbound"
 
     async def test_role_events_are_noted_and_deleted_bound_role_logged(
@@ -214,16 +231,10 @@ class TestApply:
                 tenant_id, community_id, kind, _DISCORD_GUILD_ID, None, role, frozenset()
             )
 
-        assert (
-            await inbound.apply_inbound_event(dal, role_ev("guild.role.create", "5"))
-        ).outcome == "role_event_noted"
-        assert (
-            await inbound.apply_inbound_event(dal, role_ev("guild.role.delete", "5"))
-        ).outcome == "role_event_noted"
+        assert (await _apply(dal, role_ev("guild.role.create", "5"))).outcome == "role_event_noted"
+        assert (await _apply(dal, role_ev("guild.role.delete", "5"))).outcome == "role_event_noted"
         with caplog.at_level(logging.ERROR):
-            out = await inbound.apply_inbound_event(
-                dal, role_ev("guild.role.delete", _MEMBER_ROLE_DISCORD)
-            )
+            out = await _apply(dal, role_ev("guild.role.delete", _MEMBER_ROLE_DISCORD))
         assert out.outcome == "bound_role_deleted"
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
         assert _DISCORD_PLATFORM_USER not in caplog.text
@@ -250,26 +261,24 @@ def _signed(
     version: int = 3,
     kid: str = "k1",
     json_ids: tuple[int, int] | None = None,
+    event_id: str = _EV,
 ) -> dict[bytes, bytes]:
-    """A correctly MAC'd envelope entry (MAC over the REAL ids `tid`/`cid`)."""
-    if version == 3:
-        mac = inbound.compute_binding_mac_v3(
-            _RING, kid, tid, cid, tenant, community, _WS, _EV, _TRACE
-        )
-    else:
-        mac = inbound.compute_binding_mac(_RING, kid, tenant, community, _WS, _EV, _TRACE)
+    """A correctly MAC'd v3 envelope entry (MAC over `tid`/`cid`; JSON ids may be swapped)."""
+    mac_ids = (tid, cid)
+    mac = inbound.compute_binding_mac_v3(
+        _RING, kid, mac_ids[0], mac_ids[1], tenant, community, _WS, event_id, _TRACE
+    )
     body: dict[str, Any] = {
         "schema_version": version,
         "tenant": tenant,
         "community": community,
         "workstream_id": _WS,
-        "event_id": _EV,
+        "event_id": event_id,
         "trace": {"traceparent": _TP},
         "binding": {"kid": kid, "mac": mac},
         "event": {"platform": "discord", "event_type": event_type, "payload": payload},
     }
-    if version == 3:
-        body["tenant_id"], body["community_id"] = json_ids or (tid, cid)
+    body["tenant_id"], body["community_id"] = json_ids or (tid, cid)
     return {b"env": json.dumps(body).encode()}
 
 
@@ -283,11 +292,9 @@ _MEMBER_PAYLOAD = {"guild_id": "1", "user_id": "2", "role_ids": ["3"]}
 class TestMacVectors:
     """Pinned to the Rust `penguin_spine` test vectors (binding.rs) -- one shared oracle."""
 
-    def test_v3_and_v2_match_the_rust_pinned_vectors(self) -> None:
+    def test_v3_matches_the_rust_pinned_vector(self) -> None:
         v3 = inbound.compute_binding_mac_v3(_RING, "k1", 10, 7, "acme", "main", _WS, _EV, _TRACE)
-        v2 = inbound.compute_binding_mac(_RING, "k1", "acme", "main", _WS, _EV, _TRACE)
         assert v3 == "4a7246ec724fb1cdcd88bc37b7243ecd3a10a4eec39d01a8cd3cd24f06db5fc2"
-        assert v2 == "d94c3849257550fe817c399410113a45e22b1c9203fbd02908f6bcc19df95f3f"
 
     def test_keyring_parse(self) -> None:
         ring = inbound.KeyRing.parse(" a:0102 , b:ff ,")
@@ -304,9 +311,7 @@ class TestParse:
         assert (m.tenant_id, m.community_id, m.user_id) == (tid, cid, "2")
         assert m.role_ids == {"3"}
         r = _parse(
-            _signed(
-                "guild.role.delete", {"guild_id": "1", "role_id": "3"}, tid=tid, cid=cid, version=2
-            ),
+            _signed("guild.role.delete", {"guild_id": "1", "role_id": "3"}, tid=tid, cid=cid),
             dal,
         )
         assert r.role_id == "3" and r.user_id is None and r.community_id == cid
@@ -400,6 +405,8 @@ class TestTenantBoundary:
         self._expect(f, dal, "tenant_mismatch", "waddles:t:other:c:test-community:src:discord:g")
         self._expect(f, dal, "community_mismatch", f"waddles:t:{_TENANT}:c:main:src:discord:g")
         self._expect(f, dal, "bad_stream_key", "garbage")
+        self._expect(f, dal, "bad_stream_key", "waddles:t::c:main:src:discord:g")
+        self._expect(f, dal, "bad_stream_key", f"waddles:t:{_TENANT}:c::src:discord:g")
         self._expect(f, dal, "bad_stream_key", f"waddles:t:{_TENANT}:c:_tenant:src:discord:g")
 
     def test_unknown_scope_in_db(self, bar_citizen_db: Any) -> None:
@@ -423,26 +430,61 @@ class TestTenantBoundary:
         run(lambda e: e.update(workstream_id=5), "malformed_binding_fields")
         run(lambda e: e.update(schema_version=9), "unsupported_schema_version")
         run(lambda e: e.pop("tenant_id"), "v3_missing_ids")
-        run(lambda e: e.update(schema_version=2), "v2_with_ids")
+        run(lambda e: e.update(schema_version=2), "unsupported_schema_version")
         run(lambda e: e.pop("trace"), "mac_mismatch")  # trace id is MAC input
 
-    def test_v2_without_trace_verifies_with_empty_trace_id(self, bar_citizen_db: Any) -> None:
+    def test_v2_entry_is_refused_even_with_a_valid_v2_mac(self, bar_citizen_db: Any) -> None:
+        import hashlib
+        import hmac
+
         dal, cid, tid, _ = bar_citizen_db
-        mac = inbound.compute_binding_mac(_RING, "k1", _TENANT, _COMMUNITY, _WS, _EV, None)
+        msg = (_TENANT + _COMMUNITY + _WS + _EV + _TRACE).encode()
         env = {
             "schema_version": 2,
             "tenant": _TENANT,
             "community": _COMMUNITY,
             "workstream_id": _WS,
             "event_id": _EV,
-            "binding": {"kid": "k1", "mac": mac},
+            "trace": {"traceparent": _TP},
+            "binding": {
+                "kid": "k1",
+                "mac": hmac.new(bytes([1]) * 32, msg, hashlib.sha256).hexdigest(),
+            },
             "event": {
                 "platform": "discord",
                 "event_type": "guild.role.update",
                 "payload": {"guild_id": "1", "role_id": "3"},
             },
         }
-        assert _parse({b"env": json.dumps(env).encode()}, dal).role_id == "3"
+        self._expect({b"env": json.dumps(env).encode()}, dal, "unsupported_schema_version")
+
+    @pytest.mark.parametrize("ids", [(2**63, 7), (-(2**63) - 1, 7), (5, 2**31), (5, -(2**31) - 1)])
+    def test_out_of_range_ids_are_refused_not_crashed(
+        self, ids: tuple[int, int], bar_citizen_db: Any
+    ) -> None:
+        dal = bar_citizen_db[0]
+        f = _signed("guild.member.update", _MEMBER_PAYLOAD, tid=1, cid=1, json_ids=ids)
+        self._expect(f, dal, "ids_out_of_range")
+
+    @pytest.mark.parametrize("ids", [(True, 7), ("5", 7), (5.5, 7), (None, 7), (5, None)])
+    def test_non_int_ids_are_refused(self, ids: tuple[Any, Any], bar_citizen_db: Any) -> None:
+        dal = bar_citizen_db[0]
+        f = _signed("guild.member.update", _MEMBER_PAYLOAD, tid=1, cid=1)
+        env = json.loads(f[b"env"])
+        env["tenant_id"], env["community_id"] = ids
+        reason = "v3_missing_ids" if None in ids else "ids_out_of_range"
+        self._expect({b"env": json.dumps(env).encode()}, dal, reason)
+
+    def test_any_exception_in_verification_becomes_malformed(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal = bar_citizen_db[0]
+        monkeypatch.setattr(inbound, "_verify_binding_v3", lambda *_a: 1 / 0)
+        self._expect(
+            _signed("guild.member.update", _MEMBER_PAYLOAD, tid=1, cid=1),
+            dal,
+            "malformed_binding_fields",
+        )
 
 
 class _FakeRedis:
@@ -451,6 +493,9 @@ class _FakeRedis:
         self.acked: list[str] = []
         self.groups: set[str] = set()
         self.busy = False
+        self.kv: dict[str, Any] = {}
+        self.dlq: list[dict[str, Any]] = []
+        self.fail_xack = False
 
     async def scan_iter(self, match: str) -> Any:
         assert match == inbound.DISCORD_STREAM_PATTERN
@@ -470,32 +515,133 @@ class _FakeRedis:
         return [(stream, entries)] if entries else []
 
     async def xack(self, stream: str, group: str, entry_id: str) -> None:
+        if self.fail_xack:
+            raise ConnectionError("valkey down")
         self.acked.append(entry_id)
+
+    async def set(self, key: str, value: str, nx: bool, ex: int) -> bool:
+        assert ex > 0 and nx
+        if key in self.kv:
+            return False
+        self.kv[key] = value
+        return True
+
+    async def xadd(
+        self, stream: str, fields: dict[str, Any], maxlen: int, approximate: bool
+    ) -> None:
+        if self.fail_xack:
+            raise ConnectionError("valkey down")
+        assert stream == inbound._DLQ_STREAM
+        self.dlq.append(fields)
+
+
+_GOOD = {
+    "guild_id": _DISCORD_GUILD_ID,
+    "user_id": _DISCORD_PLATFORM_USER,
+    "role_ids": [_MEMBER_ROLE_DISCORD],
+}
+
+
+def _batch(fake: Any, dal: Any, confirm: Any = None) -> Any:
+    return inbound.run_inbound_batch(dal, fake, _RING, confirm or _Confirm({_MEMBER_ROLE_DISCORD}))
+
+
+class TestPayloadConfirmation:
+    """The payload is not MAC-covered: Discord's own state decides."""
+
+    async def test_forged_payload_with_a_valid_mac_is_refused(self, bar_citizen_db: Any) -> None:
+        dal, community_id, tenant_id, _ = bar_citizen_db
+        _seed(dal, community_id, role="vip")
+        ev = _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD])  # attacker claims a role
+        confirm = _Confirm({"999"})  # Discord says the member does not hold it
+        out = await _apply(dal, ev, confirm)
+        assert out.outcome == "payload_mismatch"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+
+    async def test_absent_member_and_unavailable_discord_refuse(self, bar_citizen_db: Any) -> None:
+        dal, community_id, tenant_id, _ = bar_citizen_db
+        _seed(dal, community_id, role="vip")
+        ev = _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD])
+        assert (await _apply(dal, ev, _Confirm(None))).outcome == "payload_mismatch"
+        for exc in (inbound.TransportUnavailable("x"), inbound.DiscordSyncError("x")):
+            out = await _apply(dal, ev, _Confirm(None, raises=exc))
+            assert out.outcome == "confirm_unavailable"
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+
+    async def test_confirmation_uses_the_paired_guild_and_resolved_tenant(
+        self, bar_citizen_db: Any
+    ) -> None:
+        dal, community_id, tenant_id, _ = bar_citizen_db
+        _seed(dal, community_id)
+        confirm = _Confirm({_MEMBER_ROLE_DISCORD})
+        await _apply(dal, _member(tenant_id, community_id, [_MEMBER_ROLE_DISCORD]), confirm)
+        (call,) = confirm.calls
+        assert call["guild_id"] == _DISCORD_GUILD_ID and call["tenant_id"] == tenant_id
+        assert call["user_id"] == _DISCORD_PLATFORM_USER
+
+    async def test_api_confirm_resolves_the_tenant_token_and_reads_the_member(
+        self, bar_citizen_db: Any
+    ) -> None:
+        from services.credential_resolver import PlatformCredentials
+
+        dal = bar_citizen_db[0]
+        seen: dict[str, Any] = {}
+
+        class Resolver:
+            async def resolve(self, dal: Any, **kw: Any) -> Any:
+                seen.update(kw)
+                return PlatformCredentials(
+                    tenant_id=3, platform="discord", payload={"bot_token": "tok"}, source="tenant"
+                )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path.endswith("/guilds/5/members/7")
+            assert request.headers["authorization"] == "Bot tok"
+            return httpx.Response(200, json={"roles": ["10", "11"]})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            c = inbound.ApiDiscordConfirm(http, Resolver())
+            got = await c.member_roles(dal, tenant_id=3, is_global=False, guild_id="5", user_id="7")
+        assert got == {"10", "11"} and seen["tenant_id"] == 3 and seen["platform"] == "discord"
+
+    async def test_api_confirm_without_a_token_is_unavailable(self, bar_citizen_db: Any) -> None:
+        from services.credential_resolver import PlatformCredentials
+
+        class Resolver:
+            async def resolve(self, dal: Any, **kw: Any) -> Any:
+                return PlatformCredentials(
+                    tenant_id=3, platform="discord", payload={}, source="tenant"
+                )
+
+        async with httpx.AsyncClient() as http:
+            c = inbound.ApiDiscordConfirm(http, Resolver())
+            with pytest.raises(inbound.TransportUnavailable):
+                await c.member_roles(
+                    bar_citizen_db[0], tenant_id=3, is_global=False, guild_id="5", user_id="7"
+                )
 
 
 class TestBatch:
     async def test_drain_applies_acks_and_counts(self, bar_citizen_db: Any) -> None:
         dal, community_id, tenant_id, _ = bar_citizen_db
         _seed(dal, community_id)
-        good = {
-            "guild_id": _DISCORD_GUILD_ID,
-            "user_id": _DISCORD_PLATFORM_USER,
-            "role_ids": [_MEMBER_ROLE_DISCORD],
-        }
-        mk = lambda et, pl: _signed(et, pl, tid=tenant_id, cid=community_id)  # noqa: E731
-        forged = json.loads(mk("guild.member.update", good)[b"env"])
+
+        def mk(et: str, pl: Any, n: int) -> Any:
+            return _signed(et, pl, tid=tenant_id, cid=community_id, event_id=f"e{n}")
+
+        forged = json.loads(mk("guild.member.update", _GOOD, 9)[b"env"])
         forged["binding"]["mac"] = "f" * 64
         fake = _FakeRedis(
             {
                 _KEY: [
-                    ("1-0", mk("guild.member.update", good)),
-                    ("2-0", mk("message", {"text": "hi"})),
+                    ("1-0", mk("guild.member.update", _GOOD, 1)),
+                    ("2-0", mk("message", {"text": "hi"}, 2)),
                     ("3-0", {b"env": b"junk"}),
                     ("4-0", {b"env": json.dumps(forged).encode()}),
                 ]
             }
         )
-        res = await inbound.run_inbound_batch(dal, fake, _RING)
+        res = await _batch(fake, dal)
         assert (
             res.streams,
             res.examined,
@@ -504,28 +650,91 @@ class TestBatch:
             res.poison,
             res.violations,
             res.failed,
-        ) == (1, 4, 1, 1, 1, 1, 0)
+            res.replayed,
+        ) == (1, 4, 1, 1, 1, 1, 0, 0)
         assert sorted(fake.acked) == ["1-0", "2-0", "3-0", "4-0"]
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
         fake.busy = True  # existing group tolerated
-        assert (await inbound.run_inbound_batch(dal, fake, _RING)).examined == 0
+        assert (await _batch(fake, dal)).examined == 0
 
-    async def test_apply_failure_is_left_pending_not_acked(
+    async def test_replayed_event_id_is_applied_once(self, bar_citizen_db: Any) -> None:
+        dal, community_id, tenant_id, _ = bar_citizen_db
+        _seed(dal, community_id)
+        e = _signed("guild.member.update", _GOOD, tid=tenant_id, cid=community_id)
+        fake = _FakeRedis({_KEY: [("1-0", e), ("2-0", e)]})
+        confirm = _Confirm({_MEMBER_ROLE_DISCORD})
+        res = await _batch(fake, dal, confirm)
+        assert (res.applied, res.replayed, res.failed) == (1, 1, 0)
+        assert len(confirm.calls) == 1, "the replay never reached Discord or the DB"
+        assert sorted(fake.acked) == ["1-0", "2-0"]
+
+    async def test_forged_payload_in_a_batch_is_refused_after_confirmation(
+        self, bar_citizen_db: Any
+    ) -> None:
+        dal, community_id, tenant_id, _ = bar_citizen_db
+        _seed(dal, community_id, role="vip")
+        e = _signed("guild.member.update", _GOOD, tid=tenant_id, cid=community_id)
+        res = await _batch(_FakeRedis({_KEY: [("1-0", e)]}), dal, _Confirm({"1"}))
+        assert (res.role_events, res.applied) == (1, 0)
+        assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "vip"
+
+    async def test_batch_continues_past_poison_and_unexpected_entries(
         self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         dal, community_id, tenant_id, _ = bar_citizen_db
-        boom = AsyncMock(side_effect=RuntimeError("db down"))
-        monkeypatch.setattr(inbound, "apply_inbound_event", boom)
-        payload = {"guild_id": "1", "role_id": "2"}
-        fake = _FakeRedis(
-            {
-                _KEY: [
-                    ("1-0", _signed("guild.role.update", payload, tid=tenant_id, cid=community_id))
-                ]
-            }
+        _seed(dal, community_id)
+        real = inbound.parse_inbound_entry
+
+        def flaky(fields: Any, **kw: Any) -> Any:
+            if fields.get(b"boom"):
+                raise RuntimeError("parser bug")
+            return real(fields, **kw)
+
+        monkeypatch.setattr(inbound, "parse_inbound_entry", flaky)
+        good = _signed("guild.member.update", _GOOD, tid=tenant_id, cid=community_id, event_id="g")
+        huge = _signed(
+            "guild.member.update", _GOOD, tid=1, cid=1, json_ids=(2**80, 1), event_id="h"
         )
-        res = await inbound.run_inbound_batch(dal, fake, _RING)
-        assert (res.failed, fake.acked) == (1, [])
+        fake = _FakeRedis(
+            {_KEY: [("1-0", {b"boom": b"1"}), ("2-0", huge[b"env"] and huge), ("3-0", good)]}
+        )
+        res = await _batch(fake, dal)
+        assert (res.failed, res.violations, res.applied) == (1, 1, 1)
+        assert sorted(fake.acked) == ["1-0", "2-0", "3-0"], "nothing left pending"
+        assert fake.dlq == [{"stream": _KEY, "entry_id": "1-0", "error": "RuntimeError"}]
+
+    async def test_apply_failure_is_dead_lettered_and_acked(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, community_id, tenant_id, _ = bar_citizen_db
+        monkeypatch.setattr(
+            inbound, "apply_inbound_event", AsyncMock(side_effect=RuntimeError("db"))
+        )
+        e = _signed(
+            "guild.role.update", {"guild_id": "1", "role_id": "2"}, tid=tenant_id, cid=community_id
+        )
+        fake = _FakeRedis({_KEY: [("1-0", e)]})
+        res = await _batch(fake, dal)
+        assert (res.failed, fake.acked, len(fake.dlq)) == (1, ["1-0"], 1)
+
+    async def test_dlq_and_ack_failures_never_abort_the_batch(
+        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal, community_id, tenant_id, _ = bar_citizen_db
+        monkeypatch.setattr(
+            inbound, "apply_inbound_event", AsyncMock(side_effect=RuntimeError("db"))
+        )
+        mk = lambda n: _signed(  # noqa: E731
+            "guild.role.update",
+            {"guild_id": "1", "role_id": "2"},
+            tid=tenant_id,
+            cid=community_id,
+            event_id=f"x{n}",
+        )
+        fake = _FakeRedis({_KEY: [("1-0", mk(1)), ("2-0", mk(2))]})
+        fake.fail_xack = True
+        res = await _batch(fake, dal)
+        assert (res.examined, res.failed) == (2, 2)
 
     async def test_group_create_error_other_than_busy_propagates(self) -> None:
         class Bad(_FakeRedis):
@@ -533,7 +742,7 @@ class TestBatch:
                 raise redis.exceptions.ResponseError("WRONGTYPE")
 
         with pytest.raises(redis.exceptions.ResponseError):
-            await inbound.run_inbound_batch(object(), Bad({"s": []}), _RING)
+            await inbound.run_inbound_batch(object(), Bad({"s": []}), _RING, _Confirm(set()))
 
 
 class TestMain:

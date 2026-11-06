@@ -32,11 +32,17 @@ no new authority:
 
 - **Entries are verified before anything is applied** (same checks as
   ``svc_process::hop::verify_hop``): ``binding.mac`` is recomputed with the shared spine
-  keyring (``ENVELOPE_BINDING_KEYS``; faithful port of ``penguin_spine::verify_binding``, v2 + v3,
-  pinned to the Rust test vectors), the envelope tenant/community must equal the scope parsed
+  keyring (``ENVELOPE_BINDING_KEYS``; faithful port of ``penguin_spine::verify_binding``'s v3 arm,
+  pinned to the Rust test vector; schema v2 is refused), the envelope tenant/community must
+  equal the scope parsed
   from the STREAM KEY, and the numeric ids are resolved from the DB by that scope -- never taken
   from the JSON. Any failure acks the entry, increments
   ``waddles_role_sync_inbound_tenant_boundary_violations_total`` and applies nothing.
+- **The payload is NOT MAC-covered** (the v3 MAC signs scope/ids only), so it is treated as
+  untrusted: ``event_id`` is claimed once (Valkey ``SET NX`` + TTL, replays acked + counted) and,
+  before applying, the member's current roles are fetched from Discord for the community's paired
+  guild; a payload that disagrees is refused (``payload_mismatch``). Signing a payload digest
+  into the v3 MAC (svc-ingest + spine) is tracked in #1059.
 - **Bridge:** this consumer is a beta bridge on hub-api; it is to be migrated into the platform
   service bundles (svc-gateway / connector side) -- tracked in a follow-up issue.
 
@@ -50,6 +56,7 @@ logged -- never a username, nickname or the member's platform id.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
@@ -59,14 +66,19 @@ import re
 import struct
 import sys
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
+import httpx
 import redis.exceptions
 
 from services.bundle_telemetry import bundle_span, get_meter
+from services.credential_resolver import DefaultCredentialResolver, TransportUnavailable
 from services.guild_pairing import list_bindings
 from services.role_sync_service import (
     _DISCORD_TO_PLATFORM_DIRECTIONS,
+    CredentialResolver,
+    DiscordSyncError,
+    HttpDiscordRoleTargetClient,
     _apply_community_role,
     _community_role_priorities,
     _find_linked_hub_user_by_discord,
@@ -155,23 +167,6 @@ def _framed(field: str) -> bytes:
     return struct.pack(">I", len(raw)) + raw
 
 
-def compute_binding_mac(
-    ring: KeyRing,
-    kid: str,
-    tenant: str,
-    community: str | None,
-    workstream_id: str,
-    event_id: str,
-    trace_id: str | None,
-) -> str:
-    """Schema-v2 ``binding.mac`` (port of ``penguin_spine::compute_binding_mac``)."""
-    key = ring.key_for(kid)
-    if key is None:
-        raise TenantBoundaryError("unknown_kid")
-    msg = tenant + (community or _TENANT_WIDE_SEGMENT) + workstream_id + event_id + (trace_id or "")
-    return hmac.new(key, msg.encode(), hashlib.sha256).hexdigest()
-
-
 def compute_binding_mac_v3(
     ring: KeyRing,
     kid: str,
@@ -194,12 +189,28 @@ def compute_binding_mac_v3(
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 
-def verify_binding(ring: KeyRing, env: dict[str, Any]) -> None:
-    """Recompute ``binding.mac`` and compare in constant time; raises on ANY mismatch.
+def _is_int(value: Any, lo: int, hi: int) -> bool:
+    """``True`` for a real in-range int (bool is NOT an int here)."""
+    return isinstance(value, int) and not isinstance(value, bool) and lo <= value <= hi
 
-    Mirrors ``penguin_spine::verify_binding``: v3 requires both numeric ids and signs them; a v2
-    envelope smuggling numeric ids is refused; any other schema version is refused.
+
+def verify_binding(ring: KeyRing, env: dict[str, Any]) -> None:
+    """Recompute ``binding.mac`` (v3 ONLY) and compare in constant time; raises on ANY failure.
+
+    Port of ``penguin_spine::verify_binding``'s v3 arm: framed fields, signed numeric ids.
+    Schema v2 (unframed, ids unsigned) is refused outright by this new consumer. Any unexpected
+    exception while verifying a hostile entry becomes ``malformed_binding_fields`` -- a bad
+    entry can never abort the batch.
     """
+    try:
+        _verify_binding_v3(ring, env)
+    except TenantBoundaryError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - hostile input: any failure is a refusal
+        raise TenantBoundaryError("malformed_binding_fields") from exc
+
+
+def _verify_binding_v3(ring: KeyRing, env: dict[str, Any]) -> None:
     binding = env.get("binding")
     if not isinstance(binding, dict):
         raise TenantBoundaryError("no_binding")
@@ -216,18 +227,16 @@ def verify_binding(ring: KeyRing, env: dict[str, Any]) -> None:
     trace_id = match.group(1) if match else None
     version = env.get("schema_version")
     tid, cid = env.get("tenant_id"), env.get("community_id")
-    if version == 3:
-        if not isinstance(tid, int) or not isinstance(cid, int):
-            raise TenantBoundaryError("v3_missing_ids")
-        expected = compute_binding_mac_v3(
-            ring, kid, tid, cid, tenant, community, ws, event_id, trace_id
-        )
-    elif version == 2:
-        if tid is not None or cid is not None:
-            raise TenantBoundaryError("v2_with_ids")
-        expected = compute_binding_mac(ring, kid, tenant, community, ws, event_id, trace_id)
-    else:
+    if version != 3:
+        # v2 MACs do not cover the numeric ids and use unframed fields: refused outright.
         raise TenantBoundaryError("unsupported_schema_version")
+    if tid is None or cid is None:
+        raise TenantBoundaryError("v3_missing_ids")
+    if not _is_int(tid, -(2**63), 2**63 - 1) or not _is_int(cid, -(2**31), 2**31 - 1):
+        raise TenantBoundaryError("ids_out_of_range")
+    expected = compute_binding_mac_v3(
+        ring, kid, tid, cid, tenant, community, ws, event_id, trace_id
+    )
     if not hmac.compare_digest(expected.encode(), mac.encode()):
         raise TenantBoundaryError("mac_mismatch")
 
@@ -279,6 +288,7 @@ class InboundRoleEvent:
     user_id: str | None
     role_id: str | None
     role_ids: frozenset[str]
+    event_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -343,6 +353,7 @@ def parse_inbound_entry(
             user_id=_snowflake(payload.get("user_id"), "user_id"),
             role_id=None,
             role_ids=frozenset(_snowflake(r, "role_ids[]") for r in roles),
+            event_id=str(env["event_id"]),
         )
     return InboundRoleEvent(
         tenant_id=tenant_id,
@@ -352,6 +363,7 @@ def parse_inbound_entry(
         user_id=None,
         role_id=_snowflake(payload.get("role_id"), "role_id"),
         role_ids=frozenset(),
+        event_id=str(env["event_id"]),
     )
 
 
@@ -393,16 +405,58 @@ def _find_pairing(dal: Any, community_id: int, guild_id: str) -> Any | None:
     )
 
 
-async def apply_inbound_event(dal: Any, event: InboundRoleEvent) -> InboundOutcome:
+class DiscordConfirm(Protocol):
+    """Reads a member's CURRENT roles from Discord so the (unsigned) payload is never trusted."""
+
+    async def member_roles(
+        self, dal: Any, *, tenant_id: int, is_global: bool, guild_id: str, user_id: str
+    ) -> set[str] | None:
+        """The member's role ids now, or ``None`` when they are not in the guild."""
+        ...
+
+
+class ApiDiscordConfirm:
+    """``DiscordConfirm`` over the existing credential resolver + Discord REST client."""
+
+    def __init__(
+        self,
+        http_client: Any,
+        credential_resolver: CredentialResolver | None = None,
+    ) -> None:
+        """Bind the shared HTTP client and (optionally) a custom credential resolver."""
+        self._http = http_client
+        self._resolver = credential_resolver or DefaultCredentialResolver()
+
+    async def member_roles(
+        self, dal: Any, *, tenant_id: int, is_global: bool, guild_id: str, user_id: str
+    ) -> set[str] | None:
+        """Resolve the tenant's bot token and ``GET /guilds/{guild}/members/{user}``."""
+        creds = await self._resolver.resolve(
+            dal, tenant_id=tenant_id, is_global_tenant=is_global, platform="discord"
+        )
+        token = str(creds.payload.get("bot_token", ""))
+        if not token:
+            raise TransportUnavailable(f"tenant {tenant_id} has no discord bot token")
+        client = HttpDiscordRoleTargetClient(self._http, bot_token=token)
+        return await client.get_member_role_ids(guild_id=guild_id, user_id=user_id)
+
+
+async def apply_inbound_event(
+    dal: Any, event: InboundRoleEvent, confirm: DiscordConfirm
+) -> InboundOutcome:
     """Reconcile ONE inbound event into Waddles under the role-sync direction rules.
 
     Returns the classified outcome; never raises for an expected refusal. Writes only
-    ``community_members.role`` (via the shared idempotent applier) -- never Discord.
+    ``community_members.role`` (via the shared idempotent applier) -- never writes Discord.
+
+    The event PAYLOAD is not covered by ``binding.mac``, so it is untrusted: before anything is
+    applied the member's current roles are fetched from Discord (the community's paired guild,
+    the tenant's own credential) and must equal the payload; only that confirmed state is used.
     """
     tenant = _resolve_tenant_for_community(dal, event.community_id)
     if tenant is None:
         return InboundOutcome("no_tenant")
-    tenant_id, tenant_slug, _is_global = tenant
+    tenant_id, tenant_slug, is_global = tenant
     if tenant_id != event.tenant_id:
         logger.warning("role_sync.inbound_tenant_mismatch community_id=%s", event.community_id)
         return InboundOutcome("cross_tenant_refused")
@@ -440,8 +494,31 @@ async def apply_inbound_event(dal: Any, event: InboundRoleEvent) -> InboundOutco
     hub_user_id = _find_linked_hub_user_by_discord(dal, event.user_id)
     if hub_user_id is None:
         return InboundOutcome("unlinked")
+    try:
+        confirmed = await confirm.member_roles(
+            dal,
+            tenant_id=tenant_id,
+            is_global=is_global,
+            guild_id=str(pairing.discord_guild_id),
+            user_id=event.user_id,
+        )
+    except (TransportUnavailable, DiscordSyncError) as exc:
+        logger.error(
+            "role_sync.inbound_confirm_unavailable community_id=%s error_type=%s",
+            event.community_id,
+            type(exc).__name__,
+        )
+        return InboundOutcome("confirm_unavailable")
+    if confirmed is None or set(confirmed) != set(event.role_ids):
+        logger.error(
+            "role_sync.inbound_payload_mismatch community_id=%s guild_id=%s -- refused",
+            event.community_id,
+            event.guild_id,
+        )
+        return InboundOutcome("payload_mismatch")
     desired = _resolve_desired_community_role(
-        _community_role_priorities(dal, event.community_id), mapped
+        _community_role_priorities(dal, event.community_id),
+        {inbound_roles[r] for r in confirmed if r in inbound_roles},
     )
     if desired is None:  # defensive: `mapped` is non-empty, so never expected
         return InboundOutcome("no_mapped_roles")
@@ -481,6 +558,7 @@ class InboundBatchResult:
     poison: int = 0
     failed: int = 0
     violations: int = 0
+    replayed: int = 0
 
 
 async def _ensure_group(client: Any, stream: str) -> None:
@@ -495,14 +573,16 @@ async def run_inbound_batch(
     dal: Any,
     redis_client: Any,
     ring: KeyRing,
+    confirm: DiscordConfirm,
     *,
     batch_size: int = 200,
     consumer_name: str = "hub-api-1",
 ) -> InboundBatchResult:
     """One bounded, non-blocking drain of every Discord source stream.
 
-    Per entry: poison (unparseable role event) is acked + counted; an apply that raises is
-    NOT acked (stays pending for retry) and is counted ``failed`` so it is never silent.
+    Per entry: poison / violation / replay / failure is counted and acked (failures are first
+    written to a bounded dead-letter stream), so one bad entry never aborts the batch or strands
+    a pending-entries-list slot. The periodic reconcile is the correctness backstop.
     """
     result = InboundBatchResult()
     async with bundle_span("hub.role_sync.inbound_batch"):
@@ -517,14 +597,54 @@ async def run_inbound_batch(
             for _key, entries in response or []:
                 for entry_id, fields in entries:
                     result.examined += 1
-                    await _handle_entry(dal, redis_client, ring, stream, entry_id, fields, result)
+                    await _handle_entry(
+                        dal, redis_client, ring, confirm, stream, entry_id, fields, result
+                    )
     return result
+
+
+_DEDUPE_TTL_SECONDS = 24 * 3600
+_DLQ_STREAM = "waddles:dlq:role_sync_inbound"
+_DLQ_MAXLEN = 1000
 
 
 async def _handle_entry(
     dal: Any,
     redis_client: Any,
     ring: KeyRing,
+    confirm: DiscordConfirm,
+    stream: str,
+    entry_id: Any,
+    fields: Any,
+    result: InboundBatchResult,
+) -> None:
+    """Never raises: any failure is dead-lettered (id + reason only) and the entry is acked."""
+    try:
+        await _process_entry(dal, redis_client, ring, confirm, stream, entry_id, fields, result)
+    except Exception as exc:  # noqa: BLE001 - one bad entry must never abort the batch
+        result.failed += 1
+        _events_counter.add(1, {"outcome": "failed"})
+        logger.error("role_sync.inbound_entry_failed error_type=%s", type(exc).__name__)
+        try:
+            await redis_client.xadd(
+                _DLQ_STREAM,
+                {"stream": stream, "entry_id": _decode(entry_id), "error": type(exc).__name__},
+                maxlen=_DLQ_MAXLEN,
+                approximate=True,
+            )
+        except Exception as dlq_exc:  # noqa: BLE001 - DLQ is best effort, the ack still happens
+            logger.error("role_sync.inbound_dlq_failed error_type=%s", type(dlq_exc).__name__)
+        try:
+            await redis_client.xack(stream, INBOUND_CONSUMER_GROUP, entry_id)
+        except Exception as ack_exc:  # noqa: BLE001
+            logger.error("role_sync.inbound_ack_failed error_type=%s", type(ack_exc).__name__)
+
+
+async def _process_entry(
+    dal: Any,
+    redis_client: Any,
+    ring: KeyRing,
+    confirm: DiscordConfirm,
     stream: str,
     entry_id: Any,
     fields: Any,
@@ -547,21 +667,27 @@ async def _handle_entry(
         await redis_client.xack(stream, INBOUND_CONSUMER_GROUP, entry_id)
         return
     result.role_events += 1
-    try:
-        outcome = await apply_inbound_event(dal, event)
-    except Exception as exc:  # noqa: BLE001 - one bad event must not stop the drain; left pending
-        result.failed += 1
-        _events_counter.add(1, {"outcome": "failed"})
-        logger.error(
-            "role_sync.inbound_apply_failed community_id=%s error_type=%s",
-            event.community_id,
-            type(exc).__name__,
-        )
+    # Replay guard: a (validly MAC'd) event_id is honoured once. Claimed BEFORE applying.
+    claimed = await redis_client.set(
+        f"role_sync:inbound:evt:{event.event_id}", "1", nx=True, ex=_DEDUPE_TTL_SECONDS
+    )
+    if not claimed:
+        result.replayed += 1
+        _events_counter.add(1, {"outcome": "replayed"})
+        await redis_client.xack(stream, INBOUND_CONSUMER_GROUP, entry_id)
         return
+    outcome = await apply_inbound_event(dal, event, confirm)
     _events_counter.add(1, {"outcome": outcome.outcome})
     if outcome.outcome == "applied":
         result.applied += 1
     await redis_client.xack(stream, INBOUND_CONSUMER_GROUP, entry_id)
+
+
+@contextlib.asynccontextmanager
+async def _opened_dal() -> Any:
+    """Async-context adapter over the sync ``open_worker_dal`` context manager."""
+    with open_worker_dal(os.environ["DATABASE_URL"]) as async_dal:
+        yield async_dal
 
 
 async def main() -> int:
@@ -569,9 +695,10 @@ async def main() -> int:
     ring = KeyRing.parse(os.environ["ENVELOPE_BINDING_KEYS"])
     redis_client = build_client()
     total = InboundBatchResult()
-    with open_worker_dal(os.environ["DATABASE_URL"]) as async_dal:
+    async with httpx.AsyncClient() as http_client, _opened_dal() as async_dal:
+        confirm = ApiDiscordConfirm(http_client)
         for _ in range(20):
-            r = await run_inbound_batch(async_dal.dal, redis_client, ring)
+            r = await run_inbound_batch(async_dal.dal, redis_client, ring, confirm)
             total.streams = max(total.streams, r.streams)
             total.examined += r.examined
             total.role_events += r.role_events
@@ -579,12 +706,14 @@ async def main() -> int:
             total.poison += r.poison
             total.failed += r.failed
             total.violations += r.violations
+            total.replayed += r.replayed
             if r.examined == 0:
                 break
     print(
         f"role_sync_inbound: streams={total.streams} examined={total.examined} "
         f"role_events={total.role_events} applied={total.applied} "
-        f"poison={total.poison} failed={total.failed} violations={total.violations}"
+        f"poison={total.poison} failed={total.failed} violations={total.violations} "
+        f"replayed={total.replayed}"
     )
     if total.streams == 0:
         print("role_sync_inbound: zero Discord streams found", file=sys.stderr)
