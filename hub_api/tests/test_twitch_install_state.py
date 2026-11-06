@@ -15,8 +15,12 @@ from quart import Quart
 
 from config import HubAPIConfig
 from services import twitch_install_state as state_module
+from services.install_state_binding import ERR_STATE, InstallStateError
 
 _TEST_ENCRYPTION_KEY = "11" * 32  # 32 bytes hex -- matches platform_integrations_crypto's format
+
+
+NONCE = "browser-nonce-0123456789"
 
 
 class FakeRedis:
@@ -29,6 +33,15 @@ class FakeRedis:
     async def set(self, key: str, value: str, ex: int | None = None) -> None:
         expires_at = time.monotonic() + ex if ex is not None else None
         self.store[key] = (value, expires_at)
+
+    async def get(self, key: str) -> str | None:
+        entry = self.store.get(key)
+        if entry is None:
+            return None
+        value, expires_at = entry
+        if expires_at is not None and time.monotonic() > expires_at:
+            return None
+        return value
 
     async def getdel(self, key: str) -> str | None:
         entry = self.store.pop(key, None)
@@ -93,13 +106,14 @@ class TestCreateAndConsumeState:
     ) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 tenant_id=7,
                 installed_by_user_id=42,
                 client_id="tenant-client-id",
                 client_secret="tenant-client-secret",  # noqa: S106
                 redirect_uri="https://hub.example/api/v1/tenant/twitch-install/callback",
             )
-            payload = await state_module.consume_state(token)
+            payload = await state_module.consume_state(token, NONCE)
 
         assert payload == state_module.TwitchInstallStatePayload(
             tenant_id=7,
@@ -112,6 +126,7 @@ class TestCreateAndConsumeState:
     async def test_client_secret_encrypted_at_rest(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 tenant_id=7,
                 installed_by_user_id=42,
                 client_id="tenant-client-id",
@@ -125,34 +140,39 @@ class TestCreateAndConsumeState:
     async def test_state_is_single_use(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 tenant_id=1,
                 installed_by_user_id=1,
                 client_id="cid",
                 client_secret="csecret",  # noqa: S106
                 redirect_uri="https://hub.example/cb",
             )
-            first = await state_module.consume_state(token)
-            second = await state_module.consume_state(token)
+            first = await state_module.consume_state(token, NONCE)
+            with pytest.raises(InstallStateError) as replay:
+                await state_module.consume_state(token, NONCE)
 
         assert first is not None
-        assert second is None
+        assert replay.value.code == ERR_STATE
 
     async def test_unknown_token_returns_none(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
-            result = await state_module.consume_state("never-issued-token")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("never-issued-token", NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_empty_state_returns_none_without_touching_redis(
         self, app: Quart, fake_redis: FakeRedis
     ) -> None:
         async with app.app_context():
-            result = await state_module.consume_state("")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("", NONCE)
+            assert refused.value.code == ERR_STATE
         assert fake_redis.store == {}
 
     async def test_expired_state_returns_none(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 tenant_id=1,
                 installed_by_user_id=1,
                 client_id="cid",
@@ -160,15 +180,17 @@ class TestCreateAndConsumeState:
                 redirect_uri="https://hub.example/cb",
             )
             fake_redis.force_expire(f"{state_module._STATE_KEY_PREFIX}{token}")
-            result = await state_module.consume_state(token)
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state(token, NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_malformed_payload_returns_none(self, app: Quart, fake_redis: FakeRedis) -> None:
         async with app.app_context():
             key = f"{state_module._STATE_KEY_PREFIX}bogus"
             await fake_redis.set(key, "not-json", ex=60)
-            result = await state_module.consume_state("bogus")
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state("bogus", NONCE)
+            assert refused.value.code == ERR_STATE
 
     async def test_undecryptable_secret_returns_none(
         self, app: Quart, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
@@ -176,6 +198,7 @@ class TestCreateAndConsumeState:
         """A key rotation between create and consume must fail closed, not raise/leak plaintext."""
         async with app.app_context():
             token = await state_module.create_state(
+                binding_nonce=NONCE,
                 tenant_id=1,
                 installed_by_user_id=1,
                 client_id="cid",
@@ -183,5 +206,6 @@ class TestCreateAndConsumeState:
                 redirect_uri="https://hub.example/cb",
             )
             monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "22" * 32)
-            result = await state_module.consume_state(token)
-        assert result is None
+            with pytest.raises(InstallStateError) as refused:
+                await state_module.consume_state(token, NONCE)
+            assert refused.value.code == ERR_STATE

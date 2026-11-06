@@ -45,9 +45,18 @@ from typing import Any, cast
 from quart import current_app
 
 from config import HubAPIConfig
+from services.install_state_binding import (
+    ERR_STATE,
+    InstallStateError,
+    consume_bound,
+    nonce_hash,
+)
 from services.rate_limiting import RATE_LIMITER_CONFIG_KEY
 
 logger = logging.getLogger(__name__)
+
+#: Upper bound (seconds) on a state's lifetime regardless of configuration.
+MAX_TTL_S = 600
 
 #: Redis key prefix every state token is stored under.
 _STATE_KEY_PREFIX = "oauth:conn:state:"
@@ -108,7 +117,13 @@ def _redis_client() -> Any:
 
 def _ttl_seconds() -> int:
     cfg = cast(HubAPIConfig, current_app.config["HUB_API_CONFIG"])
-    return cfg.connections_state_ttl_s
+    # Hard ceiling of 10 minutes: a longer-lived state widens the CSRF/replay window.
+    return min(int(cfg.connections_state_ttl_s), MAX_TTL_S)
+
+
+def binding_cookie_max_age() -> int:
+    """Binding-cookie lifetime == the state TTL, so the two expire together."""
+    return _ttl_seconds()
 
 
 async def create_state(
@@ -118,12 +133,14 @@ async def create_state(
     user_id: int,
     redirect_uri: str,
     code_verifier: str | None,
+    binding_nonce: str,
     tenant_id: int | None = None,
 ) -> str:
     """Mint a fresh single-use `state` token and store its context in Redis.
 
     Returns the opaque token to embed in the provider's `authorize` URL --
-    never the payload itself.
+    never the payload itself. Only the SHA-256 of `binding_nonce` (the
+    initiating browser's cookie) is stored.
     """
     token = secrets.token_urlsafe(32)
     payload = {
@@ -133,30 +150,30 @@ async def create_state(
         "redirect_uri": redirect_uri,
         "code_verifier": code_verifier,
         "tenant_id": tenant_id,
+        "binding": nonce_hash(binding_nonce),
     }
     client = _redis_client()
     await client.set(f"{_STATE_KEY_PREFIX}{token}", json.dumps(payload), ex=_ttl_seconds())
     return token
 
 
-async def consume_state(state: str) -> StatePayload | None:
-    """Atomically fetch-and-delete `state`'s context; `None` if absent/expired/already used.
+async def consume_state(state: str, binding_nonce: str | None) -> StatePayload:
+    """Verify the browser binding, then atomically fetch-and-delete `state`'s context.
 
-    `GETDEL` makes this single-use: a second call with the same token
-    (whether a legitimate retry or a replay attempt) always misses, even
-    under concurrent requests, since the delete is part of the same atomic
-    command as the read.
+    Raises `InstallStateError`: `invalid_or_expired_state` for absent/expired/
+    replayed/corrupt state, `state_binding_mismatch` for a missing/foreign
+    binding cookie (state left untouched). `GETDEL` makes it single-use
+    even under concurrent requests.
     """
-    if not state:
-        return None
-    client = _redis_client()
+    if not state or len(state) > 128:
+        raise InstallStateError(ERR_STATE)
     try:
-        raw = await client.getdel(f"{_STATE_KEY_PREFIX}{state}")
-    except Exception:  # noqa: BLE001 - a Redis hiccup must fail the flow, not crash it
+        raw = await consume_bound(_redis_client(), f"{_STATE_KEY_PREFIX}{state}", binding_nonce)
+    except InstallStateError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a Redis hiccup must fail the flow, not crash it
         logger.exception("oauth_connection_state.consume_failed")
-        return None
-    if raw is None:
-        return None
+        raise InstallStateError(ERR_STATE) from exc
     try:
         data = json.loads(raw)
         return StatePayload(
@@ -169,4 +186,4 @@ async def consume_state(state: str) -> StatePayload | None:
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         logger.warning("oauth_connection_state.malformed_payload")
-        return None
+        raise InstallStateError(ERR_STATE) from None

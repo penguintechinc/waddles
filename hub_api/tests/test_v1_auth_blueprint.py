@@ -33,6 +33,7 @@ from app import bridge_session_cookie_to_bearer
 from blueprints.v1.auth import auth_bp
 from config import HubAPIConfig
 from services import oauth_service
+from services.install_state_binding import bound_state
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -438,6 +439,7 @@ def _patch_oauth_callback(monkeypatch: Any, token: str) -> None:
         code: str,
         state: str,
         callback_base_url: str,
+        binding_nonce: str | None = None,
     ) -> str:
         return token
 
@@ -576,8 +578,9 @@ class TestOAuthExchangeCodeHandoff:
         assert response.status_code == 400
 
     async def test_expired_exchange_code_is_rejected(self, client: Any, auth_db: Any) -> None:
+        code = bound_state("expired-exchange-code", "n")
         auth_db.dal.hub_oauth_exchange_codes.insert(
-            code="expired-exchange-code",
+            code=code,
             token="whatever-it-was",
             platform="discord",
             used=False,
@@ -586,9 +589,12 @@ class TestOAuthExchangeCodeHandoff:
         )
         auth_db.dal.commit()
         response = await client.post(
-            "/api/v1/auth/exchange", json={"code": "expired-exchange-code"}
+            "/api/v1/auth/exchange",
+            json={"code": code},
+            headers={"Cookie": f"{oauth_service.EXCHANGE_BINDING_COOKIE}=n"},
         )
         assert response.status_code == 400
+        assert "invalid_or_expired_state" in await response.get_data(as_text=True)
 
 
 class TestSessionCookieBridgeEndToEnd:
