@@ -41,16 +41,10 @@ namespaced `"shoutout"`):
   already knows it). The add/remove/list commands themselves require `auto`
   to already be enabled (`!so enable auto` first) -- same idiom as
   `AUTHORING.md`'s own `ai`-sub-module worked example.
-- `ai` -- `!so enable ai` / `!so disable ai` (admin/mod only). **License-
-  gated**: `enable ai` additionally requires the tenant's license tier (the
-  always-granted WIT `%flags.tier()` import, via
-  `waddle_sdk.flask_core.feature_flags.tier_at_least()`) to be at least
-  `"professional"` (`critical-rules.md` Feature Flags & License Tiers:
-  "basic AI = Professional"). Fails CLOSED -- an unavailable/stale tier
-  binding degrades to `"free"` (`tier_at_least`'s own documented behavior),
-  never an implicit allow, and is never env-overridable. `disable ai`
-  requires no license check (turning a thing off is always allowed), same
-  as `lurk`'s own `!lurk disable ai`.
+- `ai` -- `!so enable ai` / `!so disable ai` (admin/mod only). A plain toggle: the bundle
+  performs NO license-tier check. AI is a platform harness capability -- the host's
+  `ai.generate` enforces the Professional-tier requirement itself (typed `tier_required` /
+  `tier_unknown` refusal) for every bundle.
 
 Data scoping: every piece of state here -- the per-community template, the
 `auto`/`ai` enabled flags, and the auto-shoutout list -- is keyed by the
@@ -71,7 +65,7 @@ decides whether this bundle runs.
 DO NOT BUILD in v1 -- clean, documented extension points, never a silent
 stub:
 
-- **AI-generated shoutout text.** `ai` is a real, license-checked toggle,
+- **AI-generated shoutout text.** `ai` is a real toggle (the host enforces the AI license tier),
   but `_handle_shoutout()` always renders the community's configured (or
   default) template today, logging at DEBUG that AI generation was
   requested but is pending, when the sub-module is enabled -- the actual
@@ -102,7 +96,6 @@ from waddle_sdk.command import (
     parse_command,
     substitute_placeholders,
 )
-from waddle_sdk.flask_core.feature_flags import tier_at_least
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.sub_modules import SubModuleGate
 
@@ -114,10 +107,6 @@ SPEC = CommandSpec(name="so", sub_modules=frozenset({"auto", "ai"}))
 #: `(command, sub_module)`, so a single instance namespaced `"shoutout"`
 #: handles `auto` and `ai` independently with no key collision.
 _GATE = SubModuleGate(command="shoutout")
-
-#: License tier required for `!so enable ai` (`critical-rules.md` Feature
-#: Flags & License Tiers: "basic AI = Professional").
-_AI_TIER_REQUIRED = "professional"
 
 _TEMPLATE_KEY = "shoutout.config.template"
 _AUTO_LIST_KEY = "shoutout.auto.list"
@@ -528,10 +517,7 @@ async def _handle_auto_list(*, community: str, provider: str, channel_id: str) -
 
 
 async def _handle_enable_ai(*, community: str) -> str:
-    """Apply `!so enable ai`'s license gate, then enable if it passes (see module docstring)."""
-    if not await tier_at_least(_AI_TIER_REQUIRED):
-        log.info("shoutout.enable_ai_denied", community=community)
-        return f"the ai sub-module requires a {_AI_TIER_REQUIRED} license or higher"
+    """Enable the `ai` sub-module; the host's AI capability enforces the license tier."""
     await _GATE.enable(community, "ai")
     log.info("shoutout.submodule_enabled", sub_module="ai", community=community)
     return "shoutout ai sub-module enabled"

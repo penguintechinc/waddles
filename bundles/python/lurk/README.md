@@ -16,7 +16,7 @@ attribution to carry. kv-only (`storage.kv`); no `db`, no egress.
 | `!lurk` | anyone | Starts (or **resets**, if already lurking) the caller's lurk timer and replies with the community's lurk template (default `$(username) is now lurking`). |
 | `!unlurk` | anyone | If lurking: replies `Welcome back, <name>! You lurked for 2h 13m.` (two largest units) and clears the state. If not (never lurked, already unlurked, or the 24 h TTL expired it): `You weren't lurking!` -- one code path for all three. |
 | `!lurk set <message>` | **mod / broadcaster** | Sets the community's lurk template (1-200 chars). Placeholders: `$(username)`, `$(duration)`; any other `$(...)` is rejected at set time (no silent typo). |
-| `!lurk enable ai` | **mod / broadcaster** + **Enterprise** | Turns on the AI-response toggle. Replies "AI lurk responses require Enterprise" below Enterprise. |
+| `!lurk enable ai` | **mod / broadcaster** | Turns on the AI-response toggle (the host's AI capability enforces the license tier). |
 | `!lurk disable ai` | **mod / broadcaster** | Turns the toggle off (no license check -- turning a thing off is always allowed). |
 | `!lurk reset` | **mod / broadcaster** | Restores the default template and clears the AI toggle. |
 
@@ -37,13 +37,9 @@ runs in `dispatch` **before any kv or license access**:
 
 Denial logs `lurk.config_denied` (command + role-signal state only). `!lurk`/`!unlurk` never need a role.
 
-## License gate (fail-closed)
+## License
 
-`!lurk enable ai` reads the always-granted WIT `flags.tier()` import and proceeds only for
-`enterprise`. A missing `wit_world`, a stale component with no `flags` import, or no `tier`
-function all resolve to `free` -- never an implicit allow, never env-overridable
-(`critical-rules.md` Feature Flags & License Tiers). A non-mod on an Enterprise tenant is still
-denied by the mod gate first.
+The bundle never checks a license tier; the platform's AI host capability enforces it for every bundle.
 
 ## Examples
 
@@ -63,7 +59,7 @@ invalid lurk message: unknown placeholder(s): nope (allowed: $(username), $(dura
 | id | Why |
 |---|---|
 | `storage.kv` | Persists per-community lurk state (start timestamps, template, AI toggle). Without it `_derive_capabilities()` never grants `kv` at all. |
-| `flags.read` | Reads the license tier for the AI toggle (the command itself is not flag-gated). |
+| `flags.read` | Retained for manifest stability; no longer used (no tier check). |
 
 ## Gating
 
@@ -125,7 +121,7 @@ and asserts both its absence and the exact per-message field set).
 | `hub-manifest.yaml` | hub-api install-pipeline manifest (separate schema consumer) |
 | `src/app.py` | `transform` / `dispatch` |
 | `src/_entry_wiring.py` | Static `bundle_compiler`-shaped entry wiring |
-| `tests/` | Host-native pytest suite (fake `wit_world` incl. `kv`/`clock`/`flags.tier`; no wasmtime) |
+| `tests/` | Host-native pytest suite (fake `wit_world` incl. `kv`/`clock`; no wasmtime) |
 
 ## Test
 
