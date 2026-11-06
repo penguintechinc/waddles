@@ -148,13 +148,7 @@ where
         &config.cli.stream_data_dir,
         record_metrics,
     );
-    let (record, record_readiness) = match record_result {
-        Ok(sink) => (Some(Arc::new(sink)), http::RecordReadiness::Enabled),
-        Err(err) => {
-            tracing::warn!(error = %err, "recording disabled: S3_ENDPOINT/RECORDINGS_BUCKET/S3_ACCESS_KEY/S3_SECRET_KEY not fully configured");
-            (None, http::RecordReadiness::Disabled(format!("{err:#}")))
-        }
-    };
+    let (record, record_readiness) = record_status(record_result);
 
     let mut state = state;
     state.record = record_readiness;
@@ -268,5 +262,88 @@ pub async fn run_healthcheck() -> anyhow::Result<()> {
             eprintln!("healthcheck failed: {err}");
             std::process::exit(1);
         }
+    }
+}
+
+/// Splits the `RecordSink::from_env` outcome into the sink the orchestrator
+/// uses and the readiness `/readyz` reports. A failure is logged and kept as
+/// the `Disabled` reason (it names the missing variable, never a value).
+fn record_status(
+    result: anyhow::Result<egress::record::RecordSink>,
+) -> (
+    Option<Arc<egress::record::RecordSink>>,
+    http::RecordReadiness,
+) {
+    match result {
+        Ok(sink) => (Some(Arc::new(sink)), http::RecordReadiness::Enabled),
+        Err(err) => {
+            tracing::warn!(error = %err, "recording disabled: S3_ENDPOINT/RECORDINGS_BUCKET/S3_ACCESS_KEY/S3_SECRET_KEY not fully configured");
+            (None, http::RecordReadiness::Disabled(format!("{err:#}")))
+        }
+    }
+}
+
+#[cfg(test)]
+mod record_status_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use clap::Parser as _;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt as _;
+
+    async fn readyz(readiness: http::RecordReadiness) -> serde_json::Value {
+        let cli = config::CliConfig::parse_from(["svc-streaming"]);
+        let cfg = config::Config {
+            cli,
+            db_password: config::Secret::new("x"),
+            cache_password: None,
+            service_api_key: config::Secret::new("x"),
+            jwt_hmac_secret: None,
+        };
+        let mut state = http::AppState::new(cfg, prometheus::Registry::new());
+        state.record = readiness;
+        let res = http::router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn disabled_sink_reports_degraded_with_the_reason() {
+        let (sink, readiness) = record_status(Err(anyhow::anyhow!("S3_ENDPOINT is not set")));
+        assert!(sink.is_none());
+        let body = readyz(readiness).await;
+        assert_eq!(body["status"], "degraded");
+        let record = &body["dependencies"][3];
+        assert_eq!(record["name"], "record");
+        assert_eq!(record["configured"], false);
+        assert!(record["detail"]
+            .as_str()
+            .unwrap()
+            .contains("S3_ENDPOINT is not set"));
+    }
+
+    #[tokio::test]
+    async fn enabled_sink_reports_ok() {
+        let dir = std::env::temp_dir();
+        let metrics = egress::record::register_metrics(&prometheus::Registry::new());
+        let sink = egress::record::RecordSink::new(
+            dir,
+            Arc::new(object_store::memory::InMemory::new()),
+            metrics,
+        );
+        let (got, readiness) = record_status(Ok(sink));
+        assert!(got.is_some());
+        let body = readyz(readiness).await;
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["dependencies"][3]["configured"], true);
     }
 }
