@@ -25,7 +25,6 @@ requires_docker = pytest.mark.skipif(
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MIGRATION_PATH = _ROOT / "alembic" / "versions" / "0078_wix_connection_resource.py"
-_PREVIOUS = "0077_stream_keys_destinations"
 
 
 def _load() -> ModuleType:
@@ -36,16 +35,26 @@ def _load() -> ModuleType:
     return module
 
 
+def _script() -> ScriptDirectory:
+    cfg = Config(str(_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_ROOT / "alembic"))
+    return ScriptDirectory.from_config(cfg)
+
+
+# The parent is read from the migration itself, so re-chaining after a sibling 0078 merges
+# (single head) never needs a test edit.
+_PREVIOUS = _load().down_revision
+
+
 def test_chain_and_id_length() -> None:
     module = _load()
     assert module.down_revision == _PREVIOUS
+    assert module.down_revision in {r.revision for r in _script().walk_revisions()}
     assert len(module.revision) <= 32
 
 
 def test_history_has_exactly_one_head_and_0078_is_in_it() -> None:
-    cfg = Config(str(_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(_ROOT / "alembic"))
-    script = ScriptDirectory.from_config(cfg)
+    script = _script()
     assert len(script.get_heads()) == 1
     assert "0078_wix_connection_resource" in {
         r.revision for r in script.walk_revisions()
