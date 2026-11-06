@@ -64,6 +64,7 @@
 
 pub mod config;
 pub mod connector;
+pub mod connector_runtime;
 pub mod crypto;
 pub mod discord_rest;
 pub mod error;
