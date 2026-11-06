@@ -121,6 +121,13 @@ spec:
         - name: SERVICE_JWT_PUBLIC_KEY_{{ $kid }}
           value: {{ $pem | quote }}
         {{- end }}
+        {{- if .Values.pipeline.svcStreaming.enabled }}
+        # hub_api/services/calls_proxy.py -- svc-streaming (RTC control plane) base URL. Rendered
+        # from the same Service name/port templates/svc-streaming.yaml creates; hub-api has NO
+        # in-code default and fails loud on the first proxied call when this is absent.
+        - name: STREAMING_RTC_URL
+          value: "http://{{ include "waddlebot.fullname" . }}-svc-streaming:{{ .Values.pipeline.svcStreaming.port }}"
+        {{- end }}
         - name: SERVICE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
         - name: SERVICE_JWT_BOOTSTRAP_AUDIENCE

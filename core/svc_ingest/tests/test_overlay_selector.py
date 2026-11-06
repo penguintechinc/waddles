@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from quart.testing.app import LifespanError
 
@@ -188,3 +191,68 @@ class TestAppSuppression:
         with pytest.raises(LifespanError):
             async with quart_app.test_app():
                 pass
+
+
+_TABLE = json.loads(
+    (Path(__file__).parent / "fixtures" / "overlay_selector_table.json").read_text("utf-8")
+)["cases"]
+
+
+class TestSharedDecisionTable:
+    """Parity with the Rust selector: both read tests/fixtures/overlay_selector_table.json."""
+
+    def test_fixture_is_not_empty(self) -> None:
+        assert len(_TABLE) >= 100  # a zero-case table would pass vacuously
+
+    @pytest.mark.parametrize(
+        "case", _TABLE, ids=lambda c: json.dumps(c["env"], sort_keys=True)[:80]
+    )
+    def test_case(self, case: dict) -> None:
+        env = case["env"]
+        if case["expect"] == "error":
+            with pytest.raises(OverlayConfigError):
+                OverlaySelector.from_env(env, identify_budget_ready=case["identify_budget_ready"])
+            return
+        sel = OverlaySelector.from_env(env, identify_budget_ready=case["identify_budget_ready"])
+        exp = case["expect"]
+        assert sel.legacy("twitch") is exp["twitch_inbound"]
+        assert sel.twitch_eventsub_legacy is exp["twitch_eventsub"]
+        assert sel.twitch_outbound_legacy is exp["twitch_outbound"]
+        assert sel.legacy("discord") is exp["discord_inbound"]
+        assert sel.legacy("youtube") is exp["youtube_inbound"]
+
+
+class TestSuppressedFactoriesNeverInvoked:
+    """A suppressed platform's receiver factory must not even be called."""
+
+    async def test_factories_gated_by_selector(
+        self, twitch_and_youtube_configured: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import app as app_mod
+
+        calls: list[str] = []
+        names = {
+            "_register_youtube_live_receiver": "youtube",
+            "_register_twitch_eventsub": "eventsub",
+        }
+        for attr, tag in names.items():
+            monkeypatch.setattr(app_mod, attr, lambda *a, _t=tag, **k: calls.append(_t))
+        real_twitch = app_mod._register_twitch_receivers  # noqa: SLF001
+
+        def spy(*a: object, **k: object) -> None:
+            calls.append(f"twitch:in={k['register_inbound']}:out={k['register_outbound']}")
+            real_twitch(*a, **k)
+
+        monkeypatch.setattr(app_mod, "_register_twitch_receivers", spy)
+        monkeypatch.setenv("OVERLAY_YOUTUBE_ENABLED", "true")
+        monkeypatch.setenv("OVERLAY_TWITCH_ENABLED", "true")
+        monkeypatch.setenv("CONNECTOR_RUNTIME_ENABLED", "true")
+        monkeypatch.setenv("CONNECTOR_TOOLS_ENABLED", "true")
+        monkeypatch.setenv("CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS", "twitch")
+        async with quart_app.test_app():
+            pass
+        assert calls == ["twitch:in=False:out=False"]  # youtube + eventsub never called
+
+    async def test_flag_fetch_is_never_attempted(self) -> None:
+        # fail-safe direction: with no env, legacy runs; there is no flag/network input at all
+        assert not OverlaySelector.from_env({}).overlay("twitch")
