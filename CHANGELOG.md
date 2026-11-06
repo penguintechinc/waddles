@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- hub-api stream key + restream destination admin (`/api/v1/admin/{community_id}/streams/*`) is now native (was a reverse proxy to the legacy `video_proxy_module` that stored keys in plaintext and returned them on GET): the inbound key is CSPRNG-generated, stored only as a SHA-256 (`streaming_configs.stream_key_hash`), and returned exactly once in `streamKey` on create/regenerate (`Cache-Control: no-store`); destination RTMP URL + key are AES-256-GCM sealed (`streaming_destinations`, AAD-bound) and never returned (URL redacted to `scheme://host`); HEVC/AV1 on RTMP destinations rejected like svc-streaming. Migration `0076_stream_keys_destinations`. See `docs/streaming-stream-keys.md` (svc-streaming ingest-auth must adopt `stream_key_hash` -- documented follow-up).
 - hub-api AI-knowledge sources (`/api/v1/admin/ai-knowledge/sources*`): update/delete/reindex now authorize against the source's community (tenant-checked) / vendor owner and answer 404 for foreign ids (cross-community IDOR); list requires `communityId` for non-super-admins; access tokens are encrypted at rest (AES-256-GCM, `GITHUB_SYNC_ENCRYPTION_KEY`) and decrypted only in `index_source`. Request field renamed `token` (`encrypted_token` accepted as a DEPRECATED plaintext alias). Migration `0075_ai_knowledge_token_enc` seals existing plaintext rows (needs `GITHUB_SYNC_ENCRYPTION_KEY` when any exist). See `docs/ai-knowledge-sources.md`.
 
 ### Added

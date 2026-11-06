@@ -111,6 +111,15 @@ def platform_connection_aad(*, public_id: UUID, platform: str) -> bytes:
     return f"conn:{public_id}:{platform}".encode()
 
 
+def stream_destination_aad(*, config_id: int, public_id: str) -> bytes:
+    """AAD binding a `streaming_destinations` ciphertext to its row (config + immutable id).
+
+    A sealed URL/key copied onto another destination row (or another community's config) no
+    longer authenticates.
+    """
+    return f"streamdest:{config_id}:{public_id}".encode()
+
+
 def encrypt_token(plaintext: str, *, aad: bytes | None = None) -> str:
     """AES-256-GCM encrypt `plaintext`; returns base64(iv(12) || ciphertext || tag).
 
