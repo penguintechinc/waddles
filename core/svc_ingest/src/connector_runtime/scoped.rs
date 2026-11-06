@@ -225,10 +225,12 @@ mod tests {
     use crate::connector_runtime::testkit::{desired_webhook, desired_ws};
     use crate::identity_crypto::DekUnavailableError;
 
+    type Answer = ((String, String), Result<ResolvedScope, Unresolved>);
+
     /// Answers by `(platform, source)` from a script and records every ask.
     #[derive(Default)]
     struct Script {
-        answers: Mutex<Vec<((String, String), Result<ResolvedScope, Unresolved>)>>,
+        answers: Mutex<Vec<Answer>>,
         asked: Mutex<Vec<(String, String)>>,
     }
 

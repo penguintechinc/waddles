@@ -437,7 +437,7 @@ entries are consumed by whichever path is running).
 HostCallHandler>)` plugs in `OverlayHostCalls`, the explicit allowlist for the host-calls an overlay makes (default stays deny-all).
 The executor stamps `args._scope = {connection_id}` after guest code for every export that carries a `ConnectionCtx`; the handler
 maps it through the host-owned `ActiveConnections` table (`connection_id -> platform/community/tenant`) to a `CallScope`.
-`tool-call`/`build-request` exports carry no ctx, so their host-calls are UNSCOPED and **denied** (typed `denied`/`unscoped_call`,
+`tool-call` exports carry no ctx, so their host-calls are UNSCOPED and **denied** (`build-request` only gets its own flag read, see below) (typed `denied`/`unscoped_call`,
 counted, no fallback). Also denied: unknown/stale connection, unknown overlay, an overlay acting on another platform's
 connection, and any op needing a grant the overlay's `hub-manifest.yaml` lacks (twitch: `connector.pii.read`, `flags.read`;
 discord: `connector.pii.read`, `platform.log`; youtube: `connector.pii.read`; a unit test parses the real manifests).
@@ -452,11 +452,45 @@ discord: `connector.pii.read`, `platform.log`; youtube: `connector.pii.read`; a 
 | everything else (http, kv, relay, other db ops) | `denied` / `not_serviced` |
 
 Limits: 2 s deadline, 16 in flight per overlay, 4 per connection (over cap = `quota_exceeded`, never queued). Metrics:
-`connector_host_call_total{capability,outcome}`, `connector_host_call_denied_total{reason}` (bounded labels, no ids). Not yet wired
-at boot: the supervisor must `activate`/`deactivate` each connection, and `build-request` flag reads need a scoped path (see PR notes).
+`connector_host_call_total{capability,outcome}`, `connector_host_call_denied_total{reason}` (bounded labels, no ids). Wired at boot
+by the connector runtime (below): the supervisor `activate`s/`deactivate`s each connection, and `build-request` flag reads are served through the
+host-recorded `CallOrigin::BuildRequest` (the link matches the call's `call_id` to the build-request invocation IT sent; only the invoked overlay's
+own `waddles.overlay-<p>` flag is answered, every other unscoped call stays `unscoped_call`-denied).
 
 **Known prerequisite outside this crate:** a `bundle-executor` must dial this pod's host-api port with the
 three connectors pinned (`Executor::pin_connector`) and a host-call bridge so the twitch overlay's
 `waddles.overlay-twitch` gate can read the flag. Neither exists in the production executor yet
 (`connector_wire` doc: "no host-call bridge today"); until then every build-request is a typed, counted
 `build_unavailable` (nothing is sent). The real-path proof is `core/connector_e2e/tests/outbound_exec.rs`.
+
+
+## Connector runtime boot (PR-E, spec `2026-11-05-connector-runtime-inbound-manager.md`)
+
+Opt-in per platform by the env baselines `OVERLAY_{TWITCH,DISCORD,YOUTUBE}_ENABLED` (default OFF, strict bool; Discord stays a fatal boot error while
+`IDENTIFY_BUDGET_READY` is `false`). With every overlay OFF (and `CONNECTOR_RUNTIME_ENABLED` unset) nothing below is built, bound or spawned --
+`tests/connector_runtime_default_boot.rs` pins it (no `connector_runtime_*`/host-call series, no overlay in `/readyz`, webhook ingress stays 503).
+
+```text
+ lib.rs run_with_shutdown (data-plane flag ON, any overlay ON)
+   connector_runtime::boot::start_overlay
+     RuntimeSettings (digests SENDER_EXEC_DIGEST_<P>, CONNECTOR_* knobs, CONNECTOR_HEARTBEAT_ENABLED)
+     webhook ingress (WebhookEnv::from_lookup -> build_ingress)  ──> state.webhook   BEFORE http::router
+     start_bridge: HubIdentityTokenizer + HostBridge{ExecutorLink+OverlayHostCalls, ActiveConnections} + mTLS listener (8301)
+     start_runtime: spine + Valkey lease -> assemble -> spawn ConnectorRuntime::run ; ready handle -> /readyz
+   start_outbound(shared link)      outbound executor rides the SAME link/listener (no second bind)
+```
+
+| Piece | Behavior |
+|---|---|
+| Tenant | `ScopeTenantResolve`: hub-api scope resolution of the profile's upstream resource (twitch channel / discord guild) must resolve to the connection's own community, else the connection is parked (`tenant_unresolved`/`tenant_mismatch`). YouTube has no scope mapping yet: parked `tenant_unresolved` (not defaulted). Profiles take the feed's `tenantId` and still refuse a metadata tenant. |
+| Sink | `ScopedSinkFactory`: one sink per connection stamping that connection's resolved numeric scope (transports' `source_id` is an opaque hash no per-event lookup could resolve). |
+| Twitch secrets | `ResolverSecrets::with_wrapper("twitch", TwitchFieldSecrets)`: `pass` via the community-bound source, `nick`/`channel` from the validated config only. |
+| Host calls | `ConnectionCtx.connection_id` is pinned to the hub connection row id (what the executor stamps into `_scope`); `TableActivator` registers `(platform, community, tenant, connection)`. A different scope for a live id is refused (`activation_failed` park) and `deactivate` is compare-and-remove (refcounted per exact scope), so a stale guard never removes a newer registration. |
+| Rotation | `BindingSummary.secret_version` (hub-api `secretVersion`, >= 1) is in every fingerprint; a bump restarts the connection. |
+| Webhooks | `IngressAttach`: `activate_plan` for Webhook plans, `deactivate_route` on end; listed by `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`. |
+| Readiness | `/readyz` per platform: enabled, executor attached, pinned ok, desired/live, discovery failed. Overlay ON with the data plane OFF or a prerequisite missing is a fatal named boot error. |
+
+Env (helm #1012 names): `OVERLAY_<P>_ENABLED`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_{SERVER_CERT,SERVER_KEY,CLIENT_CA}_FILE`, `HOST_API_CLIENT_IDENTITY`,
+`SENDER_EXEC_HOST_API_PORT`, `HUB_API_GRPC_ENDPOINT`/`HUB_API_GRPC_CA_FILE`, `CONNECTOR_RECONCILE_INTERVAL_SECS`, `CONNECTOR_MAX_CONNECTIONS`,
+`CONNECTOR_START_CONCURRENCY`, `CONNECTOR_DISCORD_START_PACE_MS`, `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`, `CONNECTOR_ROUTE_KEY_SECRET`,
+`CONNECTOR_HEARTBEAT_ENABLED` (new, default false).

@@ -270,6 +270,10 @@ pub enum ActivateError {
     /// The table's lock was poisoned; nothing can be trusted.
     #[error("active-connection table is unusable")]
     Poisoned,
+    /// A DIFFERENT scope (other platform/community/tenant) is already active for
+    /// this connection id; it is never overwritten.
+    #[error("a different scope is already active for this connection id")]
+    Conflict,
 }
 
 /// The host-owned table of ACTIVE connections: `connection_id -> scope`. The
@@ -277,7 +281,8 @@ pub enum ActivateError {
 /// `deactivate`s it when it ends, so a stale id is refused.
 #[derive(Default)]
 pub struct ActiveConnections {
-    table: RwLock<HashMap<i64, CallScope>>,
+    /// `connection_id -> (scope, live registrations of exactly that scope)`.
+    table: RwLock<HashMap<i64, (CallScope, usize)>>,
 }
 
 impl ActiveConnections {
@@ -287,11 +292,15 @@ impl ActiveConnections {
         Self::default()
     }
 
-    /// Registers (or replaces) the scope of a live connection.
+    /// Registers the scope of a live connection. Re-registering the SAME scope
+    /// (a restart overlapping its predecessor) counts one more registration; a
+    /// DIFFERENT scope for an id that is already active is refused, never
+    /// overwritten -- one connection id can never be re-pointed at another
+    /// community's scope while a registration is live.
     ///
     /// # Errors
     /// [`ActivateError`] when an id is not positive, the platform has no
-    /// overlay, or the table is poisoned.
+    /// overlay, the table is poisoned, or the id is active under another scope.
     pub fn activate(&self, scope: CallScope) -> Result<(), ActivateError> {
         if scope.community_id < 1 || scope.tenant_id < 1 || scope.connection_id < 1 {
             return Err(ActivateError::InvalidId);
@@ -300,15 +309,32 @@ impl ActiveConnections {
             return Err(ActivateError::UnknownPlatform);
         }
         let mut table = self.table.write().map_err(|_| ActivateError::Poisoned)?;
-        table.insert(scope.connection_id, scope);
+        match table.get_mut(&scope.connection_id) {
+            Some((existing, n)) if *existing == scope => *n += 1,
+            Some(_) => return Err(ActivateError::Conflict),
+            None => {
+                table.insert(scope.connection_id, (scope, 1));
+            }
+        }
         Ok(())
     }
 
-    /// Removes a connection; later host-calls naming it are denied.
-    pub fn deactivate(&self, connection_id: i64) {
+    /// Drops ONE registration of exactly `scope` (compare-and-remove): the
+    /// entry goes away only when its last registration of that same scope is
+    /// released, and a guard holding a different (stale) scope removes nothing.
+    pub fn deactivate(&self, scope: &CallScope) {
         match self.table.write() {
             Ok(mut table) => {
-                table.remove(&connection_id);
+                let last = match table.get_mut(&scope.connection_id) {
+                    Some((existing, n)) if existing == scope => {
+                        *n = n.saturating_sub(1);
+                        *n == 0
+                    }
+                    _ => false,
+                };
+                if last {
+                    table.remove(&scope.connection_id);
+                }
             }
             Err(_) => error!("active-connection table poisoned; deactivate dropped"),
         }
@@ -333,7 +359,7 @@ impl ActiveConnections {
 impl ScopeSource for ActiveConnections {
     fn scope_of(&self, connection_id: i64) -> Option<CallScope> {
         match self.table.read() {
-            Ok(t) => t.get(&connection_id).cloned(),
+            Ok(t) => t.get(&connection_id).map(|(sc, _)| sc.clone()),
             Err(_) => {
                 // A poisoned table can no longer be trusted: fail closed.
                 error!("active-connection table poisoned; refusing every scope lookup");
@@ -1281,7 +1307,7 @@ mod tests {
             .handle(&lookup(TWITCH, Some("11"), "9", "twitch"))
             .await
             .is_ok());
-        t.deactivate(11);
+        t.deactivate(&scope("twitch", 5, 9, 11));
         assert_eq!(
             h.handle(&lookup(TWITCH, Some("11"), "9", "twitch")).await,
             Err(denied(DenyReason::UnknownConnection)),
@@ -1774,9 +1800,42 @@ mod tests {
         t.activate(scope("twitch", 1, 2, 3)).unwrap();
         assert_eq!(t.len(), 1);
         assert_eq!(t.scope_of(3), Some(scope("twitch", 1, 2, 3)));
-        t.deactivate(3);
+        t.deactivate(&scope("twitch", 1, 2, 3));
         assert_eq!(t.scope_of(3), None);
         assert!(t.is_empty());
+    }
+
+    /// Security review MEDIUM: a conflicting activation is refused (never
+    /// overwrites), and a stale guard's deactivate removes only its own scope.
+    #[test]
+    fn conflicting_activation_is_refused_and_deactivate_is_compare_and_remove() {
+        let t = ActiveConnections::new();
+        let a = scope("twitch", 1, 2, 3);
+        t.activate(a.clone()).unwrap();
+        // Another community / tenant / platform reusing connection id 3.
+        for other in [
+            scope("twitch", 9, 2, 3),
+            scope("twitch", 1, 8, 3),
+            scope("youtube", 1, 2, 3),
+        ] {
+            assert_eq!(t.activate(other.clone()), Err(ActivateError::Conflict));
+            assert_eq!(t.scope_of(3), Some(a.clone()), "never overwritten");
+            // ... and a stale guard of the OTHER scope removes nothing.
+            t.deactivate(&other);
+            assert_eq!(t.scope_of(3), Some(a.clone()));
+        }
+        // Restart overlap: the same scope registered twice; the OLD guard
+        // dropping must NOT remove the NEW registration.
+        t.activate(a.clone()).unwrap();
+        t.deactivate(&a);
+        assert_eq!(t.scope_of(3), Some(a.clone()), "new registration survives");
+        t.deactivate(&a);
+        assert_eq!(t.scope_of(3), None);
+        // Once gone, a different scope may take the id.
+        t.activate(scope("twitch", 9, 2, 3)).unwrap();
+        // Releasing an unregistered scope is a no-op.
+        t.deactivate(&a);
+        assert_eq!(t.scope_of(3), Some(scope("twitch", 9, 2, 3)));
     }
 
     #[test]
@@ -1794,7 +1853,7 @@ mod tests {
             t.activate(scope("twitch", 1, 2, 4)),
             Err(ActivateError::Poisoned)
         );
-        t.deactivate(3);
+        t.deactivate(&scope("twitch", 1, 2, 3));
         assert_eq!(t.len(), 0);
     }
 

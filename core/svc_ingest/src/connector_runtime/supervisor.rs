@@ -251,8 +251,9 @@ pub trait ConnectionActivator: Send + Sync {
     /// Makes `key` callable with the RESOLVED `tenant_id`. A refusal (fixed
     /// reason, no values) parks the connection: it must never run unscoped.
     fn activate(&self, key: &ConnKey, tenant_id: i64) -> Result<(), &'static str>;
-    /// Removes `key`; later host calls naming it are denied. Idempotent.
-    fn deactivate(&self, key: &ConnKey);
+    /// Releases the registration `activate(key, tenant_id)` made (compare-and-
+    /// remove: a stale guard never removes another registration). Idempotent.
+    fn deactivate(&self, key: &ConnKey, tenant_id: i64);
 }
 
 /// Deactivates its connection when dropped, however the connection future
@@ -260,11 +261,12 @@ pub trait ConnectionActivator: Send + Sync {
 struct ActiveGuard {
     activator: Arc<dyn ConnectionActivator>,
     key: ConnKey,
+    tenant_id: i64,
 }
 
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
-        self.activator.deactivate(&self.key);
+        self.activator.deactivate(&self.key, self.tenant_id);
     }
 }
 
@@ -547,6 +549,7 @@ where
             Ok(()) => Some(ActiveGuard {
                 activator: Arc::clone(activator),
                 key: key.clone(),
+                tenant_id,
             }),
             Err(reason) => {
                 tracing::warn!(

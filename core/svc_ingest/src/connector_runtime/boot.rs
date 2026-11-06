@@ -224,8 +224,13 @@ impl ConnectionActivator for TableActivator {
             .map_err(|_| "active-connection table refused the scope")
     }
 
-    fn deactivate(&self, key: &ConnKey) {
-        self.0.deactivate(key.connection_id);
+    fn deactivate(&self, key: &ConnKey, tenant_id: i64) {
+        self.0.deactivate(&CallScope {
+            platform: key.platform,
+            community_id: key.community_id,
+            tenant_id,
+            connection_id: key.connection_id,
+        });
     }
 }
 
@@ -484,7 +489,7 @@ pub struct Started {
 /// or an unreachable hub-api -- all fatal, named without values.
 pub async fn start_bridge(
     cli: &CliConfig,
-    lookup: &dyn Fn(&str) -> Option<String>,
+    lookup: &(dyn Fn(&str) -> Option<String> + Sync),
     enabled: &[&'static str],
     shutdown: impl Fn() -> tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<HostBridge> {
@@ -693,4 +698,509 @@ pub async fn start_overlay(
         registry,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use clap::Parser;
+    use connection_resolver::{ConnectionRef, SecretString};
+
+    use super::*;
+    use crate::connector::host_calls::{ScopeSource, TokenizeError};
+    use crate::connector::webhook::{
+        BoxFut, DedupToken, SecretError, WebhookDedup, WebhookSecretSource,
+    };
+    use crate::connector_runtime::testkit::{desired_webhook, desired_ws};
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let m: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |k| m.get(k).cloned()
+    }
+
+    fn cli() -> CliConfig {
+        CliConfig::parse_from(["svc-ingest"])
+    }
+
+    fn cli_alpha() -> CliConfig {
+        CliConfig::parse_from(["svc-ingest", "--environment", "alpha"])
+    }
+
+    fn selector(pairs: &[(&str, &str)]) -> OverlaySelector {
+        OverlaySelector::from_env(&env(pairs)).unwrap()
+    }
+
+    #[test]
+    fn settings_read_the_digest_of_every_enabled_platform_and_default_the_rest() {
+        let sel = selector(&[
+            ("OVERLAY_TWITCH_ENABLED", "true"),
+            ("OVERLAY_YOUTUBE_ENABLED", "true"),
+        ]);
+        let lookup = env(&[
+            ("SENDER_EXEC_DIGEST_TWITCH", " sha256:aa "),
+            ("SENDER_EXEC_DIGEST_YOUTUBE", "sha256:bb"),
+        ]);
+        let s = RuntimeSettings::from_inputs(&cli(), &sel, &lookup).unwrap();
+        assert_eq!(s.platforms, vec!["twitch", "youtube"]);
+        assert_eq!(s.digests["twitch"], "sha256:aa");
+        assert_eq!(s.reconcile_interval, Duration::from_secs(60));
+        assert_eq!((s.max_connections, s.start_concurrency), (500, 8));
+        assert!(!s.heartbeat_enabled && s.egress_allow.is_empty());
+        let cfg = s.runtime_config();
+        assert!(cfg.start_pace.is_empty(), "no discord pace without discord");
+        assert_eq!(s.registry().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_missing_digest_or_a_malformed_heartbeat_is_fatal_and_named() {
+        let sel = selector(&[("OVERLAY_TWITCH_ENABLED", "true")]);
+        assert_eq!(
+            RuntimeSettings::from_inputs(&cli(), &sel, &env(&[])).unwrap_err(),
+            BootError::Missing("SENDER_EXEC_DIGEST_TWITCH")
+        );
+        assert_eq!(
+            RuntimeSettings::from_inputs(
+                &cli(),
+                &sel,
+                &env(&[("SENDER_EXEC_DIGEST_TWITCH", "  ")])
+            )
+            .unwrap_err(),
+            BootError::Missing("SENDER_EXEC_DIGEST_TWITCH")
+        );
+        for (raw, want) in [("true", true), ("1", true), ("false", false), ("0", false)] {
+            let s = RuntimeSettings::from_inputs(
+                &cli(),
+                &sel,
+                &env(&[("SENDER_EXEC_DIGEST_TWITCH", "d"), (ENV_HEARTBEAT, raw)]),
+            )
+            .unwrap();
+            assert_eq!(s.heartbeat_enabled, want, "{raw}");
+        }
+        let err = RuntimeSettings::from_inputs(
+            &cli(),
+            &sel,
+            &env(&[("SENDER_EXEC_DIGEST_TWITCH", "d"), (ENV_HEARTBEAT, "yes")]),
+        )
+        .unwrap_err();
+        assert_eq!(err, BootError::Malformed(ENV_HEARTBEAT));
+    }
+
+    #[test]
+    fn discord_pace_applies_only_when_discord_is_enabled() {
+        let mut s = RuntimeSettings {
+            platforms: vec!["discord"],
+            digests: BTreeMap::from([("discord", "d".to_owned())]),
+            reconcile_interval: Duration::from_secs(5),
+            max_connections: 3,
+            start_concurrency: 2,
+            discord_pace: Duration::from_millis(5500),
+            environment: "alpha".into(),
+            heartbeat_enabled: true,
+            egress_allow: vec![],
+        };
+        let cfg = s.runtime_config();
+        assert_eq!(cfg.start_pace["discord"], Duration::from_millis(5500));
+        assert_eq!(cfg.max_connections, 3);
+        let env = s.runtime_env();
+        assert_eq!(
+            (env.max_frame_bytes, env.environment.as_str()),
+            (MAX_FRAME_BYTES, "alpha")
+        );
+        s.discord_pace = Duration::ZERO;
+        assert!(s.runtime_config().start_pace.is_empty());
+        s.digests.clear();
+        assert_eq!(
+            s.registry().unwrap_err(),
+            BootError::Missing("SENDER_EXEC_DIGEST_DISCORD")
+        );
+        s.platforms = vec!["slack"];
+        assert_eq!(s.registry().unwrap_err(), BootError::Malformed("platform"));
+    }
+
+    struct NoTok;
+    impl IdentityTokenizer for NoTok {
+        fn tokenize<'a>(
+            &'a self,
+            _s: &'a CallScope,
+            _id: &'a str,
+        ) -> BoxFut<'a, Result<String, TokenizeError>> {
+            Box::pin(async { Err(TokenizeError::Unavailable) })
+        }
+    }
+
+    #[test]
+    fn the_bridge_rejects_an_unknown_platform_and_builds_an_unattached_link() {
+        let b = HostBridge::new(Arc::new(NoTok), &["twitch"]).unwrap();
+        assert!(!b.link.is_attached());
+        assert!(b.active.is_empty());
+        assert!(HostBridge::new(Arc::new(NoTok), &["slack"]).is_err());
+    }
+
+    /// The activator publishes the RESOLVED scope the host-call handler reads,
+    /// and removal makes the id unknown again (stale ids are refused).
+    #[test]
+    fn the_activator_writes_and_removes_the_host_call_scope() {
+        let b = HostBridge::new(Arc::new(NoTok), &["twitch"]).unwrap();
+        let act = TableActivator(Arc::clone(&b.active));
+        let key = ConnKey {
+            platform: "twitch",
+            community_id: 7,
+            connection_id: 9,
+        };
+        act.activate(&key, 5).unwrap();
+        let scope = b.active.scope_of(9).unwrap();
+        assert_eq!(
+            (
+                scope.platform,
+                scope.community_id,
+                scope.tenant_id,
+                scope.connection_id
+            ),
+            ("twitch", 7, 5, 9)
+        );
+        act.deactivate(&key, 5);
+        assert!(b.active.scope_of(9).is_none());
+        // A tenant that is not positive (or an unknown platform) is refused.
+        assert!(act.activate(&key, 0).is_err());
+        let slack = ConnKey {
+            platform: "slack",
+            ..key
+        };
+        assert!(act.activate(&slack, 5).is_err());
+    }
+
+    /// Security review MEDIUM: another community cannot take over a live
+    /// connection id, and a stale guard cannot remove the new activation.
+    #[test]
+    fn the_activator_refuses_takeover_and_a_stale_guard_removes_nothing() {
+        let b = HostBridge::new(Arc::new(NoTok), &["twitch"]).unwrap();
+        let act = TableActivator(Arc::clone(&b.active));
+        let mine = ConnKey {
+            platform: "twitch",
+            community_id: 7,
+            connection_id: 9,
+        };
+        let other = ConnKey {
+            community_id: 8,
+            ..mine.clone()
+        };
+        act.activate(&mine, 5).unwrap();
+        assert!(act.activate(&other, 5).is_err(), "other community refused");
+        assert!(act.activate(&mine, 6).is_err(), "other tenant refused");
+        assert_eq!(b.active.scope_of(9).unwrap().community_id, 7);
+        // Overlapping restart of the same connection: old guard drops after re-activation.
+        act.activate(&mine, 5).unwrap();
+        act.deactivate(&mine, 5);
+        assert!(
+            b.active.scope_of(9).is_some(),
+            "new activation survives the old guard"
+        );
+        // A stale guard for a different scope removes nothing.
+        act.deactivate(&other, 5);
+        assert!(b.active.scope_of(9).is_some());
+        act.deactivate(&mine, 5);
+        assert!(b.active.scope_of(9).is_none());
+    }
+
+    #[test]
+    fn the_twitch_wrapper_refuses_non_websocket_plans_and_wraps_websocket_ones() {
+        let wrap = twitch_secrets_wrapper();
+        struct Inner;
+        impl TransportSecretSource for Inner {
+            fn resolve(
+                &self,
+                _r: ConnectionRef,
+                _d: crate::connector::secrets::Destination,
+            ) -> BoxFut<'_, Result<crate::connector::secrets::ResolvedAuth, SecretError>>
+            {
+                Box::pin(async { Err(SecretError::Missing) })
+            }
+        }
+        let inner: Arc<dyn TransportSecretSource> = Arc::new(Inner);
+        let webhook = desired_webhook(1, 2, "route-key-1", 1);
+        assert!(wrap(Arc::clone(&inner), &webhook).is_err());
+        // The test-kit ws config has no twitch handles/self-echo: the wrapper
+        // refuses it (never a half-built credential source).
+        let ws = desired_ws("twitch", 1, 2, 1, "twitch:chan", 1);
+        assert!(wrap(inner, &ws).is_err());
+    }
+
+    struct Sec;
+    impl WebhookSecretSource for Sec {
+        fn resolve(&self, _r: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
+            Box::pin(async { Err(SecretError::Missing) })
+        }
+    }
+    struct Dd;
+    impl WebhookDedup for Dd {
+        fn first_seen<'a>(&'a self, _k: &'a str) -> BoxFut<'a, Result<Option<DedupToken>, ()>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn release<'a>(&'a self, _k: &'a str, _t: &'a DedupToken) -> BoxFut<'a, Result<(), ()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// Webhook plans go through `activate_plan`: a route key that is not the
+    /// host derivation is refused; the derived one registers, binds and detaches.
+    #[test]
+    fn webhook_plans_activate_only_the_host_derived_route() {
+        const SECRET: &str = "0123456789abcdef0123456789abcdef";
+        let wenv = Arc::new(
+            WebhookEnv::from_lookup(&env(&[
+                ("CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS", "discord"),
+                ("CONNECTOR_ROUTE_KEY_SECRET", SECRET),
+            ]))
+            .unwrap(),
+        );
+        let ingress = Arc::new(WebhookIngress::new(Arc::new(Sec), Arc::new(Dd), None));
+        let attach = IngressAttach::new(Arc::clone(&ingress), Arc::clone(&wenv));
+        let key = ConnKey {
+            platform: "discord",
+            community_id: 7,
+            connection_id: 9,
+        };
+        // Forged key: refused.
+        let mut forged = desired_webhook(7, 9, "forged-route-key-0000000000000000000000000", 1);
+        if let TransportPlan::Webhook(p) = &mut forged.plan {
+            p.route.owner_bundle = "discord".into();
+            assert!(attach.attach(p, &key).is_err());
+        }
+        // The derived key: accepted.
+        let route = webhook_boot::build_route(
+            &wenv,
+            "discord",
+            ConnectionRef {
+                community_id: 7,
+                connection_id: 9,
+            },
+        )
+        .unwrap();
+        let plan = WebhookPlan {
+            route,
+            authorized_community: 7,
+        };
+        assert!(attach.attach(&plan, &key).is_ok());
+        attach.detach(&plan);
+        // Detaching twice only logs (never panics).
+        attach.detach(&plan);
+    }
+
+    #[tokio::test]
+    async fn start_bridge_names_a_missing_hub_endpoint() {
+        let lookup = env(&[
+            ("HOST_API_SERVER_CERT_FILE", "/x"),
+            ("HOST_API_SERVER_KEY_FILE", "/x"),
+            ("HOST_API_CLIENT_CA_FILE", "/x"),
+            ("HOST_API_CLIENT_IDENTITY", "spiffe://x"),
+        ]);
+        let err = start_bridge(&cli(), &lookup, &["twitch"], || {
+            tokio::sync::oneshot::channel().1
+        })
+        .await
+        .err()
+        .expect("must fail");
+        assert!(err.to_string().contains("HUB_API_GRPC_ENDPOINT"), "{err}");
+        // And TLS items are checked first, by name.
+        let err = start_bridge(&cli(), &env(&[]), &["twitch"], || {
+            tokio::sync::oneshot::channel().1
+        })
+        .await
+        .err()
+        .expect("must fail");
+        assert!(
+            err.to_string().contains("HOST_API_SERVER_CERT_FILE"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_resolver_builds_from_cli_defaults() {
+        assert!(build_resolver(&cli_alpha()).is_ok());
+    }
+
+    struct EmptyHub(std::sync::atomic::AtomicUsize);
+    impl ConnectionResolve for EmptyHub {
+        async fn resolve(
+            &self,
+            _r: ConnectionRef,
+        ) -> Result<connection_resolver::ResolvedConnection, connection_resolver::ResolveError>
+        {
+            Err(connection_resolver::ResolveError::Malformed("none"))
+        }
+        async fn list_bindings(
+            &self,
+            _p: &str,
+            _c: Option<&str>,
+            _a: i64,
+            _l: u32,
+        ) -> Result<connection_resolver::BindingPage, connection_resolver::ResolveError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(connection_resolver::BindingPage {
+                items: vec![],
+                next_after: None,
+            })
+        }
+    }
+
+    struct NoScope;
+    impl ScopeLookup for NoScope {
+        fn lookup<'a>(
+            &'a self,
+            _p: &'a str,
+            _s: &'a str,
+        ) -> BoxFut<
+            'a,
+            Result<crate::scope_resolver::ResolvedScope, crate::scope_resolver::Unresolved>,
+        > {
+            Box::pin(async { Err(crate::scope_resolver::Unresolved::NotFound) })
+        }
+    }
+
+    struct NullAppender;
+    impl EventAppender for NullAppender {
+        async fn append(
+            &self,
+            _s: &str,
+            _e: &penguin_spine::StageEnvelope,
+        ) -> Result<String, penguin_spine::SpineError> {
+            Ok("1-0".into())
+        }
+    }
+
+    struct FixedDek;
+    impl DekProvider for FixedDek {
+        async fn get_dek(
+            &self,
+            _t: &str,
+        ) -> Result<(crate::identity_crypto::Dek, u32), crate::identity_crypto::DekUnavailableError>
+        {
+            Ok((zeroize::Zeroizing::new([1u8; 32]), 1))
+        }
+    }
+
+    async fn lease_conn() -> redis::aio::MultiplexedConnection {
+        let url = std::env::var("VALKEY_URL")
+            .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
+        redis::Client::open(url)
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap()
+    }
+
+    fn settings(platforms: Vec<&'static str>) -> RuntimeSettings {
+        RuntimeSettings {
+            digests: platforms
+                .iter()
+                .map(|p| (*p, format!("sha256:{p}")))
+                .collect(),
+            platforms,
+            reconcile_interval: Duration::from_millis(200),
+            max_connections: 4,
+            start_concurrency: 2,
+            discord_pace: Duration::ZERO,
+            environment: "test".into(),
+            heartbeat_enabled: true,
+            egress_allow: vec![],
+        }
+    }
+
+    async fn deps(
+        hub: Arc<EmptyHub>,
+        registry: prometheus::Registry,
+    ) -> AssembleDeps<EmptyHub, NullAppender, FixedDek> {
+        AssembleDeps {
+            resolver: hub,
+            scope: Arc::new(NoScope),
+            appender: Arc::new(NullAppender),
+            spine_metrics: Arc::new(penguin_spine::NoopMetrics),
+            keyring: Arc::new(KeyRing::new(vec![("k1".into(), vec![7u8; 32])])),
+            active_kid: "k1".into(),
+            dek: Arc::new(FixedDek),
+            identity_metrics: prometheus::IntCounterVec::new(
+                prometheus::Opts::new("boot_unit_identity_total", "t"),
+                &["tenant", "status"],
+            )
+            .unwrap(),
+            lease_conn: lease_conn().await,
+            bridge: HostBridge::new(Arc::new(NoTok), &["twitch", "youtube"]).unwrap(),
+            webhook: None,
+            registry,
+            seams: LoopbackSeams::default(),
+        }
+    }
+
+    /// `assemble` builds a runtime that reconciles every enabled platform's feed
+    /// (non-zero list calls), reports per-platform readiness, and registers the
+    /// runtime/connector series exactly once (a second assembly on the same
+    /// registry is a typed boot error, not a panic).
+    #[tokio::test]
+    async fn assemble_reconciles_each_enabled_platform_and_registers_series_once() {
+        let hub = Arc::new(EmptyHub(std::sync::atomic::AtomicUsize::new(0)));
+        let registry = prometheus::Registry::new();
+        let rt = assemble(
+            &settings(vec!["twitch", "youtube"]),
+            deps(hub.clone(), registry.clone()).await,
+        )
+        .unwrap();
+        let ready = rt.ready_handle();
+        assert!(matches!(
+            ready.ready("twitch"),
+            super::super::Readiness::NotReady(_)
+        ));
+        assert_eq!(ready.ready("discord"), super::super::Readiness::Disabled);
+        let (stop, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(rt.run(rx));
+        for _ in 0..100 {
+            if hub.0.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            hub.0.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "both platforms listed"
+        );
+        let _ = stop.send(());
+        task.await.unwrap();
+        let again = assemble(&settings(vec!["twitch"]), deps(hub, registry).await);
+        assert_eq!(
+            again.err(),
+            Some(BootError::Malformed("connector runtime metrics")),
+            "duplicate series on one registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn assemble_refuses_an_unknown_platform_and_a_missing_digest() {
+        let hub = Arc::new(EmptyHub(std::sync::atomic::AtomicUsize::new(0)));
+        let err = assemble(
+            &settings(vec!["slack"]),
+            deps(hub.clone(), prometheus::Registry::new()).await,
+        )
+        .err();
+        assert_eq!(err, Some(BootError::Malformed("platform")));
+        let mut s = settings(vec!["twitch"]);
+        s.digests.clear();
+        let err = assemble(&s, deps(hub, prometheus::Registry::new()).await).err();
+        assert_eq!(err, Some(BootError::Missing("SENDER_EXEC_DIGEST_TWITCH")));
+    }
+
+    #[tokio::test]
+    async fn no_webhook_platforms_means_no_ingress() {
+        let resolver = Arc::new(build_resolver(&cli_alpha()).unwrap());
+        let client = redis::Client::open("redis://127.0.0.1:1/").unwrap();
+        let wenv = WebhookEnv::from_lookup(&env(&[])).unwrap();
+        let ingress = build_webhook(&wenv, resolver, &client, &prometheus::Registry::new())
+            .await
+            .unwrap();
+        assert!(ingress.is_none(), "route stays 503 when nothing is enabled");
+    }
 }

@@ -1689,7 +1689,7 @@ impl ConnectionActivator for RecActivator {
             .push(format!("on:{}:{tenant_id}", key.connection_id));
         Ok(())
     }
-    fn deactivate(&self, key: &ConnKey) {
+    fn deactivate(&self, key: &ConnKey, _tenant_id: i64) {
         self.active.lock().expect("lock").remove(&key.connection_id);
         self.log
             .lock()
