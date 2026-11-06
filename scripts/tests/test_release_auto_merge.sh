@@ -19,6 +19,7 @@ if [ "$1" = "api" ]; then
   [ -f "$SCRATCH/log-$id" ] || exit 1
   cat "$SCRATCH/log-$id"; exit 0
 fi
+if [ "$1" = "run" ] && [ "$2" = "rerun" ]; then echo "run $3 cannot be rerun; its workflow file may be broken" >&2; exit 1; fi
 echo "gh shim: unexpected call: $*" >&2; exit 99
 SHIM
 chmod +x "$SCRATCH/bin/gh"
@@ -52,6 +53,14 @@ mk "$H" "[$GATE_BAD,$(fail_chk a 7 11)]";              expect "timeout job -> re
 mk "$H" "[$GATE_BAD,$(fail_chk a 7 12)]";              expect "apt attempt job -> rerun" "would rerun --failed \(all failed jobs" 5
 mk "$H" "[$GATE_BAD,$(fail_chk a 7 11),$(fail_chk b 7 13)]"; expect "mixed run -> REAL" "REAL FAILURE" 5
 mk "$H" "[$GATE_BAD,$(fail_chk a 7 14)]";              expect "unreadable log -> REAL" "REAL FAILURE" 5
+
+# live (non-dry) rerun refused by GitHub: watcher must keep running, retry next tick, not consume the counter
+mk "$H" "[$GATE_BAD,$(fail_chk a 7 11)]"; rc=0
+out="$(env SCRATCH="$SCRATCH" FIXTURE="$SCRATCH/f.json" RELEASE_AUTO_MERGE_STATE="$SCRATCH/state2" PATH="$SCRATCH/bin:$PATH" timeout 5 bash "$SCRIPT" --interval 1 5 2>&1)" || rc=$?
+n="$(grep -c 'RERUN refused' <<<"$out" || true)"
+if [ "$rc" -eq 124 ] && [ "$n" -ge 2 ] && [ "$(cat "$SCRATCH/state2/rerun-7")" = 0 ]; then
+  PASS=$((PASS + 1)); echo "ok   refused rerun: watcher survives, retries ($n), counter unspent"
+else FAIL=$((FAIL + 1)); echo "FAIL refused rerun (rc=$rc refused=$n)"; printf '%s\n' "$out"; fi
 
 # bad pin / symlinked state must be refused (non-zero exit)
 rc=0; PATH="$SCRATCH/bin:$PATH" bash "$SCRIPT" --dry-run "5@abc" >/dev/null 2>&1 || rc=$?
