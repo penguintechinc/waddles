@@ -509,3 +509,40 @@ class TestByokTier:
             )
         assert exc_info.value.status_code == 409
         assert exc_info.value.code == "AI_BYOK_KEY_MISSING"
+
+
+class TestByokProfessionalFloor:
+    """BYOK entitlement floor is Professional (2026-11-06 decision), premium stays Enterprise."""
+
+    @pytest.mark.parametrize(
+        ("tier", "byok", "premium"),
+        [
+            (None, False, False),
+            ("free", False, False),
+            ("professional", True, False),
+            ("enterprise", True, True),
+        ],
+    )
+    async def test_tier_floor(
+        self, router_db: Any, tier: str | None, byok: bool, premium: bool
+    ) -> None:
+        async_dal, community_id = router_db
+        await async_dal.update_async(
+            async_dal.dal.communities.id == community_id, license_tier=tier
+        )
+        assert (
+            await router._is_professional_or_higher(
+                async_dal, async_dal.dal, community_id=community_id
+            )
+            is byok
+        )
+        assert (
+            await router._is_enterprise_tier(async_dal, async_dal.dal, community_id=community_id)
+            is premium
+        )
+
+    async def test_unknown_community_fails_closed(self, router_db: Any) -> None:
+        async_dal, _ = router_db
+        assert not await router._is_professional_or_higher(
+            async_dal, async_dal.dal, community_id=987654
+        )

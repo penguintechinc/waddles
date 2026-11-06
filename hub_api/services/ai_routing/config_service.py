@@ -23,6 +23,9 @@ from services.schema import bind_ai_routing_tables
 
 _VALID_TIERS = frozenset({"free", "premium", "byok"})
 _VALID_PROVIDERS = frozenset({"openai", "anthropic"})
+#: Media (Gemini) BYOK rows share the `ai_byok_keys` store + AES-GCM key but are managed ONLY by
+#: `services.media_byok_service`; the AI router/config paths never see or select them.
+MEDIA_PROVIDERS = frozenset({"gemini"})
 _VALID_BALANCE_POLICIES = frozenset({"block", "fallback_free"})
 
 
@@ -40,7 +43,7 @@ class AIConfig:
 class ByokKeyInfo:
     """Masked view of one `ai_byok_keys` row -- never carries the real key."""
 
-    provider: ByokProvider
+    provider: str
     key_last4: str
     is_active: bool
     created_at: Any
@@ -127,7 +130,10 @@ async def list_byok_keys(async_dal: Any, dal: Any, *, community_id: int) -> list
     """List every BYOK key on file for `community_id`, active or not -- masked."""
     bind_ai_routing_tables(dal)
     rows = await async_dal.select_async(
-        dal(dal.ai_byok_keys.community_id == community_id),
+        dal(
+            (dal.ai_byok_keys.community_id == community_id)
+            & dal.ai_byok_keys.provider.belongs(sorted(_VALID_PROVIDERS))
+        ),
         orderby=dal.ai_byok_keys.provider,
     )
     return [_key_info(r) for r in rows]
@@ -155,6 +161,30 @@ async def set_byok_key(
 
     await validate_byok_key(provider, plaintext_key)  # type: ignore[arg-type]
 
+    return await store_byok_key(
+        async_dal,
+        dal,
+        community_id=community_id,
+        provider=provider,
+        plaintext_key=plaintext_key,
+        created_by_user_id=created_by_user_id,
+    )
+
+
+async def store_byok_key(
+    async_dal: Any,
+    dal: Any,
+    *,
+    community_id: int,
+    provider: str,
+    plaintext_key: str,
+    created_by_user_id: int,
+) -> ByokKeyInfo:
+    """Encrypt and upsert (set-or-rotate) an ALREADY-VALIDATED key; never logs `plaintext_key`.
+
+    Shared by the AI path above and `services.media_byok_service` (which validates against its own
+    provider first). Provider validity is the caller's job -- this only persists.
+    """
     bind_ai_routing_tables(dal)
     encrypted = encrypt_key(plaintext_key)
     last4 = mask_key(plaintext_key)
@@ -203,6 +233,13 @@ async def delete_byok_key(async_dal: Any, dal: Any, *, community_id: int, provid
     """Deactivate (never hard-delete, keeps the audit trail) `community_id`'s `provider` key."""
     if provider not in _VALID_PROVIDERS:
         raise bad_request(f"invalid provider: {provider!r}")
+    await deactivate_byok_key(async_dal, dal, community_id=community_id, provider=provider)
+
+
+async def deactivate_byok_key(
+    async_dal: Any, dal: Any, *, community_id: int, provider: str
+) -> None:
+    """Deactivate one stored key (404 when none on file). Provider validity is the caller's job."""
     bind_ai_routing_tables(dal)
     existing = await async_dal.select_async(
         dal(

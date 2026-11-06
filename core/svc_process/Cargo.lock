@@ -703,6 +703,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-media"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bundle-host-http",
+ "bytes",
+ "http",
+ "object_store",
+ "opentelemetry",
+ "redis",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "bundle-host-platform-table"
 version = "0.1.0"
 dependencies = [
@@ -4201,6 +4223,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "bundle-active-set",
@@ -4209,6 +4232,7 @@ dependencies = [
  "bundle-host-economy",
  "bundle-host-http",
  "bundle-host-kv",
+ "bundle-host-media",
  "bundle-host-platform-table",
  "bundle-host-reputation",
  "bundle-host-storage",
@@ -4239,6 +4263,7 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
+ "service_auth",
  "sha2 0.10.9",
  "socket2",
  "thiserror 2.0.20",

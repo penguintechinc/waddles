@@ -85,6 +85,7 @@ use crate::identity::{
     self, IdentityError, IdentityScope, IdentityWiring, InvocationIdentity, MAX_MENTION_TOKEN_LEN,
 };
 use crate::license::FeatureGate;
+use crate::media::MediaWiring;
 use crate::stage_metrics::{self, StageMetrics};
 
 mod tool;
@@ -558,6 +559,12 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// [`Self::with_ai`]. Every model call is clamped to what remains of it, so a
     /// slow model can never hold the stage past the invocation's own deadline.
     ai_deadline: Option<std::time::Instant>,
+    /// `None` until [`Self::with_media`] -- every `media.*` call denies
+    /// `not_implemented` in that state (fail-loud, never a canned result).
+    media: Option<MediaWiring>,
+    /// The instant this invocation's executor deadline expires, set with
+    /// [`Self::with_media`]; bounds the synchronous image call.
+    media_deadline: Option<std::time::Instant>,
     /// The HOST-derived identity facts of THIS invocation (who triggered it,
     /// which mentions its message carried) -- built by `crate::spine` from the
     /// event it delivered, never from guest input. Paired with [`Self::identity`]
@@ -621,6 +628,8 @@ impl<K: KvBackend> StageCapabilities<K> {
             identity: None,
             ai: None,
             ai_deadline: None,
+            media: None,
+            media_deadline: None,
             invocation_identity: None,
             verified_scope: None,
             stage_metrics: stage_metrics::stage_metrics(),
@@ -748,6 +757,215 @@ impl<K: KvBackend> StageCapabilities<K> {
         self.ai = Some(ai);
         self.ai_deadline = Some(invoke_deadline);
         self
+    }
+
+    /// Attaches the `media` capability's live wiring (flag + `MediaHost`).
+    pub fn with_media(mut self, media: MediaWiring, invoke_deadline: std::time::Instant) -> Self {
+        self.media = Some(media);
+        self.media_deadline = Some(invoke_deadline);
+        self
+    }
+
+    /// `media.generate_image` / `media.submit_music` / `media.submit_video` /
+    /// `media.job_status` / `media.object_url` (`wit/waddle-bundle/stage.wit`
+    /// `interface media`), carried as `capability = db`, `op = "media.*"`.
+    ///
+    /// Fail-loud order: (1) argument SHAPE (unknown keys refused so a guest can
+    /// never name a model, key, provider, tenant or URL); (2) **the gate
+    /// authorizes FIRST** (`media.generate`: grant, 6/min, instance policy);
+    /// (3) wiring and the default-OFF flag `waddles.harness-media-generation`;
+    /// (4) a community-scoped activation (BYOK and tier are per community);
+    /// (5) PII/secret rejection of the prompt (same guard as `ai.generate`);
+    /// (6) `bundle_host_media::MediaHost` -- tier gate (effective tier =
+    /// max(tenant, community) >= Professional, fail closed), BYOK, limits,
+    /// provider, tagged storage. Scope is always the host-derived invoke scope.
+    async fn handle_media(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PromptArgs {
+            prompt: String,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct JobArgs {
+            job_id: String,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct HandleArgs {
+            handle: String,
+        }
+        enum Op {
+            Image(String),
+            Submit(bundle_host_media::MediaKind, String),
+            Status(String),
+            Url(String),
+        }
+        let bad = |what: &str| {
+            denied(
+                "invalid_args",
+                format!("{} args malformed ({what})", call.op),
+            )
+        };
+        let op = match call.op.as_str() {
+            "media.generate_image" => Op::Image(
+                serde_json::from_value::<PromptArgs>(call.args.clone())
+                    .map_err(|_| bad("expected prompt: string"))?
+                    .prompt,
+            ),
+            "media.submit_music" => Op::Submit(
+                bundle_host_media::MediaKind::Music,
+                serde_json::from_value::<PromptArgs>(call.args.clone())
+                    .map_err(|_| bad("expected prompt: string"))?
+                    .prompt,
+            ),
+            "media.submit_video" => Op::Submit(
+                bundle_host_media::MediaKind::Video,
+                serde_json::from_value::<PromptArgs>(call.args.clone())
+                    .map_err(|_| bad("expected prompt: string"))?
+                    .prompt,
+            ),
+            "media.job_status" => Op::Status(
+                serde_json::from_value::<JobArgs>(call.args.clone())
+                    .map_err(|_| bad("expected job_id: string"))?
+                    .job_id,
+            ),
+            "media.object_url" => Op::Url(
+                serde_json::from_value::<HandleArgs>(call.args.clone())
+                    .map_err(|_| bad("expected handle: string"))?
+                    .handle,
+            ),
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("media op {other:?} not supported"),
+                ))
+            }
+        };
+
+        match &op {
+            // Generation spends the key owner's money: full authorize (6/min).
+            Op::Image(_) | Op::Submit(..) => self
+                .gate
+                .authorize(
+                    &self.gate_scope(),
+                    PermissionId::MediaGenerate,
+                    ResourceRef::AppScoped(AppScopedResource::None),
+                )
+                .map(|_| ())
+                .map_err(denied_from_gate)?,
+            // Polling a job / resolving an owned handle costs nothing: grant +
+            // instance policy only, so polling never spends the generation
+            // budget (host-side scoping still binds them to this bundle).
+            Op::Status(_) | Op::Url(_) => self
+                .gate
+                .check_granted(&self.gate_scope(), PermissionId::MediaGenerate)
+                .map_err(denied_from_gate)?,
+        }
+
+        let Some(wiring) = &self.media else {
+            return Err(denied(
+                "not_implemented",
+                "media capability is not provisioned in this deployment",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "media capability is disabled (waddles.harness-media-generation is OFF)",
+            ));
+        }
+        if self.tenant_id <= 0 || self.community_id <= 0 {
+            return Err(denied(
+                "invalid_args",
+                "media requires a community-scoped activation (tier and BYOK are per community)",
+            ));
+        }
+        let scope = bundle_host_media::Scope {
+            tenant_id: i64::from(self.tenant_id),
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        };
+        if let Op::Image(prompt) | Op::Submit(_, prompt) = &op {
+            // Same content guard as `ai.generate`: PII / secret-shaped prompts are
+            // REJECTED, never redacted. The framed messages are discarded -- the
+            // provider receives the guest's words as a plain generation prompt.
+            ai::prepare(prompt, false).map_err(|refusal| match refusal {
+                PromptRefusal::ContainsPii(category) => denied(
+                    Denied::ContainsPii.reason_str(),
+                    format!(
+                        "prompt contains {category}; tokenize or remove personal data before \
+                         calling media.generate"
+                    ),
+                ),
+                PromptRefusal::Empty => denied("invalid_args", "prompt must not be empty"),
+                PromptRefusal::TooManyTokens(_) => denied("invalid_args", "prompt too long"),
+                PromptRefusal::GuardUnavailable => {
+                    denied("backend", "media prompt guard unavailable")
+                }
+            })?;
+        }
+        let host = &wiring.host;
+        let media_err = |e: bundle_host_media::MediaError| denied(e.code(), e.detail());
+        match op {
+            Op::Image(prompt) => {
+                // The synchronous call may not outlive the invocation: clamp to
+                // the time left on its deadline (less a margin to answer) and to
+                // the configured ceiling; too little left is refused, not
+                // attempted. The permit wait shares the same timeout.
+                let remaining = self
+                    .media_deadline
+                    .map(|d| d.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or(wiring.max_call_timeout);
+                let budget = remaining
+                    .saturating_sub(ai::DEADLINE_MARGIN)
+                    .min(wiring.max_call_timeout);
+                if budget < ai::MIN_CALL_BUDGET {
+                    return Err(denied(
+                        "unavailable",
+                        "too little of the invocation deadline remains for media.generate-image",
+                    ));
+                }
+                let guarded = async {
+                    let _permit = wiring.concurrency.acquire().await;
+                    host.generate_image(&scope, &prompt).await
+                };
+                match tokio::time::timeout(budget, guarded).await {
+                    Err(_elapsed) => Err(denied("timeout", "")),
+                    Ok(r) => r
+                        .map(|handle| serde_json::json!({ "handle": handle }))
+                        .map_err(media_err),
+                }
+            }
+            Op::Submit(kind, prompt) => {
+                let job_id = host
+                    .submit(&scope, kind, &prompt)
+                    .await
+                    .map_err(media_err)?;
+                Ok(serde_json::json!({ "job_id": job_id }))
+            }
+            Op::Status(job_id) => {
+                use bundle_host_media::JobState;
+                Ok(
+                    match host.job_status(&scope, &job_id).await.map_err(media_err)? {
+                        JobState::Pending => serde_json::json!({ "state": "pending" }),
+                        JobState::Done(handle) => {
+                            serde_json::json!({ "state": "done", "handle": handle })
+                        }
+                        JobState::Failed(e) => serde_json::json!({
+                            "state": "failed", "code": e.code(), "message": e.detail()
+                        }),
+                    },
+                )
+            }
+            Op::Url(handle) => {
+                let url = host.object_url(&scope, &handle).await.map_err(media_err)?;
+                Ok(serde_json::json!({ "url": url }))
+            }
+        }
     }
 
     /// `identity.resolve_actor` / `identity.resolve_mention`
@@ -3179,6 +3397,9 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // `ai.*` ops likewise: own gate permission (`ai.generate`), own
             // handler, never the `storage.tables` path.
             CapabilityKind::Db if call.op.starts_with("ai.") => self.handle_ai(&call).await,
+            // `media.*` ops likewise: own gate permission (`media.generate`), own
+            // handler (`bundle_host_media`), never the `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("media.") => self.handle_media(&call).await,
             CapabilityKind::Db => self.handle_db(&call).await,
             // `enabled` is wired to a real `penguin_licensing::
             // LicenseClient` (`crate::license::resolve_flag`) -- see

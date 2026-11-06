@@ -78,6 +78,34 @@ impl CapabilityGate {
         reason
     }
 
+    /// Grant-and-policy check WITHOUT consuming quota or resolving a resource:
+    /// the instance policy and the grant row, exactly as [`Self::authorize`]
+    /// evaluates them first. For READ-style calls on an already-granted
+    /// capability whose rate limit exists to bound the expensive operation
+    /// (`media.job_status` / `media.object_url` poll results of `media.generate`
+    /// work and must not spend its 6-per-minute generation budget). A revoked or
+    /// instance-denied grant still refuses them. Never use it for a call that
+    /// itself costs money, writes, or reaches a third party.
+    pub fn check_granted(
+        &self,
+        scope: &InvokeScope,
+        permission: PermissionId,
+    ) -> Result<(), Denied> {
+        let key = GrantScopeKey::from_scope(scope);
+        let canonical_id = permission.canonical_id();
+        if self.instance_policy.action(permission.family()) == InstanceAction::Deny {
+            return Err(self.deny(scope, &permission, Denied::InstanceDenied));
+        }
+        let grant_set = self
+            .snapshot
+            .current(&key)
+            .ok_or_else(|| self.deny(scope, &permission, Denied::NotGranted))?;
+        grant_set
+            .get(&canonical_id)
+            .ok_or_else(|| self.deny(scope, &permission, Denied::NotGranted))?;
+        Ok(())
+    }
+
     /// spec SS5: "every host import calls it first." `scope` must come only
     /// from [`crate::scope::HostInvokeScopeBuilder`] -- see that module's
     /// doc for why the type system forecloses any guest-influenced scope
@@ -1173,6 +1201,47 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err, Denied::QuotaExceeded);
+    }
+
+    /// `check_granted` enforces the grant but never spends the call quota.
+    #[test]
+    fn check_granted_requires_the_grant_and_consumes_no_quota() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[("media.generate", serde_json::json!({}))]),
+        );
+        let gate = gate_with(Arc::new(snapshot));
+        for _ in 0..50 {
+            assert!(gate
+                .check_granted(&scope(), PermissionId::MediaGenerate)
+                .is_ok());
+        }
+        // The 6/min generation budget is untouched by the 50 checks above.
+        for _ in 0..6 {
+            assert!(gate
+                .authorize(
+                    &scope(),
+                    PermissionId::MediaGenerate,
+                    ResourceRef::AppScoped(AppScopedResource::None),
+                )
+                .is_ok());
+        }
+        assert_eq!(
+            gate.authorize(
+                &scope(),
+                PermissionId::MediaGenerate,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .unwrap_err(),
+            Denied::RateLimited
+        );
+        // An ungranted permission is refused.
+        assert_eq!(
+            gate.check_granted(&scope(), PermissionId::AiGenerate)
+                .unwrap_err(),
+            Denied::NotGranted
+        );
     }
 
     /// Rate-limit quota exhaustion for a `CallsPerWindow`-shaped permission

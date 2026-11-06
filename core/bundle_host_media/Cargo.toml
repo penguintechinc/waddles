@@ -1,0 +1,35 @@
+[package]
+name = "bundle-host-media"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Bundle `media` host capability (spec 2026-11-06-harness-media-generation): Gemini-only image/music/video generation behind a host-side tier gate (effective tier = max(tenant, community) >= Professional, fail closed) and a per-community BYOK key fetched from hub-api per job, never from the guest. Outputs are stored under the media-harness prefix of the bundle bucket tagged `app-bundle:<requesting bundle>` and returned as opaque object handles; jobs live in Valkey (community-scoped keys, TTL). A same-repo path dependency consumed by core/svc_process."
+
+[lib]
+name = "bundle_host_media"
+path = "src/lib.rs"
+
+# Exact-version pins only -- rules/critical-rules.md Dependency Pinning.
+[dependencies]
+tokio = { version = "=1.53.3", features = ["time", "sync", "rt", "macros"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+thiserror = "=2.0.20"
+tracing = "=0.1.44"
+async-trait = "=0.1.89"
+base64 = "=0.22.1"
+bytes = "=1.12.1"
+uuid = { version = "=1.26.1", features = ["v4"] }
+zeroize = { version = "=1.9.0", features = ["derive"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "script"] }
+object_store = { version = "=0.14.1", default-features = false, features = ["aws"] }
+http = "=1.5.0"
+opentelemetry = "=0.32.0"
+bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+
+[dev-dependencies]
+tokio = { version = "=1.53.3", features = ["full", "test-util"] }
+axum = "=0.8.9"

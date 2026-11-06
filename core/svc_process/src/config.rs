@@ -372,6 +372,38 @@ pub struct CliConfig {
     /// `[1, 64]` by [`CliConfig::ai_max_concurrency`]).
     #[arg(long, env = "BUNDLE_AI_MAX_CONCURRENCY", default_value_t = 4)]
     pub ai_max_concurrency: usize,
+    /// S3 endpoint of the bundle bucket (SeaweedFS) the `media` capability writes
+    /// finished products to, under the media-harness prefix (credentials come
+    /// from `MEDIA_BUCKET_ACCESS_KEY_ID` / `MEDIA_BUCKET_SECRET_ACCESS_KEY`).
+    #[arg(
+        long,
+        env = "MEDIA_BUCKET_ENDPOINT",
+        default_value = "http://seaweedfs:8333"
+    )]
+    pub media_bucket_endpoint: String,
+    /// Bundle bucket name for `media` outputs.
+    #[arg(long, env = "MEDIA_BUCKET_NAME", default_value = "waddlebot-bundles")]
+    pub media_bucket_name: String,
+    /// Bundle bucket region for `media` outputs.
+    #[arg(long, env = "MEDIA_BUCKET_REGION", default_value = "us-east-1")]
+    pub media_bucket_region: String,
+    /// Gemini model id for `media.generate-image` (operator config, never a guest value).
+    #[arg(
+        long,
+        env = "MEDIA_GEMINI_IMAGE_MODEL",
+        default_value = "gemini-nano-banana-2.1"
+    )]
+    pub media_image_model: String,
+    /// Gemini model id for `media.submit-music`.
+    #[arg(long, env = "MEDIA_GEMINI_MUSIC_MODEL", default_value = "lyria-3.5")]
+    pub media_music_model: String,
+    /// Gemini model id for `media.submit-video`.
+    #[arg(
+        long,
+        env = "MEDIA_GEMINI_VIDEO_MODEL",
+        default_value = "gemini-omni-1.2-flash"
+    )]
+    pub media_video_model: String,
     /// Poll interval, in whole seconds, for the change-log consumer's
     /// incremental tick (`bundle_active_set::read_safe_seq`/`read_changes`)
     /// -- the full active-set re-read only runs for scopes the change-log

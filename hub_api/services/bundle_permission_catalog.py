@@ -106,6 +106,9 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     #: the export, enforcing the grant) is deferred past this catalog entry.
     "streaming.lifecycle.subscribe": "normal",
     "ai.generate": "dangerous",
+    #: Image generation via the community's own BYOK provider key; Professional+ tier
+    #: enforced host-side (2026-11-06 harness-media-generation spec). Spends the key owner's money.
+    "media.generate": "dangerous",
     #: Raw PII (not just a tenant-tokenized UUID) embedded in a form/modal/
     #: interaction input the bundle receives -- e.g. a free-text field the
     #: user typed a name/email/phone into. DEFAULT NO, `dangerous`: without

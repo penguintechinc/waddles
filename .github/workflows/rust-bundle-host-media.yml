@@ -1,0 +1,64 @@
+name: Rust bundle-host-media (lint + test)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/bundle_host_media/**'
+      - 'core/test_support/**'
+      - 'core/bundle_capability_gate/**'
+      - 'core/bundle_host_http/**'
+      - '.github/workflows/rust-bundle-host-media.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Path gate (release PRs only): shared detector, fails closed. A job skipped
+  # here means "not affected"; main PRs / pushes / dispatch run everything.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      match: ${{ steps.paths.outputs.match }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+        with:
+          area: rust
+          globs: |
+            core/bundle_host_media/**
+            core/test_support/**
+            core/bundle_capability_gate/**
+            core/bundle_host_http/**
+
+  lint-test:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: bundle-host-media
+      working_directory: core/bundle_host_media
+      # `tests/real_backends.rs` starts real Valkey + SeaweedFS containers via
+      # the `docker` CLI helper (`core/test_support`) -- needs Docker, which `ubuntu-latest` ships.

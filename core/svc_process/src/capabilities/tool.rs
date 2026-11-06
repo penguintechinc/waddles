@@ -149,6 +149,8 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             object_storage: self.object_storage.clone(),
             identity: self.identity.clone(),
             ai: self.ai.clone(),
+            media: self.media.clone(),
+            media_deadline: ctx.deadline.or(self.media_deadline),
             ai_deadline: ctx.deadline.or(self.ai_deadline),
             invocation_identity: self
                 .invocation_identity
