@@ -79,7 +79,7 @@ readonly SERVICE_ORDER=(
     "svc-presentation"
     "svc-streaming"
     "reputation-module"
-    "waddlebot-migrations"
+    "migrations"
 )
 
 # Build context, relative to PROJECT_ROOT. Every service except svc-streaming
@@ -96,7 +96,7 @@ declare -A SERVICE_CONTEXT=(
     ["svc-presentation"]="."
     ["svc-streaming"]="core/svc_streaming"
     ["reputation-module"]="."
-    ["waddlebot-migrations"]="."
+    ["migrations"]="."
 )
 
 # Dockerfile path, relative to PROJECT_ROOT (or relative to the context above
@@ -111,7 +111,7 @@ declare -A SERVICE_DOCKERFILE=(
     ["svc-presentation"]="core/svc_presentation/Dockerfile"
     ["svc-streaming"]="core/svc_streaming/Dockerfile.rust"
     ["reputation-module"]="core/reputation_module/Dockerfile"
-    ["waddlebot-migrations"]="migrations/Dockerfile"
+    ["migrations"]="migrations/Dockerfile"
 )
 
 # Required secret env vars. Mirrors the five ad-hoc --set overrides the live
@@ -501,7 +501,7 @@ SERVICES (built/pushed as ${REGISTRY}/<service>:<tag>):
     svc-presentation        (core/svc_presentation/Dockerfile)
     svc-streaming           (core/svc_streaming/Dockerfile.rust)
     reputation-module       (core/reputation_module/Dockerfile)
-    waddlebot-migrations    (migrations/Dockerfile)
+    migrations    (migrations/Dockerfile)
 
 EXAMPLES:
     # Full build, push, and deploy

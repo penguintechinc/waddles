@@ -123,7 +123,7 @@ SERVICES (v2.2.x — 22 total):
   action-discord, action-platforms, action-serverless
   interactive-ai, interactive-loyalty, interactive-social
   interactive-gaming, interactive-media, interactive-productivity
-  marketplace, waddlebot-migrations
+  marketplace, migrations
 
 EXAMPLES:
   # Deploy all services with a specific tag
@@ -197,10 +197,10 @@ done
 if [ ${#SERVICES_TO_BUILD[@]} -eq 0 ] && [ "$SKIP_BUILD" = false ]; then
     SERVICES_TO_BUILD=("${!SERVICES[@]}")
 elif [ ${#SERVICES_TO_BUILD[@]} -gt 0 ] && [ "$SKIP_BUILD" = false ]; then
-    # Partial builds: always include waddlebot-migrations since it's an init container
+    # Partial builds: always include migrations since it's an init container
     # shared by all pods. Without it, pods with the new global.imageTag can't start.
-    if [[ ! " ${SERVICES_TO_BUILD[*]} " =~ " waddlebot-migrations " ]]; then
-        SERVICES_TO_BUILD+=("waddlebot-migrations")
+    if [[ ! " ${SERVICES_TO_BUILD[*]} " =~ " migrations " ]]; then
+        SERVICES_TO_BUILD+=("migrations")
     fi
 fi
 

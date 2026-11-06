@@ -105,7 +105,7 @@ spec:
         # same guard + repository source as dbMigrateInitContainer so both call sites can
         # never drift apart again.
         {{- $registry := .Values.global.imageRegistry | default "" }}
-        {{- $repository := .Values.modules.migrations.image | default "waddlebot-migrations" }}
+        {{- $repository := .Values.modules.migrations.image | default "migrations" }}
         {{- $tag := .Values.global.imageTag | toString }}
         {{- if $registry }}
         image: "{{ $registry }}/{{ $repository }}:{{ $tag }}"

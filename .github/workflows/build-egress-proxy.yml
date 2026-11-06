@@ -1,6 +1,6 @@
 name: Build egress-proxy
 
-# Publishes the Rust network-level egress gateway image (`waddlebot-egress-proxy`,
+# Publishes the Rust network-level egress gateway image (`egress-proxy`,
 # matching k8s/helm/waddlebot/values.yaml `egressProxy.image`) built from
 # `core/egress_proxy/Dockerfile.rust`. See build-svc-ingest.yml for the full
 # rationale (self-contained build, gated Trivy scan, and the PR-path job
@@ -46,7 +46,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  MODULE_NAME: waddlebot-egress-proxy
+  MODULE_NAME: egress-proxy
   MODULE_PATH: core/egress_proxy
   # Dockerfile.rust COPYs three sibling crates (same-repo path dependencies:
   # `service_auth`, `bundle_host_http`, `egress_assertion`), so the build

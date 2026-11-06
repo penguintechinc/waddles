@@ -28,9 +28,9 @@
 # pipeline.{svcIngest,svcProcess,svcAction}.enabled=false (those Deployments
 # crash-looped -- "No module named 'waddle'" -- behind the live Rust data
 # plane), so those Deployments no longer render in alpha and building/pushing
-# those images is wasted work. waddlebot-egress-proxy was added: the chart's
+# those images is wasted work. egress-proxy was added: the chart's
 # egress-proxy Deployment (templates/infrastructure/egress-proxy.yaml,
-# egressProxy.image="waddlebot-egress-proxy") was never in this build list, so
+# egressProxy.image="egress-proxy") was never in this build list, so
 # alpha always pulled a nonexistent tag for it until now.
 #
 # fix/helm-alpha-self-provisioning -- this script NEVER generates or rotates
@@ -231,7 +231,7 @@ info "Deploying release SHA ${SHA} (tag ${SHA8}) to context ${KUBE_CONTEXT}, nam
 # pipeline.svc{Ingest,Process,Action} Deployments are disabled there (see
 # fix/alpha-clean-deploy header comment). core-bundle-seeder builds the ping/
 # pyping WASM components + hub_api/cli seeder in one image (bundles/
-# Dockerfile.core-bundles). waddlebot-egress-proxy builds core/egress_proxy/
+# Dockerfile.core-bundles). egress-proxy builds core/egress_proxy/
 # Dockerfile.rust from the "core" context (its Cargo.toml has same-repo path
 # deps on sibling crates service_auth/bundle_host_http/egress_assertion --
 # see that Dockerfile's own header).
@@ -250,18 +250,18 @@ info "Deploying release SHA ${SHA} (tag ${SHA8}) to context ${KUBE_CONTEXT}, nam
 # than the per-commit SHA8 (same pattern as bundleExecutor's own comment:
 # "built locally + pushed to the local registry ... same as every other
 # alpha-only module image") -- see service_image_tag below.
-readonly SERVICES="hub-api hub-webui waddlebot-migrations svc-ingest svc-process svc-action waddlebot-egress-proxy core-bundle-seeder reputation-module svc-presentation svc-streaming bundle-executor"
+readonly SERVICES="hub-api hub-webui migrations svc-ingest svc-process svc-action egress-proxy core-bundle-seeder reputation-module svc-presentation svc-streaming bundle-executor"
 
 service_dockerfile() {
     case "$1" in
         hub-api) echo "hub_api/Dockerfile" ;;
         hub-webui) echo "admin/hub_module/Dockerfile.webui" ;;
-        waddlebot-migrations) echo "migrations/Dockerfile" ;;
+        migrations) echo "migrations/Dockerfile" ;;
         core-bundle-seeder) echo "bundles/Dockerfile.core-bundles" ;;
         svc-ingest) echo "core/svc_ingest/Dockerfile.rust" ;;
         svc-process) echo "core/svc_process/Dockerfile.rust" ;;
         svc-action) echo "core/svc_action/Dockerfile.rust" ;;
-        waddlebot-egress-proxy) echo "core/egress_proxy/Dockerfile.rust" ;;
+        egress-proxy) echo "core/egress_proxy/Dockerfile.rust" ;;
         reputation-module) echo "core/reputation_module/Dockerfile" ;;
         # chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (values-alpha.yaml
         # presentation.rust.enabled); Dockerfile.rust builds from the "core" context.
@@ -280,15 +280,15 @@ service_context() {
     case "$1" in
         # bundle-executor's Dockerfile COPYs core/bundle_executor AND wit/ from the repo
         # root (see its own header comment) -- same "." context as hub-api et al.
-        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|reputation-module|bundle-executor) echo "." ;;
-        svc-ingest|svc-process|svc-action|waddlebot-egress-proxy|svc-presentation) echo "core" ;;
+        hub-api|hub-webui|migrations|core-bundle-seeder|reputation-module|bundle-executor) echo "." ;;
+        svc-ingest|svc-process|svc-action|egress-proxy|svc-presentation) echo "core" ;;
         svc-streaming) echo "core/svc_streaming" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac
 }
 
 # Image repository name (differs from the service name for the 3 Rust
-# stages -- see the comment above; waddlebot-egress-proxy pushes under its
+# stages -- see the comment above; egress-proxy pushes under its
 # own name, matching egressProxy.image in values.yaml).
 service_image_repo() {
     case "$1" in

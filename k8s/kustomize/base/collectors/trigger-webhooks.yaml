@@ -23,7 +23,7 @@ spec:
         fsGroup: 1000
       initContainers:
       - name: db-migrate
-        image: waddlebot-migrations:latest
+        image: migrations:latest
         imagePullPolicy: Always
         envFrom:
         - configMapRef:

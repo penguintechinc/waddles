@@ -148,7 +148,7 @@ jobs:
           # "service_auth" (the "core" dir, like svc_process); svc_process/svc_action COPY "svc_process/..." + sibling
           # "bundle_active_set"/"bundle_host_http" (the shared "core" dir, one level up).
           declare -a IMAGES=(
-            "waddlebot-migrations:ci:migrations/Dockerfile:."
+            "migrations:ci:migrations/Dockerfile:."
             "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
             "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
             "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core"
@@ -499,7 +499,7 @@ jobs:
           # "service_auth" (the "core" dir, like svc_process); svc_process/svc_action COPY "svc_process/..." + sibling
           # "bundle_active_set"/"bundle_host_http" (the shared "core" dir, one level up).
           declare -a IMAGES=(
-            "waddlebot-migrations:ci:migrations/Dockerfile:."
+            "migrations:ci:migrations/Dockerfile:."
             "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
             "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
             "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core"
@@ -529,7 +529,7 @@ jobs:
           # build (same layers, no rebuild -- the Rust builds are the 25+ min cost); a PR that
           # changes those images' behaviour against the base chart is outside this job's scope.
           declare -a BASE_DB_IMAGES=(
-            "waddlebot-migrations:ci-base:migrations/Dockerfile:."
+            "migrations:ci-base:migrations/Dockerfile:."
             "hub-api:ci-base:hub_api/Dockerfile:."
           )
           base_built=0
@@ -542,7 +542,7 @@ jobs:
           retagged=0
           for entry in "${IMAGES[@]}"; do
             IFS=":" read -r name tag _ _ <<< "${entry}"
-            case "${name}" in waddlebot-migrations|hub-api) continue ;; esac
+            case "${name}" in migrations|hub-api) continue ;; esac
             docker tag "${name}:${tag}" "${name}:ci-base"
             kind load docker-image "${name}:ci-base" --name waddlebot-upgrade
             retagged=$((retagged + 1))

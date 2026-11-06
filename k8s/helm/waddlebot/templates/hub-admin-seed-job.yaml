@@ -46,7 +46,7 @@ spec:
       - name: hub-admin-seed
         # Same migrations image as templates/migrations-job.yaml (carries the 081 SQL + psycopg2).
         {{- $registry := .Values.global.imageRegistry | default "" }}
-        {{- $repository := .Values.modules.migrations.image | default "waddlebot-migrations" }}
+        {{- $repository := .Values.modules.migrations.image | default "migrations" }}
         {{- $tag := .Values.global.imageTag | toString }}
         {{- if $registry }}
         image: "{{ $registry }}/{{ $repository }}:{{ $tag }}"

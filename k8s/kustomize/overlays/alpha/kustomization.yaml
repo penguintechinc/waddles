@@ -107,8 +107,8 @@ images:
     newTag: latest
 
   # Migrations
-  - name: waddlebot-migrations
-    newName: waddlebot/waddlebot-migrations
+  - name: migrations
+    newName: waddlebot/migrations
     newTag: alpha
 
 labels:

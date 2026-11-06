@@ -138,8 +138,8 @@ images:
     newTag: latest
 
   # Migrations
-  - name: waddlebot-migrations
-    newName: ghcr.io/penguintechinc/waddlebot/waddlebot-migrations
+  - name: migrations
+    newName: ghcr.io/penguintechinc/waddlebot/migrations
     newTag: latest
 
 labels:

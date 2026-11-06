@@ -207,7 +207,7 @@ global:
 # falls back to global.imageTag, so unset = unchanged behavior for every environment.
 # Applies ONLY to workloads pulling the `hub-api` image repository: the hub-api Deployment
 # + role-sync / event-sync-reconcile / odoo-sync / bundle-signing-reconciler CronJobs + the
-# bundle-signing-backfill hook Job. The SEPARATE images (core-bundle-seeder, waddlebot-migrations,
+# bundle-signing-backfill hook Job. The SEPARATE images (core-bundle-seeder, migrations,
 # svc-*, bundle-executor, hub-webui, ...) are NOT affected -- they stay on global.imageTag.
 # (Distinct from `pipeline.hubApi`, which holds hub-api's port/replicas/resources.)
 hubApi:
@@ -1970,7 +1970,7 @@ pipeline:
 # beta/gamma/prod ghcr.io registry -- see templates/svc-presentation.yaml rendering logic.
 presentation:
   image:
-    repository: "waddlebot-svc-presentation"
+    repository: "svc-presentation"
     tag: ""
   service:
     type: ClusterIP
@@ -2028,7 +2028,7 @@ streaming:
   # STREAM_ENCODER handed to the service: auto | cpu | nvenc | vaapi.
   encoder: auto
   image:
-    repository: "waddlebot-svc-streaming"
+    repository: "svc-streaming"
     tag: ""
   # Node selection for the svc-streaming Deployment (every variant).
   nodeSelector: {}
@@ -2065,7 +2065,7 @@ streaming:
 # unset so it falls through to global.imageTag) -- this is no longer a KNOWN GAP.
 bundleExecutor:
   image:
-    repository: "waddlebot-bundle-executor"
+    repository: "bundle-executor"
     tag: ""
 
 # Reputation service (Issue #310, core/reputation_module) -- standalone internal
@@ -2112,7 +2112,7 @@ modules:
   router:
     enabled: true
     name: router
-    image: waddlebot-router
+    image: router
     imageTag: ""
     port: 8000
     service:
@@ -2151,7 +2151,7 @@ modules:
   hub:
     enabled: true
     name: hub-api
-    image: waddlebot-hub-api
+    image: hub-api
     imageTag: ""
     port: 8060
     replicas: 2
@@ -2176,7 +2176,7 @@ modules:
   hubWebui:
     enabled: true
     name: hub-webui
-    image: waddlebot-hub-webui
+    image: hub-webui
     imageTag: ""
     port: 80
     replicas: 2
@@ -2196,7 +2196,7 @@ modules:
   coreData:
     enabled: true
     name: core-data
-    image: waddlebot-core-data
+    image: core-data
     imageTag: ""
     port: 8040
     replicas: 2
@@ -2220,7 +2220,7 @@ modules:
   coreIdentity:
     enabled: true
     name: core-identity
-    image: waddlebot-core-identity
+    image: core-identity
     imageTag: ""
     port: 8050
     replicas: 2
@@ -2244,7 +2244,7 @@ modules:
   coreCommunity:
     enabled: true
     name: core-community
-    image: waddlebot-core-community
+    image: core-community
     imageTag: ""
     port: 8020
     replicas: 2
@@ -2269,7 +2269,7 @@ modules:
   triggerWebhooks:
     enabled: true
     name: trigger-webhooks
-    image: waddlebot-trigger-webhooks
+    image: trigger-webhooks
     imageTag: ""
     port: 8100
     replicas: 1
@@ -2293,7 +2293,7 @@ modules:
   triggerStreaming:
     enabled: true
     name: trigger-streaming
-    image: waddlebot-trigger-streaming
+    image: trigger-streaming
     imageTag: ""
     port: 8101
     replicas: 1
@@ -2318,7 +2318,7 @@ modules:
   actionPlatforms:
     enabled: true
     name: action-platforms
-    image: waddlebot-action-platforms
+    image: action-platforms
     imageTag: ""
     port: 8102
     replicas: 2
@@ -2342,7 +2342,7 @@ modules:
   actionServerless:
     enabled: true
     name: action-serverless
-    image: waddlebot-action-serverless
+    image: action-serverless
     imageTag: ""
     port: 8103
     replicas: 1
@@ -2367,7 +2367,7 @@ modules:
   interactiveSocial:
     enabled: true
     name: interactive-social
-    image: waddlebot-interactive-social
+    image: interactive-social
     imageTag: ""
     port: 8010
     replicas: 2
@@ -2391,7 +2391,7 @@ modules:
   interactiveGaming:
     enabled: true
     name: interactive-gaming
-    image: waddlebot-interactive-gaming
+    image: interactive-gaming
     imageTag: ""
     port: 8104
     replicas: 2
@@ -2415,7 +2415,7 @@ modules:
   interactiveMedia:
     enabled: true
     name: interactive-media
-    image: waddlebot-interactive-media
+    image: interactive-media
     imageTag: ""
     port: 8105
     replicas: 1
@@ -2439,7 +2439,7 @@ modules:
   interactiveProductivity:
     enabled: true
     name: interactive-productivity
-    image: waddlebot-interactive-productivity
+    image: interactive-productivity
     imageTag: ""
     port: 8030
     replicas: 2
@@ -2464,7 +2464,7 @@ modules:
   aiResearcher:
     enabled: true
     name: ai-researcher
-    image: waddlebot-ai-researcher
+    image: ai-researcher
     imageTag: ""
     port: 8070
     service:
@@ -2488,7 +2488,7 @@ modules:
   triggerDiscord:
     enabled: true
     name: trigger-discord
-    image: waddlebot-trigger-discord
+    image: trigger-discord
     imageTag: ""
     port: 8011
     service:
@@ -2512,7 +2512,7 @@ modules:
   actionDiscord:
     enabled: true
     name: action-discord
-    image: waddlebot-action-discord
+    image: action-discord
     imageTag: ""
     port: 8012
     service:
@@ -2536,7 +2536,7 @@ modules:
   interactiveAi:
     enabled: true
     name: interactive-ai
-    image: waddlebot-interactive-ai
+    image: interactive-ai
     imageTag: ""
     port: 8013
     service:
@@ -2560,7 +2560,7 @@ modules:
   interactiveLoyalty:
     enabled: true
     name: interactive-loyalty
-    image: waddlebot-interactive-loyalty
+    image: interactive-loyalty
     imageTag: ""
     port: 8014
     service:
@@ -2584,7 +2584,7 @@ modules:
   marketplace:
     enabled: true
     name: marketplace
-    image: waddlebot-marketplace
+    image: marketplace
     imageTag: ""
     port: 8100
     replicas: 2
@@ -2608,7 +2608,7 @@ modules:
   migrations:
     enabled: true
     name: migrations
-    image: waddlebot-migrations
+    image: migrations
     imageTag: ""
     port: 8999
     replicas: 1
@@ -2633,7 +2633,7 @@ modules:
   collectors:
     discord:
       enabled: true
-      image: waddlebot-trigger-discord
+      image: trigger-discord
       imageTag: ""
       port: 8003
       replicas: 1
@@ -2647,7 +2647,7 @@ modules:
 
     twitch:
       enabled: true
-      image: waddlebot-trigger-twitch
+      image: trigger-twitch
       imageTag: ""
       port: 8002
       replicas: 1
@@ -2661,7 +2661,7 @@ modules:
 
     slack:
       enabled: true
-      image: waddlebot-trigger-slack
+      image: trigger-slack
       imageTag: ""
       port: 8004
       replicas: 1
@@ -2675,7 +2675,7 @@ modules:
 
     youtubeLive:
       enabled: true
-      image: waddlebot-trigger-youtube
+      image: trigger-youtube
       imageTag: ""
       port: 8005
       replicas: 1
@@ -2689,7 +2689,7 @@ modules:
 
     teams:
       enabled: false
-      image: waddlebot-trigger-teams
+      image: trigger-teams
       imageTag: ""
       port: 8006
       replicas: 1
@@ -2703,7 +2703,7 @@ modules:
 
     mattermost:
       enabled: false
-      image: waddlebot-trigger-mattermost
+      image: trigger-mattermost
       imageTag: ""
       port: 8007
       replicas: 1
@@ -2717,7 +2717,7 @@ modules:
 
     googlechat:
       enabled: false
-      image: waddlebot-trigger-googlechat
+      image: trigger-googlechat
       imageTag: ""
       port: 8008
       replicas: 1
@@ -2731,7 +2731,7 @@ modules:
 
     kick:
       enabled: false
-      image: waddlebot-trigger-kick
+      image: trigger-kick
       imageTag: ""
       port: 8009
       replicas: 1
@@ -3369,11 +3369,11 @@ egressProxy:
   # `waddlebot.legacyModuleImage` helper svc-action-rust/svc-process-rust
   # use (templates/infrastructure/egress-proxy.yaml). Build target:
   # `docker build -f egress_proxy/Dockerfile.rust -t
-  # <registry>/waddlebot-egress-proxy:<tag> .` run from `core/` (the
+  # <registry>/egress-proxy:<tag> .` run from `core/` (the
   # PARENT of core/egress_proxy -- see that Dockerfile's own header
   # comment for why). CI fills imageTag with the built digest/tag; leave
   # empty here to fall back to global.imageTag.
-  image: "waddlebot-egress-proxy"
+  image: "egress-proxy"
   imageTag: ""
   port: 8443
   metricsPort: 9090
