@@ -12,7 +12,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::error::ApiError;
-use crate::http::AppState;
+use crate::http::{AppState, RecordReadiness};
 
 /// Liveness probe response body.
 #[derive(Debug, Serialize, ToSchema)]
@@ -63,6 +63,18 @@ pub struct ReadinessBody {
 )]
 pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessBody> {
     let cfg = &state.config.cli;
+    let record = match &state.record {
+        RecordReadiness::Enabled => DependencyStatus {
+            name: "record",
+            configured: true,
+            detail: "s3 recording sink ready".to_string(),
+        },
+        RecordReadiness::Disabled(reason) => DependencyStatus {
+            name: "record",
+            configured: false,
+            detail: format!("recording disabled: {reason}"),
+        },
+    };
     let dependencies = vec![
         DependencyStatus {
             name: "database",
@@ -79,9 +91,18 @@ pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessBody> {
             configured: cfg.ffmpeg_path.exists(),
             detail: cfg.ffmpeg_path.display().to_string(),
         },
+        record,
     ];
+    // Recording is an optional capability: its absence degrades the pod but
+    // must not fail readiness (that would pull live ingest out of service
+    // and kill every stream), so it reports "degraded" with HTTP 200.
+    let status = if matches!(state.record, RecordReadiness::Enabled) {
+        "ok"
+    } else {
+        "degraded"
+    };
     Json(ReadinessBody {
-        status: "ok",
+        status,
         dependencies,
     })
 }
@@ -118,10 +139,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_reports_three_dependencies() {
+    async fn readiness_reports_four_dependencies() {
         let Json(body) = readiness(State(test_state())).await;
-        assert_eq!(body.status, "ok");
-        assert_eq!(body.dependencies.len(), 3);
+        assert_eq!(body.dependencies.len(), 4);
         let ffmpeg = body
             .dependencies
             .iter()
@@ -131,6 +151,45 @@ mod tests {
         // runner) must never panic -- the assertion below is on the
         // *shape*, not on ffmpeg actually being installed.
         assert_eq!(ffmpeg.detail, "/usr/bin/ffmpeg");
+    }
+
+    #[tokio::test]
+    async fn readiness_is_degraded_with_the_reason_when_record_is_disabled() {
+        let mut state = test_state();
+        state.record = RecordReadiness::Disabled("S3_ENDPOINT is not set".to_string());
+        let Json(body) = readiness(State(state)).await;
+        assert_eq!(body.status, "degraded");
+        let record = body
+            .dependencies
+            .iter()
+            .find(|d| d.name == "record")
+            .unwrap();
+        assert!(!record.configured);
+        assert!(
+            record.detail.contains("S3_ENDPOINT is not set"),
+            "{}",
+            record.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_is_ok_when_record_is_enabled() {
+        let mut state = test_state();
+        state.record = RecordReadiness::Enabled;
+        let Json(body) = readiness(State(state)).await;
+        assert_eq!(body.status, "ok");
+        let record = body
+            .dependencies
+            .iter()
+            .find(|d| d.name == "record")
+            .unwrap();
+        assert!(record.configured);
+    }
+
+    #[tokio::test]
+    async fn uninitialised_record_state_never_claims_recording_works() {
+        let Json(body) = readiness(State(test_state())).await;
+        assert_eq!(body.status, "degraded");
     }
 
     #[tokio::test]
