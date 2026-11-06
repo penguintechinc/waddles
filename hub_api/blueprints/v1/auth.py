@@ -821,6 +821,7 @@ async def oauth_start(platform: str) -> OAuthStartResponse | tuple[dict[str, obj
             binding_nonce=nonce,
         )
     except ApiError as exc:
+        logger.warning("oauth start rejected: %s", type(exc).__name__)
         return _err(exc)
 
     @after_this_request
@@ -922,6 +923,7 @@ async def oauth_link_start(platform: str) -> OAuthStartResponse | tuple[dict[str
             binding_nonce=nonce,
         )
     except ApiError as exc:
+        logger.warning("oauth start rejected: %s", type(exc).__name__)
         return _err(exc)
 
     @after_this_request
