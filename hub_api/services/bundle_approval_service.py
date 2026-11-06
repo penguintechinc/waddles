@@ -112,7 +112,7 @@ from services import (
     bundle_signing_service,
     valkey_admin_client,
 )
-from services.bundle_access_grants import access_grant_diff_atoms
+from services.bundle_access_grants import access_grant_diff_atoms, is_access_grant_id
 from services.bundle_manifest_v2 import (
     BundleManifestV2,
     ConsumeRule,
@@ -1195,33 +1195,9 @@ async def activate_tenant_wide_with_warnings(
     tenant()` (there is no community row to validate -- 404 is
     impossible by construction, not skipped).
     """
-    availability_rows = await install_dal(
-        (install_dal.bundle_tenant_availability.tenant_id == tenant_id)
-        & (install_dal.bundle_tenant_availability.app_id == app_id)
-        & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
-    ).select()
-    availability = availability_rows.first()
-    if availability is None:
-        raise conflict(f"{app_id!r} is not available in this tenant's marketplace")
-
-    if availability.pinned_version_id is not None:
-        version_id = int(availability.pinned_version_id)
-        version_rows = await install_dal(install_dal.app_versions.id == version_id).select()
-        version_row = version_rows.first()
-        if version_row is None:  # pragma: no cover - defensive, FK guarantees this in production
-            raise ApiError(f"pinned version {version_id} not found", 500, "missing_app_version")
-        version = str(version_row.version)
-    else:
-        install_rows = await install_dal(
-            (install_dal.app_global_installs.app_id == app_id)
-            & (install_dal.app_global_installs.superseded_by == None)  # noqa: E711
-            & (install_dal.app_global_installs.revoked_at == None)  # noqa: E711
-        ).select()
-        install = install_rows.first()
-        if install is None:  # pragma: no cover - defensive, availability implies a current install
-            raise conflict(f"{app_id!r} is not currently installed in the platform catalog")
-        version_id = int(install.version_id)
-        version = str(install.version)
+    version_id, version = await resolve_activation_version(
+        install_dal, tenant_id=tenant_id, app_id=app_id
+    )
 
     upload_rows = await install_dal(
         (install_dal.app_version_uploads.app_id == app_id)
@@ -1325,6 +1301,91 @@ async def activate_for_community(
     return result.approval
 
 
+async def resolve_activation_version(
+    install_dal: AsyncDB, *, tenant_id: int, app_id: str
+) -> tuple[int, str]:
+    """`(version_id, version)` an activation of `app_id` in `tenant_id` would run.
+
+    409 unless `app_id` has a CURRENT available `bundle_tenant_availability` row for the
+    tenant. Uses that row's `pinned_version_id` when set, else the platform's current
+    `app_global_installs` version. Shared by activation and the access-grant preview so
+    the warning always describes the exact version that would be activated.
+    """
+    availability_rows = await install_dal(
+        (install_dal.bundle_tenant_availability.tenant_id == tenant_id)
+        & (install_dal.bundle_tenant_availability.app_id == app_id)
+        & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
+    ).select()
+    availability = availability_rows.first()
+    if availability is None:
+        raise conflict(f"{app_id!r} is not available in this tenant's marketplace")
+
+    if availability.pinned_version_id is not None:
+        version_id = int(availability.pinned_version_id)
+        version_rows = await install_dal(install_dal.app_versions.id == version_id).select()
+        version_row = version_rows.first()
+        if version_row is None:  # pragma: no cover - defensive, FK guarantees this in production
+            raise ApiError(f"pinned version {version_id} not found", 500, "missing_app_version")
+        version = str(version_row.version)
+    else:
+        install_rows = await install_dal(
+            (install_dal.app_global_installs.app_id == app_id)
+            & (install_dal.app_global_installs.superseded_by == None)  # noqa: E711
+            & (install_dal.app_global_installs.revoked_at == None)  # noqa: E711
+        ).select()
+        install = install_rows.first()
+        if install is None:  # pragma: no cover - defensive, availability implies a current install
+            raise conflict(f"{app_id!r} is not currently installed in the platform catalog")
+        version_id = int(install.version_id)
+        version = str(install.version)
+    return version_id, version
+
+
+async def _require_access_grant_ack(
+    install_dal: AsyncDB,
+    *,
+    app_id: str,
+    version: str,
+    tenant_id: int,
+    community_id: int,
+    acknowledged: frozenset[str],
+    activated_by: int | None,
+) -> None:
+    """Community activation re-shows dangerous access grants (spec Sec4): 422 without an ack.
+
+    Only globally-APPROVED access-grant ids (platform.table.*, ...) are actionable at
+    activation; every one must appear in `acknowledged` (`access_grant_ack_required`).
+    The ack is audited (who/when/what). Requested-but-unapproved ids (e.g. a widened
+    manifest's new access) are unusable until a global admin re-approves them.
+    """
+    rows = await install_dal(
+        (install_dal.app_permission_requests.app_id == app_id)
+        & (install_dal.app_permission_requests.version == version)
+    ).select()
+    approved = frozenset(r.permission_id for r in rows if is_access_grant_id(r.permission_id))
+    if not approved:
+        return
+    missing = approved - acknowledged
+    if missing:
+        raise ApiError(
+            f"activation requires acknowledging dangerous access grants: {sorted(missing)}",
+            422,
+            "access_grant_ack_required",
+        )
+    await bundle_audit.record(
+        install_dal,
+        actor_id=activated_by,
+        action="access_grants_acknowledged",
+        target_type="community_permission_grants",
+        target_id=f"{app_id}@{version}",
+        details={
+            "tenant_id": tenant_id,
+            "community_id": community_id,
+            "acknowledged": sorted(approved),
+        },
+    )
+
+
 async def activate_for_community_with_warnings(
     install_dal: AsyncDB,
     *,
@@ -1334,8 +1395,13 @@ async def activate_for_community_with_warnings(
     activated_by: int | None,
     valkey_client: Any | None = None,
     approval_source: str = "human",
+    acknowledged_access_grants: frozenset[str] = frozenset(),
 ) -> ActivationResult:
     """COMMUNITY tier: activate `app_id` for `community_id`, AUTO-BINDing its sources.
+
+    `acknowledged_access_grants`: every globally-approved dangerous access grant
+    (platform.table.*, ...) the version carries must be listed, else 422
+    `access_grant_ack_required` (the community admin sees the bold-red warning again).
 
     409 unless `app_id` has a CURRENT `bundle_tenant_availability` row for
     `tenant_id` with `available=True` (superset invariant: `activated <=
@@ -1394,6 +1460,16 @@ async def activate_for_community_with_warnings(
         activated_by=activated_by,
         app_id=app_id,
         version=version,
+    )
+
+    await _require_access_grant_ack(
+        install_dal,
+        app_id=app_id,
+        version=version,
+        tenant_id=tenant_id,
+        community_id=community_id,
+        acknowledged=acknowledged_access_grants,
+        activated_by=activated_by,
     )
 
     summary, computed_hash = await get_permission_summary(

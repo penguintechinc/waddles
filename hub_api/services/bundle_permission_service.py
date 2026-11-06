@@ -36,7 +36,7 @@ from penguin_dal import AsyncDB
 from sqlalchemy import func, select
 
 from services import bundle_audit, valkey_admin_client
-from services.bundle_access_grants import is_access_grant_id
+from services.bundle_access_grants import is_access_grant_id, summarize_access_grants
 from services.bundle_access_grants import kinds as access_grant_kinds
 from services.bundle_approval_service import _reparse_trusted
 from services.bundle_manifest_v2 import BundleManifestV2, PermissionDeclaration
@@ -64,6 +64,31 @@ async def manifest_for_version(
     if upload is None:
         raise not_found(f"version {version} of {app_id} not found")
     return _reparse_trusted(upload.manifest_json)
+
+
+def access_grant_permission_ids(manifest: BundleManifestV2) -> frozenset[str]:
+    """Every dangerous resource-access grant id (platform.table.*, ...) the manifest declares."""
+    return frozenset(d.id for d in manifest.permission_declarations if is_access_grant_id(d.id))
+
+
+async def get_access_grants(
+    install_dal: AsyncDB, *, app_id: str, version: str
+) -> tuple[dict[str, list[dict[str, Any]]], frozenset[str], frozenset[str], frozenset[str]]:
+    """`(summary_blocks, requested_ids, globally_approved_ids, dangerous_ids)` for one version.
+
+    `dangerous_ids` is EVERY dangerous id the manifest declares (access grants and
+    others) -- exactly the set the global approve endpoint requires acknowledging.
+
+    `summary_blocks` is `summarize_access_grants` (table/columns/ops/reason per kind);
+    `approved` is the subset of `requested` a global admin has approved -- anything
+    requested but not approved (a widened manifest's new ids) stays unusable until
+    it is.
+    """
+    manifest = await manifest_for_version(install_dal, app_id=app_id, version=version)
+    requested = access_grant_permission_ids(manifest)
+    approved = await get_approved_permission_ids(install_dal, app_id=app_id, version=version)
+    dangerous = frozenset(d.id for d in manifest.permission_declarations if d.risk == "dangerous")
+    return summarize_access_grants(manifest), requested, requested & approved, dangerous
 
 
 #: Every write to a grant table publishes here (spec Sec4). Consumers:
