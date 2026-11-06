@@ -207,16 +207,15 @@ spec:
         # PR-H connector runtime (spec SS2): the executor DIALS svc-ingest's host-api (ONE connection)
         # with a DISTINCT client cert (SAN = executor identity only) from its own Secret, mounted
         # nowhere else. It pins svc-ingest's own server SAN, never the svc-action identity.
-        # NOTE: CONNECTOR_HOST_API_{CA,CLIENT_CERT,CLIENT_KEY}_FILE are the cert-path env names
-        # this chart supplies for the second dial (the spec leaves them to executor PR-A1).
+        # Env names match executor config.rs: CONNECTOR_HOST_API_{ADDR,IDENTITY,CLIENT_CERT_FILE,
+        # CLIENT_KEY_FILE}; the CA is REUSED from HOST_API_CA_FILE (hostApiTlsClientEnv) -- there is
+        # no CONNECTOR_HOST_API_CA_FILE.
         - name: CONNECTOR_HOST_API_ADDR
           value: "{{ include "waddlebot.svcIngestHostApiServiceName" . }}:{{ (.Values.pipeline.rustDataPlane.svcIngest.connectorTools).hostApiPort | default 8301 }}"
         - name: CONNECTOR_HOST_API_IDENTITY
           value: {{ include "waddlebot.svcIngestHostApiServerIdentity" . | quote }}
         - name: EXECUTOR_CONNECTOR_CONNECTIONS
           value: "1"
-        - name: CONNECTOR_HOST_API_CA_FILE
-          value: /etc/waddlebot/connector-host-api-tls/ca.crt
         - name: CONNECTOR_HOST_API_CLIENT_CERT_FILE
           value: /etc/waddlebot/connector-host-api-tls/tls.crt
         - name: CONNECTOR_HOST_API_CLIENT_KEY_FILE

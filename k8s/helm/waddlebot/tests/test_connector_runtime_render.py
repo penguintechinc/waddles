@@ -117,6 +117,13 @@ def test_executor_env_and_distinct_client_secret_mounted_only_there() -> None:
     assert env["CONNECTOR_HOST_API_ADDR"]["value"].endswith("-svc-ingest-rust:8301")
     assert env["CONNECTOR_HOST_API_IDENTITY"]["value"].endswith("-svc-ingest-rust")
     assert env["EXECUTOR_CONNECTOR_CONNECTIONS"]["value"] == "1"
+    # Exact names the executor reads (core/bundle_executor/src/config.rs): dedicated cert/key, CA reused.
+    assert env["CONNECTOR_HOST_API_CLIENT_CERT_FILE"]["value"].endswith("/tls.crt")
+    assert env["CONNECTOR_HOST_API_CLIENT_KEY_FILE"]["value"].endswith("/tls.key")
+    assert env["CONNECTOR_HOST_API_CLIENT_CERT_FILE"]["value"] != env["HOST_API_CLIENT_CERT_FILE"]["value"]
+    assert env["CONNECTOR_HOST_API_CLIENT_KEY_FILE"]["value"] != env["HOST_API_CLIENT_KEY_FILE"]["value"]
+    assert "HOST_API_CA_FILE" in env
+    assert "CONNECTOR_HOST_API_CA_FILE" not in env
     cli = [n for n in _secret_vols(ex) if n.endswith("-ingest-executor-tls")]
     assert len(cli) == 1
     # Existing stage secret stays; the connector client secret is a SECOND, separate volume.
