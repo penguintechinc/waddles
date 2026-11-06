@@ -21,6 +21,10 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
       echo "Post https://api.github.com/graphql: dial tcp: i/o timeout" >&2; exit 1
     fi
   fi
+  if [ -n "${FIXTURE_DIR:-}" ]; then
+    if [ "$3" = 5 ] && [ -e "$FIXTURE_DIR/merged" ]; then cat "$FIXTURE_DIR/pr-5-merged.json"; else cat "$FIXTURE_DIR/pr-$3.json"; fi
+    exit 0
+  fi
   cat "$FIXTURE"; exit 0
 fi
 if [ "$1" = "api" ]; then
@@ -84,6 +88,19 @@ out="$(env SCRATCH="$SCRATCH" FAIL_PRVIEW=always FIXTURE="$SCRATCH/f.json" RELEA
 if [ "$rc" -eq 2 ] && grep -q 'consecutive ticks; aborting' <<<"$out"; then
   PASS=$((PASS + 1)); echo "ok   persistent API failure aborts after 10 ticks"
 else FAIL=$((FAIL + 1)); echo "FAIL api abort (rc=$rc)"; printf '%s\n' "$out" | tail -5; fi
+
+# first PR merges, second still open: watcher must keep running (no premature "done")
+FD="$SCRATCH/fd"; mkdir -p "$FD/scripts"; rm -f "$FD/merged"
+cp "$SCRIPT" "$FD/scripts/release-auto-merge.sh"
+printf '#!/usr/bin/env bash\ntouch "%s/merged"\n' "$FD" > "$FD/scripts/release-merge.sh"; chmod +x "$FD/scripts/release-merge.sh"
+mk "$H" "[$GATE_OK]"; cp "$SCRATCH/f.json" "$FD/pr-5.json"
+sed 's/"state":"OPEN"/"state":"MERGED"/' "$FD/pr-5.json" > "$FD/pr-5-merged.json"
+mk "$H" "[$GATE_BAD,$(fail_chk a 7 13)]"; cp "$SCRATCH/f.json" "$FD/pr-6.json"
+rc=0
+out="$(env SCRATCH="$SCRATCH" FIXTURE_DIR="$FD" RELEASE_AUTO_MERGE_STATE="$SCRATCH/state5" PATH="$SCRATCH/bin:$PATH" timeout 5 bash "$FD/scripts/release-auto-merge.sh" --interval 1 5 6 2>&1)" || rc=$?
+if [ "$rc" -eq 124 ] && grep -q 'pr=5 .*MERGED' <<<"$out" && ! grep -q 'all PRs merged/closed' <<<"$out" && grep -q 'pr=6 .*REAL FAILURE' <<<"$out"; then
+  PASS=$((PASS + 1)); echo "ok   merge of first PR does not end the watch while second is open"
+else FAIL=$((FAIL + 1)); echo "FAIL premature done (rc=$rc)"; printf '%s\n' "$out"; fi
 
 # bad pin / symlinked state must be refused (non-zero exit)
 rc=0; PATH="$SCRATCH/bin:$PATH" bash "$SCRIPT" --dry-run "5@abc" >/dev/null 2>&1 || rc=$?

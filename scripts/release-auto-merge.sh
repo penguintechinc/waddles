@@ -205,9 +205,10 @@ while :; do
     API_FAIL_TICKS=$((API_FAIL_TICKS + 1))
     if [ "$API_FAIL_TICKS" -ge "$MAX_API_FAIL_TICKS" ]; then die "GitHub API failed on $API_FAIL_TICKS consecutive ticks; aborting"; fi
   else API_FAIL_TICKS=0; fi
+  # A merge breaks the PR loop early, so the tally is partial: re-evaluate everything, never declare done.
+  if [ "$merged_now" = 1 ]; then continue; fi
   if [ "$n_open" -eq 0 ]; then log "all PRs merged/closed; done"; exit 0; fi
   if [ "$DRY" = 1 ]; then log "dry-run: single tick only"; exit 0; fi
-  [ "$merged_now" = 1 ] && continue
   [ "$(date +%s)" -lt "$DEADLINE" ] || { log "max duration ${MAX_HOURS}h reached with $n_open open"; exit 1; }
   sleep "$INTERVAL"
 done
