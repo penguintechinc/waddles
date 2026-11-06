@@ -560,7 +560,8 @@ pub async fn invoke_dispatch(
 /// The guild snowflake a Discord gateway event came from (`payload.guild_id` of a `discord`
 /// event); `None` for any other platform or a malformed value.
 fn discord_event_guild(env: &penguin_spine::StageEnvelope) -> Option<String> {
-    if env.event.platform != "discord" {
+    // The SAME platform field every other origin check uses (`source.platform`).
+    if env.event.source.as_ref().map(|s| s.platform.as_str()) != Some("discord") {
         return None;
     }
     env.event
@@ -3954,12 +3955,14 @@ mod tests {
     }
 
     fn env_with(platform: &str, payload: serde_json::Value) -> penguin_spine::StageEnvelope {
+        let source =
+            serde_json::json!({"platform": platform, "account_id": "a", "channel_id": null});
         serde_json::from_value(serde_json::json!({
             "schema_version": 2, "tenant": "acme", "community": "main",
             "app_id": "waddles.bot.commands.default", "stage": "action",
             "event": {"platform": platform, "event_type": "guild.member.update",
                 "actor": null, "payload": payload,
-                "occurred_at": "2026-09-14T12:00:00.000Z", "source": null},
+                "occurred_at": "2026-09-14T12:00:00.000Z", "source": source},
             "ts": "2026-09-14T12:00:00.123Z", "target_app_id": null,
             "workstream_id": "8f14e45f-ceea-467e-adde-3fb5c9752730",
             "event_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "session_id": null,
@@ -3977,6 +3980,10 @@ mod tests {
         );
         // A Wix (or any non-Discord) event can never carry a guild assertion.
         assert_eq!(g("wix", serde_json::json!({"guild_id": "123"})), None);
+        // The source platform is the single field: no source -> no guild.
+        let mut e = env_with("discord", serde_json::json!({"guild_id": "123"}));
+        e.event.source = None;
+        assert_eq!(discord_event_guild(&e), None);
         for bad in [
             serde_json::json!({}),
             serde_json::json!({"guild_id": 5}),

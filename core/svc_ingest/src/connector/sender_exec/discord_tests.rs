@@ -230,6 +230,14 @@ fn role_tpl(base: &str, method: &str, guild: &str, user: &str, role: &str) -> Re
 }
 
 async fn rig_with(tpl: impl FnOnce(&str) -> RequestTpl, ttl: Duration) -> Rig {
+    rig_full(tpl, ttl, None).await
+}
+
+async fn rig_full(
+    tpl: impl FnOnce(&str) -> RequestTpl,
+    ttl: Duration,
+    err: Option<CredError>,
+) -> Rig {
     let server = MockServer::start().await;
     let base = server.uri();
     let tpl = Tpl::new(tpl(&base));
@@ -249,7 +257,8 @@ async fn rig_with(tpl: impl FnOnce(&str) -> RequestTpl, ttl: Duration) -> Rig {
             vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
         );
     let api = format!("{base}/api/v10");
-    let creds = Creds::new();
+    let mut creds = Creds::new();
+    creds.err = err;
     let users = Users::new();
     let exec = SenderExecutor::with_duties(
         tpl.clone(),
@@ -818,6 +827,34 @@ async fn an_external_event_op_can_only_touch_the_communitys_own_paired_guild() {
         put.headers.get("authorization").unwrap(),
         &format!("Bot {TOKEN2}")
     );
+}
+
+/// A community with several usable Discord bindings is refused with the typed
+/// `ambiguous_paired_guild` BEFORE anything is built or sent -- for channel-pinned and
+/// guild-scoped ops alike; the guild is never guessed.
+#[tokio::test]
+async fn several_paired_guilds_are_refused_explicitly() {
+    for scope in ["guild:-".to_string(), format!("guild:{GUILD}")] {
+        let r = rig_full(
+            |b| good_role(b, "PUT", "vip"),
+            Duration::from_secs(30),
+            Some(CredError::AmbiguousBinding),
+        )
+        .await;
+        mock_roles(&r.server).await;
+        mock_role_put(&r.server, "PUT", RAW_A, "222").await;
+        let e = r
+            .exec
+            .execute(&rq(&guild_role(true, &scope), 1))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e,
+            ExecError::Slot(SlotError::Refused("ambiguous_paired_guild")),
+            "{scope}"
+        );
+        assert_eq!(writes(&r.server).await, 0, "nothing was sent");
+    }
 }
 
 #[tokio::test]

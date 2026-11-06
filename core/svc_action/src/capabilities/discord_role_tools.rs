@@ -98,6 +98,10 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             {
                 Ok(_confirmed) => Ok(json!({"ok": true, "op": op.as_str()})),
                 Err(e) if e.code == "invalid_args" => Err(ToolRefusal::InvalidArgs(e.message)),
+                // Several paired guilds: a typed refusal, never a guess (and not retryable).
+                Err(e) if e.code == "ambiguous_paired_guild" => Err(ToolRefusal::Forbidden(
+                    format!("ambiguous_paired_guild: {}", e.message),
+                )),
                 Err(e) => Err(ToolRefusal::TargetUnavailable(format!(
                     "discord role tool refused: {}",
                     e.code
@@ -326,5 +330,67 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.code, "invalid_args");
         assert!(c.relay_queue.envelopes().is_empty());
+    }
+
+    /// A community with several paired guilds is refused with the typed `ambiguous_paired_guild`
+    /// (the drain acks it; the producer never guesses and never retries it as transient).
+    #[tokio::test]
+    async fn several_paired_guilds_are_a_typed_refusal() {
+        let c = caps(FakeRelayQueue::with_drain_result(
+            r#"{"ok":false,"code":"ambiguous_paired_guild"}"#,
+        ));
+        let r = c
+            .run_discord_role_tool(&discord_scope(), TOOL_ROLES_ADD, &args(json!({})))
+            .await
+            .unwrap();
+        match r {
+            Err(ToolRefusal::Forbidden(m)) => {
+                assert!(m.starts_with("ambiguous_paired_guild"), "{m}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Fail-closed origin rules for channel-less role ops (one platform field decides): a Discord
+    /// event with no valid source guild is refused; chat origins (twitch/youtube/...), unknown
+    /// and absent platforms can never reach `guild:-`; only the explicit external allowlist can.
+    #[tokio::test]
+    async fn channel_less_origins_are_allowlisted_and_discord_needs_a_guild() {
+        let cases: [(Option<&str>, Option<&str>, Option<&str>); 9] = [
+            // (platform, origin_guild_id, expected wire scope; None = refused invalid_args)
+            (Some("discord"), None, None),
+            (Some("discord"), Some("123"), Some("guild:123")),
+            (Some("wix"), None, Some("guild:-")),
+            (Some("wix"), Some("123"), Some("guild:-")),
+            (Some("twitch"), None, None),
+            (Some("youtube"), None, None),
+            (Some("kick"), Some("123"), None),
+            (Some("Wix"), None, None),
+            (None, None, None),
+        ];
+        for (platform, guild, want) in cases {
+            let c = caps(FakeRelayQueue::with_live_drain());
+            let mut sc = scope();
+            sc.origin_platform = platform.map(str::to_string);
+            sc.origin_channel_id = None;
+            sc.origin_guild_id = guild.map(str::to_string);
+            let r = c
+                .run_discord_role_tool(&sc, TOOL_ROLES_ADD, &args(json!({})))
+                .await
+                .unwrap();
+            match want {
+                Some(w) => {
+                    r.unwrap();
+                    assert_eq!(queued_scope(&c), w, "{platform:?} {guild:?}");
+                }
+                None => {
+                    assert!(
+                        matches!(r, Err(ToolRefusal::InvalidArgs(_))),
+                        "{platform:?} {guild:?}: {r:?}"
+                    );
+                    assert!(c.relay_queue.envelopes().is_empty(), "{platform:?} queued");
+                }
+            }
+        }
     }
 }

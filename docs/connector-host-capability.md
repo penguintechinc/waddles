@@ -398,11 +398,13 @@ By origin of the triggering event the producer stamps the MAC-covered wire scope
 |---|---|---|
 | Discord event with a channel (chat, interaction) | the channel snowflake | channel must belong to the binding's guild (`channel_not_owned`) |
 | Discord gateway event, no channel (`guild.member.update`, ...) | `guild:<source guild>` | source guild must equal the binding's guild (`guild_mismatch`); the op lands in the binding guild |
-| External event (Wix, ...) | `guild:-` | no assertion; the op can ONLY touch the community's binding guild |
+| External event (allowlist: `wix`) | `guild:-` | no assertion; the op can ONLY touch the community's binding guild |
+| Discord event with no valid source guild | refused `invalid_args` | never falls through to `guild:-` |
+| Twitch / YouTube / any other chat or unknown origin | refused `invalid_args` | cannot trigger role ops via `guild:-` |
 
 The source guild is host-derived from the delivered envelope (`payload.guild_id` of a `discord`
 event), never from tool args (a `guild_id` arg is `invalid_args`). A community with no binding, or
-whose binding cannot be resolved uniquely, is refused by the binding source (no guessing). The
+with SEVERAL paired guilds is refused with the typed `ambiguous_paired_guild` (never guessed). The
 `relay.push` role path is unchanged (still requires a channel).
 
 Other constraints: the user is the tokenized UUID (the host detokenizes for the drain); a role KEY

@@ -38,6 +38,7 @@ use super::role_guild_scope;
 use super::subst::SlotValue;
 use super::{DutyCx, DutyHook, ExecError, RequestTpl, SlotError};
 use crate::discord_rest::{classify_membership, is_snowflake, Membership};
+use crate::outbound_creds::CredError;
 use crate::outbound_creds_discord::{is_role_key, DiscordBinding, DiscordCredentialSource};
 use crate::outbound_ops::{EventKind, OutboundAction};
 
@@ -261,7 +262,11 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
             .creds
             .binding(Some(community))
             .await
-            .map_err(|e| ExecError::Slot(map_cred(e)))?;
+            .map_err(|e| match e {
+                // Several usable bindings for the community: the guild is never guessed.
+                CredError::AmbiguousBinding => refused("ambiguous_paired_guild"),
+                e => ExecError::Slot(map_cred(e)),
+            })?;
         Ok((community, b))
     }
 
