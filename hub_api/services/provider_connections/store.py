@@ -512,6 +512,40 @@ async def update_link(
     return refreshed
 
 
+async def invalidate_for_app(
+    db: Any, *, tenant_id: int, platform: str, client_id: str, reason: str, now: datetime
+) -> int:
+    """Kill every connection of ``tenant_id``/``platform`` minted under OAuth app ``client_id``.
+
+    One transaction: matching rows (``resource_metadata.client_id``) go ``expired`` with the fixed
+    ``reason`` and their sealed refresh token is DROPPED, so nothing keeps working -- or can be
+    refreshed -- under an application the admin just revoked. Tenant-scoped by the query itself.
+    Returns how many connections were invalidated.
+    """
+    t = _tables(db)
+    c = t.connections.c
+    async with db.engine.begin() as conn:
+        rows = (
+            await conn.execute(
+                select(c.id, c.resource_metadata).where(
+                    c.tenant_id == tenant_id, c.platform == platform
+                )
+            )
+        ).all()
+        ids = [
+            int(row.id)
+            for row in rows
+            if _as_dict(row.resource_metadata).get("client_id") == client_id
+        ]
+        if ids:
+            await conn.execute(
+                update(t.connections)
+                .where(c.tenant_id == tenant_id, c.id.in_(ids))
+                .values(status="expired", status_reason=reason, refresh_token=None, updated_at=now)
+            )
+    return len(ids)
+
+
 async def delete_for_community(
     db: Any, *, tenant_id: int, community_id: int, connection_id: int
 ) -> DeleteOutcome | None:

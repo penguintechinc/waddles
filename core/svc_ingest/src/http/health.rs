@@ -11,6 +11,7 @@ use axum::extract::State;
 use axum::Json;
 use serde::Serialize;
 
+use crate::connector_runtime::ready::PlatformSnapshot;
 use crate::error::ApiError;
 use crate::http::AppState;
 
@@ -70,6 +71,11 @@ pub struct ReceiverReadinessStatus {
 pub struct ReadyBody {
     pub status: &'static str,
     pub receivers: Vec<ReceiverReadinessStatus>,
+    /// Connector-runtime overlay platforms (enabled, executor_attached,
+    /// pinned_ok, desired, live, discovery_failed); absent when the runtime is
+    /// not enabled in this process.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overlays: Vec<PlatformSnapshot>,
 }
 
 /// `GET /readyz` -- real Kubernetes readiness: `503` while any *enabled*
@@ -100,7 +106,21 @@ pub async fn readyz(State(state): State<AppState>) -> (axum::http::StatusCode, J
             ready: r.twitch_outbound.is_ready(),
         },
     ];
-    let ok = r.all_ready();
+    let overlays = match crate::connector_runtime::ready::installed() {
+        Some(status) => status.snapshots(),
+        None => Vec::new(),
+    };
+    compose_ready(r.all_ready(), receivers, overlays)
+}
+
+/// Builds the `/readyz` answer: `503` unless every enabled receiver AND every
+/// enabled overlay platform is ready.
+fn compose_ready(
+    receivers_ok: bool,
+    receivers: Vec<ReceiverReadinessStatus>,
+    overlays: Vec<PlatformSnapshot>,
+) -> (axum::http::StatusCode, Json<ReadyBody>) {
+    let ok = receivers_ok && overlays.iter().all(|o| o.ready);
     let code = if ok {
         axum::http::StatusCode::OK
     } else {
@@ -111,6 +131,7 @@ pub async fn readyz(State(state): State<AppState>) -> (axum::http::StatusCode, J
         Json(ReadyBody {
             status: if ok { "ok" } else { "degraded" },
             receivers,
+            overlays,
         }),
     )
 }
@@ -184,6 +205,58 @@ mod tests {
         let (code, Json(body)) = readyz(State(state)).await;
         assert_eq!(code, axum::http::StatusCode::OK);
         assert_eq!(body.status, "ok");
+    }
+
+    fn snap(ready: bool) -> PlatformSnapshot {
+        PlatformSnapshot {
+            platform: "twitch",
+            enabled: true,
+            executor_attached: true,
+            pinned_ok: ready,
+            desired: 2,
+            live: u32::from(ready),
+            discovery_failed: false,
+            ready,
+            reason: if ready {
+                None
+            } else {
+                Some("digest_unverified")
+            },
+        }
+    }
+
+    #[test]
+    fn readyz_is_degraded_when_an_overlay_platform_is_not_ready() {
+        let (code, Json(body)) = compose_ready(true, vec![], vec![snap(false)]);
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "degraded");
+        let v = serde_json::to_value(&body).unwrap();
+        let o = &v["overlays"][0];
+        for k in [
+            "enabled",
+            "executor_attached",
+            "pinned_ok",
+            "desired",
+            "live",
+            "discovery_failed",
+        ] {
+            assert!(o.get(k).is_some(), "overlay field {k} missing");
+        }
+        assert_eq!(o["reason"], "digest_unverified");
+    }
+
+    #[test]
+    fn readyz_is_ok_when_overlays_and_receivers_are_ready_and_omits_empty_overlays() {
+        let (code, _) = compose_ready(true, vec![], vec![snap(true)]);
+        assert_eq!(code, axum::http::StatusCode::OK);
+        let (code, Json(body)) = compose_ready(true, vec![], vec![]);
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert!(serde_json::to_value(&body)
+            .unwrap()
+            .get("overlays")
+            .is_none());
+        let (code, _) = compose_ready(false, vec![], vec![snap(true)]);
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
