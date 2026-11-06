@@ -31,6 +31,7 @@ identically regardless of write history).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -44,8 +45,15 @@ from config import HubAPIConfig
 from services import community_access, overlay_service
 from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
-from services.errors import ApiError, bad_request, payment_required
-from services.overlay_service import OverlayRecord, OverlayStats
+from services.errors import ApiError, bad_request, not_found, payment_required
+from services.overlay_service import (
+    BROWSER_SOURCE_SURFACES,
+    BrowserSourceRecord,
+    OverlayRecord,
+    OverlayStats,
+)
+
+logger = logging.getLogger(__name__)
 
 overlay_bp = Blueprint("v1_overlay", __name__, url_prefix="/api/v1/admin")
 
@@ -84,6 +92,16 @@ async def _require_admin(community_id: int) -> int:
     return user_id
 
 
+async def _require_admin_or_404(community_id: int) -> int:
+    """`_require_admin`, but a refusal reads as 404 so a foreign community's id is not an oracle."""
+    try:
+        return await _require_admin(community_id)
+    except ApiError as exc:
+        if exc.status_code == 403:
+            raise not_found("Community not found") from exc
+        raise
+
+
 @dataclass(slots=True, frozen=True)
 class UpdateOverlayRequest:
     """Request DTO for `PUT /:communityId/overlay` -- camelCase, matches Node's `req.body`."""
@@ -116,6 +134,78 @@ class OverlayStatsResponse:
 
     success: bool
     stats: OverlayStats
+
+
+@dataclass(slots=True, frozen=True)
+class RegenerateBrowserSourcesRequest:
+    """Request DTO for `POST /:communityId/browser-sources/regenerate`."""
+
+    sourceType: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class BrowserSourcesResponse:
+    """Response DTO for `GET /:communityId/browser-sources` -- `{success, sources}`."""
+
+    success: bool
+    sources: list[BrowserSourceRecord]
+
+
+@dataclass(slots=True, frozen=True)
+class RegenerateBrowserSourcesResponse:
+    """Response DTO for regenerate -- `{success, message}`; no key is echoed back."""
+
+    success: bool
+    message: str
+
+
+@overlay_bp.route("/<int:community_id>/browser-sources", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+async def get_browser_sources(community_id: int) -> Any:
+    """List browser-source URLs (ticker/media/general) for a community admin."""
+    try:
+        await _require_admin_or_404(community_id)
+        ctx = get_tenant_context(request)
+        assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
+        if not await feature_enabled(FEATURE_STREAMING_OVERLAYS, tenant=ctx.tenant_slug):
+            raise payment_required("Browser-source overlays are not enabled for this plan")
+        async_dal, dal = _dal()
+        sources = await overlay_service.get_browser_sources(
+            async_dal, dal, _cfg(), community_id=community_id
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return jsonify_dto(BrowserSourcesResponse(success=True, sources=sources))
+
+
+@overlay_bp.route("/<int:community_id>/browser-sources/regenerate", methods=["POST"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope(SCOPE_ADMIN)  # type: ignore[misc]
+@validate_request(RegenerateBrowserSourcesRequest)
+async def regenerate_browser_sources(
+    community_id: int, data: RegenerateBrowserSourcesRequest
+) -> Any:
+    """Rotate the view key behind every browser-source URL (one credential per community)."""
+    if data.sourceType is not None and data.sourceType not in BROWSER_SOURCE_SURFACES:
+        return _err(bad_request("Unknown sourceType"))
+    try:
+        await _require_admin_or_404(community_id)
+        ctx = get_tenant_context(request)
+        assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
+        if not await feature_enabled(FEATURE_STREAMING_OVERLAYS, tenant=ctx.tenant_slug):
+            raise payment_required("Browser-source overlays are not enabled for this plan")
+        async_dal, dal = _dal()
+        await overlay_service.get_or_create_overlay(
+            async_dal, dal, _cfg(), community_id=community_id
+        )
+        await overlay_service.rotate_overlay_key(async_dal, dal, _cfg(), community_id=community_id)
+    except ApiError as exc:
+        return _err(exc)
+    logger.info("browser_sources_regenerated", extra={"community_id": community_id})
+    return jsonify_dto(
+        RegenerateBrowserSourcesResponse(success=True, message="Browser source keys regenerated")
+    )
 
 
 @overlay_bp.route("/<int:community_id>/overlay", methods=["GET"])
