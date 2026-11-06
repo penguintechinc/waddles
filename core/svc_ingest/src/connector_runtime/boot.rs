@@ -588,6 +588,8 @@ where
         frame_metrics: Some(frame_metrics),
         webhook,
         activator: Some(Arc::new(TableActivator(deps.bridge.active))),
+        // Spectrum is not an enabled boot platform yet (selector slice): no store.
+        spectrum: None,
     };
     ConnectorRuntime::new(runtime_deps, settings.runtime_config()).map_err(|e| match e {
         RuntimeError::Config(m) => BootError::Malformed(m),

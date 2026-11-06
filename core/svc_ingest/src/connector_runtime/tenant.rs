@@ -48,6 +48,7 @@ pub fn source_key_of(d: &DesiredConnection) -> Option<&str> {
     match &d.plan {
         TransportPlan::Ws(c) => Some(&c.source_key),
         TransportPlan::Poll(c) => Some(&c.source_key),
+        TransportPlan::Spectrum(s) => Some(&s.poll.source_key),
         TransportPlan::Webhook(_) => None,
     }
 }

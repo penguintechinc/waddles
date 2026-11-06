@@ -54,6 +54,8 @@ pub mod registry;
 pub mod secrets;
 pub mod sender_exec;
 pub mod sink;
+pub mod spectrum;
+pub mod spectrum_org;
 pub mod transport;
 pub(crate) mod transport_common;
 pub mod types;

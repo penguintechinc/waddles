@@ -460,6 +460,7 @@ struct Opts {
     secrets_fail: bool,
     tenants: Arc<FakeTenants>,
     activator: Option<Arc<dyn ConnectionActivator>>,
+    spectrum: Option<Arc<dyn crate::connector::spectrum::SpectrumStore>>,
 }
 
 impl Default for Opts {
@@ -471,6 +472,7 @@ impl Default for Opts {
             secrets_fail: false,
             tenants: FakeTenants::ok(1),
             activator: None,
+            spectrum: None,
         }
     }
 }
@@ -546,6 +548,7 @@ fn start(sh: &Shared3, cfg: RuntimeConfig, owner: &str, opts: Opts) -> Running {
         RuntimeDeps {
             gates: None,
             activator: opts.activator.clone(),
+            spectrum: opts.spectrum.clone(),
             feed: FakeFeed(sh.feed.clone()),
             invoker: Arc::new(FakeInvoker),
             registry: Arc::new(registry),
@@ -1124,6 +1127,7 @@ async fn construction_rejects_an_invalid_config() {
         RuntimeDeps {
             gates: None,
             activator: None,
+            spectrum: None,
             feed: FakeFeed(sh.feed.clone()),
             invoker: Arc::new(FakeInvoker),
             registry: Arc::new(ConnectorRegistry::new()),
@@ -1175,6 +1179,7 @@ fn core_rig(cfg: RuntimeConfig) -> (TestCore, Arc<LeaseStore>, RuntimeMetrics) {
         RuntimeDeps {
             gates: None,
             activator: None,
+            spectrum: None,
             feed: FakeFeed(sh3.feed.clone()),
             invoker: Arc::new(FakeInvoker),
             registry: Arc::new(ConnectorRegistry::new()),

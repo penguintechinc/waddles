@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 use super::metrics::{saturating_u32, RuntimeMetrics, SkipReason};
 use super::plan::{ConnectorProfile, RuntimeEnv};
+use crate::connector::spectrum::SpectrumSpec;
 use crate::connector::webhook::WebhookRoute;
 use crate::connector::{PollConfig, WsConfig};
 
@@ -46,6 +47,8 @@ pub enum TransportPlan {
     Poll(Box<PollConfig>),
     /// Verified webhook route bound to a transport.
     Webhook(Box<WebhookPlan>),
+    /// Polling with host-side dedupe/priming or snapshot diffing (Spectrum).
+    Spectrum(Box<SpectrumPlan>),
 }
 
 impl TransportPlan {
@@ -56,8 +59,17 @@ impl TransportPlan {
             Self::Ws(_) => "ws",
             Self::Poll(_) => "poll",
             Self::Webhook(_) => "webhook",
+            Self::Spectrum(_) => "spectrum",
         }
     }
+}
+
+/// A stateful poll: the poll config plus the host-owned dedupe/diff spec.
+pub struct SpectrumPlan {
+    /// The poll transport configuration.
+    pub poll: PollConfig,
+    /// Dedupe / snapshot behaviour and the community-scoped store key.
+    pub spec: SpectrumSpec,
 }
 
 /// A webhook route the runtime must register and bind.
@@ -138,6 +150,7 @@ fn claim_of(d: &DesiredConnection) -> Claim {
         TransportPlan::Ws(c) => Claim::Resource(c.source_key.clone()),
         TransportPlan::Poll(c) => Claim::Resource(c.source_key.clone()),
         TransportPlan::Webhook(w) => Claim::Route(w.route.route_key.clone()),
+        TransportPlan::Spectrum(s) => Claim::Resource(s.poll.source_key.clone()),
     }
 }
 

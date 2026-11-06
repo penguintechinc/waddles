@@ -79,6 +79,12 @@ pub struct PollRequest {
     /// anchored handle (`PollConfig::handles`) and placed as a sensitive
     /// header with the configured literal prefix (e.g. `Cookie: Rsi-Token=`).
     pub extra_auth: Vec<PollAuth>,
+    /// Host-owned page cursor: the name of a TOP-LEVEL integer field of
+    /// `json_body` the host overwrites per page ([`PollTransport::fetch_page`]).
+    /// The substitution is a typed JSON number written by the transport; no
+    /// guest or metadata value ever reaches the body, URL or headers. Requires
+    /// `json_body` to be a JSON object that already carries the field.
+    pub page_field: Option<String>,
 }
 
 impl PollRequest {
@@ -90,6 +96,18 @@ impl PollRequest {
             }
             serde_json::from_slice::<serde_json::Value>(b)
                 .map_err(|_| TransportError::Connect("request body is not JSON".into()))?;
+        }
+        if let Some(field) = &self.page_field {
+            let ok = self
+                .json_body
+                .as_deref()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+                .is_some_and(|v| v.get(field.as_str()).is_some_and(serde_json::Value::is_u64));
+            if !ok {
+                return Err(TransportError::Connect(
+                    "page field must be an integer member of the JSON body".into(),
+                ));
+            }
         }
         for a in &self.extra_auth {
             let name = HeaderName::from_bytes(a.header.as_bytes())
@@ -302,11 +320,12 @@ impl<S: TransportSecretSource> PollTransport<S> {
     /// One authenticated request to `url` (the poll URL with its cursor, or the
     /// rediscovery URL) through the pinned client: the query secret and the
     /// auth header are resolved per request and never leave this function.
-    /// `shaped` applies the host-configured request shape (POST body + extra
-    /// credential headers) to poll requests; rediscovery is always a plain GET.
+    /// `body` = JSON POST body (`None` = GET); `shaped` adds the host-configured
+    /// extra credential headers. Rediscovery is always a plain GET without them.
     async fn send_authed(
         &self,
         mut url: reqwest::Url,
+        body: Option<Vec<u8>>,
         shaped: bool,
     ) -> Result<reqwest::Response, TransportError> {
         let client = self.pinned_client().await?;
@@ -327,12 +346,11 @@ impl<S: TransportSecretSource> PollTransport<S> {
             // `Url` owns a non-zeroizing copy until it drops after the send.
             url.query_pairs_mut().append_pair(&q.param, secret.expose());
         }
-        let body = self.cfg.request.json_body.as_ref().filter(|_| shaped);
         let mut req = match body {
             Some(body) => client
                 .post(url)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body.clone()),
+                .body(body),
             None => client.get(url),
         };
         if let Some(a) = &self.cfg.auth {
@@ -392,7 +410,7 @@ impl<S: TransportSecretSource> PollTransport<S> {
         else {
             return Err(TransportError::Fatal("rediscovery not configured".into()));
         };
-        let mut resp = self.send_authed(url, false).await?;
+        let mut resp = self.send_authed(url, None, false).await?;
         let status = resp.status();
         if matches!(status.as_u16(), 401 | 403) {
             self.count("poll_rediscover", "rejected");
@@ -424,12 +442,13 @@ impl<S: TransportSecretSource> PollTransport<S> {
     }
 
     /// One request; `Ok(None)` = nothing new.
-    async fn fetch(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+    async fn fetch(&mut self, page: Option<u32>) -> Result<Option<Vec<u8>>, TransportError> {
+        let body_bytes = self.request_body(page)?;
         let mut url = self.url.clone();
         if let (Some(p), Some(c)) = (&self.cfg.cursor_param, &self.committed) {
             url.query_pairs_mut().append_pair(p, c);
         }
-        let mut resp = self.send_authed(url, true).await?;
+        let mut resp = self.send_authed(url, body_bytes, true).await?;
         let status = resp.status();
         let code = status.as_u16();
         // Host-classified error responses (e.g. quota 403 -> back off, not
@@ -555,6 +574,78 @@ impl<S: TransportSecretSource> PollTransport<S> {
         Ok(Some(body))
     }
 
+    /// The request body for this poll: the configured JSON body with the
+    /// host-owned page field (when configured) set to `page`. A page without a
+    /// configured page field is refused loudly, never silently ignored.
+    fn request_body(&self, page: Option<u32>) -> Result<Option<Vec<u8>>, TransportError> {
+        let Some(page) = page else {
+            return Ok(self.cfg.request.json_body.clone());
+        };
+        let (Some(field), Some(raw)) = (&self.cfg.request.page_field, &self.cfg.request.json_body)
+        else {
+            return Err(TransportError::Fatal("paging is not configured".into()));
+        };
+        let mut v: serde_json::Value = serde_json::from_slice(raw)
+            .map_err(|_| TransportError::Fatal("request body is not JSON".into()))?;
+        let obj = v
+            .as_object_mut()
+            .ok_or_else(|| TransportError::Fatal("request body is not an object".into()))?;
+        obj.insert(field.clone(), serde_json::Value::from(page));
+        serde_json::to_vec(&v)
+            .map(Some)
+            .map_err(|_| TransportError::Fatal("request body not serializable".into()))
+    }
+
+    /// Opaque `source_id` of this poll source (host hash, never the raw key).
+    #[must_use]
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    /// Sleeps out any classified back-off and the poll interval. Cancel-safe:
+    /// both deadlines live on `self`, so a cancelled wait resumes the same one.
+    async fn wait_turn(&mut self) {
+        if let Some(until) = self.backoff_until {
+            tokio::time::sleep_until(until).await;
+            self.backoff_until = None;
+        }
+        if let Some(t) = self.last_poll {
+            // interval is validated <= 24h, so overflow is unreachable;
+            // checked_add keeps it total regardless.
+            match t.checked_add(self.interval_now) {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => tokio::time::sleep(self.interval_now).await,
+            }
+        }
+    }
+
+    /// Snapshot paging: waits out back-off + the interval when `first`
+    /// (`gap` otherwise, the inter-page courtesy delay), then fetches ONE page
+    /// whose number the HOST writes into the body's page field. `Ok(None)` =
+    /// nothing usable (back-off classified, empty/204 body): the caller must
+    /// abandon the cycle rather than diff a partial snapshot.
+    ///
+    /// # Errors
+    /// The same classes as [`Transport::next_frame`]; also fatal when paging is
+    /// not configured.
+    pub async fn fetch_page(
+        &mut self,
+        page: u32,
+        first: bool,
+        gap: Duration,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
+        if first {
+            self.wait_turn().await;
+        } else {
+            tokio::time::sleep(gap).await;
+        }
+        self.pending = None;
+        self.pending_digest = None;
+        let res = self.fetch(Some(page)).await;
+        self.last_poll = Some(Instant::now());
+        res
+    }
+
     /// Reads a response body up to the size ceiling.
     async fn read_body(&self, resp: &mut reqwest::Response) -> Result<Vec<u8>, TransportError> {
         let mut body = Vec::new();
@@ -622,23 +713,10 @@ impl<S: TransportSecretSource + 'static> Transport for PollTransport<S> {
 
     async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
         loop {
-            if let Some(until) = self.backoff_until {
-                // Cancel-safe: the deadline lives on self, so a cancelled
-                // read resumes the same wait.
-                tokio::time::sleep_until(until).await;
-                self.backoff_until = None;
-            }
-            if let Some(t) = self.last_poll {
-                // interval is validated <= 24h, so overflow is unreachable;
-                // checked_add keeps it total regardless.
-                match t.checked_add(self.interval_now) {
-                    Some(at) => tokio::time::sleep_until(at).await,
-                    None => tokio::time::sleep(self.interval_now).await,
-                }
-            }
+            self.wait_turn().await;
             self.pending = None;
             self.pending_digest = None;
-            let res = self.fetch().await;
+            let res = self.fetch(None).await;
             self.last_poll = Some(Instant::now());
             if let Some(body) = res? {
                 return Ok(Some(body));
@@ -1110,6 +1188,7 @@ mod tests {
                 prefix: "Rsi-Token=".into(),
                 handle: "h1".into(),
             }],
+            page_field: None,
         };
         c
     }
@@ -1161,6 +1240,20 @@ mod tests {
             Box::new(|r| r.extra_auth[0].header = "Content-Type".into()),
             Box::new(|r| r.extra_auth[0].header = "Host".into()),
             Box::new(|r| r.extra_auth[0].handle = "nope".into()),
+            // page field must name an integer member of the body
+            Box::new(|r| r.page_field = Some("page".into())),
+            Box::new(|r| {
+                r.json_body = Some(br#"{"page":"1"}"#.to_vec());
+                r.page_field = Some("page".into());
+            }),
+            Box::new(|r| {
+                r.json_body = Some(b"[1]".to_vec());
+                r.page_field = Some("page".into());
+            }),
+            Box::new(|r| {
+                r.json_body = None;
+                r.page_field = Some("page".into());
+            }),
         ];
         for (i, f) in bad.iter().enumerate() {
             let mut c = post_cfg(addr);
@@ -1181,5 +1274,46 @@ mod tests {
         t.on_frame_outcome(FrameOutcome::Published).await;
         let again = tokio::time::timeout(Duration::from_millis(120), t.next_frame()).await;
         assert!(again.is_err(), "identical POST window re-published");
+    }
+
+    #[tokio::test]
+    async fn host_writes_the_page_number_and_refuses_unconfigured_paging() {
+        let (addr, srv) = start_post().await;
+        let mut c = post_cfg(addr);
+        c.request.json_body = Some(br#"{"channel_id":"7","page":1}"#.to_vec());
+        c.request.page_field = Some("page".into());
+        let mut t = PollTransport::new(c, CountingSecrets(Arc::new(AtomicUsize::new(0)))).unwrap();
+        assert!(
+            !t.source_id().contains("room"),
+            "source id is the opaque hash"
+        );
+        t.fetch_page(1, true, Duration::ZERO).await.unwrap();
+        t.fetch_page(3, false, Duration::from_millis(1))
+            .await
+            .unwrap();
+        let bodies: Vec<String> = srv
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.2.clone())
+            .collect();
+        assert_eq!(bodies.len(), 2);
+        for (b, want) in bodies.iter().zip([1u64, 3]) {
+            let v: serde_json::Value = serde_json::from_str(b).unwrap();
+            assert_eq!(v["page"], want);
+            assert_eq!(v["channel_id"], "7", "only the page field changes");
+        }
+        // a plain next_frame still sends the configured (page 1) body
+        t.next_frame().await.unwrap();
+
+        let mut c = post_cfg(addr);
+        c.request.page_field = None;
+        let mut t = PollTransport::new(c, CountingSecrets(Arc::new(AtomicUsize::new(0)))).unwrap();
+        let e = t.fetch_page(2, true, Duration::ZERO).await.unwrap_err();
+        assert!(
+            e.is_fatal(),
+            "paging without a page field is refused: {e:?}"
+        );
     }
 }

@@ -17,7 +17,13 @@ use crate::twitch_sessions::lease::{LeaseError, SessionLease, RESPONSE_TIMEOUT};
 const KEY_PREFIX: &str = "waddles:ingest:connector:";
 
 /// `(slug, namespace)` for every platform the runtime may supervise.
-const PLATFORMS: [(&str, i64); 4] = [("twitch", 1), ("discord", 2), ("youtube", 3), ("wix", 4)];
+const PLATFORMS: [(&str, i64); 5] = [
+    ("twitch", 1),
+    ("discord", 2),
+    ("youtube", 3),
+    ("wix", 4),
+    ("spectrum", 5),
+];
 
 const RENEW_LUA: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then \
 return redis.call('PEXPIRE', KEYS[1], ARGV[2]) else return 0 end";
