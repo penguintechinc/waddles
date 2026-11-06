@@ -11,13 +11,18 @@
 //! never logged or put in an error; logs use [`channel_fingerprint`].
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::time::Duration;
 
-use connection_resolver::{BindingSummary, ConnectionKind, ConnectionRef};
+use connection_resolver::{BindingSummary, ConnectionKind, ConnectionRef, SecretString};
 use sha2::{Digest, Sha256};
 
+use crate::connector::secrets::{Destination, ResolvedAuth};
 use crate::connector::transport_common::FrameRules;
-use crate::connector::{AutoReplyRule, SelfEchoFilter, SessionRules, WsConfig};
+use crate::connector::webhook::{BoxFut, SecretError};
+use crate::connector::{
+    AutoReplyRule, SelfEchoFilter, SessionRules, TransportSecretSource, WsConfig,
+};
 use crate::connector_runtime::feed::{ConnKey, DesiredConnection, TransportPlan};
 use crate::connector_runtime::plan::{OverlayProfile, PlanError, RuntimeEnv};
 
@@ -37,7 +42,7 @@ pub const SLOT_PREFIXES: [&str; 3] = ["PASS oauth:", "NICK ", "JOIN #"];
 pub const META_CHANNEL: &str = "channel";
 /// Binding metadata key: the IRC nick the token authenticates as.
 pub const META_BOT_LOGIN: &str = "bot_login";
-/// Binding metadata key: the owning tenant (numeric).
+/// Binding metadata key: an OPTIONAL tenant claim, cross-checked only.
 pub const META_TENANT_ID: &str = "tenant_id";
 /// Binding metadata key: opaque credential version (rotation marker).
 pub const META_SECRET_VERSION: &str = "secret_version";
@@ -63,9 +68,43 @@ const MAX_LOGIN_LEN: usize = 25;
 /// Longest accepted secret-version marker.
 const MAX_VERSION_LEN: usize = 64;
 
+/// Host-side, server-derived community -> tenant mapping. The tenant is NEVER
+/// taken from editable binding metadata: the supervisor supplies the same
+/// resolver it uses for the per-connection sink scope.
+pub trait TenantSource: Send + Sync {
+    /// The tenant owning `community_id`, or `None` when not (yet) known.
+    fn tenant_of(&self, community_id: i64) -> Option<i64>;
+}
+
+impl<F> TenantSource for F
+where
+    F: Fn(i64) -> Option<i64> + Send + Sync,
+{
+    fn tenant_of(&self, community_id: i64) -> Option<i64> {
+        self(community_id)
+    }
+}
+
 /// The Twitch IRC chat-ingest profile.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TwitchProfile;
+#[derive(Clone)]
+pub struct TwitchProfile {
+    tenants: Arc<dyn TenantSource>,
+}
+
+impl TwitchProfile {
+    /// Builds the profile over the host's community -> tenant source.
+    #[must_use]
+    pub fn new(tenants: Arc<dyn TenantSource>) -> Self {
+        Self { tenants }
+    }
+}
+
+/// Synthetic `connection_id` of the non-secret `nick` handle. Never a real row
+/// (real ids are positive) and never sent to the resolver: only
+/// [`TwitchFieldSecrets`] answers it.
+pub const NICK_CONN_ID: i64 = -1;
+/// Synthetic `connection_id` of the non-secret `channel` handle.
+pub const CHANNEL_CONN_ID: i64 = -2;
 
 /// Lowercases ASCII, strips ONE leading `#`, and requires `^[a-z0-9_]{1,25}$`
 /// with no trimming: whitespace, CR/LF, commas, non-ASCII and over-length
@@ -95,13 +134,29 @@ fn required<'a>(m: &'a BTreeMap<String, String>, key: &'static str) -> Result<&'
         .ok_or(PlanError::MissingKey(key))
 }
 
-/// Parses the strictly-positive numeric tenant id.
-fn tenant_id(m: &BTreeMap<String, String>) -> Result<i64, PlanError> {
-    let raw = required(m, META_TENANT_ID)?;
-    match raw.parse::<i64>() {
-        Ok(t) if t > 0 && raw.bytes().all(|b| b.is_ascii_digit()) => Ok(t),
-        _ => Err(PlanError::InvalidValue(META_TENANT_ID)),
+/// Resolves the tenant from the host's community mapping. Binding metadata is
+/// editable, so it is never authoritative: a `tenant_id` key, when present, must
+/// AGREE with the host's answer or the binding is refused.
+fn resolve_tenant(
+    tenants: &dyn TenantSource,
+    community_id: i64,
+    m: &BTreeMap<String, String>,
+) -> Result<i64, PlanError> {
+    let tenant = tenants
+        .tenant_of(community_id)
+        .filter(|t| *t > 0)
+        .ok_or(PlanError::Config("tenant for community is unresolved"))?;
+    if let Some(raw) = m.get(META_TENANT_ID) {
+        let claimed = if raw.bytes().all(|b| b.is_ascii_digit()) {
+            raw.parse::<i64>().ok()
+        } else {
+            None
+        };
+        if claimed != Some(tenant) {
+            return Err(PlanError::InvalidValue(META_TENANT_ID));
+        }
     }
+    Ok(tenant)
 }
 
 /// The optional credential version marker (`[A-Za-z0-9._-]{1,64}`); absent is
@@ -208,6 +263,91 @@ fn fingerprint(cfg: &WsConfig, tenant: i64, version: Option<&str>) -> u64 {
     u64::from_be_bytes(b)
 }
 
+/// Handle-aware credential source for one Twitch connection. Wraps the real
+/// source and enforces that ONLY the `pass` handle's ref reaches it: the
+/// `nick`/`channel` handles are answered from the validated logins carried by
+/// the derived [`WsConfig`] and can never return the OAuth secret. Any other ref
+/// is refused. Holds logins (PII), so it has no `Debug`.
+pub struct TwitchFieldSecrets<S: TransportSecretSource> {
+    inner: S,
+    pass: ConnectionRef,
+    nick: ConnectionRef,
+    channel: ConnectionRef,
+    nick_value: String,
+    channel_value: String,
+}
+
+impl<S: TransportSecretSource> TwitchFieldSecrets<S> {
+    /// Builds the source from a config this profile derived, re-validating
+    /// every value it will release.
+    pub fn from_config(inner: S, cfg: &WsConfig) -> Result<Self, PlanError> {
+        let handle = |name: &'static str| {
+            cfg.handles
+                .get(name)
+                .copied()
+                .ok_or(PlanError::Config("twitch handle missing"))
+        };
+        let (pass, nick, channel) = (
+            handle(HANDLE_PASS)?,
+            handle(HANDLE_NICK)?,
+            handle(HANDLE_CHANNEL)?,
+        );
+        let synthetic = |r: ConnectionRef, id: i64| {
+            r.community_id == pass.community_id && r.connection_id == id
+        };
+        if pass.connection_id <= 0
+            || !synthetic(nick, NICK_CONN_ID)
+            || !synthetic(channel, CHANNEL_CONN_ID)
+        {
+            return Err(PlanError::Config("twitch handle refs are not canonical"));
+        }
+        let nick_value = match &cfg.self_echo {
+            Some(e) => normalize_login(&e.self_id, META_BOT_LOGIN)?,
+            None => return Err(PlanError::MissingKey(META_BOT_LOGIN)),
+        };
+        let channel_value = match cfg.source_key.strip_prefix("twitch:") {
+            Some(c) => normalize_login(c, META_CHANNEL)?,
+            None => return Err(PlanError::InvalidValue(META_CHANNEL)),
+        };
+        Ok(Self {
+            inner,
+            pass,
+            nick,
+            channel,
+            nick_value,
+            channel_value,
+        })
+    }
+}
+
+impl<S: TransportSecretSource> TransportSecretSource for TwitchFieldSecrets<S> {
+    fn resolve(
+        &self,
+        requested: ConnectionRef,
+        dest: Destination,
+    ) -> BoxFut<'_, Result<ResolvedAuth, SecretError>> {
+        if requested == self.pass {
+            return self.inner.resolve(requested, dest);
+        }
+        let value = if requested == self.nick {
+            Some(&self.nick_value)
+        } else if requested == self.channel {
+            Some(&self.channel_value)
+        } else {
+            None
+        };
+        Box::pin(async move {
+            match value {
+                Some(v) => Ok(ResolvedAuth {
+                    secret: SecretString::new(v.clone()),
+                    header: None,
+                }),
+                None => Err(SecretError::Missing),
+            }
+        })
+    }
+}
+
 impl OverlayProfile for TwitchProfile {
     fn platform(&self) -> &'static str {
         PLATFORM
@@ -249,7 +389,7 @@ impl OverlayProfile for TwitchProfile {
         }
         let channel = normalize_login(required(&b.metadata, META_CHANNEL)?, META_CHANNEL)?;
         let bot_login = normalize_login(required(&b.metadata, META_BOT_LOGIN)?, META_BOT_LOGIN)?;
-        let tenant = tenant_id(&b.metadata)?;
+        let tenant = resolve_tenant(self.tenants.as_ref(), b.community_id, &b.metadata)?;
         let version = secret_version(&b.metadata)?;
 
         let conn = ConnectionRef {
@@ -273,10 +413,25 @@ impl OverlayProfile for TwitchProfile {
             // Identifies the upstream resource: the feed fails closed when two
             // communities claim the same Twitch channel.
             source_key: format!("{PLATFORM}:{channel}"),
+            // Only `pass` reaches the credential. nick/channel are synthetic refs
+            // answered by `TwitchFieldSecrets` from validated metadata, so no
+            // slot other than `pass` can ever resolve to the OAuth secret.
             handles: HashMap::from([
                 (HANDLE_PASS.to_owned(), conn),
-                (HANDLE_NICK.to_owned(), conn),
-                (HANDLE_CHANNEL.to_owned(), conn),
+                (
+                    HANDLE_NICK.to_owned(),
+                    ConnectionRef {
+                        community_id: b.community_id,
+                        connection_id: NICK_CONN_ID,
+                    },
+                ),
+                (
+                    HANDLE_CHANNEL.to_owned(),
+                    ConnectionRef {
+                        community_id: b.community_id,
+                        connection_id: CHANNEL_CONN_ID,
+                    },
+                ),
             ]),
             resume_token: None,
             connect_timeout: CONNECT_TIMEOUT,
@@ -318,6 +473,10 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
+    fn profile() -> TwitchProfile {
+        TwitchProfile::new(Arc::new(|_c: i64| Some(42)))
+    }
+
     fn env() -> RuntimeEnv {
         RuntimeEnv {
             environment: "alpha".into(),
@@ -342,7 +501,7 @@ mod tests {
     }
 
     fn one(b: &BindingSummary, e: &RuntimeEnv) -> (DesiredConnection, WsConfig) {
-        let mut v = TwitchProfile.plan(b, e).expect("plan ok");
+        let mut v = profile().plan(b, e).expect("plan ok");
         assert_eq!(v.len(), 1);
         let d = v.remove(0);
         let TransportPlan::Ws(cfg) = &d.plan else {
@@ -354,7 +513,7 @@ mod tests {
 
     #[test]
     fn identity_matches_the_legacy_discover() {
-        let p = TwitchProfile;
+        let p = profile();
         assert_eq!(
             (p.platform(), p.app_id(), p.provider(), p.capability()),
             (
@@ -412,8 +571,20 @@ mod tests {
             cfg.handles,
             HashMap::from([
                 ("pass".to_owned(), conn),
-                ("nick".to_owned(), conn),
-                ("channel".to_owned(), conn)
+                (
+                    "nick".to_owned(),
+                    ConnectionRef {
+                        community_id: 7,
+                        connection_id: NICK_CONN_ID
+                    }
+                ),
+                (
+                    "channel".to_owned(),
+                    ConnectionRef {
+                        community_id: 7,
+                        connection_id: CHANNEL_CONN_ID
+                    }
+                )
             ])
         );
         assert_eq!(cfg.heartbeat_interval, Some(Duration::from_secs(120)));
@@ -500,7 +671,7 @@ mod tests {
                 let mut b = binding(1, 2, "chan", "bot");
                 b.metadata.insert(key.to_owned(), bad.to_owned());
                 assert_eq!(
-                    TwitchProfile.plan(&b, &env()).err(),
+                    profile().plan(&b, &env()).err(),
                     Some(PlanError::InvalidValue(if key == META_CHANNEL {
                         META_CHANNEL
                     } else {
@@ -515,13 +686,9 @@ mod tests {
     #[test]
     fn max_length_login_is_accepted_and_one_more_is_not() {
         let ok = "a".repeat(25);
-        assert!(TwitchProfile
-            .plan(&binding(1, 2, &ok, "bot"), &env())
-            .is_ok());
+        assert!(profile().plan(&binding(1, 2, &ok, "bot"), &env()).is_ok());
         let bad = "a".repeat(26);
-        assert!(TwitchProfile
-            .plan(&binding(1, 2, &bad, "bot"), &env())
-            .is_err());
+        assert!(profile().plan(&binding(1, 2, &bad, "bot"), &env()).is_err());
     }
 
     #[test]
@@ -530,7 +697,7 @@ mod tests {
         let mut b = binding(1, 2, "chan", "bot");
         b.metadata
             .insert(META_CHANNEL.to_owned(), secret.to_owned());
-        let e = TwitchProfile.plan(&b, &env()).err().unwrap();
+        let e = profile().plan(&b, &env()).err().unwrap();
         assert!(!format!("{e} {e:?}").contains("secret"));
     }
 
@@ -539,49 +706,56 @@ mod tests {
         let mut b = binding(1, 2, "c", "b");
         b.provider = "discord".into();
         assert_eq!(
-            TwitchProfile.plan(&b, &env()).err(),
+            profile().plan(&b, &env()).err(),
             Some(PlanError::WrongProvider)
         );
         let mut b = binding(1, 2, "c", "b");
         b.kind = ConnectionKind::ExternalHttp;
+        assert_eq!(profile().plan(&b, &env()).err(), Some(PlanError::WrongKind));
         assert_eq!(
-            TwitchProfile.plan(&b, &env()).err(),
-            Some(PlanError::WrongKind)
-        );
-        assert_eq!(
-            TwitchProfile.plan(&binding(0, 2, "c", "b"), &env()).err(),
+            profile().plan(&binding(0, 2, "c", "b"), &env()).err(),
             Some(PlanError::InvalidValue("community_id"))
         );
         assert_eq!(
-            TwitchProfile.plan(&binding(1, -1, "c", "b"), &env()).err(),
+            profile().plan(&binding(1, -1, "c", "b"), &env()).err(),
             Some(PlanError::InvalidValue("connection_id"))
         );
     }
 
     #[test]
     fn missing_keys_are_named() {
-        for key in [META_CHANNEL, META_BOT_LOGIN, META_TENANT_ID] {
+        for key in [META_CHANNEL, META_BOT_LOGIN] {
             let mut b = binding(1, 2, "c", "b");
             b.metadata.remove(key);
-            let want = match key {
-                META_CHANNEL => META_CHANNEL,
-                META_BOT_LOGIN => META_BOT_LOGIN,
-                _ => META_TENANT_ID,
+            let want = if key == META_CHANNEL {
+                META_CHANNEL
+            } else {
+                META_BOT_LOGIN
             };
             assert_eq!(
-                TwitchProfile.plan(&b, &env()).err(),
+                profile().plan(&b, &env()).err(),
                 Some(PlanError::MissingKey(want))
             );
         }
     }
 
     #[test]
-    fn tenant_must_be_a_positive_decimal() {
-        for bad in ["0", "-3", "abc", "", "+5", "1 ", "99999999999999999999"] {
+    fn metadata_tenant_claim_must_agree_with_the_host_tenant() {
+        // regression: security review MEDIUM -- metadata is editable, never authoritative.
+        for bad in [
+            "43",
+            "0",
+            "-3",
+            "abc",
+            "",
+            "+5",
+            "42 ",
+            "99999999999999999999",
+        ] {
             let mut b = binding(1, 2, "c", "b");
             b.metadata.insert(META_TENANT_ID.into(), bad.into());
             assert_eq!(
-                TwitchProfile.plan(&b, &env()).err(),
+                profile().plan(&b, &env()).err(),
                 Some(PlanError::InvalidValue(META_TENANT_ID)),
                 "{bad:?}"
             );
@@ -593,7 +767,7 @@ mod tests {
         let mut e = env();
         e.max_frame_bytes = 0;
         assert_eq!(
-            TwitchProfile.plan(&binding(1, 2, "c", "b"), &e).err(),
+            profile().plan(&binding(1, 2, "c", "b"), &e).err(),
             Some(PlanError::Config("max_frame_bytes must be non-zero"))
         );
     }
@@ -604,7 +778,7 @@ mod tests {
             let mut b = binding(1, 2, "c", "b");
             b.metadata.insert(META_SECRET_VERSION.into(), bad.into());
             assert_eq!(
-                TwitchProfile.plan(&b, &env()).err(),
+                profile().plan(&b, &env()).err(),
                 Some(PlanError::InvalidValue(META_SECRET_VERSION)),
                 "{bad:?}"
             );
@@ -612,7 +786,7 @@ mod tests {
         let mut b = binding(1, 2, "c", "b");
         b.metadata
             .insert(META_SECRET_VERSION.into(), "v1.2-3_x".into());
-        assert!(TwitchProfile.plan(&b, &env()).is_ok());
+        assert!(profile().plan(&b, &env()).is_ok());
     }
 
     #[test]
@@ -670,9 +844,11 @@ mod tests {
         assert!(versions.insert(fp(&v2, &env())), "version bump changes it");
         assert_eq!(fp(&v1, &env()), fp(&v1.clone(), &env()));
 
-        let mut tenant = base.clone();
-        tenant.metadata.insert(META_TENANT_ID.into(), "43".into());
-        assert!(versions.insert(fp(&tenant, &env())));
+        let mut other_tenant = base.clone();
+        other_tenant.metadata.remove(META_TENANT_ID);
+        let moved = TwitchProfile::new(Arc::new(|_c: i64| Some(43)));
+        let moved_fp = moved.plan(&other_tenant, &env()).unwrap()[0].fingerprint;
+        assert!(versions.insert(moved_fp));
         assert!(versions.insert(fp(&binding(1, 2, "other", "bot"), &env())));
         assert!(versions.insert(fp(&binding(1, 2, "chan", "bot2"), &env())));
         assert!(versions.insert(fp(&binding(1, 3, "chan", "bot"), &env())));
@@ -712,7 +888,7 @@ mod tests {
         bindings.push(other);
         let (mut planned, mut skipped) = (0usize, 0usize);
         for b in &bindings {
-            match TwitchProfile.plan(b, &env()) {
+            match profile().plan(b, &env()) {
                 Ok(v) => planned += v.len(),
                 Err(_) => skipped += 1,
             }
@@ -745,5 +921,183 @@ mod tests {
     fn plan_never_yields_a_webhook_or_poll_transport() {
         let (d, _) = one(&binding(1, 2, "c", "b"), &env());
         assert!(matches!(d.plan, TransportPlan::Ws(_)));
+    }
+
+    #[test]
+    fn tenant_comes_from_the_host_and_metadata_may_only_agree() {
+        // regression: security review MEDIUM.
+        let mut b = binding(1, 2, "c", "b");
+        // Absent claim: the host's answer is used.
+        b.metadata.remove(META_TENANT_ID);
+        assert_eq!(one(&b, &env()).0.tenant_id, 42);
+        // Agreeing claim: accepted.
+        b.metadata.insert(META_TENANT_ID.into(), "42".into());
+        assert_eq!(one(&b, &env()).0.tenant_id, 42);
+        // Disagreeing claim (a forged other-tenant): refused, never honored.
+        b.metadata.insert(META_TENANT_ID.into(), "7".into());
+        assert_eq!(
+            profile().plan(&b, &env()).err(),
+            Some(PlanError::InvalidValue(META_TENANT_ID))
+        );
+        // Host cannot resolve (or resolves nonsense): refused, never defaulted.
+        for host in [None, Some(0), Some(-4)] {
+            let p = TwitchProfile::new(Arc::new(move |_c: i64| host));
+            assert_eq!(
+                p.plan(&binding(1, 2, "c", "b"), &env()).err(),
+                Some(PlanError::Config("tenant for community is unresolved")),
+                "{host:?}"
+            );
+        }
+        // Per-community mapping is honored.
+        let p = TwitchProfile::new(Arc::new(|c: i64| (c == 5).then_some(500)));
+        let mut b5 = binding(5, 2, "c", "b");
+        b5.metadata.remove(META_TENANT_ID);
+        assert_eq!(p.plan(&b5, &env()).unwrap()[0].tenant_id, 500);
+    }
+
+    const TOKEN: &str = "tok_REAL_SOURCE_SECRET";
+
+    /// Counts resolves; returns a twitch OAuth row with `TOKEN`.
+    struct OauthResolver(std::sync::atomic::AtomicUsize);
+
+    impl connection_resolver::ConnectionResolve for OauthResolver {
+        async fn resolve(
+            &self,
+            r: ConnectionRef,
+        ) -> Result<connection_resolver::ResolvedConnection, connection_resolver::ResolveError>
+        {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(connection_resolver::ResolvedConnection {
+                connection_id: r.connection_id,
+                community_id: r.community_id,
+                provider: "twitch".into(),
+                kind: ConnectionKind::PlatformOauth,
+                endpoint: connection_resolver::Endpoint::default(),
+                secret: connection_resolver::ConnectionSecret::OAuthAccessToken {
+                    access_token: SecretString::new(TOKEN.to_owned()),
+                },
+                expires_at: None,
+                metadata: BTreeMap::new(),
+            })
+        }
+        async fn list_bindings(
+            &self,
+            _p: &str,
+            _c: Option<&str>,
+            _a: i64,
+            _l: u32,
+        ) -> Result<connection_resolver::BindingPage, connection_resolver::ResolveError> {
+            Err(connection_resolver::ResolveError::NotFound)
+        }
+    }
+
+    fn twitch_dest() -> Destination {
+        Destination::from_url(&reqwest::Url::parse(IRC_URL).unwrap()).unwrap()
+    }
+
+    /// regression: security review HIGH -- with the REAL `TransportSecrets`
+    /// behind it, only `pass` returns the token; `nick`/`channel` return their
+    /// validated logins and never touch the resolver.
+    #[tokio::test]
+    async fn only_the_pass_handle_can_resolve_the_oauth_secret() {
+        use crate::connector::TransportSecrets;
+        use std::sync::atomic::Ordering;
+        let resolver = Arc::new(OauthResolver(std::sync::atomic::AtomicUsize::new(0)));
+        let inner = TransportSecrets::new(Arc::clone(&resolver), 7)
+            .unwrap()
+            .with_expected_provider("twitch");
+        let (_, cfg) = one(&binding(7, 9, "SomeChan", "WaddleBot"), &env());
+        let src = TwitchFieldSecrets::from_config(inner, &cfg).unwrap();
+        let get = |h: &str| cfg.handles[h];
+
+        let nick = src.resolve(get("nick"), twitch_dest()).await.unwrap();
+        assert_eq!(nick.secret.expose(), "waddlebot");
+        let chan = src.resolve(get("channel"), twitch_dest()).await.unwrap();
+        assert_eq!(chan.secret.expose(), "somechan");
+        assert_ne!(nick.secret.expose(), TOKEN);
+        assert_ne!(chan.secret.expose(), TOKEN);
+        assert_eq!(resolver.0.load(Ordering::SeqCst), 0, "no credential fetch");
+
+        let pass = src.resolve(get("pass"), twitch_dest()).await.unwrap();
+        assert_eq!(pass.secret.expose(), TOKEN);
+        assert_eq!(resolver.0.load(Ordering::SeqCst), 1);
+
+        // Any ref other than the three handles (incl. another connection of the
+        // same community, or the synthetic ids on another community) is refused.
+        for r in [
+            ConnectionRef {
+                community_id: 7,
+                connection_id: 10,
+            },
+            ConnectionRef {
+                community_id: 8,
+                connection_id: NICK_CONN_ID,
+            },
+            ConnectionRef {
+                community_id: 8,
+                connection_id: 9,
+            },
+        ] {
+            assert!(matches!(
+                src.resolve(r, twitch_dest()).await,
+                Err(SecretError::Missing)
+            ));
+        }
+        assert_eq!(resolver.0.load(Ordering::SeqCst), 1);
+
+        // The plain real source refuses the synthetic nick/channel refs outright.
+        let plain = TransportSecrets::new(Arc::clone(&resolver), 7).unwrap();
+        for h in ["nick", "channel"] {
+            assert!(plain.resolve(get(h), twitch_dest()).await.is_err());
+        }
+    }
+
+    #[test]
+    fn field_secrets_refuse_a_tampered_config() {
+        let (_, good) = one(&binding(7, 9, "chan", "bot"), &env());
+        let inner = || {
+            crate::connector::TransportSecrets::new(
+                Arc::new(OauthResolver(std::sync::atomic::AtomicUsize::new(0))),
+                7,
+            )
+            .unwrap()
+        };
+        assert!(TwitchFieldSecrets::from_config(inner(), &good).is_ok());
+
+        let mut c = good.clone();
+        c.handles.remove("nick");
+        assert!(TwitchFieldSecrets::from_config(inner(), &c).is_err());
+        // nick pointed at the real credential ref: not canonical, refused.
+        let mut c = good.clone();
+        let pass = c.handles["pass"];
+        c.handles.insert("nick".into(), pass);
+        assert!(TwitchFieldSecrets::from_config(inner(), &c).is_err());
+        let mut c = good.clone();
+        c.handles.insert(
+            "channel".into(),
+            ConnectionRef {
+                community_id: 99,
+                connection_id: CHANNEL_CONN_ID,
+            },
+        );
+        assert!(TwitchFieldSecrets::from_config(inner(), &c).is_err());
+        let mut c = good.clone();
+        c.self_echo = None;
+        assert_eq!(
+            TwitchFieldSecrets::from_config(inner(), &c).err(),
+            Some(PlanError::MissingKey(META_BOT_LOGIN))
+        );
+        let mut c = good.clone();
+        c.source_key = "discord:chan".into();
+        assert_eq!(
+            TwitchFieldSecrets::from_config(inner(), &c).err(),
+            Some(PlanError::InvalidValue(META_CHANNEL))
+        );
+        let mut c = good.clone();
+        c.source_key = "twitch:evil\r\nJOIN #x".into();
+        assert!(TwitchFieldSecrets::from_config(inner(), &c).is_err());
+        let mut c = good;
+        c.self_echo.as_mut().unwrap().self_id = "bad nick".into();
+        assert!(TwitchFieldSecrets::from_config(inner(), &c).is_err());
     }
 }

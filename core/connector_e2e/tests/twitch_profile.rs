@@ -6,19 +6,21 @@
 //! recorded event is mocked except the fake IRC peer, the scripted identity stage
 //! (`scripted_bridge`, a fake identity), and the credential source.
 //!
-//! Test-only deviations from the derived config, each in `derived_config`:
+//! Test-only deviation from the derived config (in `derived_config`):
 //! `RuntimeEnv` has no loopback switch and the URL is a host constant, so the
 //! test rewrites `url` to the fake server and sets `allow_loopback_insecure`
-//! AFTER asserting the derived values are the production constants; and the
-//! `TransportSecretSource` trait receives no handle name, so the three handles
-//! are pointed at three synthetic refs so the test source can answer per field.
+//! AFTER asserting the derived values are the production constants. The
+//! credential source is the production `TwitchFieldSecrets` wrapper over a
+//! pass-only stand-in for `TransportSecrets` (the real one refuses loopback
+//! hosts); the stand-in records every ref it is asked for, proving nick and
+//! channel never reach the credential source.
 //!
 //! `fixtures/twitch_overlay.wasm` is a build output of `bundles/rust/twitch`;
 //! see `fixtures/README.md`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,7 +43,9 @@ use svc_ingest::connector::{
     EventSink, ExecutorLink, PinnedConnector, SinkError, TransportSecretSource,
     WireConnectorInvoker, WsConfig, WsTransport,
 };
-use svc_ingest::connector_runtime::profiles::twitch::{TwitchProfile, APP_ID, IRC_URL};
+use svc_ingest::connector_runtime::profiles::twitch::{
+    TwitchFieldSecrets, TwitchProfile, APP_ID, IRC_URL,
+};
 use svc_ingest::connector_runtime::{OverlayProfile, RuntimeEnv, TransportPlan};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -54,42 +58,30 @@ const BOT: &str = "waddlebot";
 const CHANNEL: &str = "somechannel";
 const MAX_FRAME: usize = 65_536;
 
-/// Synthetic refs the test source answers per handle (see module docs).
+/// The credential ref (the only one the credential source may be asked for).
 const PASS_REF: ConnectionRef = ConnectionRef {
     community_id: 7,
     connection_id: 9,
 };
-const NICK_REF: ConnectionRef = ConnectionRef {
-    community_id: 7,
-    connection_id: 10,
-};
-const CHAN_REF: ConnectionRef = ConnectionRef {
-    community_id: 7,
-    connection_id: 11,
-};
 
-/// Answers each synthetic ref with its field value, like the production
-/// source resolves `pass` from the secret and nick/channel from metadata.
-struct FieldSecrets;
+/// Stand-in for the real credential source: answers the pass ref with the
+/// token, refuses everything else, and records every ref it was asked for.
+#[derive(Clone, Default)]
+struct PassOnly(Arc<Mutex<Vec<ConnectionRef>>>);
 
-impl TransportSecretSource for FieldSecrets {
+impl TransportSecretSource for PassOnly {
     fn resolve(
         &self,
         requested: ConnectionRef,
         _dest: Destination,
     ) -> BoxFut<'_, Result<ResolvedAuth, SecretError>> {
+        self.0.lock().unwrap().push(requested);
         Box::pin(async move {
-            let v = if requested == PASS_REF {
-                TOKEN
-            } else if requested == NICK_REF {
-                BOT
-            } else if requested == CHAN_REF {
-                CHANNEL
-            } else {
+            if requested != PASS_REF {
                 return Err(SecretError::Missing);
-            };
+            }
             Ok(ResolvedAuth {
-                secret: SecretString::new(v.to_owned()),
+                secret: SecretString::new(TOKEN.to_owned()),
                 header: None,
             })
         })
@@ -133,7 +125,9 @@ fn derived_config(addr: std::net::SocketAddr) -> WsConfig {
         egress_allow: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
         heartbeat_enabled: true,
     };
-    let mut planned = TwitchProfile.plan(&binding(), &env).expect("plan");
+    let mut planned = TwitchProfile::new(Arc::new(|_c: i64| Some(42)))
+        .plan(&binding(), &env)
+        .expect("plan");
     assert_eq!(planned.len(), 1, "one binding in, one connection out");
     let TransportPlan::Ws(cfg) = planned.remove(0).plan else {
         panic!("twitch plans a Ws transport");
@@ -142,11 +136,7 @@ fn derived_config(addr: std::net::SocketAddr) -> WsConfig {
     assert_eq!(cfg.url, IRC_URL, "production URL is the host constant");
     cfg.url = format!("ws://{addr}/");
     cfg.allow_loopback_insecure = true;
-    cfg.handles = HashMap::from([
-        ("pass".to_owned(), PASS_REF),
-        ("nick".to_owned(), NICK_REF),
-        ("channel".to_owned(), CHAN_REF),
-    ]);
+    assert_eq!(cfg.handles["pass"], PASS_REF);
     cfg
 }
 
@@ -264,6 +254,7 @@ async fn serve(
 }
 
 struct Run {
+    asked: PassOnly,
     events: Arc<Mutex<Vec<ConnectorEvent>>>,
     seen: mpsc::UnboundedReceiver<Seen>,
     shutdown: oneshot::Sender<()>,
@@ -281,7 +272,9 @@ async fn start(server_ping: bool, lines: Vec<String>, heartbeat: Option<Duration
         cfg.heartbeat_interval = Some(h);
     }
     let rig = rig().await;
-    let transport = WsTransport::new(cfg, FieldSecrets).expect("derived config is valid");
+    let asked = PassOnly::default();
+    let secrets = TwitchFieldSecrets::from_config(asked.clone(), &cfg).expect("field secrets");
+    let transport = WsTransport::new(cfg, secrets).expect("derived config is valid");
     let sink = RecordingSink::default();
     let events = Arc::clone(&sink.0);
     let metrics = register_connector_metrics(&prometheus::Registry::new()).unwrap();
@@ -298,6 +291,7 @@ async fn start(server_ping: bool, lines: Vec<String>, heartbeat: Option<Duration
         driver.run(transport, rx).await.unwrap();
     });
     Run {
+        asked,
         events,
         seen,
         shutdown,
@@ -393,6 +387,11 @@ async fn derived_config_drives_handshake_pong_event_and_echo_drop() {
         assert_eq!(p["text"], text);
         assert_eq!(p["channel_name"], CHANNEL);
     }
+    assert_eq!(
+        *run.asked.0.lock().unwrap(),
+        vec![PASS_REF],
+        "only the pass handle ever reached the credential source"
+    );
     assert!(
         !events
             .iter()
