@@ -387,6 +387,23 @@ impl FeatureGate for BundleAiCapabilityGate {
     }
 }
 
+/// Production [`crate::ai::TierSource`] -- the deployment license tier from
+/// `LicenseClient::tier` (last-known cached value within grace; `Free` when never
+/// seen/expired, so the AI capability fails closed; `Enterprise` under domain bypass).
+pub struct LicenseTierSource(Arc<LicenseClient>);
+
+impl LicenseTierSource {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl crate::ai::TierSource for LicenseTierSource {
+    fn tier<'a>(&'a self) -> crate::ai::BoxFuture<'a, Option<penguin_licensing::Tier>> {
+        Box::pin(async move { Some(self.0.tier().await) })
+    }
+}
+
 /// Opt-out kill-switch for the inbound PII-tokenization pre-dispatch pass
 /// (`crate::pii_tokenize`, `rules/critical-rules.md` PII Tokenization) --
 /// same opt-out-kill-switch shape as [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]:

@@ -1,6 +1,6 @@
-"""Bar Citizen: N:M guild<->tenant pairing, platform-generic tenant credentials, Twitch<->Discord role sync bindings.
+"""Guild pairing: N:M guild<->tenant pairing, platform-generic tenant credentials, Twitch<->Discord role sync bindings.
 
-**Serialization anchor for the Bar Citizen workstream (owner-confirmed
+**Serialization anchor for the guild-pairing workstream (owner-confirmed
 objectives, 2026-10-03).** Supersedes the schema halves of the parked,
 stale PRs #501 (`0038_guild_tenant_pairing`, forked off dead branch
 `0030_bundle_app_schemas`) and #504 (`0039_platform_creds_generic`,
@@ -55,7 +55,7 @@ Tables:
   **opt-in** (`sync_enabled`, default FALSE) and the admin chooses the
   sync `direction` (`discord_to_twitch` / `twitch_to_discord` /
   `bidirectional`) per pairing. `role_name_prefix` is the per-community
-  Discord role-name prefix (e.g. `[BCSEA]`) so two communities sharing a
+  Discord role-name prefix (e.g. `[ACSEA]`) so two communities sharing a
   guild don't collide on role names -- a human-readable convention only,
   never the authorization mechanism (role ownership, if/when a
   `managed_roles`-style registry is built, resolves by Discord role ID,

@@ -1,10 +1,10 @@
-"""Round-trip + constraint tests for the Bar Citizen guild-pairing SQLAlchemy models.
+"""Round-trip + constraint tests for the guild-pairing SQLAlchemy models.
 
-Mirrors `alembic/versions/0034_bar_citizen_guild_pairing.py`'s shape --
+Mirrors `alembic/versions/0034_guild_pairing.py`'s shape --
 see that migration's own docstring for the full design rationale. These
 tests exercise the models directly (in-memory SQLite via `db.create_all()`),
 independent of the real-Postgres migration round-trip test
-(`alembic/tests/test_0034_bar_citizen_guild_pairing.py`), which proves the
+(`alembic/tests/test_0034_guild_pairing.py`), which proves the
 two stay in lockstep (`test_0034_schema_drift.py` cross-checks column sets
 between the migration and these models directly).
 """
@@ -71,7 +71,7 @@ class TestGuildTenantPairingRoundTrip:
                 community_id=1,
                 discord_guild_id="guild-1",
                 direction="twitch_to_discord",
-                role_name_prefix="[BC]",
+                role_name_prefix="[AC]",
             )
             db.session.add(pairing)
             db.session.commit()
@@ -87,7 +87,7 @@ class TestGuildTenantPairingRoundTrip:
                     community_id=1,
                     discord_guild_id="guild-bad",
                     direction="sideways",
-                    role_name_prefix="[BC]",
+                    role_name_prefix="[AC]",
                 )
             )
             with pytest.raises(IntegrityError):
@@ -101,7 +101,7 @@ class TestGuildTenantPairingRoundTrip:
                     community_id=1,
                     discord_guild_id="guild-dup",
                     direction="bidirectional",
-                    role_name_prefix="[BC]",
+                    role_name_prefix="[AC]",
                 )
             )
             db.session.commit()
@@ -110,7 +110,7 @@ class TestGuildTenantPairingRoundTrip:
                     community_id=1,
                     discord_guild_id="guild-dup",
                     direction="discord_to_twitch",
-                    role_name_prefix="[BC2]",
+                    role_name_prefix="[AC2]",
                 )
             )
             with pytest.raises(IntegrityError):
@@ -127,7 +127,7 @@ class TestGuildTenantPairingRoundTrip:
                     community_id=1,
                     discord_guild_id="shared-guild",
                     direction="twitch_to_discord",
-                    role_name_prefix="[BC1]",
+                    role_name_prefix="[AC1]",
                 )
             )
             db.session.add(
@@ -135,7 +135,7 @@ class TestGuildTenantPairingRoundTrip:
                     community_id=2,
                     discord_guild_id="shared-guild",
                     direction="bidirectional",
-                    role_name_prefix="[BC2]",
+                    role_name_prefix="[AC2]",
                 )
             )
             db.session.commit()
@@ -150,7 +150,7 @@ class TestCommunityRoleSyncBindingRoundTrip:
             community_id=1,
             discord_guild_id="guild-sync",
             direction="twitch_to_discord",
-            role_name_prefix="[BC]",
+            role_name_prefix="[AC]",
         )
         db.session.add(pairing)
         db.session.commit()
@@ -223,7 +223,7 @@ class TestCommunityRoleSyncBindingRoundTrip:
         """`ON DELETE CASCADE` is a Postgres-level FK action -- SQLite (this
         fixture) does not enforce FK actions by default, so the real cascade
         behavior is proven against Postgres in
-        `alembic/tests/test_0034_bar_citizen_guild_pairing.py` instead. This
+        `alembic/tests/test_0034_guild_pairing.py` instead. This
         test only checks the FK linkage itself round-trips correctly."""
         with app.app_context():
             pairing = self._make_pairing()

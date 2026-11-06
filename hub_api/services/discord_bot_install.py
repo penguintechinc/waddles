@@ -5,7 +5,7 @@ link (`discord.com/oauth2/authorize?...&scope=bot...`) that adds the bot
 to a server -- this is that link's builder, SEPARATE from the `identify
 guilds` OAuth *login* flow (`services.oauth_providers.PROVIDERS["discord"]`)
 and SEPARATE from the per-tenant custom-app install flow
-(`services.discord_install_service` -- Bar Citizen tenants bringing their
+(`services.discord_install_service` -- tenants bringing their
 OWN Discord application). This module always points at the ONE shared SaaS
 Discord application tenant 0 (and every tenant without its own app) uses,
 templated on the same `DISCORD_CLIENT_ID` env var `oauth_providers.py`

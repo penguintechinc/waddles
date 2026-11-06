@@ -1,7 +1,7 @@
-"""SQLAlchemy models for Bar Citizen's guild-pairing + role-sync schema,
+"""SQLAlchemy models for the guild-pairing + role-sync schema,
 plus the three-layer platform-connection model (0035).
 
-Mirrors `alembic/versions/0034_bar_citizen_guild_pairing.py` and
+Mirrors `alembic/versions/0034_guild_pairing.py` and
 `alembic/versions/0035_connection_model_layers.py` column-for-column (see
 each migration's own docstring for full design rationale) -- these
 tables are hub-api-owned control-plane data, created and migrated only

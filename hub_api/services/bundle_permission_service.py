@@ -36,6 +36,8 @@ from penguin_dal import AsyncDB
 from sqlalchemy import func, select
 
 from services import bundle_audit, valkey_admin_client
+from services.bundle_access_grants import is_access_grant_id
+from services.bundle_access_grants import kinds as access_grant_kinds
 from services.bundle_approval_service import _reparse_trusted
 from services.bundle_manifest_v2 import BundleManifestV2, PermissionDeclaration
 from services.bundle_permission_catalog import CORE_NAMESPACE_PREFIX, is_dangerous
@@ -246,10 +248,16 @@ async def record_permission_requests(
 
     table = install_dal.metadata.tables["app_permission_requests"]
     now = datetime.now(UTC)
+    delete_where = (table.c.app_id == app_id) & (table.c.version == version)
+    if approval_source == _SYSTEM_APPROVAL_SOURCE:
+        # Defense in depth for the never-auto-granted rule: the system path can
+        # neither write nor erase a human-approved dangerous access-grant row.
+        declarations = tuple(d for d in declarations if not is_access_grant_id(d.id))
+        for grant_kind in access_grant_kinds():
+            like = f"{grant_kind.id_prefix}%"
+            delete_where = delete_where & ~table.c.permission_id.like(like)
     async with install_dal.engine.begin() as conn:
-        await conn.execute(
-            table.delete().where((table.c.app_id == app_id) & (table.c.version == version))
-        )
+        await conn.execute(table.delete().where(delete_where))
         if declarations:
             await conn.execute(
                 table.insert(),
@@ -287,12 +295,20 @@ async def seed_core_permission_requests(
     `install_version_globally(install_source="system:core-seeder")` call
     -- `approved_by=None` (the SYSTEM-actor convention already used for
     `app_install_approvals.approval_source`, migration 0026).
+
+    EXCEPTION: `platform.table.*` ids (platform-table access, spec
+    2026-11-06-bundle-table-access-grants Sec3) are NEVER auto-granted, not even
+    to a core bundle -- they are filtered out here and need a human global-admin
+    approval like any vendor bundle. Existing blanket grants (e.g.
+    `connector.pii.read`) are unchanged and deliberately not extended.
     """
     await record_permission_requests(
         install_dal,
         app_id=app_id,
         version=version,
-        declarations=manifest.permission_declarations,
+        declarations=tuple(
+            d for d in manifest.permission_declarations if not is_access_grant_id(d.id)
+        ),
         approved_by=None,
         approval_source=_SYSTEM_APPROVAL_SOURCE,
     )

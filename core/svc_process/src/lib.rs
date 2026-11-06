@@ -187,6 +187,7 @@ fn build_ai_wiring(
                 Arc::new(license::BundleAiCapabilityGate::new(Arc::clone(
                     license_client,
                 ))),
+                Arc::new(license::LicenseTierSource::new(Arc::clone(license_client))),
                 call_timeout,
                 cli.ai_max_concurrency(),
             ))
@@ -3197,6 +3198,11 @@ mod tests {
         assert!(
             !wiring.flag.enabled().await,
             "the ai capability flag must default OFF"
+        );
+        // Never-seen license -> Free -> the AI capability refuses (fail closed).
+        assert_eq!(
+            wiring.tier.tier().await,
+            Some(penguin_licensing::Tier::Free)
         );
         assert_eq!(wiring.max_call_timeout, cli.ai_call_timeout());
         assert_eq!(wiring.concurrency.available_permits(), 4);

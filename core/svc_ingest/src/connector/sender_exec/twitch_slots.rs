@@ -247,6 +247,7 @@ mod tests {
 
     fn req<'a>(handles: &'a [&'static str], channel: Option<&'a str>) -> SlotRequest<'a> {
         SlotRequest {
+            guild_scoped: false,
             platform: "twitch",
             community_id: Some(7),
             pinned_channel: channel,

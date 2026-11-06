@@ -158,7 +158,7 @@ infrastructure:
 # skeleton) and svcRtc is additionally gated on modules.social.enabled; neither
 # is part of this fix's scope.
 pipeline:
-  # Monday-demo (881ac8dd): Bar Citizen role-sync reconcile CronJob ON, 1-min cadence.
+  # Monday-demo (881ac8dd): role-sync reconcile CronJob ON, 1-min cadence.
   # demotePairingIds left empty (grant-only); demoteBaselineRole = member fallback.
   roleSync:
     enabled: true
@@ -225,6 +225,11 @@ pipeline:
   # network call mocked: 228,876,288 bytes (~218Mi) for BOTH bundles. Limits set to
   # ~1.5x that measured peak, rounded up, with extra headroom for real asyncpg/Postgres
   # (vs the measurement's sqlite fixture) and OTel SDK overhead not present in the probe.
+  # Seeder publishes the signed connector objects the executor pins at boot; digests are build
+  # outputs (see values.yaml pipeline.connectors) -- set digests.<p> from the seeder log after
+  # the first deploy, then enable the connector (connectorRuntime.connector.<p>.enabled).
+  connectors:
+    publishAtSeed: true
   coreBundleSeeder:
     enabled: true
     # fix/preexisting-test-failures: the alpha Discord ingest source, moved here from
@@ -640,8 +645,9 @@ modules:
     resources:
       requests: { cpu: "50m", memory: "96Mi" }
       limits: { cpu: "300m", memory: "384Mi" }
+  # gh-894 -- hosts the consolidated analytics (/api/v1/analytics/*) hub-api proxies to.
   coreData:
-    enabled: false
+    enabled: true
     replicas: 1
     resources:
       requests: { cpu: "50m", memory: "96Mi" }
@@ -847,6 +853,6 @@ podSecurity:
 config:
   eventDiscordSyncEnabled: true
   communityConnectionsEnabled: true
-  # Monday-demo: ENV baseline for waddles.bar_citizen.role_sync -> FLAG_WADDLES_BAR_CITIZEN_ROLE_SYNC
+  # Monday-demo: ENV baseline for waddles.role_sync -> FLAG_WADDLES_ROLE_SYNC
   # (read by hub-api + the role-sync CronJob via envFrom waddlebot-config; PostHog still overrides).
-  barCitizenRoleSyncEnabled: true
+  roleSyncEnabled: true

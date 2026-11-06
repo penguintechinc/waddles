@@ -64,8 +64,8 @@ const community = (joinMode: string) => ({
     success: true,
     community: {
       id: 7,
-      name: 'bc',
-      displayName: 'Bar Citizen',
+      name: 'acme',
+      displayName: 'Acme',
       description: 'Social club',
       memberCount: 10,
       createdAt: '2025-01-01T00:00:00Z',

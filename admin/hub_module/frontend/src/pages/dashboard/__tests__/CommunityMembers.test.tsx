@@ -22,7 +22,7 @@ vi.mock('../../../lib/unservedFeatures', async (importOriginal) => {
 
 const me = (role: string, id = 7) => ({
   success: true,
-  user: { id: 1, communities: [{ id, name: 'bc', displayName: 'Bar Citizen', role }] },
+  user: { id: 1, communities: [{ id, name: 'acme', displayName: 'Acme', role }] },
 });
 
 const member = (id: number, over: Record<string, unknown> = {}) => ({

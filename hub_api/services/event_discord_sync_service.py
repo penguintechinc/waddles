@@ -7,7 +7,7 @@ engine's job is purely to mirror an `approved` event onto every Discord
 guild its community has opted into via `guild_tenant_pairings.
 event_sync_enabled` (migration 0039_event_sync_enabled -- a SECOND,
 independent opt-in from 0034's `sync_enabled`, which gates the unrelated
-Bar Citizen role-sync engine in `services/role_sync_service.py`). This
+role-sync engine in `services/role_sync_service.py`). This
 module mirrors that module's own shape closely (same `CredentialResolver`
 + `guild_pairing` + reconcile-CronJob precedent) -- see its docstring for
 the design rationale this one inherits wholesale.
@@ -82,6 +82,7 @@ from typing import Any, Literal, Protocol
 import httpx
 from pydal import Field
 
+from services import event_sync_connector_client, valkey_admin_client
 from services.bundle_telemetry import bundle_span, get_meter
 from services.credential_resolver import (
     CredentialResolver,
@@ -121,6 +122,11 @@ _DEFAULT_RECONCILE_LIMIT = 100
 
 #: PostHog flag gating this entire engine -- defaulted OFF until validated (critical-rules.md).
 FEATURE_EVENT_DISCORD_SYNC = "waddles.calendar.event_discord_sync"
+
+#: Opt-out kill-switch (core-mechanism convention `{product}.disable-{mechanism}`): unseen/OFF =
+#: events go through the connector outbound path (svc-action -> svc-ingest executor -> Discord
+#: connector); ON = the LEGACY direct-httpx path. Exists only as a rollback escape hatch.
+DISABLE_CONNECTOR_EVENT_SYNC_FLAG = "waddles.disable-connector-event-sync"
 
 _meter = get_meter()
 _events_synced_counter = _meter.create_counter(
@@ -354,6 +360,42 @@ async def _flag_enabled(tenant_slug: str) -> bool:
     return bool(await feature_enabled(FEATURE_EVENT_DISCORD_SYNC, tenant=tenant_slug))
 
 
+async def _legacy_httpx_enabled(tenant_slug: str) -> bool:
+    """`True` only when the kill-switch is positively ON (unseen/OFF = connector path)."""
+    if feature_enabled is None:  # pragma: no cover -- only in a flask_core-less environment
+        return False
+    return bool(await feature_enabled(DISABLE_CONNECTOR_EVENT_SYNC_FLAG, tenant=tenant_slug))
+
+
+class _ConnectorClientFactory:
+    """Builds the connector-path client per push and closes its Valkey connection after.
+
+    A missing/malformed request key ring raises `DiscordEventSyncError` (fail loud) -- it never
+    silently falls back to the legacy direct path; only the explicit kill-switch does that.
+    """
+
+    def __init__(self, *, valkey_factory: Any = None, keys_loader: Any = None) -> None:
+        self._valkey_factory = valkey_factory or valkey_admin_client.build_client
+        self._keys_loader = keys_loader or event_sync_connector_client.keys_from_env
+
+    def open(self, tenant_id: int, community_id: int) -> tuple[DiscordEventTargetClient, Any]:
+        """`(client, valkey)`; the caller must `await valkey.aclose()` when done."""
+        try:
+            keys = self._keys_loader()
+        except event_sync_connector_client.RequestKeyError as exc:
+            raise DiscordEventSyncError(f"event sync request signing unavailable: {exc}") from exc
+        valkey = self._valkey_factory()
+        client = event_sync_connector_client.ConnectorEventClient(
+            valkey,
+            tenant_id=tenant_id,
+            community_id=community_id,
+            keys=keys,
+            error_cls=DiscordEventSyncError,
+            not_found_cls=DiscordEventNotFoundError,
+        )
+        return client, valkey
+
+
 # ---------------------------------------------------------------------------
 # Per-guild sync-state row (calendar_event_discord_syncs)
 # ---------------------------------------------------------------------------
@@ -480,10 +522,19 @@ class DiscordScheduledEventTarget:
         *,
         credential_resolver: CredentialResolver,
         make_client: Any,
+        connector: _ConnectorClientFactory | None = None,
+        legacy_flag: Any = None,
     ) -> None:
-        """`make_client(bot_token) -> DiscordEventTargetClient` -- injected for tests."""
+        """`make_client(bot_token) -> DiscordEventTargetClient` -- injected for tests.
+
+        `connector` (production wiring) routes pushes through the connector outbound path unless
+        `legacy_flag(tenant_slug)` (the `waddles.disable-connector-event-sync` kill-switch) is ON.
+        Without `connector` the legacy direct path is used (unit-test injection only).
+        """
         self._credential_resolver = credential_resolver
         self._make_client = make_client
+        self._connector = connector
+        self._legacy_flag = legacy_flag or _legacy_httpx_enabled
 
     async def push(
         self, dal: Any, event_row: Any, *, action: Literal["create", "update", "cancel"]
@@ -500,18 +551,41 @@ class DiscordScheduledEventTarget:
         tenant = _resolve_tenant_for_community(dal, community_id)
         if tenant is None:
             raise TransportUnavailable(f"community {community_id} has no resolvable tenant")
-        tenant_id, _tenant_slug, is_global = tenant
+        tenant_id, tenant_slug, is_global = tenant
 
-        creds = await self._credential_resolver.resolve(
-            dal, tenant_id=tenant_id, is_global_tenant=is_global, platform="discord"
-        )
-        bot_token = str(creds.payload.get("bot_token", ""))
-        if not bot_token:
-            raise TransportUnavailable(
-                f"tenant {tenant_id} has no discord bot token for event-sync"
+        owned_valkey: Any = None
+        if self._connector is not None and not await self._legacy_flag(tenant_slug):
+            # Connector path: no Discord credential here -- the host resolves it by slot.
+            client, owned_valkey = self._connector.open(tenant_id, community_id)
+        else:
+            creds = await self._credential_resolver.resolve(
+                dal, tenant_id=tenant_id, is_global_tenant=is_global, platform="discord"
             )
+            bot_token = str(creds.payload.get("bot_token", ""))
+            if not bot_token:
+                raise TransportUnavailable(
+                    f"tenant {tenant_id} has no discord bot token for event-sync"
+                )
+            client = self._make_client(bot_token)
+        try:
+            return await self._push_pairings(
+                dal, event_row, pairings, client, action, event_id=event_id
+            )
+        finally:
+            if owned_valkey is not None:
+                await owned_valkey.aclose()
 
-        client = self._make_client(bot_token)
+    async def _push_pairings(
+        self,
+        dal: Any,
+        event_row: Any,
+        pairings: Any,
+        client: DiscordEventTargetClient,
+        action: Literal["create", "update", "cancel"],
+        *,
+        event_id: int,
+    ) -> PlatformSyncResult:
+        """Fan the event out to every opted-in pairing through `client` (either path)."""
         payload = build_discord_payload(event_row)
 
         synced = 0
@@ -644,7 +718,9 @@ def _default_targets(http_client: httpx.AsyncClient) -> list[PlatformEventTarget
 
     return [
         DiscordScheduledEventTarget(
-            credential_resolver=DefaultCredentialResolver(), make_client=make_client
+            credential_resolver=DefaultCredentialResolver(),
+            make_client=make_client,
+            connector=_ConnectorClientFactory(),
         )
     ]
 
@@ -839,14 +915,19 @@ async def run_event_sync_reconcile_batch(
     credential_resolver = credential_resolver or DefaultCredentialResolver()
     bound_http_client = http_client
 
+    make_discord_client_injected = make_discord_client is not None
     if make_discord_client is None:
 
         def make_discord_client(bot_token: str) -> DiscordEventTargetClient:
             return HttpDiscordEventTargetClient(bound_http_client, bot_token=bot_token)
 
+    # Production (no injected client) rides the connector path; an injected
+    # `make_discord_client` is the unit-test seam and keeps the direct path.
     targets: list[PlatformEventTarget] = [
         DiscordScheduledEventTarget(
-            credential_resolver=credential_resolver, make_client=make_discord_client
+            credential_resolver=credential_resolver,
+            make_client=make_discord_client,
+            connector=None if make_discord_client_injected else _ConnectorClientFactory(),
         )
     ]
 

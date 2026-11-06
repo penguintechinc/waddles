@@ -472,6 +472,9 @@ pub struct AiWiring {
     /// Ceiling on one model call; further clamped to the invocation's remaining
     /// deadline by the handler.
     pub max_call_timeout: Duration,
+    /// Platform-side license-tier source. The AI harness capability enforces
+    /// [`AI_TIER_REQUIRED`] itself so no bundle ever checks a tier.
+    pub tier: Arc<dyn TierSource>,
     /// Process-wide cap on concurrent model calls, so many bundles (each within
     /// its own 10-calls-per-minute quota) cannot together saturate the model host.
     /// A call waits for a permit INSIDE its deadline-clamped timeout and gives up
@@ -484,16 +487,29 @@ impl AiWiring {
     pub fn new(
         backend: Arc<dyn AiBackend>,
         flag: Arc<dyn FeatureGate>,
+        tier: Arc<dyn TierSource>,
         max_call_timeout: Duration,
         max_concurrent: usize,
     ) -> Self {
         Self {
             backend,
             flag,
+            tier,
             max_call_timeout,
             concurrency: Arc::new(tokio::sync::Semaphore::new(max_concurrent.max(1))),
         }
     }
+}
+
+/// Minimum license tier for the AI harness capability ("basic AI =
+/// Professional", `critical-rules.md` Feature Flags & License Tiers).
+pub const AI_TIER_REQUIRED: penguin_licensing::Tier = penguin_licensing::Tier::Professional;
+
+/// Resolves the license tier the AI capability is entitled to. `None` means the
+/// tier is unknown (never-seen / unresolvable) -- the caller MUST refuse.
+pub trait TierSource: Send + Sync {
+    /// Last-known tier, or `None` when never seen.
+    fn tier<'a>(&'a self) -> BoxFuture<'a, Option<penguin_licensing::Tier>>;
 }
 
 /// Operator configuration for [`OllamaBackend`] -- never guest-influenced.
@@ -786,6 +802,10 @@ pub mod outcome {
     pub const UNAVAILABLE: &str = "unavailable";
     /// Any other backend or guard failure.
     pub const BACKEND_ERROR: &str = "backend_error";
+    /// Refused: license tier below Professional.
+    pub const TIER_REFUSED: &str = "tier_refused";
+    /// Refused: license tier unknown (fail closed).
+    pub const TIER_UNKNOWN: &str = "tier_unknown";
     /// The arguments were malformed.
     pub const INVALID: &str = "invalid_args";
 }

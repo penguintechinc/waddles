@@ -69,8 +69,9 @@ import yaml
 from penguin_dal import AsyncDB
 
 from config import HubAPIConfig
-from services import app_command_backfill, vendor_bundle_authz
+from services import app_command_backfill, connector_publish_service, vendor_bundle_authz
 from services.app_source_binding_service import TENANT_WIDE_COMMUNITY_SENTINEL
+from services.bundle_access_grants import is_access_grant_id
 from services.bundle_approval_service import (
     activate_for_community,
     activate_tenant_wide,
@@ -81,6 +82,7 @@ from services.bundle_approval_service import (
 from services.bundle_install_dal import build_install_dal, raw_sql_rows, raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, parse_bundle_manifest_v2
 from services.bundle_permission_service import (
+    get_community_granted_ids,
     grant_community_permissions,
     seed_core_permission_requests,
 )
@@ -1216,12 +1218,23 @@ async def _grant_core_bundle_permissions(
     core bundle must not abort the whole seeder run (every other install/activation this
     run already committed) -- logged loud instead, so an operator notices and reruns.
     """
-    required = frozenset(d.id for d in manifest.permission_declarations)
+    # `platform.table.*` is never auto-granted (spec 2026-11-06 Sec3): a human
+    # global admin must approve it, so the seeder neither approves nor grants it.
+    required = frozenset(
+        d.id for d in manifest.permission_declarations if not is_access_grant_id(d.id)
+    )
     if not required:
         return
     try:
         if community_id == TENANT_WIDE_COMMUNITY_SENTINEL:
             await _ensure_sentinel_community(install_dal, tenant_id=tenant_id)
+        held_table_access = frozenset(
+            pid
+            for pid in await get_community_granted_ids(
+                install_dal, community_id=community_id, app_id=app_id
+            )
+            if is_access_grant_id(pid)
+        )
         await grant_community_permissions(
             install_dal,
             tenant_id=tenant_id,
@@ -1229,7 +1242,9 @@ async def _grant_core_bundle_permissions(
             app_id=app_id,
             version=version,
             manifest=manifest,
-            granted_permission_ids=required,
+            # Re-assert (never create) table-access grants a human admin already
+            # made, so this idempotent DELETE-then-INSERT cannot wipe them.
+            granted_permission_ids=required | held_table_access,
             params_by_id=_declared_bound_params(manifest) or None,
             granted_by=None,
             valkey_client=valkey_client,
@@ -1439,6 +1454,33 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 "connection_count": len(connections),
             },
         )
+
+        # Connector service bundles: the executor boot-pins `connectors/<p>/<digest>.{wasm,json}`
+        # (signed sidecar), a bucket layout the app-bundle path below never writes. This Job
+        # already holds the signing key + scoped S3 identity and the reproducibly-built wasm, so
+        # it publishes them here (idempotent). Opt-in via the chart (`pipeline.connectors.
+        # publishAtSeed`); a failure counts toward the Job's failure total -- never swallowed.
+        if os.environ.get("CORE_BUNDLES_PUBLISH_CONNECTORS", "").strip().lower() in {"1", "true"}:
+            try:
+                published = await connector_publish_service.publish_connectors(
+                    connector_publish_service.load_connector_artifacts(catalog_path, bundles_dir),
+                    connector_publish_service.signer_from_env(),
+                )
+                for item in published:
+                    logger.info(
+                        "core-bundle-seeder: connector published",
+                        extra={"platform": item.platform, "digest": item.digest},
+                    )
+                logger.info(
+                    "core-bundle-seeder: connector digests (set pipeline.connectors.digests)\n%s",
+                    connector_publish_service.values_snippet(published),
+                )
+            except Exception as exc:  # noqa: BLE001 -- logged loud with traceback, counted
+                failures += 1
+                logger.error(
+                    f"core-bundle-seeder: connector publish FAILED ({type(exc).__name__}: {exc})",
+                    exc_info=True,
+                )
 
         # Platform connections register BEFORE any bundle activates -- auto-bind
         # (app_source_binding_service.sync_bindings()) only grants a bundle's `consumes`
