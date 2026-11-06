@@ -3,9 +3,9 @@
 #
 # Asserts scripts/alpha-deploy.sh's SERVICES/service_dockerfile/
 # service_context/service_image_repo build list:
-#   1. builds waddlebot-egress-proxy from core/egress_proxy/Dockerfile.rust
+#   1. builds egress-proxy from core/egress_proxy/Dockerfile.rust
 #      with the "core" build context (the chart's egress-proxy Deployment
-#      references egressProxy.image="waddlebot-egress-proxy" and was
+#      references egressProxy.image="egress-proxy" and was
 #      previously never built here, leaving it stuck on a nonexistent tag);
 #   2. no longer builds the plain-name Python svc-ingest/svc-process/
 #      svc-action images (core/svc_{ingest,process,action}/Dockerfile,
@@ -118,13 +118,13 @@ assert_not_built() {
     fi
 }
 
-echo "Test: waddlebot-egress-proxy is built from the core/ context"
-assert_built "waddlebot-egress-proxy" "core/egress_proxy/Dockerfile.rust"
-if grep -qE "STUB-CALLED docker buildx build .*-t localhost:32000/waddlebot/waddlebot-egress-proxy:" "$LOG_FILE"; then
+echo "Test: egress-proxy is built from the core/ context"
+assert_built "egress-proxy" "core/egress_proxy/Dockerfile.rust"
+if grep -qE "STUB-CALLED docker buildx build .*-t localhost:32000/waddlebot/egress-proxy:" "$LOG_FILE"; then
     echo "  - tagged under the egressProxy.image repo name"
     cases_passed=$((cases_passed + 1))
 else
-    echo "  x not tagged under localhost:32000/waddlebot/waddlebot-egress-proxy"
+    echo "  x not tagged under localhost:32000/waddlebot/egress-proxy"
     cases_failed=$((cases_failed + 1))
 fi
 

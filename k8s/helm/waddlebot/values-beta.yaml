@@ -838,7 +838,7 @@ egressPolicy:
 
 presentation:
   image:
-    repository: "waddlebot-svc-presentation"
+    repository: "svc-presentation"
     tag: "latest"
 
 # R5: the SPIRE agent DaemonSet is an approved ROOT EXCEPTION (uid 0 + hostPath Workload-API socket
