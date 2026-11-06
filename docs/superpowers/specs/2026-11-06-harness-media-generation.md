@@ -1,9 +1,9 @@
 # Harness Media Generation (image / music / video) — Design
 
-**Status:** Proposed. **Date:** 2026-11-06. **Flag:** `waddles.harness-media-generation` (default OFF).
+**Status:** Proposed — v3.0 scope REDUCED to Gemini-only image + music + video (see §6 and Deferred). **Date:** 2026-11-06. **Flag:** `waddles.harness-media-generation` (default OFF).
 **Scope:** `wit/waddle-bundle/stage.wit` (new `media` interface), `core/bundle_capability_gate` (`media.generate`), new `core/bundle_host_media` crate, `core/svc_process` + `core/bundle_executor` (bridge), `hub_api` (BYOK + credential broker + settings), webui settings page.
 
-## 1. Licensing decision (supersedes the memory note "basic AI = Pro, BYOK = Enterprise" for media only)
+## 1. Licensing decision (2026-11-06; supersedes "BYOK = Enterprise")
 
 | Rule | Decision |
 |---|---|
@@ -12,7 +12,8 @@
 | Effective tier | `max(tenant_tier, community_tier)`, cascading down (`critical-rules.md`). Resolved host-side; never taken from the guest or the bundle manifest. |
 | Unknown license state | **Fail closed**: last-known cached tier within grace; never-seen = refuse (`tier-required`, wire code `license_unknown`). Never default to Free-allowed or Pro-allowed. |
 | Where enforced | **Inside the host capability** (`bundle_host_media::gate`), never in a bundle. App bundles are free; they merely request the permission. |
-| Existing text `ai.generate` | Unchanged (self-hosted Ollama; Enterprise enforcement still tracked in #858). Media is a separate capability so its tier rule cannot be confused with it. |
+| **BYOK tier (all AI)** | **BYOK = Professional or higher** for AI generally, not only media. `hub_api/services/ai_routing/router.py` `_byok_entitled` now checks Professional-or-higher (was Enterprise); premium-local-metered stays Enterprise. |
+| Existing text `ai.generate` | Self-hosted Ollama, unchanged (its Enterprise enforcement is still tracked in #858). Media is a separate capability. |
 
 Rationale: media costs real money per call, so the cost is borne by the key owner (BYOK) and the tier gates the feature, not the bundle.
 
@@ -75,15 +76,23 @@ Per-community rate (default 6 submits/min, 60/hour) and a **daily spend cap in m
 
 `/api/v1/admin/<community_id>/media/byok-keys` (PUT/GET/DELETE, community-admin, DTOs, key never returned, `key_last4` only) reusing the `ai_byok_keys` encryption with a `purpose`/provider discriminator for `gemini`, `openai-images`. Internal `POST /internal/v1/media/credentials:resolve` (service JWT) for the stage. A webui settings page is part of PR3; until it lands the capability is **unserved in the UI** (API-only) and says so.
 
-## 6. Delivery plan (stacked PRs into `release/v3.0.X`)
+## 6. v3.0 scope (reduced) and delivery
+
+v3.0 is **Gemini only** (single BYOK Gemini API key, pinned host `generativelanguage.googleapis.com`) covering **image (Imagen), music (Lyria), video (Veo)** behind the `MediaProvider` trait. Pro+ tier and BYOK required; flag default OFF; outputs in object storage, returned as scoped expiring URLs; manifest grant `media.generate`; basic per-community rate limit (6/min) plus a per-community in-flight job cap.
+
+Async model (simplest correct): `media.generate-image|music|video(prompt, opts) -> result<job-id, error>` submits and returns a job id; the host runs the provider call (Imagen is a quick `:predict`, Veo/Lyria long-running operations are polled host-side) with a bounded timeout (image 60 s, music 5 min, video 10 min -> `timeout`); the guest polls `media.job-status(job-id) -> result<job-state, error>` where `job-state` = `pending | done(url) | failed(error)`. No event delivery in v3.0 (poll only). Job lookup is scoped to (tenant, community); a mismatch is `not-found`.
 
 | PR | Content |
 |---|---|
-| 1 | This spec; WIT `media` interface; `media.generate` catalog entry (Rust + Python); `bundle_host_media` crate: types, errors, **tier gate**, request validation, `TierResolver`/`CredentialResolver`/`ObjectStore`/`MediaProvider` seams, tests + mutation check |
-| 2 | Provider adapters (Imagen/Veo/Lyria/OpenAI) over `GuardedClient` vs fake provider APIs; storage + scoped URLs; rate/spend ledger; stage + executor wiring; real-path executor e2e with a fixture bundle |
-| 3 | hub-api BYOK admin API + internal resolver + webui settings page |
+| 1 | Spec; BYOK floor -> Professional (hub-api router + tests); `media.generate` catalog (Rust gate + Python); WIT `media` interface (3 submit calls + `job-status`); `bundle_host_media` crate: types, typed errors, tier gate, validation, seams |
+| 2 | Gemini adapters (Imagen/Lyria/Veo) over `GuardedClient` vs a fake API; job store, storage + scoped URLs; rate limit; stage + executor wiring; real-path e2e |
+| 3 | hub-api media BYOK admin API (API only) + internal credential resolver |
 
-Until PR2 wires the stage handler, a `media.*` host call answers `not_implemented` -> `unavailable` (fail-loud); the flag stays OFF.
+Until PR2 wires the stage handler a `media.*` call answers `not_implemented` -> `unavailable` (fail-loud). The webui BYOK settings page is **unserved** in v3.0 (API only).
+
+## Deferred to v3.1.x
+
+OpenAI images and every other provider; routing through WaddleAI; spend caps and cost display at activation; webui BYOK settings page; advanced moderation beyond surfacing the provider's safety refusal; event/callback delivery of job completion (poll-only in v3.0).
 
 ## 7. Test matrix
 
