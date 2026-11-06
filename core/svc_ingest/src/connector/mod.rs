@@ -67,12 +67,12 @@ pub use driver::{
 };
 pub use gateway_rules::{HandshakeAfter, HeartbeatAck, ReconnectUrlCapture};
 pub use handshake_gate::{GateCtx, GateError, GatePermit, HandshakeGate, NoopGate};
+pub use host_calls::{
+    ActiveConnections, CallScope, HostCallError, HostCallHandler, OverlayHostCalls,
+};
 pub use identify_budget::{
     BotIdentity, BudgetError, DiscordIdentifyGate, GatewayBotSource, GatewayInfoSource,
     IdentifyBudget, IdentifyBudgetMetrics, RedisIdentifyBudget, SessionStartLimit,
-};
-pub use host_calls::{
-    ActiveConnections, CallScope, HostCallError, HostCallHandler, OverlayHostCalls,
 };
 pub use invoker::{ConnectorInvokeError, ConnectorInvoker};
 pub use lifecycle::{
