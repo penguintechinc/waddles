@@ -47,6 +47,7 @@ from quart_schema import validate_request, validate_response
 
 from services import bot_ai_chatter, bot_ai_knowledge, bot_rcon, bot_shoutout
 from services.bot_tables import bind_bot_tables, community_belongs_to_tenant
+from services.errors import ApiError
 
 bot_bp = Blueprint("v1_bot", __name__, url_prefix="/api/v1/admin")
 
@@ -83,7 +84,7 @@ async def _require_community(community_id: int) -> tuple[dict[str, Any], int] | 
     return None
 
 
-async def _require_server(community_id: int, server_id: int) -> tuple[dict[str, Any], int] | None:
+async def _require_server(community_id: int, server_id: int) -> None:
     """404 unless `server_id` is an active server of `community_id` (no cross-community ids).
 
     Run after `_require_community` on every `<server_id>` route so a foreign server id is
@@ -92,8 +93,21 @@ async def _require_server(community_id: int, server_id: int) -> tuple[dict[str, 
     try:
         await asyncio.to_thread(bot_rcon.get_active_server, _dal(), community_id, server_id)
     except bot_rcon.RconNotFoundError as exc:
-        return _error(str(exc), 404, "NOT_FOUND")
-    return None
+        raise ApiError(str(exc), 404, "NOT_FOUND") from exc
+
+
+@bot_bp.errorhandler(ApiError)
+async def _handle_api_error(exc: ApiError) -> tuple[dict[str, Any], int]:
+    """Convert a raised `ApiError` into the Bot JSON error shape, logging type + message."""
+    logging.getLogger(__name__).warning(
+        "bot_api_error",
+        extra={
+            "error_type": type(exc).__name__,
+            "status": exc.status_code,
+            "error_message": exc.message,
+        },
+    )
+    return _error(exc.message, exc.status_code, exc.code)
 
 
 def _dal() -> Any:
@@ -1166,9 +1180,7 @@ async def execute_rcon_command(
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     try:
         return await bot_rcon.execute_command(
             _dal(), community_id, server_id, command=data.command, user_id=_user_id()
@@ -1186,9 +1198,7 @@ async def kick_rcon_player(data: KickPlayerRequest, community_id: int, server_id
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     try:
         return await bot_rcon.kick_player(
             _dal(),
@@ -1211,9 +1221,7 @@ async def ban_rcon_player(data: BanPlayerRequest, community_id: int, server_id: 
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     try:
         return await bot_rcon.ban_player(
             _dal(),
@@ -1236,9 +1244,7 @@ async def get_rcon_channels(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     return await bot_rcon.get_channels(_dal(), community_id, server_id)
 
 
@@ -1251,9 +1257,7 @@ async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: in
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     try:
         return await bot_rcon.move_user(
             _dal(), community_id, server_id, target_user_id=data.user_id, channel_id=data.channel_id
@@ -1271,9 +1275,7 @@ async def send_rcon_message(data: SendMessageRequest, community_id: int, server_
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     try:
         return await bot_rcon.send_message(
             _dal(),
@@ -1318,9 +1320,7 @@ async def get_rcon_access_policy(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     return await bot_rcon.get_access_policy(_dal(), community_id, server_id)
 
 
@@ -1337,9 +1337,7 @@ async def update_rcon_access_policy(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     policy = await request.get_json(force=True, silent=True) or {}
     return await bot_rcon.update_access_policy(_dal(), community_id, server_id, policy)
 
@@ -1352,9 +1350,7 @@ async def trigger_rcon_enforcement(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     return await bot_rcon.trigger_enforcement(_dal(), community_id, server_id)
 
 
@@ -1366,9 +1362,7 @@ async def get_rcon_access_log(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     limit = min(200, max(1, _int_arg("limit", 50)))
     offset = max(0, _int_arg("offset", 0))
     return await bot_rcon.get_access_log(
@@ -1400,9 +1394,7 @@ async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     return await bot_rcon.get_server_status(_dal(), community_id, server_id)
 
 
@@ -1414,9 +1406,7 @@ async def get_rcon_player_list(community_id: int, server_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    denied = await _require_server(community_id, server_id)
-    if denied:
-        return denied
+    await _require_server(community_id, server_id)
     return await bot_rcon.get_player_list(_dal(), community_id, server_id)
 
 
