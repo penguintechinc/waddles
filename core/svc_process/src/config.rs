@@ -304,7 +304,7 @@ pub struct CliConfig {
     /// Production wiring for the bundle `platform-table` host capability
     /// (`bundle_host_platform_table::connect`) -- the least-privilege
     /// `waddles_platform_table` role (`alembic/versions/
-    /// 0078_bundle_platform_table.py`): column-scoped SELECT/UPDATE on the
+    /// 0079_bundle_platform_table.py`): column-scoped SELECT/UPDATE on the
     /// allowlisted `community_members` columns + audit INSERT, nothing else.
     #[arg(long, env = "BUNDLE_PLATFORM_TABLE_HOST", default_value = "localhost")]
     pub bundle_platform_table_host: String,

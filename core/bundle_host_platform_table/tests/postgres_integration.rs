@@ -3,7 +3,7 @@
 //! absent), allowlist/value denial, protected roles, per-write audit, and the
 //! `waddles_platform_table` role's privilege boundary. The schema under test is
 //! the EXACT shipped DDL (`scripts/db/bundle_platform_table.sql`, also run by
-//! alembic 0078) on minimal prerequisites. Requires Docker.
+//! alembic 0079) on minimal prerequisites. Requires Docker.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

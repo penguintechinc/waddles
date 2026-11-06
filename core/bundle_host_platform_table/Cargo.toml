@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.97.0"
 license = "AGPL-3.0-or-later"
 publish = false
-description = "Bundle `platform-table` host capability store (spec 2026-11-06-bundle-table-access-grants): key-addressed read/write of ALLOWLISTED platform-table columns (initially community_members.role), ALWAYS scoped by host-injected community_id + tenant_id, parameterized, audited per write in the same transaction. A path dependency within this repo consumed by core/svc_process. Runs under the least-privilege `waddles_platform_table` role (alembic 0078)."
+description = "Bundle `platform-table` host capability store (spec 2026-11-06-bundle-table-access-grants): key-addressed read/write of ALLOWLISTED platform-table columns (initially community_members.role), ALWAYS scoped by host-injected community_id + tenant_id, parameterized, audited per write in the same transaction. A path dependency within this repo consumed by core/svc_process. Runs under the least-privilege `waddles_platform_table` role (alembic 0079)."
 
 [lib]
 name = "bundle_host_platform_table"

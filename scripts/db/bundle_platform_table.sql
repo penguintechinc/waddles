@@ -1,6 +1,6 @@
 -- Bundle `platform-table` capability (spec 2026-11-06-bundle-table-access-grants):
 -- the per-write audit ledger + the least-privilege `waddles_platform_table` role.
--- Shared verbatim by alembic 0078 and the Rust integration test so the shipped
+-- Shared verbatim by alembic 0079 and the Rust integration test so the shipped
 -- schema and the tested schema cannot drift. Idempotent.
 
 CREATE TABLE IF NOT EXISTS bundle_platform_table_audit (

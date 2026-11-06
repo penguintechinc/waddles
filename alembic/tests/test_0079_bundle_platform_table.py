@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0078_bundle_platform_table: audit table + least-privilege role."""
+"""Real-Postgres tests for 0079_bundle_platform_table: audit table + least-privilege role."""
 
 from __future__ import annotations
 
@@ -22,13 +22,13 @@ def _q(dsn: str, sql: str, params: Sequence[object] = ()) -> list[tuple[object, 
 
 @pytest.fixture(scope="module")
 def fresh_db() -> Iterator[PgTestDatabase]:
-    with empty_postgres("0078-fresh") as db:
+    with empty_postgres("0079-fresh") as db:
         alembic_cli("upgrade", "head", dsn=db.dsn)
         yield db
 
 
 def test_revision_id_within_limit() -> None:
-    assert len("0078_bundle_platform_table") <= 32
+    assert len("0079_bundle_platform_table") <= 32
 
 
 def test_audit_table_and_inert_role_exist(fresh_db: PgTestDatabase) -> None:
