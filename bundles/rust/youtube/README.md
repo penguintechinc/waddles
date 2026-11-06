@@ -84,10 +84,12 @@ core `connector.pii.read` grant, which the hub permission catalog does not know 
 
 ## Gaps for the integrator (not in this bundle's scope)
 
-- `PollTransport` treats **every 403 as Fatal** (`poll.rs`): a quota 403 and a `liveChatEnded` 403 both kill the
-  poller instead of backing off/rediscovering. Needs a host hook calling `classify_error`.
+- Host classification (`PollLifecycle`) now backs off quota 403s and rediscovers on `liveChatEnded` (host-side, via
+  `liveBroadcasts`, see `docs/connector-host-capability.md`); the guest `classify_error` tool is still not called by
+  the host (same classes, evaluated host-side).
 - `PollConfig.interval` is static; `pollingIntervalMillis` cannot feed back. Needs a per-frame interval hint.
-- No host-side discovery loop (search -> videos -> set `liveChatId` in the URL).
+- Rediscovery is host-side and only runs after a `liveChatEnded`; a binding with no `live_chat_id` yet is still
+  skipped (initial discovery is hub-api's job).
 - `hub_api/services/bundle_manifest_v2.py` has no connector `receiver`/`sender` stage; this manifest uses the
   `action` stage with `tool-provider#call` like economy.
 - `connector.pii.read` is declared in `hub-manifest.yaml` (catalog id exists; dangerous, core-only) and is
