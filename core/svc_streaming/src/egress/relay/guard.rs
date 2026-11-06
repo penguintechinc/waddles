@@ -69,7 +69,15 @@ impl EgressGuard {
             redacted: redact_url(raw),
             reason,
         };
+        if let Some(why) = forbidden_chars(raw) {
+            return Err(reject(format!("relay url rejected: {why}")));
+        }
         let parts = split_url(raw).ok_or_else(|| reject("unparseable relay url".into()))?;
+        // Parser-differential defense: a second, independent parser must agree on host + port.
+        let strict = url::Url::parse(raw).map_err(|_| reject("unparseable relay url".into()))?;
+        if !parser_agrees(&strict, &parts) {
+            return Err(reject("relay url is parsed ambiguously".into()));
+        }
         let port = match (parts.port, parts.scheme.as_str()) {
             (Some(p), _) => p,
             (None, "rtmps") => 443,
@@ -104,11 +112,60 @@ impl EgressGuard {
             IpAddr::V6(v6) => format!("[{v6}]"),
         };
         let port_part = parts.port.map(|p| format!(":{p}")).unwrap_or_default();
-        Ok(format!(
-            "{}://{}{}{}",
-            parts.scheme, host, port_part, parts.rest
-        ))
+        let pinned = format!("{}://{}{}{}", parts.scheme, host, port_part, parts.rest);
+        // Re-parse what ffmpeg will actually receive: it must name exactly the validated IP.
+        let reparsed = url::Url::parse(&pinned).map_err(|_| reject("pinned url invalid".into()))?;
+        let again = split_url(&pinned).ok_or_else(|| reject("pinned url invalid".into()))?;
+        let want = ip.to_string();
+        let host_ok = |h: Option<url::Host<&str>>| match h {
+            // Non-special schemes (rtmp/srt) parse an IPv4 literal as an opaque domain.
+            Some(url::Host::Domain(d)) => d == want,
+            Some(url::Host::Ipv4(v)) => v.to_string() == want,
+            Some(url::Host::Ipv6(v)) => v.to_string() == want,
+            None => false,
+        };
+        if !host_ok(reparsed.host()) || again.host != want || reparsed.port() != parts.port {
+            return Err(reject(
+                "pinned url does not name the validated address".into(),
+            ));
+        }
+        Ok(pinned)
     }
+}
+
+/// Characters that make parsers (this one, `url`, ffmpeg's `av_url_split`) disagree or that
+/// terminate/extend an ffmpeg `-f tee` slave (`|` separates slaves, `[`/`]` open option blocks,
+/// `;`/`\\` are option/escape syntax, `#` starts a fragment ffmpeg strips, `@` userinfo).
+/// An IPv6 literal's own brackets are allowed only as the very first authority character.
+fn forbidden_chars(raw: &str) -> Option<&'static str> {
+    if raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some("whitespace or control character");
+    }
+    if raw.contains(['#', '\\', '|', ';', '"', '\'', '@']) {
+        return Some("reserved character (# \\ | ; quote @)");
+    }
+    let after = raw.split_once("://").map_or("", |(_, a)| a);
+    let end = after.find(['/', '?']).unwrap_or(after.len());
+    let (authority, rest) = after.split_at(end);
+    let v6 = authority.starts_with('[');
+    let bracket_in_authority = authority.char_indices().any(|(i, c)| {
+        (c == '[' && i != 0) || (c == ']' && !(v6 && authority[i..].starts_with(']')))
+    });
+    if bracket_in_authority || rest.contains(['[', ']']) {
+        return Some("square bracket outside an IPv6 literal");
+    }
+    None
+}
+
+/// `true` when the `url` crate and the hand-rolled splitter name the same host and port.
+fn parser_agrees(strict: &url::Url, parts: &UrlParts) -> bool {
+    let host_matches = match strict.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case(&parts.host),
+        Some(url::Host::Ipv4(v)) => v.to_string() == parts.host,
+        Some(url::Host::Ipv6(v)) => v.to_string() == parts.host.to_ascii_lowercase(),
+        None => false,
+    };
+    host_matches && strict.port() == parts.port && strict.scheme() == parts.scheme
 }
 
 struct UrlParts {
@@ -155,17 +212,9 @@ fn split_url(raw: &str) -> Option<UrlParts> {
 pub fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => blocked_v4(v4),
-        IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return blocked_v4(mapped);
-            }
-            let seg = v6.segments();
-            if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2..6].iter().all(|s| *s == 0) {
-                let o = v6.octets();
-                return blocked_v4(Ipv4Addr::new(o[12], o[13], o[14], o[15]));
-            }
-            blocked_v6(v6)
-        }
+        // Default-deny: embedded-v4 forms (mapped, NAT64, IPv4-compatible) all lie outside
+        // 2000::/3 and are refused without extracting the v4.
+        IpAddr::V6(v6) => blocked_v6(v6),
     }
 }
 
@@ -174,23 +223,28 @@ fn blocked_v4(ip: Ipv4Addr) -> bool {
     ip.is_loopback()
         || ip.is_private()
         || ip.is_link_local()
-        || ip.is_unspecified()
         || ip.is_broadcast()
         || ip.is_multicast()
         || ip.is_documentation()
+        || o[0] == 0 // 0.0.0.0/8 "this network"
         || (o[0] == 100 && (64..=127).contains(&o[1])) // CGNAT 100.64/10
         || (o[0] == 198 && (18..=19).contains(&o[1])) // benchmarking 198.18/15
         || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF protocol assignments
         || o[0] >= 240 // reserved
 }
 
+/// Default-deny: only global unicast 2000::/3 is dialable, minus the special-purpose carve-outs
+/// inside it (6to4, Teredo/IETF 2001::/23, documentation, ORCHID/benchmarking-adjacent ranges).
 fn blocked_v6(ip: Ipv6Addr) -> bool {
     let seg = ip.segments();
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || (seg[0] & 0xfe00) == 0xfc00 // ULA fc00::/7
-        || (seg[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+    if (seg[0] & 0xe000) != 0x2000 {
+        return true; // loopback, unspecified, multicast, ULA, link-local, site-local fec0::/10,
+                     // 64:ff9b:1::/48 local NAT64, mapped, ... everything outside 2000::/3
+    }
+    seg[0] == 0x2002 // 6to4 2002::/16 (embeds an arbitrary v4)
+        || (seg[0] == 0x2001 && seg[1] < 0x0200) // 2001::/23 incl. Teredo 2001::/32
+        || (seg[0] == 0x2001 && seg[1] == 0x0db8) // documentation 2001:db8::/32
+        || (seg[0] == 0x3fff && seg[1] < 0x1000) // documentation 3fff::/20
 }
 
 #[cfg(test)]
@@ -312,6 +366,93 @@ mod tests {
                 .unwrap(),
             "rtmp://127.0.0.1/a/K"
         );
+    }
+
+    #[tokio::test]
+    async fn parser_differential_and_tee_injection_urls_are_refused() {
+        let g = lookup_to("8.8.8.8");
+        for url in [
+            "rtmp://8.8.8.8#@127.0.0.1/app/KEY",
+            "rtmp://8.8.8.8/app/KEY#frag",
+            "rtmp://127.0.0.1\\@8.8.8.8/app/KEY",
+            "rtmp://8.8.8.8@127.0.0.1/app/KEY",
+            "rtmp://live.example/app/KEY|[f=flv]rtmp://127.0.0.1/x",
+            "rtmp://live.example/app/KEY|rtmp://127.0.0.1/x",
+            "rtmp://live.example/app/KEY;onfail=abort",
+            "rtmp://live.example/app/KEY[f=flv]",
+            "rtmp://live.example/app/KEY]",
+            "rtmp://live.example/app/KE Y",
+            "rtmp://live.example/app/KEY\n|x",
+            "rtmp://live.example/app/KEY\t",
+            "rtmp://[8.8.8.8/app/KEY",
+            "rtmp://li[ve.example/app/KEY",
+        ] {
+            assert!(g.pin(RelayTargetKind::Rtmp, url).await.is_err(), "{url:?}");
+        }
+        // a legitimate IPv6 literal authority still works
+        let ok = lookup_to("2606:4700:4700::1111")
+            .pin(
+                RelayTargetKind::Rtmp,
+                "rtmp://[2606:4700:4700::1111]:1935/app/KEY",
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok, "rtmp://[2606:4700:4700::1111]:1935/app/KEY");
+    }
+
+    #[test]
+    fn ipv6_default_deny_table() {
+        let blocked = [
+            "::",
+            "::1",
+            "::127.0.0.1",
+            "::10.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:8.8.8.8",
+            "64:ff9b::7f00:1",
+            "64:ff9b::808:808",
+            "64:ff9b:1::1",
+            "fc00::1",
+            "fd00::1",
+            "fe80::1",
+            "fec0::1",
+            "ff02::1",
+            "2002::1",
+            "2002:0a00:0001::1",
+            "2001::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "2001:1::1",
+            "2001:db8::1",
+            "3fff::1",
+            "4000::1",
+            "8000::1",
+            "100::1",
+        ];
+        for ip in blocked {
+            assert!(is_blocked_ip(ip.parse().unwrap()), "{ip} must be blocked");
+        }
+        for ip in [
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "2a00:1450:4001::1",
+            "2001:200::1",
+        ] {
+            assert!(!is_blocked_ip(ip.parse().unwrap()), "{ip} must be allowed");
+        }
+    }
+
+    #[test]
+    fn ipv4_zero_network_and_special_ranges_blocked() {
+        for ip in [
+            "0.0.0.0",
+            "0.1.2.3",
+            "0.255.255.255",
+            "192.0.2.1",
+            "240.0.0.1",
+        ] {
+            assert!(is_blocked_ip(ip.parse().unwrap()), "{ip}");
+        }
+        assert!(!is_blocked_ip("1.0.0.1".parse().unwrap()));
     }
 
     #[test]
