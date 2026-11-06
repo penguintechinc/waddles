@@ -50,7 +50,7 @@ pub const REPLAY_WINDOW: Duration = Duration::from_secs(300);
 pub const VALKEY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Platforms that have a webhook scheme in this host.
-const SUPPORTED: [&str; 2] = ["discord", "twitch"];
+const SUPPORTED: [&str; 3] = ["discord", "twitch", "wix"];
 
 /// Webhook boot / activation failures (names the item, never a value).
 #[derive(Debug, thiserror::Error)]
@@ -224,6 +224,11 @@ pub fn scheme_for(platform: &str) -> Result<Scheme, BootError> {
     match platform {
         "discord" => discord_scheme(),
         "twitch" => Ok(Scheme::twitch_eventsub()),
+        // Wix routes are bound to a per-connection instance id: their scheme
+        // is built by `profiles::wix`, never from a platform constant.
+        "wix" => Err(BootError::Scheme(
+            "wix scheme is built per connection by its profile".into(),
+        )),
         other => Err(BootError::UnsupportedPlatform(other.to_string())),
     }
 }

@@ -20,15 +20,15 @@ vi.mock('../../../components/dashboard/CommunityReputationPanel', () => ({
 
 const me = (role: string) => ({
   success: true,
-  user: { id: 1, communities: [{ id: 7, name: 'bar-citizen', displayName: 'Bar Citizen', role }] },
+  user: { id: 1, communities: [{ id: 7, name: 'acme', displayName: 'Acme', role }] },
 });
 
 const PUBLIC = {
   success: true,
   community: {
     id: 7,
-    name: 'bar-citizen',
-    displayName: 'Bar Citizen HQ',
+    name: 'acme',
+    displayName: 'Acme HQ',
     description: 'd',
     logoUrl: null,
     bannerUrl: null,
@@ -93,7 +93,7 @@ describe('CommunityDashboard', () => {
     const get = serve('community-admin');
     renderPage();
 
-    expect(await screen.findByRole('heading', { level: 1, name: 'Bar Citizen HQ' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Acme HQ' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Admin Panel' })).toHaveAttribute('href', '/admin/7');
     expect(await screen.findByText('1,234')).toBeInTheDocument();
     expect(await screen.findByText('Maintenance window')).toBeInTheDocument();
@@ -114,7 +114,7 @@ describe('CommunityDashboard', () => {
   it('gives a plain member no admin entry points and no bot-score panel', async () => {
     serve('member');
     renderPage();
-    await screen.findByRole('heading', { level: 1, name: 'Bar Citizen HQ' });
+    await screen.findByRole('heading', { level: 1, name: 'Acme HQ' });
     expect(screen.queryByRole('link', { name: 'Admin Panel' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Manage' })).not.toBeInTheDocument();
     expect(screen.getAllByTestId('not-available-yet').map((el) => el.getAttribute('data-feature'))).toEqual(['community-recent-activity']);
@@ -148,7 +148,7 @@ describe('CommunityDashboard', () => {
       return undefined;
     });
     renderPage();
-    expect(await screen.findByRole('heading', { level: 1, name: 'Bar Citizen' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Acme' })).toBeInTheDocument();
     expect(screen.getByText('Members').previousElementSibling).toHaveTextContent('—');
   });
 

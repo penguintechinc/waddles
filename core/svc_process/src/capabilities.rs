@@ -787,10 +787,10 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// length-capped. The success value is `{"text": "<completion>"}`. Neither the
     /// prompt nor the completion is ever logged or used as a metric label.
     ///
-    /// **NOT PRODUCTION-READY -- do not enable waddles.bundle-ai-capability in
-    /// any environment until issue #858 is resolved.** Gating today is the
-    /// default-OFF flag plus the `ai.generate` 'dangerous' consent-ack;
-    /// Enterprise-tier enforcement is NOT YET implemented in code (issue #858).
+    /// Gating: the default-OFF flag, the `ai.generate` 'dangerous' consent-ack,
+    /// and a platform-side license-tier check (>= Professional; unknown tier
+    /// fails closed) applied here for every bundle. BYOK/Enterprise (#858) and
+    /// per-community effective-tier resolution are not yet implemented.
     async fn handle_ai(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
         /// The only four fields a bundle may influence.
         #[derive(serde::Deserialize)]
@@ -842,6 +842,37 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
         let model = wiring.backend.model_for(args.json).to_string();
         let started = std::time::Instant::now();
+        // Platform-side tier enforcement (every bundle, none check it themselves).
+        match wiring.tier.tier().await {
+            Some(t) if t >= ai::AI_TIER_REQUIRED => {}
+            Some(t) => {
+                ai::record_call(&model, ai::outcome::TIER_REFUSED, 0.0);
+                tracing::warn!(
+                    tenant_id = self.tenant_id,
+                    community_id = self.community_id,
+                    app_id = %self.app_id,
+                    tier = ?t,
+                    "ai.generate refused: license tier below Professional"
+                );
+                return Err(denied(
+                    "tier_required",
+                    "AI features require a Professional license or higher",
+                ));
+            }
+            None => {
+                ai::record_call(&model, ai::outcome::TIER_UNKNOWN, 0.0);
+                tracing::warn!(
+                    tenant_id = self.tenant_id,
+                    community_id = self.community_id,
+                    app_id = %self.app_id,
+                    "ai.generate refused: license tier unknown (fail closed)"
+                );
+                return Err(denied(
+                    "tier_unknown",
+                    "AI features are unavailable: license tier could not be determined",
+                ));
+            }
+        }
         let refuse = |outcome: &'static str, err: HostResultError| {
             ai::record_call(&model, outcome, started.elapsed().as_secs_f64());
             err

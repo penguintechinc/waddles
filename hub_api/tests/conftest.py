@@ -91,10 +91,10 @@ from services.schema import (
     bind_ai_routing_tables,
     bind_app_bundle_tables,
     bind_auth_tables,
-    bind_bar_citizen_tables,
     bind_calendar_sync_tables,
     bind_community_authz_tables,
     bind_github_sync_tables,
+    bind_guild_pairing_tables,
     bind_lifecycle_tables,
     bind_marketplace_module_tables,
     bind_music_tables,
@@ -882,13 +882,13 @@ def service_key_headers() -> dict[str, str]:
 
 
 @pytest.fixture
-def bar_citizen_db(tmp_path: Any) -> Any:
-    """File-backed pydal DB for the Bar Citizen guild-pairing/role-sync group (migration 0034).
+def guild_pairing_db(tmp_path: Any) -> Any:
+    """File-backed pydal DB for the guild-pairing/role-sync group (migration 0034).
 
     Additive fixture (`hub_api/PORTING.md`: new groups add their own
     `bind_<group>_tables()` call rather than editing an existing fixture)
     -- `bind_auth_tables()` for `tenants`/`communities`/`hub_users`, then
-    `bind_bar_citizen_tables()` on top, same layering `ai_routing_db`/
+    `bind_guild_pairing_tables()` on top, same layering `ai_routing_db`/
     `overlay_db` use. Seeds one regular tenant + one global tenant + one
     community under the regular tenant, so both `CredentialResolver` lanes
     (tenant 0 / tenant N) and `community_in_tenant()` tenant-isolation
@@ -896,7 +896,7 @@ def bar_citizen_db(tmp_path: Any) -> Any:
 
     Yields `(dal, community_id, tenant_id, global_tenant_id)`.
     """
-    async_dal = AsyncDAL(f"sqlite://{tmp_path / 'bar_citizen_test.db'}", pool_size=1)
+    async_dal = AsyncDAL(f"sqlite://{tmp_path / 'guild_pairing_test.db'}", pool_size=1)
     dal = async_dal.dal
     dal.define_table(
         "tenants",
@@ -908,7 +908,7 @@ def bar_citizen_db(tmp_path: Any) -> Any:
         Field("config", "json"),
     )
     bind_auth_tables(dal, migrate=True)
-    bind_bar_citizen_tables(dal, migrate=True)
+    bind_guild_pairing_tables(dal, migrate=True)
 
     tenant_id = dal.tenants.insert(
         slug=TENANT_SLUG, display_name="Acme Corp", is_active=True, is_global=False
@@ -928,8 +928,8 @@ def bar_citizen_db(tmp_path: Any) -> Any:
 def event_sync_db(tmp_path: Any) -> Any:
     """File-backed pydal DB for the Discord event-sync group (migration 0039_event_sync_enabled).
 
-    Additive on top of `bar_citizen_db`'s own layering pattern --
-    `bind_auth_tables()` + `bind_bar_citizen_tables()` (for `guild_tenant_
+    Additive on top of `guild_pairing_db`'s own layering pattern --
+    `bind_auth_tables()` + `bind_guild_pairing_tables()` (for `guild_tenant_
     pairings.event_sync_enabled` + `CredentialResolver`'s tenant lookup)
     plus this group's own `bind_calendar_sync_tables()` (`calendar_events`
     + `calendar_event_discord_syncs`). Seeds one regular tenant + one
@@ -952,7 +952,7 @@ def event_sync_db(tmp_path: Any) -> Any:
         Field("config", "json"),
     )
     bind_auth_tables(dal, migrate=True)
-    bind_bar_citizen_tables(dal, migrate=True)
+    bind_guild_pairing_tables(dal, migrate=True)
     bind_calendar_sync_tables(dal, migrate=True)
 
     tenant_id = dal.tenants.insert(

@@ -41,11 +41,11 @@ chat-invoked command is `!so` while `SubModuleGate`'s kv-namespace string is `"s
   usernames -- a deliberate PII-tokenization trade-off. Automatically *triggering* a shoutout for
   a listed user (e.g. on raid/join) is not built -- `auto` today is pure list CRUD; see module
   docstring's DO-NOT-BUILD section.
-- **`ai`** -- license-gated AI-generated shoutout text. `!so enable ai` requires the tenant's
-  license tier to be at least Professional (`waddle_sdk.flask_core.feature_flags.tier_at_least`),
-  fails CLOSED on an unavailable/stale tier binding, never env-overridable. The toggle and its
-  license gate are real; the actual AI-generation call is a tracked, documented follow-up (not a
-  stub): https://github.com/penguintechinc/waddles/issues/626. Until then, `!so <user>` always
+- **`ai`** -- AI-generated shoutout text. `!so enable ai` is a plain toggle; the bundle never
+  checks a license tier. The platform's `ai.generate` host capability enforces the Professional
+  requirement for every bundle (typed `tier_required`/`tier_unknown` refusal). The actual
+  AI-generation call is a tracked, documented follow-up (not a stub):
+  https://github.com/penguintechinc/waddles/issues/626. Until then, `!so <user>` always
   renders the configured template, logging at DEBUG that AI was requested but is pending.
 
 ## State (kv, community-scoped only)

@@ -69,7 +69,7 @@ import yaml
 from penguin_dal import AsyncDB
 
 from config import HubAPIConfig
-from services import app_command_backfill, vendor_bundle_authz
+from services import app_command_backfill, connector_publish_service, vendor_bundle_authz
 from services.app_source_binding_service import TENANT_WIDE_COMMUNITY_SENTINEL
 from services.bundle_approval_service import (
     activate_for_community,
@@ -1439,6 +1439,33 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 "connection_count": len(connections),
             },
         )
+
+        # Connector service bundles: the executor boot-pins `connectors/<p>/<digest>.{wasm,json}`
+        # (signed sidecar), a bucket layout the app-bundle path below never writes. This Job
+        # already holds the signing key + scoped S3 identity and the reproducibly-built wasm, so
+        # it publishes them here (idempotent). Opt-in via the chart (`pipeline.connectors.
+        # publishAtSeed`); a failure counts toward the Job's failure total -- never swallowed.
+        if os.environ.get("CORE_BUNDLES_PUBLISH_CONNECTORS", "").strip().lower() in {"1", "true"}:
+            try:
+                published = await connector_publish_service.publish_connectors(
+                    connector_publish_service.load_connector_artifacts(catalog_path, bundles_dir),
+                    connector_publish_service.signer_from_env(),
+                )
+                for item in published:
+                    logger.info(
+                        "core-bundle-seeder: connector published",
+                        extra={"platform": item.platform, "digest": item.digest},
+                    )
+                logger.info(
+                    "core-bundle-seeder: connector digests (set pipeline.connectors.digests)\n%s",
+                    connector_publish_service.values_snippet(published),
+                )
+            except Exception as exc:  # noqa: BLE001 -- logged loud with traceback, counted
+                failures += 1
+                logger.error(
+                    f"core-bundle-seeder: connector publish FAILED ({type(exc).__name__}: {exc})",
+                    exc_info=True,
+                )
 
         # Platform connections register BEFORE any bundle activates -- auto-bind
         # (app_source_binding_service.sync_bindings()) only grants a bundle's `consumes`

@@ -69,7 +69,7 @@ handlers:
     tracking: "#840"
   - handler: core/svc_ingest/builtin_handlers/spectrum_ingest.py
     status: pending
-    gap: "no Rust Spectrum poll/org-sync receiver/normalizer or connector bundle (Bar Citizen v3.0 must-have); corpus slot corpus/spectrum"
+    gap: "no Rust Spectrum poll/org-sync receiver/normalizer or connector bundle (v3.0 must-have); corpus slot corpus/spectrum"
     tracking: "#840"
   - handler: core/svc_ingest/builtin_handlers/echo_ingest.py
     status: pending

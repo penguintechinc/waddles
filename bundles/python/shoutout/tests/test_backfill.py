@@ -144,15 +144,14 @@ def test_ai_pending_is_logged_at_debug_with_no_user_text(
 
 
 @pytest.mark.parametrize("tier", ["free", "", "FREE", "nonsense"])
-def test_enable_ai_is_denied_for_free_or_unrecognized_tiers_and_writes_nothing(
+def test_enable_ai_does_not_check_the_tier_the_host_enforces_it(
     monkeypatch: pytest.MonkeyPatch, tier: str
 ) -> None:
     host = _FakeHost()
     _install(monkeypatch, host, tier=tier)
     result = _go("config_enable_ai", is_mod=True)
     assert result.detail == "config_enable_ai"
-    assert "requires a professional license" in _last_reply(host)
-    assert host.store == {}
+    assert "enabled" in _last_reply(host)
 
 
 # -- kv charset (gh-631) + state hygiene

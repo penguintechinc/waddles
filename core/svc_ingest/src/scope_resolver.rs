@@ -737,7 +737,7 @@ mod tests {
             raw(0, 9, "acme", "main"),                       // tenant id < 1
             raw(2, -1, "acme", "main"),                      // negative community id
             raw(2, 9, "ac:me", "main"),                      // key-unsafe tenant slug
-            raw(2, 9, "acme", "Bar Citizen"),                // key-unsafe community name
+            raw(2, 9, "acme", "Acme Guild"),                 // key-unsafe community name
             raw(2, i64::from(i32::MAX) + 1, "acme", "main"), // does not fit i32
         ] {
             let fake = Arc::new(Fake::new(Ok(bad.clone())));

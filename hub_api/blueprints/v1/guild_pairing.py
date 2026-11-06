@@ -1,6 +1,6 @@
-"""v1 `community.guild_pairing` group -- Bar Citizen guild<->tenant pairing + role-sync CRUD.
+"""v1 `community.guild_pairing` group -- guild<->tenant pairing + role-sync CRUD.
 
-**Foundation REST surface** other Bar Citizen units (C/D's OAuth
+**Foundation REST surface** other units (C/D's OAuth
 bot-install flows, F's role-sync worker) sit behind -- `services/
 guild_pairing.py` (the data-access/service layer) and `services/
 credential_resolver.py` (the `CredentialResolver` seam) are the two

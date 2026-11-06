@@ -9,7 +9,7 @@ interface Row {
 }
 
 const ROWS: Row[] = [
-  { id: 1, name: 'Bar Citizen', platform: 'Discord', status: 'Active' },
+  { id: 1, name: 'Acme', platform: 'Discord', status: 'Active' },
   { id: 2, name: 'Penguinz Plays', platform: 'Twitch', status: 'Active' },
   { id: 3, name: 'Waddles HQ', platform: 'Slack', status: 'Paused' },
 ];

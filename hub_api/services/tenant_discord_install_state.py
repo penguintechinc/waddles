@@ -1,4 +1,4 @@
-"""Single-use `state` token store for the per-tenant Discord bot-install flow (Bar Citizen).
+"""Single-use `state` token store for the per-tenant Discord bot-install flow.
 
 Same shape as `services/oauth_connection_state.py`'s own opaque-token +
 Redis-stashed-context design -- see that module's docstring for the full
