@@ -65,6 +65,7 @@ every other public route in this file's sibling blueprints is bounded.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -84,6 +85,8 @@ from services.community_common import community_in_tenant
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, not_found, payment_required
 from services.machine_auth import machine_authenticated
+
+logger = logging.getLogger(__name__)
 
 connections_bp = Blueprint("v1_community_connections", __name__, url_prefix="/api/v1")
 
@@ -309,11 +312,13 @@ async def oauth_callback(provider: str) -> tuple[Response, int] | Response:
 
     try:
         cookie_name = _binding_cookie(provider)
-    except ValueError:
+    except ValueError as exc:
+        logger.warning("oauth callback rejected: unknown provider (%s)", type(exc).__name__)
         return _callback_html(provider=provider, ok=False, error="invalid_or_expired_state"), 400
     try:
         payload = await state_svc.consume_state(state_param, request.cookies.get(cookie_name))
     except binding.InstallStateError as exc:
+        logger.warning("oauth callback state rejected: code=%s", exc.code)
         return _callback_html(provider=provider, ok=False, error=exc.code), 400
 
     @after_this_request

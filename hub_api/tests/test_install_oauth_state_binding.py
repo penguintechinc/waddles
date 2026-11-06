@@ -121,8 +121,8 @@ def valkey(monkeypatch: pytest.MonkeyPatch) -> FakeValkey:
 
 
 @pytest.fixture
-def twitch_discord_app(bar_citizen_db: Any) -> Quart:
-    dal, *_ = bar_citizen_db
+def twitch_discord_app(guild_pairing_db: Any) -> Quart:
+    dal, *_ = guild_pairing_db
     app = Quart(__name__)
     QuartSchema(app)
     app.register_blueprint(tenant_twitch_install_bp)
