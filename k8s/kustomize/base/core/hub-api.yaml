@@ -59,6 +59,9 @@ spec:
           value: "hub-api"
         - name: MODULE_PORT
           value: "8060"
+        # gh-894 -- analytics-core is consolidated into core-data (:8040, /api/v1/analytics/*).
+        - name: ANALYTICS_CORE_API_URL
+          value: "http://core-data:8040"
         livenessProbe:
           httpGet:
             path: /health

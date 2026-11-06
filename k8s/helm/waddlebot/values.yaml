@@ -1212,6 +1212,9 @@ pipeline:
     enabled: true
     port: 8204
     grpcPort: 50204
+    # ANALYTICS_CORE_API_URL for hub-api's analytics proxy (gh-894). Empty = derive from the
+    # core-data Service ("http://<fullname>-core-data.<namespace>.svc:<modules.coreData.service.port>").
+    analyticsCoreUrl: ""
     # SPIFFE_PEER_TRUST / SPIFFE_PEER_ID_HEADER (hub_api/services/machine_auth.py). Default OFF.
     # Enable ONLY behind an mTLS terminator that strips the header from non-mTLS traffic AND
     # after a per-identity community allow-list exists -- see docs/PROVIDER_CONNECTIONS.md.

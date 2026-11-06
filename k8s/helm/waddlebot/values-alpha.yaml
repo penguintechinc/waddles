@@ -609,8 +609,9 @@ modules:
     resources:
       requests: { cpu: "50m", memory: "96Mi" }
       limits: { cpu: "300m", memory: "384Mi" }
+  # gh-894 -- hosts the consolidated analytics (/api/v1/analytics/*) hub-api proxies to.
   coreData:
-    enabled: false
+    enabled: true
     replicas: 1
     resources:
       requests: { cpu: "50m", memory: "96Mi" }
