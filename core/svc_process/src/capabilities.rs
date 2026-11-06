@@ -76,6 +76,7 @@ use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_platform_table::{
     Change as PlatformTableChange, PlatformTableError, PlatformTableScope, PlatformTableStore,
 };
+use bundle_host_storage::{GrantSet as StorageGrantSet, StorageError, StorageHost, StorageScope};
 use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
@@ -430,6 +431,32 @@ pub struct PlatformTableWiring {
     pub flag: Arc<dyn FeatureGate>,
 }
 
+/// Live wiring for the `object-storage` bundle host capability (spec
+/// 2026-11-06-bundle-object-storage): the scope-enforcing [`StorageHost`] (S3
+/// credentials + durable audit live INSIDE it, never in a bundle) plus the opt-in
+/// flag. `None` on the handler means every `object_storage.*` call denies
+/// `not_implemented`.
+#[derive(Clone)]
+pub struct ObjectStorageWiring {
+    pub host: Arc<StorageHost>,
+    /// `crate::license::BUNDLE_OBJECT_STORAGE_CAPABILITY_FLAG` gate -- OFF denies
+    /// every call `feature_disabled` before the host is touched.
+    pub flag: Arc<dyn FeatureGate>,
+}
+
+/// Maps a host error onto the host-result wire (backend detail is logged, never
+/// forwarded to the guest). Codes use `_` (the executor maps them onto the WIT variant).
+fn storage_error_to_host(err: StorageError) -> HostResultError {
+    match &err {
+        StorageError::Backend(detail) => {
+            tracing::error!(error = %detail, "object-storage host backend error");
+            denied("backend", "object-storage backend error")
+        }
+        StorageError::TooLarge(n) => denied("too_large", n.to_string()),
+        other => denied(&other.wire_code().replace('-', "_"), other.to_string()),
+    }
+}
+
 /// Maps a store error onto the host-result wire (backend detail is logged, never
 /// forwarded to the guest).
 fn platform_table_error_to_host(err: PlatformTableError) -> HostResultError {
@@ -517,6 +544,9 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `None` until [`Self::with_platform_table`] -- every `platform_table.*`
     /// call denies `not_implemented` in that state (never a silent no-op).
     platform_table: Option<PlatformTableWiring>,
+    /// `None` until [`Self::with_object_storage`] -- every `object_storage.*` call
+    /// denies `not_implemented` in that state.
+    object_storage: Option<ObjectStorageWiring>,
     /// `None` until [`Self::with_identity`] -- every `identity.*` call denies
     /// `not_implemented` in that state (never panics, never a default or
     /// guessed identity).
@@ -587,6 +617,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             reputation: None,
             economy: None,
             platform_table: None,
+            object_storage: None,
             identity: None,
             ai: None,
             ai_deadline: None,
@@ -677,6 +708,13 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// invoke with a clone of the process-wide [`PlatformTableWiring`].
     pub fn with_platform_table(mut self, platform_table: PlatformTableWiring) -> Self {
         self.platform_table = Some(platform_table);
+        self
+    }
+
+    /// Attaches the `object-storage` capability's live wiring -- called once per
+    /// invoke with a clone of the process-wide [`ObjectStorageWiring`].
+    pub fn with_object_storage(mut self, object_storage: ObjectStorageWiring) -> Self {
+        self.object_storage = Some(object_storage);
         self
     }
 
@@ -1825,6 +1863,191 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
     }
 
+    /// `object_storage.*` (`wit/waddle-bundle/stage.wit` `interface object-storage`),
+    /// carried as `capability = db`. Order: (1) op/arg parsing; (2) wiring + flag
+    /// (cheap, before any gate quota is spent); (3) for a CROSS-prefix data op the
+    /// gate authorizes `storage.<op>:<owner>` (own prefix needs no grant; tag ops
+    /// are owner-only and never cross-prefix); (4) the host, which re-checks the
+    /// grant, filters by tag + system tags, enforces limits and audits. Tenant and
+    /// community come from this invoke's scope -- never from `call.args`.
+    async fn handle_object_storage(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        use base64::Engine as _;
+        use bundle_capability_gate::storage_access::StorageOp;
+        let op = call
+            .op
+            .strip_prefix("object_storage.")
+            .ok_or_else(|| denied("unknown_op", "not an object_storage op"))?;
+        let args = &call.args;
+        let str_arg = |k: &str| -> Result<String, HostResultError> {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| denied("invalid_args", format!("{k} must be a string")))
+        };
+        let opt_str = |k: &str| -> Result<Option<String>, HostResultError> {
+            match args.get(k) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+                Some(_) => Err(denied("invalid_args", format!("{k} must be a string or null"))),
+            }
+        };
+        let owner = opt_str("owner")?;
+        let grant_op = match op {
+            "put" => Some(StorageOp::Write),
+            "get" | "head" | "presign_get" => Some(StorageOp::Read),
+            "list" => Some(StorageOp::List),
+            "delete" => Some(StorageOp::Delete),
+            "tag_add" | "tag_remove" => None,
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("object_storage op {other:?} not supported"),
+                ))
+            }
+        };
+
+        let Some(wiring) = &self.object_storage else {
+            return Err(denied(
+                "not_implemented",
+                "object-storage capability is not provisioned in this deployment \
+                 (BUNDLE_STORAGE_* unset or the S3/audit connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "object-storage capability is disabled (waddles.bundle-object-storage is OFF)",
+            ));
+        }
+
+        // Cross-prefix data op: the gate must hold `storage.<op>:<owner>`.
+        let mut grants: Vec<String> = Vec::new();
+        if let (Some(gop), Some(o)) = (grant_op, owner.as_deref()) {
+            if o != self.app_id {
+                let permission = PermissionId::parse(&format!("storage.{}:{o}", gop.as_str()))
+                    .map_err(|_| denied("invalid_args", "bad prefix owner"))?;
+                self.gate
+                    .authorize(
+                        &self.gate_scope(),
+                        permission,
+                        ResourceRef::AppScoped(AppScopedResource::None),
+                    )
+                    .map_err(denied_from_gate)?;
+                grants.push(format!("storage.{}:{o}", gop.as_str()));
+            }
+        }
+        let scope = StorageScope {
+            app_id: self.app_id.clone(),
+            tenant: u64::try_from(self.tenant_id)
+                .map_err(|_| denied("invalid_args", "tenant id out of range"))?,
+            community: u64::try_from(self.community_id)
+                .map_err(|_| denied("invalid_args", "community id out of range"))?,
+            grants: StorageGrantSet::from_permission_ids(grants.iter().map(String::as_str))
+                .map_err(storage_error_to_host)?,
+            enabled: true,
+            request_id: format!("{}-{}", self.app_id.replace('.', "-"), call.call_id),
+        };
+        let host = &wiring.host;
+        let owner_ref = owner.as_deref();
+        let info = |i: &bundle_host_storage::host::ObjectInfo| {
+            serde_json::json!({ "key": i.key, "size": i.size, "content_type": i.content_type })
+        };
+        match op {
+            "put" => {
+                let body = base64::engine::general_purpose::STANDARD
+                    .decode(str_arg("body_b64")?)
+                    .map_err(|_| denied("invalid_args", "body_b64 must be base64"))?;
+                let tags: Vec<String> = match args.get("tags") {
+                    None | Some(serde_json::Value::Null) => Vec::new(),
+                    Some(serde_json::Value::Array(a)) => a
+                        .iter()
+                        .map(|v| v.as_str().map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| denied("invalid_args", "tags must be strings"))?,
+                    Some(_) => return Err(denied("invalid_args", "tags must be an array")),
+                };
+                let i = host
+                    .put(
+                        &scope,
+                        owner_ref,
+                        &str_arg("key")?,
+                        bundle_host_storage::Bytes::from(body),
+                        &str_arg("content_type")?,
+                        &tags,
+                    )
+                    .await
+                    .map_err(storage_error_to_host)?;
+                Ok(info(&i))
+            }
+            "get" => {
+                let (i, body) = host
+                    .get(&scope, owner_ref, &str_arg("key")?)
+                    .await
+                    .map_err(storage_error_to_host)?;
+                let mut v = info(&i);
+                v["body_b64"] = serde_json::Value::String(
+                    base64::engine::general_purpose::STANDARD.encode(&body),
+                );
+                Ok(v)
+            }
+            "head" => host
+                .head(&scope, owner_ref, &str_arg("key")?)
+                .await
+                .map(|i| info(&i))
+                .map_err(storage_error_to_host),
+            "list" => {
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .ok_or_else(|| denied("invalid_args", "limit must be a u32"))?;
+                let page = host
+                    .list(
+                        &scope,
+                        owner_ref,
+                        &str_arg("key_prefix")?,
+                        opt_str("cursor")?.as_deref(),
+                        limit,
+                    )
+                    .await
+                    .map_err(storage_error_to_host)?;
+                Ok(serde_json::json!({
+                    "objects": page.objects.iter().map(info).collect::<Vec<_>>(),
+                    "next_cursor": page.next_cursor,
+                }))
+            }
+            "delete" => host
+                .delete(&scope, owner_ref, &str_arg("key")?)
+                .await
+                .map(|_| serde_json::json!({ "ok": true }))
+                .map_err(storage_error_to_host),
+            "presign_get" => {
+                let ttl = args
+                    .get("ttl_seconds")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .ok_or_else(|| denied("invalid_args", "ttl_seconds must be a u32"))?;
+                host.presign_get(&scope, owner_ref, &str_arg("key")?, ttl)
+                    .await
+                    .map(|url| serde_json::json!({ "url": url }))
+                    .map_err(storage_error_to_host)
+            }
+            "tag_add" => host
+                .tag_add(&scope, owner_ref, &str_arg("key")?, &str_arg("consumer")?)
+                .await
+                .map(|_| serde_json::json!({ "ok": true }))
+                .map_err(storage_error_to_host),
+            _ => host
+                .tag_remove(&scope, owner_ref, &str_arg("key")?, &str_arg("consumer")?)
+                .await
+                .map(|_| serde_json::json!({ "ok": true }))
+                .map_err(storage_error_to_host),
+        }
+    }
+
     /// `reputation.get` / `reputation.adjust` (`wit/waddle-bundle/stage.wit`
     /// `interface reputation`), carried as `capability = db`,
     /// `op = "reputation.*"` (`penguin-bundle-host`'s closed `CapabilityKind`
@@ -2934,6 +3157,9 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // `platform_table.*` ops (spec 2026-11-06): own gate permissions
             // (`platform.table.<op>:<table>.<column>`), own handler, never the
             // `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("object_storage.") => {
+                self.handle_object_storage(&call).await
+            }
             CapabilityKind::Db if call.op.starts_with("platform_table.") => {
                 self.handle_platform_table(&call).await
             }

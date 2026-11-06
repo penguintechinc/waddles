@@ -1083,6 +1083,17 @@ export const bundleApi = {
       `/api/v1/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(version)}/deny`,
       data,
     ),
+  // Dangerous access grants (platform tables, ...) a version requests + approval state.
+  getAccessGrants: (appId, version) =>
+    api.get(
+      `/api/v1/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(version)}/access-grants`,
+    ),
+  // Global approval of the requested permission ids; every dangerous id must be acked.
+  approvePermissions: (appId, version, approvedPermissions) =>
+    api.post(
+      `/api/v1/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(version)}/permissions/approve`,
+      { approvedPermissions },
+    ),
 };
 
 // ── Global-Admin Bundle Approval Queue (hub_api/blueprints/v1/bundle_admin.py) ──

@@ -216,3 +216,63 @@ async def test_system_reseed_preserves_human_approved_table_access(install_dal: 
             "platform.table.write:community_members.role",
         }
     )
+
+
+async def _approve_access(install_dal: Any, manifest: Any, ids: set[str]) -> None:
+    await svc.record_permission_requests(
+        install_dal,
+        app_id=manifest.app_id,
+        version=manifest.version,
+        declarations=manifest.permission_declarations,
+        approved_by=7,
+        approved_permissions=frozenset(ids),
+    )
+
+
+async def test_activation_requires_ack_of_every_approved_access_grant(install_dal: Any) -> None:
+    from services.bundle_approval_service import _require_access_grant_ack
+    from services.errors import ApiError
+
+    manifest = _parse(table_access=[_ENTRY])
+    ids = {d.id for d in manifest.permission_declarations}
+    await _approve_access(install_dal, manifest, ids)
+    kwargs: dict[str, Any] = {
+        "app_id": manifest.app_id,
+        "version": manifest.version,
+        "tenant_id": 1,
+        "community_id": 3,
+        "activated_by": 9,
+    }
+    for partial in (frozenset(), frozenset(sorted(ids)[:1])):
+        with pytest.raises(ApiError) as exc:
+            await _require_access_grant_ack(install_dal, acknowledged=partial, **kwargs)
+        assert exc.value.status_code == 422
+        assert exc.value.code == "access_grant_ack_required"
+    await _require_access_grant_ack(install_dal, acknowledged=frozenset(ids), **kwargs)
+
+
+async def test_activation_ack_is_a_noop_without_approved_access_grants(install_dal: Any) -> None:
+    from services.bundle_approval_service import _require_access_grant_ack
+
+    plain = _parse()
+    await _approve_access(install_dal, plain, set())
+    await _require_access_grant_ack(
+        install_dal,
+        app_id=plain.app_id,
+        version=plain.version,
+        tenant_id=1,
+        community_id=3,
+        acknowledged=frozenset(),
+        activated_by=9,
+    )
+    # Requested-but-unapproved access (e.g. a widened manifest) is NOT actionable.
+    unapproved = _parse(table_access=[_ENTRY], version="2.0.0")
+    await _require_access_grant_ack(
+        install_dal,
+        app_id=unapproved.app_id,
+        version=unapproved.version,
+        tenant_id=1,
+        community_id=3,
+        acknowledged=frozenset(),
+        activated_by=9,
+    )

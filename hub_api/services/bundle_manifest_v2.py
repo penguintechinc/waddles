@@ -38,6 +38,12 @@ from services.bundle_permission_catalog import (
     is_valid_egress_host,
     resolve_risk,
 )
+from services.bundle_storage_access import (
+    StorageAccessError,
+    StorageAccessRequest,
+    parse_storage_access,
+    storage_access_permission_ids,
+)
 from services.bundle_table_access import (
     TableAccessError,
     TableAccessRequest,
@@ -249,6 +255,10 @@ class BundleManifestV2:
     # as a dangerous `platform.table.*` id; this keeps the consent-screen shape
     # (table/columns/ops/reason). Defaulted last for hand-built fixtures.
     table_access: tuple[TableAccessRequest, ...] = ()
+    # Cross-prefix object-storage requests (spec 2026-11-06-bundle-object-storage); each
+    # (op, owner) is ALSO folded into `permission_declarations` as a dangerous
+    # `storage.<op>:<owner>` id. Defaulted last for hand-built fixtures.
+    storage_access: tuple[StorageAccessRequest, ...] = ()
 
     def supports_platform(self, platform: str) -> bool:
         """Return True when this bundle may run on `platform` (absent field = every platform)."""
@@ -690,8 +700,10 @@ def parse_permission_declarations(
         permission_id = entry.get("id", "")
         _require(
             not is_access_grant_id(str(permission_id)),
-            "use_table_access_block",
-            f"{permission_id!r}: declare platform-table access via the table_access block",
+            "use_storage_access_block"
+            if str(permission_id).startswith("storage.")
+            else "use_table_access_block",
+            f"{permission_id!r}: declare it via the table_access / storage_access block",
         )
         risk = resolve_risk(permission_id)
         _require(risk is not None, "unknown_permission", f"{permission_id!r}")
@@ -1071,6 +1083,20 @@ def parse_bundle_manifest_v2(
         if pid not in declared_ids
     )
 
+    try:
+        storage_access = parse_storage_access(
+            raw.get("storage_access"), own_app_id=str(raw.get("app_id", ""))
+        )
+    except StorageAccessError as exc:
+        raise ManifestV2Error(exc.reason, exc.detail) from exc
+    declared_ids = {d.id for d in permission_declarations}
+    permission_declarations = permission_declarations + tuple(
+        PermissionDeclaration(id=pid, risk="dangerous", justification=req.reason)
+        for req in storage_access
+        for pid in storage_access_permission_ids((req,))
+        if pid not in declared_ids
+    )
+
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -1106,4 +1132,5 @@ def parse_bundle_manifest_v2(
         requested_tools=requested_tools,
         trusted_source=trusted_source,
         table_access=table_access,
+        storage_access=storage_access,
     )

@@ -1,0 +1,30 @@
+[package]
+name = "bundle-host-storage"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Shared `storage` bundle host-capability (wit/waddle-bundle/storage.wit: put/get/list/delete/presign-get) over ONE S3-compatible bucket with a per-bundle prefix, approved cross-prefix grants and host-side tag filtering. Bundles never hold S3 credentials; tenant/community scope is injected host-side."
+
+[lib]
+name = "bundle_host_storage"
+path = "src/lib.rs"
+
+# Exact-version pins (rules/critical-rules.md Dependency Pinning); versions mirror core/svc_presentation.
+[dependencies]
+async-trait = "=0.1.89"
+bytes = "=1.12.1"
+futures = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
+http = "=1.5.0"
+object_store = { version = "=0.14.1", features = ["aws"] }
+opentelemetry = "=0.32.0"
+sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
+thiserror = "=2.0.20"
+tokio = { version = "=1.53.3", features = ["sync", "time", "rt"] }
+tracing = "=0.1.44"
+url = "=2.5.8"
+
+[dev-dependencies]
+# Docker-backed Postgres helper shared with the other bundle_host_* integration tests.
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
