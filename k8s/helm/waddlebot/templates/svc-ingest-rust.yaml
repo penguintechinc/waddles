@@ -208,7 +208,7 @@ spec:
         # the Python svc-ingest deployment reads (templates/svc-ingest.yaml).
         - name: CONNECTOR_RUNTIME_ENABLED
           value: "true"
-        {{- include "waddlebot.connectorConnectorEnv" . | nindent 8 }}
+        {{- include "waddlebot.connectorPlatformEnv" . | nindent 8 }}
         - name: CONNECTOR_RECONCILE_INTERVAL_SECS
           value: {{ $cr.reconcileIntervalSecs | quote }}
         - name: CONNECTOR_HEARTBEAT_ENABLED
