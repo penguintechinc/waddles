@@ -1,4 +1,4 @@
-"""Bar Citizen role-sync worker (Unit F) -- bidirectional Twitch<->Discord reconcile engine.
+"""Role-sync worker (Unit F) -- bidirectional Twitch<->Discord reconcile engine.
 
 **Two directions, each with its own single authoritative source -- never
 the same role concept written both ways.** `guild_tenant_pairings.direction`
@@ -80,8 +80,10 @@ run as a Kubernetes CronJob -- same "standalone process, own
 `penguin-dal` connection" shape `usage_aggregator_service.py` already
 uses, chosen over an in-process hub-api loop since Twitch's own rate
 limits make a sub-minute cadence pointless here (unlike that module's
-`e2s` cadence). **Follow-up (not in this PR):** an EventSub/gateway-pushed
-fast path once the Rust dispatch work lands; this worker's periodic pass
+`e2s` cadence). **Discord gateway push (inbound) is now wired** in
+`services/role_sync_inbound_service.py` (Discord service bundle >=1.0.3 forwards
+GUILD_MEMBER_UPDATE / GUILD_ROLE_*; origin-marker echo suppression via `sync_scope`).
+**Follow-up:** an EventSub-pushed Twitch fast path; this worker's periodic pass
 remains the correctness backstop (drift reconciliation) even after that
 lands -- reconciliation-by-polling is never fully replaced by push.
 
@@ -126,7 +128,7 @@ from services.credential_resolver import (
     TransportUnavailable,
 )
 from services.guild_pairing import list_bindings
-from services.schema import bind_auth_tables, bind_bar_citizen_tables
+from services.schema import bind_auth_tables, bind_guild_pairing_tables
 from services.sync_worker_dal import open_worker_dal
 
 try:
@@ -178,22 +180,22 @@ _TWITCH_TO_DISCORD_DIRECTIONS = frozenset({"twitch_to_discord", "bidirectional"}
 _DISCORD_TO_PLATFORM_DIRECTIONS = frozenset({"discord_to_twitch", "bidirectional"})
 
 #: PostHog flag gating this entire engine -- defaulted OFF until validated (critical-rules.md).
-FEATURE_BAR_CITIZEN_ROLE_SYNC = "waddles.bar_citizen.role_sync"
+FEATURE_ROLE_SYNC = "waddles.role_sync"
 
 _meter = get_meter()
 _roles_added_counter = _meter.create_counter(
-    "waddles_bar_citizen_roles_added_total", description="Discord roles added by role-sync"
+    "waddles_role_sync_roles_added_total", description="Discord roles added by role-sync"
 )
 _roles_removed_counter = _meter.create_counter(
-    "waddles_bar_citizen_roles_removed_total", description="Discord roles removed by role-sync"
+    "waddles_role_sync_roles_removed_total", description="Discord roles removed by role-sync"
 )
 _community_roles_applied_counter = _meter.create_counter(
-    "waddles_bar_citizen_community_roles_applied_total",
+    "waddles_role_sync_community_roles_applied_total",
     description="hub-platform community_members.role changes applied by role-sync "
     "(Discord -> platform direction)",
 )
 _sync_errors_counter = _meter.create_counter(
-    "waddles_bar_citizen_sync_errors_total", description="role-sync pairing failures, fail-closed"
+    "waddles_role_sync_errors_total", description="role-sync pairing failures, fail-closed"
 )
 
 
@@ -549,7 +551,7 @@ def _list_enabled_pairings(dal: Any) -> list[Any]:
     Direction filtering happens in the caller (not this query) so a
     skipped-direction pairing is still counted, not silently invisible.
     """
-    bind_bar_citizen_tables(dal)
+    bind_guild_pairing_tables(dal)
     t = dal.guild_tenant_pairings
     return list(dal(t.sync_enabled == True).select())  # noqa: E712 - pydal idiom
 
@@ -563,7 +565,7 @@ def _bind_reference_tenants(dal: Any) -> None:
     `services.schema.bind_tenant_tables()` -- that function's own
     `redefine=True` replaces `tenants`' field list wholesale, which would
     silently widen the Python-side Table object past what a test's
-    minimal sqlite schema (see `conftest.py::bar_citizen_db`) actually has
+    minimal sqlite schema (see `conftest.py::guild_pairing_db`) actually has
     columns for.
     """
     if "tenants" in dal.tables:
@@ -818,7 +820,7 @@ def _current_role(dal: Any, community_id: int, hub_user_id: int) -> str | None:
 
 
 async def _flag_enabled(tenant_slug: str) -> bool:
-    """`feature_enabled(FEATURE_BAR_CITIZEN_ROLE_SYNC, tenant=...)`, defaulted OFF.
+    """`feature_enabled(FEATURE_ROLE_SYNC, tenant=...)`, defaulted OFF.
 
     `feature_enabled` itself already degrades to a cached/default value on
     a PostHog/license-server outage (never raises) -- this wrapper exists
@@ -828,7 +830,7 @@ async def _flag_enabled(tenant_slug: str) -> bool:
     """
     if feature_enabled is None:  # pragma: no cover -- only in a flask_core-less environment
         return False
-    return bool(await feature_enabled(FEATURE_BAR_CITIZEN_ROLE_SYNC, tenant=tenant_slug))
+    return bool(await feature_enabled(FEATURE_ROLE_SYNC, tenant=tenant_slug))
 
 
 async def reconcile_pairing(
@@ -1198,7 +1200,7 @@ async def run_role_sync_reconcile_batch(
                 continue
 
             pairing_failed = False
-            async with bundle_span("bar_citizen.role_sync.pairing", pairing_id=int(pairing.id)):
+            async with bundle_span("role_sync.pairing", pairing_id=int(pairing.id)):
                 if direction in _TWITCH_TO_DISCORD_DIRECTIONS:
                     twitch_result = await reconcile_pairing(
                         dal,

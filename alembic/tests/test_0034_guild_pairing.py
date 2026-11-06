@@ -1,6 +1,6 @@
-"""Real-Postgres regression tests for 0034_bar_citizen_guild_pairing.
+"""Real-Postgres regression tests for the 0034 guild-pairing migration.
 
-This is the serialization anchor for the Bar Citizen workstream -- these
+This is the serialization anchor for the guild-pairing workstream -- these
 tests prove the migration actually lands on a real Postgres 17 container
 (`pg_docker.migrated_postgres`, which replays migrations 0020 through
 head) and round-trips upgrade -> downgrade -> upgrade idempotently, plus
@@ -47,7 +47,7 @@ def pg_db() -> Iterator[PgTestDatabase]:
     """One real Postgres 17 container, migrated to `head`, shared by every non-round-trip test below."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0034-bar-citizen-guild-pairing") as db:
+    with migrated_postgres("0034-guild-pairing") as db:
         yield db
 
 
@@ -57,7 +57,7 @@ class TestTenantPlatformCredentials:
         conn = _connect(pg_db)
         try:
             with conn.cursor() as cur:
-                tenant_id = _seed_tenant(cur, slug="acme-bc-1", is_global=False)
+                tenant_id = _seed_tenant(cur, slug="acme-1", is_global=False)
                 cur.execute(
                     "INSERT INTO tenant_platform_credentials (tenant_id, platform, "
                     "credentials_ciphertext) VALUES (%s, %s, %s)",
@@ -96,7 +96,7 @@ class TestTenantPlatformCredentials:
         conn = _connect(pg_db)
         try:
             with conn.cursor() as cur:
-                tenant_id = _seed_tenant(cur, slug="acme-bc-2", is_global=False)
+                tenant_id = _seed_tenant(cur, slug="acme-2", is_global=False)
                 cur.execute(
                     "INSERT INTO tenant_platform_credentials (tenant_id, platform, "
                     "credentials_ciphertext) VALUES (%s, %s, %s)",
@@ -123,8 +123,8 @@ class TestGuildTenantPairingsNtoM:
         conn = _connect(pg_db)
         try:
             with conn.cursor() as cur:
-                c1 = _seed_community(cur, name="bc-sea")
-                c2 = _seed_community(cur, name="bc-eu")
+                c1 = _seed_community(cur, name="acme-sea")
+                c2 = _seed_community(cur, name="acme-eu")
                 cur.execute(
                     "INSERT INTO guild_tenant_pairings "
                     "(community_id, discord_guild_id, direction, role_name_prefix) "
@@ -150,7 +150,7 @@ class TestGuildTenantPairingsNtoM:
         conn = _connect(pg_db)
         try:
             with conn.cursor() as cur:
-                community_id = _seed_community(cur, name="bc-dup")
+                community_id = _seed_community(cur, name="acme-dup")
                 cur.execute(
                     "INSERT INTO guild_tenant_pairings "
                     "(community_id, discord_guild_id, direction, role_name_prefix) "
@@ -332,7 +332,7 @@ class TestCommunityRoleSyncBindings:
 @requires_docker
 class TestDowngradeThenUpgrade:
     def test_downgrade_then_upgrade_round_trip(self) -> None:
-        with migrated_postgres("0034-bar-citizen-roundtrip") as db:
+        with migrated_postgres("0034-roundtrip") as db:
             conn = _connect(db)
             try:
                 with conn.cursor() as cur:

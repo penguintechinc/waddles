@@ -63,6 +63,7 @@ __all__ = [
     "install_fake_ai_host",
     "install_fake_economy_host",
     "install_fake_identity_host",
+    "install_fake_platform_table_host",
     "install_fake_kv_host",
     "install_fake_reputation_host",
     "rfc3339_from_millis",
@@ -524,6 +525,86 @@ def install_fake_identity_host(
     return host
 
 
+_Error_NotAllowlisted = _variant("Error_NotAllowlisted", True)
+
+
+@dataclass(slots=True)
+class FakePlatformTableHost:
+    """In-memory stand-in for `wit_world.imports.platform_table`, enforcing the real host's rules.
+
+    Mirrors the stage (gate + store): every column needs its own grant id in `grants`
+    (`platform.table.<op>:<table>.<column>`, else `Error_Denied("not_granted")`); an
+    off-allowlist triple is `Error_NotAllowlisted`; rows live in `rows[user] = {column:
+    value}` and are scoped to ONE community -- a user not in `rows` (or holding a
+    protected role on write) is `Error_NotAMember`; `role` writes accept only
+    member/vip/moderator. `calls` records `(op, user, tuple(columns))`.
+    """
+
+    rows: dict[str, dict[str, str]] = field(default_factory=dict)
+    grants: set[str] = field(default_factory=set)
+    calls: list[tuple[str, str, tuple[str, ...]]] = field(default_factory=list)
+    allowlist: dict[str, dict[str, set[str]]] = field(
+        default_factory=lambda: {
+            "community_members": {
+                "role": {"read", "write"},
+                "is_active": {"read"},
+                "joined_at": {"read"},
+            }
+        }
+    )
+
+    def _check(self, op: str, table: str, column: str) -> None:
+        if op not in self.allowlist.get(table, {}).get(column, set()):
+            raise _FakeWitError(_Error_NotAllowlisted(f"{op}.{table}.{column}"))
+        if f"platform.table.{op}:{table}.{column}" not in self.grants:
+            raise _FakeWitError(_Error_Denied("not_granted"))
+
+    def read(self, table: str, user: str, columns: list[str]) -> list[Any]:
+        """Return `ColumnValue`s for `columns` or raise the host's refusal."""
+        self.calls.append(("read", user, tuple(columns)))
+        for column in columns:
+            self._check("read", table, column)
+        if user not in self.rows:
+            raise _FakeWitError(_Error_NotAMember())
+        return [_FakeColumnValue(c, self.rows[user][c]) for c in columns]
+
+    def write(self, table: str, user: str, changes: list[Any]) -> None:
+        """Apply `changes` or raise the host's refusal."""
+        self.calls.append(("write", user, tuple(c.column for c in changes)))
+        for change in changes:
+            self._check("write", table, change.column)
+        if user not in self.rows or self.rows[user].get("role") in {
+            "community-owner",
+            "community-admin",
+        }:
+            raise _FakeWitError(_Error_NotAMember())
+        for change in changes:
+            if change.column == "role" and change.value not in {"member", "vip", "moderator"}:
+                raise _FakeWitError(_Error_Invalid("role must be one of member/vip/moderator"))
+        for change in changes:
+            self.rows[user][change.column] = change.value
+
+
+@dataclass(slots=True)
+class _FakeColumnValue:
+    column: str
+    value: str
+
+
+def install_fake_platform_table_host(
+    monkeypatch: Any,
+    rows: dict[str, dict[str, str]] | None = None,
+    grants: set[str] | None = None,
+) -> FakePlatformTableHost:
+    """Install a fresh `FakePlatformTableHost` as `wit_world.imports.platform_table`."""
+    host = FakePlatformTableHost(rows=dict(rows or {}), grants=set(grants or ()))
+    mod = types.SimpleNamespace(read=host.read, write=host.write, ColumnValue=_FakeColumnValue)
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(platform_table=mod)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+    return host
+
+
 _Error_TooManyTokens = _variant("Error_TooManyTokens", True)
 _Error_ContentFiltered = _variant("Error_ContentFiltered", False)
 
@@ -601,7 +682,7 @@ class StageViolationError(Exception):
 #: Capabilities the real host serves ONLY to the process stage (``core/svc_process/src/
 #: capabilities.rs``): ``svc_action`` has no handler for them, so a call from ``dispatch`` is
 #: denied/unwired on a real host even though it works against a stage-blind fake.
-PROCESS_ONLY_CAPABILITIES = frozenset({"economy", "identity", "reputation", "ai"})
+PROCESS_ONLY_CAPABILITIES = frozenset({"economy", "identity", "reputation", "ai", "platform_table"})
 
 #: Capabilities served ONLY to the action stage (the process stage hard-denies ``relay``).
 ACTION_ONLY_CAPABILITIES = frozenset({"relay"})

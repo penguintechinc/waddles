@@ -17,6 +17,8 @@ vi.mock('../../../services/api', () => ({
     getPermissions: vi.fn(),
     approveVersion: vi.fn(),
     denyVersion: vi.fn(),
+    getAccessGrants: vi.fn(),
+    approvePermissions: vi.fn(),
   },
 }));
 
@@ -183,5 +185,122 @@ describe('SuperAdminBundleApprovals', () => {
     expect(await screen.findByTestId('bundle-approvals-error')).toHaveTextContent(
       'Insufficient scope',
     );
+  });
+
+  describe('platform-table access grants', () => {
+    const TABLE_SUMMARY = {
+      egress: [],
+      tableAccess: [
+        {
+          table: 'community_members',
+          columns: ['role'],
+          ops: ['read', 'write'],
+          reason: 'Mirror Discord role to community role',
+        },
+      ],
+    };
+
+    async function openReviewWithTableAccess() {
+      bundleAdminApi.listPendingVersions.mockResolvedValue(listResponse());
+      bundleApi.getPermissions.mockResolvedValue({
+        data: { success: true, summary: TABLE_SUMMARY, permissionHash: 'sha256:abc' },
+      });
+      bundleApi.approveVersion.mockResolvedValue({ data: { success: true } });
+      bundleApi.getAccessGrants.mockResolvedValue({
+        data: { success: true, dangerousIds: ['platform.table.write:community_members.role'] },
+      });
+      bundleApi.approvePermissions.mockResolvedValue({ data: { success: true } });
+      render(<SuperAdminBundleApprovals />);
+      await screen.findAllByTestId('bundle-approvals-row');
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('bundle-approvals-review-7'));
+      });
+      await screen.findByTestId('bundle-approvals-summary');
+    }
+
+    it('shows the bold red warning with table, columns, ops and reason', async () => {
+      await openReviewWithTableAccess();
+      const warning = screen.getByTestId('access-grant-warning');
+      expect(warning.className).toContain('border-red-500');
+      expect(screen.getByTestId('access-grant-entry')).toHaveTextContent('community_members');
+      expect(screen.getByTestId('access-grant-entry')).toHaveTextContent('ops: read, write');
+      expect(screen.getByTestId('access-grant-entry')).toHaveTextContent(
+        'Mirror Discord role to community role',
+      );
+    });
+
+    it('blocks Install until acknowledged, then approves every dangerous id', async () => {
+      await openReviewWithTableAccess();
+      const install = screen.getByTestId('bundle-approvals-install-button');
+      expect(install).toBeDisabled();
+
+      fireEvent.click(screen.getByTestId('access-grant-ack'));
+      expect(install).not.toBeDisabled();
+      await act(async () => {
+        fireEvent.click(install);
+      });
+
+      expect(bundleApi.approvePermissions).toHaveBeenCalledWith(
+        'waddles.integrations.vendor-42.mybundle',
+        '1.0.0',
+        ['platform.table.write:community_members.role'],
+      );
+    });
+
+    it('storage-access-only bundles get the same red warning and ack gate', async () => {
+      bundleAdminApi.listPendingVersions.mockResolvedValue(listResponse());
+      bundleApi.getPermissions.mockResolvedValue({
+        data: {
+          success: true,
+          summary: {
+            egress: [],
+            storageAccess: [
+              { prefixOwner: 'waddles.harness.media', ops: ['read'], reason: 'Fetch clips' },
+            ],
+          },
+          permissionHash: 'sha256:abc',
+        },
+      });
+      bundleApi.approveVersion.mockResolvedValue({ data: { success: true } });
+      bundleApi.getAccessGrants.mockResolvedValue({
+        data: { success: true, dangerousIds: ['storage.read:waddles.harness.media'] },
+      });
+      bundleApi.approvePermissions.mockResolvedValue({ data: { success: true } });
+      render(<SuperAdminBundleApprovals />);
+      await screen.findAllByTestId('bundle-approvals-row');
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('bundle-approvals-review-7'));
+      });
+      await screen.findByTestId('bundle-approvals-summary');
+      expect(screen.getByTestId('access-grant-storageAccess')).toHaveTextContent(
+        'waddles.harness.media',
+      );
+      const install = screen.getByTestId('bundle-approvals-install-button');
+      expect(install).toBeDisabled();
+      fireEvent.click(screen.getByTestId('access-grant-ack'));
+      await act(async () => {
+        fireEvent.click(install);
+      });
+      expect(bundleApi.approvePermissions).toHaveBeenCalledWith(
+        'waddles.integrations.vendor-42.mybundle',
+        '1.0.0',
+        ['storage.read:waddles.harness.media'],
+      );
+    });
+
+    it('does not show the warning or require an ack for a bundle without access grants', async () => {
+      bundleAdminApi.listPendingVersions.mockResolvedValue(listResponse());
+      bundleApi.getPermissions.mockResolvedValue({
+        data: { success: true, summary: { egress: [] }, permissionHash: 'sha256:abc' },
+      });
+      render(<SuperAdminBundleApprovals />);
+      await screen.findAllByTestId('bundle-approvals-row');
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('bundle-approvals-review-7'));
+      });
+      await screen.findByTestId('bundle-approvals-summary');
+      expect(screen.queryByTestId('access-grant-warning')).not.toBeInTheDocument();
+      expect(screen.getByTestId('bundle-approvals-install-button')).not.toBeDisabled();
+    });
   });
 });

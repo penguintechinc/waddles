@@ -27,6 +27,7 @@ import blueprints.v1.community_connections as connections_module
 from blueprints.v1.community_connections import connections_bp, connections_internal_bp
 from config import HubAPIConfig
 from services.community_connections import ConnectionStatus, DecryptedTokens, UnsupportedProvider
+from services.install_state_binding import ERR_STATE, InstallStateError
 from services.oauth_connection_state import StatePayload
 from services.oauth_providers import (
     OAuthExchangeError,
@@ -422,7 +423,9 @@ class TestOAuthCallback:
 
     async def test_invalid_or_expired_state_is_400(self, client: Any, monkeypatch: Any) -> None:
         monkeypatch.setattr(
-            connections_module.state_svc, "consume_state", AsyncMock(return_value=None)
+            connections_module.state_svc,
+            "consume_state",
+            AsyncMock(side_effect=InstallStateError(ERR_STATE)),
         )
         response = await client.get(
             "/api/v1/connections/callback/youtube?state=bogus&code=auth-code"

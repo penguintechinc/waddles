@@ -21,7 +21,10 @@ import pytest
 
 from services import identity_service, oauth_service
 from services import suppression_keys as keys
+from services.install_state_binding import bound_state
 from tests.conftest import TENANT_SLUG
+
+NONCE = "browser-nonce-0123456789"
 
 MASTER_HEX = "ab" * 32
 PLATFORM_ID = "d-evader-1"
@@ -167,7 +170,7 @@ class TestLinkCallbacks:
     @staticmethod
     def _state(auth_db: Any, user_id: int, state: str) -> None:
         auth_db.dal.hub_oauth_states.insert(
-            state=state,
+            state=bound_state(state, NONCE),
             mode="link",
             platform="discord",
             user_id=user_id,
@@ -200,7 +203,8 @@ class TestLinkCallbacks:
             auth_db.dal,
             platform="discord",
             code="c",
-            state="state-oauth-link",
+            state=bound_state("state-oauth-link", NONCE),
+            binding_nonce=NONCE,
             callback_base_url="http://localhost",
         )
 
@@ -231,7 +235,8 @@ class TestLinkCallbacks:
                 auth_db.dal,
                 platform="discord",
                 code="c",
-                state="state-first",
+                state=bound_state("state-first", NONCE),
+                binding_nonce=NONCE,
                 callback_base_url="http://localhost",
             )
         # The identity WAS linked before the re-check failed; the retry must still re-check.
@@ -244,7 +249,8 @@ class TestLinkCallbacks:
             auth_db.dal,
             platform="discord",
             code="c",
-            state="state-second",
+            state=bound_state("state-second", NONCE),
+            binding_nonce=NONCE,
             callback_base_url="http://localhost",
         )
 
@@ -269,7 +275,8 @@ class TestLinkCallbacks:
             auth_db.dal,
             platform="discord",
             code="c",
-            state="state-identity-link",
+            state=bound_state("state-identity-link", NONCE),
+            binding_nonce=NONCE,
             callback_base_url="http://localhost",
         )
 
@@ -298,7 +305,8 @@ class TestLinkCallbacks:
             auth_db.dal,
             platform="discord",
             code="c",
-            state="state-relink",
+            state=bound_state("state-relink", NONCE),
+            binding_nonce=NONCE,
             callback_base_url="http://localhost",
         )
 
@@ -323,7 +331,8 @@ class TestLinkCallbacks:
             auth_db.dal,
             platform="discord",
             code="c",
-            state="state-clean",
+            state=bound_state("state-clean", NONCE),
+            binding_nonce=NONCE,
             callback_base_url="http://localhost",
         )
 

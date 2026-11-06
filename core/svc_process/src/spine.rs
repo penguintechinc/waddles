@@ -901,6 +901,12 @@ pub struct ProcessDeps<S: SpineOps> {
     /// when `BUNDLE_ECONOMY_PASSWORD` is unset or the connection failed
     /// (every `economy.*` call then denies `not_implemented`).
     pub economy_wiring: Option<crate::capabilities::EconomyWiring>,
+    /// The `platform-table` host capability's production wiring
+    /// (`crate::lib::try_build_platform_table_wiring`), cloned into every
+    /// per-invoke `StageCapabilities`. `None` when
+    /// `BUNDLE_PLATFORM_TABLE_PASSWORD` is unset or the connection failed
+    /// (every `platform_table.*` call then denies `not_implemented`).
+    pub platform_table_wiring: Option<crate::capabilities::PlatformTableWiring>,
     /// The `identity` host capability's production wiring
     /// (`crate::lib::try_build_identity_wiring`), cloned into every per-invoke
     /// `StageCapabilities` like [`ProcessDeps::economy_wiring`] -- paired there
@@ -1354,6 +1360,10 @@ async fn handle_delivered_inner<S: SpineOps>(
         };
         let caps = match &deps.economy_wiring {
             Some(eco) => caps.with_economy(eco.clone()),
+            None => caps,
+        };
+        let caps = match &deps.platform_table_wiring {
+            Some(pt) => caps.with_platform_table(pt.clone()),
             None => caps,
         };
         // `ai`: every model call is clamped to what remains of THIS invoke's
@@ -2475,6 +2485,7 @@ mod tests {
             breaker: Arc::new(CircuitBreaker::new(Arc::new(()))),
             reputation_wiring: None,
             economy_wiring: None,
+            platform_table_wiring: None,
             identity_wiring: None,
             ai_wiring: None,
             media_wiring: None,

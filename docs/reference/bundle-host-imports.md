@@ -291,3 +291,15 @@ together when adding a capability.
 Integrity: the spine envelope's `binding.mac` covers both ids from schema v3 (`penguin_spine::compute_binding_mac_v3`), so
 mutating either id invalidates the MAC. Schema v2 envelopes (no ids) still verify under the original formula and may not carry
 ids.
+
+## Operating platform-table access
+
+| Item | Value |
+|---|---|
+| Spec | `docs/superpowers/specs/2026-11-06-bundle-table-access-grants.md` |
+| Schema | alembic `0079_bundle_platform_table` (DDL in `scripts/db/bundle_platform_table.sql`): `bundle_platform_table_audit` ledger (one row per write) |
+| Role | `waddles_platform_table`: column-scoped SELECT/UPDATE on the allowlisted `community_members` columns, `communities(id, tenant_id)` SELECT, audit INSERT. NOLOGIN unless `DB_PLATFORM_TABLE_PASSWORD` is set when migrating |
+| svc_process env | `BUNDLE_PLATFORM_TABLE_{HOST,PORT,NAME,USER}`, `BUNDLE_PLATFORM_TABLE_PASSWORD`. Chart: explicit opt-in `infrastructure.postgresql.platformTable.enabled` (default false: role NOLOGIN, no env). Enabled: password `PW_WADDLES_PLATFORM_TABLE` in `<release>-db-credentials` only (never envFrom, never `waddlebot-secrets`), generated on alpha/local via `waddlebot.autoSecretValue`, required elsewhere; secretKeyRef on svc-process-rust, `DB_PLATFORM_TABLE_PASSWORD` in the db-migrate hook Secret. Absent password: every call is `not_implemented` |
+| Flag | `waddles.bundle-platform-table-capability` (default OFF) |
+| Stage | **process stage only.** Like `reputation`/`economy`/`identity`/`ai` it is a community-scoped stage-next process-world capability; `svc_action` answers `platform_table.*` with `not_implemented` (explicit arm, tested) instead of falling into the `storage.tables` path. An action-stage bundle that needs a role change must do it from a process-stage handler or via a service tool |
+| SDK | `waddle_sdk.platform_table.read/write` (Python); fake: `waddle_sdk.testing.install_fake_platform_table_host` |

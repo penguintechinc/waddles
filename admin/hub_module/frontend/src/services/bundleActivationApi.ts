@@ -28,6 +28,31 @@ interface MessageResponse {
   message: string;
 }
 
+/** One requested platform-table access block (`hub_api/services/access_grant_dto.py`). */
+export interface TableAccess {
+  table: string;
+  columns: string[];
+  ops: string[];
+  reason: string;
+}
+
+/** One requested cross-prefix object-storage access block. */
+export interface StorageAccess {
+  prefixOwner: string;
+  ops: string[];
+  reason: string;
+}
+
+/** Dangerous access grants activating an app would carry (`.../activation/<appId>/access-grants`). */
+export interface AccessGrants {
+  success: boolean;
+  requestedIds: string[];
+  approvedIds: string[];
+  dangerousIds: string[];
+  tableAccess: TableAccess[];
+  storageAccess?: StorageAccess[];
+}
+
 export const bundleActivationApi = {
   /** `GET /api/v1/apps/community/<communityId>/activation` -- requires active community membership. */
   list: (communityId: number) =>
@@ -35,10 +60,27 @@ export const bundleActivationApi = {
       .get<ActivationListResponse>(`/api/v1/apps/community/${communityId}/activation`)
       .then((res) => res.data.bundles),
 
-  /** `POST /api/v1/apps/community/<communityId>/activation` -- requires community-admin membership. */
-  activate: (communityId: number, appId: string) =>
+  /**
+   * `GET /api/v1/apps/community/<communityId>/activation/<appId>/access-grants` -- the dangerous
+   * access grants (platform tables, ...) this activation carries; community-admin only.
+   */
+  accessGrants: (communityId: number, appId: string) =>
     apiClient
-      .post<MessageResponse>(`/api/v1/apps/community/${communityId}/activation`, { appId })
+      .get<AccessGrants>(
+        `/api/v1/apps/community/${communityId}/activation/${encodeURIComponent(appId)}/access-grants`,
+      )
+      .then((res) => res.data),
+
+  /**
+   * `POST /api/v1/apps/community/<communityId>/activation` -- requires community-admin membership.
+   * `acknowledgedAccessGrants` must list every approved dangerous access id (else 422).
+   */
+  activate: (communityId: number, appId: string, acknowledgedAccessGrants: string[] = []) =>
+    apiClient
+      .post<MessageResponse>(`/api/v1/apps/community/${communityId}/activation`, {
+        appId,
+        acknowledgedAccessGrants,
+      })
       .then((res) => res.data),
 
   /** `DELETE /api/v1/apps/community/<communityId>/activation/<appId>` -- requires community-admin membership. */

@@ -33,12 +33,12 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
 | Concern | Hardcoded path | Connector / host split |
 |---|---|---|
 | Opcodes handled | 0 DISPATCH, 1 HEARTBEAT (answer immediately), 2 IDENTIFY (send), 6 RESUME (send), 7 RECONNECT, 9 INVALID_SESSION (`d` = resumable flag, never collapsed), 10 HELLO, 11 HEARTBEAT_ACK | `gateway.rs` builds IDENTIFY/RESUME/HEARTBEAT and `classify`es 1/7/9/10/11/READY/RESUMED. Acting on them is the host's job (see Host duties) |
-| Intents | `GUILDS \| GUILD_MESSAGES \| MESSAGE_CONTENT` = 33281, nothing else | identical (`DEFAULT_INTENTS`); no extra privileged intent is requested |
+| Intents | `GUILDS \| GUILD_MESSAGES \| MESSAGE_CONTENT` = 33281, nothing else | `GUILDS \| GUILD_MEMBERS \| GUILD_MESSAGES \| MESSAGE_CONTENT` = 33283 (`DEFAULT_INTENTS`) -- **1.0.3 adds the PRIVILEGED `GUILD_MEMBERS` intent** for inbound role sync; enable **Server Members Intent** in the Discord developer portal (Bot tab) or the gateway closes 4014 and the connection parks |
 | IDENTIFY payload | `properties {os: linux, browser/device: penguin-connector-discord}` | identical bytes minus the token: `"token":"{{DISCORD_BOT_TOKEN}}"` slot + secret-ref handle `discord-bot` |
 | RESUME | `session_id` + `seq` from `READY`, reconnect to `resume_gateway_url`; RESUME-first, exempt from the IDENTIFY budget; `resumable:true` INVALID_SESSION retries RESUME once, else clear + IDENTIFY | RESUME body built when the host session-token names a `session_id`; persistence/ordering/retry stay host-side |
 | Heartbeat | timer on `heartbeat_interval`, body `{op:1,d:seq}`, `awaiting_ack` -> `HeartbeatAckTimeout` -> reconnect | `on-heartbeat-due` returns the `seq` body when the token carries `seq`, else `none` (host default `d:null`). Timer + ACK-timeout = host (P6a T5 scheduler) |
 | Session state | `session_id`/`seq`/`resume_gateway_url`/`self_user_id` in `GatewaySession`, mirrored to Valkey `SessionStore` | A component holds NO state between calls -> state is the host-owned `session-token` JSON (`session.rs`) |
-| Dispatches | **Only `MESSAGE_CREATE` yields an event**; `READY`/`RESUMED`/`GUILD_CREATE` are logged and dropped; everything else ignored | same. Added (no hardcoded equivalent): `INTERACTION_CREATE` + webhook interactions |
+| Dispatches | **`MESSAGE_CREATE` yields `message`**; 1.0.3 adds `GUILD_MEMBER_UPDATE` -> `guild.member.update` (actor = tokenized UUID; payload `guild_id`/`user_id`/`role_ids`) and `GUILD_ROLE_CREATE\|UPDATE\|DELETE` -> `guild.role.*` (ids only); `READY`/`RESUMED`/`GUILD_CREATE` are logged and dropped; everything else ignored | same. Added (no hardcoded equivalent): `INTERACTION_CREATE` + webhook interactions |
 | MESSAGE_CREATE | drop if `author.id == self_user_id` (by id, other bots kept); required `author.id`, `channel_id`, lenient `username/id/content` (empty default); `guild_id` optional (DM) | `normalize::normalize_message_create`, same rules |
 | Permissions | per guild message: `GET /guilds/{g}` + `GET /guilds/{g}/members/{u}` -> `compute_discord_permissions` (owner / ADMINISTRATOR -> broadcaster; MANAGE_MESSAGES -> mod); DM: no lookup; any failure -> `false/false` (fail closed) | `perms.rs` (same math), lookups via guarded guest `http` w/ secret-ref; failure -> fail closed + PII-free WARN |
 | Permission cache / breaker | 60s TTL, 1h stale cap (stale never elevates), 10k entries, 5-failure breaker | **Not reproducible in a stateless component.** Cost: up to 2 REST calls per guild message. See Host duties |
@@ -69,7 +69,7 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
    `query: "v=10&encoding=json"`), `heartbeat_ack` (op 11, `max_unacked: 1`), `handshake_after: FirstFrame` (HELLO before
    IDENTIFY/RESUME) and `jitter_first_heartbeat` to the session rules -- full example in `docs/connector-host-capability.md`.
    The host (not the connector) captures and validates the resume URL; the connector's `resume_gateway_url` session-token field is
-   no longer needed for dialling. **Intents** stay `33281` (identical to the hardcoded path, no extra privileged intent);
+   no longer needed for dialling. **Intents** are `33283` (1.0.3: adds privileged `GUILD_MEMBERS`; portal toggle required);
    **sharding** is single-shard (no `shard` field), identify buckets / `session_start_limit` remain host-only.
 2. **Session token.** `ctx.session-token` MUST be the JSON in `session.rs` (`{"session_id","seq",
    "resume_gateway_url","self_user_id"}`, all optional), maintained by the host from the frames
@@ -125,6 +125,15 @@ harness does not bridge the guest `http` lookup).
 | `chat.delete` | `DELETE /channels/{target.channel_id}/messages/{message_id}` | `{message_id}` (snowflake) — channel-scoped, never from the id alone |
 | `dm.send` | `POST /channels/{dm.channel_id}/messages` (host opens the DM first) | `{recipient_id, content}` — `recipient_id` ONLY a `{user:<uuid>}` placeholder (raw snowflake refused); recipient rides in pseudo-header `X-Waddle-Host-Dm-Recipient` |
 | `role.add` / `role.remove` | `PUT` / `DELETE /guilds/{target.guild_id}/members/{user:<uuid>}/roles/{target.role.<key>}` | `{user_id, role}` — `user_id` ONLY a `{user:<uuid>}` placeholder; `role` is a managed-role KEY `[a-z][a-z0-9_-]{0,31}`, never a snowflake |
+| `event.create` / `event.update` / `event.cancel` / `event.delete` | `POST /guilds/{target.guild_id}/scheduled-events`, `PATCH .../{id}` (full field set), `PATCH .../{id}` `{"status":4}` (history kept), `DELETE .../{id}` | `{name, description?, scheduled_start_time, scheduled_end_time, location}` (+ `event_id` snowflake for update/cancel/delete). Fixed `EXTERNAL` / guild-only body. A `guild_id` / `channel_id` / unknown field is REFUSED; the guild is always the host's `{target.guild_id}` binding slot |
+
+**Scheduled-event tools (host-mediated).** The service bundle declares `discord.scheduled_event.create|update|cancel|delete`
+(`access: write`, `risk: dangerous`) in `exported_tools`; the guest only validates arguments through the same template
+builder. The HOST executes them (svc-action `tool.invoke` -> signed `event.*` outbound entry -> svc-ingest executor ->
+this connector's template; guild + credential from the community binding). App bundles call them with a manifest
+`requested_tools: [{tool: discord.scheduled_event.create, access: write, target_app_id: waddles.core.service.discord}]`
+and the approved grant `tool.call:waddles.core.service.discord:discord.scheduled_event.create` (`params: {write: true}`).
+
 
 * The connector never holds a token (`secret-refs: [("Authorization","discord-bot")]`) and never chooses the
   destination: a payload naming `channel_id`/`guild_id` is refused. Every message body carries

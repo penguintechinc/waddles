@@ -27,11 +27,12 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
-from quart import Blueprint, current_app, redirect, request
+from quart import Blueprint, after_this_request, current_app, redirect, request
 from quart_schema import validate_request, validate_response
 
 from config import HubAPIConfig
 from services import auth_service, branding_service, oauth_service, passkey_service
+from services import install_state_binding as binding
 from services.current_user import (
     get_current_session_id,
     get_current_user_id,
@@ -48,6 +49,12 @@ from services.session_cookie import (
 )
 
 auth_bp = Blueprint("v1_auth", __name__, url_prefix="/api/v1/auth")
+
+#: ``__Host-`` cookie binding an account-link `state` to the initiating browser.
+LINK_BINDING_COOKIE = binding.cookie_name("oauth_link")
+LINK_STATE_TTL_S = binding.LINK_STATE_TTL_S
+#: ``__Host-`` cookie binding a social-login `state` to the initiating browser.
+LOGIN_BINDING_COOKIE = binding.cookie_name("oauth_login")
 
 logger = logging.getLogger(__name__)
 
@@ -768,11 +775,25 @@ async def oauth_start(platform: str) -> OAuthStartResponse | tuple[dict[str, obj
     async_dal, dal = _dal()
     mode = request.args.get("mode", "login")
     try:
+        nonce = binding.new_nonce()
         authorize_url, state = await oauth_service.start_oauth(
-            async_dal, dal, platform=platform, mode=mode, callback_base_url=_callback_base_url()
+            async_dal,
+            dal,
+            platform=platform,
+            mode=mode,
+            callback_base_url=_callback_base_url(),
+            binding_nonce=nonce,
         )
     except ApiError as exc:
+        logger.warning("auth.oauth_start.refused type=%s code=%s", type(exc).__name__, exc.code)
         return _err(exc)
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Bind the login state to THIS browser (``__Host-`` HttpOnly Secure SameSite=Lax)."""
+        binding.set_binding_cookie(response, LOGIN_BINDING_COOKIE, nonce, LINK_STATE_TTL_S)
+        return response
+
     return OAuthStartResponse(success=True, authorizeUrl=authorize_url, state=state)
 
 
@@ -809,14 +830,25 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
             code=code,
             state=state,
             callback_base_url=_callback_base_url(),
+            binding_nonce=request.cookies.get(LOGIN_BINDING_COOKIE),
         )
-    except ApiError:
-        return redirect(f"{frontend_origin}/login?error=oauth_failed")
+    except ApiError as exc:
+        logger.warning("auth.oauth_callback.refused type=%s code=%s", type(exc).__name__, exc.code)
+        error = exc.code if exc.code in (binding.ERR_BINDING, binding.ERR_STATE) else "oauth_failed"
+        return redirect(f"{frontend_origin}/login?error={error}")
 
-    exchange_code = await oauth_service.create_oauth_exchange_code(
+    exchange_code, exchange_nonce = await oauth_service.create_oauth_exchange_code(
         async_dal, dal, token=token, platform=platform
     )
-    return redirect(f"{frontend_origin}/auth/callback?code={exchange_code}")
+    page = redirect(f"{frontend_origin}/auth/callback?code={exchange_code}")
+    binding.clear_binding_cookie(page, LOGIN_BINDING_COOKIE)
+    binding.set_binding_cookie(
+        page,
+        oauth_service.EXCHANGE_BINDING_COOKIE,
+        exchange_nonce,
+        oauth_service.EXCHANGE_CODE_TTL_SECONDS,
+    )
+    return page
 
 
 @auth_bp.route("/exchange", methods=["POST"])
@@ -834,9 +866,22 @@ async def exchange_oauth_code(
     """
     async_dal, dal = _dal()
     try:
-        token = await oauth_service.redeem_oauth_exchange_code(async_dal, dal, code=data.code)
+        token = await oauth_service.redeem_oauth_exchange_code(
+            async_dal,
+            dal,
+            code=data.code,
+            binding_nonce=request.cookies.get(oauth_service.EXCHANGE_BINDING_COOKIE),
+        )
     except ApiError as exc:
+        logger.warning("auth.exchange.refused type=%s code=%s", type(exc).__name__, exc.code)
         return _err(exc)
+
+    @after_this_request
+    def _clear_exchange_binding(response: Any) -> Any:
+        """Redeemed: the binding cookie has done its job."""
+        binding.clear_binding_cookie(response, oauth_service.EXCHANGE_BINDING_COOKIE)
+        return response
+
     issue_session_cookie(token)
     return ExchangeCodeResponse(success=True, token=token)
 
@@ -848,15 +893,27 @@ async def oauth_link_start(platform: str) -> OAuthStartResponse | tuple[dict[str
     async_dal, dal = _dal()
     try:
         user_id = get_current_user_id(request)
+        nonce = binding.new_nonce()
         authorize_url, state = await oauth_service.start_link(
             async_dal,
             dal,
             platform=platform,
             user_id=user_id,
             callback_base_url=_callback_base_url(),
+            binding_nonce=nonce,
         )
     except ApiError as exc:
+        logger.warning(
+            "auth.oauth_link_start.refused type=%s code=%s", type(exc).__name__, exc.code
+        )
         return _err(exc)
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Bind the link state to THIS browser (``__Host-`` HttpOnly Secure SameSite=Lax)."""
+        binding.set_binding_cookie(response, LINK_BINDING_COOKIE, nonce, LINK_STATE_TTL_S)
+        return response
+
     return OAuthStartResponse(success=True, authorizeUrl=authorize_url, state=state)
 
 
@@ -879,10 +936,17 @@ async def oauth_link_callback(platform: str):  # type: ignore[no-untyped-def]
             code=code or "",
             state=state or "",
             callback_base_url=_callback_base_url(),
+            binding_nonce=request.cookies.get(LINK_BINDING_COOKIE),
         )
-    except ApiError:
-        return redirect(f"{frontend_origin}/dashboard/settings?error=link_failed")
-    return redirect(f"{frontend_origin}/dashboard/settings?linked={platform}")
+    except ApiError as exc:
+        logger.warning(
+            "auth.oauth_link_callback.refused type=%s code=%s", type(exc).__name__, exc.code
+        )
+        error = exc.code if exc.code in (binding.ERR_BINDING, binding.ERR_STATE) else "link_failed"
+        return redirect(f"{frontend_origin}/dashboard/settings?error={error}")
+    page = redirect(f"{frontend_origin}/dashboard/settings?linked={platform}")
+    binding.clear_binding_cookie(page, LINK_BINDING_COOKIE)
+    return page
 
 
 @auth_bp.route("/oauth/<platform>", methods=["DELETE"])

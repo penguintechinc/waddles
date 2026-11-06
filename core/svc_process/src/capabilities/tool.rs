@@ -145,6 +145,8 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             db: self.db.clone(),
             reputation: self.reputation.clone(),
             economy: self.economy.clone(),
+            platform_table: self.platform_table.clone(),
+            object_storage: self.object_storage.clone(),
             identity: self.identity.clone(),
             ai: self.ai.clone(),
             media: self.media.clone(),

@@ -1,0 +1,33 @@
+[package]
+name = "waddle-bundle-spectrum-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "RSI Spectrum platform connector service bundle (gh #486): a one-way INBOUND `kind: service` connector on the `connector` world. Parses Spectrum forum/lobby poll responses (and raw org-sync change frames) into normalized events with the author tokenized to a UUID. No outbound path exists. The host owns transport, egress and credentials."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-spectrum-service"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-connector"
+world = "connector"
+
+[package.metadata.component.dependencies]
+
+[package.metadata.component.target.dependencies]
+"waddle:bundle" = { path = "../../../wit/waddle-connector/deps/waddle-bundle" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

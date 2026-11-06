@@ -65,6 +65,7 @@ every other public route in this file's sibling blueprints is bounded.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -73,16 +74,19 @@ from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
-from quart import Blueprint, Response, current_app, request
+from quart import Blueprint, Response, after_this_request, current_app, request
 
 from config import HubAPIConfig
 from services import community_connections as connections_svc
+from services import install_state_binding as binding
 from services import oauth_connection_state as state_svc
 from services import oauth_providers as providers_svc
 from services.community_common import community_in_tenant
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, not_found, payment_required
 from services.machine_auth import machine_authenticated
+
+logger = logging.getLogger(__name__)
 
 connections_bp = Blueprint("v1_community_connections", __name__, url_prefix="/api/v1")
 
@@ -149,6 +153,11 @@ def _token_envelope(
         scopes=list(scopes) if scopes is not None else None,
     )
     return _envelope(asdict(dto))
+
+
+def _binding_cookie(provider: str) -> str:
+    """Per-provider ``__Host-`` binding cookie name (concurrent popups never clobber each other)."""
+    return binding.cookie_name("conn", provider.replace("-", "_").lower())
 
 
 def _callback_redirect_uri(provider: str) -> str:
@@ -258,6 +267,7 @@ async def authorize_connection(community_id: int, provider: str) -> tuple[dict[s
 
     redirect_uri = _callback_redirect_uri(provider)
     user_id = get_current_user_id(request)
+    nonce = binding.new_nonce()
     state = await state_svc.create_state(
         community_id=community_id,
         provider=provider,
@@ -265,7 +275,16 @@ async def authorize_connection(community_id: int, provider: str) -> tuple[dict[s
         redirect_uri=redirect_uri,
         code_verifier=code_verifier,
         tenant_id=ctx.tenant_id,
+        binding_nonce=nonce,
     )
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Bind the state to THIS browser (``__Host-`` HttpOnly Secure SameSite=Lax cookie)."""
+        binding.set_binding_cookie(
+            response, _binding_cookie(provider), nonce, state_svc.binding_cookie_max_age()
+        )
+        return response
 
     try:
         authorize_url = providers_svc.build_authorize_url(
@@ -291,9 +310,22 @@ async def oauth_callback(provider: str) -> tuple[Response, int] | Response:
     code = request.args.get("code")
     provider_error = request.args.get("error")
 
-    payload = await state_svc.consume_state(state_param)
-    if payload is None:
+    try:
+        cookie_name = _binding_cookie(provider)
+    except ValueError as exc:
+        logger.warning("oauth callback rejected: unknown provider (%s)", type(exc).__name__)
         return _callback_html(provider=provider, ok=False, error="invalid_or_expired_state"), 400
+    try:
+        payload = await state_svc.consume_state(state_param, request.cookies.get(cookie_name))
+    except binding.InstallStateError as exc:
+        logger.warning("oauth callback state rejected: code=%s", exc.code)
+        return _callback_html(provider=provider, ok=False, error=exc.code), 400
+
+    @after_this_request
+    def _clear_binding(response: Any) -> Any:
+        """The state was consumed: the binding cookie has done its job."""
+        binding.clear_binding_cookie(response, cookie_name)
+        return response
 
     if provider_error:
         return _callback_html(provider=provider, ok=False, error="access_denied")

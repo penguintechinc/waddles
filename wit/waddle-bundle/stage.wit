@@ -213,6 +213,110 @@ interface db {
   delete: func(row-id: string, expected-version: u64) -> result<_, error>;
 }
 
+/// Key-addressed read/write of ALLOWLISTED platform-table columns (spec
+/// `docs/superpowers/specs/2026-11-06-bundle-table-access-grants.md`), for APP
+/// bundles that declare `table_access` in their manifest (platform SERVICE
+/// bundles expose tools instead; they never use this). Additive,
+/// `stage-next`/`stage-v2`/`stage-tools` only -- `world stage` (1.0.0) never
+/// imports it.
+///
+/// Capability: each named column needs its own approved
+/// `platform.table.<read|write>:<table>.<column>` grant (`dangerous`, never
+/// auto-granted). The guest names only the `table`, the target `user` UUID and
+/// the columns/values; the tenant and community scope is ALWAYS host-injected
+/// -- a row of another community or tenant is indistinguishable from an absent
+/// one (`not-a-member`). Values are text (booleans render `true`/`false`).
+///
+/// Wire note: carried as `capability = db`, `op = "platform_table.read"|
+/// "platform_table.write"`; the stage dispatches on the op prefix before the
+/// `db` (`storage.tables`) path and the gate authorizes.
+interface platform-table {
+  variant error {
+    /// The gate denied the call (not granted / revoked / quota / instance
+    /// policy); carries the gate's stable denial code.
+    denied(string),
+    /// Target absent, not an active member of THIS community, or a protected
+    /// (owner/admin) row.
+    not-a-member,
+    /// Table/column/op is not on the platform allowlist.
+    not-allowlisted(string),
+    /// Malformed argument or a value outside the column's permitted set.
+    invalid(string),
+    /// The capability is not wired/enabled on this host.
+    unavailable(string),
+    backend(string),
+  }
+
+  record column-value {
+    column: string,
+    value: string,
+  }
+
+  /// Reads the named columns of `user`'s row.
+  read: func(table: string, user: string, columns: list<string>)
+    -> result<list<column-value>, error>;
+
+  /// Writes `changes` to `user`'s row atomically; one audit row per column.
+  write: func(table: string, user: string, changes: list<column-value>)
+    -> result<_, error>;
+}
+
+/// Host-mediated object storage over ONE bucket, one prefix per bundle. The guest
+/// NEVER holds S3 credentials and never names a tenant/community (host-injected).
+/// `owner = none` targets the caller's own prefix (auto-granted). `some(app-id)`
+/// targets another bundle's prefix: needs an approved `storage_access` grant AND the
+/// object must carry the tag `app-bundle:<caller>` -- an approved grant alone never
+/// exposes untagged objects or objects tagged for other bundles. Capability:
+/// flag `waddles.bundle-object-storage` (off -> `not-implemented`).
+///
+/// Wire note: carried as `capability = db`, `op = "object_storage.<put|get|head|list|
+/// delete|presign_get|tag_add|tag_remove>"` (bodies base64 in JSON); the stage
+/// dispatches on the op prefix before the `db` (`storage.tables`) path. Additive:
+/// `stage-next`/`stage-v2`/`stage-tools` only -- `world stage` (1.0.0) never imports it.
+interface object-storage {
+  variant error {
+    not-granted,
+    not-found,
+    invalid(string),
+    too-large(u64),
+    quota-exceeded,
+    rate-limited,
+    backend(string),
+    not-implemented,
+  }
+
+  record object-info {
+    key: string,
+    size: u64,
+    content-type: string,
+  }
+
+  /// `tags` is honoured only when writing to the caller's OWN prefix (format
+  /// `<k>:<v>`, <= 8). System tags (`waddles-*`) are host-written and refused if supplied.
+  record put-options {
+    content-type: string,
+    tags: list<string>,
+  }
+
+  record list-page {
+    objects: list<object-info>,
+    next-cursor: option<string>,
+  }
+
+  put: func(owner: option<string>, key: string, body: list<u8>, opts: put-options) -> result<object-info, error>;
+  get: func(owner: option<string>, key: string) -> result<tuple<object-info, list<u8>>, error>;
+  head: func(owner: option<string>, key: string) -> result<object-info, error>;
+  %list: func(owner: option<string>, key-prefix: string, cursor: option<string>, limit: u32) -> result<list-page, error>;
+  delete: func(owner: option<string>, key: string) -> result<_, error>;
+  /// Host-signed, GET-only URL for exactly one object; ttl clamped to 1..=300s.
+  presign-get: func(owner: option<string>, key: string, ttl-seconds: u32) -> result<string, error>;
+  /// OWNER-ONLY, audited: share one of your objects with `consumer` (adds tag
+  /// `app-bundle:<consumer>`). `owner` must be none/own app id; otherwise `not-granted`.
+  tag-add: func(owner: option<string>, key: string, consumer: string) -> result<_, error>;
+  /// OWNER-ONLY, audited: revoke `consumer`'s visibility of one of your objects.
+  tag-remove: func(owner: option<string>, key: string, consumer: string) -> result<_, error>;
+}
+
 /// Push onto a provider-scoped outbound relay queue owned by svc-ingest.
 /// Capability: granted only to action-stage bundles.
 interface relay {
@@ -924,6 +1028,8 @@ world stage-next {
   import identity;
   import ai;
   import media;
+  import platform-table;
+  import object-storage;
 
   export process-stage;
   export action-stage;
@@ -1031,6 +1137,8 @@ world stage-v2 {
   import identity;
   import ai;
   import media;
+  import platform-table;
+  import object-storage;
 
   export process-stage;
   export action-stage-v2;

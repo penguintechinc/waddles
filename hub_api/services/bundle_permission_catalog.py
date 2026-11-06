@@ -28,6 +28,9 @@ import os
 import re
 from typing import Literal
 
+from services.bundle_storage_access import is_storage_access_id, parse_storage_access_id
+from services.bundle_table_access import is_table_access_id, parse_table_access_id
+
 logger = logging.getLogger(__name__)
 
 Risk = Literal["normal", "dangerous"]
@@ -215,6 +218,16 @@ def resolve_risk(permission_id: str) -> Risk | None:
     if _TOOL_CALL_RE.fullmatch(permission_id):
         return "dangerous"
 
+    # `platform.table.<op>:<table>.<column>` -- `dangerous`, and ONLY for an
+    # allowlisted triple (an off-allowlist table/column/op is not a catalog
+    # member at all). Mirrors Rust `PermissionFamily::PlatformTable{Read,Write}`.
+    if parse_table_access_id(permission_id) is not None:
+        return "dangerous"
+
+    # `storage.<op>:<prefix_owner>` -- cross-prefix object-storage access; dangerous.
+    if parse_storage_access_id(permission_id) is not None:
+        return "dangerous"
+
     match = _NET_HTTP_FQDN_RE.match(permission_id)
     if match and is_valid_fqdn(match.group("host")):
         return "normal"
@@ -263,6 +276,8 @@ def permission_family(permission_id: str) -> str:
             return prefix.rstrip(":")
     if _TOOL_CALL_RE.fullmatch(permission_id):
         return "tool.call"
+    if is_table_access_id(permission_id) or is_storage_access_id(permission_id):
+        return permission_id.split(":", 1)[0]
     if _CHAT_SEND_RE.match(permission_id):
         return "chat.send"
     if _CHAT_DELETE_RE.match(permission_id):

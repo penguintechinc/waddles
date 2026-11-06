@@ -1559,3 +1559,7 @@ mod economy_tests;
 #[cfg(test)]
 #[path = "gate_tool_tests.rs"]
 mod tool_tests;
+
+#[cfg(test)]
+#[path = "gate_platform_table_tests.rs"]
+mod gate_platform_table_tests;
