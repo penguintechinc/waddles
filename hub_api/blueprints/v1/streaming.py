@@ -13,8 +13,8 @@ Contract highlights:
   and `POST .../streams/key/regenerate` responses, with `Cache-Control: no-store`; no GET ever
   returns it (the config DTO carries `stream_key_set` + a non-secret `stream_key_fingerprint`).
 - Auth: community admin via `services.community_authz.authorize_community(admin=True)` (tenant
-  middleware first). Destination management is additionally gated on the Professional-tier
-  `streaming.broadcast` feature (forwarding), as before.
+  middleware first). Config read and destination management are gated on the Professional-tier
+  `streaming.broadcast` feature, as before (create/regenerate stay ungated).
 - Every response is an explicit dataclass DTO (`@validate_response`), never a raw row.
 """
 
@@ -146,9 +146,9 @@ async def _json_body() -> dict[str, Any]:
 async def get_stream_config(
     community_id: int,
 ) -> ConfigResponse | tuple[dict[str, object], int]:
-    """Get the stream configuration (never the key) for a community."""
+    """Get the stream configuration (never the key); Professional-tier gated as before."""
     try:
-        async_dal, dal = await _authorize(community_id)
+        async_dal, dal = await _authorize(community_id, require_broadcast=True)
         config = await svc.get_config(
             async_dal, dal, community_id=community_id, ingest_url=_ingest_url()
         )

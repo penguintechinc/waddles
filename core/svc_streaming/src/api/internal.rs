@@ -138,11 +138,10 @@ pub struct IngestAuthResponse {
 
 /// `POST /api/v1/internal/streaming/ingest-auth` -- called by the ingest
 /// listeners (S4 RTMP/S5 SRT/S6 WHIP) to authorize a stream key at connect
-/// time. Migration 079 has no dedicated `stream_key` column on
-/// `streaming_configs`; `source_url` is the closest existing column and is
-/// used as the match target for every `kind` pending a real column (a
-/// schema change outside this chunk's file ownership -- SQL migrations are
-/// owned elsewhere).
+/// time. The presented key is hashed (SHA-256) and matched against
+/// `streaming_configs.stream_key_hash` (alembic 0076) for every `kind`;
+/// `source_url` is never consulted, and an empty/short key is refused
+/// without a lookup.
 #[utoipa::path(
     post,
     path = "/internal/streaming/ingest-auth",
@@ -156,12 +155,17 @@ pub async fn ingest_auth(
     ValidatedJson(body): ValidatedJson<IngestAuthRequest>,
 ) -> Result<ApiSuccess<IngestAuthResponse>, ApiError> {
     let _kind = body.kind;
-    let config = streaming_config::Entity::find()
-        .filter(streaming_config::Column::SourceUrl.eq(body.key))
-        .filter(streaming_config::Column::Enabled.eq(true))
-        .one(&db)
-        .await
-        .map_err(|err| ApiError::Internal(err.into()))?;
+    // Empty/short keys never reach the DB; the hash column is the only credential matched.
+    let config = if crate::stream_key::is_acceptable(&body.key) {
+        streaming_config::Entity::find()
+            .filter(streaming_config::Column::StreamKeyHash.eq(crate::stream_key::hash(&body.key)))
+            .filter(streaming_config::Column::Enabled.eq(true))
+            .one(&db)
+            .await
+            .map_err(|err| ApiError::Internal(err.into()))?
+    } else {
+        None
+    };
 
     let response = match config {
         Some(c) => IngestAuthResponse {

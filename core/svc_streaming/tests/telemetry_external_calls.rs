@@ -261,7 +261,9 @@ async fn relay_targets_emit_one_session_lifetime_each_when_the_pipeline_stops() 
         std::env::set_var(rtmp_var, "rtmp://live.example.com/app/secret-stream-key");
         std::env::set_var(srt_var, "srt://relay.example.com:9000?streamid=secret-id");
     }
-    let relay = RelaySink::new().with_stream_metrics(metrics);
+    let relay = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled())
+        .with_stream_metrics(metrics);
     let pipeline_id = Uuid::new_v4();
     relay
         .start(

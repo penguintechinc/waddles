@@ -32,6 +32,7 @@ async fn seed_db() -> DatabaseConnection {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             community_id INTEGER NOT NULL UNIQUE,
             source_url TEXT NOT NULL,
+            stream_key_hash TEXT,
             source_type TEXT NOT NULL DEFAULT 'rtmp',
             enabled INTEGER NOT NULL DEFAULT 1,
             record_enabled INTEGER NOT NULL DEFAULT 0,
@@ -53,6 +54,7 @@ async fn seed_db() -> DatabaseConnection {
                 .unwrap_or_else(|err| panic!("seed statement failed ({stmt:?}): {err}"));
         }
     }
+    svc_streaming::stream_key::backfill_hashes_from_source_url_for_tests(&db).await;
     db
 }
 
@@ -284,4 +286,78 @@ async fn list_pipelines_reports_only_running_configs() {
     assert_eq!(running[0]["config_id"], 1);
     assert_eq!(running[0]["community_id"], 10);
     assert_eq!(running[0]["status"]["state"], "running");
+}
+
+async fn ingest_auth_allowed(app: &axum::Router, key: &str) -> bool {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/streaming/ingest-auth")
+                .header(SERVICE_KEY_HEADER, SERVICE_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"kind": "rtmp", "key": key}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    body["data"]["allowed"].as_bool().unwrap()
+}
+
+#[tokio::test]
+async fn ingest_auth_refuses_empty_and_short_keys_even_when_source_url_is_empty() {
+    // Config created the way hub-api / the REST API creates it: source_url = '' (and here a
+    // matching empty-string "hash" row would be the legacy hazard). An empty key must never match.
+    let db = seed_db().await;
+    db.execute_unprepared(
+        "INSERT INTO streaming_configs (id, community_id, source_url, enabled) VALUES (3, 30, '', 1)",
+    )
+    .await
+    .unwrap();
+    let engine: SharedEngine = std::sync::Arc::new(FakeEngine::default());
+    let app = router_for_testing(db, engine).with_state(test_state());
+    assert!(!ingest_auth_allowed(&app, "").await);
+    assert!(!ingest_auth_allowed(&app, "short").await);
+    assert!(!ingest_auth_allowed(&app, "0123456789abcde").await); // 15 chars: one below the minimum
+}
+
+#[tokio::test]
+async fn ingest_auth_no_longer_matches_plaintext_source_url() {
+    // The fixture's plaintext key sits in source_url; only its hash column authorizes.
+    let db = seed_db().await;
+    db.execute_unprepared("UPDATE streaming_configs SET stream_key_hash = NULL WHERE id = 1")
+        .await
+        .unwrap();
+    let engine: SharedEngine = std::sync::Arc::new(FakeEngine::default());
+    let app = router_for_testing(db, engine).with_state(test_state());
+    assert!(!ingest_auth_allowed(&app, "demo-stream-key-a").await);
+}
+
+#[tokio::test]
+async fn ingest_auth_valid_key_accepted_and_old_key_refused_after_rotate() {
+    let db = seed_db().await;
+    let engine: SharedEngine = std::sync::Arc::new(FakeEngine::default());
+    let app = router_for_testing(db.clone(), engine).with_state(test_state());
+    let old = "demo-stream-key-a";
+    let new = "rotated-key-0123456789";
+    assert!(ingest_auth_allowed(&app, old).await);
+
+    // What hub-api's rotate does: overwrite the hash column (hex sha256 of the new key).
+    db.execute_unprepared(&format!(
+        "UPDATE streaming_configs SET stream_key_hash = '{}' WHERE id = 1",
+        svc_streaming::stream_key::hash(new)
+    ))
+    .await
+    .unwrap();
+    assert!(!ingest_auth_allowed(&app, old).await);
+    assert!(ingest_auth_allowed(&app, new).await);
 }

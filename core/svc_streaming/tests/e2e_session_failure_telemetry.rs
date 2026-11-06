@@ -134,7 +134,10 @@ async fn every_session_failure_reason_is_counted_and_none_is_recorded_as_started
         config.clone(),
         supervisor,
         hls,
-        Arc::new(RelaySink::new()),
+        Arc::new(
+            RelaySink::new()
+                .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled()),
+        ),
         None,
         Arc::new(PipelineRegistry::new()),
         whip_state(&config),
@@ -172,6 +175,7 @@ async fn every_session_failure_reason_is_counted_and_none_is_recorded_as_started
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             community_id INTEGER NOT NULL UNIQUE,
             source_url TEXT NOT NULL,
+            stream_key_hash TEXT,
             source_type TEXT NOT NULL DEFAULT 'rtmp',
             enabled INTEGER NOT NULL DEFAULT 1,
             record_enabled INTEGER NOT NULL DEFAULT 0,
@@ -196,7 +200,7 @@ async fn every_session_failure_reason_is_counted_and_none_is_recorded_as_started
         -- tenant_unresolved: config points at a community that is not there.
         INSERT INTO streaming_configs (id, community_id, source_url) VALUES (1, 99, 'sk_orphan_community');
         -- spec_build_failed: a target whose forward_url is not a secret_ref.
-        INSERT INTO streaming_configs (id, community_id, source_url) VALUES (2, 42, 'sk_bad_target');
+        INSERT INTO streaming_configs (id, community_id, source_url) VALUES (2, 42, 'sk_bad_target_0123456789abcdef');
         INSERT INTO streaming_targets (config_id, platform, forward_url) VALUES (2, 'twitch', 'not-a-secret-ref');
         -- whip_sdp_missing: a healthy config, but no WHIP bridge was registered.
         INSERT INTO streaming_configs (id, community_id, source_url) VALUES (3, 43, 'sk_whip_no_bridge');
@@ -209,11 +213,16 @@ async fn every_session_failure_reason_is_counted_and_none_is_recorded_as_started
     )
     .await
     .expect("seed schema");
+    svc_streaming::stream_key::backfill_hashes_from_source_url_for_tests(&db).await;
 
     let cases = [
         (IngestKind::Rtmp, "sk_unknown_key", "config_not_found"),
         (IngestKind::Srt, "sk_orphan_community", "tenant_unresolved"),
-        (IngestKind::Rtmp, "sk_bad_target", "spec_build_failed"),
+        (
+            IngestKind::Rtmp,
+            "sk_bad_target_0123456789abcdef",
+            "spec_build_failed",
+        ),
         (IngestKind::Whip, "sk_whip_no_bridge", "whip_sdp_missing"),
         (
             IngestKind::Rtmp,

@@ -48,6 +48,7 @@ jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["use
 # in the lockfile transitively via `jsonwebtoken` (same exact version) --
 # promoting it to a direct dependency adds no new package.
 base64 = "=0.22.1"
+sha2 = "=0.10.9"
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }
 chrono = { version = "=0.4.45", features = ["serde"] }
 thiserror = "=2.0.20"

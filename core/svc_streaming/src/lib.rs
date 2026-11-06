@@ -19,6 +19,7 @@ pub mod redact;
 pub mod rtc;
 pub mod spec_builder;
 pub mod store;
+pub mod stream_key;
 pub mod telemetry;
 
 use std::net::SocketAddr;

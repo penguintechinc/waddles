@@ -191,6 +191,20 @@ class TestKeyLifecycle:
         assert row.stream_key_hash == svc.hash_stream_key(key)
         assert row.stream_key_fingerprint == row.stream_key_hash[:8]
 
+    async def test_source_url_is_never_empty_or_the_key(
+        self, client: Any, streaming_db: Any
+    ) -> None:
+        cid = _community(streaming_db)
+        headers = _admin(streaming_db, community_id=cid)
+        key = (await _create(client, cid, headers))["streamKey"]
+        row = (
+            streaming_db.dal(streaming_db.dal.streaming_configs.community_id == cid)
+            .select()
+            .first()
+        )
+        assert row.source_url and row.source_url != key
+        assert len(svc.generate_stream_key()) >= svc.MIN_KEY_LEN
+
     async def test_second_create_is_409(self, client: Any, streaming_db: Any) -> None:
         cid = _community(streaming_db)
         headers = _admin(streaming_db, community_id=cid)
@@ -468,8 +482,9 @@ class TestDestinations:
         assert (
             await client.post(_url(cid, "/destinations"), headers=headers, json=_DEST)
         ).status_code == 402
-        # key/config management is NOT forwarding -- stays available on every tier
-        assert (await client.get(_url(cid), headers=headers)).status_code == 200
+        assert (await client.get(_url(cid), headers=headers)).status_code == 402
+        # minting/rotating a key is not forwarding -- stays available on every tier
+        assert (await client.post(_url(cid, "/key/regenerate"), headers=headers)).status_code == 200
 
 
 class TestStatus:

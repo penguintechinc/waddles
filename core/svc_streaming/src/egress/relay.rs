@@ -17,6 +17,7 @@
 //! [`target::ResolvedRelayTarget::url_redacted`] only.
 
 pub mod error;
+pub mod guard;
 pub mod health;
 pub mod metrics;
 pub mod policy;
@@ -24,6 +25,8 @@ pub mod target;
 
 use std::collections::HashMap;
 use std::time::Instant;
+
+use self::guard::EgressGuard;
 
 use tokio::sync::RwLock;
 
@@ -59,6 +62,7 @@ pub struct RelaySink<R: SecretResolver = DefaultSecretResolver> {
     policy: RelayPolicy,
     metrics: Option<RelayMetrics>,
     stream_metrics: StreamMetrics,
+    guard: EgressGuard,
     state: RwLock<HashMap<PipelineId, PipelineRelayState>>,
 }
 
@@ -66,13 +70,15 @@ impl RelaySink<DefaultSecretResolver> {
     /// A relay sink using the default (env/file) secret resolver and the
     /// Free-tier [`RelayPolicy`].
     pub fn new() -> Self {
-        Self::with_resolver_and_policy(DefaultSecretResolver, RelayPolicy::default())
+        Self::with_policy(RelayPolicy::default())
     }
 
     /// A relay sink using the default secret resolver and an explicit
     /// [`RelayPolicy`] (e.g. [`RelayPolicy::PROFESSIONAL`]).
     pub fn with_policy(policy: RelayPolicy) -> Self {
+        // Production constructors enforce the dial-time egress guard (see `guard`).
         Self::with_resolver_and_policy(DefaultSecretResolver, policy)
+            .with_egress_guard(EgressGuard::enforcing())
     }
 }
 
@@ -96,8 +102,17 @@ impl<R: SecretResolver> RelaySink<R> {
             policy,
             metrics: None,
             stream_metrics: StreamMetrics::shared(),
+            // Injected-resolver constructors are test seams (fake hostnames); the production
+            // `new`/`with_policy` constructors above switch the guard on.
+            guard: EgressGuard::disabled(),
             state: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Replaces the dial-time egress guard (tests inject a fake resolver or disable it).
+    pub fn with_egress_guard(mut self, guard: EgressGuard) -> Self {
+        self.guard = guard;
+        self
     }
 
     /// Replaces the process-wide stream instruments with an explicit handle
@@ -247,6 +262,12 @@ impl<R: SecretResolver> RelaySink<R> {
             RelayTargetSpec::from_output_spec(spec).ok_or(RelayError::UnsupportedOutputSpec)?;
         let raw = self.resolver.resolve(&target_spec.url_secret_ref)?;
         let resolved = ResolvedRelayTarget::from_raw(target_spec.kind, raw)?;
+        // Re-validate + IP-pin immediately before dial (DNS-rebinding/TOCTOU defense).
+        let pinned = self
+            .guard
+            .pin(resolved.kind, resolved.raw_url_unredacted())
+            .await?;
+        let resolved = resolved.with_dial_url(pinned);
 
         let mut state = self.state.write().await;
         let entry = state.entry(pipeline_id).or_default();
@@ -380,6 +401,41 @@ mod tests {
             },
             profile: None,
         }
+    }
+
+    #[tokio::test]
+    async fn start_refuses_a_destination_that_rebinds_to_a_private_ip_and_pins_a_public_one() {
+        let resolver = FakeResolver::with(&[("RELAY_URL", "rtmp://ingest.example.com/app/sk_abc")]);
+        let pipeline_id = Uuid::new_v4();
+
+        let rebound = RelaySink::with_resolver(FakeResolver::with(&[(
+            "RELAY_URL",
+            "rtmp://ingest.example.com/app/sk_abc",
+        )]))
+        .with_egress_guard(EgressGuard::enforcing_with_lookup(|_, _| {
+            Box::pin(async { Ok(vec!["169.254.169.254".parse().unwrap()]) })
+        }));
+        let err = rebound
+            .start(pipeline_id, rtmp_spec("RELAY_URL"))
+            .await
+            .expect_err("metadata address must be refused at dial time");
+        assert!(err.to_string().contains("non-public"), "{err}");
+        assert!(rebound.tee_slaves(pipeline_id).await.is_empty());
+
+        let public = RelaySink::with_resolver(resolver).with_egress_guard(
+            EgressGuard::enforcing_with_lookup(|_, _| {
+                Box::pin(async { Ok(vec!["8.8.8.8".parse().unwrap()]) })
+            }),
+        );
+        public
+            .start(pipeline_id, rtmp_spec("RELAY_URL"))
+            .await
+            .expect("public address starts");
+        let args = public.ffmpeg_output_args(pipeline_id).await.unwrap();
+        assert!(
+            args.contains(&"rtmp://8.8.8.8/app/sk_abc".to_string()),
+            "{args:?}"
+        );
     }
 
     #[tokio::test]

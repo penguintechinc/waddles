@@ -4,7 +4,7 @@
 
 | Route | Purpose |
 |---|---|
-| `GET .../streams` | config (never the key); `config: null` until created |
+| `GET .../streams` | config (never the key); `config: null` until created (broadcast flag) |
 | `POST .../streams` | create config; **one-time** plaintext key in `streamKey` |
 | `POST .../streams/key/regenerate` | rotate; old key stops authorizing at once; new key in `streamKey` |
 | `GET/POST .../streams/destinations` | list / add restream destination (`waddles.streaming.broadcast` flag) |
@@ -22,9 +22,12 @@
 - RTMP destinations accept H.264 only (FLV cannot carry HEVC/AV1); SSRF guard on the URL.
 - `STREAMING_INGEST_RTMP_URL` (env) is the public ingest base URL shown to admins.
 
-## Follow-up (svc-streaming)
+## svc-streaming contract
 
-The Rust data plane still authorizes ingest by matching the presented key against plaintext
-`streaming_configs.source_url`. It must switch to `stream_key_hash = sha256(presented key)`
-(`orchestrator::find_enabled_config`, `api::internal::ingest_auth`, SRT key refresh) before keys
-minted by this API authorize a publish. Until then, hub-api-created configs carry `source_url = ''`.
+- Ingest auth (RTMP, SRT, WHIP and `/internal/streaming/ingest-auth`) hashes the presented key and
+  matches `streaming_configs.stream_key_hash` only; `source_url` is never consulted. Keys shorter
+  than 16 chars (incl. empty) are refused before any lookup (`core/svc_streaming/src/stream_key.rs`).
+  Existing rows without a hash cannot authenticate until a key is minted/rotated via this API.
+- Relay egress (`src/egress/relay/guard.rs`) re-resolves each destination at dial time, refuses any
+  non-public answer, and pins the validated IP into rtmp/srt URLs (rtmps keeps its hostname for TLS;
+  validated, not pinned). Consuming `streaming_destinations` in the data plane is tracked in #1034.

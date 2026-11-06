@@ -106,9 +106,16 @@ def _now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+#: svc-streaming refuses presented keys shorter than this (`stream_key::MIN_KEY_LEN`).
+MIN_KEY_LEN = 16
+
+
 def generate_stream_key() -> str:
     """Return a fresh 256-bit CSPRNG stream key (`wbsk_` + 43 URL-safe chars)."""
-    return _KEY_PREFIX + secrets.token_urlsafe(_KEY_BYTES)
+    key = _KEY_PREFIX + secrets.token_urlsafe(_KEY_BYTES)
+    if len(key) < MIN_KEY_LEN:  # defensive: can only trip if the constants above are edited
+        raise RuntimeError("generated stream key is shorter than the ingest minimum")
+    return key
 
 
 def hash_stream_key(key: str) -> str:
@@ -195,7 +202,9 @@ async def create_config(
         await async_dal.insert_async(
             dal.streaming_configs,
             community_id=community_id,
-            source_url="",
+            # NOT NULL column that svc-streaming no longer matches (ingest auth is hash-only);
+            # an unguessable placeholder, never an empty string.
+            source_url=f"hubapi-unset:{uuid.uuid4().hex}",
             source_type="rtmp",
             enabled=enabled,
             stream_key_hash=digest,
