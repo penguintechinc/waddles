@@ -83,7 +83,7 @@ jobs:
       - name: Setup build deps (C toolchain, cmake, protoc)
         uses: ./.github/actions/setup-build-deps
         with:
-          protoc: 'true'
+          packages: 'cmake build-essential protobuf-compiler'
       - name: Install Rust 1.97.1
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
         with:

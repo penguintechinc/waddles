@@ -74,7 +74,7 @@ jobs:
       - name: Setup build deps (C toolchain, cmake, protoc)
         uses: ./.github/actions/setup-build-deps
         with:
-          protoc: 'true'
+          packages: 'cmake build-essential protobuf-compiler'
       - name: Live e2e (starts its own Valkey + Postgres containers)
         env:
           HUB_PYTHON: ${{ runner.temp }}/hub-venv/bin/python

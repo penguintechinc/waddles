@@ -6,20 +6,36 @@ description: >-
   apt-get install steps, which flaked on mirror timeouts. Fails loudly.
 
 inputs:
-  protoc:
-    description: "'true' to install the pinned protoc and export PROTOC/PROTOC_INCLUDE"
+  packages:
+    description: >-
+      Space-separated legacy apt package names. Only cmake, build-essential and
+      protobuf-compiler are known; any other name FAILS the step (never ignored).
     required: false
-    default: 'false'
+    default: 'cmake build-essential protobuf-compiler'
 
 runs:
   using: composite
   steps:
-    - name: Verify preinstalled toolchain (gcc, g++, make, cmake)
+    - name: Resolve requested packages and verify preinstalled tools
+      id: resolve
       shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
       run: |
         set -euo pipefail
+        tools=""
+        protoc=false
+        for p in $PACKAGES; do
+          case "$p" in
+            cmake) tools="$tools cmake" ;;
+            build-essential) tools="$tools gcc g++ make" ;;
+            protobuf-compiler) protoc=true ;;
+            *) echo "setup-build-deps: unknown package '$p' -- add explicit support (verified preinstalled tool or sha256-pinned download); refusing to ignore it" >&2; exit 1 ;;
+          esac
+        done
+        echo "protoc=$protoc" >> "$GITHUB_OUTPUT"
         missing=0
-        for t in gcc g++ make cmake; do
+        for t in $tools; do
           if command -v "$t" >/dev/null 2>&1; then
             echo "found $t: $(command -v "$t")"
           else
@@ -30,7 +46,7 @@ runs:
         exit "$missing"
 
     - name: Install pinned protoc (sha256-verified)
-      if: inputs.protoc == 'true'
+      if: steps.resolve.outputs.protoc == 'true'
       shell: bash
       env:
         PROTOC_VERSION: '31.1'
