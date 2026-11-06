@@ -225,6 +225,15 @@ pub struct StripeSpec {
     pub signature_header: HeaderName,
 }
 
+/// Wix app webhooks (`connector::wix_jwt`): the body IS the RS256 JWT, the
+/// route's secret-ref resolves to the app PUBLIC key, and the signed
+/// `instanceId` must equal `instance_id` (host registration data).
+#[derive(Debug, Clone)]
+pub struct WixSpec {
+    /// The Wix app instance (site) this route is bound to.
+    pub instance_id: String,
+}
+
 /// The signature scheme of a registered route (host-side config only).
 #[derive(Debug, Clone)]
 pub enum Scheme {
@@ -234,6 +243,8 @@ pub enum Scheme {
     Ed25519(Ed25519Spec),
     /// Stripe-style.
     Stripe(StripeSpec),
+    /// Wix app webhooks: raw RS256 JWT body, public key = the secret.
+    WixJwt(WixSpec),
     /// The fixed Twitch EventSub preset: a distinct, constructor-only
     /// marker (not a shape). It is the ONLY scheme exempt from the
     /// adjacent-placeholder rule; a configurable `HmacSha256` never is.
@@ -272,6 +283,10 @@ enum PreparedKind {
         message: Vec<u8>,
         signature: Vec<u8>,
         encoding: Encoding,
+    },
+    Wix {
+        jwt: super::wix_jwt::ParsedJwt,
+        instance_id: String,
     },
 }
 
@@ -327,6 +342,13 @@ impl Scheme {
                 (&s.template, &s.id_header)
             }
             Self::Stripe(_) => return Ok(()),
+            Self::WixJwt(w) => {
+                return if w.instance_id.is_empty() {
+                    Err("wix route needs an instance id".into())
+                } else {
+                    Ok(())
+                };
+            }
             // Fixed, known-good preset; the only adjacency exemption.
             Self::TwitchEventSub => return Ok(()),
         };
@@ -401,6 +423,19 @@ impl Scheme {
                         message,
                         signature: sig,
                         encoding: s.encoding,
+                    },
+                    dedup_id,
+                })
+            }
+            Self::WixJwt(w) => {
+                let jwt = super::wix_jwt::parse(body, window_secs, now_unix, FUTURE_SKEW_SECS)?;
+                // Replay key = the Wix event id, so re-signed copies of one
+                // event dedupe; only consulted after the signature verifies.
+                let dedup_id = signed_message_id(format!("wix-event:{}", jwt.event_id).as_bytes());
+                Ok(Prepared {
+                    kind: PreparedKind::Wix {
+                        jwt,
+                        instance_id: w.instance_id.clone(),
                     },
                     dedup_id,
                 })
@@ -483,6 +518,7 @@ impl Prepared {
                     Err(VerifyError::BadSignature)
                 }
             }
+            PreparedKind::Wix { jwt, instance_id } => jwt.verify(secret, instance_id),
             PreparedKind::Ed25519 {
                 message,
                 signature,

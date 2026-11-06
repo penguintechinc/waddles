@@ -33,6 +33,7 @@ from quart_schema import validate_request, validate_response
 
 from services import bundle_instance_policy_service as instance_policy_svc
 from services import bundle_permission_service as svc
+from services.access_grant_dto import AccessGrantsResponse, access_grants_response
 from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
 from services.errors import ApiError
@@ -167,6 +168,46 @@ async def approve_permissions(
         )
         return _err(exc)
     return MessageResponse(success=True, message=f"permissions approved for {app_id}@{version}")
+
+
+@bundle_permissions_bp.route("/<app_id>/versions/<version>/access-grants", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope("platform:admin")  # type: ignore[misc]
+@validate_response(AccessGrantsResponse)
+async def get_version_access_grants(
+    app_id: str, version: str
+) -> AccessGrantsResponse | tuple[dict[str, object], int]:
+    """GLOBAL tier: dangerous access grants a version requests (feeds the red warning)."""
+    try:
+        blocks, requested, approved, dangerous = await svc.get_access_grants(
+            _install_dal(), app_id=app_id, version=version
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return access_grants_response(blocks, requested, approved, dangerous)
+
+
+@bundle_permissions_bp.route(
+    "/community/<int:community_id>/<app_id>/access-grants", methods=["GET"]
+)
+@tenant_middleware  # type: ignore[misc]
+@validate_response(AccessGrantsResponse)
+async def get_community_access_grants(
+    community_id: int, app_id: str
+) -> AccessGrantsResponse | tuple[dict[str, object], int]:
+    """COMMUNITY tier: the access grants shown (again) before activation. Community admin only."""
+    version = request.args.get("version", "")
+    if not version:
+        return _err(ApiError("version query param is required", 400, "BAD_REQUEST"))
+    async_dal, dal = _dal()
+    try:
+        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        blocks, requested, approved, dangerous = await svc.get_access_grants(
+            _install_dal(), app_id=app_id, version=version
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return access_grants_response(blocks, requested, approved, dangerous)
 
 
 @bundle_permissions_bp.route("/<app_id>/versions/<version>/permissions/approved", methods=["GET"])

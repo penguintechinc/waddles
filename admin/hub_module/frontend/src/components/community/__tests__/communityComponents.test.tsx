@@ -72,17 +72,17 @@ describe('MemberRow', () => {
 });
 
 describe('CommunityHeader', () => {
-  const membership = { id: 7, name: 'bc', displayName: 'Bar Citizen', role: 'community-owner' };
+  const membership = { id: 7, name: 'acme', displayName: 'Acme', role: 'community-owner' };
   it('prefers public details, falls back to membership, and gates the admin link', () => {
     const { rerender } = render(<MemoryRouter><CommunityHeader membership={membership} details={undefined} canAdminister={false} /></MemoryRouter>);
-    expect(screen.getByRole('heading', { name: 'Bar Citizen' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Acme' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Admin Panel' })).not.toBeInTheDocument();
     rerender(
       <MemoryRouter>
         <CommunityHeader
           membership={membership}
           canAdminister
-          details={{ id: 7, name: 'bc', displayName: 'HQ', description: null, logoUrl: 'https://x/l.png', bannerUrl: null, platform: null, memberCount: 1, joinMode: null, createdAt: null }}
+          details={{ id: 7, name: 'acme', displayName: 'HQ', description: null, logoUrl: 'https://x/l.png', bannerUrl: null, platform: null, memberCount: 1, joinMode: null, createdAt: null }}
         />
       </MemoryRouter>,
     );

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CheckCircleIcon, XCircleIcon, ClockIcon, EyeIcon } from '@heroicons/react/24/outline';
 import { bundleAdminApi, bundleApi } from '../../services/api';
+import AccessGrantWarning, { ACCESS_GRANT_KINDS } from '../../components/bundles/AccessGrantWarning';
 
 /**
  * Global-admin bundle-version INSTALL queue (three-tier app lifecycle,
@@ -40,6 +41,7 @@ function SuperAdminBundleApprovals() {
   const [panelError, setPanelError] = useState(null);
   const [panelLoading, setPanelLoading] = useState(false);
   const [actionPending, setActionPending] = useState(false);
+  const [accessAck, setAccessAck] = useState(false);
 
   useEffect(() => {
     loadVersions();
@@ -68,6 +70,7 @@ function SuperAdminBundleApprovals() {
   async function openReview(row) {
     setReviewing(row);
     setSummary(null);
+    setAccessAck(false);
     setPermissionHash(null);
     setDenyReason('');
     setPanelError(null);
@@ -90,6 +93,10 @@ function SuperAdminBundleApprovals() {
     setPanelError(null);
   }
 
+  const hasAccessGrants = Boolean(
+    summary && Object.keys(ACCESS_GRANT_KINDS).some((key) => summary[key] && summary[key].length),
+  );
+
   async function handleInstall() {
     if (!reviewing) return;
     setActionPending(true);
@@ -98,6 +105,16 @@ function SuperAdminBundleApprovals() {
       // Tier 1 only -- platform-catalog install, no communityId/tenantId.
       // See this file's module docstring for the tier-2/3 boundary.
       await bundleApi.approveVersion(reviewing.appId, reviewing.version, { permissionHash });
+      if (hasAccessGrants) {
+        // Dangerous access grants only become available once the global admin
+        // explicitly acknowledged them (checkbox) -- approve every dangerous id.
+        const grants = await bundleApi.getAccessGrants(reviewing.appId, reviewing.version);
+        await bundleApi.approvePermissions(
+          reviewing.appId,
+          reviewing.version,
+          grants.data.dangerousIds,
+        );
+      }
       console.debug('[SuperAdminBundleApprovals] Install', {
         appId: reviewing.appId,
         version: reviewing.version,
@@ -280,6 +297,7 @@ function SuperAdminBundleApprovals() {
             )}
             {summary && (
               <>
+                <AccessGrantWarning summary={summary} requireAck onAckChange={setAccessAck} />
                 <pre
                   className="bg-navy-900 border border-navy-700 rounded p-3 text-xs text-navy-300 overflow-x-auto mb-4"
                   data-testid="bundle-approvals-summary"
@@ -321,7 +339,7 @@ function SuperAdminBundleApprovals() {
               </button>
               <button
                 onClick={handleInstall}
-                disabled={actionPending || !summary}
+                disabled={actionPending || !summary || (hasAccessGrants && !accessAck)}
                 data-testid="bundle-approvals-install-button"
                 className="px-4 py-2 rounded bg-gold-500 text-navy-900 font-semibold hover:bg-gold-400 disabled:opacity-50"
               >

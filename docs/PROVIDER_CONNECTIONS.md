@@ -288,7 +288,7 @@ app that minted the bot token, or refresh is refused (`409 CONNECTION_NOT_USABLE
 > | Flow | Callback | Writes |
 > |---|---|---|
 > | Community Connections page (`community_connections.py`, `services/community_connections.py`) | `/api/v1/connections/callback/<provider>` | `platform_integrations` (legacy store) |
-> | Tenant Twitch bot-install (`tenant_twitch_install.py`, Bar Citizen role-sync) | `/api/v1/tenant/twitch-install/callback` | `tenant_platform_apps` + `platform_connections` with **no grant** (`twitch_install_credentials.py`) |
+> | Tenant Twitch bot-install (`tenant_twitch_install.py`, role-sync) | `/api/v1/tenant/twitch-install/callback` | `tenant_platform_apps` + `platform_connections` with **no grant** (`twitch_install_credentials.py`) |
 >
 > A channel connected only through those flows therefore never appears in the data-plane list. Until
 > the webui gains a provider-connections UI (listed as a follow-up above), register the binding with

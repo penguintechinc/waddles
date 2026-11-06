@@ -539,10 +539,10 @@ def hub_api_board() -> Board:
     b.ts(
         "Role sync changes",
         [
-            (sumrate("waddles_bar_citizen_roles_added_total"), "roles added"),
-            (sumrate("waddles_bar_citizen_roles_removed_total"), "roles removed"),
+            (sumrate("waddles_role_sync_roles_added_total"), "roles added"),
+            (sumrate("waddles_role_sync_roles_removed_total"), "roles removed"),
             (
-                sumrate("waddles_bar_citizen_community_roles_applied_total"),
+                sumrate("waddles_role_sync_community_roles_applied_total"),
                 "community roles applied",
             ),
         ],
@@ -550,7 +550,7 @@ def hub_api_board() -> Board:
     )
     b.ts(
         "Role sync errors",
-        [(sumrate("waddles_bar_citizen_sync_errors_total"), "pairing failures")],
+        [(sumrate("waddles_role_sync_errors_total"), "pairing failures")],
         "ops",
         "Fail-closed pairing failures.",
     )

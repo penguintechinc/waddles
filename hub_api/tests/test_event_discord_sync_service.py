@@ -2,7 +2,7 @@
 
 Discord HTTP calls are mocked via the module's own `DiscordEventTargetClient`
 Protocol (fake below) -- no real network access, no `httpx.AsyncClient`
-constructed. DB state uses `event_sync_db` (real `bind_bar_citizen_tables()`/
+constructed. DB state uses `event_sync_db` (real `bind_guild_pairing_tables()`/
 `bind_calendar_sync_tables()`/`bind_auth_tables()` sqlite), same fixture
 layering `test_role_sync_service.py` uses for its own group.
 """

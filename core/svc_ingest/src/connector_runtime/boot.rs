@@ -31,7 +31,7 @@ use penguin_spine::{KeyRing, SpineMetrics};
 use super::feed::{ConnKey, DynFeed, FeedSet, HubBindingFeed, TransportPlan, WebhookPlan};
 use super::metrics::RuntimeMetrics;
 use super::plan::{ConnectorProfile, RuntimeEnv};
-use super::profiles::{discord, twitch, youtube};
+use super::profiles::{discord, twitch, wix, youtube};
 use super::scoped::{ConnectionSink, ScopeLookup, ScopeTenantResolve, ScopedSinkFactory};
 use super::selector::{BootError, ConnectorSelector, IDENTIFY_BUDGET_READY};
 use super::supervisor::{
@@ -66,6 +66,7 @@ fn digest_env(platform: &str) -> &'static str {
     match platform {
         "twitch" => "SENDER_EXEC_DIGEST_TWITCH",
         "discord" => "SENDER_EXEC_DIGEST_DISCORD",
+        "wix" => "SENDER_EXEC_DIGEST_WIX",
         _ => "SENDER_EXEC_DIGEST_YOUTUBE",
     }
 }
@@ -76,6 +77,7 @@ fn platform_consts(platform: &str) -> Option<(&'static str, &'static str)> {
         "twitch" => Some((twitch::APP_ID, twitch::PROVIDER)),
         "discord" => Some((discord::APP_ID, discord::PROVIDER)),
         "youtube" => Some((youtube::APP_ID, youtube::PROVIDER)),
+        "wix" => Some((wix::APP_ID, wix::PROVIDER)),
         _ => None,
     }
 }
@@ -452,6 +454,7 @@ fn feed_for<R: ConnectionResolve + 'static>(
     resolver: &Arc<R>,
     env: &RuntimeEnv,
     metrics: &RuntimeMetrics,
+    route_keys: Option<&webhook_boot::RouteKeyDeriver>,
 ) -> Option<Arc<dyn DynFeed>> {
     fn make<R: ConnectionResolve + 'static, P: ConnectorProfile + 'static>(
         resolver: &Arc<R>,
@@ -483,6 +486,12 @@ fn feed_for<R: ConnectionResolve + 'static>(
             metrics,
         )),
         "youtube" => Some(make(resolver, youtube::YoutubeProfile::new(), env, metrics)),
+        "wix" => Some(make(
+            resolver,
+            wix::WixProfile::new(route_keys.cloned()),
+            env,
+            metrics,
+        )),
         _ => None,
     }
 }
@@ -525,9 +534,13 @@ where
     let env = settings.runtime_env();
     let mut feeds = FeedSet::new();
     let mut providers = BTreeMap::new();
+    let route_keys = deps
+        .webhook
+        .as_ref()
+        .and_then(|(_, e)| e.deriver().cloned());
     for p in &settings.platforms {
-        let feed =
-            feed_for(p, &deps.resolver, &env, &metrics).ok_or(BootError::Malformed("platform"))?;
+        let feed = feed_for(p, &deps.resolver, &env, &metrics, route_keys.as_ref())
+            .ok_or(BootError::Malformed("platform"))?;
         let feed = match &deps.seams.feed_wrap {
             Some(wrap) => wrap(p, feed),
             None => feed,

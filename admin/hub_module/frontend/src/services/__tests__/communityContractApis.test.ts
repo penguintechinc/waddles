@@ -16,7 +16,7 @@ afterEach(() => vi.restoreAllMocks());
 
 describe('myCommunitiesApi', () => {
   it('falls back to the community name, then a numbered label, for display names', () => {
-    expect(parsePublicCommunity({ id: 1, name: 'bc' })).toMatchObject({ displayName: 'bc', memberCount: 0, description: null, joinMode: null });
+    expect(parsePublicCommunity({ id: 1, name: 'acme' })).toMatchObject({ displayName: 'acme', memberCount: 0, description: null, joinMode: null });
     expect(parsePublicCommunity({ id: 2 })).toMatchObject({ displayName: 'Community 2', name: null });
     expect(parsePublicCommunity({ id: 3, displayName: 'Shown', name: 'x', memberCount: 9 })).toMatchObject({ displayName: 'Shown', memberCount: 9 });
   });

@@ -50,6 +50,7 @@ from quart_schema import validate_request, validate_response
 from werkzeug.wrappers import Response as WerkzeugResponse
 
 from config import HubAPIConfig
+from services import install_state_binding as binding
 from services import oauth_service
 from services.current_user import get_current_user_id
 from services.errors import ApiError, not_found
@@ -472,13 +473,19 @@ async def sso_login(public_id: str) -> Response:
 async def _finish_redirect(public_id: str, outcome_token: str, protocol: str) -> Response:
     """Mint the single-use exchange code and redirect the browser into the SPA."""
     ctx = _ctx()
-    code = await oauth_service.create_oauth_exchange_code(
+    code, nonce = await oauth_service.create_oauth_exchange_code(
         ctx.async_dal, ctx.dal, token=outcome_token, platform="sso"
     )
     response = cast(
         Response, redirect(f"{_cfg().frontend_origin}/auth/callback?code={code}", code=303)
     )
     _clear_binder_cookie(response, public_id)
+    binding.set_binding_cookie(
+        response,
+        oauth_service.EXCHANGE_BINDING_COOKIE,
+        nonce,
+        oauth_service.EXCHANGE_CODE_TTL_SECONDS,
+    )
     response.headers["Cache-Control"] = "no-store"
     logger.debug("sso.login.handoff connection=%s protocol=%s", public_id, protocol)
     return response

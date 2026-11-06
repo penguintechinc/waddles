@@ -4,4 +4,5 @@
 
 pub mod discord;
 pub mod twitch;
+pub mod wix;
 pub mod youtube;

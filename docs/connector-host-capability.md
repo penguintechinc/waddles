@@ -323,8 +323,18 @@ PollConfig { /* url = ".../liveChat/messages?part=id,snippet,authorDetails&liveC
     }, ..
 }
 ```
-`liveChatEnded`-style 403s are left unclassified (Fatal) on purpose: rediscovery is the connector/host discovery loop's
-job (not in this change). Tests: `connector/lifecycle_tests.rs` (real local WS + HTTP servers, wire asserted),
+A `liveChatEnded` 403 is classified `HttpAction::Rediscover` (host constant, YouTube profile): the transport asks
+`liveBroadcasts?broadcastStatus=active` with the connection's own OAuth credential through the same pinned/guarded
+client (same host, validated at construction), hands the body to the profile's `Rediscover` hook and ends the run.
+The hook accepts only a valid `liveChatId` of the binding's pinned `channel_id` (when set) that is not the chat that
+just ended, and records it in a per-connection override table keyed by the binding's own `live_chat_id` (a hub-api
+re-pin wins). The next reconcile derives the plan with the override (new URL/source key = new fingerprint = clean
+restart, no cursor carry-over; the feed's cross-community claim check sees the new chat too). No acceptable live
+broadcast = `waiting_for_live` (`connector_runtime_parked_total{reason="waiting_for_live"}`, a non-terminal cooldown
+slot re-checked every reconcile); a transient discovery failure is a `Read` error retried under the driver backoff,
+a 401/403 on discovery or a refused target parks. Tests: `connector_e2e/tests/youtube_rediscovery.rs` (production
+runtime, real connector + executor + Valkey, fake YouTube API), `connector/lifecycle_tests.rs` (rediscovery section).
+Other tests: `connector/lifecycle_tests.rs` (real local WS + HTTP servers, wire asserted),
 `tests/connector_session_lifecycle.rs` (real driver + `WsTransport`: HELLO -> heartbeat with live seq -> op 7 -> RESUME
 -> 4004 parks), `tests/connector_heartbeat.rs` (announced interval start/re-schedule/out-of-range/flag-off).
 

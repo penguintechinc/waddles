@@ -223,6 +223,56 @@ async def write_bundle_sidecar(
     return key
 
 
+def connector_component_key(platform: str, digest: str) -> str:
+    """Bucket key of a platform connector component: `connectors/<platform>/<digest>.wasm`.
+
+    MUST match `core/bundle_executor/src/connector_boot.rs::component_key` byte-for-byte --
+    `digest` is the full `sha256:<64 hex>` string (the executor keys on it verbatim).
+    """
+    return f"connectors/{platform}/{digest}.wasm"
+
+
+def connector_sidecar_key(platform: str, digest: str) -> str:
+    """Bucket key of a connector's signed sidecar (`connector_boot.rs::sidecar_key` parity)."""
+    return f"connectors/{platform}/{digest}.json"
+
+
+async def write_connector_objects(
+    platform: str, digest: str, component: bytes, sidecar_document: dict[str, Any]
+) -> tuple[str, str]:
+    """PUTs a connector's `.wasm` then its signed `.json` sidecar; returns both bucket keys.
+
+    Component first, sidecar last: the executor refuses a connector without a valid sidecar, so a
+    partial failure never leaves a loadable-but-unsigned object. Same SSE/bucket (`_bundle_bucket`)
+    as `write_bundle_sidecar`; sidecar is canonical sorted-key JSON so re-publishing the same
+    document is byte-identical (idempotent).
+    """
+    component_key = connector_component_key(platform, digest)
+    sidecar_key = connector_sidecar_key(platform, digest)
+    body = json.dumps(sidecar_document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    sse = await get_object_storage_sse().put_params()
+
+    def _put() -> None:
+        client = _client()
+        client.put_object(
+            Bucket=_bundle_bucket(),
+            Key=component_key,
+            Body=component,
+            ContentType="application/wasm",
+            **sse,
+        )
+        client.put_object(
+            Bucket=_bundle_bucket(),
+            Key=sidecar_key,
+            Body=body,
+            ContentType="application/json",
+            **sse,
+        )
+
+    await asyncio.to_thread(_put)
+    return component_key, sidecar_key
+
+
 async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dict[str, Any] | None:
     """GETs the `.json` sidecar at `bundle_sidecar_key()`. Returns `None` if the object is missing.
 

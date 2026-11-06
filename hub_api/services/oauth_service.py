@@ -32,7 +32,15 @@ import httpx
 from config import HubAPIConfig
 from services import ban_suppression, session_service
 from services.auth_service import SessionUser, create_session_token
-from services.errors import bad_request, conflict
+from services.errors import ApiError, bad_request, conflict
+from services.install_state_binding import (
+    ERR_STATE,
+    InstallStateError,
+    bound_state,
+    cookie_name,
+    new_nonce,
+    verify_state_binding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +54,9 @@ VALID_PLATFORMS = ("discord", "twitch", "slack", "google")
 #: enough that a leaked code (e.g. still visible in a browser history entry
 #: for the split-second before it's consumed) is worthless shortly after.
 EXCHANGE_CODE_TTL_SECONDS = 60
+
+#: ``__Host-`` cookie binding an exchange code to the browser the login completed in.
+EXCHANGE_BINDING_COOKIE = cookie_name("oauth_xchg")
 
 _AUTHORIZE_URLS = {
     "discord": "https://discord.com/api/oauth2/authorize",
@@ -135,9 +146,17 @@ async def exchange_code(
 
 
 async def start_oauth(
-    async_dal: Any, dal: Any, *, platform: str, mode: str, callback_base_url: str
+    async_dal: Any,
+    dal: Any,
+    *,
+    platform: str,
+    mode: str,
+    callback_base_url: str,
+    binding_nonce: str,
 ) -> tuple[str, str]:
     """Start an OAuth login/link flow. Returns `(authorize_url, state)`.
+
+    The state embeds the SHA-256 of `binding_nonce` (the initiating browser's cookie).
 
     `hub_oauth_states` has no `metadata` column (see `schema.py`'s module
     docstring gap 2) -- the tenant-scoped `metadata` insert Node performs
@@ -147,7 +166,7 @@ async def start_oauth(
     the real schema.
     """
     _require_valid_platform(platform)
-    state = secrets.token_hex(16)
+    state = bound_state(secrets.token_hex(16), binding_nonce)
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/callback"
 
     await async_dal.insert_async(
@@ -404,8 +423,18 @@ async def oauth_callback(
     code: str,
     state: str,
     callback_base_url: str,
+    binding_nonce: str | None,
 ) -> str:
-    """Complete an OAuth login. Returns a minted session JWT."""
+    """Complete an OAuth login. Returns a minted session JWT.
+
+    A browser that cannot present the nonce the state was bound to is refused (typed `ApiError`
+    code `state_binding_mismatch`) BEFORE the state is consumed; absent/expired/replayed state
+    raises code `invalid_or_expired_state`.
+    """
+    try:
+        verify_state_binding(state, binding_nonce)
+    except InstallStateError as exc:
+        raise ApiError("OAuth state is not bound to this browser", 400, exc.code) from exc
     state_rows = await async_dal.select_async(
         dal(
             (dal.hub_oauth_states.state == state)
@@ -414,7 +443,7 @@ async def oauth_callback(
         )
     )
     if not state_rows:
-        raise bad_request("Invalid or expired OAuth state")
+        raise ApiError("Invalid or expired OAuth state", 400, ERR_STATE)
     await async_dal.delete_async(dal.hub_oauth_states.state == state)
 
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/callback"
@@ -438,7 +467,9 @@ async def oauth_callback(
     )
 
 
-async def create_oauth_exchange_code(async_dal: Any, dal: Any, *, token: str, platform: str) -> str:
+async def create_oauth_exchange_code(
+    async_dal: Any, dal: Any, *, token: str, platform: str
+) -> tuple[str, str]:
     """Mint a short-lived, single-use opaque code standing in for a just-issued session JWT.
 
     Used by `blueprints/v1/auth.py::oauth_callback` to hand the session off
@@ -447,8 +478,13 @@ async def create_oauth_exchange_code(async_dal: Any, dal: Any, *, token: str, pl
     and the `Referer` header of any outbound request the callback page
     happens to make. The code is redeemed exactly once, server-side, via
     `redeem_oauth_exchange_code` (`POST /api/v1/auth/exchange`).
+
+    Returns `(code, binding_nonce)`: the code embeds only SHA-256(nonce), and the caller MUST set
+    the nonce as the `EXCHANGE_BINDING_COOKIE` on the redirect, so a code leaked or injected into
+    another browser cannot be redeemed there (login CSRF / session fixation).
     """
-    code = secrets.token_urlsafe(32)
+    nonce = new_nonce()
+    code = bound_state(secrets.token_urlsafe(32), nonce)
     await async_dal.insert_async(
         dal.hub_oauth_exchange_codes,
         code=code,
@@ -458,10 +494,12 @@ async def create_oauth_exchange_code(async_dal: Any, dal: Any, *, token: str, pl
         expires_at=datetime.now(UTC) + timedelta(seconds=EXCHANGE_CODE_TTL_SECONDS),
         created_at=datetime.now(UTC),
     )
-    return code
+    return code, nonce
 
 
-async def redeem_oauth_exchange_code(async_dal: Any, dal: Any, *, code: str) -> str:
+async def redeem_oauth_exchange_code(
+    async_dal: Any, dal: Any, *, code: str, binding_nonce: str | None
+) -> str:
     """Redeem a single-use OAuth exchange code for the session JWT it stands in for.
 
     The `UPDATE ... WHERE used = FALSE AND expires_at > NOW()` clause is the
@@ -469,8 +507,14 @@ async def redeem_oauth_exchange_code(async_dal: Any, dal: Any, *, code: str) -> 
     which concurrent caller, if any, wins a race against the same code,
     mirroring `community_welcomed_users`'s `ON CONFLICT DO NOTHING` pattern
     (migration 068). A second redemption attempt against the same code
-    updates zero rows and is rejected, same as an unknown or expired one.
+    updates zero rows and is rejected, same as an unknown or expired one. The browser binding is
+    verified in constant time BEFORE the claim, so a foreign browser cannot burn the code
+    (typed `ApiError`: `state_binding_mismatch` / `invalid_or_expired_state`).
     """
+    try:
+        verify_state_binding(code, binding_nonce)
+    except InstallStateError as exc:
+        raise ApiError("exchange code is not bound to this browser", 400, exc.code) from exc
     claimed = await async_dal.update_async(
         (dal.hub_oauth_exchange_codes.code == code)
         & (dal.hub_oauth_exchange_codes.used == False)  # noqa: E712 - pydal Field comparison
@@ -479,18 +523,27 @@ async def redeem_oauth_exchange_code(async_dal: Any, dal: Any, *, code: str) -> 
         used_at=datetime.now(UTC),
     )
     if not claimed:
-        raise bad_request("Invalid or expired exchange code")
+        raise ApiError("Invalid or expired exchange code", 400, ERR_STATE)
 
     rows = await async_dal.select_async(dal(dal.hub_oauth_exchange_codes.code == code))
     return str(rows.first().token)
 
 
 async def start_link(
-    async_dal: Any, dal: Any, *, platform: str, user_id: int, callback_base_url: str
+    async_dal: Any,
+    dal: Any,
+    *,
+    platform: str,
+    user_id: int,
+    callback_base_url: str,
+    binding_nonce: str,
 ) -> tuple[str, str]:
-    """Start linking `platform` to the currently-authenticated user."""
+    """Start linking `platform` to the currently-authenticated user.
+
+    `binding_nonce` is the initiating browser's cookie nonce; the state embeds only its hash.
+    """
     _require_valid_platform(platform)
-    state = secrets.token_hex(16)
+    state = bound_state(secrets.token_hex(16), binding_nonce)
     redirect_uri = f"{callback_base_url}/api/v1/auth/oauth/{platform}/link-callback"
 
     await async_dal.insert_async(
@@ -510,9 +563,24 @@ async def start_link(
 
 
 async def link_callback(
-    async_dal: Any, dal: Any, *, platform: str, code: str, state: str, callback_base_url: str
+    async_dal: Any,
+    dal: Any,
+    *,
+    platform: str,
+    code: str,
+    state: str,
+    callback_base_url: str,
+    binding_nonce: str | None,
 ) -> None:
-    """Complete an OAuth account-link flow for an already-authenticated user."""
+    """Complete an OAuth account-link flow for an already-authenticated user.
+
+    Refuses (typed `ApiError`, code `state_binding_mismatch`) any browser that cannot present the
+    nonce the state was bound to, BEFORE the state is consumed.
+    """
+    try:
+        verify_state_binding(state, binding_nonce)
+    except InstallStateError as exc:
+        raise ApiError("OAuth state is not bound to this browser", 400, exc.code) from exc
     state_rows = await async_dal.select_async(
         dal(
             (dal.hub_oauth_states.state == state)
@@ -522,7 +590,7 @@ async def link_callback(
         )
     )
     if not state_rows:
-        raise bad_request("Invalid or expired OAuth state")
+        raise ApiError("Invalid or expired OAuth state", 400, ERR_STATE)
     user_id = state_rows.first().user_id
     await async_dal.delete_async(dal.hub_oauth_states.state == state)
 

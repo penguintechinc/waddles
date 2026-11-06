@@ -18,7 +18,7 @@ const ME_TWO = {
   user: {
     id: 1,
     communities: [
-      { id: 7, name: 'bar-citizen', displayName: 'Bar Citizen', role: 'community-owner' },
+      { id: 7, name: 'acme', displayName: 'Acme', role: 'community-owner' },
       { id: 9, name: 'penguins', displayName: 'Penguin Pals', role: 'member' },
     ],
   },
@@ -28,10 +28,10 @@ const PUBLIC_7 = {
   success: true,
   community: {
     id: 7,
-    name: 'bar-citizen',
-    displayName: 'Bar Citizen',
+    name: 'acme',
+    displayName: 'Acme',
     description: 'Star Citizen social club',
-    logoUrl: 'https://cdn.example/bc.png',
+    logoUrl: 'https://cdn.example/logo.png',
     bannerUrl: null,
     platform: 'discord',
     memberCount: 1234,
@@ -89,7 +89,7 @@ describe('DashboardHome (post-login landing)', () => {
       if (url !== '/api/v1/auth/me') return unexpectedUrl(url);
       calls += 1;
       if (calls === 1) throw httpError(500, { error: { code: 'INTERNAL', message: 'Database unavailable' } });
-      return { success: true, user: { id: 1, communities: [{ id: 7, name: 'bc', displayName: 'Bar Citizen', role: 'member' }] } };
+      return { success: true, user: { id: 1, communities: [{ id: 7, name: 'acme', displayName: 'Acme', role: 'member' }] } };
     });
     renderLanding();
     const alert = await screen.findByRole('alert');

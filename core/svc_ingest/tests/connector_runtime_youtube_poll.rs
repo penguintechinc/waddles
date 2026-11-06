@@ -108,6 +108,12 @@ fn derived(server: &MockServer, chat: &str) -> PollConfig {
     url.set_port(Some(port)).unwrap();
     cfg.url = url.into();
     cfg.allow_loopback_insecure = true;
+    let rd = cfg.rediscover.as_mut().expect("youtube plans rediscover");
+    let mut rurl = reqwest::Url::parse(&rd.url).unwrap();
+    rurl.set_scheme("http").unwrap();
+    rurl.set_host(Some("127.0.0.1")).unwrap();
+    rurl.set_port(Some(port)).unwrap();
+    rd.url = rurl.into();
     *cfg
 }
 
@@ -226,12 +232,7 @@ async fn quota_403_backs_off_and_does_not_park() {
 #[tokio::test]
 async fn forbidden_and_chat_ended_park_the_transport() {
     let mut parked = 0;
-    for reason in [
-        "forbidden",
-        "insufficientPermissions",
-        "liveChatEnded",
-        "someUnlistedReason",
-    ] {
+    for reason in ["forbidden", "insufficientPermissions", "someUnlistedReason"] {
         let server = MockServer::start().await;
         mount_403(&server, reason, None).await;
         let (secrets, _) = FakeSecrets::new(Mode::Token);
@@ -241,7 +242,37 @@ async fn forbidden_and_chat_ended_park_the_transport() {
         assert!(e.is_fatal(), "{reason}: {e:?}");
         parked += 1;
     }
-    assert_eq!(parked, 4);
+    assert_eq!(parked, 3);
+}
+
+/// `liveChatEnded` is no longer a plain park: the transport asks the upstream
+/// for the current broadcast, records the outcome for the supervisor and ends
+/// the run (fatal to the driver) so the runtime can retarget or wait.
+#[tokio::test]
+async fn chat_ended_rediscovers_then_ends_the_run() {
+    for (broadcasts, want) in [
+        (serde_json::json!({"items": []}), "waiting_for_live"),
+        (
+            serde_json::json!({"items":[{"snippet":{"liveChatId":"NewLive_2","channelId":"UCx"}}]}),
+            "rediscovered",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        mount_403(&server, "liveChatEnded", None).await;
+        Mock::given(method("GET"))
+            .and(path("/youtube/v3/liveBroadcasts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(broadcasts))
+            .mount(&server)
+            .await;
+        let (secrets, _) = FakeSecrets::new(Mode::Token);
+        let cfg = derived(&server, CHAT);
+        let hook = cfg.rediscover.as_ref().expect("hook").hook.clone();
+        let mut t = PollTransport::new(cfg, secrets).unwrap();
+        t.connect().await.unwrap();
+        let e = t.next_frame().await.unwrap_err();
+        assert!(e.is_fatal(), "{want}: {e:?}");
+        assert_eq!(hook.take_outcome().map(|o| o.label()), Some(want));
+    }
 }
 
 #[tokio::test]

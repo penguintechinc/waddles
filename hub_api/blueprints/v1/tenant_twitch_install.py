@@ -1,6 +1,6 @@
-"""v1 `tenant.twitch_install` group -- per-tenant Twitch bot-install OAuth flow (Bar Citizen).
+"""v1 `tenant.twitch_install` group -- per-tenant Twitch bot-install OAuth flow.
 
-**Net-new, Twitch-only half of the Bar Citizen OAuth bot-install work** --
+**Net-new, Twitch-only half of the OAuth bot-install work** --
 the sibling unit building the Discord half (`tenant_discord_install.py`,
 if/when it lands) is a separate file; this module never imports it and
 never shares a blueprint object with it, avoiding any merge collision
@@ -9,7 +9,7 @@ between the two stacked PRs.
 Each tenant beyond tenant 0 brings its OWN Twitch application (client
 id/secret, registered by the tenant admin in the Twitch developer
 console) and authorizes a bot account for the exact Helix scopes the
-Bar Citizen role-sync worker needs
+role-sync worker needs
 (`services.twitch_install_oauth.ROLE_SYNC_SCOPES`) -- tenant 0 keeps using
 the SaaS-wide Twitch app via `services.credential_resolver`'s existing
 `is_global_tenant` lane and is explicitly rejected here (`tenant:admin`
@@ -38,7 +38,7 @@ docstring for the precedent this mirrors):
 
 Feature-gated behind `waddles.community.guild_pairing` (same flag the
 guild-pairing CRUD group uses -- this is the install-time half of the
-same Professional+ Bar Citizen feature, not a second gate to keep in
+same Professional+ role-sync feature, not a second gate to keep in
 sync).
 
 Never logs a token, code, `client_id`, or `client_secret` anywhere in this
@@ -56,10 +56,11 @@ from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
-from quart import Blueprint, Response, current_app, request
+from quart import Blueprint, Response, after_this_request, current_app, request
 from quart_schema import validate_response
 
 from config import HubAPIConfig
+from services import install_state_binding as binding
 from services import twitch_install_credentials as creds_svc
 from services import twitch_install_oauth as oauth_svc
 from services import twitch_install_state as state_svc
@@ -75,6 +76,9 @@ tenant_twitch_install_bp = Blueprint(
 
 #: Same two-gate feature flag the guild-pairing CRUD group uses -- see module docstring.
 FEATURE_TWITCH_INSTALL = "waddles.community.guild_pairing"
+
+#: ``__Host-`` cookie carrying the initiating browser's state-binding nonce.
+BINDING_COOKIE = binding.cookie_name("tw_install")
 
 #: Upper bound on tenant-admin-suppliable `client_id`/`client_secret` length --
 #: Twitch's own values are short (~30 chars); this is a sanity ceiling against
@@ -203,13 +207,21 @@ async def authorize() -> TwitchInstallAuthorizeResponse | tuple[dict[str, object
 
     user_id = get_current_user_id(request)
     redirect_uri = _redirect_uri()
+    nonce = binding.new_nonce()
     state = await state_svc.create_state(
         tenant_id=ctx.tenant_id,
         installed_by_user_id=user_id,
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=redirect_uri,
+        binding_nonce=nonce,
     )
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Bind the state to THIS browser (``__Host-`` HttpOnly Secure SameSite=Lax cookie)."""
+        binding.set_binding_cookie(response, BINDING_COOKIE, nonce, state_svc.ttl_seconds())
+        return response
 
     authorize_url = oauth_svc.build_authorize_url(
         client_id=client_id, redirect_uri=redirect_uri, state=state
@@ -234,10 +246,21 @@ async def callback() -> tuple[Response, int] | Response:
     code = request.args.get("code")
     provider_error = request.args.get("error")
 
-    payload = await state_svc.consume_state(state_param)
-    if payload is None:
-        return _callback_html(ok=False, error="invalid_or_expired_state"), 400
+    try:
+        payload = await state_svc.consume_state(state_param, request.cookies.get(BINDING_COOKIE))
+    except binding.InstallStateError as exc:
+        logger.warning("tenant_twitch_install.state_refused code=%s", exc.code)
+        return _callback_html(ok=False, error=exc.code), 400
+    page = await _finish(payload, code=code, provider_error=provider_error)
+    # The state was consumed: the cookie has done its job.
+    binding.clear_binding_cookie(page[0] if isinstance(page, tuple) else page, BINDING_COOKIE)
+    return page
 
+
+async def _finish(
+    payload: state_svc.TwitchInstallStatePayload, *, code: str | None, provider_error: str | None
+) -> tuple[Response, int] | Response:
+    """Run the post-state steps (provider error, code exchange, credential store)."""
     if provider_error:
         return _callback_html(ok=False, error="access_denied")
 

@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any
 
+from services.bundle_access_grants import summarize_access_grants
 from services.bundle_manifest_v2 import BundleManifestV2
 
 
@@ -71,6 +72,11 @@ def build_permission_summary(
             ),
             key=lambda t: (t["target"], t["tool"]),
         )
+    # Dangerous resource-access grants (platform tables, ...): the MOST
+    # consent-relevant blocks -- rendered in bold red by the webui and part of
+    # the hashed summary so widening forces re-approval. Present-only, so
+    # pre-existing bundles' hashes are unchanged. Registry: bundle_access_grants.
+    summary.update(summarize_access_grants(manifest))
     return summary
 
 
