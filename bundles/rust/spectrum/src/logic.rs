@@ -347,6 +347,7 @@ fn item_to_raw(
             .map_or(Value::Null, Value::String),
     );
     // Items with no timestamp sort first (Python `created_epoch or 0.0`).
+    #[allow(clippy::manual_unwrap_or)] // explicit match: house rule bans unwrap_or* defaults
     let sort_key = match created {
         Some(c) => c,
         None => 0.0,
