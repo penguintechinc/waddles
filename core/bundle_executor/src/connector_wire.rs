@@ -45,6 +45,7 @@
 //! bytes, actors, payloads or guest-supplied error text.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -59,6 +60,8 @@ use crate::connector::{
     HttpRequestTpl, NormalizedEvent, RawFrame, SenderAction, ToolError,
 };
 use crate::error::ExecutorError;
+use crate::host::HostBridge;
+use crate::wire::Connection;
 
 /// `ErrorBody::detail` for a connector pool with no free slot (shared with
 /// the stage path's `pool_exhausted`).
@@ -117,6 +120,18 @@ impl ConnectorRouter {
     /// digest, an `app_id` that does not match the pinned one, or a
     /// non-connector export are all refused before any guest runs.
     pub async fn invoke(&self, body: InvokeBody) -> Result<ResultBody, ErrorBody> {
+        self.invoke_bound(body, None).await
+    }
+
+    /// [`Self::invoke`] for a call that arrived over the connector link
+    /// (`link` = `Some`): the guest's host-calls go back over that
+    /// connection, carrying the `ConnectionCtx`-derived `_scope`. `None`
+    /// keeps the pin-time bridge (none, for a production pin).
+    pub async fn invoke_bound(
+        &self,
+        body: InvokeBody,
+        link: Option<LinkBinding>,
+    ) -> Result<ResultBody, ErrorBody> {
         // `ToolCall` reaches a `connector-tools` overlay's `tool-provider.call`
         // (P6a T4); a plain `connector` host answers it `EXPORT_MISSING`.
         if !body.export.is_connector() && body.export != ExportKind::ToolCall {
@@ -142,7 +157,7 @@ impl ConnectorRouter {
         let export = body.export;
         let app_id = body.app_id.clone();
         let started = Instant::now();
-        let outcome = dispatch(&host, export, body.payload, body.deadline_ms).await;
+        let outcome = dispatch(&host, link.as_ref(), export, body.payload, body.deadline_ms).await;
         match &outcome {
             Ok(_) => debug!(app_id = %app_id, export = export.as_str(), "connector invoke ok"),
             Err(e) => warn!(
@@ -158,6 +173,37 @@ impl ConnectorRouter {
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             fuel_used,
         })
+    }
+}
+
+/// The connection one connector `invoke` arrived on plus its frame id: what
+/// [`ConnectorRouter::invoke_bound`] needs to route the guest's host-calls
+/// back over the same (connector) link.
+#[derive(Clone)]
+pub struct LinkBinding {
+    /// The connector-link connection the `invoke` frame arrived on.
+    pub connection: Arc<Connection>,
+    /// That `invoke` frame's id (`HostCallBody.call_id`).
+    pub invoke_id: u64,
+}
+
+/// A handle to `host` whose host-calls follow `link` (when present), scoped to
+/// `connection_id` (the invoked export's `ConnectionCtx`, host-derived from the
+/// `invoke` payload) or unscoped for an export that carries no ctx.
+fn bind(
+    host: &ConnectorHost,
+    link: Option<&LinkBinding>,
+    connection_id: Option<&str>,
+) -> ConnectorHost {
+    match link {
+        None => host.clone(),
+        Some(l) => host.bound(
+            Some(HostBridge::for_connector_call(
+                Arc::clone(&l.connection),
+                connection_id.map(str::to_string),
+            )),
+            l.invoke_id,
+        ),
     }
 }
 
@@ -399,18 +445,24 @@ fn encode_events(events: Vec<NormalizedEvent>) -> Result<serde_json::Value, Erro
 /// Decodes the payload for `export`, runs the matching `ConnectorHost` call
 /// and encodes the outcome.
 async fn dispatch(
-    host: &ConnectorHost,
+    pinned: &ConnectorHost,
+    link: Option<&LinkBinding>,
     export: ExportKind,
     payload: serde_json::Value,
     deadline_ms: u64,
 ) -> Result<(serde_json::Value, u64), ErrorBody> {
+    // Exports with no `ConnectionCtx` (build-request, tool-call) are bound
+    // unscoped: their host-calls carry no `_scope` and the listener denies them.
+    let host = &bind(pinned, link, None);
     match export {
         ExportKind::ConnectorOnConnect => {
             let args: CtxArgs = decode(payload)?;
+            let host = &bind(pinned, link, Some(&args.ctx.connection_id));
             settle(host.on_connect(args.ctx.into()).await, encode_handshake)
         }
         ExportKind::ConnectorOnFrame => {
             let args: FrameArgs = decode(payload)?;
+            let host = &bind(pinned, link, Some(&args.ctx.connection_id));
             let frame = RawFrame {
                 ctx: args.ctx.into(),
                 bytes: decode_bytes(&args.bytes)?,
@@ -420,6 +472,7 @@ async fn dispatch(
         }
         ExportKind::ConnectorOnHeartbeatDue => {
             let args: CtxArgs = decode(payload)?;
+            let host = &bind(pinned, link, Some(&args.ctx.connection_id));
             settle(host.on_heartbeat_due(args.ctx.into()).await, |bytes| {
                 encode_reply(&HeartbeatReply {
                     bytes: bytes.map(|b| BASE64.encode(b)),
@@ -428,6 +481,7 @@ async fn dispatch(
         }
         ExportKind::ConnectorOnDisconnect => {
             let args: DisconnectArgs = decode(payload)?;
+            let host = &bind(pinned, link, Some(&args.ctx.connection_id));
             settle(
                 host.on_disconnect(args.ctx.into(), args.reason).await,
                 |()| encode_reply(&serde_json::json!({})),

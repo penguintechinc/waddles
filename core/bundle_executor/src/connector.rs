@@ -386,6 +386,7 @@ pub struct ConnectorHost {
     inner: Arc<Inner>,
 }
 
+#[derive(Clone)]
 struct Inner {
     engine: Engine,
     pre: ConnectorPreKind,
@@ -400,6 +401,9 @@ struct Inner {
     /// more than its share and starve `receiver` calls (`on-frame`, heartbeat).
     tool_slots: Arc<Semaphore>,
     bridge: Option<Arc<HostBridge>>,
+    /// The `invoke` frame id charged for this host's host-calls
+    /// (`HostCallBody.call_id`); `0` for a pin-time host not bound to a call.
+    call_id: u64,
     metrics: Arc<ExecutorMetrics>,
 }
 
@@ -481,6 +485,7 @@ impl ConnectorHost {
                 tool_slots: Arc::new(Semaphore::new(tool_pool_size(limits.pool_size))),
                 limits,
                 bridge,
+                call_id: 0,
                 metrics: executor_metrics(),
             }),
         })
@@ -489,18 +494,25 @@ impl ConnectorHost {
     /// Test seam: route this host's call metrics into `metrics`.
     #[must_use]
     pub fn with_metrics(self, metrics: Arc<ExecutorMetrics>) -> Self {
-        let i = &*self.inner;
         Self {
             inner: Arc::new(Inner {
-                engine: i.engine.clone(),
-                pre: i.pre.clone(),
-                app_id: i.app_id.clone(),
-                digest: i.digest.clone(),
-                limits: i.limits,
-                slots: Arc::clone(&i.slots),
-                tool_slots: Arc::clone(&i.tool_slots),
-                bridge: i.bridge.clone(),
                 metrics,
+                ..(*self.inner).clone()
+            }),
+        }
+    }
+
+    /// A handle to the SAME pinned component and pools, whose host-calls go
+    /// through `bridge` and are charged to `call_id` (the `invoke` frame id).
+    /// Used per connector-link invoke so every guest host-call returns over
+    /// the connection the export arrived on, carrying that call's scope.
+    #[must_use]
+    pub fn bound(&self, bridge: Option<Arc<HostBridge>>, call_id: u64) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                bridge,
+                call_id,
+                ..(*self.inner).clone()
             }),
         }
     }
@@ -780,7 +792,7 @@ impl Inner {
         started: Instant,
         deadline_ms: u64,
     ) -> Result<(Store<ExecState>, ConnectorInstance), ConnectorCallError> {
-        let exec_state = ExecState::new(self.bridge.clone(), self.app_id.clone(), 0)
+        let exec_state = ExecState::new(self.bridge.clone(), self.app_id.clone(), self.call_id)
             .with_memory_limit_mb(self.limits.memory_limit_mb);
         let mut store = new_bounded_store(&self.engine, exec_state, deadline_ms);
         if let Err(e) = store.set_fuel(self.limits.fuel) {

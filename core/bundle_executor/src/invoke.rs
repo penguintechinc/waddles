@@ -58,6 +58,7 @@ use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::config::CliConfig;
+use crate::connector_wire::LinkBinding;
 use crate::engine::stage_tools_world::{StageTools, StageToolsPre};
 use crate::engine::stage_v2_world::{StageV2, StageV2Pre};
 use crate::engine::{ticks_for_deadline, Stage, StagePre};
@@ -1028,37 +1029,8 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         invoke_id: u64,
         connection: Arc<Connection>,
     ) -> Result<ResultBody, ErrorBody> {
-        let app_id = body.app_id.clone();
-        let export = export_label(&body.export);
-        let _active = self.metrics.invocation_started();
-        let started = Instant::now();
-        let outcome = self.invoke_inner(body, invoke_id, connection).await;
-        let (result, trip) = match &outcome {
-            Ok(_) => ("ok", None),
-            Err(e) => {
-                // A fuel trap is the sandbox firing on a runaway guest: log
-                // it (type + message only -- no payload, no secrets) so it is
-                // diagnosable beyond the metric, and label it distinctly
-                // from a wall-clock deadline.
-                if e.detail.as_deref() == Some(DETAIL_FUEL_EXHAUSTED) {
-                    warn!(
-                        app_id = %app_id,
-                        export,
-                        invoke_id,
-                        code = ?e.code,
-                        message = %e.message,
-                        "guest exhausted its fuel budget (trap)"
-                    );
-                }
-                (
-                    metrics::error_label(e.code, e.detail.as_deref()),
-                    metrics::trip_limit(e.code, e.detail.as_deref()),
-                )
-            }
-        };
-        self.metrics
-            .record_invoke(&app_id, export, result, trip, started.elapsed());
-        outcome
+        self.invoke_observed(body, invoke_id, connection, LinkKind::Stage)
+            .await
     }
 
     async fn on_shutdown(&self, body: ShutdownBody) {
@@ -1090,7 +1062,82 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
     }
 }
 
+/// Which host-API link an `invoke` arrived on. Only the dedicated connector
+/// link ([`LinkKind::Connector`]) may run connector exports with a host-call
+/// bridge, and it may run nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkKind {
+    /// The svc-process/svc-action stage link.
+    Stage,
+    /// The svc-ingest connector link (`CONNECTOR_HOST_API_ADDR`).
+    Connector,
+}
+
 impl<S: ComponentSource> Executor<S> {
+    /// The component source (bucket) connector pinning fetches through.
+    pub(crate) fn source(&self) -> &S {
+        &self.source
+    }
+
+    /// The platform signing keys every fetched sidecar is verified against.
+    pub(crate) fn signing_keys(&self) -> &PlatformPublicKeys {
+        &self.signing_keys
+    }
+
+    /// `invoke` arriving on the CONNECTOR link: connector exports (and a
+    /// pinned overlay's `tool-call`) only, with the guest's host-calls routed
+    /// back over `connection` carrying the call's `_scope`.
+    pub(crate) async fn on_connector_invoke(
+        &self,
+        body: InvokeBody,
+        invoke_id: u64,
+        connection: Arc<Connection>,
+    ) -> Result<ResultBody, ErrorBody> {
+        self.invoke_observed(body, invoke_id, connection, LinkKind::Connector)
+            .await
+    }
+
+    /// The metrics-wrapped body shared by both links' `on_invoke`.
+    async fn invoke_observed(
+        &self,
+        body: InvokeBody,
+        invoke_id: u64,
+        connection: Arc<Connection>,
+        link: LinkKind,
+    ) -> Result<ResultBody, ErrorBody> {
+        let app_id = body.app_id.clone();
+        let export = export_label(&body.export);
+        let _active = self.metrics.invocation_started();
+        let started = Instant::now();
+        let outcome = self.invoke_inner(body, invoke_id, connection, link).await;
+        let (result, trip) = match &outcome {
+            Ok(_) => ("ok", None),
+            Err(e) => {
+                // A fuel trap is the sandbox firing on a runaway guest: log
+                // it (type + message only -- no payload, no secrets) so it is
+                // diagnosable beyond the metric, and label it distinctly
+                // from a wall-clock deadline.
+                if e.detail.as_deref() == Some(DETAIL_FUEL_EXHAUSTED) {
+                    warn!(
+                        app_id = %app_id,
+                        export,
+                        invoke_id,
+                        code = ?e.code,
+                        message = %e.message,
+                        "guest exhausted its fuel budget (trap)"
+                    );
+                }
+                (
+                    metrics::error_label(e.code, e.detail.as_deref()),
+                    metrics::trip_limit(e.code, e.detail.as_deref()),
+                )
+            }
+        };
+        self.metrics
+            .record_invoke(&app_id, export, result, trip, started.elapsed());
+        outcome
+    }
+
     /// The body of `on_invoke`, recording the instantiate and guest-execution
     /// histograms as it goes. The `on_invoke` wrapper adds the in-flight
     /// gauge, the end-to-end histogram and the sandbox-trip counter around
@@ -1101,12 +1148,36 @@ impl<S: ComponentSource> Executor<S> {
         body: InvokeBody,
         invoke_id: u64,
         connection: Arc<Connection>,
+        link: LinkKind,
     ) -> Result<ResultBody, ErrorBody> {
         if self.draining.load(Ordering::SeqCst) {
             return Err(error_body(
                 ErrorCode::ShuttingDown,
                 "executor is shutting down",
             ));
+        }
+        // Only the connector link binds a host-call bridge to a connector
+        // call (so guest host-calls return over THAT link, scoped); a stage
+        // link's connector invoke keeps the pin-time (absent) bridge.
+        let binding = (link == LinkKind::Connector).then(|| LinkBinding {
+            connection: Arc::clone(&connection),
+            invoke_id,
+        });
+        // The connector link serves pinned connector exports and nothing else:
+        // it can never reach the scope-refcounted stage registry.
+        if link == LinkKind::Connector {
+            let serves = body.export.is_connector()
+                || (body.export == ExportKind::ToolCall
+                    && self.connectors.contains(&body.digest).await);
+            if !serves {
+                return Err(error_body(
+                    ErrorCode::ExportMissing,
+                    format!(
+                        "{} is not served on the connector link",
+                        body.export.as_str()
+                    ),
+                ));
+            }
         }
         // Fail-closed, digest-only lookup (spec §3): never falls back to
         // "whatever happens to be loaded under this app_id" -- an
@@ -1126,10 +1197,10 @@ impl<S: ComponentSource> Executor<S> {
         // build-request for a digest-pinned connector it resolved itself).
         if body.export == ExportKind::ConnectorBuildRequest {
             let _global = self.acquire_global_slot(&body.app_id).await?;
-            return self.connectors.invoke(body).await;
+            return self.connectors.invoke_bound(body, binding).await;
         }
         if body.export.is_connector() {
-            return self.connectors.invoke(body).await;
+            return self.connectors.invoke_bound(body, binding).await;
         }
         // A `tool-call` for a pinned `connector-tools` overlay (P6a T4) rides
         // the connector registry too: connectors are never in `bundles`.
@@ -1142,7 +1213,7 @@ impl<S: ComponentSource> Executor<S> {
         // takes the same global slot as every stage export (PR #984 review).
         if body.export == ExportKind::ToolCall && self.connectors.contains(&body.digest).await {
             let _global = self.acquire_global_slot(&body.app_id).await?;
-            return self.connectors.invoke(body).await;
+            return self.connectors.invoke_bound(body, binding).await;
         }
         let (pre, slots, memory_limit_mb, allowed_scopes) = {
             let bundles = self.bundles.read().await;
