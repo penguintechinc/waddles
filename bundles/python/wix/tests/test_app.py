@@ -1,4 +1,4 @@
-"""Host-native tests for the Bar Citizen full bundle -- fake `wit_world` (kv/identity/http/clock/relay/log)."""
+"""Host-native tests for the Wix full bundle -- fake `wit_world` (kv/identity/http/clock/relay/log)."""
 
 from __future__ import annotations
 
@@ -15,8 +15,6 @@ from app import (
     _UNAVAILABLE,
     _UPGRADE,
     _USAGE,
-    MAX_ANNOUNCE_LEN,
-    NEWS_CAP,
     STATUS_TTL_SECONDS,
     WIX_MEMBER_URL,
     dispatch,
@@ -111,7 +109,7 @@ def host(monkeypatch: pytest.MonkeyPatch) -> _Host:
 def _say(host: _Host, text: str, *, community: str | None = "c1", **badges: Any) -> str:
     payload: dict[str, Any] = {"text": text, "channel_id": "chan-1", **badges}
     event = PlatformEvent("discord", "chat.message", "raw-handle", payload, "2026-11-01T00:00:00Z")
-    with bundle_context(tenant="t", community=community, app_id="waddles.core.barcitizen.full"):
+    with bundle_context(tenant="t", community=community, app_id="waddles.core.integration.wix"):
         out = _run(transform(event))
     assert out is not None
     return cast(str, out.payload["text"])
@@ -127,25 +125,25 @@ def test_non_matching_ignored(host: _Host) -> None:
         assert (
             _run(transform(PlatformEvent("discord", "chat.message", "a", {"text": 5}, "t"))) is None
         )
-        long = PlatformEvent("discord", "chat.message", "a", {"text": "!bcm " + "x" * 2000}, "t")
+        long = PlatformEvent("discord", "chat.message", "a", {"text": "!wix " + "x" * 2000}, "t")
         assert _run(transform(long)) is None
 
 
 def test_usage(host: _Host) -> None:
-    assert _say(host, "!bcm wat") == _USAGE
-    assert _say(host, "!bcm news extra") == _USAGE
+    assert _say(host, "!wix wat") == _USAGE
+    assert _say(host, "!wix bogus") == _USAGE
     assert host.http_calls == []
 
 
 def test_link_then_status_roundtrip(host: _Host) -> None:
     host.ident.add_mention("tokA", ALICE)
-    assert _say(host, f"!bcm link {{user:tokA}} {WIX_A.upper()}", **MOD).startswith("Linked")
+    assert _say(host, f"!wix set {{user:tokA}} {WIX_A.upper()}", **MOD).startswith("Linked")
     assert (
-        host.kv.store[next(k for k in host.kv.store if k.endswith(f"bcf.link.{ALICE}"))]
+        host.kv.store[next(k for k in host.kv.store if k.endswith(f"wix.link.{ALICE}"))]
         == WIX_A.encode()
     )
     host.wix(member_status="PENDING")
-    assert _say(host, "!bcm") == "Your Wix membership status: pending"
+    assert _say(host, "!wix") == "Your Wix membership status: pending"
     req = host.http_calls[0]
     assert req.url == WIX_MEMBER_URL + WIX_A
     assert req.method == "GET"
@@ -156,56 +154,56 @@ def test_link_then_status_roundtrip(host: _Host) -> None:
 
 def test_status_is_cached_with_ttl(host: _Host) -> None:
     host.ident.add_mention("tokA", ALICE)
-    _say(host, f"!bcm link {{user:tokA}} {WIX_A}", **MOD)
+    _say(host, f"!wix set {{user:tokA}} {WIX_A}", **MOD)
     host.wix()
-    assert _say(host, "!bcm status").endswith("approved")
-    assert _say(host, "!bcm status").endswith("approved")
+    assert _say(host, "!wix status").endswith("approved")
+    assert _say(host, "!wix status").endswith("approved")
     assert len(host.http_calls) == 1
-    sets = [c for c in host.kv.calls if c[0] == "set" and "bcf.status" in c[1][0]]
+    sets = [c for c in host.kv.calls if c[0] == "set" and "wix.status" in c[1][0]]
     assert sets[0][1][2] == STATUS_TTL_SECONDS
 
 
 def test_relink_invalidates_status_cache(host: _Host) -> None:
     host.ident.add_mention("tokA", ALICE)
-    _say(host, f"!bcm link {{user:tokA}} {WIX_A}", **MOD)
+    _say(host, f"!wix set {{user:tokA}} {WIX_A}", **MOD)
     host.wix(member_status="APPROVED")
-    _say(host, "!bcm")
-    _say(host, f"!bcm link {{user:tokA}} {WIX_B}", **MOD)
+    _say(host, "!wix")
+    _say(host, f"!wix set {{user:tokA}} {WIX_B}", **MOD)
     host.wix(member_status="BLOCKED")
-    assert _say(host, "!bcm").endswith("blocked")
+    assert _say(host, "!wix").endswith("blocked")
     assert len(host.http_calls) == 2
 
 
 def test_status_unlinked(host: _Host) -> None:
-    assert "aren't linked" in _say(host, "!bcm")
+    assert "aren't linked" in _say(host, "!wix")
     host.ident.add_mention("tokB", BOB)
-    assert "isn't linked" in _say(host, "!bcm status {user:tokB}", **MOD)
+    assert "isn't linked" in _say(host, "!wix status {user:tokB}", **MOD)
 
 
 def test_status_other_needs_mod(host: _Host) -> None:
     host.ident.add_mention("tokB", BOB)
-    assert _say(host, "!bcm status {user:tokB}") == _DENIED
-    assert _say(host, "!bcm status {user:tokB}", is_mod="true") == _DENIED
+    assert _say(host, "!wix status {user:tokB}") == _DENIED
+    assert _say(host, "!wix status {user:tokB}", is_mod="true") == _DENIED
     assert host.ident.calls == []
 
 
 def test_status_other_as_mod(host: _Host) -> None:
     host.ident.add_mention("tokB", BOB)
     host.ident.add_mention("tokA", ALICE)
-    _say(host, f"!bcm link {{user:tokB}} {WIX_B}", is_broadcaster=True)
+    _say(host, f"!wix set {{user:tokB}} {WIX_B}", is_broadcaster=True)
     host.wix(member_status="OFFLINE")
     assert (
-        _say(host, "!bcm status {user:tokB}", **MOD)
+        _say(host, "!wix status {user:tokB}", **MOD)
         == "That member's Wix membership status: offline"
     )
 
 
 def test_link_validation_and_denial(host: _Host) -> None:
     host.ident.add_mention("tokA", ALICE)
-    assert _say(host, f"!bcm link {{user:tokA}} {WIX_A}") == _DENIED
-    assert "must be a UUID" in _say(host, "!bcm link {user:tokA} not-a-uuid", **MOD)
-    assert "must be a UUID" in _say(host, "!bcm link {user:tokA} " + WIX_A.replace("-", ""), **MOD)
-    assert _say(host, f"!bcm link {WIX_A}", **MOD) == _USAGE
+    assert _say(host, f"!wix set {{user:tokA}} {WIX_A}") == _DENIED
+    assert "must be a UUID" in _say(host, "!wix set {user:tokA} not-a-uuid", **MOD)
+    assert "must be a UUID" in _say(host, "!wix set {user:tokA} " + WIX_A.replace("-", ""), **MOD)
+    assert _say(host, f"!wix set {WIX_A}", **MOD) == _USAGE
     assert host.kv.store == {}
 
 
@@ -218,40 +216,40 @@ def test_target_resolution_errors(host: _Host, setup: str, message: str) -> None
         host.ident.add_unlinked_mention("tokX")
     elif setup == "ambiguous":
         host.ident.add_ambiguous_mention("tokX")
-    assert message in _say(host, f"!bcm link {{user:tokX}} {WIX_A}", **MOD)
+    assert message in _say(host, f"!wix set {{user:tokX}} {WIX_A}", **MOD)
 
 
 def test_not_a_member_target(host: _Host) -> None:
     host.ident.add_mention("tokX", "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee")
-    assert "isn't a member" in _say(host, f"!bcm link {{user:tokX}} {WIX_A}", **MOD)
+    assert "isn't a member" in _say(host, f"!wix set {{user:tokX}} {WIX_A}", **MOD)
 
 
 def test_actor_resolution_errors(host: _Host) -> None:
     host.ident.actor = None
-    assert "isn't linked to Waddles" in _say(host, "!bcm")
+    assert "isn't linked to Waddles" in _say(host, "!wix")
     host.ident.granted = False
-    assert _say(host, "!bcm") == _UNAVAILABLE
-    assert "bcf.identity_error" in host.logs_text()
+    assert _say(host, "!wix") == _UNAVAILABLE
+    assert "wix.identity_error" in host.logs_text()
     host.ident.add_mention("t", BOB)
-    assert _say(host, f"!bcm link {{user:t}} {WIX_A}", **MOD) == _UNAVAILABLE
+    assert _say(host, f"!wix set {{user:t}} {WIX_A}", **MOD) == _UNAVAILABLE
 
 
 def test_unlink_self_and_other(host: _Host) -> None:
     host.ident.add_mention("tokA", ALICE)
     host.ident.add_mention("tokB", BOB)
-    assert _say(host, "!bcm unlink") == "No Wix link to remove."
-    _say(host, f"!bcm link {{user:tokA}} {WIX_A}", **MOD)
-    _say(host, f"!bcm link {{user:tokB}} {WIX_B}", **MOD)
-    assert _say(host, "!bcm unlink") == "Wix link removed."
-    assert _say(host, "!bcm unlink {user:tokB}") == _DENIED
-    assert _say(host, "!bcm unlink {user:tokB}", **MOD) == "Wix link removed."
-    assert not any("bcf.link" in k for k in host.kv.store)
-    assert _say(host, "!bcm unlink {user:tokB}", **MOD) == "No Wix link to remove."
-    assert _say(host, "!bcm unlink", **MOD) == "No Wix link to remove."
+    assert _say(host, "!wix remove") == "No Wix link to remove."
+    _say(host, f"!wix set {{user:tokA}} {WIX_A}", **MOD)
+    _say(host, f"!wix set {{user:tokB}} {WIX_B}", **MOD)
+    assert _say(host, "!wix remove") == "Wix link removed."
+    assert _say(host, "!wix remove {user:tokB}") == _DENIED
+    assert _say(host, "!wix remove {user:tokB}", **MOD) == "Wix link removed."
+    assert not any("wix.link" in k for k in host.kv.store)
+    assert _say(host, "!wix remove {user:tokB}", **MOD) == "No Wix link to remove."
+    assert _say(host, "!wix remove", **MOD) == "No Wix link to remove."
 
 
 def test_unlink_target_error_propagates(host: _Host) -> None:
-    assert "couldn't find" in _say(host, "!bcm unlink {user:ghost}", **MOD)
+    assert "couldn't find" in _say(host, "!wix remove {user:ghost}", **MOD)
 
 
 @pytest.mark.parametrize(
@@ -273,63 +271,24 @@ def test_wix_failures_are_explicit_and_not_cached(
     host: _Host, response: Any, expected: str
 ) -> None:
     host.ident.add_mention("tokA", ALICE)
-    _say(host, f"!bcm link {{user:tokA}} {WIX_A}", **MOD)
+    _say(host, f"!wix set {{user:tokA}} {WIX_A}", **MOD)
     host.http_responses.append(response)
-    assert expected in _say(host, "!bcm")
-    assert not any("bcf.status" in k for k in host.kv.store)
+    assert expected in _say(host, "!wix")
+    assert not any("wix.status" in k for k in host.kv.store)
     assert any(lvl in (0, 2) for lvl, _m, _f in host.log_calls)
 
 
 def test_wix_pii_never_stored_or_logged(host: _Host) -> None:
     host.ident.add_mention("tokA", ALICE)
-    _say(host, f"!bcm link {{user:tokA}} {WIX_A}", **MOD)
+    _say(host, f"!wix set {{user:tokA}} {WIX_A}", **MOD)
     host.wix()
-    reply = _say(host, "!bcm")
+    reply = _say(host, "!wix")
     stored = b" ".join(host.kv.store.values()).decode()
     for blob in (reply, stored, host.logs_text()):
         assert "leak@example.com" not in blob
         assert "raw-handle" not in blob
     assert WIX_A not in host.logs_text()
     assert ALICE not in host.logs_text()
-
-
-def test_announce_and_news(host: _Host) -> None:
-    assert _say(host, "!bcm news") == "No announcements yet."
-    assert _say(host, "!bcm announce hello") == _DENIED
-    assert _say(host, "!bcm announce @everyone  meetup   tonight", **MOD).startswith(
-        "Announcement: "
-    )
-    out = _say(host, "!bcm news")
-    assert "@everyone" not in out
-    assert "meetup tonight" in out
-    for i in range(NEWS_CAP + 3):
-        host.now += 1000
-        _say(host, f"!bcm announce item{i}", **MOD)
-    key = next(k for k in host.kv.store if k.endswith("bcf.news"))
-    assert len(json.loads(host.kv.store[key])) == NEWS_CAP
-    news = _say(host, "!bcm news")
-    assert "item" + str(NEWS_CAP + 2) in news
-    assert news.count("|") == 2
-
-
-def test_announce_validation(host: _Host) -> None:
-    assert "announcements must be" in _say(host, "!bcm announce", **MOD)
-    assert "announcements must be" in _say(
-        host, "!bcm announce " + "x" * (MAX_ANNOUNCE_LEN + 1), **MOD
-    )
-    assert "announcements must be" in _say(host, "!bcm announce a\x00b", **MOD)
-
-
-def test_announce_logs_are_text_free(host: _Host) -> None:
-    _say(host, "!bcm announce SECRETPLAN tonight", **MOD)
-    assert "SECRETPLAN" not in host.logs_text()
-
-
-def test_tenant_wide_and_per_community_isolation(host: _Host) -> None:
-    _say(host, "!bcm announce one", community="c1", **MOD)
-    assert _say(host, "!bcm news", community="c2") == "No announcements yet."
-    _say(host, "!bcm announce two", community=None, **MOD)
-    assert "two" in _say(host, "!bcm news", community=None)
 
 
 def test_kv_failure_replies_unavailable(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,12 +299,11 @@ def test_kv_failure_replies_unavailable(host: _Host, monkeypatch: pytest.MonkeyP
 
     for op in ("get", "set", "delete"):
         monkeypatch.setattr(wit.imports.kv, op, boom)
-    assert _say(host, "!bcm news") == _UNAVAILABLE
-    assert _say(host, "!bcm announce hi", **MOD) == _UNAVAILABLE
+    assert _say(host, "!wix") == _UNAVAILABLE
     host.ident.add_mention("tokA", ALICE)
-    assert _say(host, f"!bcm link {{user:tokA}} {WIX_A}", **MOD) == _UNAVAILABLE
-    assert _say(host, "!bcm unlink") == _UNAVAILABLE
-    assert "bcf.kv_error" in host.logs_text()
+    assert _say(host, f"!wix set {{user:tokA}} {WIX_A}", **MOD) == _UNAVAILABLE
+    assert _say(host, "!wix remove") == _UNAVAILABLE
+    assert "wix.kv_error" in host.logs_text()
 
 
 def test_kv_set_and_delete_failures_individually(
@@ -358,37 +316,32 @@ def test_kv_set_and_delete_failures_individually(
         raise RuntimeError("kv down")
 
     monkeypatch.setattr(wit.imports.kv, "set", boom)
-    assert _say(host, f"!bcm link {{user:tokA}} {WIX_A}", **MOD) == _UNAVAILABLE
+    assert _say(host, f"!wix set {{user:tokA}} {WIX_A}", **MOD) == _UNAVAILABLE
     monkeypatch.undo()
 
 
 def test_corrupt_stored_state_fails_closed(host: _Host) -> None:
     host.ident.add_mention("tokA", ALICE)
-    _say(host, f"!bcm link {{user:tokA}} {WIX_A}", **MOD)
-    _say(host, "!bcm announce hi", **MOD)
-    link_key = next(k for k in host.kv.store if "bcf.link" in k)
-    news_key = next(k for k in host.kv.store if k.endswith("bcf.news"))
+    _say(host, f"!wix set {{user:tokA}} {WIX_A}", **MOD)
+    link_key = next(k for k in host.kv.store if "wix.link" in k)
     for bad in (b"\xff", b"not-a-uuid"):
         host.kv.store[link_key] = bad
-        assert _say(host, "!bcm") == _UNAVAILABLE
-    for bad in (b"\xff", b"nope", b"{}", b'[{"ms": "x", "text": "t"}]'):
-        host.kv.store[news_key] = bad
-        assert _say(host, "!bcm news") == _UNAVAILABLE
+        assert _say(host, "!wix") == _UNAVAILABLE
 
 
 def test_cached_status_garbage_is_refetched(host: _Host) -> None:
     host.ident.add_mention("tokA", ALICE)
-    _say(host, f"!bcm link {{user:tokA}} {WIX_A}", **MOD)
-    key = f"c.c1.bcf.status.{ALICE}"
+    _say(host, f"!wix set {{user:tokA}} {WIX_A}", **MOD)
+    key = f"c.c1.wix.status.{ALICE}"
     host.kv.store[key] = b"\xff\xfe"
     host.wix(member_status="APPROVED")
-    assert _say(host, "!bcm").endswith("approved")
+    assert _say(host, "!wix").endswith("approved")
     assert len(host.http_calls) == 1
 
 
 def _env(payload: dict[str, Any]) -> StageEnvelope:
     ev = PlatformEvent("discord", "chat.message", "a", payload, "t")
-    return StageEnvelope("t", "c", "waddles.core.barcitizen.full", "action", ev, "ts")
+    return StageEnvelope("t", "c", "waddles.core.integration.wix", "action", ev, "ts")
 
 
 def test_dispatch_relays_lead_guarded(host: _Host) -> None:
@@ -407,18 +360,18 @@ def test_dispatch_validation(host: _Host) -> None:
 
 
 def test_status_other_unresolved_target(host: _Host) -> None:
-    assert "couldn't find" in _say(host, "!bcm status {user:ghost}", **MOD)
+    assert "couldn't find" in _say(host, "!wix status {user:ghost}", **MOD)
 
 
 def test_kv_delete_failure_on_unlink(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
     host.ident.add_mention("tokA", ALICE)
-    _say(host, f"!bcm link {{user:tokA}} {WIX_A}", **MOD)
+    _say(host, f"!wix set {{user:tokA}} {WIX_A}", **MOD)
 
     def boom(*_a: Any, **_k: Any) -> Any:
         raise RuntimeError("kv down")
 
     monkeypatch.setattr(sys.modules["wit_world"].imports.kv, "delete", boom)
-    assert _say(host, "!bcm unlink") == _UNAVAILABLE
+    assert _say(host, "!wix remove") == _UNAVAILABLE
 
 
 @pytest.mark.parametrize(
@@ -433,17 +386,52 @@ def test_kv_delete_failure_on_unlink(host: _Host, monkeypatch: pytest.MonkeyPatc
 )
 def test_professional_tier_gate(host: _Host, tier: str | None, allowed: bool) -> None:
     host.tier = tier
-    reply = _say(host, "!bcm news", **MOD)
+    reply = _say(host, "!wix status", **MOD)
     assert (reply != _UPGRADE) is allowed or tier is None
     if tier is None:
         assert reply == _UPGRADE
-        assert "bcf.tier_error" in host.logs_text()
+        assert "wix.tier_error" in host.logs_text()
     if not allowed:
         assert host.kv.calls == []
         assert host.http_calls == []
-        assert _say(host, "!bcm announce x", **MOD) == _UPGRADE
+        assert _say(host, "!wix set @x y", **MOD) == _UPGRADE
 
 
 def test_missing_flags_binding_degrades_to_free(host: _Host) -> None:
     del sys.modules["wit_world"].imports.flags
-    assert _say(host, "!bcm news", **MOD) == _UPGRADE
+    assert _say(host, "!wix status", **MOD) == _UPGRADE
+
+
+@pytest.mark.parametrize("module", ["roles", "events"])
+def test_feature_modules_default_off_and_refuse_without_capability(
+    host: _Host, module: str
+) -> None:
+    reply = _say(host, f"!wix enable {module}", **MOD)
+    assert "can't be enabled" in reply
+    assert not any(f"wix.module.{module}" in k for k in host.kv.store)
+    assert "wix.module_capability_missing" in host.logs_text()
+
+
+@pytest.mark.parametrize("module", ["roles", "events"])
+def test_feature_modules_enable_disable_with_capability(host: _Host, module: str) -> None:
+    sys.modules["wit_world"].imports.__dict__["tool"] = object()
+    assert _say(host, f"!wix enable {module}", **MOD) == f"Wix {module} module enabled."
+    assert any(k.endswith(f"wix.module.{module}") for k in host.kv.store)
+    assert _say(host, f"!wix disable {module}", **MOD) == f"Wix {module} module disabled."
+    assert not any(f"wix.module.{module}" in k for k in host.kv.store)
+
+
+def test_feature_module_commands_need_mod_and_valid_name(host: _Host) -> None:
+    assert _say(host, "!wix enable roles") == _DENIED
+    assert _say(host, "!wix disable events", is_mod="true") == _DENIED
+    assert _say(host, "!wix enable nope", **MOD) == _USAGE
+    assert _say(host, "!wix enable", **MOD) == _USAGE
+
+
+def test_capability_check_without_wit_world(monkeypatch: pytest.MonkeyPatch) -> None:
+    import event_sync
+    import plan_roles
+
+    monkeypatch.setitem(sys.modules, "wit_world", None)
+    assert plan_roles.capability_available() is False
+    assert event_sync.capability_available() is False
