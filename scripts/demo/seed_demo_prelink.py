@@ -10,7 +10,7 @@ baseline unless it is `community-owner`).
 Config (env, never CLI args; no secrets besides DATABASE_URL):
   DATABASE_URL            required, libpq DSN for the hub database
   DEMO_COMMUNITY_ID       default 1
-  DEMO_GUILD_ID           default 474965105759748096 (demo Discord guild)
+  DEMO_GUILD_ID           REQUIRED -- Discord guild snowflake (no default; fails loud if unset)
   DEMO_DISCORD_USER_ID    Discord snowflake of the demo member (SWAP IN the real one)
   DEMO_DISCORD_ROLE_ID    Discord role snowflake to sync (SWAP IN the customer's real role)
   DEMO_COMMUNITY_ROLE     Waddles role the Discord role grants (default `moderator`)
@@ -115,9 +115,7 @@ def load_config(env: Mapping[str, str]) -> DemoConfig:
     """Build a `DemoConfig` from `env`, failing loud on any invalid value."""
     cfg = DemoConfig(
         community_id=_int(env.get("DEMO_COMMUNITY_ID", "1"), "DEMO_COMMUNITY_ID"),
-        guild_id=_snowflake(
-            env.get("DEMO_GUILD_ID", "474965105759748096"), "DEMO_GUILD_ID"
-        ),
+        guild_id=_snowflake(env.get("DEMO_GUILD_ID", ""), "DEMO_GUILD_ID"),
         discord_user_id=_snowflake(
             env.get("DEMO_DISCORD_USER_ID", "900000000000000001"),
             "DEMO_DISCORD_USER_ID",

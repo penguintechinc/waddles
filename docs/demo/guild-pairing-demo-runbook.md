@@ -1,6 +1,6 @@
 # customer-A Monday Demo: Role Sync + Event Sync Rehearsal Runbook
 
-Target: alpha `waddlebot` community (id 1), Discord guild `474965105759748096`,
+Target: alpha `waddlebot` community (id 1), Discord guild (set `DEMO_GUILD_ID`),
 Twitch channel `penguinzplays`. Run top to bottom after the deploy lands.
 
 ## Honest limits (say these out loud)
@@ -31,7 +31,7 @@ Twitch channel `penguinzplays`. Run top to bottom after the deploy lands.
 ```bash
 # DATABASE_URL = hub DB DSN (from the secret; never typed into shell history)
 export DEMO_DISCORD_USER_ID=<demo member's Discord user id>     # Discord: right-click > Copy User ID
-export DEMO_DISCORD_ROLE_ID=<the customer's real role id to sync>         # Server Settings > Roles > Copy Role ID
+export DEMO_DISCORD_ROLE_ID=<real role id to sync>         # Server Settings > Roles > Copy Role ID
 # optional: DEMO_COMMUNITY_ROLE=moderator (vip|member|community-admin), DEMO_BASELINE_ROLE=member
 make seed-demo-prelink
 ```
@@ -94,7 +94,7 @@ SELECT role FROM community_members
 ## 4. Go/no-go checklist (5 min before)
 
 - [ ] Both flags ON, tenant Professional
-- [ ] `make seed-demo-prelink` ran clean with the customer's real role and user ids
+- [ ] `make seed-demo-prelink` ran clean with the real role and user ids
 - [ ] `demotePairingIds` + `demoteBaselineRole=member` deployed
 - [ ] One full promote + demote cycle rehearsed; one event created and seen in Discord
 - [ ] Demo member reset to baseline

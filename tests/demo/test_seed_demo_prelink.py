@@ -18,6 +18,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+_ENV = {"DEMO_GUILD_ID": "100000000000000001"}
+
+
 def _load(name: str, rel: str):  # type: ignore[no-untyped-def]
     spec = importlib.util.spec_from_file_location(name, ROOT / rel)
     assert spec is not None and spec.loader is not None
@@ -131,7 +134,7 @@ def _count(conn: psycopg2.extensions.connection, table: str) -> int:
 
 
 def test_seed_creates_all_links(conn: psycopg2.extensions.connection) -> None:
-    cfg = seed_mod.load_config({})
+    cfg = seed_mod.load_config(_ENV)
     result = seed_mod.seed(conn, cfg)
     assert result.binding_count == 1
     with conn.cursor() as cur:
@@ -152,7 +155,7 @@ def test_seeded_identity_resolvable_by_role_sync_path(
     conn: psycopg2.extensions.connection,
 ) -> None:
     """regression: member.user_id is the HUB USER id (not Discord id / pseudonym uuid)."""
-    cfg = seed_mod.load_config({})
+    cfg = seed_mod.load_config(_ENV)
     result = seed_mod.seed(conn, cfg)
     with conn.cursor() as cur:
         # role-sync resolution: discord id -> hub_user_identities -> hub user -> member
@@ -179,7 +182,7 @@ def test_refuses_to_rebind_pseudonymous_member(
     conn: psycopg2.extensions.connection,
 ) -> None:
     """regression: a pre-existing pseudonym member (NULL user_id) must not be hijacked."""
-    cfg = seed_mod.load_config({})
+    cfg = seed_mod.load_config(_ENV)
     with conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO community_members (community_id, platform, platform_user_id, role) "
@@ -200,7 +203,7 @@ def test_refuses_to_rebind_member_of_other_hub_user(
     conn: psycopg2.extensions.connection,
 ) -> None:
     """regression: never re-point another hub user's member row at the demo user."""
-    cfg = seed_mod.load_config({})
+    cfg = seed_mod.load_config(_ENV)
     with conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO hub_users (username) VALUES ('real-user') RETURNING id"
@@ -222,7 +225,7 @@ def test_verify_binding_fails_on_inconsistent_uuid(
     conn: psycopg2.extensions.connection,
 ) -> None:
     """The post-write check trips if user_uuid is not the hub user's uuid."""
-    cfg = seed_mod.load_config({})
+    cfg = seed_mod.load_config(_ENV)
     result = seed_mod.seed(conn, cfg)
     with conn, conn.cursor() as cur:
         cur.execute("ALTER TABLE community_members DISABLE TRIGGER trg_cm_uuid")
@@ -237,7 +240,7 @@ def test_verify_binding_fails_on_inconsistent_uuid(
 
 
 def test_seed_is_idempotent(conn: psycopg2.extensions.connection) -> None:
-    cfg = seed_mod.load_config({})
+    cfg = seed_mod.load_config(_ENV)
     first = seed_mod.seed(conn, cfg)
     second = seed_mod.seed(conn, cfg)
     assert first == second
@@ -254,7 +257,7 @@ def test_seed_is_idempotent(conn: psycopg2.extensions.connection) -> None:
 def test_reseed_resets_promoted_role_but_never_owner(
     conn: psycopg2.extensions.connection,
 ) -> None:
-    cfg = seed_mod.load_config({})
+    cfg = seed_mod.load_config(_ENV)
     seed_mod.seed(conn, cfg)
     with conn, conn.cursor() as cur:
         cur.execute("UPDATE community_members SET role = 'moderator'")
@@ -271,8 +274,8 @@ def test_reseed_resets_promoted_role_but_never_owner(
 
 
 def test_binding_swap_updates_in_place(conn: psycopg2.extensions.connection) -> None:
-    seed_mod.seed(conn, seed_mod.load_config({}))
-    cfg = seed_mod.load_config({"DEMO_COMMUNITY_ROLE": "vip"})
+    seed_mod.seed(conn, seed_mod.load_config(_ENV))
+    cfg = seed_mod.load_config({**_ENV, "DEMO_COMMUNITY_ROLE": "vip"})
     seed_mod.seed(conn, cfg)
     with conn.cursor() as cur:
         cur.execute("SELECT community_role FROM community_role_sync_bindings")
@@ -286,7 +289,7 @@ def test_missing_table_fails_loud_and_writes_nothing(
         cur.execute("ALTER TABLE community_role_sync_bindings RENAME TO crsb_gone")
     try:
         with pytest.raises(seed_mod.SeedError, match="community_role_sync_bindings"):
-            seed_mod.seed(conn, seed_mod.load_config({}))
+            seed_mod.seed(conn, seed_mod.load_config(_ENV))
     finally:
         with conn, conn.cursor() as cur:
             cur.execute("ALTER TABLE crsb_gone RENAME TO community_role_sync_bindings")
@@ -302,7 +305,7 @@ def test_missing_column_fails_loud(conn: psycopg2.extensions.connection) -> None
         with pytest.raises(
             seed_mod.SeedError, match="guild_tenant_pairings.event_sync_enabled"
         ):
-            seed_mod.seed(conn, seed_mod.load_config({}))
+            seed_mod.seed(conn, seed_mod.load_config(_ENV))
     finally:
         with conn, conn.cursor() as cur:
             cur.execute(
@@ -314,9 +317,9 @@ def test_missing_community_and_baseline_fail_loud(
     conn: psycopg2.extensions.connection,
 ) -> None:
     with pytest.raises(seed_mod.SeedError, match="does not exist"):
-        seed_mod.seed(conn, seed_mod.load_config({"DEMO_COMMUNITY_ID": "99"}))
+        seed_mod.seed(conn, seed_mod.load_config({**_ENV, "DEMO_COMMUNITY_ID": "99"}))
     with pytest.raises(seed_mod.SeedError, match="baseline role"):
-        seed_mod.seed(conn, seed_mod.load_config({"DEMO_BASELINE_ROLE": "vip"}))
+        seed_mod.seed(conn, seed_mod.load_config({**_ENV, "DEMO_BASELINE_ROLE": "vip"}))
 
 
 @pytest.mark.parametrize(
@@ -331,13 +334,13 @@ def test_missing_community_and_baseline_fail_loud(
 )
 def test_invalid_config_rejected(env: dict[str, str]) -> None:
     with pytest.raises(seed_mod.SeedError):
-        seed_mod.load_config(env)
+        seed_mod.load_config({**_ENV, **env})
 
 
 def test_logs_are_pii_free(
     conn: psycopg2.extensions.connection, caplog: pytest.LogCaptureFixture
 ) -> None:
-    cfg = seed_mod.load_config({})
+    cfg = seed_mod.load_config(_ENV)
     with caplog.at_level("DEBUG", logger="seed_demo_prelink"):
         seed_mod.seed(conn, cfg)
     text = caplog.text
@@ -349,3 +352,9 @@ def test_logs_are_pii_free(
 def test_main_requires_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     assert seed_mod.main() == 2
+
+
+def test_missing_guild_id_fails_loud() -> None:
+    """DEMO_GUILD_ID has no default; an unset value must raise SeedError."""
+    with pytest.raises(seed_mod.SeedError, match="DEMO_GUILD_ID"):
+        seed_mod.load_config({})
