@@ -75,6 +75,10 @@ jobs:
       - name: Changed-paths classifier tests
         run: bash scripts/ci/tests/test_changed_paths.sh
 
+      # Proves ci-gate's tiering never weakens the main tier (see docs/WORKFLOWS.md).
+      - name: ci-gate tier policy tests
+        run: python -m pytest -q scripts/ci/tests/test_ci_gate_tier.py
+
   no-stubs-gate:
     name: No stubs / no silent fallbacks (check-no-stubs)
     runs-on: ubuntu-latest
