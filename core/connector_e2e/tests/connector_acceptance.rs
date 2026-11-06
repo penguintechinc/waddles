@@ -344,6 +344,15 @@ impl DynFeed for Rewrite {
                             .expect("the youtube profile's host constant");
                         cfg.url = format!("http://127.0.0.1:{}{rest}", self.yt_port);
                         cfg.allow_loopback_insecure = true;
+                        // The rediscovery request must share the poll host
+                        // (the credential is bound to it), so it moves to
+                        // the same fake API.
+                        let rd = cfg.rediscover.as_mut().expect("youtube plans rediscover");
+                        let rest = rd
+                            .url
+                            .strip_prefix("https://www.googleapis.com")
+                            .expect("the profile's discovery host constant");
+                        rd.url = format!("http://127.0.0.1:{}{rest}", self.yt_port);
                     }
                     _ => panic!("acceptance feed produced an unexpected transport plan"),
                 }
