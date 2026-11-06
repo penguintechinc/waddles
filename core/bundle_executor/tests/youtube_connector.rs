@@ -1,11 +1,11 @@
-//! Real-path proof for the YouTube overlay (P6b T3): the REAL compiled
+//! Real-path proof for the YouTube connector (P6b T3): the REAL compiled
 //! `bundles/rust/youtube` component loaded through the production
 //! `ConnectorHost::load` (connector-tools world, digest-checked, fuel/epoch/
 //! memory bounded), driving `receiver` + `tool-provider` exports.
 //!
 //! Needs the built wasm, so it is `#[ignore]`d in a plain `cargo test`; run it
-//! via `scripts/test-overlay-youtube.sh` (builds the component, sets
-//! `YOUTUBE_OVERLAY_WASM`, runs `--ignored`). A missing env var FAILS (never
+//! via `scripts/test-connector-youtube.sh` (builds the component, sets
+//! `YOUTUBE_CONNECTOR_WASM`, runs `--ignored`). A missing env var FAILS (never
 //! skips) once the test is selected.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -24,8 +24,8 @@ use sha2::{Digest, Sha256};
 const APP: &str = "waddles.core.service.youtube";
 
 fn wasm() -> Vec<u8> {
-    let p = std::env::var("YOUTUBE_OVERLAY_WASM")
-        .expect("YOUTUBE_OVERLAY_WASM must point at the built youtube.wasm");
+    let p = std::env::var("YOUTUBE_CONNECTOR_WASM")
+        .expect("YOUTUBE_CONNECTOR_WASM must point at the built youtube.wasm");
     std::fs::read(p).expect("read youtube wasm")
 }
 
@@ -86,7 +86,7 @@ fn frame(bytes: &[u8]) -> RawFrame {
 /// bridge) is covered by the shared harness (`make test-connector-parity PLATFORM=youtube`).
 /// Without a bridge, `on-frame` for an actor MUST fail loud, never emit a raw handle.
 #[tokio::test]
-#[ignore = "needs built wasm; run scripts/test-overlay-youtube.sh"]
+#[ignore = "needs built wasm; run scripts/test-connector-youtube.sh"]
 async fn real_component_connect_heartbeat_and_no_identity_fails_loud() {
     let (host, _t) = host().await;
     let hs = host.on_connect(ctx()).await.unwrap();
@@ -111,7 +111,7 @@ async fn real_component_connect_heartbeat_and_no_identity_fails_loud() {
 }
 
 #[tokio::test]
-#[ignore = "needs built wasm; run scripts/test-overlay-youtube.sh"]
+#[ignore = "needs built wasm; run scripts/test-connector-youtube.sh"]
 async fn real_component_tools_poll_plan_classify_and_send_template() {
     let (host, _t) = host().await;
     let call = |name: &str, v: serde_json::Value| {

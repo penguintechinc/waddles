@@ -122,9 +122,9 @@ check-builtin-handler-inventory:
 test-data-plane-parity:
 	@bash scripts/ci/data-plane-parity.sh
 
-# Connector-overlay golden-payload parity (P6b):
-#   PARITY_OVERLAY_WASM=<built .wasm> make test-connector-parity PLATFORM=<twitch|discord|youtube>
-# (no PARITY_OVERLAY_WASM => fixture harness self-check; a set-but-missing path fails). docs/connector-parity-harness.md
+# Connector-connector golden-payload parity (P6b):
+#   PARITY_CONNECTOR_WASM=<built .wasm> make test-connector-parity PLATFORM=<twitch|discord|youtube>
+# (no PARITY_CONNECTOR_WASM => fixture harness self-check; a set-but-missing path fails). docs/connector-parity-harness.md
 test-connector-parity:
 	@bash scripts/ci/connector-parity.sh
 

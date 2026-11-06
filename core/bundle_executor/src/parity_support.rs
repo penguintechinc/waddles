@@ -3,7 +3,7 @@
 //!
 //! [`crate::wire::Connection`] is crate-private, so an integration test cannot
 //! build a real [`HostBridge`] on its own. [`scripted_bridge`] does it over an
-//! in-memory duplex against a scripted stage, so an overlay's `identity.lookup`
+//! in-memory duplex against a scripted stage, so an connector's `identity.lookup`
 //! import exercises the REAL host-call path (tenant establishment, tenant
 //! echo check, wire mapping) instead of a mock of it. Nothing here is reachable
 //! from the production binary's request path.
@@ -65,8 +65,8 @@ fn answer(body: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
             "tenant": PARITY_TENANT, "community": null, "app_id": "parity"
         })),
         CapabilityKind::Log | CapabilityKind::Clock => Ok(serde_json::json!({})),
-        // The parity run models a flag-ON host: an overlay that gates itself on its own cutover
-        // flag (twitch's `waddles.overlay-twitch`) must read ON, else every frame is refused.
+        // The parity run models a flag-ON host: an connector that gates itself on its own cutover
+        // flag (twitch's `waddles.connector-twitch`) must read ON, else every frame is refused.
         CapabilityKind::Flags if body.op == "enabled" => Ok(serde_json::json!({ "enabled": true })),
         CapabilityKind::Db if body.op == "identity.lookup" => {
             let a = &body.args;
@@ -102,7 +102,7 @@ fn answer(body: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
 }
 
 /// Builds a real [`HostBridge`] wired to the scripted parity stage; returns it
-/// with the log of ops the overlay actually invoked (so a report can show
+/// with the log of ops the connector actually invoked (so a report can show
 /// `identity.lookup` was exercised, not bypassed).
 #[must_use]
 pub fn scripted_bridge() -> (Arc<HostBridge>, CallLog) {

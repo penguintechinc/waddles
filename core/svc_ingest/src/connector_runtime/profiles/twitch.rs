@@ -1,4 +1,4 @@
-//! Twitch IRC [`OverlayProfile`] (spec 1.1/1.2, PR-F1).
+//! Twitch IRC [`ConnectorProfile`] (spec 1.1/1.2, PR-F1).
 //!
 //! Derives one [`WsConfig`] per hub-api Twitch binding. EVERY security-relevant
 //! value (URL, slot prefixes, auto-replies, limits) is a host constant defined
@@ -26,7 +26,7 @@ use crate::connector::{
     AutoReplyRule, SelfEchoFilter, SessionRules, TransportSecretSource, WsConfig,
 };
 use crate::connector_runtime::feed::{ConnKey, DesiredConnection, TransportPlan};
-use crate::connector_runtime::plan::{OverlayProfile, PlanError, RuntimeEnv};
+use crate::connector_runtime::plan::{ConnectorProfile, PlanError, RuntimeEnv};
 
 /// Platform slug.
 pub const PLATFORM: &str = "twitch";
@@ -53,14 +53,14 @@ pub const META_CHANNEL: &str = "channel";
 pub const META_BOT_LOGIN: &str = "bot_login";
 /// Binding metadata key: an OPTIONAL tenant claim, cross-checked only.
 pub const META_TENANT_ID: &str = "tenant_id";
-/// Handle names the overlay's handshake slots refer to.
+/// Handle names the connector's handshake slots refer to.
 pub const HANDLE_PASS: &str = "pass";
 /// See [`HANDLE_PASS`].
 pub const HANDLE_NICK: &str = "nick";
 /// See [`HANDLE_PASS`].
 pub const HANDLE_CHANNEL: &str = "channel";
 
-/// Client PING cadence (overlay README): the PONG keeps the idle timer fed.
+/// Client PING cadence (connector README): the PONG keeps the idle timer fed.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(120);
 /// Longest quiet period: above Twitch's ~5 minute server PING cadence.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(330);
@@ -356,7 +356,7 @@ impl<S: TransportSecretSource> TransportSecretSource for TwitchFieldSecrets<S> {
     }
 }
 
-impl OverlayProfile for TwitchProfile {
+impl ConnectorProfile for TwitchProfile {
     fn platform(&self) -> &'static str {
         PLATFORM
     }

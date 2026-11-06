@@ -108,7 +108,7 @@ fn is_snowflake(id: &str) -> bool {
     id.bytes().all(|b| b.is_ascii_digit()) && id.parse::<u64>().is_ok_and(|n| n != 0)
 }
 
-/// A YouTube live-chat id: `^[A-Za-z0-9_-]{1,128}$` (the overlay's id
+/// A YouTube live-chat id: `^[A-Za-z0-9_-]{1,128}$` (the connector's id
 /// allowlist). Case-sensitive; no normalization.
 fn is_youtube_chat_id(id: &str) -> bool {
     (1..=128).contains(&id.len())

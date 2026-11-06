@@ -109,7 +109,7 @@ impl ConnectorRouter {
 
     /// True when `digest` is a pinned connector. `Executor::invoke_inner` uses
     /// this to route `ExportKind::ToolCall` frames (which carry no connector
-    /// export kind) to a `connector-tools` overlay instead of the stage registry.
+    /// export kind) to a `connector-tools` connector instead of the stage registry.
     pub async fn contains(&self, digest: &str) -> bool {
         self.hosts.read().await.contains_key(digest)
     }
@@ -132,7 +132,7 @@ impl ConnectorRouter {
         body: InvokeBody,
         link: Option<LinkBinding>,
     ) -> Result<ResultBody, ErrorBody> {
-        // `ToolCall` reaches a `connector-tools` overlay's `tool-provider.call`
+        // `ToolCall` reaches a `connector-tools` connector's `tool-provider.call`
         // (P6a T4); a plain `connector` host answers it `EXPORT_MISSING`.
         if !body.export.is_connector() && body.export != ExportKind::ToolCall {
             return Err(error_body(
@@ -569,7 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_tool_call_for_an_unpinned_digest_is_unknown_bundle() {
-        // `ToolCall` is routable to a pinned `connector-tools` overlay (P6a T4),
+        // `ToolCall` is routable to a pinned `connector-tools` connector (P6a T4),
         // so on an empty router it reaches the digest lookup and fails closed.
         let router = ConnectorRouter::new();
         let err = router

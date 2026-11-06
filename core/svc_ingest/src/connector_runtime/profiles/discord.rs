@@ -1,4 +1,4 @@
-//! The Discord [`OverlayProfile`] (spec 1.2, README `bundles/rust/discord`
+//! The Discord [`ConnectorProfile`] (spec 1.2, README `bundles/rust/discord`
 //! "Host duties" 1/1b/2, `docs/connector-host-capability.md` "Session
 //! lifecycle"): the platform-static derivation from a hub-api Discord binding
 //! to one gateway [`WsConfig`].
@@ -12,7 +12,7 @@
 //!
 //! # Self-message filter (`self_user_id`)
 //!
-//! The overlay drops the bot's own `MESSAGE_CREATE`s using `self_user_id` from
+//! The connector drops the bot's own `MESSAGE_CREATE`s using `self_user_id` from
 //! the host's session token, which the host renders ONCE per `connect()`; the
 //! driver then reuses that connect-time context for every frame of the
 //! connection. A fresh IDENTIFY connection therefore starts with no session
@@ -36,7 +36,7 @@ use std::time::Duration;
 use connection_resolver::{BindingSummary, ConnectionKind, ConnectionRef};
 
 use super::super::feed::{ConnKey, DesiredConnection, TransportPlan};
-use super::super::plan::{OverlayProfile, PlanError, RuntimeEnv};
+use super::super::plan::{ConnectorProfile, PlanError, RuntimeEnv};
 use super::super::selector::IDENTIFY_BUDGET_READY;
 use crate::connector::{
     CaptureRule, CloseCodeRule, FrameDirective, FrameMatch, HandshakeAfter, HeartbeatAck,
@@ -53,7 +53,7 @@ pub const PROVIDER: &str = "discord";
 pub const CAPABILITY: &str = "chat_ingest";
 /// Gateway endpoint: API v10, JSON encoding. Host constant, never binding data.
 pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
-/// Handle the overlay's IDENTIFY names for the bot token (`secret_refs`).
+/// Handle the connector's IDENTIFY names for the bot token (`secret_refs`).
 pub const BOT_HANDLE: &str = "discord-bot";
 /// IDENTIFY (op 2) leading context the credential slot may directly follow;
 /// anchored at frame offset 0 by the transport.
@@ -83,7 +83,7 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// Snowflake length bounds for `guild_id`.
 const SNOWFLAKE_LEN: std::ops::RangeInclusive<usize> = 17..=20;
 
-/// The Discord overlay profile.
+/// The Discord connector profile.
 #[derive(Debug, Clone)]
 pub struct DiscordProfile {
     budget_ready: bool,
@@ -148,7 +148,7 @@ fn close(from: u16, to: u16, action: LifecycleAction) -> CloseCodeRule {
 }
 
 /// The complete, constant Discord session lifecycle (host-capability doc
-/// "Discord overlay host config" + "Gateway gaps closed" + `self_user_id`).
+/// "Discord connector host config" + "Gateway gaps closed" + `self_user_id`).
 fn session_rules() -> SessionRules {
     SessionRules {
         captures: vec![
@@ -262,7 +262,7 @@ fn fingerprint(cfg: &WsConfig, tenant: i64, secret_version: i64) -> u64 {
     h.finish()
 }
 
-impl OverlayProfile for DiscordProfile {
+impl ConnectorProfile for DiscordProfile {
     fn platform(&self) -> &'static str {
         PLATFORM
     }
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_is_the_discord_overlay() {
+    fn identity_is_the_discord_connector() {
         let p = DiscordProfile::default();
         assert_eq!(p.platform(), "discord");
         assert_eq!(p.app_id(), "waddles.core.service.discord");
@@ -553,7 +553,7 @@ mod tests {
     }
 
     /// The self-message filter needs `self_user_id` captured from READY and
-    /// rendered into the session token the overlay reads (README host duty 2).
+    /// rendered into the session token the connector reads (README host duty 2).
     #[test]
     fn self_user_id_is_captured_from_ready_and_rendered_into_the_token() {
         let s = ws(plan_ok(&binding(Some(GUILD)))).session;

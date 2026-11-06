@@ -1,5 +1,5 @@
 //! Resume-sequence tests: a scripted multi-connection session in which the test
-//! plays the HOST (the party that owns the session token), driving the overlay
+//! plays the HOST (the party that owns the session token), driving the connector
 //! through IDENTIFY -> READY -> dispatches -> disconnect -> RESUME ->
 //! INVALID_SESSION -> IDENTIFY, and asserting no step double-identifies.
 
@@ -50,7 +50,7 @@ fn op(bytes: &[u8]) -> u64 {
 }
 
 /// What the host does with a frame: persist READY, advance `seq`, clear on a
-/// non-resumable INVALID_SESSION. (The overlay's `classify` is the single source
+/// non-resumable INVALID_SESSION. (The connector's `classify` is the single source
 /// of truth for what each frame means.)
 fn host_apply(state: &mut SessionState, raw: &str) {
     let f = parse_frame(raw.as_bytes()).unwrap();

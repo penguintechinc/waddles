@@ -1,14 +1,14 @@
-//! Real-path proof of the Discord `OverlayProfile` (PR-F2): the config the
+//! Real-path proof of the Discord `ConnectorProfile` (PR-F2): the config the
 //! profile DERIVES for a hub-api binding drives the REAL `ConnectorDriver` and
 //! `WsTransport` against a local fake gateway, with the REAL compiled Discord
-//! overlay running in the REAL bundle executor over the host-API wire.
+//! connector running in the REAL bundle executor over the host-API wire.
 //!
 //! Scripted gateway (every claim is asserted on the server's wire):
 //! HELLO -> IDENTIFY (token slot substituted, only AFTER HELLO) -> READY with
 //! `resume_gateway_url` and the bot's user id -> the profile's READY directive
 //! ends the connection with state kept -> RESUME on the CAPTURED url carrying
 //! `self_user_id` in the session token -> RESUMED -> the bot's OWN
-//! `MESSAGE_CREATE` is dropped by the overlay (via `self_user_id`) while a
+//! `MESSAGE_CREATE` is dropped by the connector (via `self_user_id`) while a
 //! foreign one reaches identity lookup (denied on this wire: no host-call
 //! bridge yet) -> missed heartbeat ACK -> RESUME again -> op 7 reconnect ->
 //! RESUME -> close 4004 parks.
@@ -38,7 +38,7 @@ use svc_ingest::connector::{
     WireConnectorInvoker, WsTransport,
 };
 use svc_ingest::connector_runtime::profiles::discord::{DiscordProfile, APP_ID};
-use svc_ingest::connector_runtime::{OverlayProfile, RuntimeEnv, TransportPlan};
+use svc_ingest::connector_runtime::{ConnectorProfile, RuntimeEnv, TransportPlan};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
@@ -46,7 +46,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
 
-const WASM: &[u8] = include_bytes!("../../bundle_executor/tests/fixtures/discord_overlay.wasm");
+const WASM: &[u8] = include_bytes!("../../bundle_executor/tests/fixtures/discord_connector.wasm");
 const GUILD: &str = "123456789012345678";
 const BOT_ID: &str = "999999999999999999";
 const TOKEN: &str = "bot-token-xyz";
@@ -122,8 +122,8 @@ struct Wire {
     zombie_close_code: Option<u16>,
 }
 
-/// Executor + wire link with the REAL Discord overlay pinned (PII-read granted:
-/// the overlay imports `identity`).
+/// Executor + wire link with the REAL Discord connector pinned (PII-read granted:
+/// the connector imports `identity`).
 async fn real_invoker() -> Arc<WireConnectorInvoker> {
     let cfg = CliConfig::try_parse_from([
         "bundle-executor",
@@ -181,7 +181,7 @@ fn count(reg: &prometheus::Registry, name: &str, outcome: &str) -> u64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn discord_profile_drives_the_real_overlay_through_the_whole_gateway_lifecycle() {
+async fn discord_profile_drives_the_real_connector_through_the_whole_gateway_lifecycle() {
     let gw = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let resume = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gw_addr: SocketAddr = gw.local_addr().unwrap();

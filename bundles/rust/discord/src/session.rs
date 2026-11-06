@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{OverlayError, Result};
+use crate::error::{ConnectorError, Result};
 
 /// Longest accepted `resume_gateway_url`.
 const MAX_URL_LEN: usize = 512;
@@ -55,35 +55,37 @@ impl SessionState {
     /// Parses the host's session token. `None` => empty state (fresh session).
     ///
     /// # Errors
-    /// [`OverlayError::Malformed`] for a token that is not this module's JSON or
+    /// [`ConnectorError::Malformed`] for a token that is not this module's JSON or
     /// carries an out-of-grammar field -- fail loud, never "assume fresh".
     pub fn from_token(token: Option<&str>) -> Result<Self> {
         let Some(raw) = token else {
             return Ok(Self::default());
         };
         let st: Self = serde_json::from_str(raw).map_err(|_| {
-            OverlayError::Malformed("session-token is not the overlay's JSON".into())
+            ConnectorError::Malformed("session-token is not the connector's JSON".into())
         })?;
         if st
             .session_id
             .as_deref()
             .is_some_and(|id| !is_session_id(id))
         {
-            return Err(OverlayError::Malformed("session-token session_id".into()));
+            return Err(ConnectorError::Malformed("session-token session_id".into()));
         }
         if st
             .self_user_id
             .as_deref()
             .is_some_and(|id| !is_snowflake(id))
         {
-            return Err(OverlayError::Malformed("session-token self_user_id".into()));
+            return Err(ConnectorError::Malformed(
+                "session-token self_user_id".into(),
+            ));
         }
         if st
             .resume_gateway_url
             .as_deref()
             .is_some_and(|u| u.len() > MAX_URL_LEN)
         {
-            return Err(OverlayError::Malformed(
+            return Err(ConnectorError::Malformed(
                 "session-token resume_gateway_url".into(),
             ));
         }
@@ -93,9 +95,9 @@ impl SessionState {
     /// Serializes back to the token form the host persists.
     ///
     /// # Errors
-    /// [`OverlayError::Backend`] only if serialization fails (never for these types).
+    /// [`ConnectorError::Backend`] only if serialization fails (never for these types).
     pub fn to_token(&self) -> Result<String> {
-        serde_json::to_string(self).map_err(|e| OverlayError::Backend(e.to_string()))
+        serde_json::to_string(self).map_err(|e| ConnectorError::Backend(e.to_string()))
     }
 
     /// True when a RESUME (not IDENTIFY) should be attempted.
@@ -155,7 +157,7 @@ mod tests {
             assert!(
                 matches!(
                     SessionState::from_token(Some(bad)),
-                    Err(OverlayError::Malformed(_))
+                    Err(ConnectorError::Malformed(_))
                 ),
                 "{bad}"
             );

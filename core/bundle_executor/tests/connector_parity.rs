@@ -1,6 +1,6 @@
-//! Connector-overlay golden-payload parity harness (P6b platform overlays).
+//! Connector-connector golden-payload parity harness (P6b platform connectors).
 //!
-//! Feeds every corpus payload for a platform through an overlay component's
+//! Feeds every corpus payload for a platform through an connector component's
 //! REAL `receiver.on-frame` (production `ConnectorHost::load` path, real
 //! `identity` bridge) and diffs the `normalized-event` list against
 //! `tests/data_plane_parity/expected/<platform>/*.json` field by field.
@@ -11,8 +11,8 @@
 //! - `fixture_selfcheck` (always runs): proves the harness against the compiled
 //!   `connector_tools_fixture.wasm`, incl. mutation tests that a changed field
 //!   is NAMED in the report.
-//! - `overlay_parity` (`--ignored`, driven by the make target): the real gate.
-//!   `PARITY_OVERLAY_WASM` set -> that component; unset -> the fixture is run
+//! - `connector_parity` (`--ignored`, driven by the make target): the real gate.
+//!   `PARITY_CONNECTOR_WASM` set -> that component; unset -> the fixture is run
 //!   instead (harness proof only, loudly bannered). A set-but-missing path
 //!   FAILS; nothing here ever skips.
 
@@ -327,7 +327,7 @@ impl Report {
     }
 }
 
-struct Overlay {
+struct Connector {
     host: ConnectorHost,
     calls: CallLog,
     _ticker: tokio::task::JoinHandle<()>,
@@ -347,18 +347,18 @@ fn limits() -> ConnectorLimits {
 
 /// Loads `bytes` through the production connector path with the scripted
 /// identity bridge. `expect_digest` (if any) must equal the bytes' sha256.
-async fn load_overlay(
+async fn load_connector(
     app_id: &str,
     bytes: Vec<u8>,
     world: WitWorld,
     expect_digest: Option<&str>,
-) -> Result<Overlay, String> {
+) -> Result<Connector, String> {
     use clap::Parser;
     let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
     if let Some(want) = expect_digest {
         if want != digest {
             return Err(format!(
-                "overlay digest mismatch: PARITY_OVERLAY_DIGEST={want} actual={digest}"
+                "connector digest mismatch: PARITY_CONNECTOR_DIGEST={want} actual={digest}"
             ));
         }
     }
@@ -374,7 +374,7 @@ async fn load_overlay(
         app_id,
         digest,
         world,
-        // Overlays are first-party core connectors holding `connector.pii.read`.
+        // Connectors are first-party core connectors holding `connector.pii.read`.
         HashSet::from([bundle_executor::manifest::PERM_CONNECTOR_PII_READ.to_string()]),
     );
     let (bridge, calls) = scripted_bridge();
@@ -387,8 +387,8 @@ async fn load_overlay(
         Some(Arc::clone(&bridge)),
     )
     .await
-    .map_err(|e| format!("overlay failed to load: {e}"))?;
-    Ok(Overlay {
+    .map_err(|e| format!("connector failed to load: {e}"))?;
+    Ok(Connector {
         host,
         calls,
         _ticker: ticker,
@@ -420,7 +420,7 @@ fn frame_error_kind(e: &FrameError) -> &'static str {
 /// Runs every vector through `on-frame` and diffs. `Err` only for a harness
 /// precondition failure (zero vectors, stale/undeclared divergence file).
 async fn run(
-    overlay: &Overlay,
+    connector: &Connector,
     label: &str,
     vectors: &[Vector],
     divergences: &BTreeMap<String, BTreeSet<String>>,
@@ -438,7 +438,7 @@ async fn run(
     };
     for v in vectors {
         rep.examined += 1;
-        let reply = overlay
+        let reply = connector
             .host
             .on_frame(RawFrame {
                 ctx: ctx_for(v),
@@ -455,7 +455,7 @@ async fn run(
                     ("frame_error", Some(want)) if want == kind => {}
                     (o, _) => diffs.push((
                         "outcome".into(),
-                        format!("expected {o}, overlay returned frame-error({kind})"),
+                        format!("expected {o}, connector returned frame-error({kind})"),
                     )),
                 }
             }
@@ -488,7 +488,7 @@ async fn run(
             vectors.len()
         ));
     }
-    rep.host_calls = overlay.calls.lock().expect("call log").clone();
+    rep.host_calls = connector.calls.lock().expect("call log").clone();
     Ok(rep)
 }
 
@@ -501,7 +501,7 @@ fn compare_events(
         diffs.push((
             "outcome".into(),
             format!(
-                "expected frame-error, overlay returned {} event(s)",
+                "expected frame-error, connector returned {} event(s)",
                 got.len()
             ),
         ));
@@ -555,11 +555,11 @@ fn compare_events(
 // ------------------------------------------------------------------ tests
 
 /// The real gate. `PARITY_PLATFORM` (twitch|discord|youtube) is required.
-/// Env: `PARITY_OVERLAY_WASM`, `PARITY_OVERLAY_DIGEST`, `PARITY_OVERLAY_APP_ID`,
-/// `PARITY_OVERLAY_WORLD` (connector-tools|connector).
+/// Env: `PARITY_CONNECTOR_WASM`, `PARITY_CONNECTOR_DIGEST`, `PARITY_CONNECTOR_APP_ID`,
+/// `PARITY_CONNECTOR_WORLD` (connector-tools|connector).
 #[tokio::test]
 #[ignore = "driven by `make test-connector-parity` (needs PARITY_PLATFORM)"]
-async fn overlay_parity() {
+async fn connector_parity() {
     let platform = std::env::var("PARITY_PLATFORM")
         .expect("PARITY_PLATFORM must be set to twitch|discord|youtube");
     assert!(
@@ -575,27 +575,27 @@ async fn overlay_parity() {
         vectors.len(),
         json_count(&corpus_dir(&platform))
     );
-    match std::env::var("PARITY_OVERLAY_WASM") {
+    match std::env::var("PARITY_CONNECTOR_WASM") {
         Ok(path) => {
             let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-                panic!("PARITY_OVERLAY_WASM={path} not readable: {e} (overlay path missing is a FAILURE, never a skip)")
+                panic!("PARITY_CONNECTOR_WASM={path} not readable: {e} (connector path missing is a FAILURE, never a skip)")
             });
-            let world = match std::env::var("PARITY_OVERLAY_WORLD").as_deref() {
+            let world = match std::env::var("PARITY_CONNECTOR_WORLD").as_deref() {
                 Ok("connector") => WitWorld::Connector,
                 Ok("connector-tools") | Err(_) => WitWorld::ConnectorTools,
                 Ok(other) => {
-                    panic!("PARITY_OVERLAY_WORLD={other:?}: want connector|connector-tools")
+                    panic!("PARITY_CONNECTOR_WORLD={other:?}: want connector|connector-tools")
                 }
             };
-            let app = std::env::var("PARITY_OVERLAY_APP_ID")
+            let app = std::env::var("PARITY_CONNECTOR_APP_ID")
                 .unwrap_or_else(|_| format!("waddles.core.parity.{platform}"));
-            let digest = std::env::var("PARITY_OVERLAY_DIGEST").ok();
-            let overlay = load_overlay(&app, bytes, world, digest.as_deref())
+            let digest = std::env::var("PARITY_CONNECTOR_DIGEST").ok();
+            let connector = load_connector(&app, bytes, world, digest.as_deref())
                 .await
-                .expect("overlay load");
+                .expect("connector load");
             let rep = run(
-                &overlay,
-                &format!("platform={platform} overlay={path}"),
+                &connector,
+                &format!("platform={platform} connector={path}"),
                 &vectors,
                 &div,
             )
@@ -603,11 +603,15 @@ async fn overlay_parity() {
             .expect("run");
             let out = rep.render();
             println!("{out}");
-            assert_eq!(rep.failed(), 0, "overlay diverges from the corpus:\n{out}");
+            assert_eq!(
+                rep.failed(),
+                0,
+                "connector diverges from the corpus:\n{out}"
+            );
         }
         Err(_) => {
             println!(
-                "connector_parity: *** NO PARITY_OVERLAY_WASM -- HARNESS SELF-CHECK against the fixture component, NOT overlay parity ***"
+                "connector_parity: *** NO PARITY_CONNECTOR_WASM -- HARNESS SELF-CHECK against the fixture component, NOT connector parity ***"
             );
             let rep = fixture_run(&platform, None).await;
             println!("{}", rep.render());
@@ -623,7 +627,7 @@ async fn fixture_run(label: &str, mutate: Option<Mutator<'_>>) -> Report {
     if let Some(m) = mutate {
         m(&mut vectors);
     }
-    let overlay = load_overlay(
+    let connector = load_connector(
         "waddles.core.parity.fixture",
         FIXTURE_WASM.to_vec(),
         WitWorld::ConnectorTools,
@@ -632,7 +636,7 @@ async fn fixture_run(label: &str, mutate: Option<Mutator<'_>>) -> Report {
     .await
     .expect("fixture loads");
     run(
-        &overlay,
+        &connector,
         &format!("self-check({label})"),
         &vectors,
         &BTreeMap::new(),
@@ -685,7 +689,7 @@ async fn wrong_event_type_actor_and_count_are_all_reported() {
 
 #[tokio::test]
 async fn zero_vectors_is_a_failure_not_a_pass() {
-    let overlay = load_overlay(
+    let connector = load_connector(
         "waddles.core.parity.fixture",
         FIXTURE_WASM.to_vec(),
         WitWorld::ConnectorTools,
@@ -693,7 +697,9 @@ async fn zero_vectors_is_a_failure_not_a_pass() {
     )
     .await
     .unwrap();
-    let err = run(&overlay, "x", &[], &BTreeMap::new()).await.unwrap_err();
+    let err = run(&connector, "x", &[], &BTreeMap::new())
+        .await
+        .unwrap_err();
     assert!(err.contains("zero vectors"), "{err}");
     let dir = std::env::temp_dir().join(format!("parity-empty-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -705,7 +711,7 @@ async fn zero_vectors_is_a_failure_not_a_pass() {
 
 #[tokio::test]
 async fn declared_divergence_is_honoured_and_stale_ones_fail() {
-    let overlay = load_overlay(
+    let connector = load_connector(
         "waddles.core.parity.fixture",
         FIXTURE_WASM.to_vec(),
         WitWorld::ConnectorTools,
@@ -718,12 +724,12 @@ async fn declared_divergence_is_honoured_and_stale_ones_fail() {
     let id = vs[0].id.clone();
     let declared = |p: &str| BTreeMap::from([(id.clone(), BTreeSet::from([p.to_string()]))]);
 
-    let ok = run(&overlay, "d", &vs, &declared("events[0].payload.text"))
+    let ok = run(&connector, "d", &vs, &declared("events[0].payload.text"))
         .await
         .unwrap();
     assert_eq!(ok.failed(), 0, "{}", ok.render());
 
-    let stale = run(&overlay, "d", &vs, &declared("events[0].payload.nope"))
+    let stale = run(&connector, "d", &vs, &declared("events[0].payload.nope"))
         .await
         .unwrap();
     let out = stale.render();
@@ -731,7 +737,7 @@ async fn declared_divergence_is_honoured_and_stale_ones_fail() {
     assert!(out.contains("events[0].payload.text"), "{out}");
 
     let err = run(
-        &overlay,
+        &connector,
         "d",
         &vs,
         &BTreeMap::from([("no/such".to_string(), BTreeSet::new())]),
@@ -742,8 +748,8 @@ async fn declared_divergence_is_honoured_and_stale_ones_fail() {
 }
 
 #[tokio::test]
-async fn bad_overlay_inputs_fail_loud() {
-    let err = load_overlay(
+async fn bad_connector_inputs_fail_loud() {
+    let err = load_connector(
         "waddles.core.parity.x",
         b"not wasm".to_vec(),
         WitWorld::ConnectorTools,
@@ -753,7 +759,7 @@ async fn bad_overlay_inputs_fail_loud() {
     .err()
     .expect("garbage must not load");
     assert!(err.contains("failed to load"), "{err}");
-    let err = load_overlay(
+    let err = load_connector(
         "waddles.core.parity.fixture",
         FIXTURE_WASM.to_vec(),
         WitWorld::ConnectorTools,
@@ -814,7 +820,7 @@ fn expected_files_cover_the_corpus_and_actors_match_the_stub() {
 #[tokio::test]
 async fn identity_bridge_serves_real_lookups() {
     const IDENTITY_CONNECTOR: &[u8] = include_bytes!("fixtures/connector_fixture.wasm");
-    let overlay = load_overlay(
+    let connector = load_connector(
         "waddles.core.parity.identity",
         IDENTITY_CONNECTOR.to_vec(),
         WitWorld::Connector,
@@ -822,7 +828,7 @@ async fn identity_bridge_serves_real_lookups() {
     )
     .await
     .unwrap();
-    overlay
+    connector
         .host
         .on_connect(ConnectionCtx {
             platform: "twitch".into(),
@@ -832,7 +838,7 @@ async fn identity_bridge_serves_real_lookups() {
         })
         .await
         .unwrap();
-    let calls = overlay.calls.lock().unwrap().clone();
+    let calls = connector.calls.lock().unwrap().clone();
     assert!(calls.iter().any(|c| c == "identity.lookup"), "{calls:?}");
 }
 

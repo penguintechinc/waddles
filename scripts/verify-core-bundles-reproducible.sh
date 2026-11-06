@@ -92,10 +92,10 @@ check_artifact() {
 # is named explicitly here and the zero-denominator guard below still fails closed if this
 # ever ends up comparing nothing.
 check_artifact "waddles.core.example.ping" "/core-bundles/ping.wasm"
-# P6b platform overlays (Rust, connector-tools world) share the ping builder's pinned toolchain
+# P6b platform connectors (Rust, connector-tools world) share the ping builder's pinned toolchain
 # and reproducible-build ENV, so they are held to the same byte-identical bar.
 check_artifact "waddles.core.service.twitch" "/core-bundles/twitch.wasm"
-check_artifact "waddles.core.service.discord" "/core-bundles/discord-overlay.wasm"
+check_artifact "waddles.core.service.discord" "/core-bundles/discord-connector.wasm"
 check_artifact "waddles.core.service.youtube" "/core-bundles/youtube.wasm"
 
 # critical-rules.md Verification Integrity: zero items examined is a FAILURE, not a pass --

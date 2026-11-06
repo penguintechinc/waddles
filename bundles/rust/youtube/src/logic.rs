@@ -1,4 +1,4 @@
-//! Pure, host-testable YouTube overlay logic (no WASM bindings here).
+//! Pure, host-testable YouTube connector logic (no WASM bindings here).
 //!
 //! Everything the Python path did in `receivers/youtube_live_poll.py` and
 //! `builtin_handlers/youtube_live_ingest.py` that is *platform knowledge*
@@ -55,7 +55,7 @@ const QUOTA_REASONS: [&str; 4] = [
 pub enum LogicError {
     /// Input is not what the platform contract allows.
     Malformed(String),
-    /// Verb/step the overlay does not implement.
+    /// Verb/step the connector does not implement.
     Unsupported(String),
 }
 
@@ -613,7 +613,7 @@ pub fn parse_videos(body: &Value) -> Result<Option<String>, LogicError> {
 /// `{{YT_LIVE_CHAT_ID}}` and the payload supplies only the text, so an app
 /// cannot redirect a message. Text containing control/invisible characters or a
 /// `{{`/`}}` marker is REJECTED (never stripped). The credential is a slot the
-/// host substitutes -- the overlay never holds a token.
+/// host substitutes -- the connector never holds a token.
 pub fn build_chat_send(
     kind: &str,
     target: &str,

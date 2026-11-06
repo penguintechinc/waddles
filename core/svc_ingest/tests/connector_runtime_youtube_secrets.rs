@@ -16,7 +16,7 @@ use connection_resolver::{
 use svc_ingest::connector::secrets::{Destination, TransportSecretSource, TransportSecrets};
 use svc_ingest::connector::webhook::SecretError;
 use svc_ingest::connector_runtime::feed::TransportPlan;
-use svc_ingest::connector_runtime::plan::{OverlayProfile, RuntimeEnv};
+use svc_ingest::connector_runtime::plan::{ConnectorProfile, RuntimeEnv};
 use svc_ingest::connector_runtime::profiles::youtube::YoutubeProfile;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -108,7 +108,7 @@ async fn real_transport_secrets_release_only_the_oauth_token_to_the_pinned_host(
 
     let ok = secrets.resolve(conn, real.clone()).await.unwrap();
     assert_eq!(ok.secret.expose(), TOKEN);
-    assert!(ok.header.is_none(), "bearer row: overlay header + prefix");
+    assert!(ok.header.is_none(), "bearer row: connector header + prefix");
 
     let mut refused = 0;
     for bad in [

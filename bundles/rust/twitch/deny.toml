@@ -1,4 +1,4 @@
-# cargo-deny configuration for the Twitch overlay Rust bundle. Run: cargo deny check  (advisories + licenses + bans + sources)
+# cargo-deny configuration for the Twitch connector Rust bundle. Run: cargo deny check  (advisories + licenses + bans + sources)
 # See rules/critical-rules.md Dependency Pinning + rules/general.md Supply
 # Chain Security for the policy this enforces. Mirrors
 # bundles/rust/example/deny.toml and sdk/waddle-sdk-rs/deny.toml (this

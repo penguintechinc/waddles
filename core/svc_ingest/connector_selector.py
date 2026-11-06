@@ -1,7 +1,7 @@
-"""Overlay host selector for the Python svc-ingest (spec 2026-11-05 section 5).
+"""Connector host selector for the Python svc-ingest (spec 2026-11-05 section 5).
 
 Mirror of the Rust `connector_runtime::selector`: both services read the SAME
-env baselines (`OVERLAY_{TWITCH,DISCORD,YOUTUBE}_ENABLED`, set from one helm
+env baselines (`CONNECTOR_{TWITCH,DISCORD,YOUTUBE}_ENABLED`, set from one helm
 value) so they cannot disagree about which implementation owns a platform.
 
 Never reads the PostHog / licensing flag client: the `*.waddles.app` domain
@@ -16,14 +16,14 @@ from dataclasses import dataclass
 
 # Flipped to True by the identify-budget PR (together with the Rust const
 # `connector_runtime::selector::IDENTIFY_BUDGET_READY`) once the Discord
-# IDENTIFY budget is ported. While False, a Discord overlay ON is fatal.
+# IDENTIFY budget is ported. While False, a Discord connector ON is fatal.
 IDENTIFY_BUDGET_READY = False
 
 PLATFORMS = ("twitch", "discord", "youtube")
 WEBHOOK_CAPABLE = ("twitch", "discord")
 
 
-class OverlayConfigError(Exception):
+class ConnectorConfigError(Exception):
     """A selector setting is malformed or blocked; names the item, never a value."""
 
 
@@ -36,7 +36,7 @@ def _parse_bool(environ: Mapping[str, str], name: str) -> bool:
         return True
     if raw in ("false", "0"):
         return False
-    raise OverlayConfigError(f"{name} is malformed")
+    raise ConnectorConfigError(f"{name} is malformed")
 
 
 def parse_webhook_platforms(raw: str) -> tuple[str, ...]:
@@ -47,15 +47,15 @@ def parse_webhook_platforms(raw: str) -> tuple[str, ...]:
     for part in raw.split(","):
         platform = part.strip().lower()
         if platform not in WEBHOOK_CAPABLE:
-            raise OverlayConfigError("CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS is malformed")
+            raise ConnectorConfigError("CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS is malformed")
         if platform not in out:
             out.append(platform)
     return tuple(out)
 
 
 @dataclass(frozen=True)
-class OverlaySelector:
-    """Which platforms run on the overlay runtime instead of the Python receivers."""
+class ConnectorSelector:
+    """Which platforms run on the connector runtime instead of the Python receivers."""
 
     twitch: bool = False
     discord: bool = False
@@ -69,29 +69,31 @@ class OverlaySelector:
         environ: Mapping[str, str],
         *,
         identify_budget_ready: bool | None = None,
-    ) -> OverlaySelector:
+    ) -> ConnectorSelector:
         """Read the baselines; malformed is fatal; Discord ON is fatal until the budget lands."""
         ready = IDENTIFY_BUDGET_READY if identify_budget_ready is None else identify_budget_ready
         sel = cls(
-            twitch=_parse_bool(environ, "OVERLAY_TWITCH_ENABLED"),
-            discord=_parse_bool(environ, "OVERLAY_DISCORD_ENABLED"),
-            youtube=_parse_bool(environ, "OVERLAY_YOUTUBE_ENABLED"),
+            twitch=_parse_bool(environ, "CONNECTOR_TWITCH_ENABLED"),
+            discord=_parse_bool(environ, "CONNECTOR_DISCORD_ENABLED"),
+            youtube=_parse_bool(environ, "CONNECTOR_YOUTUBE_ENABLED"),
             tools_enabled=_parse_bool(environ, "CONNECTOR_TOOLS_ENABLED"),
             webhook_platforms=parse_webhook_platforms(
                 environ.get("CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS", "")
             ),
         )
         if sel.discord and not ready:
-            raise OverlayConfigError("discord overlay requires the identify budget, not yet ported")
+            raise ConnectorConfigError(
+                "discord connector requires the identify budget, not yet ported"
+            )
         return sel
 
-    def overlay(self, platform: str) -> bool:
-        """True when the overlay path owns `platform` (unknown platforms: False)."""
+    def connector(self, platform: str) -> bool:
+        """True when the connector path owns `platform` (unknown platforms: False)."""
         return bool(getattr(self, platform, False)) if platform in PLATFORMS else False
 
     def legacy(self, platform: str) -> bool:
         """True when the Python receivers own `platform`."""
-        return not self.overlay(platform)
+        return not self.connector(platform)
 
     @property
     def twitch_outbound_legacy(self) -> bool:

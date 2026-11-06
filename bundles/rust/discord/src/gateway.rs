@@ -10,7 +10,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::error::{OverlayError, Result};
+use crate::error::{ConnectorError, Result};
 use crate::session::SessionState;
 
 /// Dispatch: an event (`t` names it).
@@ -66,10 +66,10 @@ pub struct Frame {
 /// Parses one gateway text frame.
 ///
 /// # Errors
-/// [`OverlayError::Malformed`] when the bytes are not a gateway envelope.
+/// [`ConnectorError::Malformed`] when the bytes are not a gateway envelope.
 pub fn parse_frame(bytes: &[u8]) -> Result<Frame> {
     serde_json::from_slice(bytes)
-        .map_err(|_| OverlayError::Malformed("not a gateway frame envelope".into()))
+        .map_err(|_| ConnectorError::Malformed("not a gateway frame envelope".into()))
 }
 
 /// What a frame means for the connection, independent of any event it carries.
@@ -103,8 +103,8 @@ pub enum Lifecycle {
 /// `GatewaySession::next_chat_message`.
 ///
 /// # Errors
-/// [`OverlayError::Malformed`] for a HELLO missing `heartbeat_interval`,
-/// [`OverlayError::Unsupported`] for an opcode the gateway never sends a client.
+/// [`ConnectorError::Malformed`] for a HELLO missing `heartbeat_interval`,
+/// [`ConnectorError::Unsupported`] for an opcode the gateway never sends a client.
 pub fn classify(frame: &Frame) -> Result<Lifecycle> {
     match frame.op {
         OP_HELLO => {
@@ -113,7 +113,7 @@ pub fn classify(frame: &Frame) -> Result<Lifecycle> {
                 .get("heartbeat_interval")
                 .and_then(Value::as_u64)
                 .ok_or_else(|| {
-                    OverlayError::Malformed("HELLO missing heartbeat_interval".into())
+                    ConnectorError::Malformed("HELLO missing heartbeat_interval".into())
                 })?;
             Ok(Lifecycle::Hello {
                 heartbeat_interval_ms: ms,
@@ -125,7 +125,7 @@ pub fn classify(frame: &Frame) -> Result<Lifecycle> {
         // Never collapse Discord's own flag to a fixed value (same rule as the crate).
         OP_INVALID_SESSION => match frame.d {
             Value::Bool(resumable) => Ok(Lifecycle::InvalidSession { resumable }),
-            _ => Err(OverlayError::Malformed(
+            _ => Err(ConnectorError::Malformed(
                 "INVALID_SESSION `d` is not a bool".into(),
             )),
         },
@@ -139,7 +139,9 @@ pub fn classify(frame: &Frame) -> Result<Lifecycle> {
             Some("RESUMED") => Ok(Lifecycle::Resumed),
             _ => Ok(Lifecycle::Dispatch),
         },
-        other => Err(OverlayError::Unsupported(format!("gateway opcode {other}"))),
+        other => Err(ConnectorError::Unsupported(format!(
+            "gateway opcode {other}"
+        ))),
     }
 }
 
@@ -155,7 +157,7 @@ fn str_at(v: &Value, path: &[&str]) -> Option<String> {
 /// placeholder the host substitutes after this returns.
 ///
 /// # Errors
-/// [`OverlayError::Backend`] only if JSON serialization fails (it cannot).
+/// [`ConnectorError::Backend`] only if JSON serialization fails (it cannot).
 pub fn build_identify(intents: u64) -> Result<Vec<u8>> {
     token_first(
         OP_IDENTIFY,
@@ -175,33 +177,32 @@ pub fn build_identify(intents: u64) -> Result<Vec<u8>> {
 /// other fields; the host pins an offset-0-anchored prefix
 /// (`{"op":N,"d":{"token":"`) so the leading context must be stable.
 fn token_first(op: u8, rest: &Value) -> Result<Vec<u8>> {
-    let r = serde_json::to_string(rest).map_err(|e| OverlayError::Backend(e.to_string()))?;
-    let inner = r
-        .strip_prefix('{')
-        .filter(|i| i.len() > 1)
-        .ok_or_else(|| OverlayError::Backend("handshake fields must be a non-empty object".into()))?;
+    let r = serde_json::to_string(rest).map_err(|e| ConnectorError::Backend(e.to_string()))?;
+    let inner = r.strip_prefix('{').filter(|i| i.len() > 1).ok_or_else(|| {
+        ConnectorError::Backend("handshake fields must be a non-empty object".into())
+    })?;
     Ok(format!(r#"{{"op":{op},"d":{{"token":"{TOKEN_SLOT}",{inner}}}"#).into_bytes())
 }
 
 /// Builds the RESUME handshake bytes from a persisted session (token slot only).
 ///
 /// # Errors
-/// [`OverlayError::Malformed`] when `session` has no `session_id`.
+/// [`ConnectorError::Malformed`] when `session` has no `session_id`.
 pub fn build_resume(session: &SessionState) -> Result<Vec<u8>> {
     let id = session
         .session_id
         .as_deref()
-        .ok_or_else(|| OverlayError::Malformed("resume needs a session_id".into()))?;
+        .ok_or_else(|| ConnectorError::Malformed("resume needs a session_id".into()))?;
     token_first(OP_RESUME, &json!({ "session_id": id, "seq": session.seq }))
 }
 
 /// Builds a HEARTBEAT body carrying the last-seen sequence (`null` before any).
 ///
 /// # Errors
-/// [`OverlayError::Backend`] only if JSON serialization fails (it cannot).
+/// [`ConnectorError::Backend`] only if JSON serialization fails (it cannot).
 pub fn build_heartbeat(seq: Option<u64>) -> Result<Vec<u8>> {
     let v = json!({ "op": OP_HEARTBEAT, "d": seq });
-    serde_json::to_vec(&v).map_err(|e| OverlayError::Backend(e.to_string()))
+    serde_json::to_vec(&v).map_err(|e| ConnectorError::Backend(e.to_string()))
 }
 
 /// How a Gateway close code must be handled (Discord's documented table).
@@ -257,7 +258,10 @@ mod tests {
             ..SessionState::default()
         };
         let text = String::from_utf8(build_resume(&s).unwrap()).unwrap();
-        assert!(text.starts_with(&format!("{TOKEN_PREFIX_RESUME}{TOKEN_SLOT}\"")), "{text}");
+        assert!(
+            text.starts_with(&format!("{TOKEN_PREFIX_RESUME}{TOKEN_SLOT}\"")),
+            "{text}"
+        );
         let v: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["op"], 6);
         assert_eq!(v["d"]["session_id"], "sess9");
@@ -304,7 +308,7 @@ mod tests {
             r#"{"op":9,"d":"yes"}"#,
         ] {
             assert!(
-                matches!(classify(&frame(raw)), Err(OverlayError::Malformed(_))),
+                matches!(classify(&frame(raw)), Err(ConnectorError::Malformed(_))),
                 "{raw}"
             );
         }
@@ -339,11 +343,11 @@ mod tests {
     fn bad_hello_and_unknown_opcode_fail_loud() {
         assert!(matches!(
             classify(&frame(r#"{"op":10,"d":{}}"#)),
-            Err(OverlayError::Malformed(_))
+            Err(ConnectorError::Malformed(_))
         ));
         assert!(matches!(
             classify(&frame(r#"{"op":99}"#)),
-            Err(OverlayError::Unsupported(_))
+            Err(ConnectorError::Unsupported(_))
         ));
         assert!(parse_frame(b"nope").is_err());
         assert!(parse_frame(br#"{"d":1}"#).is_err());

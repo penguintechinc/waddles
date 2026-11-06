@@ -204,11 +204,11 @@ spec:
         {{- end }}
         {{- if include "waddlebot.connectorRuntimeActive" . }}
         {{- $cr := .Values.pipeline.rustDataPlane.svcIngest.connectorRuntime }}
-        # PR-H connector runtime (spec SS1.3). OVERLAY_<P>_ENABLED come from the SAME helm value
+        # PR-H connector runtime (spec SS1.3). CONNECTOR_<P>_ENABLED come from the SAME helm value
         # the Python svc-ingest deployment reads (templates/svc-ingest.yaml).
         - name: CONNECTOR_RUNTIME_ENABLED
           value: "true"
-        {{- include "waddlebot.connectorOverlayEnv" . | nindent 8 }}
+        {{- include "waddlebot.connectorPlatformEnv" . | nindent 8 }}
         - name: CONNECTOR_RECONCILE_INTERVAL_SECS
           value: {{ $cr.reconcileIntervalSecs | quote }}
         - name: CONNECTOR_HEARTBEAT_ENABLED

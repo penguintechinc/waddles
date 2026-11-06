@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.service.twitch
-name: Twitch Platform Overlay (Rust)
-version: 1.0.0
+name: Twitch Platform Connector (Rust)
+version: 1.0.1
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -49,8 +49,8 @@ permissions:
   justification: Gates identity.lookup, used to resolve the actor to its canonical UUID
     and the read-tool users; first-party core only, dangerous, global-admin-approved
 - id: flags.read
-  justification: Reads the waddles.overlay-twitch cutover flag (default OFF) as the
-    overlay's defence-in-depth gate; without it the gate always reads OFF
+  justification: Reads the waddles.connector-twitch cutover flag (default OFF) as the
+    connector's defence-in-depth gate; without it the gate always reads OFF
 - id: platform.log
   justification: Bounded, PII-free lifecycle diagnostics (op and count only, debug
     level); the host drops guest text and keeps only level and size

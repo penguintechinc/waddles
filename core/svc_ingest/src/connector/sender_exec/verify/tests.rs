@@ -1,5 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! Verifier tests. The "good" templates are byte-for-byte what the overlay
+//! Verifier tests. The "good" templates are byte-for-byte what the connector
 //! sources (`bundles/rust/{twitch,discord,youtube}/src`) emit; every "bad"
 //! case is one mutation of a good template, so each gate is proven to be the
 //! one that fires (mutation-checked: removing the gate makes exactly its case
@@ -125,7 +125,7 @@ fn twitch(kind: &str, t: &RequestTpl) -> Result<VerifiedTemplate, TemplateError>
 }
 
 #[test]
-fn every_overlay_template_verifies() {
+fn every_connector_template_verifies() {
     assert!(twitch("chat.send", &twitch_send()).is_ok());
     assert!(twitch("chat.delete", &twitch_delete()).is_ok());
     assert!(check(&PlatformPolicy::discord(), "chat.send", &discord_send()).is_ok());

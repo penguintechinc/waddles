@@ -5,8 +5,8 @@
 //! | Module | Role |
 //! |---|---|
 //! | [`feed`] | desired-set types and the [`BindingFeed`] over hub-api bindings |
-//! | [`plan`] | the platform-static [`OverlayProfile`] seam and [`RuntimeEnv`] |
-//! | [`profiles`] | the per-platform [`OverlayProfile`] implementations |
+//! | [`plan`] | the platform-static [`ConnectorProfile`] seam and [`RuntimeEnv`] |
+//! | [`profiles`] | the per-platform [`ConnectorProfile`] implementations |
 //! | [`supervisor`] | the reconcile loop and per-connection supervision |
 //! | [`lease`] | the per-connection Valkey lease (`connector:<platform>:<id>`) |
 //! | [`observed`] | delegating wrappers recording readiness facts |
@@ -34,7 +34,7 @@ pub use feed::{
     TransportPlan, WebhookPlan,
 };
 pub use lease::ConnectorValkeyLease;
-pub use plan::{OverlayProfile, PlanError, RuntimeEnv};
+pub use plan::{ConnectorProfile, PlanError, RuntimeEnv};
 pub use ready::{Readiness, RuntimeReady};
 pub use supervisor::{
     ConnectionActivator, ConnectorRuntime, ResolverSecrets, RuntimeConfig, RuntimeDeps,

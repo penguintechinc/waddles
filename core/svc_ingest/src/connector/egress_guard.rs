@@ -3,7 +3,7 @@
 //! A thin adapter over `bundle_host_http::guarded` -- the ONE implementation
 //! of the denylist, resolve-then-connect pinning, scheme/userinfo checks and
 //! typed errors shared with svc_action/svc_process. The endpoint host comes
-//! from overlay config (untrusted): it is resolved there, every address is
+//! from connector config (untrusted): it is resolved there, every address is
 //! checked, and the connection is made to the PINNED address (never
 //! re-resolved by the client), closing DNS-rebind. Loopback, link-local,
 //! metadata, CGNAT, private, multicast, reserved and documentation ranges

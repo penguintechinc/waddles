@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 
-use crate::error::{OverlayError, Result};
+use crate::error::{ConnectorError, Result};
 use crate::gateway::{
     self, DEFAULT_INTENTS, Lifecycle, TOKEN_HANDLE, TOKEN_SLOT, build_heartbeat, build_identify,
     build_resume, classify, parse_frame,
@@ -14,7 +14,7 @@ use crate::normalize::{self, Event, PLATFORM};
 use crate::perms::{DiscordPermissions, GuildInfo, compute_permissions};
 use crate::session::{SessionState, is_snowflake};
 
-/// Log levels the overlay emits (mirror of WIT `log.level`).
+/// Log levels the connector emits (mirror of WIT `log.level`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
     /// Error.
@@ -77,7 +77,7 @@ fn require_platform(ctx: &ConnCtx) -> Result<()> {
     if ctx.platform == PLATFORM {
         Ok(())
     } else {
-        Err(OverlayError::Unsupported(
+        Err(ConnectorError::Unsupported(
             "connection platform is not discord".into(),
         ))
     }
@@ -87,7 +87,7 @@ fn require_platform(ctx: &ConnCtx) -> Result<()> {
 /// otherwise a fresh IDENTIFY. Never contains the token itself.
 ///
 /// # Errors
-/// [`OverlayError::Unsupported`] for a foreign platform, [`OverlayError::Malformed`]
+/// [`ConnectorError::Unsupported`] for a foreign platform, [`ConnectorError::Malformed`]
 /// for an invalid session token (fail loud -- never silently re-IDENTIFY, which
 /// burns the fleet-wide ~1000/24h IDENTIFY budget).
 pub fn on_connect(host: &dyn Host, ctx: &ConnCtx) -> Result<Handshake> {
@@ -152,9 +152,9 @@ fn resolve_permissions(host: &dyn Host, guild_id: &str, author_id: &str) -> Disc
         Ok(p) => p,
         Err(e) => {
             let class = match e {
-                OverlayError::Unsupported(_) => "unsupported",
-                OverlayError::Malformed(_) => "malformed",
-                OverlayError::Backend(_) => "backend",
+                ConnectorError::Unsupported(_) => "unsupported",
+                ConnectorError::Malformed(_) => "malformed",
+                ConnectorError::Backend(_) => "backend",
             };
             host.log(
                 Level::Warn,
@@ -176,7 +176,7 @@ fn resolve_permissions(host: &dyn Host, guild_id: &str, author_id: &str) -> Disc
 ///   the Ed25519 signature; this code never sees an unverified body.
 ///
 /// # Errors
-/// [`OverlayError::Malformed`] / [`OverlayError::Unsupported`] -- the host drops
+/// [`ConnectorError::Malformed`] / [`ConnectorError::Unsupported`] -- the host drops
 /// that frame and keeps the connection (frame-error contract).
 pub fn on_frame(
     host: &dyn Host,
@@ -186,7 +186,7 @@ pub fn on_frame(
 ) -> Result<Vec<Event>> {
     require_platform(ctx)?;
     let v: Value = serde_json::from_slice(bytes)
-        .map_err(|_| OverlayError::Malformed("frame is not JSON".into()))?;
+        .map_err(|_| ConnectorError::Malformed("frame is not JSON".into()))?;
     if v.get("op").is_some() {
         return gateway_frame(host, ctx, bytes, received_at);
     }
@@ -197,7 +197,7 @@ pub fn on_frame(
                 .collect(),
         );
     }
-    Err(OverlayError::Malformed(
+    Err(ConnectorError::Malformed(
         "frame is neither a gateway envelope nor an interaction".into(),
     ))
 }
@@ -284,17 +284,17 @@ mod tests {
             *self.lookups.borrow_mut() += 1;
             self.guild
                 .clone()
-                .ok_or_else(|| OverlayError::Backend("denied".into()))
+                .ok_or_else(|| ConnectorError::Backend("denied".into()))
         }
         fn member_roles(&self, _g: &str, _u: &str) -> Result<Vec<String>> {
             *self.lookups.borrow_mut() += 1;
             self.roles
                 .clone()
-                .ok_or_else(|| OverlayError::Backend("denied".into()))
+                .ok_or_else(|| ConnectorError::Backend("denied".into()))
         }
         fn identity(&self, id: &str) -> Result<String> {
             if self.identity_down {
-                return Err(OverlayError::Backend("identity denied".into()));
+                return Err(ConnectorError::Backend("identity denied".into()));
             }
             Ok(format!("uuid-of-{id}"))
         }
@@ -351,13 +351,13 @@ mod tests {
         let h = FakeHost::default();
         assert!(matches!(
             on_connect(&h, &ctx(Some("sess-1"))),
-            Err(OverlayError::Malformed(_))
+            Err(ConnectorError::Malformed(_))
         ));
         let mut c = ctx(None);
         c.platform = "twitch".into();
         assert!(matches!(
             on_connect(&h, &c),
-            Err(OverlayError::Unsupported(_))
+            Err(ConnectorError::Unsupported(_))
         ));
         assert!(on_frame(&h, &c, b"{}", "t").is_err());
         assert!(on_heartbeat_due(&c).is_err());
@@ -428,7 +428,7 @@ mod tests {
     }
 
     /// Pins a KNOWN GAP (host duty): with no `self_user_id` in the session token the
-    /// overlay cannot filter the bot's own messages. The host-side self-identity
+    /// connector cannot filter the bot's own messages. The host-side self-identity
     /// filter (feature/p6b-host-transport-support) must populate it before the flag
     /// is enabled; if this ever starts filtering, update the README too.
     #[test]
@@ -469,7 +469,7 @@ mod tests {
         // No raw-handle fallback: the frame fails (dropped + counted by the host).
         assert!(matches!(
             on_frame(&down, &ctx(None), &mc("901", None), "t"),
-            Err(OverlayError::Backend(_))
+            Err(ConnectorError::Backend(_))
         ));
         let body = br#"{"id":"777","type":2,"member":{"user":{"id":"4","username":"u"}},"data":{"name":"x"}}"#;
         assert!(on_frame(&down, &ctx(None), body, "t").is_err());
