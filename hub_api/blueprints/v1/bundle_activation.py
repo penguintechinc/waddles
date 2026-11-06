@@ -27,6 +27,8 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import bundle_approval_service as svc
+from services import bundle_permission_service as perm_svc
+from services.access_grant_dto import AccessGrantsResponse, access_grants_response
 from services.app_command_service import ActivationWarning
 from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
@@ -100,6 +102,9 @@ class ActivateRequest:
     """Request DTO for `POST /community/<community_id>/activation`."""
 
     appId: str
+    # Every globally-approved dangerous access grant (platform.table.*, ...) the
+    # admin has just seen in the red warning; missing -> 422 access_grant_ack_required.
+    acknowledgedAccessGrants: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)
@@ -148,6 +153,36 @@ async def list_activation(
     return ActivationListResponse(success=True, bundles=[_activation_dto(r) for r in rows])
 
 
+@bundle_activation_bp.route(
+    "/<int:community_id>/activation/<app_id>/access-grants", methods=["GET"]
+)
+@tenant_middleware  # type: ignore[misc]
+@validate_response(AccessGrantsResponse)
+async def activation_access_grants(
+    community_id: int, app_id: str
+) -> AccessGrantsResponse | tuple[dict[str, object], int]:
+    """The dangerous access grants activating `app_id` here would carry (red warning source).
+
+    Resolves the exact version an activation would run; community-admin only. The
+    activation POST must then acknowledge every approved id (`acknowledgedAccessGrants`).
+    """
+    install_dal = _install_dal()
+    async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # nosec B101
+    try:
+        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        _, version = await svc.resolve_activation_version(
+            install_dal, tenant_id=ctx.tenant_id, app_id=app_id
+        )
+        blocks, requested, approved, dangerous = await perm_svc.get_access_grants(
+            install_dal, app_id=app_id, version=version
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return access_grants_response(blocks, requested, approved, dangerous)
+
+
 @bundle_activation_bp.route("/<int:community_id>/activation", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(ActivateRequest)
@@ -175,6 +210,7 @@ async def activate(
             community_id=community_id,
             app_id=data.appId,
             activated_by=get_current_user_id(request),
+            acknowledged_access_grants=frozenset(data.acknowledgedAccessGrants),
         )
     except ApiError as exc:
         return _err(exc)

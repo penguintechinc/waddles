@@ -73,6 +73,9 @@ use bundle_host_economy::{
 };
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
+use bundle_host_platform_table::{
+    Change as PlatformTableChange, PlatformTableError, PlatformTableScope, PlatformTableStore,
+};
 use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
@@ -415,6 +418,28 @@ pub struct ReputationWiring {
     pub flag: Arc<dyn FeatureGate>,
 }
 
+/// Live wiring for the `platform-table` bundle host capability (spec
+/// 2026-11-06-bundle-table-access-grants): the durable, scope-bound store plus
+/// the opt-in flag. `None` on the handler means every `platform_table.*` call
+/// denies `not_implemented`.
+#[derive(Clone)]
+pub struct PlatformTableWiring {
+    pub store: Arc<dyn PlatformTableStore>,
+    /// `crate::license::BUNDLE_PLATFORM_TABLE_CAPABILITY_FLAG` gate -- OFF denies
+    /// every call `feature_disabled` before the store is touched.
+    pub flag: Arc<dyn FeatureGate>,
+}
+
+/// Maps a store error onto the host-result wire (backend detail is logged, never
+/// forwarded to the guest).
+fn platform_table_error_to_host(err: PlatformTableError) -> HostResultError {
+    if let PlatformTableError::Backend(detail) = &err {
+        tracing::error!(error = %detail, "platform-table store backend error");
+        return denied("backend", "platform-table store backend error");
+    }
+    denied(err.wire_code(), err.to_string())
+}
+
 /// Live wiring for the `economy` bundle host capability (issue #714): the
 /// durable store plus the opt-in flag. Built once at startup
 /// (`crate::lib::try_build_economy_wiring`) and cloned (cheap, `Arc`) into
@@ -489,6 +514,9 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `not_implemented` in that state (never panics, never a silent default
     /// balance).
     economy: Option<EconomyWiring>,
+    /// `None` until [`Self::with_platform_table`] -- every `platform_table.*`
+    /// call denies `not_implemented` in that state (never a silent no-op).
+    platform_table: Option<PlatformTableWiring>,
     /// `None` until [`Self::with_identity`] -- every `identity.*` call denies
     /// `not_implemented` in that state (never panics, never a default or
     /// guessed identity).
@@ -558,6 +586,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             db: None,
             reputation: None,
             economy: None,
+            platform_table: None,
             identity: None,
             ai: None,
             ai_deadline: None,
@@ -641,6 +670,13 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// invoke with a clone of the process-wide [`ReputationWiring`].
     pub fn with_reputation(mut self, reputation: ReputationWiring) -> Self {
         self.reputation = Some(reputation);
+        self
+    }
+
+    /// Attaches the `platform-table` capability's live wiring -- called once per
+    /// invoke with a clone of the process-wide [`PlatformTableWiring`].
+    pub fn with_platform_table(mut self, platform_table: PlatformTableWiring) -> Self {
+        self.platform_table = Some(platform_table);
         self
     }
 
@@ -1606,6 +1642,156 @@ impl<K: KvBackend> StageCapabilities<K> {
         }
         identity::record_actor_binding(op, "bound");
         Ok(())
+    }
+
+    /// `platform_table.read` / `platform_table.write` (`wit/waddle-bundle/stage.wit`
+    /// `interface platform-table`), carried as `capability = db`. Fail-loud order:
+    /// (1) argument parsing; (2) the activation must have a community; (3) the
+    /// gate authorizes EVERY named column as its own `platform.table.<op>:<table>.<column>`
+    /// permission (an off-allowlist triple does not even parse -> `not_allowlisted`);
+    /// (4) wiring/flag state; (5) the store, which re-checks the allowlist and
+    /// scopes every statement by host-derived (tenant, community) -- never guest input.
+    async fn handle_platform_table(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        use bundle_capability_gate::platform_table::TableOp;
+        let op = match call.op.as_str() {
+            "platform_table.read" => TableOp::Read,
+            "platform_table.write" => TableOp::Write,
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("platform_table op {other:?} not supported"),
+                ))
+            }
+        };
+        let table = call
+            .args
+            .get("table")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| denied("invalid_args", "table must be a string"))?;
+        let user = call
+            .args
+            .get("user")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| denied("invalid_args", "user must be a UUID string"))
+            .and_then(|s| {
+                uuid::Uuid::parse_str(s)
+                    .map_err(|_| denied("invalid_args", "user must be a UUID string"))
+            })?;
+
+        let (columns, changes): (Vec<String>, Vec<PlatformTableChange>) = match op {
+            TableOp::Read => {
+                let cols = call
+                    .args
+                    .get("columns")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| denied("invalid_args", "columns must be an array"))?
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| denied("invalid_args", "columns must be strings"))?;
+                (cols, Vec::new())
+            }
+            TableOp::Write => {
+                let items = call
+                    .args
+                    .get("changes")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| denied("invalid_args", "changes must be an array"))?;
+                let changes = items
+                    .iter()
+                    .map(|c| {
+                        Some(PlatformTableChange {
+                            column: c.get("column")?.as_str()?.to_string(),
+                            value: c.get("value")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| {
+                        denied("invalid_args", "changes must be {column, value} strings")
+                    })?;
+                (changes.iter().map(|c| c.column.clone()).collect(), changes)
+            }
+        };
+        if columns.is_empty() || columns.len() > bundle_host_platform_table::MAX_COLUMNS {
+            return Err(denied(
+                "invalid_args",
+                format!(
+                    "columns must be 1..={}",
+                    bundle_host_platform_table::MAX_COLUMNS
+                ),
+            ));
+        }
+
+        if self.community_id == 0 || self.community.is_none() {
+            return Err(denied(
+                "invalid_args",
+                "platform-table access is community-scoped; this activation has no community",
+            ));
+        }
+
+        for column in &columns {
+            let id = format!("platform.table.{}:{table}.{column}", op.as_str());
+            let permission = PermissionId::parse(&id).map_err(|_| {
+                bundle_host_platform_table::record_denied("not_allowlisted");
+                denied(
+                    "not_allowlisted",
+                    format!("{}.{table}.{column} is not allowlisted", op.as_str()),
+                )
+            })?;
+            self.gate
+                .authorize(
+                    &self.gate_scope(),
+                    permission,
+                    ResourceRef::AppScoped(AppScopedResource::None),
+                )
+                .map_err(|e| {
+                    bundle_host_platform_table::record_denied("gate");
+                    denied_from_gate(e)
+                })?;
+        }
+
+        let Some(wiring) = &self.platform_table else {
+            return Err(denied(
+                "not_implemented",
+                "platform-table capability is not provisioned in this deployment \
+                 (BUNDLE_PLATFORM_TABLE_PASSWORD unset or connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "platform-table capability is disabled \
+                 (waddles.bundle-platform-table-capability is OFF)",
+            ));
+        }
+
+        let scope = PlatformTableScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+            app_version: self.app_version,
+        };
+        match op {
+            TableOp::Read => {
+                let columns_json = wiring
+                    .store
+                    .read(&scope, table, user, &columns)
+                    .await
+                    .map_err(platform_table_error_to_host)?;
+                Ok(serde_json::json!({ "columns": columns_json }))
+            }
+            TableOp::Write => {
+                wiring
+                    .store
+                    .write(&scope, table, user, &changes)
+                    .await
+                    .map_err(platform_table_error_to_host)?;
+                Ok(serde_json::json!({ "ok": true }))
+            }
+        }
     }
 
     /// `reputation.get` / `reputation.adjust` (`wit/waddle-bundle/stage.wit`
@@ -2714,6 +2900,12 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // `economy.*` ops (issue #714) likewise: own gate permissions
             // (`economy.read`/`economy.wager`/`economy.transfer`), own
             // handler, never the `storage.tables` path.
+            // `platform_table.*` ops (spec 2026-11-06): own gate permissions
+            // (`platform.table.<op>:<table>.<column>`), own handler, never the
+            // `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("platform_table.") => {
+                self.handle_platform_table(&call).await
+            }
             CapabilityKind::Db if call.op.starts_with("economy.") => {
                 self.handle_economy(&call).await
             }
@@ -4446,3 +4638,7 @@ mod identity_tests;
 #[cfg(test)]
 #[path = "capabilities_ai_tests.rs"]
 mod ai_tests;
+
+#[cfg(test)]
+#[path = "capabilities_platform_table_tests.rs"]
+mod platform_table_tests;

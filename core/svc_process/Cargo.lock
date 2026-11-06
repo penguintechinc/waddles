@@ -703,6 +703,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-platform-table"
+version = "0.1.0"
+dependencies = [
+ "bundle-capability-gate",
+ "opentelemetry",
+ "sea-orm",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "bundle-host-reputation"
 version = "0.1.0"
 dependencies = [
@@ -4065,6 +4079,7 @@ dependencies = [
  "bundle-host-economy",
  "bundle-host-http",
  "bundle-host-kv",
+ "bundle-host-platform-table",
  "bundle-host-reputation",
  "bundle-tool-call",
  "chrono",
