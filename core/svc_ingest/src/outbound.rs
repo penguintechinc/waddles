@@ -699,6 +699,13 @@ fn ack_payload(result: &Result<Option<String>, SenderError>) -> String {
         Ok(None) => serde_json::json!({"ok": true}),
         // A create-style op's platform id (a snowflake the executor parsed out
         // of Discord's reply): the producer needs it to address later updates.
+        // A bulk read's JSON object result (`role.list`): returned to the producer as `data`.
+        Ok(Some(json)) if json.starts_with('{') => {
+            match serde_json::from_str::<serde_json::Value>(json) {
+                Ok(data) => serde_json::json!({"ok": true, "data": data}),
+                Err(_) => serde_json::json!({"ok": false, "code": "bad_result"}),
+            }
+        }
         Ok(Some(id)) => serde_json::json!({"ok": true, "id": id}),
         Err(err) => serde_json::json!({"ok": false, "code": err.ack_code()}),
     }
@@ -2125,6 +2132,14 @@ mod tests {
         assert_eq!(
             ack_payload(&Ok(Some("123".to_string()))),
             r#"{"ok":true,"id":"123"}"#
+        );
+        assert_eq!(
+            ack_payload(&Ok(Some(r#"{"roles":[]}"#.to_string()))),
+            r#"{"ok":true,"data":{"roles":[]}}"#
+        );
+        assert_eq!(
+            ack_payload(&Ok(Some("{bad".to_string()))),
+            r#"{"ok":false,"code":"bad_result"}"#
         );
         let rejected = ack_payload(&Err(SenderError::Rejected {
             platform: "discord",

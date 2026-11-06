@@ -26,7 +26,7 @@ use super::tests::Flag;
 use super::*;
 use crate::outbound_creds::CredError;
 use crate::outbound_creds_discord::{DiscordBinding, DiscordCredentialSource};
-use crate::outbound_ops::{parse_outbound_entry, EventKind};
+use crate::outbound_ops::{parse_outbound_entry, EventKind, RoleBulkKind};
 
 const DIGEST: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const TOKEN: &str = "BOT-SECRET-ONE";
@@ -60,6 +60,7 @@ fn roles() -> BTreeMap<String, String> {
         ("guildmgr", "335"),
         ("mixed", "336"),
         ("ghost", "999999"),
+        ("helper", "337"),
     ]
     .iter()
     .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -147,10 +148,14 @@ impl PlatformUserResolver for Users {
     }
 }
 
+type DynTpl = Arc<dyn Fn(&SenderAction) -> RequestTpl + Send + Sync>;
+
 #[derive(Clone)]
 struct Tpl {
     tpl: Arc<Mutex<RequestTpl>>,
     calls: Arc<Mutex<Vec<SenderAction>>>,
+    /// Builds the template per action (add vs remove, per role key) for bulk tests.
+    dynamic: Arc<Mutex<Option<DynTpl>>>,
 }
 
 impl Tpl {
@@ -158,6 +163,7 @@ impl Tpl {
         Self {
             tpl: Arc::new(Mutex::new(tpl)),
             calls: Arc::new(Mutex::new(Vec::new())),
+            dynamic: Arc::new(Mutex::new(None)),
         }
     }
     fn calls(&self) -> usize {
@@ -172,8 +178,12 @@ impl TemplateBuilder for Tpl {
         action: &SenderAction,
     ) -> Result<BuiltTemplate, BuildError> {
         self.calls.lock().unwrap().push(action.clone());
+        let tpl = match self.dynamic.lock().unwrap().as_ref() {
+            Some(f) => f(action),
+            None => self.tpl.lock().unwrap().clone(),
+        };
         Ok(BuiltTemplate {
-            tpl: self.tpl.lock().unwrap().clone(),
+            tpl,
             component_digest: DIGEST.to_string(),
         })
     }
@@ -330,6 +340,7 @@ async fn mock_roles(s: &MockServer) {
             {"id": "334", "permissions": "268435456"},
             {"id": "335", "permissions": "32"},
             {"id": "336", "permissions": "2147483656"},
+            {"id": "337", "permissions": "0"},
         ])))
         .mount(s)
         .await;
@@ -854,6 +865,271 @@ async fn several_paired_guilds_are_refused_explicitly() {
             "{scope}"
         );
         assert_eq!(writes(&r.server).await, 0, "nothing was sent");
+    }
+}
+
+// ---- bulk role ops (role.set / role.list) ---------------------------------
+
+fn bulk(kind: RoleBulkKind, user: Option<&str>, keys: &[&str], scope: &str) -> OutboundAction {
+    OutboundAction::RoleBulk {
+        kind,
+        user_id: user.map(str::to_string),
+        role_keys: keys.iter().map(|k| (*k).to_string()).collect(),
+        origin_channel: scope.to_string(),
+        tenant_id: Some(9),
+    }
+}
+
+/// A rig whose template follows the sub-op (PUT/DELETE, per role key), like the real connector.
+async fn bulk_rig() -> Rig {
+    let r = rig(|b| good_role(b, "PUT", "vip")).await;
+    let base = r.server.uri();
+    *r.tpl.dynamic.lock().unwrap() = Some(Arc::new(move |a: &SenderAction| {
+        let v: serde_json::Value = serde_json::from_str(&a.payload_json).unwrap();
+        let key = v["role"].as_str().unwrap().to_string();
+        let verb = if a.kind == "role.remove" {
+            "DELETE"
+        } else {
+            "PUT"
+        };
+        good_role(&base, verb, &key)
+    }));
+    r
+}
+
+async fn mock_member_roles(s: &MockServer, raw: &str, roles: &[&str]) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v10/guilds/{GUILD}/members/{raw}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"roles": roles})))
+        .mount(s)
+        .await;
+}
+
+/// `role.set` reads the member's roles host-side and applies the MINIMAL add/remove diff inside
+/// the managed allowlist: wanted-and-missing -> PUT, held-managed-not-wanted -> DELETE; unmanaged
+/// roles held by the member are never touched.
+#[tokio::test]
+async fn role_set_applies_the_minimal_diff_within_the_allowlist() {
+    let r = bulk_rig().await;
+    mock_roles(&r.server).await;
+    // vip=222 held (not wanted), helper=337 missing (wanted); 999 is unmanaged and untouched.
+    mock_member_roles(&r.server, RAW_A, &["222", "999"]).await;
+    mock_role_put(&r.server, "PUT", RAW_A, "337").await;
+    mock_role_put(&r.server, "DELETE", RAW_A, "222").await;
+    let out = r
+        .exec
+        .execute_role_bulk(
+            "discord",
+            Some(1),
+            &bulk(RoleBulkKind::Set, Some(UUID_A), &["helper"], "guild:-"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out, None);
+    let mut writes_seen: Vec<_> = seen(&r.server)
+        .await
+        .into_iter()
+        .filter(|(m, _)| m == "PUT" || m == "DELETE")
+        .collect();
+    writes_seen.sort();
+    assert_eq!(
+        writes_seen,
+        vec![
+            (
+                "DELETE".to_string(),
+                format!("/api/v10/guilds/{GUILD}/members/{RAW_A}/roles/222")
+            ),
+            (
+                "PUT".to_string(),
+                format!("/api/v10/guilds/{GUILD}/members/{RAW_A}/roles/337")
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn role_set_that_already_matches_changes_nothing_and_unknown_or_privileged_keys_refuse_first()
+{
+    let r = bulk_rig().await;
+    mock_roles(&r.server).await;
+    mock_member_roles(&r.server, RAW_A, &["222"]).await;
+    r.exec
+        .execute_role_bulk(
+            "discord",
+            Some(1),
+            &bulk(RoleBulkKind::Set, Some(UUID_A), &["vip"], "guild:-"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(writes(&r.server).await, 0, "already converged");
+    for (key, want) in [("nope", "role_not_managed"), ("adm", "role_privileged")] {
+        let e = r
+            .exec
+            .execute_role_bulk(
+                "discord",
+                Some(1),
+                &bulk(RoleBulkKind::Set, Some(UUID_A), &["vip", key], "guild:-"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code(&e), want, "{key}");
+    }
+    assert_eq!(writes(&r.server).await, 0, "refused before any change");
+}
+
+/// `role.list` returns the managed keys with assignability (privileged / missing roles are not
+/// assignable); nothing is written and no user is needed.
+/// A privileged managed role the member already holds is NEVER removed by `role.set` (nor
+/// added): only unprivileged managed roles take part in the diff.
+#[tokio::test]
+async fn role_set_never_touches_a_privileged_managed_role() {
+    let r = bulk_rig().await;
+    mock_roles(&r.server).await;
+    // adm=333 (ADMINISTRATOR) and vip=222 held; helper=337 wanted.
+    mock_member_roles(&r.server, RAW_A, &["222", "333"]).await;
+    mock_role_put(&r.server, "PUT", RAW_A, "337").await;
+    mock_role_put(&r.server, "DELETE", RAW_A, "222").await;
+    r.exec
+        .execute_role_bulk(
+            "discord",
+            Some(1),
+            &bulk(RoleBulkKind::Set, Some(UUID_A), &["helper"], "guild:-"),
+        )
+        .await
+        .unwrap();
+    let touched: Vec<_> = seen(&r.server)
+        .await
+        .into_iter()
+        .filter(|(m, _)| m == "PUT" || m == "DELETE")
+        .collect();
+    assert_eq!(touched.len(), 2, "{touched:?}");
+    assert!(
+        touched.iter().all(|(_, p)| !p.ends_with("/333")),
+        "{touched:?}"
+    );
+}
+
+#[tokio::test]
+async fn role_list_returns_managed_keys_with_assignability() {
+    let r = bulk_rig().await;
+    mock_roles(&r.server).await;
+    let out = r
+        .exec
+        .execute_role_bulk(
+            "discord",
+            Some(1),
+            &bulk(RoleBulkKind::List, None, &[], "guild:-"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let roles = v["roles"].as_array().unwrap();
+    let get = |k: &str| roles.iter().find(|r| r["key"] == k).unwrap()["assignable"].clone();
+    assert_eq!(get("vip"), true);
+    assert_eq!(get("adm"), false);
+    assert_eq!(get("ghost"), false, "allowlisted but absent from the guild");
+    assert_eq!(writes(&r.server).await, 0);
+}
+
+/// Bulk ops obey the SAME guild pinning as single ops.
+#[tokio::test]
+async fn bulk_ops_are_pinned_to_the_binding_guild() {
+    let r = bulk_rig().await;
+    mock_roles(&r.server).await;
+    mock_member_roles(&r.server, RAW_A, &[]).await;
+    mock_role_put(&r.server, "PUT", RAW_A, "222").await;
+    for kind_user in [
+        (RoleBulkKind::Set, Some(UUID_A)),
+        (RoleBulkKind::List, None),
+    ] {
+        let e = r
+            .exec
+            .execute_role_bulk(
+                "discord",
+                Some(1),
+                &bulk(
+                    kind_user.0,
+                    kind_user.1,
+                    &["vip"][..usize::from(kind_user.1.is_some())],
+                    "guild:999000999",
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code(&e), "guild_mismatch");
+    }
+    assert_eq!(writes(&r.server).await, 0);
+    // several paired guilds -> typed refusal
+    let r = rig_full(
+        |b| good_role(b, "PUT", "vip"),
+        Duration::from_secs(30),
+        Some(CredError::AmbiguousBinding),
+    )
+    .await;
+    let e = r
+        .exec
+        .execute_role_bulk(
+            "discord",
+            Some(1),
+            &bulk(RoleBulkKind::List, None, &[], "guild:-"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), "ambiguous_paired_guild");
+}
+
+#[test]
+fn bulk_wire_forms_parse_and_malformed_ones_are_refused() {
+    use crate::outbound_ops::parse_outbound_entry;
+    let uu = format!("{{user:{UUID_A}}}");
+    let set = format!(
+        r#"{{"v":1,"op":"role.set","platform":"discord","user_id":"{uu}","text":"vip,helper,vip","origin_channel":"guild:-","tenant_id":9,"community_id":1}}"#
+    );
+    let e = parse_outbound_entry(&set, "discord").unwrap();
+    assert_eq!(
+        e.action,
+        OutboundAction::RoleBulk {
+            kind: RoleBulkKind::Set,
+            user_id: Some(uu.clone()),
+            role_keys: vec!["helper".into(), "vip".into()],
+            origin_channel: "guild:-".into(),
+            tenant_id: Some(9),
+        }
+    );
+    assert_eq!(e.action.op(), "role.set");
+    let list = r#"{"v":1,"op":"role.list","platform":"discord","origin_channel":"guild:-","tenant_id":9,"community_id":1}"#;
+    assert_eq!(
+        parse_outbound_entry(list, "discord").unwrap().action.op(),
+        "role.list"
+    );
+    let many = (0..17)
+        .map(|i| format!("k{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    for bad in [
+        r#"{"op":"role.set","platform":"discord","text":"vip","origin_channel":"guild:-"}"#
+            .to_string(),
+        format!(
+            r#"{{"op":"role.set","platform":"discord","user_id":"{uu}","origin_channel":"guild:-"}}"#
+        ),
+        format!(
+            r#"{{"op":"role.set","platform":"discord","user_id":"{uu}","text":"222222222222222222","origin_channel":"guild:-"}}"#
+        ),
+        format!(
+            r#"{{"op":"role.set","platform":"discord","user_id":"{uu}","text":"VIP","origin_channel":"guild:-"}}"#
+        ),
+        format!(
+            r#"{{"op":"role.set","platform":"discord","user_id":"{uu}","text":"{many}","origin_channel":"guild:-"}}"#
+        ),
+        r#"{"op":"role.list","platform":"discord","text":"vip","origin_channel":"guild:-"}"#
+            .to_string(),
+        format!(
+            r#"{{"op":"role.list","platform":"discord","user_id":"{uu}","origin_channel":"guild:-"}}"#
+        ),
+        r#"{"op":"role.list","platform":"discord"}"#.to_string(),
+    ] {
+        assert!(parse_outbound_entry(&bad, "discord").is_err(), "{bad}");
     }
 }
 
