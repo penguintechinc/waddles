@@ -302,6 +302,7 @@ impl ConnectorProfile for YoutubeProfile {
             egress_allow: env.egress_allow.clone(),
             allow_loopback_insecure: false,
             lifecycle: lifecycle(),
+            request: Default::default(),
             rediscover: Some(RediscoverConfig {
                 url: rediscover::discovery_url()?,
                 hook: Arc::new(YoutubeRediscover::new(
