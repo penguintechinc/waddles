@@ -98,6 +98,8 @@ pub struct RuntimeEnv { pub environment: String, pub max_frame_bytes: usize, pub
 **Decision 2.2. mTLS identities with pinned peer SANs, on both sides.**
 - svc-ingest has its OWN server cert/key (`svc-ingest-hostapi-tls` secret, SAN `spiffe://waddlebot/svc-ingest-hostapi`). It shares no key material with the svc-action stage cert.
 - `HostApiTls` gains `client_identity: String`. `build_acceptor` wraps `WebPkiClientVerifier` in a verifier that, after chain validation, additionally requires the leaf SAN (URI or DNS) to exactly equal `HOST_API_CLIENT_IDENTITY` (the executor's SAN). A stage cert signed by the same CA is therefore refused and nothing attaches.
+- Status (PR #1009, outbound boot wiring): svc-ingest already has its own server-only cert and client-identity pinning on its listener.
+- Gap (executor side): the executor still needs a DISTINCT client cert. Today the executor client and the svc-action/svc-process stages share one cert whose SANs include the stage names, so SAN pinning on the stage listeners would accept a stage cert as the executor. PR-A1/H must provide a dedicated executor client cert with its own SAN (`HOST_API_CLIENT_IDENTITY`), and no stage cert may carry that SAN.
 - The executor pins the server SAN to `CONNECTOR_HOST_API_IDENTITY` through the existing `tls.rs` pinning path (`HOST_API_STAGE_IDENTITY` precedent). It must not reuse the svc-action identity, so svc-action cannot impersonate svc-ingest.
 - SSRF on dial: the executor dials only the configured address (a service DNS name, validated at config load); nothing from a frame ever selects an address.
 
@@ -157,8 +159,9 @@ impl ConnectorRuntime { pub async fn run(self, shutdown: oneshot::Receiver<()>);
 
 - Boot builds `ConnectionResolverSecrets(Arc<resolver>)` (`WebhookSecretSource`), `RedisWebhookDedup::new(conn, ttl)` (existing Valkey connection, `DEDUP_TTL`) and `WebhookIngress::new(secrets, dedup, Some(&registry))`, and sets `state.webhook = Some(..)` BEFORE `http::router(state)`. Today `lib.rs` builds `AppState` and then the router without it, so the build must move earlier.
 - Registry of trusted bindings (host-owned): for each `TransportPlan::Webhook`, `WebhookIngress::register(route, authorized_community)` and `bind_transport(route_key, owner)` so frames reach the driver through `WebhookTransport`. `register` is already fail-closed on community mismatch and cross-community takeover.
-- `route_key = base64url(HMAC-SHA256(CONNECTOR_ROUTE_KEY_SECRET, "wh:v1:{platform}:{connection_id}"))` (43 chars, within 8-128). It is stable, unguessable, and carries no ids in the URL. hub-api (or the subscription creator) obtains the URL from svc-ingest by the same derivation. This is the open item "who creates EventSub subscriptions" (Needs user decision 1).
+- `route_key = base64url(HMAC-SHA256(CONNECTOR_ROUTE_KEY_SECRET, "wh:v1:{platform}:{connection_id}"))` (43 chars, within 8-128). It is stable, unguessable, and carries no ids in the URL. hub-api (or the subscription creator) obtains the URL from svc-ingest by the same derivation. EventSub subscription creation is owned by svc-gateway (decision 1, resolved; see Scope above).
 - Schemes: Twitch EventSub uses `Scheme::twitch_eventsub()` (HMAC, secret from the connection via `secret_ref`). Discord interactions use the Ed25519 `Ed25519Spec` (public key from the connection). The secret/public key stays inside `connection_resolver`; the guest never receives it.
+- Scope (decision 1, resolved): Twitch EventSub subscription ownership belongs to svc-gateway (edge-reshape, `docs/superpowers/specs/2026-10-23-edge-reshape-gateway-dispatcher-design.md`). Until it exists, legacy keeps owning EventSub subscriptions and the Twitch overlay is IRC-only. `twitch` is NOT added to `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`. PR-D still builds the generic webhook activation (Discord interactions and future platforms).
 - Dedup/replay: `replay_window <= DEDUP_TTL`, the Valkey dedup token store, the existing pre-auth/failure budgets (`MAX_FAILURES_PER_SOURCE`), and body caps (`HARD_MAX_BODY_BYTES 1 MiB`).
 - Discord 3-second deadline: the route answers type-1 PING with `{"type":1}` itself and acks within the deadline (host-side, per README "Host-only concerns"). This is part of PR-D and needs an explicit test.
 - 503 to live: `/intake/webhook/{route_key}` stays 503 (fail loud) while `state.webhook` is `None`; an unknown route key is a uniform 404/403 with no oracle. Rollout flag: `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS=<csv>`. A platform not listed registers no routes, so a Twitch EventSub callback keeps its legacy handler and there is no doubling.
@@ -192,6 +195,11 @@ impl OverlaySelector {
 - The outbound and inbound selectors are independent: `CONNECTOR_TOOLS_ENABLED` still governs the outbound drains (#1009); the overlay flag governs inbound. The README's outbound mode must remain consistent with `OVERLAY_FLAGS` (the executor path already answers the overlay flags true).
 
 **Decision 5.3. Fail loud.** If any overlay is ON, startup validates, in a fixed order and naming the item but never a value: `INGEST_DYNAMIC_CONNECTIONS`, `HUB_API_GRPC_ENDPOINT`, `SERVICE_JWT_TOKEN_ENDPOINT`, `SENDER_EXEC_DIGEST_<P>` for each ON platform, host-API TLS files and `HOST_API_CLIENT_IDENTITY`, the spine config, and `CONNECTOR_ROUTE_KEY_SECRET` when any webhook platform is listed. A missing item is a startup error (`BootError`), like #1009. After boot, an unready runtime reports `/readyz` false with the platform and reason. It never silently falls back to legacy (the legacy path is already off) and never silently drops to nothing.
+
+**Decision 5.4. Discord is blocked until the identify budget is ported (decision 5, resolved).**
+- `OVERLAY_DISCORD_ENABLED=true` is a fatal boot error, naming item `I` (section 8), until the `IDENTIFY_BUDGET_READY` const/feature is true.
+- Port: `core/svc_ingest/src/connector/identify_budget.rs` (see row I). `HandshakeGate` is awaited before IDENTIFY (not RESUME) in the WS driver.
+- The start-pacing semaphore stays as defense in depth; it does not replace the budget.
 
 ## 6. Parity and e2e gates
 
@@ -232,9 +240,10 @@ Interfaces frozen so work can start now. All names below are normative.
 | E | `core/svc_ingest/src/{lib.rs,config.rs}`, `connector_runtime/selector.rs`, `core/svc_ingest/app.py` | needs `RuntimeReady` from C; owns `lib.rs` (the `mod` line from C goes through E) |
 | F1/F2/F3 | `connector_runtime/profiles/{twitch,discord,youtube}.rs` | each implements `OverlayProfile`; no shared file |
 | G | `core/connector_e2e/**`, `tests/data_plane_parity/**` | after A1, A2, C, D, F* |
-| H | helm templates and `values.yaml` | names only; independent |
+| H | helm templates and `values.yaml`; dedicated executor client cert (section 2.2) | names only; independent |
+| I | new `core/svc_ingest/src/connector/identify_budget.rs`; port of `core/svc_ingest/src/ingest/discord_identify_budget.rs` (~1000 lines) | Valkey-backed global budget honoring `session_start_limit`/`max_concurrency`; `HandshakeGate` awaited before IDENTIFY (not RESUME) in the WS driver; host selector refuses `OVERLAY_DISCORD_ENABLED=true` until `IDENTIFY_BUDGET_READY` is true (section 5.4) |
 
-Start now (against current release): A1, B, C, D, E, F1-F3, H. A2 starts now but rebases onto #1009. G waits.
+Start now (against current release): A1, B, C, D, E, F1-F3, H, I. A2 starts now but rebases onto #1009. G waits.
 
 ## 9. Security review checklist (adversarial review)
 
@@ -251,15 +260,15 @@ Start now (against current release): A1, B, C, D, E, F1-F3, H. A2 starts now but
 
 ## 10. Non-goals and deferrals
 
-Sharding and a Valkey identify budget (replaced by start pacing plus lease); the svc-gateway rename; removing the Python svc-ingest (only its overlay-platform receivers are suppressed); T4 deletion of the legacy code; Twitch EventSub subscription management in svc-ingest; Slack/Kick/Spectrum overlays; multi-executor load balancing (one executor connection per svc-ingest replica for now); any new `penguin-libs` capability kind.
+Sharding; the svc-gateway rename; removing the Python svc-ingest (only its overlay-platform receivers are suppressed); T4 deletion of the legacy code; Twitch EventSub subscription management in svc-ingest (owned by svc-gateway, decision 1); Slack/Kick/Spectrum overlays; multi-executor load balancing (one executor connection per svc-ingest replica for now); any new `penguin-libs` capability kind.
 
 ## Needs user decision (with recommendation)
 
-1. **EventSub subscription ownership.** Who creates Twitch EventSub subscriptions pointing at the generic route? Recommendation: keep legacy ownership for alpha, and make the overlay IRC-only until a hub-api subscription step exists. List `twitch` in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` only once it does.
+1. **RESOLVED (user): svc-gateway owns EventSub subscriptions.** Legacy keeps ownership until svc-gateway exists; Twitch overlay is IRC-only; `twitch` NOT in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS`. See section 4 Scope. Original question: who creates Twitch EventSub subscriptions pointing at the generic route? Recommendation: keep legacy ownership for alpha, and make the overlay IRC-only until a hub-api subscription step exists. List `twitch` in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` only once it does.
 2. **Python suppression mechanism.** Env baseline in both services (recommended, simple, symmetric) versus a hub-api flag read.
 3. **Overlay ON with an unready runtime.** Fatal at boot (recommended for alpha and beta, matches #1009) versus serve `/readyz`=false only.
 4. **Executor pairing.** One executor per svc-ingest replica (sidecar-like, recommended because `ExecutorLink` is single-session) versus a shared executor pool, which needs `ExecutorLink` multi-session support.
-5. **Discord identify risk.** Accept start pacing plus lease on alpha with the Valkey budget deferred (recommended), or block Discord ON until the budget is ported.
+5. **RESOLVED (user): block Discord ON until the identify budget is ported** (section 5.4, task I). Original options: accept start pacing plus lease on alpha with the Valkey budget deferred (recommended), or block Discord ON until the budget is ported.
 
 ### Critical Files for Implementation
 - /home/penguin/code/waddles/core/svc_ingest/src/lib.rs
@@ -270,5 +279,12 @@ Sharding and a Valkey identify budget (replaced by start pacing plus lease); the
 ## Status
 
 - Design only — nothing in this spec is implemented yet as of 2026-11-05.
-- "Needs user decision" 2 (Python suppression: env baseline in both services), 3 (overlay ON with unready runtime: fatal at boot), and 4 (1:1 executor pairing) are ADOPTED per the recommendations.
-- Decisions 1 (EventSub ownership) and 5 (Discord identify risk) are pending user input.
+- Decision status (all five):
+
+| # | Decision | Status |
+|---|---|---|
+| 1 | EventSub subscription ownership | RESOLVED by user: svc-gateway owns it; legacy keeps it until then; Twitch IRC-only; not in webhook platforms |
+| 2 | Python suppression mechanism | ADOPTED per recommendation: env baseline in both services |
+| 3 | Overlay ON with unready runtime | ADOPTED per recommendation: fatal at boot |
+| 4 | Executor pairing | ADOPTED per recommendation: 1:1 executor per svc-ingest replica |
+| 5 | Discord identify risk | RESOLVED by user: block Discord ON until identify budget is ported (task I) |
