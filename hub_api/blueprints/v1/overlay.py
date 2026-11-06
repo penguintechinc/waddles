@@ -159,23 +159,34 @@ class RegenerateBrowserSourcesResponse:
     message: str
 
 
+@overlay_bp.errorhandler(ApiError)
+async def _handle_api_error(exc: ApiError) -> tuple[dict[str, object], int]:
+    """Convert a service `ApiError` into the JSON error shape, logging type + message."""
+    logger.warning(
+        "overlay_api_error",
+        extra={
+            "error_type": type(exc).__name__,
+            "status": exc.status_code,
+            "error_message": exc.message,
+        },
+    )
+    return _err(exc)
+
+
 @overlay_bp.route("/<int:community_id>/browser-sources", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_browser_sources(community_id: int) -> Any:
     """List browser-source URLs (ticker/media/general) for a community admin."""
-    try:
-        await _require_admin_or_404(community_id)
-        ctx = get_tenant_context(request)
-        assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
-        if not await feature_enabled(FEATURE_STREAMING_OVERLAYS, tenant=ctx.tenant_slug):
-            raise payment_required("Browser-source overlays are not enabled for this plan")
-        async_dal, dal = _dal()
-        sources = await overlay_service.get_browser_sources(
-            async_dal, dal, _cfg(), community_id=community_id
-        )
-    except ApiError as exc:
-        return _err(exc)
+    await _require_admin_or_404(community_id)
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
+    if not await feature_enabled(FEATURE_STREAMING_OVERLAYS, tenant=ctx.tenant_slug):
+        raise payment_required("Browser-source overlays are not enabled for this plan")
+    async_dal, dal = _dal()
+    sources = await overlay_service.get_browser_sources(
+        async_dal, dal, _cfg(), community_id=community_id
+    )
     return jsonify_dto(BrowserSourcesResponse(success=True, sources=sources))
 
 
@@ -189,19 +200,14 @@ async def regenerate_browser_sources(
     """Rotate the view key behind every browser-source URL (one credential per community)."""
     if data.sourceType is not None and data.sourceType not in BROWSER_SOURCE_SURFACES:
         return _err(bad_request("Unknown sourceType"))
-    try:
-        await _require_admin_or_404(community_id)
-        ctx = get_tenant_context(request)
-        assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
-        if not await feature_enabled(FEATURE_STREAMING_OVERLAYS, tenant=ctx.tenant_slug):
-            raise payment_required("Browser-source overlays are not enabled for this plan")
-        async_dal, dal = _dal()
-        await overlay_service.get_or_create_overlay(
-            async_dal, dal, _cfg(), community_id=community_id
-        )
-        await overlay_service.rotate_overlay_key(async_dal, dal, _cfg(), community_id=community_id)
-    except ApiError as exc:
-        return _err(exc)
+    await _require_admin_or_404(community_id)
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
+    if not await feature_enabled(FEATURE_STREAMING_OVERLAYS, tenant=ctx.tenant_slug):
+        raise payment_required("Browser-source overlays are not enabled for this plan")
+    async_dal, dal = _dal()
+    await overlay_service.get_or_create_overlay(async_dal, dal, _cfg(), community_id=community_id)
+    await overlay_service.rotate_overlay_key(async_dal, dal, _cfg(), community_id=community_id)
     logger.info("browser_sources_regenerated", extra={"community_id": community_id})
     return jsonify_dto(
         RegenerateBrowserSourcesResponse(success=True, message="Browser source keys regenerated")

@@ -207,3 +207,18 @@ async def test_missing_overlay_code_fails_loud_503(
             overlay_db, overlay_db.dal, _test_config(), community_id=cid
         )
     assert exc.value.status_code == 503
+
+
+async def test_route_returns_503_and_logs_when_overlay_code_unavailable(
+    client: Any, overlay_db: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Pre-0057 DB: the ApiError handler fails loud with 503 and logs type + message, no key."""
+    overlay_db.dal.executesql("ALTER TABLE communities DROP COLUMN overlay_code")
+    overlay_db.dal.commit()
+    headers, cid = _admin(overlay_db)
+    with caplog.at_level("WARNING"):
+        r = await client.get(f"/api/v1/admin/{cid}/browser-sources", headers=headers)
+    assert r.status_code == 503
+    rec = next(x for x in caplog.records if x.message == "overlay_api_error")
+    assert rec.error_type == "ApiError"
+    assert "key=" not in str(rec.__dict__)
