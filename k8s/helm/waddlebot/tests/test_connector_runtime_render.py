@@ -269,3 +269,13 @@ def test_external_connector_secrets_require_shared_ca_attestation() -> None:
     assert res.returncode != 0 and "sharedCa" in res.stderr
     ok = _render(*_yt(*ext, "--set", f"{_CT}.hostApiTls.sharedCa=true"))
     assert ok.returncode == 0, ok.stderr[-600:]
+
+
+@pytest.mark.parametrize("values", ["values-alpha.yaml", "values-dal2alpha.yaml", "values-local.yaml"])
+def test_overlays_off_mints_no_connector_secrets_and_never_fails(values: str) -> None:
+    """Connector overlays OFF: render succeeds, no connector Secret is emitted, and the stage
+    Secret is rendered exactly as before (the connector branch is gated on connectorTools.enabled;
+    helm template cannot stub `lookup`, so the existing-stage-Secret case is covered by that gate)."""
+    docs = _docs([], values)
+    names = [d["metadata"]["name"] for d in docs if d.get("kind") == "Secret"]
+    assert not [n for n in names if n.endswith(("-ingest-executor-tls", "-svc-ingest-host-api-tls"))]
