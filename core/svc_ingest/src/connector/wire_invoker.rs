@@ -55,6 +55,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use super::host_calls::HostCallHandler;
 use super::invoker::{ConnectorInvokeError, ConnectorInvoker};
 use super::registry::ConnectorRegistry;
 use super::types::{ConnectionCtx, ConnectorEvent, ConnectorFrameError, Handshake, RawFrame};
@@ -107,6 +108,8 @@ struct Session {
     next_id: AtomicU64,
     closed: AtomicBool,
     max_in_flight: usize,
+    /// Scope-checked host-call servicing; `None` keeps the link deny-all.
+    host_calls: Option<Arc<dyn HostCallHandler>>,
     /// Flag keys the host answers `flags.enabled` with `true` (see
     /// [`ExecutorLink::with_enabled_flags`]).
     enabled_flags: Arc<HashSet<String>>,
@@ -195,6 +198,7 @@ pub struct ExecutorLink {
     call_timeout: Duration,
     max_in_flight: usize,
     enabled_flags: Arc<HashSet<String>>,
+    host_calls: Option<Arc<dyn HostCallHandler>>,
 }
 
 impl ExecutorLink {
@@ -207,7 +211,17 @@ impl ExecutorLink {
             call_timeout: DEFAULT_CALL_TIMEOUT,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
             enabled_flags: Arc::new(HashSet::new()),
+            host_calls: None,
         }
+    }
+
+    /// Plugs in the scope-checked host-call handler. Without it every
+    /// connector host-call stays refused (deny all). With it, EVERY host-call
+    /// (including `flags`) is decided by the handler: unscoped calls are denied.
+    #[must_use]
+    pub fn with_host_calls(mut self, handler: Arc<dyn HostCallHandler>) -> Self {
+        self.host_calls = Some(handler);
+        self
     }
 
     /// The flag keys a connector's `flags.enabled` host-call is answered
@@ -310,6 +324,7 @@ impl ExecutorLink {
             closed: AtomicBool::new(false),
             max_in_flight: self.max_in_flight,
             enabled_flags: Arc::clone(&self.enabled_flags),
+            host_calls: self.host_calls.clone(),
         });
 
         let writer_session = Arc::clone(&session);
@@ -434,6 +449,38 @@ async fn read_loop<R: AsyncRead + Unpin>(reader: &mut R, session: &Arc<Session>)
                     .is_err()
                 {
                     return;
+                }
+            }
+            Message::HostCall(call) if session.host_calls.is_some() => {
+                // Serviced off the read loop: a slow identity mint must not
+                // stall replies. The handler bounds concurrency itself.
+                if let Some(handler) = session.host_calls.clone() {
+                    let session = Arc::clone(session);
+                    let id = frame.id;
+                    tokio::spawn(async move {
+                        let outcome = handler.handle(&call).await;
+                        let reply = Message::HostResult(match outcome {
+                            Ok(value) => HostResultBody {
+                                result: Some(value),
+                                error: None,
+                            },
+                            Err(e) => HostResultBody {
+                                result: None,
+                                error: Some(HostResultError {
+                                    code: e.code().to_string(),
+                                    message: e.wire_message(),
+                                }),
+                            },
+                        });
+                        if session
+                            .writer
+                            .send_timeout(Frame::new(id, reply), WRITE_TIMEOUT)
+                            .await
+                            .is_err()
+                        {
+                            session.close();
+                        }
+                    });
                 }
             }
             Message::HostCall(call)

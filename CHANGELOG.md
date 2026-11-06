@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- svc-ingest connector host-call bridge (connector runtime PR-A2): `connector/host_calls.rs` `HostCallHandler`/`OverlayHostCalls`/`CallScope`/`ActiveConnections`/`HubIdentityTokenizer`, plugged in via `ExecutorLink::with_host_calls`. Scope-validated (unscoped calls denied, fail closed), per-overlay grants subset of `hub-manifest.yaml`, PII-free identity tokenization, `connector_host_call_total` metrics. Not yet wired into boot.
 - `sender.build-request` over the executor wire (P6a T6d wire follow-up; needs penguin-libs#151, `penguin-bundle-host` 0.5.0
   `ExportKind::ConnectorBuildRequest`): `bundle_executor` `ConnectorHost::build_request` + `connector_wire` dispatch (digest-pinned
   connectors only, global admission slot, action/template size caps, deadline clamp, typed errors) and svc_ingest
