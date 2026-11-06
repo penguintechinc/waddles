@@ -1561,6 +1561,31 @@ pipeline:
         # enabled. A new/removed Twitch binding takes effect within <= one reconcile interval.
         twitchReconcileIntervalSecs: 60
         twitchResolveTimeoutSecs: 10
+      # P6a -- `waddles.connector-tools` env baseline (CONNECTOR_TOOLS_ENABLED). OFF (default) =
+      # the legacy outbound drains, nothing below renders. ON = the generic outbound executor:
+      # requires dynamicConnections.enabled + hubApi.enabled, the three pinned connector digests,
+      # the operator-managed platform-credentials Secret key TWITCH_CLIENT_ID, and the
+      # OUTBOUND_PIN_KEYS secret (outboundPin). A half-configured ON fails `helm template`.
+      # Rollout order: svc-action first (pin_sig v2), then svc-ingest; rollback = enabled:false.
+      # A bundle-executor must dial this pod's host-api port (see core/svc_ingest/README.md).
+      connectorTools:
+        enabled: false
+        hostApiPort: 8301
+        # svc-ingest's DEDICATED host-api mTLS material (never the shared executor/stage
+        # host-api-tls). Secret `secretName` (ca.crt = CA the executor client cert must chain to,
+        # tls.crt/tls.key = server-only cert with the svc-ingest SAN) is generated on alpha/local;
+        # elsewhere supply it (externalSecret: true = an external controller owns it). The listener
+        # pins `clientIdentity` (the ingest-dedicated executor cert); the matching client Secret
+        # `<fullname>-ingest-executor-tls` is for the executor track and is mounted by nothing here.
+        hostApiTls:
+          secretName: ""
+          clientIdentity: ""
+          externalSecret: false
+        # Pinned connector component digests, sha256:<64 lowercase hex> (docs/connector-host-capability.md).
+        digests:
+          twitch: ""
+          discord: ""
+          youtube: ""
       resources:
         requests:
           cpu: "100m"

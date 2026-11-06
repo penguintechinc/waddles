@@ -38,7 +38,7 @@
 //! Only the export label, correlation id and error class are ever logged --
 //! never frame bytes, actors, payloads, or executor/guest-supplied text.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -47,8 +47,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use penguin_bundle_host::wire::message::PROTOCOL_VERSION;
 use penguin_bundle_host::wire::{
-    read_frame, write_frame, ErrorBody, ErrorCode, ExportKind, Frame, HelloLimits, HelloOkBody,
-    HostResultBody, HostResultError, InvokeBody, Message, ResultBody,
+    read_frame, write_frame, CapabilityKind, ErrorBody, ErrorCode, ExportKind, Frame, HelloLimits,
+    HelloOkBody, HostResultBody, HostResultError, InvokeBody, Message, ResultBody,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -107,6 +107,9 @@ struct Session {
     next_id: AtomicU64,
     closed: AtomicBool,
     max_in_flight: usize,
+    /// Flag keys the host answers `flags.enabled` with `true` (see
+    /// [`ExecutorLink::with_enabled_flags`]).
+    enabled_flags: Arc<HashSet<String>>,
 }
 
 /// Releases one reply slot on drop so a cancelled call cannot leak it.
@@ -191,6 +194,7 @@ pub struct ExecutorLink {
     current: Mutex<Option<Arc<Session>>>,
     call_timeout: Duration,
     max_in_flight: usize,
+    enabled_flags: Arc<HashSet<String>>,
 }
 
 impl ExecutorLink {
@@ -202,7 +206,24 @@ impl ExecutorLink {
             current: Mutex::new(None),
             call_timeout: DEFAULT_CALL_TIMEOUT,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            enabled_flags: Arc::new(HashSet::new()),
         }
+    }
+
+    /// The flag keys a connector's `flags.enabled` host-call is answered
+    /// `true` for (every other key, and every other host capability, is
+    /// refused / answered with the guest's own default). Boot passes the
+    /// platform overlay cutover flags here when the generic outbound executor
+    /// is ON: the overlays gate `sender.build-request` on them, and the
+    /// executor path is the host's decision to use the overlay.
+    #[must_use]
+    pub fn with_enabled_flags<I, S>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.enabled_flags = Arc::new(keys.into_iter().map(Into::into).collect());
+        self
     }
 
     /// Overrides the per-call wall-clock budget (sent as `deadline_ms`).
@@ -288,6 +309,7 @@ impl ExecutorLink {
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
             max_in_flight: self.max_in_flight,
+            enabled_flags: Arc::clone(&self.enabled_flags),
         });
 
         let writer_session = Arc::clone(&session);
@@ -408,6 +430,29 @@ async fn read_loop<R: AsyncRead + Unpin>(reader: &mut R, session: &Arc<Session>)
                 if session
                     .writer
                     .send_timeout(Frame::new(frame.id, Message::Pong), WRITE_TIMEOUT)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Message::HostCall(call)
+                if call.capability == CapabilityKind::Flags && call.op == "enabled" =>
+            {
+                let key = call.args.get("key").and_then(serde_json::Value::as_str);
+                // A missing/non-bool default is "not asking for ON": false.
+                let default = call
+                    .args
+                    .get("default_value")
+                    .is_some_and(|v| v.as_bool() == Some(true));
+                let enabled = key.is_some_and(|k| session.enabled_flags.contains(k)) || default;
+                let reply = Message::HostResult(HostResultBody {
+                    result: Some(serde_json::json!({ "enabled": enabled })),
+                    error: None,
+                });
+                if session
+                    .writer
+                    .send_timeout(Frame::new(frame.id, reply), WRITE_TIMEOUT)
                     .await
                     .is_err()
                 {
@@ -705,7 +750,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::connector::registry::PinnedConnector;
-    use penguin_bundle_host::wire::{CapabilityKind, HelloBody, HostCallBody, SandboxInfo};
+    use penguin_bundle_host::wire::{HelloBody, HostCallBody, SandboxInfo};
     use tokio::io::{duplex, DuplexStream};
 
     const PLATFORM: &str = "echo";
@@ -1139,6 +1184,54 @@ mod tests {
         let denied = read_frame(&mut exec.io).await.unwrap();
         assert_eq!(denied.id, 78);
         match denied.message {
+            Message::HostResult(HostResultBody {
+                result: None,
+                error: Some(e),
+            }) => assert_eq!(e.code, HOST_CALL_DENIED),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `flags.enabled` is answered `true` only for the keys the host enabled
+    /// (or when the guest's own default is true); `flags.tier` and every
+    /// other capability stay refused.
+    #[tokio::test]
+    async fn flags_enabled_is_answered_only_for_configured_keys() {
+        let link = Arc::new(ExecutorLink::new().with_enabled_flags(["waddles.overlay-twitch"]));
+        let mut exec = FakeExecutor::attach(&link).await;
+        let call = |op: &str, args: serde_json::Value| {
+            Message::HostCall(HostCallBody {
+                app_id: APP_ID.to_string(),
+                capability: CapabilityKind::Flags,
+                op: op.to_string(),
+                args,
+                call_id: 1,
+            })
+        };
+        for (key, default, want) in [
+            ("waddles.overlay-twitch", false, true),
+            ("waddles.overlay-other", false, false),
+            ("waddles.overlay-other", true, true),
+        ] {
+            exec.reply(
+                80,
+                call(
+                    "enabled",
+                    serde_json::json!({"key": key, "default_value": default}),
+                ),
+            )
+            .await;
+            let r = read_frame(&mut exec.io).await.unwrap();
+            match r.message {
+                Message::HostResult(HostResultBody {
+                    result: Some(v),
+                    error: None,
+                }) => assert_eq!(v["enabled"], want, "{key} default={default}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        exec.reply(81, call("tier", serde_json::json!({}))).await;
+        match read_frame(&mut exec.io).await.unwrap().message {
             Message::HostResult(HostResultBody {
                 result: None,
                 error: Some(e),

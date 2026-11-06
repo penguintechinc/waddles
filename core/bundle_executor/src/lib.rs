@@ -43,6 +43,7 @@ pub mod metrics;
 pub mod parity_support;
 pub mod probe;
 pub mod signing;
+pub mod stage_bridge;
 pub mod telemetry;
 pub mod tls;
 pub mod wire;

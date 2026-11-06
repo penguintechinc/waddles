@@ -369,3 +369,45 @@ accepts a `{user:<uuid>}` recipient, the only form this executor's duty accepts.
 **Gaps (not silent):** (1) YouTube has a slot source and a hub-api
 provider adapter (see "YouTube slot source"); (2) the executor and `HubPlatformUserResolver::connect` are not wired at boot (T6d-1 status above);
 the default `NoUserResolver` refuses every DM/role op loudly until it is.
+
+## Outbound executor — boot wiring & rollout order (P6a, `src/outbound_boot.rs`)
+
+Flag `waddles.connector-tools`, env baseline `CONNECTOR_TOOLS_ENABLED` (default OFF, read once at
+startup, like `INGEST_DYNAMIC_CONNECTIONS` -- the `*.waddles.app` license bypass would make a
+licensing-client read always ON). Metric `svc_ingest_outbound_path{path=legacy|executor,platform}` = 1
+for the path that started.
+
+| Flag | Behaviour |
+|---|---|
+| OFF | legacy drains exactly as before (`RealIrcOutbound`, `discord_rest`); none of the settings below are read |
+| ON | executor path for twitch/discord/youtube; ANY missing/malformed item below is a fatal startup error naming the item (never a value, never a fallback to legacy) |
+
+**Flag-ON startup requirements** (all host config, never from the queue or the guest):
+
+| Item | Source |
+|---|---|
+| `INGEST_DYNAMIC_CONNECTIONS=true`, `SERVICE_JWT_TOKEN_ENDPOINT`, hub-api URL | per-community creds via `connection_resolver` |
+| `OUTBOUND_PIN_KEYS` + `OUTBOUND_PIN_ACTIVE_KID` (active kid must be in the ring) | `outbound-pin` Secret (#987) |
+| `SENDER_EXEC_DIGEST_TWITCH` / `_DISCORD` / `_YOUTUBE` (`sha256:<64 hex>`) | chart `svcIngest.connectorTools.digests.*` |
+| `TWITCH_CLIENT_ID` (public Helix app id) | platform-credentials Secret key |
+| `HUB_API_GRPC_ENDPOINT` (+ `HUB_API_GRPC_CA_FILE`) | `HubPlatformUserResolver::connect`, scope `identity:platform-user:resolve` |
+| `HOST_API_SERVER_CERT_FILE` / `_KEY_FILE` / `HOST_API_CLIENT_CA_FILE`, `HOST_API_CLIENT_IDENTITY`, `SENDER_EXEC_HOST_API_PORT` (8301) | mTLS listener the executor dials (`connector/host_api_listener.rs`). Server-only cert from svc-ingest's OWN Secret (never the shared executor/stage `host-api-tls`); the client cert must chain to its CA AND carry exactly `HOST_API_CLIENT_IDENTITY` (a stage cert is refused) |
+
+Wiring: `PlatformSlotRouter` (twitch/discord/youtube slot sources; unknown platform -> typed
+`slot_platform_unknown`) + `DiscordDuties` + `WireTemplateBuilder` over the `ExecutorLink`; the drains are
+`run_exec` (twitch), `run_discord_exec`, `run_youtube_exec` (queue
+`waddles:transport:irc:youtube:outbound`, executor-only). Shutdown uses the same per-drain SIGINT/SIGTERM
+receivers as the legacy drains. The link answers the overlay cutover flags
+(`waddles.overlay-{twitch,discord,youtube}`) `true` to `flags.enabled` host-calls; every other host-call is
+refused.
+
+**Rollout order:** (1) deploy `svc_action` first (pin_sig v2; v1-signed entries are refused
+`pin_sig_legacy`), (2) deploy `svc_ingest` with the flag OFF, (3) set `connectorTools.digests.*`, (4) set
+`connectorTools.enabled=true`. **Rollback = flag OFF** (restarts onto the legacy drains; in-flight queue
+entries are consumed by whichever path is running).
+
+**Known prerequisite outside this crate:** a `bundle-executor` must dial this pod's host-api port with the
+three connectors pinned (`Executor::pin_connector`) and a host-call bridge so the twitch overlay's
+`waddles.overlay-twitch` gate can read the flag. Neither exists in the production executor yet
+(`connector_wire` doc: "no host-call bridge today"); until then every build-request is a typed, counted
+`build_unavailable` (nothing is sent). The real-path proof is `core/connector_e2e/tests/outbound_exec.rs`.

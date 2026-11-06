@@ -88,6 +88,8 @@ pub struct WireRig {
     pub registry: Arc<ConnectorRegistry>,
     /// The real executor (its pinned registry survives reconnects).
     pub executor: Arc<Executor<NoSource>>,
+    /// Keeps the flag-answering stage of the connectors' host-call bridge alive.
+    _stage_link: Option<Arc<ExecutorLink>>,
     connection: Option<JoinHandle<Result<(), ExecutorError>>>,
 }
 
@@ -98,9 +100,27 @@ impl WireRig {
     ///
     /// # Panics
     /// Test harness: any setup failure is a loud panic naming the cause.
-    #[allow(clippy::unwrap_used, clippy::expect_used)]
     pub async fn start(
         connectors: Vec<RigConnector>,
+        max_frame_bytes: usize,
+        tune: impl Fn(&mut ConnectorLimits),
+    ) -> Self {
+        Self::start_with_permissions(connectors, &[], &[], max_frame_bytes, tune).await
+    }
+
+    /// As [`WireRig::start`], granting every pinned connector the manifest
+    /// `permissions` (e.g. `connector.pii.read`, which the real platform
+    /// overlays import `identity` under) and answering `flags.enabled`
+    /// host-calls `true` for `enabled_flags` (the boot path's overlay cutover
+    /// flags, `svc_ingest::outbound_boot::OVERLAY_FLAGS`).
+    ///
+    /// # Panics
+    /// Test harness: any setup failure is a loud panic naming the cause.
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    pub async fn start_with_permissions(
+        connectors: Vec<RigConnector>,
+        permissions: &[&str],
+        enabled_flags: &[&str],
         max_frame_bytes: usize,
         tune: impl Fn(&mut ConnectorLimits),
     ) -> Self {
@@ -111,15 +131,40 @@ impl WireRig {
         ])
         .expect("static executor args parse");
         let executor = Arc::new(Executor::new(&cfg, NoSource).expect("executor builds"));
+        // With flags to answer, connectors get a REAL host-call bridge whose
+        // peer is a REAL `ExecutorLink` (a second instance: attaching on the
+        // main link would replace the main session) -- so `flags.enabled` is
+        // answered by svc_ingest's own link code, not a script.
+        let (bridge, stage_link) = if enabled_flags.is_empty() {
+            (None, None)
+        } else {
+            let link =
+                Arc::new(ExecutorLink::new().with_enabled_flags(enabled_flags.iter().copied()));
+            let (stage_io, exec_io) = duplex(PIPE_BYTES);
+            let attach_link = Arc::clone(&link);
+            let (attached, bridge) = tokio::join!(
+                async move { attach_link.attach(stage_io).await },
+                bundle_executor::stage_bridge::bridge_to_stage(exec_io)
+            );
+            attached.expect("flag stage attaches");
+            (Some(bridge.expect("stage bridge handshake")), Some(link))
+        };
         let mut registry = ConnectorRegistry::new();
         for c in connectors {
             let digest = digest_of(c.wasm);
-            let manifest =
-                VerifiedManifest::new(c.app_id.clone(), digest.clone(), c.world, HashSet::new());
+            let manifest = VerifiedManifest::new(
+                c.app_id.clone(),
+                digest.clone(),
+                c.world,
+                permissions
+                    .iter()
+                    .map(|p| (*p).to_string())
+                    .collect::<HashSet<_>>(),
+            );
             let mut limits = ConnectorLimits::from_config(&cfg);
             tune(&mut limits);
             executor
-                .pin_connector(&manifest, c.wasm.to_vec(), limits, None)
+                .pin_connector(&manifest, c.wasm.to_vec(), limits, bridge.clone())
                 .await
                 .expect("connector pins");
             registry
@@ -142,6 +187,7 @@ impl WireRig {
             invoker,
             registry,
             executor,
+            _stage_link: stage_link,
             connection: None,
         };
         rig.reconnect().await;

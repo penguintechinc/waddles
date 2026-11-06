@@ -359,3 +359,16 @@ MANAGE_ROLES / MANAGE_GUILD, per-community bot credential) are the Discord `Duty
 and its OAuth token + chat id come from the community's own connection (`youtube_slots.rs`; `core/svc_ingest/README.md` "YouTube slot
 source"; expired token -> retryable `token_expired`; the hub-api `youtube` provider adapter -- OAuth connect, refresh, `live_chat_id` binding -- is `docs/PROVIDER_CONNECTIONS.md` "YouTube provider"). The wire does not yet carry
 `build-request` (no `ExportKind::ConnectorBuildRequest` in `penguin-bundle-host` 0.4.0): see "T6d-1 status".
+
+## Outbound executor boot wiring (P6a, flag `waddles.connector-tools`)
+
+svc_ingest listens (mTLS, `connector/host_api_listener.rs`) and the executor dials in, so
+`ExecutorLink::attach` receives the stream; `WireTemplateBuilder` then runs `sender.build-request` on the
+connector pinned for the platform. Pinned connector digests are HOST config
+(`SENDER_EXEC_DIGEST_<PLATFORM>`), mirrored into the `ConnectorRegistry` and compared by the executor on
+every send -- never taken from the queue entry or the guest. `ExecutorLink::with_enabled_flags` answers
+`flags.enabled` host-calls for the overlay cutover flags (the twitch overlay refuses build-request while its
+flag reads OFF); all other host capabilities stay `HOST_CALL_DENIED`. Flag-ON requirements, rollout order
+and rollback: `core/svc_ingest/README.md` "Outbound executor -- boot wiring & rollout order". Real-path
+proof: `core/connector_e2e/tests/outbound_exec.rs` (real Valkey queue, real compiled overlays over the real
+wire, fake platform endpoints; only scheme+host of the overlay template is rewritten to the local fake).
