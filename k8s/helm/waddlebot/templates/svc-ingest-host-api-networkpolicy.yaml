@@ -1,0 +1,29 @@
+# PR-H -- CiliumNetworkPolicy for svc-ingest's host-api mTLS port (generic connector executor).
+# Ingress on 8301 from the bundle-executor pod ONLY (nothing else in the namespace). svc-ingest ->
+# hub-api gRPC egress is already granted by the data-plane egress CNP
+# (network-policies-egress.yaml) and hub-api's gRPC ingress CNP; nothing broader is added here.
+{{- $ct := .Values.pipeline.rustDataPlane.svcIngest.connectorTools | default dict }}
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcIngest.enabled $ct.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-ingest-host-api
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-ingest-rust
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-ingest-rust
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: bundle-executor
+      toPorts:
+        - ports:
+            - port: {{ $ct.hostApiPort | default 8301 | quote }}
+              protocol: TCP
+{{- end }}

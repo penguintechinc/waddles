@@ -1021,6 +1021,15 @@ pipeline:
   # GAPS "guild->community" shortcut (community_id=None, activated tenant-wide).
   runnerTenantSlug: "global"
 
+  # PR-H -- ONE source of truth for the pinned connector component digests
+  # (sha256:<64 lowercase hex>; empty = unset). Rendered into svc-ingest
+  # SENDER_EXEC_DIGEST_<P> AND bundle-executor CONNECTOR_PIN_DIGEST_<P>.
+  connectors:
+    digests:
+      twitch: ""
+      discord: ""
+      youtube: ""
+
   # T10 (v3 demo) — pre-install/pre-upgrade Helm hook Job (templates/migrations-job.yaml)
   # that applies config/postgres/migrations/*.sql to completion before any pipeline
   # Deployment's pods are scheduled. Complements (does not replace) the per-pod
@@ -1581,11 +1590,51 @@ pipeline:
           secretName: ""
           clientIdentity: ""
           externalSecret: false
-        # Pinned connector component digests, sha256:<64 lowercase hex> (docs/connector-host-capability.md).
-        digests:
-          twitch: ""
-          discord: ""
-          youtube: ""
+          # Separate connector trust domain: these Secrets are issued by a CONNECTOR CA, never the stage
+          # CA. The executor trusts both via `<fullname>-executor-ca-bundle` mounted over HOST_API_CA_FILE
+          # (follow-up executor PR: a dedicated connector CA env). With externalSecret=true, supply
+          # executorCaBundleSecretName (Secret key ca.crt = stage CA + connector CA).
+          executorCaBundleSecretName: ""
+        # Connector component digests are NO LONGER set here: single source of truth is
+        # `pipeline.connectors.digests` (also feeds the executor's CONNECTOR_PIN_DIGEST_<P>).
+        # Setting a non-empty `digests.*` here fails the render.
+      # PR-H (connector runtime, docs/superpowers/specs/2026-11-05-connector-runtime-inbound-manager.md
+      # SS1.3/SS5/SS7) -- inbound connector runtime + per-platform overlay baselines. ALL OFF by
+      # default (beta/gamma/prod inherit OFF; nothing below renders while OFF). Each overlay ON
+      # flips BOTH svc-ingest deployments (Rust + Python) from this ONE value, so they cannot
+      # disagree. Prerequisites (render-time `fail` otherwise): connectorTools.enabled,
+      # pipeline.connectors.digests.<p>, the host-api TLS Secrets, and routeKeySecret when
+      # webhookPlatforms is non-empty. Per-platform ON procedure (alpha, one at a time, SS7):
+      #   1. youtube (poll, lowest blast radius)  2. discord (single guild)  3. twitch
+      #   set overlay.<p>.enabled: true (+ connectorTools.enabled + the digest), redeploy; smoke;
+      #   rollback = overlay.<p>.enabled: false + redeploy (legacy path restarts).
+      # Beta only after a clean 48h alpha soak.
+      connectorRuntime:
+        enabled: false
+        overlay:
+          twitch:
+            enabled: false
+          # REJECTED at render until the identify budget is ported (flip identifyBudgetReady).
+          discord:
+            enabled: false
+          youtube:
+            enabled: false
+        # Flipped to true ONLY by the identify-budget PR (spec SS5.4 / row I).
+        identifyBudgetReady: false
+        reconcileIntervalSecs: 60
+        maxConnections: 500
+        startConcurrency: 8
+        discordStartPaceMs: 5500
+        # CONNECTOR_HEARTBEAT_ENABLED on the Rust svc-ingest (boot.rs ENV_HEARTBEAT, strict bool; the
+        # Rust default when unset is false). Driver heartbeat baseline (`ingest.connector-heartbeat`).
+        heartbeatEnabled: false
+        # csv-rendered subset of [twitch, discord] whose webhook routes are registered.
+        webhookPlatforms: []
+        # HMAC key deriving webhook route keys: an EXISTING Secret only (never a literal here).
+        # Required when webhookPlatforms is non-empty.
+        routeKeySecret:
+          existingSecret: ""
+          key: "CONNECTOR_ROUTE_KEY_SECRET"
       resources:
         requests:
           cpu: "100m"
