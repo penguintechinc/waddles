@@ -101,7 +101,7 @@ impl EventSink for RecordingSink {
 
 fn binding() -> BindingSummary {
     BindingSummary {
-        tenant_id: 1,
+        tenant_id: 42,
         secret_version: 1,
         community_id: 7,
         connection_id: 9,
