@@ -1,7 +1,7 @@
 //! Real-path e2e of the generic outbound executor's BOOT path
 //! (`waddles.connector-tools` ON): a signed queue entry on a REAL Valkey list
 //! is drained by the production `outbound::run_exec` / `run_discord_exec` /
-//! `run_youtube_exec`, the REAL compiled platform overlay builds the request
+//! `run_youtube_exec`, the REAL compiled platform connector builds the request
 //! template over the REAL executor wire (`WireTemplateBuilder` ->
 //! `ExecutorLink` -> `run_connection` -> `ConnectorHost` -> wasm), the
 //! production verifier / substituter / `GuardedClient` / per-community slot
@@ -10,8 +10,8 @@
 //!
 //! Doubles (and only these): the hub-api credential seam, the hub-api
 //! tokenization seam, and a `TemplateBuilder` decorator that rewrites ONLY the
-//! scheme+host of the overlay's template to the local fake after asserting the
-//! overlay named the real platform host (https cannot be terminated by a
+//! scheme+host of the connector's template to the local fake after asserting the
+//! connector named the real platform host (https cannot be terminated by a
 //! local plain-http fake). Needs a real Valkey: `VALKEY_URL` unset FAILS (no
 //! silent skip).
 
@@ -52,10 +52,10 @@ use tokio::sync::oneshot;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const TWITCH_WASM: &[u8] = include_bytes!("fixtures/twitch_overlay.wasm");
-const YOUTUBE_WASM: &[u8] = include_bytes!("fixtures/youtube_overlay.wasm");
+const TWITCH_WASM: &[u8] = include_bytes!("fixtures/twitch_connector.wasm");
+const YOUTUBE_WASM: &[u8] = include_bytes!("fixtures/youtube_connector.wasm");
 const DISCORD_WASM: &[u8] =
-    include_bytes!("../../bundle_executor/tests/fixtures/discord_overlay.wasm");
+    include_bytes!("../../bundle_executor/tests/fixtures/discord_connector.wasm");
 
 const KEYS: &str = "k1:00112233445566778899aabbccddeeff";
 const COMMUNITY: i64 = 7;
@@ -146,8 +146,8 @@ impl PlatformUserResolver for Users {
     }
 }
 
-/// Real overlay output, with only scheme+host swapped for the local fake after
-/// asserting the overlay named the real platform host.
+/// Real connector output, with only scheme+host swapped for the local fake after
+/// asserting the connector named the real platform host.
 struct Rewrite {
     inner: WireTemplateBuilder,
     bases: HashMap<&'static str, String>,
@@ -170,7 +170,7 @@ impl TemplateBuilder for Rewrite {
             .tpl
             .url
             .strip_prefix(prod)
-            .unwrap_or_else(|| panic!("overlay did not name {prod}: {}", built.tpl.url));
+            .unwrap_or_else(|| panic!("connector did not name {prod}: {}", built.tpl.url));
         built.tpl.url = format!("{local}{rest}");
         Ok(built)
     }
@@ -246,7 +246,7 @@ async fn rig(flag: bool) -> Rig {
             },
         ],
         &["connector.pii.read"],
-        &svc_ingest::outbound_boot::OVERLAY_FLAGS,
+        &svc_ingest::outbound_boot::CONNECTOR_FLAGS,
         64 * 1024,
         |_| {},
     )
@@ -562,7 +562,7 @@ async fn twitch_chat_send_flows_queue_to_wire_with_replay_and_pin_guards() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn discord_chat_dm_and_role_flow_through_the_real_overlay() {
+async fn discord_chat_dm_and_role_flow_through_the_real_connector() {
     let rig = rig(true).await;
     let s = &rig.dc;
     Mock::given(method("GET"))

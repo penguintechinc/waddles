@@ -423,7 +423,7 @@ async fn dm_send_opens_the_dm_itself_and_fills_the_slot_from_the_reply() {
         let open = q.url.path() == "/api/v10/users/@me/channels";
         assert!(!has_raw || open, "raw id leaked into {}", q.url.path());
     }
-    // the overlay saw only the tokenized placeholder
+    // the connector saw only the tokenized placeholder
     let built = r.tpl.calls.lock().unwrap()[0].payload_json.clone();
     assert!(built.contains(&format!("{{user:{UUID_A}}}")) && !built.contains(RAW_A));
     // order: gate (channel, membership) precedes the DM open and the send
@@ -1241,7 +1241,7 @@ async fn dm_open_failures_are_refused_and_nothing_is_sent() {
 }
 
 #[tokio::test]
-async fn policy_exposes_the_overlay_contract_kinds() {
+async fn policy_exposes_the_connector_contract_kinds() {
     let p = PlatformPolicy::discord();
     for k in ["dm.send", "role.add", "role.remove"] {
         assert!(p.kind(k).unwrap().needs_duty, "{k}");

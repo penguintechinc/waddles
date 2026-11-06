@@ -26,7 +26,7 @@ use crate::outbound_creds_discord::DiscordCredentialSource;
 
 /// Discord REST base the host pins egress to.
 pub const API_BASE: &str = "https://discord.com/api/v10";
-/// The overlay's `secret-refs` handle for the bot credential.
+/// The connector's `secret-refs` handle for the bot credential.
 pub const BOT_HANDLE: &str = "discord-bot";
 
 /// One bot-authenticated, SSRF-guarded Discord REST caller.

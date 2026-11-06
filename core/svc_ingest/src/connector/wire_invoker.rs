@@ -249,9 +249,9 @@ impl ExecutorLink {
     /// The flag keys a connector's `flags.enabled` host-call is answered
     /// `true` for (every other key, and every other host capability, is
     /// refused / answered with the guest's own default). Boot passes the
-    /// platform overlay cutover flags here when the generic outbound executor
-    /// is ON: the overlays gate `sender.build-request` on them, and the
-    /// executor path is the host's decision to use the overlay.
+    /// platform connector cutover flags here when the generic outbound executor
+    /// is ON: the connectors gate `sender.build-request` on them, and the
+    /// executor path is the host's decision to use the connector.
     #[must_use]
     pub fn with_enabled_flags<I, S>(mut self, keys: I) -> Self
     where
@@ -1278,7 +1278,7 @@ mod tests {
     /// other capability stay refused.
     #[tokio::test]
     async fn flags_enabled_is_answered_only_for_configured_keys() {
-        let link = Arc::new(ExecutorLink::new().with_enabled_flags(["waddles.overlay-twitch"]));
+        let link = Arc::new(ExecutorLink::new().with_enabled_flags(["waddles.connector-twitch"]));
         let mut exec = FakeExecutor::attach(&link).await;
         let call = |op: &str, args: serde_json::Value| {
             Message::HostCall(HostCallBody {
@@ -1290,9 +1290,9 @@ mod tests {
             })
         };
         for (key, default, want) in [
-            ("waddles.overlay-twitch", false, true),
-            ("waddles.overlay-other", false, false),
-            ("waddles.overlay-other", true, true),
+            ("waddles.connector-twitch", false, true),
+            ("waddles.connector-other", false, false),
+            ("waddles.connector-other", true, true),
         ] {
             exec.reply(
                 80,
@@ -1450,10 +1450,10 @@ mod tests {
 
     const TWITCH_APP: &str = "waddles.core.service.twitch";
 
-    /// A link whose handler is the production allowlist (twitch overlay ON).
+    /// A link whose handler is the production allowlist (twitch connector ON).
     async fn handler_rig() -> (Arc<ExecutorLink>, FakeExecutor) {
-        use super::super::host_calls::{ActiveConnections, HostCallConfig, OverlayHostCalls};
-        let handler = OverlayHostCalls::new(
+        use super::super::host_calls::{ActiveConnections, ConnectorHostCalls, HostCallConfig};
+        let handler = ConnectorHostCalls::new(
             Arc::new(ActiveConnections::new()),
             Arc::new(NoTokenizer),
             HostCallConfig::new(["twitch"]).unwrap(),
@@ -1472,7 +1472,7 @@ mod tests {
             app_id: app.to_string(),
             capability: CapabilityKind::Flags,
             op: "enabled".to_string(),
-            args: serde_json::json!({"key": "waddles.overlay-twitch"}),
+            args: serde_json::json!({"key": "waddles.connector-twitch"}),
             call_id,
         })
     }
@@ -1514,7 +1514,7 @@ mod tests {
 
     /// Mutation target (unscoped denial): the SAME flag read is denied when the
     /// `call_id` is unknown / stale, or when it happened during a non-build-request
-    /// invocation (a tool-call), or when the overlay is not the invoked one.
+    /// invocation (a tool-call), or when the connector is not the invoked one.
     #[tokio::test]
     async fn the_flag_read_is_denied_without_a_build_request_invocation() {
         let (link, mut exec) = handler_rig().await;
@@ -1547,7 +1547,7 @@ mod tests {
         assert_eq!(e.message, "unscoped_call");
         exec.reply_ok(id, serde_json::json!({})).await;
         call.await.unwrap().unwrap();
-        // During a build-request for twitch, a host-call naming ANOTHER overlay.
+        // During a build-request for twitch, a host-call naming ANOTHER connector.
         let call = tokio::spawn({
             let link = Arc::clone(&link);
             async move {
@@ -1564,7 +1564,7 @@ mod tests {
         exec.reply(903, flag_call("waddles.core.service.discord", id))
             .await;
         let e = host_result(&mut exec).await.error.expect("denied");
-        assert_eq!(e.message, "unknown_overlay");
+        assert_eq!(e.message, "unknown_connector");
         exec.reply_ok(id, serde_json::json!({})).await;
         call.await.unwrap().unwrap();
         // After the invocation finished its id unlocks nothing.

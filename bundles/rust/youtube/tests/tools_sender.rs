@@ -324,7 +324,7 @@ fn chat_send_rejects_bad_input() {
     assert!(ok(&"a".repeat(200)).is_ok());
 }
 
-/// Regression (Twitch overlay review, HIGH): checking `{{` BEFORE stripping control
+/// Regression (Twitch connector review, HIGH): checking `{{` BEFORE stripping control
 /// characters let `{<ctrl>{SECRET}}` become a live slot. We REJECT (never strip) any
 /// control/invisible/format char, then `{{`/`}}` on the raw and cleaned strings.
 #[test]
@@ -412,7 +412,7 @@ fn send_chat_tool_returns_template() {
 }
 
 /// Known gap pinned by test (coordinator item 3): the generic host PollTransport treats
-/// EVERY 403 as fatal, so a quota 403 kills the poller instead of backing off. The overlay
+/// EVERY 403 as fatal, so a quota 403 kills the poller instead of backing off. The connector
 /// classifies correctly (below); wiring it needs a host hook (see README "Gaps").
 #[test]
 fn known_gap_quota_403_is_backoff_here_but_fatal_in_host_poll_transport() {

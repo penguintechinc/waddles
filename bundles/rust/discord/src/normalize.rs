@@ -9,14 +9,14 @@
 
 use serde_json::{Value, json};
 
-use crate::error::{OverlayError, Result};
+use crate::error::{ConnectorError, Result};
 use crate::perms::{DiscordPermissions, from_bits};
 use crate::session::is_snowflake;
 
-/// Platform slug on every event this overlay emits.
+/// Platform slug on every event this connector emits.
 pub const PLATFORM: &str = "discord";
 
-/// The overlay-side mirror of WIT `normalized-event` (the glue converts).
+/// The connector-side mirror of WIT `normalized-event` (the glue converts).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
     /// Always [`PLATFORM`].
@@ -52,7 +52,7 @@ pub struct ChatMessage {
 fn req_snowflake(v: Option<&Value>, field: &str) -> Result<String> {
     match v {
         Some(Value::String(s)) if is_snowflake(s) => Ok(s.clone()),
-        _ => Err(OverlayError::Malformed(format!(
+        _ => Err(ConnectorError::Malformed(format!(
             "`{field}` missing or not a snowflake"
         ))),
     }
@@ -75,7 +75,9 @@ fn message_text(v: Option<&Value>) -> Result<String> {
     match v {
         None | Some(Value::Null) => Ok(String::new()),
         Some(Value::String(s)) => Ok(s.clone()),
-        Some(_) => Err(OverlayError::Malformed("`content` is not a string".into())),
+        Some(_) => Err(ConnectorError::Malformed(
+            "`content` is not a string".into(),
+        )),
     }
 }
 
@@ -83,7 +85,7 @@ fn message_text(v: Option<&Value>) -> Result<String> {
 /// other bots are KEPT; an unknown `self_user_id` never filters).
 ///
 /// # Errors
-/// [`OverlayError::Malformed`] when `author.id`, `channel_id` or the message `id`
+/// [`ConnectorError::Malformed`] when `author.id`, `channel_id` or the message `id`
 /// is missing/not a snowflake, `guild_id` is mistyped, or `content` is not a
 /// string. Fails loudly (the host drops and counts the frame) instead of
 /// defaulting a missing id to an empty string.
@@ -152,8 +154,8 @@ fn interaction_kind(t: u64) -> Option<&'static str> {
 /// `member.permissions` bitfield -- no REST call.
 ///
 /// # Errors
-/// [`OverlayError::Malformed`] for a missing/invalid `id`/`type`,
-/// [`OverlayError::Unsupported`] for an interaction type this overlay does not know.
+/// [`ConnectorError::Malformed`] for a missing/invalid `id`/`type`,
+/// [`ConnectorError::Unsupported`] for an interaction type this connector does not know.
 pub fn interaction_event(
     body: &Value,
     occurred_at: &str,
@@ -162,12 +164,12 @@ pub fn interaction_event(
     let t = body
         .get("type")
         .and_then(Value::as_u64)
-        .ok_or_else(|| OverlayError::Malformed("interaction missing type".into()))?;
+        .ok_or_else(|| ConnectorError::Malformed("interaction missing type".into()))?;
     if t == 1 {
         return Ok(None);
     }
     let kind = interaction_kind(t)
-        .ok_or_else(|| OverlayError::Unsupported(format!("interaction type {t}")))?;
+        .ok_or_else(|| ConnectorError::Unsupported(format!("interaction type {t}")))?;
     let id = req_snowflake(body.get("id"), "interaction id")?;
 
     let user = body
@@ -186,9 +188,9 @@ pub fn interaction_event(
         None | Some(Value::Null) => 0,
         Some(Value::String(p)) => p
             .parse()
-            .map_err(|_| OverlayError::Malformed("member.permissions not a bitfield".into()))?,
+            .map_err(|_| ConnectorError::Malformed("member.permissions not a bitfield".into()))?,
         Some(_) => {
-            return Err(OverlayError::Malformed(
+            return Err(ConnectorError::Malformed(
                 "member.permissions not a string".into(),
             ));
         }
@@ -276,7 +278,7 @@ mod tests {
         cases.push(v);
         for (i, v) in cases.into_iter().enumerate() {
             assert!(
-                matches!(msg(v.clone(), None), Err(OverlayError::Malformed(_))),
+                matches!(msg(v.clone(), None), Err(ConnectorError::Malformed(_))),
                 "case {i}: {v}"
             );
         }
@@ -425,15 +427,15 @@ mod tests {
         );
         assert!(matches!(
             interaction_event(&json!({"id":"1"}), "t", &tok),
-            Err(OverlayError::Malformed(_))
+            Err(ConnectorError::Malformed(_))
         ));
         assert!(matches!(
             interaction_event(&json!({"id":"1","type":9}), "t", &tok),
-            Err(OverlayError::Unsupported(_))
+            Err(ConnectorError::Unsupported(_))
         ));
         assert!(matches!(
             interaction_event(&json!({"id":"abc","type":2}), "t", &tok),
-            Err(OverlayError::Malformed(_))
+            Err(ConnectorError::Malformed(_))
         ));
     }
 }

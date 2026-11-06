@@ -1,9 +1,9 @@
-//! Real-path proof of the YouTube `OverlayProfile` (PR-F3): the profile derives
+//! Real-path proof of the YouTube `ConnectorProfile` (PR-F3): the profile derives
 //! the `PollConfig`; svc-ingest's real `PollTransport` polls a local fake
 //! YouTube API; the real `ConnectorDriver` carries each response through the
 //! production wire (`WireConnectorInvoker` -> `ExecutorLink` -> real
-//! `run_connection`/`ConnectorHost`) into the REAL compiled YouTube overlay
-//! (`fixtures/youtube_overlay.wasm`), whose `identity.lookup` goes through the
+//! `run_connection`/`ConnectorHost`) into the REAL compiled YouTube connector
+//! (`fixtures/youtube_connector.wasm`), whose `identity.lookup` goes through the
 //! executor's real host-call path (`scripted_bridge`). Only the two ends are
 //! synthetic: the fake upstream and a recording sink.
 //!
@@ -37,14 +37,14 @@ use svc_ingest::connector::{
     WireConnectorInvoker,
 };
 use svc_ingest::connector_runtime::feed::TransportPlan;
-use svc_ingest::connector_runtime::plan::{OverlayProfile, RuntimeEnv};
+use svc_ingest::connector_runtime::plan::{ConnectorProfile, RuntimeEnv};
 use svc_ingest::connector_runtime::profiles::youtube::YoutubeProfile;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
-const WASM: &[u8] = include_bytes!("../../bundle_executor/tests/fixtures/youtube_overlay.wasm");
+const WASM: &[u8] = include_bytes!("../../bundle_executor/tests/fixtures/youtube_connector.wasm");
 const CHAT: &str = "Cg0KC-abc_123";
 const CHAT2: &str = "NewChatId_9";
 const TOKEN: &str = "ya29.e2e-token";
@@ -243,7 +243,7 @@ struct Rig {
     _link: Arc<ExecutorLink>,
 }
 
-/// Pins the REAL youtube overlay (with the pii grant and the scripted
+/// Pins the REAL youtube connector (with the pii grant and the scripted
 /// identity bridge) in a real executor and attaches it over the wire.
 async fn rig() -> Rig {
     let cfg = CliConfig::try_parse_from([

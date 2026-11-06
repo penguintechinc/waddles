@@ -1,10 +1,10 @@
 //! `sender.build-request`: Helix request templates for `chat.send`,
 //! `chat.delete` and `dm.send`.
 //!
-//! The overlay never holds a token and never chooses a destination: the
+//! The connector never holds a token and never chooses a destination: the
 //! broadcaster/sender/moderator ids and credentials are opaque slots with
 //! handles; the host binds the target from `action.target-source-id` and
-//! substitutes at send time. Any overlay/caller-supplied channel field in the
+//! substitutes at send time. Any connector/caller-supplied channel field in the
 //! payload is IGNORED (never read), so the template is byte-identical with or
 //! without it.
 
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_supplied_channel_is_ignored() {
+    fn connector_supplied_channel_is_ignored() {
         let plain = build_request("chat.send", "s", &text("hi")).unwrap();
         for key in IGNORED_TARGET_KEYS {
             let p = json!({ "text": "hi", *key: "evilchannel" }).to_string();

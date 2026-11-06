@@ -134,7 +134,7 @@ settings. All default OFF; an invalid value is refused by `WsTransport::new` (`T
 
 | Setting | Behaviour |
 |---|---|
-| `auto_replies: Vec<AutoReplyRule>` | Line rule `prefix` -> host-built `reply_prefix + token + reply_suffix` (e.g. `PING :` -> `PONG :`). The overlay never sees a consumed line unless `forward_to_guest`. Only the token after `prefix` is reflected: `[A-Za-z0-9.:_/+=@-]`, `1..=max_token_len` (hard cap 256); anything else (CR, LF, space, non-ASCII, empty, too long) is a `TransportError::Read` -- never a reply. Max 8 rules (non-overlapping prefixes), 8 replies per frame. Matching is per line, so a batched frame is answered and the remaining lines are still forwarded. Replies are queued and flushed at the top of the next `next_frame` (cancel-safe: popped only after a completed send; cleared on reconnect) |
+| `auto_replies: Vec<AutoReplyRule>` | Line rule `prefix` -> host-built `reply_prefix + token + reply_suffix` (e.g. `PING :` -> `PONG :`). The connector never sees a consumed line unless `forward_to_guest`. Only the token after `prefix` is reflected: `[A-Za-z0-9.:_/+=@-]`, `1..=max_token_len` (hard cap 256); anything else (CR, LF, space, non-ASCII, empty, too long) is a `TransportError::Read` -- never a reply. Max 8 rules (non-overlapping prefixes), 8 replies per frame. Matching is per line, so a batched frame is answered and the remaining lines are still forwarded. Replies are queued and flushed at the top of the next `next_frame` (cancel-safe: popped only after a completed send; cleared on reconnect) |
 | `self_echo: Option<SelfEchoFilter>` | Drops lines `[@tags ]<open><self_id><close><user@host> <command> ...` whose id equals `self_id` (ASCII case-insensitive) -- the bot's own echoed `PRIVMSG`. Host-side because the frozen `connector` WIT gives the guest no self identity; no WIT change. `self_id` is the bot's public login supplied by host config (never a secret, never guest data) |
 | `heartbeat_interval: Option<Duration>` | Enables the driver's heartbeat loop for this source; `send_heartbeat` writes the connector's body (non-empty, `<= max_frame_bytes`). `send_default_heartbeat` FAILS LOUD unless `session.default_heartbeat` is configured (below); the interval may instead be captured from a frame (`session.heartbeat`) |
 
@@ -144,7 +144,7 @@ Metrics: `FrameRuleMetrics::register(&registry)` once, then `WsTransport::with_m
 
 Twitch IRC example: `auto_replies = [{prefix:"PING :", reply_prefix:"PONG :", reply_suffix:"\r\n", max_token_len:64}]`,
 `self_echo = {self_id:<bot nick>, sender_open:":", sender_close:"!", command:"PRIVMSG"}`. Tests: `ws.rs`
-(real local WS server: PING -> PONG, overlay never sees the PING, hostile token never reflected, own echo dropped,
+(real local WS server: PING -> PONG, connector never sees the PING, hostile token never reflected, own echo dropped,
 others pass) and `transport_common.rs`.
 
 Permission catalog: `connector.pii.read` (Dangerous, global-approved, first-party-core only) gates `identity.lookup`;
@@ -152,7 +152,7 @@ cataloged in `core/bundle_capability_gate/src/permission.rs` and `hub_api/servic
 
 ## Session lifecycle: captured state, dynamic heartbeat, reconnect/park, poll hints (P6b session lifecycle)
 
-Platform overlays (Discord gateway, YouTube poll) need the host to run session mechanics a stateless guest cannot.
+Platform connectors (Discord gateway, YouTube poll) need the host to run session mechanics a stateless guest cannot.
 Design rule (same as `auto_replies`): **generic, declarative rules owned by host config** -- never from a guest, no
 platform named in the transport, **no change to the frozen `connector` world or the WIT contract**. The host feeds
 state back to the guest through the EXISTING opaque `session-token` and the handshake bytes it already returns.
@@ -185,7 +185,7 @@ Metrics (`FrameRuleMetrics`, same series): `svc_ingest_transport_frame_rules_tot
 `session_capture` (`stored`/`rejected`), `heartbeat_interval` (`applied`/`rejected`), `directive` and `close_code`
 (`reconnect`/`reconnect_fresh`/`park`; close also `unclassified`). Bounded enums only.
 
-Discord overlay host config (matches the overlay's session-token JSON `{"session_id","seq"}`; the overlay should answer
+Discord connector host config (matches the connector's session-token JSON `{"session_id","seq"}`; the connector should answer
 `on-heartbeat-due` with `none` and let `host_owned_heartbeat` supply the live `d:<seq>`):
 
 ```rust
@@ -253,7 +253,7 @@ SessionRules {
 }
 ```
 
-Intents / sharding (documented, deliberately not built): the overlay sends `GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT` = 33281
+Intents / sharding (documented, deliberately not built): the connector sends `GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT` = 33281
 in IDENTIFY exactly like the hardcoded gateway (`bundles/rust/discord/README.md` parity table); no `shard` field is sent (single
 shard, Discord's default), so `shard_id % max_concurrency` identify buckets and `session_start_limit` are host-only
 fleet concerns that stay with the IDENTIFY budget. Multi-shard operation would need a per-shard host config (one `WsConfig`
@@ -284,7 +284,7 @@ refusal: Exhausted{retry_after} -> close, reconnect delay floored at retry_after
 
 Wiring (Discord, single shard): build one `DiscordIdentifyGate` per bot connection from a `RedisIdentifyBudget` (shared
 Valkey connection), a `GatewayBotSource` and `IdentifyBudgetMetrics::register`, and pass it to the driver. The flag-flip
-that lets the host selector accept `OVERLAY_DISCORD_ENABLED=true` is NOT in this module: after this PR merges and the
+that lets the host selector accept `CONNECTOR_DISCORD_ENABLED=true` is NOT in this module: after this PR merges and the
 flag-on Discord e2e passes, set `IDENTIFY_BUDGET_READY = true` (connector_runtime selector) and the helm value
 `identifyBudgetReady`.
 
@@ -296,14 +296,14 @@ flag-on Discord e2e passes, set `IDENTIFY_BUDGET_READY = true` (connector_runtim
 | `error_rules: Vec<HttpErrorRule>` | `status` (400..=599) + `reason_pointer` + `reasons` (charset `[A-Za-z0-9_.-]`, max 8) -> `Backoff{base,max,honor_retry_after}` or `Park`. Backoff pauses polling (not an error: no driver backoff/reconnect), doubles per consecutive hit, capped at `max` (<= 24 h); a numeric `Retry-After` replaces the computed wait (still capped). Reset by the next good response. A 403 matching no rule (or an unparsable body) keeps the old **Fatal** behaviour; 401 stays Fatal. The body is only read for a status some rule targets, bounded by `max_body_bytes`. Metric `poll_http`: `backoff`/`park`/`unclassified`/`body_unreadable` |
 | `query_secret: Option<QuerySecret>` | `{param, handle}`: the secret resolved from `handle` (must be in `handles` = the manifest `secret_ref`; `param` must not equal `cursor_param` nor already be in the URL) is appended with strict form-urlencoding (everything outside `[A-Za-z0-9*-._]` is `%XX`, so it cannot end the parameter or add one). Resolved per request, never cached. Every transport error is a fixed class string -- the URL (which carries the key) is in no error, log or metric (tests enumerate refused-connect, 5xx, 403-park and captured tracing output). Residual: the `Url`/hyper own a non-zeroizing copy until the request completes |
 
-YouTube overlay host config:
+YouTube connector host config:
 
 ```rust
 PollConfig { /* url = ".../liveChat/messages?part=id,snippet,authorDetails&liveChatId=...", cursor_param "pageToken",
                 cursor_pointer "/nextPageToken", interval 5s */
     lifecycle: PollLifecycle {
         interval_hint: Some(IntervalHint { pointer: "/pollingIntervalMillis".into(),
-                                           min: 2s, max: 60s }),            // overlay's 2 s floor
+                                           min: 2s, max: 60s }),            // connector's 2 s floor
         error_rules: vec![
             HttpErrorRule { status: 403, reason_pointer: "/error/errors/0/reason".into(),
                 reasons: vec!["quotaExceeded","rateLimitExceeded","dailyLimitExceeded","userRateLimitExceeded"],
@@ -315,14 +315,14 @@ PollConfig { /* url = ".../liveChat/messages?part=id,snippet,authorDetails&liveC
     }, ..
 }
 ```
-`liveChatEnded`-style 403s are left unclassified (Fatal) on purpose: rediscovery is the overlay/host discovery loop's
+`liveChatEnded`-style 403s are left unclassified (Fatal) on purpose: rediscovery is the connector/host discovery loop's
 job (not in this change). Tests: `connector/lifecycle_tests.rs` (real local WS + HTTP servers, wire asserted),
 `tests/connector_session_lifecycle.rs` (real driver + `WsTransport`: HELLO -> heartbeat with live seq -> op 7 -> RESUME
 -> 4004 parks), `tests/connector_heartbeat.rs` (announced interval start/re-schedule/out-of-range/flag-off).
 
 ## Connector tools (`world connector-tools`, P6a Task 4)
 
-A connector overlay can EXPOSE normalized platform tools (`get_chatters`, `send_chat`, ...) and optionally CALL other
+A connector service bundle can EXPOSE normalized platform tools (`get_chatters`, `send_chat`, ...) and optionally CALL other
 bundles' tools, reusing the P3b tool mechanism (`docs/bundle-tool-invoke.md`) -- so app bundles reach platform data
 through `tool.invoke`, never a platform-specific host path.
 
@@ -335,7 +335,7 @@ through `tool.invoke`, never a platform-specific host path.
   `tool-provider.call` under the same pool slot / fuel / deadline / memory bounds as every other export; a guest
   refusal is `ConnectorCallError::Tool(ToolError)` (typed, not a sandbox trip), a plain-`connector` host answers
   `NoToolProvider` (fail loud, never an empty result).
-- **Wire.** `ExportKind::ToolCall` for a digest pinned in the connector registry is served by the overlay
+- **Wire.** `ExportKind::ToolCall` for a digest pinned in the connector registry is served by the connector
   (`{"ok": <json>}` / `{"tool_error": ...}`, the stage-tools result shape); a plain connector answers
   `EXPORT_MISSING`; an unpinned digest still falls through to the stage registry.
 - **Resource isolation (security review).** Tool calls run on a DEDICATED semaphore (`tool_pool_size` = half the
@@ -346,7 +346,7 @@ through `tool.invoke`, never a platform-specific host path.
 - **`tool` import.** Linked via the shared `HasExecState` host impl; authority stays with the stage (grants, kind
   matrix, depth). With no stage bridge it answers a typed `target-unavailable`.
 - **Gating / flag.** The executor only exposes the mechanism; nothing in production pins a `connector-tools`
-  component yet (the first one is a P6b overlay). The flag `waddles.connector-tools` (default OFF) is ENFORCED by the
+  component yet (the first one is a P6b connector). The flag `waddles.connector-tools` (default OFF) is ENFORCED by the
   outbound executor (P6a T6d-1, `svc_ingest::connector::sender_exec`): flag OFF => `FlagOff`, nothing is built or sent. Telemetry: `waddles_executor_connector_calls_total` /
   `_call_seconds` with `export="tool-call"`; logs carry `app_id` only (never args or results).
 - **Tests.** `core/bundle_executor/tests/connector_tools.rs` (real compiled fixtures through the production
@@ -378,7 +378,7 @@ Rebuilding the fixtures: see `core/bundle_executor/tests/fixtures/README.md`.
 
 The host executes a connector's `build-request` -> `http-request-tpl` in `core/svc_ingest/src/connector/sender_exec/`.
 Contract, slot table, verification rules, status and the T6d-2 plug-in points: `core/svc_ingest/README.md`
-"Generic outbound executor". Summary: the overlay returns slots only; the HOST verifies the template against a per-platform/kind
+"Generic outbound executor". Summary: the connector returns slots only; the HOST verifies the template against a per-platform/kind
 policy (declared egress hosts, slot positions, header allowlist, no template-set `Authorization`), substitutes pinned-target slots
 from the signed origin stamp / per-community connection and credential slots per call (never cached; zeroizing), percent-encodes
 URL positions and JSON-escapes body positions, and sends ONLY through `GuardedClient`. `dm.send` and `role.*` host duties
@@ -396,18 +396,18 @@ svc_ingest listens (mTLS, `connector/host_api_listener.rs`) and the executor dia
 connector pinned for the platform. Pinned connector digests are HOST config
 (`SENDER_EXEC_DIGEST_<PLATFORM>`), mirrored into the `ConnectorRegistry` and compared by the executor on
 every send -- never taken from the queue entry or the guest. `ExecutorLink::with_enabled_flags` answers
-`flags.enabled` host-calls for the overlay cutover flags (the twitch overlay refuses build-request while its
+`flags.enabled` host-calls for the connector cutover flags (the twitch connector refuses build-request while its
 flag reads OFF); all other host capabilities stay `HOST_CALL_DENIED`. Flag-ON requirements, rollout order
 and rollback: `core/svc_ingest/README.md` "Outbound executor -- boot wiring & rollout order". Real-path
-proof: `core/connector_e2e/tests/outbound_exec.rs` (real Valkey queue, real compiled overlays over the real
-wire, fake platform endpoints; only scheme+host of the overlay template is rewritten to the local fake).
+proof: `core/connector_e2e/tests/outbound_exec.rs` (real Valkey queue, real compiled connectors over the real
+wire, fake platform endpoints; only scheme+host of the connector template is rewritten to the local fake).
 
 ## Credential slot prefixes are per handle
 
 `WsConfig::slot_prefixes` is a `HashMap<handle, Vec<prefix>>` (type `SlotPrefixes`). A handshake slot
 may be substituted only when EVERY occurrence sits directly after one of ITS OWN handle's declared prefixes
 (ANCHORED: the prefix starts at frame offset 0 or right after CR/LF and the bytes from there to the slot equal it exactly, so `PRIVMSG #c :PASS oauth:{{S}}` is refused) and directly before a terminator (end, `"`, CR, LF). One handle's prefix never authorizes another handle's slot,
-so a signed overlay cannot place the secret-bearing handle after a non-credential prefix such as `NICK `.
+so a signed connector cannot place the secret-bearing handle after a non-credential prefix such as `NICK `.
 
 | Profile | `slot_prefixes` |
 |---|---|

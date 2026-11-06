@@ -1,5 +1,5 @@
-//! Platform overlay profiles (spec 1.2): one file per platform, each an
-//! [`OverlayProfile`](super::plan::OverlayProfile) with host-constant
+//! Platform connector profiles (spec 1.2): one file per platform, each an
+//! [`ConnectorProfile`](super::plan::ConnectorProfile) with host-constant
 //! derivation. One registration line per platform keeps merges trivial.
 
 pub mod discord;

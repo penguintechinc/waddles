@@ -8,7 +8,7 @@
 
 use serde_json::Value;
 
-use crate::error::{OverlayError, Result};
+use crate::error::{ConnectorError, Result};
 
 /// Discord `ADMINISTRATOR` permission bit.
 pub const PERM_ADMINISTRATOR: u64 = 1 << 3;
@@ -66,33 +66,35 @@ pub struct GuildInfo {
 /// Parses a `GET /guilds/{id}` body.
 ///
 /// # Errors
-/// [`OverlayError::Malformed`] when `owner_id` or `roles` is missing.
+/// [`ConnectorError::Malformed`] when `owner_id` or `roles` is missing.
 pub fn parse_guild(body: &[u8]) -> Result<GuildInfo> {
     let v: Value = serde_json::from_slice(body)
-        .map_err(|_| OverlayError::Malformed("guild response not JSON".into()))?;
+        .map_err(|_| ConnectorError::Malformed("guild response not JSON".into()))?;
     let owner_id = v
         .get("owner_id")
         .and_then(Value::as_str)
-        .ok_or_else(|| OverlayError::Malformed("guild response missing owner_id".into()))?
+        .ok_or_else(|| ConnectorError::Malformed("guild response missing owner_id".into()))?
         .to_string();
     let mut roles = Vec::new();
     for r in v
         .get("roles")
         .and_then(Value::as_array)
-        .ok_or_else(|| OverlayError::Malformed("guild response missing roles".into()))?
+        .ok_or_else(|| ConnectorError::Malformed("guild response missing roles".into()))?
     {
         let id = r
             .get("id")
             .and_then(Value::as_str)
-            .ok_or_else(|| OverlayError::Malformed("guild role missing id".into()))?;
+            .ok_or_else(|| ConnectorError::Malformed("guild role missing id".into()))?;
         // Discord stringifies the bitfield; a role we cannot parse is a typed error
         // (the lookup then fails closed) rather than a silently dropped role.
         let perms: u64 = r
             .get("permissions")
             .and_then(Value::as_str)
-            .ok_or_else(|| OverlayError::Malformed("guild role missing permissions".into()))?
+            .ok_or_else(|| ConnectorError::Malformed("guild role missing permissions".into()))?
             .parse()
-            .map_err(|_| OverlayError::Malformed("guild role permissions not a bitfield".into()))?;
+            .map_err(|_| {
+                ConnectorError::Malformed("guild role permissions not a bitfield".into())
+            })?;
         roles.push((id.to_string(), perms));
     }
     Ok(GuildInfo { owner_id, roles })
@@ -102,14 +104,14 @@ pub fn parse_guild(body: &[u8]) -> Result<GuildInfo> {
 /// implicit `@everyone` role (id == `guild_id`).
 ///
 /// # Errors
-/// [`OverlayError::Malformed`] when `roles` is missing.
+/// [`ConnectorError::Malformed`] when `roles` is missing.
 pub fn parse_member_roles(body: &[u8], guild_id: &str) -> Result<Vec<String>> {
     let v: Value = serde_json::from_slice(body)
-        .map_err(|_| OverlayError::Malformed("member response not JSON".into()))?;
+        .map_err(|_| ConnectorError::Malformed("member response not JSON".into()))?;
     let mut roles: Vec<String> = v
         .get("roles")
         .and_then(Value::as_array)
-        .ok_or_else(|| OverlayError::Malformed("member response missing roles".into()))?
+        .ok_or_else(|| ConnectorError::Malformed("member response missing roles".into()))?
         .iter()
         .filter_map(|r| r.as_str().map(str::to_string))
         .collect();

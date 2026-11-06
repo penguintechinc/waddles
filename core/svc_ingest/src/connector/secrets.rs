@@ -13,7 +13,7 @@ use super::webhook::{BoxFut, SecretError};
 
 /// Where a credential is about to be sent: the host of the transport's target
 /// URL. The credential is only released if this host is approved for the
-/// RESOLVED connection (never decided by overlay or guest input).
+/// RESOLVED connection (never decided by connector or guest input).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Destination {
     host: String,
@@ -38,7 +38,7 @@ impl Destination {
 pub struct ResolvedAuth {
     /// The secret value (zeroizing, redacted `Debug`).
     pub secret: SecretString,
-    /// Stored header name for `ApiKeyHeader` rows; overrides any overlay header.
+    /// Stored header name for `ApiKeyHeader` rows; overrides any connector header.
     pub header: Option<String>,
 }
 
@@ -113,7 +113,7 @@ impl<R: ConnectionResolve> TransportSecrets<R> {
     }
 
     /// Additionally requires the resolved provider to equal this host-verified
-    /// value (never the overlay's platform field).
+    /// value (never the connector's platform field).
     pub fn with_expected_provider(mut self, provider: impl Into<String>) -> Self {
         self.expected_provider = Some(provider.into().to_ascii_lowercase());
         self
@@ -383,7 +383,7 @@ mod tests {
         let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
         let mut poll = PollTransport::new(
             PollConfig {
-                platform: "overlay-claims-anything".into(),
+                platform: "connector-claims-anything".into(),
                 url: format!("{}/poll", server.uri()),
                 source_key: "opaque-source".into(),
                 handles: HashMap::from([("auth".into(), CONNECTION)]),
@@ -679,7 +679,7 @@ mod tests {
         assert_eq!(ok.secret.expose(), "ok");
     }
 
-    /// The overlay cannot point a registered handle at an off-allowlist
+    /// The connector cannot point a registered handle at an off-allowlist
     /// endpoint to harvest the credential: zero requests reach that host.
     #[tokio::test]
     async fn poll_to_unapproved_host_sends_nothing_and_cannot_echo() {
@@ -726,7 +726,7 @@ mod tests {
     }
 
     /// Provider binding: a host-supplied expected provider must equal the
-    /// RESOLVED provider, whatever the overlay platform string claims.
+    /// RESOLVED provider, whatever the connector platform string claims.
     #[tokio::test]
     async fn expected_provider_mismatch_is_rejected() {
         let _env = env_read().await;
@@ -773,7 +773,7 @@ mod tests {
     }
 
     /// End to end: an API-key row is sent under the stored header name with a
-    /// raw value, ignoring the overlay's header/prefix.
+    /// raw value, ignoring the connector's header/prefix.
     #[tokio::test]
     async fn poll_sends_api_key_under_stored_header() {
         let _env = env_read().await;
@@ -794,7 +794,7 @@ mod tests {
         let source = TransportSecrets::new(Arc::new(resolver), 7).unwrap();
         let mut poll = PollTransport::new(
             PollConfig {
-                platform: "overlay-claims-anything".into(),
+                platform: "connector-claims-anything".into(),
                 url: format!("{}/poll", server.uri()),
                 source_key: "opaque-source".into(),
                 handles: HashMap::from([("auth".into(), CONNECTION)]),

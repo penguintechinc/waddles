@@ -2,7 +2,7 @@
 //! `get_subscriptions`. Requests go out through the guarded `http` import with
 //! header secret-refs (the bundle never sees a token); every returned user is
 //! mapped to a canonical UUID via `identity.lookup`, so no handle or numeric
-//! Twitch id leaves the overlay.
+//! Twitch id leaves the connector.
 
 use std::sync::Arc;
 

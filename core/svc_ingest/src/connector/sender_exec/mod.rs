@@ -1,7 +1,7 @@
 //! Generic outbound executor (P6a T6d-1): the host half of
 //! `sender.build-request`.
 //!
-//! A platform overlay (`world connector-tools`) shapes a platform request as
+//! A platform connector (`world connector-tools`) shapes a platform request as
 //! an `http-request-tpl` carrying only SLOTS -- never a token, never a raw
 //! destination. This module is what makes that safe to run:
 //!
@@ -165,7 +165,7 @@ pub struct SlotRequest<'a> {
     /// The stamp-verified channel (canonical `#login` / snowflake), when the
     /// platform has one. The resolver MUST prove the community owns it.
     pub pinned_channel: Option<&'a str>,
-    /// The overlay `secret-refs` handles to resolve (`token`, `client_id`,
+    /// The connector `secret-refs` handles to resolve (`token`, `client_id`,
     /// `broadcaster_id`, `sender_id`, `youtube.oauth`, ...).
     pub handles: &'a [&'static str],
 }
@@ -224,7 +224,7 @@ pub trait DutyHook: Send + Sync {
     /// `send_dm_in_community`).
     async fn gate(&self, cx: &DutyCx<'_>) -> Result<(), ExecError>;
 
-    /// Normalizes the overlay's template BEFORE verification. Runs only for
+    /// Normalizes the connector's template BEFORE verification. Runs only for
     /// duty kinds. A hook may rewrite the placeholders and strip the
     /// pseudo-headers that carry exactly the values the HOST put into the
     /// payload (so the verifier still refuses every other placeholder). The
@@ -303,7 +303,7 @@ pub enum ExecError {
     /// The origin stamp / pin gate refused the destination.
     #[error("destination is not the host-pinned origin")]
     Pin(PinError),
-    /// The queue entry cannot be expressed as an overlay payload.
+    /// The queue entry cannot be expressed as an connector payload.
     #[error("outbound entry cannot be expressed as a connector action")]
     BadAction,
     /// The connector could not build the template.
@@ -433,7 +433,7 @@ pub struct ExecutorConfig {
 }
 
 impl ExecutorConfig {
-    /// Production defaults: the three overlay policies, no redirects
+    /// Production defaults: the three connector policies, no redirects
     /// followed, 10 s deadline, 64 KiB response ceiling, empty SSRF allowlist.
     /// `digests` maps platform to its pinned `sha256:<hex>`.
     ///
@@ -829,9 +829,9 @@ fn pin_channel(
         .map_err(ExecError::Pin)
 }
 
-/// The overlay payload for a plain (non-duty) kind: ONLY the text / message
+/// The connector payload for a plain (non-duty) kind: ONLY the text / message
 /// id from the verified queue entry -- never a channel, guild, user or
-/// credential field (overlays reject those outright).
+/// credential field (connectors reject those outright).
 fn default_payload(kind: &KindPolicy, action: &OutboundAction) -> Result<String, ExecError> {
     let v = match action {
         OutboundAction::ChatSend { text, .. } => {

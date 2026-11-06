@@ -1,12 +1,12 @@
 //! Boot wiring of the connector runtime (spec
 //! `2026-11-05-connector-runtime-inbound-manager.md` sections 3-5, PR-E).
 //!
-//! Everything here runs ONLY when an `OVERLAY_<P>_ENABLED` baseline is ON.
-//! With every overlay OFF `lib.rs` never calls into this module: nothing is
+//! Everything here runs ONLY when an `CONNECTOR_<P>_ENABLED` baseline is ON.
+//! With every connector OFF `lib.rs` never calls into this module: nothing is
 //! built, bound or spawned (pinned by `default_boot_starts_nothing_new`).
 //!
 //! ```text
-//!  HostBridge::new ──> ExecutorLink (+ OverlayHostCalls over ActiveConnections)
+//!  HostBridge::new ──> ExecutorLink (+ ConnectorHostCalls over ActiveConnections)
 //!       │                      ▲ executor dials in (mTLS listener, shared with outbound)
 //!  assemble(deps) ─────────────┴─> ConnectorRuntime
 //!       feed      FeedSet{ HubBindingFeed<profile> per enabled platform }
@@ -29,10 +29,10 @@ use penguin_spine::{KeyRing, SpineMetrics};
 
 use super::feed::{ConnKey, DynFeed, FeedSet, HubBindingFeed, TransportPlan, WebhookPlan};
 use super::metrics::RuntimeMetrics;
-use super::plan::{OverlayProfile, RuntimeEnv};
+use super::plan::{ConnectorProfile, RuntimeEnv};
 use super::profiles::{discord, twitch, youtube};
 use super::scoped::{ConnectionSink, ScopeLookup, ScopeTenantResolve, ScopedSinkFactory};
-use super::selector::{BootError, OverlaySelector, IDENTIFY_BUDGET_READY};
+use super::selector::{BootError, ConnectorSelector, IDENTIFY_BUDGET_READY};
 use super::supervisor::{
     ConnectionActivator, ConnectorRuntime, ResolverSecrets, RuntimeConfig, RuntimeDeps,
     RuntimeError, SecretsWrapper, WebhookAttach,
@@ -41,7 +41,7 @@ use super::webhook_boot::{self, WebhookEnv};
 use super::ConnectorValkeyLease;
 use crate::config::CliConfig;
 use crate::connector::host_calls::{
-    ActiveConnections, CallScope, HostCallConfig, IdentityTokenizer, OverlayHostCalls,
+    ActiveConnections, CallScope, ConnectorHostCalls, HostCallConfig, IdentityTokenizer,
 };
 use crate::connector::secrets::TransportSecretSource;
 use crate::connector::webhook::{WebhookIngress, WebhookTransport};
@@ -68,7 +68,7 @@ fn digest_env(platform: &str) -> &'static str {
     }
 }
 
-/// Host-constant `app_id` and hub-api provider of each overlay platform.
+/// Host-constant `app_id` and hub-api provider of each connector platform.
 fn platform_consts(platform: &str) -> Option<(&'static str, &'static str)> {
     match platform {
         "twitch" => Some((twitch::APP_ID, twitch::PROVIDER)),
@@ -81,7 +81,7 @@ fn platform_consts(platform: &str) -> Option<(&'static str, &'static str)> {
 /// Process-level runtime settings, validated once at boot.
 #[derive(Debug, Clone)]
 pub struct RuntimeSettings {
-    /// Overlay-ON platforms.
+    /// Connector-ON platforms.
     pub platforms: Vec<&'static str>,
     /// Pinned connector digest per platform (host config only).
     pub digests: BTreeMap<&'static str, String>,
@@ -110,7 +110,7 @@ impl RuntimeSettings {
     /// [`BootError`] naming the first missing/malformed item.
     pub fn from_inputs(
         cli: &CliConfig,
-        selector: &OverlaySelector,
+        selector: &ConnectorSelector,
         lookup: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, BootError> {
         let platforms = selector.enabled_platforms();
@@ -191,19 +191,19 @@ pub struct HostBridge {
 }
 
 impl HostBridge {
-    /// Builds the link with `OverlayHostCalls` installed (`enabled` = the
-    /// overlay-ON platforms, whose cutover flags answer ON).
+    /// Builds the link with `ConnectorHostCalls` installed (`enabled` = the
+    /// connector-ON platforms, whose cutover flags answer ON).
     ///
     /// # Errors
-    /// [`BootError::Malformed`] for a platform with no host-call overlay.
+    /// [`BootError::Malformed`] for a platform with no host-call connector.
     pub fn new(
         tokenizer: Arc<dyn IdentityTokenizer>,
         enabled: &[&'static str],
     ) -> Result<Self, BootError> {
         let active = Arc::new(ActiveConnections::new());
         let cfg = HostCallConfig::new(enabled.iter().copied())
-            .map_err(|_| BootError::Malformed("overlay platform"))?;
-        let handler = OverlayHostCalls::new(Arc::clone(&active) as _, tokenizer, cfg);
+            .map_err(|_| BootError::Malformed("connector platform"))?;
+        let handler = ConnectorHostCalls::new(Arc::clone(&active) as _, tokenizer, cfg);
         let link = Arc::new(ExecutorLink::new().with_host_calls(Arc::new(handler)));
         Ok(Self { link, active })
     }
@@ -360,7 +360,7 @@ fn feed_for<R: ConnectionResolve + 'static>(
     env: &RuntimeEnv,
     metrics: &RuntimeMetrics,
 ) -> Option<Arc<dyn DynFeed>> {
-    fn make<R: ConnectionResolve + 'static, P: OverlayProfile + 'static>(
+    fn make<R: ConnectionResolve + 'static, P: ConnectorProfile + 'static>(
         resolver: &Arc<R>,
         profile: P,
         env: &RuntimeEnv,
@@ -600,7 +600,7 @@ pub fn build_resolver(cli: &CliConfig) -> anyhow::Result<connection_resolver::Co
 
 /// Connects the spine, assembles the runtime and spawns it. The spine connect
 /// is bounded by the configured grace period: a runtime that cannot reach its
-/// dependencies is a boot error, never a silently idle overlay.
+/// dependencies is a boot error, never a silently idle connector.
 ///
 /// # Errors
 /// Any missing prerequisite (scope resolver, binding keyring, spine, Valkey) or
@@ -680,15 +680,15 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
     Ok(Started { link, ready })
 }
 
-/// The whole overlay boot sequence `lib.rs` runs when any `OVERLAY_<P>_ENABLED`
+/// The whole connector boot sequence `lib.rs` runs when any `CONNECTOR_<P>_ENABLED`
 /// is ON, from the real process environment: the hub-api resolver, identity
-/// tokenizer and the installed dataplane scope resolver, then [`start_overlay_with`].
+/// tokenizer and the installed dataplane scope resolver, then [`start_connector_with`].
 ///
 /// # Errors
 /// Any missing prerequisite -- fatal to the process, never a silent fallback.
-pub async fn start_overlay(
+pub async fn start_connector(
     config: &crate::config::Config,
-    selector: &OverlaySelector,
+    selector: &ConnectorSelector,
     webhook_env: &Arc<WebhookEnv>,
     state: &mut crate::http::AppState,
     metrics: Arc<crate::telemetry::IngestMetrics>,
@@ -701,14 +701,14 @@ pub async fn start_overlay(
         .ok_or_else(|| anyhow::anyhow!("connector runtime needs the dataplane scope resolver"))?;
     let resolver = Arc::new(build_resolver(&config.cli)?);
     let tokenizer = connect_tokenizer(&config.cli, &lookup).await?;
-    start_overlay_with(
+    start_connector_with(
         config,
         selector,
         webhook_env,
         state,
         metrics,
         dek,
-        OverlayDeps {
+        ConnectorDeps {
             resolver,
             scope,
             tokenizer,
@@ -718,9 +718,9 @@ pub async fn start_overlay(
     .await
 }
 
-/// The injected dependencies of [`start_overlay_with`] (hub-api resolver, scope
+/// The injected dependencies of [`start_connector_with`] (hub-api resolver, scope
 /// authority, identity tokenizer and the env lookup).
-pub struct OverlayDeps<'a, R: ConnectionResolve + 'static> {
+pub struct ConnectorDeps<'a, R: ConnectionResolve + 'static> {
     /// hub-api connection resolver.
     pub resolver: Arc<R>,
     /// Scope authority (tenant refusal + sink scope).
@@ -736,16 +736,16 @@ pub struct OverlayDeps<'a, R: ConnectionResolve + 'static> {
 ///
 /// # Errors
 /// Any missing prerequisite -- fatal to the process, never a silent fallback.
-pub async fn start_overlay_with<R: ConnectionResolve + 'static>(
+pub async fn start_connector_with<R: ConnectionResolve + 'static>(
     config: &crate::config::Config,
-    selector: &OverlaySelector,
+    selector: &ConnectorSelector,
     webhook_env: &Arc<WebhookEnv>,
     state: &mut crate::http::AppState,
     metrics: Arc<crate::telemetry::IngestMetrics>,
     dek: crate::identity_crypto::ConfiguredDekProvider<
         crate::identity_crypto::UnimplementedMachineJwtProvider,
     >,
-    deps: OverlayDeps<'_, R>,
+    deps: ConnectorDeps<'_, R>,
 ) -> anyhow::Result<Started> {
     let cli = &config.cli;
     let settings = RuntimeSettings::from_inputs(cli, selector, deps.lookup)?;
@@ -827,15 +827,15 @@ mod tests {
         CliConfig::parse_from(["svc-ingest", "--environment", "alpha"])
     }
 
-    fn selector(pairs: &[(&str, &str)]) -> OverlaySelector {
-        OverlaySelector::from_env(&env(pairs)).unwrap()
+    fn selector(pairs: &[(&str, &str)]) -> ConnectorSelector {
+        ConnectorSelector::from_env(&env(pairs)).unwrap()
     }
 
     #[test]
     fn settings_read_the_digest_of_every_enabled_platform_and_default_the_rest() {
         let sel = selector(&[
-            ("OVERLAY_TWITCH_ENABLED", "true"),
-            ("OVERLAY_YOUTUBE_ENABLED", "true"),
+            ("CONNECTOR_TWITCH_ENABLED", "true"),
+            ("CONNECTOR_YOUTUBE_ENABLED", "true"),
         ]);
         let lookup = env(&[
             ("SENDER_EXEC_DIGEST_TWITCH", " sha256:aa "),
@@ -854,7 +854,7 @@ mod tests {
 
     #[test]
     fn a_missing_digest_or_a_malformed_heartbeat_is_fatal_and_named() {
-        let sel = selector(&[("OVERLAY_TWITCH_ENABLED", "true")]);
+        let sel = selector(&[("CONNECTOR_TWITCH_ENABLED", "true")]);
         assert_eq!(
             RuntimeSettings::from_inputs(&cli(), &sel, &env(&[])).unwrap_err(),
             BootError::Missing("SENDER_EXEC_DIGEST_TWITCH")
@@ -1277,7 +1277,7 @@ mod tests {
     /// source that answers `nick`/`channel` itself and refuses unknown refs.
     #[tokio::test]
     async fn the_twitch_wrapper_wraps_a_real_profile_plan() {
-        use crate::connector_runtime::plan::OverlayProfile;
+        use crate::connector_runtime::plan::ConnectorProfile;
         let binding = connection_resolver::BindingSummary {
             community_id: 7,
             connection_id: 9,

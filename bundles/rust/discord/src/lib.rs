@@ -1,4 +1,4 @@
-//! Discord platform overlay (bundle-MCP-tools P6b T2) on `world connector-tools`.
+//! Discord platform connector (bundle-MCP-tools P6b T2) on `world connector-tools`.
 //!
 //! The host owns every transport concern (the Gateway over the generic WS
 //! transport, interactions over the generic webhook route with the Ed25519
@@ -35,7 +35,7 @@ mod component {
     use super::bindings::waddle::connector::types::{
         ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
     };
-    use super::error::{OverlayError, Result};
+    use super::error::{ConnectorError, Result};
     use super::perms::{GuildInfo, parse_guild, parse_member_roles};
     use super::receiver::{self, ConnCtx, Host, Level};
     use super::sender::{self, API_BASE, AUTH_HANDLE};
@@ -59,7 +59,7 @@ mod component {
                 secret_refs: vec![("Authorization".to_string(), AUTH_HANDLE.to_string())],
             })
             .map_err(|e| {
-                OverlayError::Backend(
+                ConnectorError::Backend(
                     match e {
                         http::Error::Denied(_) => "http denied",
                         http::Error::Timeout => "http timeout",
@@ -73,7 +73,7 @@ mod component {
             if (200..300).contains(&resp.status) && !resp.truncated {
                 Ok(resp.body)
             } else {
-                Err(OverlayError::Backend(format!(
+                Err(ConnectorError::Backend(format!(
                     "http status {}",
                     resp.status
                 )))
@@ -98,7 +98,7 @@ mod component {
             )))
             .map(|r| r.uuid)
             .map_err(|e| {
-                OverlayError::Backend(
+                ConnectorError::Backend(
                     match e {
                         identity::Error::Denied(_) => "identity denied",
                         identity::Error::NotFound => "identity not found",
@@ -121,11 +121,11 @@ mod component {
         }
     }
 
-    fn to_frame_error(e: OverlayError) -> FrameError {
+    fn to_frame_error(e: ConnectorError) -> FrameError {
         match e {
-            OverlayError::Unsupported(m) => FrameError::Unsupported(m),
-            OverlayError::Malformed(m) => FrameError::Malformed(m),
-            OverlayError::Backend(m) => FrameError::Backend(m),
+            ConnectorError::Unsupported(m) => FrameError::Unsupported(m),
+            ConnectorError::Malformed(m) => FrameError::Malformed(m),
+            ConnectorError::Backend(m) => FrameError::Backend(m),
         }
     }
 

@@ -825,10 +825,10 @@ def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: 
 
 
 def test_load_catalog_accepts_a_connector_tools_wit_world_row(tmp_path: Path) -> None:
-    """A platform-overlay row (`wit_world: connector-tools`) loads like any rust service row.
+    """A platform-connector row (`wit_world: connector-tools`) loads like any rust service row.
 
     The seeder never validates `wit_world` (only the python build script does, for python rows),
-    so overlay rows must parse and keep their app_id/version/activation targets intact.
+    so connector rows must parse and keep their app_id/version/activation targets intact.
     """
     catalog_path = tmp_path / "catalog.yaml"
     catalog_path.write_text(
@@ -2069,20 +2069,20 @@ def test_real_catalog_bundle_yaml_and_hub_manifest_agree() -> None:
     assert checked > 0
 
 
-_OVERLAY_APP_IDS = (
+_CONNECTOR_APP_IDS = (
     "waddles.core.service.twitch",
     "waddles.core.service.discord",
     "waddles.core.service.youtube",
 )
 
 
-def test_real_catalog_has_the_three_connector_tools_overlay_rows() -> None:
-    """P6b: twitch/discord/youtube overlays are catalog rows with the connector-tools shape."""
+def test_real_catalog_has_the_three_connector_tools_rows() -> None:
+    """P6b: twitch/discord/youtube connectors are catalog rows with the connector-tools shape."""
     bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
     by_id = {e.app_id: e for e in load_catalog(bundles_dir / "core-bundles.yaml")}
     raw = yaml.safe_load((bundles_dir / "core-bundles.yaml").read_text())["bundles"]
     raw_by_id = {r["app_id"]: r for r in raw}
-    for app_id in _OVERLAY_APP_IDS:
+    for app_id in _CONNECTOR_APP_IDS:
         platform = app_id.rsplit(".", 1)[1]
         assert app_id in by_id, app_id
         row = raw_by_id[app_id]
@@ -2092,17 +2092,17 @@ def test_real_catalog_has_the_three_connector_tools_overlay_rows() -> None:
             "service",
         )
         assert row["source_dir"] == f"rust/{platform}"
-        # discord's flat filename is `discord-overlay.*`: plain `discord.*` is the python app's.
-        stem = "discord-overlay" if platform == "discord" else platform
+        # discord's flat filename is `discord-connector.*`: plain `discord.*` is the python app's.
+        stem = "discord-connector" if platform == "discord" else platform
         assert row["artifact_path"] == f"{stem}.wasm"
         assert row["manifest_path"] == f"{stem}.manifest.yaml"
 
 
-@pytest.mark.parametrize("app_id", _OVERLAY_APP_IDS)
-async def test_seed_one_seeds_each_real_overlay_row_and_grants_pii_read(
+@pytest.mark.parametrize("app_id", _CONNECTOR_APP_IDS)
+async def test_seed_one_seeds_each_real_connector_row_and_grants_pii_read(
     app_id: str, install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Seeds every overlay from the REAL catalog + REAL hub-manifest (wasm bytes faked).
+    """Seeds every connector from the REAL catalog + REAL hub-manifest (wasm bytes faked).
 
     `wit_world: connector-tools` never reaches the seeder's validation, so the row seeds like any
     rust service; as a `waddles.core.*` bundle the seeder pre-grants every declared permission,
@@ -2134,7 +2134,7 @@ async def test_seed_one_seeds_each_real_overlay_row_and_grants_pii_read(
 
 
 def test_real_catalog_manifest_and_artifact_filenames_are_unique() -> None:
-    """regression: the overlay `discord.wasm` collided with the python discord app's output.
+    """regression: the connector `discord.wasm` collided with the python discord app's output.
 
     Every row lands in ONE flat `/core-bundles/` dir (python rows via `dist/.` COPY), so a
     duplicate `manifest_path`/`artifact_path` silently overwrites another bundle's files.

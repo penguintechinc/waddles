@@ -40,20 +40,20 @@ use crate::platform_users::HubPlatformUserResolver;
 /// Platforms the executor serves, in start order.
 pub const PLATFORMS: [&str; 3] = ["twitch", "discord", "youtube"];
 
-/// The overlay cutover flags the executor path answers `true` to over the
-/// host-API link: each platform overlay refuses `sender.build-request` while
-/// its own flag reads OFF, and using the overlay for outbound is exactly what
+/// The connector cutover flags the executor path answers `true` to over the
+/// host-API link: each platform connector refuses `sender.build-request` while
+/// its own flag reads OFF, and using the connector for outbound is exactly what
 /// `waddles.connector-tools` ON decides.
-pub const OVERLAY_FLAGS: [&str; 3] = [
-    "waddles.overlay-twitch",
-    "waddles.overlay-discord",
-    "waddles.overlay-youtube",
+pub const CONNECTOR_FLAGS: [&str; 3] = [
+    "waddles.connector-twitch",
+    "waddles.connector-discord",
+    "waddles.connector-youtube",
 ];
 
 /// Default host-API listener port (the executor dials this).
 pub const DEFAULT_HOST_API_PORT: u16 = 8301;
 
-/// Core `app_id` of each platform's overlay (host constants, not config: the
+/// Core `app_id` of each platform's connector (host constants, not config: the
 /// connector world is core-namespace only and the digest pins the content).
 fn app_id(platform: &str) -> Option<&'static str> {
     match platform {
@@ -389,7 +389,7 @@ pub fn build_with_link(
     shared_link: Option<Arc<ExecutorLink>>,
 ) -> anyhow::Result<ExecParts> {
     let link = shared_link
-        .unwrap_or_else(|| Arc::new(ExecutorLink::new().with_enabled_flags(OVERLAY_FLAGS)));
+        .unwrap_or_else(|| Arc::new(ExecutorLink::new().with_enabled_flags(CONNECTOR_FLAGS)));
     let builder = WireTemplateBuilder::new(Arc::clone(&link), Arc::new(registry(cfg)?));
     let slots = PlatformSlotRouter::new(
         TwitchSlots::new(

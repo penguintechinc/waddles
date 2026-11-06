@@ -53,13 +53,13 @@ impl TransportSecretSource for Tok {
     }
 }
 
-/// An overlay stand-in: builds IDENTIFY, or RESUME when the host handed it a
+/// An connector stand-in: builds IDENTIFY, or RESUME when the host handed it a
 /// session token; never sees the heartbeat sequence (answers `none`).
-struct Overlay {
+struct Connector {
     tokens: Mutex<Vec<Option<String>>>,
 }
 
-impl ConnectorInvoker for Overlay {
+impl ConnectorInvoker for Connector {
     async fn on_connect(
         &self,
         _p: &str,
@@ -232,10 +232,10 @@ async fn hello_heartbeat_resume_and_park_end_to_end() {
     r.register(PinnedConnector::new(PLATFORM, "id", "sha256:aa", 4096))
         .unwrap();
     let metrics = register_connector_metrics(&prometheus::Registry::new()).unwrap();
-    let overlay = Arc::new(Overlay {
+    let connector = Arc::new(Connector {
         tokens: Mutex::default(),
     });
-    let driver = ConnectorDriver::new(Arc::new(r), Arc::clone(&overlay), Arc::new(Null), metrics)
+    let driver = ConnectorDriver::new(Arc::new(r), Arc::clone(&connector), Arc::new(Null), metrics)
         .with_heartbeat_enabled(true)
         .with_backoff_cap(Duration::from_millis(20));
     let t = WsTransport::new(cfg(addr), Tok).unwrap();
@@ -256,7 +256,7 @@ async fn hello_heartbeat_resume_and_park_end_to_end() {
         wire[2],
         r#"{"op":6,"d":{"token":"tok123","session_id":"abc123","seq":5}}"#
     );
-    let tokens = overlay.tokens.lock().unwrap().clone();
+    let tokens = connector.tokens.lock().unwrap().clone();
     assert_eq!(tokens[0], None);
     assert_eq!(
         tokens[1].as_deref(),

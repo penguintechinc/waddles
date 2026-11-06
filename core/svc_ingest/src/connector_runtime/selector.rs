@@ -1,8 +1,8 @@
 //! Host selector (spec 2026-11-05 section 5): which inbound implementation
-//! runs per platform -- the legacy receivers or the connector overlay runtime.
+//! runs per platform -- the legacy receivers or the connector service bundle runtime.
 //!
 //! ```text
-//!  OVERLAY_<P>_ENABLED (env baseline, default OFF, strict bool)
+//!  CONNECTOR_<P>_ENABLED (env baseline, default OFF, strict bool)
 //!    OFF ──> legacy starters exactly as before
 //!    ON  ──> legacy inbound (and, per table, outbound/EventSub) NOT started,
 //!            every prerequisite validated up front (fatal, names the item)
@@ -13,7 +13,7 @@
 //! This module must NEVER read the PostHog / `penguin_licensing` client. The
 //! service's hardcoded `*.waddles.app` domain bypass makes that client
 //! evaluate EVERY flag ON, so a flag-client-backed selector would flip every
-//! environment to the overlay path at once. The baseline is env only, the same
+//! environment to the connector path at once. The baseline is env only, the same
 //! precedent as `INGEST_DYNAMIC_CONNECTIONS` and `CONNECTOR_TOOLS_ENABLED`.
 //! `selector_source_does_not_touch_the_flag_client` pins this.
 
@@ -21,7 +21,7 @@ use crate::config::CliConfig;
 
 /// Flipped to `true` by the identify-budget PR once the Valkey-backed Discord
 /// IDENTIFY budget is ported into the runtime. While `false`,
-/// `OVERLAY_DISCORD_ENABLED=true` is a fatal boot error: without the budget a
+/// `CONNECTOR_DISCORD_ENABLED=true` is a fatal boot error: without the budget a
 /// restart storm would trip Discord's session-start limits.
 pub const IDENTIFY_BUDGET_READY: bool = false;
 
@@ -36,15 +36,15 @@ pub const WEBHOOK_CAPABLE: [&str; 2] = ["twitch", "discord"];
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum BootError {
     /// A required setting is unset or empty.
-    #[error("connector overlay is ON but {0} is not set")]
+    #[error("connector service bundle is ON but {0} is not set")]
     Missing(&'static str),
     /// A setting is present but unusable.
     #[error("{0} is malformed")]
     Malformed(&'static str),
     /// A prerequisite is not satisfied.
-    #[error("connector overlay is ON but {0} is OFF")]
+    #[error("connector service bundle is ON but {0} is OFF")]
     Prerequisite(&'static str),
-    /// The platform overlay is blocked until a named item lands.
+    /// The platform connector is blocked until a named item lands.
     #[error("{0}")]
     Blocked(&'static str),
 }
@@ -66,16 +66,16 @@ fn parse_bool(
     }
 }
 
-/// Which platforms run on the overlay runtime (`true`) instead of legacy.
+/// Which platforms run on the connector runtime (`true`) instead of legacy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct OverlaySelector {
+pub struct ConnectorSelector {
     twitch: bool,
     discord: bool,
     youtube: bool,
 }
 
-impl OverlaySelector {
-    /// Reads `OVERLAY_{TWITCH,DISCORD,YOUTUBE}_ENABLED` via `lookup` (env in
+impl ConnectorSelector {
+    /// Reads `CONNECTOR_{TWITCH,DISCORD,YOUTUBE}_ENABLED` via `lookup` (env in
     /// production). Default OFF; malformed is fatal; Discord ON is fatal
     /// while [`IDENTIFY_BUDGET_READY`] is `false`.
     ///
@@ -91,21 +91,21 @@ impl OverlaySelector {
         identify_budget_ready: bool,
     ) -> Result<Self, BootError> {
         let sel = Self {
-            twitch: parse_bool(lookup, "OVERLAY_TWITCH_ENABLED")?,
-            discord: parse_bool(lookup, "OVERLAY_DISCORD_ENABLED")?,
-            youtube: parse_bool(lookup, "OVERLAY_YOUTUBE_ENABLED")?,
+            twitch: parse_bool(lookup, "CONNECTOR_TWITCH_ENABLED")?,
+            discord: parse_bool(lookup, "CONNECTOR_DISCORD_ENABLED")?,
+            youtube: parse_bool(lookup, "CONNECTOR_YOUTUBE_ENABLED")?,
         };
         if sel.discord && !identify_budget_ready {
             return Err(BootError::Blocked(
-                "discord overlay requires the identify budget, not yet ported",
+                "discord connector requires the identify budget, not yet ported",
             ));
         }
         Ok(sel)
     }
 
-    /// `true` when the overlay path is active for `platform` (unknown: false).
+    /// `true` when the connector path is active for `platform` (unknown: false).
     #[must_use]
-    pub fn overlay(&self, platform: &str) -> bool {
+    pub fn connector(&self, platform: &str) -> bool {
         match platform {
             "twitch" => self.twitch,
             "discord" => self.discord,
@@ -117,19 +117,22 @@ impl OverlaySelector {
     /// `true` when the legacy path is active for `platform`.
     #[must_use]
     pub fn legacy(&self, platform: &str) -> bool {
-        !self.overlay(platform)
+        !self.connector(platform)
     }
 
-    /// `true` when any platform runs on the overlay runtime.
+    /// `true` when any platform runs on the connector runtime.
     #[must_use]
-    pub fn any_overlay(&self) -> bool {
+    pub fn any_connector(&self) -> bool {
         self.twitch || self.discord || self.youtube
     }
 
-    /// Platforms with the overlay ON, in [`PLATFORMS`] order.
+    /// Platforms with the connector ON, in [`PLATFORMS`] order.
     #[must_use]
     pub fn enabled_platforms(&self) -> Vec<&'static str> {
-        PLATFORMS.into_iter().filter(|p| self.overlay(p)).collect()
+        PLATFORMS
+            .into_iter()
+            .filter(|p| self.connector(p))
+            .collect()
     }
 }
 
@@ -172,14 +175,15 @@ impl LegacyPlan {
     /// runtime webhook platform; outbound drains are suppressed only when the
     /// generic executor path (`CONNECTOR_TOOLS_ENABLED`) replaces them.
     #[must_use]
-    pub fn new(sel: &OverlaySelector, webhook_platforms: &[&str], tools_enabled: bool) -> Self {
-        let runtime_owns_eventsub = sel.overlay("twitch") && webhook_platforms.contains(&"twitch");
+    pub fn new(sel: &ConnectorSelector, webhook_platforms: &[&str], tools_enabled: bool) -> Self {
+        let runtime_owns_eventsub =
+            sel.connector("twitch") && webhook_platforms.contains(&"twitch");
         Self {
             twitch_inbound: sel.legacy("twitch"),
             twitch_eventsub: !runtime_owns_eventsub,
-            twitch_outbound: !(sel.overlay("twitch") && tools_enabled),
+            twitch_outbound: !(sel.connector("twitch") && tools_enabled),
             discord_inbound: sel.legacy("discord"),
-            discord_outbound: !(sel.overlay("discord") && tools_enabled),
+            discord_outbound: !(sel.connector("discord") && tools_enabled),
         }
     }
 }
@@ -219,7 +223,7 @@ pub async fn start_legacy<S: LegacyStarters>(
     } else {
         tracing::info!(
             platform = "twitch",
-            "overlay ON; legacy inbound not started"
+            "connector ON; legacy inbound not started"
         );
     }
     if plan.discord_inbound {
@@ -227,7 +231,7 @@ pub async fn start_legacy<S: LegacyStarters>(
     } else {
         tracing::info!(
             platform = "discord",
-            "overlay ON; legacy inbound not started"
+            "connector ON; legacy inbound not started"
         );
     }
     if plan.twitch_outbound {
@@ -235,7 +239,7 @@ pub async fn start_legacy<S: LegacyStarters>(
     } else {
         tracing::info!(
             platform = "twitch",
-            "overlay ON; legacy outbound not started"
+            "connector ON; legacy outbound not started"
         );
     }
     if plan.discord_outbound {
@@ -243,7 +247,7 @@ pub async fn start_legacy<S: LegacyStarters>(
     } else {
         tracing::info!(
             platform = "discord",
-            "overlay ON; legacy outbound not started"
+            "connector ON; legacy outbound not started"
         );
     }
     if plan.twitch_eventsub {
@@ -286,25 +290,25 @@ fn digest_name(platform: &str) -> &'static str {
 /// Everything the runtime boot validates besides the selector itself.
 pub struct BootInputs<'a> {
     pub cli: &'a CliConfig,
-    pub selector: &'a OverlaySelector,
+    pub selector: &'a ConnectorSelector,
     pub webhook_platforms: &'a [&'static str],
     /// `penguin_spine::SpineConfig::from_env()` succeeded.
     pub spine_configured: bool,
     pub lookup: &'a dyn Fn(&str) -> Option<String>,
 }
 
-const WEBHOOK_PREREQ: &str = "the overlay of every CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS platform";
+const WEBHOOK_PREREQ: &str = "the connector of every CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS platform";
 
 /// Validates the runtime prerequisites in the spec's fixed order. Names the
-/// item, never a value. With every overlay OFF, only contradictory runtime
+/// item, never a value. With every connector OFF, only contradictory runtime
 /// settings (master switch or webhook list set) are errors.
 ///
 /// # Errors
 /// The first [`BootError`] found.
 pub fn validate(inp: &BootInputs<'_>) -> Result<(), BootError> {
-    if !inp.selector.any_overlay() {
+    if !inp.selector.any_connector() {
         if inp.cli.connector_runtime_enabled {
-            return Err(BootError::Prerequisite("any OVERLAY_<PLATFORM>_ENABLED"));
+            return Err(BootError::Prerequisite("any CONNECTOR_<PLATFORM>_ENABLED"));
         }
         if !inp.webhook_platforms.is_empty() {
             return Err(BootError::Prerequisite(WEBHOOK_PREREQ));
@@ -357,43 +361,43 @@ mod tests {
 
     #[test]
     fn default_is_all_legacy() {
-        let s = OverlaySelector::from_env(&env(&[])).unwrap();
+        let s = ConnectorSelector::from_env(&env(&[])).unwrap();
         for p in PLATFORMS {
-            assert!(s.legacy(p) && !s.overlay(p));
+            assert!(s.legacy(p) && !s.connector(p));
         }
-        assert!(!s.any_overlay());
-        assert!(!s.overlay("nonsense"));
+        assert!(!s.any_connector());
+        assert!(!s.connector("nonsense"));
     }
 
     #[test]
     fn twitch_and_youtube_on_are_independent() {
-        let s = OverlaySelector::from_env(&env(&[
-            ("OVERLAY_TWITCH_ENABLED", "true"),
-            ("OVERLAY_YOUTUBE_ENABLED", "1"),
+        let s = ConnectorSelector::from_env(&env(&[
+            ("CONNECTOR_TWITCH_ENABLED", "true"),
+            ("CONNECTOR_YOUTUBE_ENABLED", "1"),
         ]))
         .unwrap();
-        assert!(s.overlay("twitch") && s.overlay("youtube") && s.legacy("discord"));
+        assert!(s.connector("twitch") && s.connector("youtube") && s.legacy("discord"));
         assert_eq!(s.enabled_platforms(), vec!["twitch", "youtube"]);
     }
 
     #[test]
     fn explicit_false_is_off() {
-        let s = OverlaySelector::from_env(&env(&[
-            ("OVERLAY_TWITCH_ENABLED", " FALSE "),
-            ("OVERLAY_YOUTUBE_ENABLED", "0"),
+        let s = ConnectorSelector::from_env(&env(&[
+            ("CONNECTOR_TWITCH_ENABLED", " FALSE "),
+            ("CONNECTOR_YOUTUBE_ENABLED", "0"),
         ]))
         .unwrap();
-        assert!(!s.any_overlay());
+        assert!(!s.any_connector());
     }
 
     #[test]
     fn malformed_bool_is_fatal_for_each_platform() {
         for (name, bad) in [
-            ("OVERLAY_TWITCH_ENABLED", "yes"),
-            ("OVERLAY_DISCORD_ENABLED", ""),
-            ("OVERLAY_YOUTUBE_ENABLED", "tru"),
+            ("CONNECTOR_TWITCH_ENABLED", "yes"),
+            ("CONNECTOR_DISCORD_ENABLED", ""),
+            ("CONNECTOR_YOUTUBE_ENABLED", "tru"),
         ] {
-            let err = OverlaySelector::from_env(&env(&[(name, bad)])).unwrap_err();
+            let err = ConnectorSelector::from_env(&env(&[(name, bad)])).unwrap_err();
             assert_eq!(err, BootError::Malformed(name));
             assert!(!err.to_string().contains(bad) || bad.is_empty());
         }
@@ -401,26 +405,28 @@ mod tests {
 
     #[test]
     fn discord_on_is_fatal_while_identify_budget_is_not_ported() {
-        let e = env(&[("OVERLAY_DISCORD_ENABLED", "true")]);
-        let err = OverlaySelector::parse(&e, false).unwrap_err();
+        let e = env(&[("CONNECTOR_DISCORD_ENABLED", "true")]);
+        let err = ConnectorSelector::parse(&e, false).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "discord overlay requires the identify budget, not yet ported"
+            "discord connector requires the identify budget, not yet ported"
         );
-        assert!(OverlaySelector::parse(&e, true).unwrap().overlay("discord"));
+        assert!(ConnectorSelector::parse(&e, true)
+            .unwrap()
+            .connector("discord"));
     }
 
     #[test]
     fn from_env_follows_the_identify_budget_const() {
         // Fails while the const is false; the identify-budget PR flips it and
         // this assertion flips with it.
-        let r = OverlaySelector::from_env(&env(&[("OVERLAY_DISCORD_ENABLED", "true")]));
+        let r = ConnectorSelector::from_env(&env(&[("CONNECTOR_DISCORD_ENABLED", "true")]));
         assert_eq!(r.is_ok(), IDENTIFY_BUDGET_READY);
     }
 
     #[test]
     fn discord_off_never_trips_the_budget_gate() {
-        assert!(OverlaySelector::parse(&env(&[]), false).is_ok());
+        assert!(ConnectorSelector::parse(&env(&[]), false).is_ok());
     }
 
     #[test]
@@ -438,12 +444,12 @@ mod tests {
         }
     }
 
-    /// Shared with the Python selector (`tests/test_overlay_selector.py`): one
+    /// Shared with the Python selector (`tests/test_connector_selector.py`): one
     /// fixture, both implementations must reach the same legacy decisions.
     #[test]
     fn shared_decision_table_parity() {
         let table: serde_json::Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/overlay_selector_table.json"
+            "../../tests/fixtures/connector_selector_table.json"
         ))
         .unwrap();
         let cases = table["cases"].as_array().unwrap();
@@ -457,7 +463,7 @@ mod tests {
                 .collect();
             let lookup = move |k: &str| m.get(k).cloned();
             let ready = case["identify_budget_ready"].as_bool().unwrap();
-            let sel = OverlaySelector::parse(&lookup, ready);
+            let sel = ConnectorSelector::parse(&lookup, ready);
             if case["expect"] == "error" {
                 assert!(sel.is_err(), "{case}");
                 continue;
@@ -485,7 +491,7 @@ mod tests {
 
     #[test]
     fn legacy_plan_off_is_everything_legacy() {
-        let p = LegacyPlan::new(&OverlaySelector::default(), &[], true);
+        let p = LegacyPlan::new(&ConnectorSelector::default(), &[], true);
         assert!(
             p.twitch_inbound
                 && p.twitch_eventsub
@@ -495,8 +501,8 @@ mod tests {
         );
     }
 
-    fn twitch_on() -> OverlaySelector {
-        OverlaySelector::parse(&env(&[("OVERLAY_TWITCH_ENABLED", "true")]), true).unwrap()
+    fn twitch_on() -> ConnectorSelector {
+        ConnectorSelector::parse(&env(&[("CONNECTOR_TWITCH_ENABLED", "true")]), true).unwrap()
     }
 
     #[test]
@@ -514,8 +520,9 @@ mod tests {
     }
 
     #[test]
-    fn discord_plan_follows_discord_overlay() {
-        let s = OverlaySelector::parse(&env(&[("OVERLAY_DISCORD_ENABLED", "true")]), true).unwrap();
+    fn discord_plan_follows_discord_connector() {
+        let s =
+            ConnectorSelector::parse(&env(&[("CONNECTOR_DISCORD_ENABLED", "true")]), true).unwrap();
         let p = LegacyPlan::new(&s, &[], true);
         assert!(!p.discord_inbound && !p.discord_outbound && p.twitch_inbound);
     }
@@ -556,7 +563,7 @@ mod tests {
     async fn all_off_runs_every_legacy_starter_once() {
         let mut c = Counting::default();
         start_legacy(
-            &LegacyPlan::new(&OverlaySelector::default(), &[], true),
+            &LegacyPlan::new(&ConnectorSelector::default(), &[], true),
             &mut c,
         )
         .await
@@ -568,7 +575,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn twitch_overlay_on_skips_twitch_legacy_but_not_eventsub() {
+    async fn twitch_connector_on_skips_twitch_legacy_but_not_eventsub() {
         let mut c = Counting::default();
         start_legacy(&LegacyPlan::new(&twitch_on(), &[], true), &mut c)
             .await
@@ -578,7 +585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn twitch_overlay_on_with_webhook_skips_eventsub() {
+    async fn twitch_connector_on_with_webhook_skips_eventsub() {
         let mut c = Counting::default();
         start_legacy(&LegacyPlan::new(&twitch_on(), &["twitch"], false), &mut c)
             .await
@@ -587,8 +594,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discord_overlay_on_skips_discord_legacy() {
-        let s = OverlaySelector::parse(&env(&[("OVERLAY_DISCORD_ENABLED", "true")]), true).unwrap();
+    async fn discord_connector_on_skips_discord_legacy() {
+        let s =
+            ConnectorSelector::parse(&env(&[("CONNECTOR_DISCORD_ENABLED", "true")]), true).unwrap();
         let mut c = Counting::default();
         start_legacy(&LegacyPlan::new(&s, &[], true), &mut c)
             .await
@@ -603,7 +611,7 @@ mod tests {
             ..Counting::default()
         };
         let r = start_legacy(
-            &LegacyPlan::new(&OverlaySelector::default(), &[], false),
+            &LegacyPlan::new(&ConnectorSelector::default(), &[], false),
             &mut c,
         )
         .await;
@@ -631,7 +639,7 @@ mod tests {
 
     fn run(
         cli: &CliConfig,
-        sel: &OverlaySelector,
+        sel: &ConnectorSelector,
         wh: &[&'static str],
         spine: bool,
         pairs: &[(&str, &str)],
@@ -649,24 +657,24 @@ mod tests {
     #[test]
     fn validate_all_off_is_ok_and_builds_nothing() {
         let c = cli(false, "", false);
-        assert!(run(&c, &OverlaySelector::default(), &[], false, &[]).is_ok());
+        assert!(run(&c, &ConnectorSelector::default(), &[], false, &[]).is_ok());
     }
 
     #[test]
-    fn master_on_without_overlay_is_fatal() {
+    fn master_on_without_connector_is_fatal() {
         let c = cli(true, "j", true);
         assert_eq!(
-            run(&c, &OverlaySelector::default(), &[], true, &FULL).unwrap_err(),
-            BootError::Prerequisite("any OVERLAY_<PLATFORM>_ENABLED")
+            run(&c, &ConnectorSelector::default(), &[], true, &FULL).unwrap_err(),
+            BootError::Prerequisite("any CONNECTOR_<PLATFORM>_ENABLED")
         );
     }
 
     #[test]
-    fn webhook_list_without_overlay_is_fatal() {
+    fn webhook_list_without_connector_is_fatal() {
         let c = cli(true, "j", false);
-        assert!(run(&c, &OverlaySelector::default(), &["twitch"], true, &FULL).is_err());
+        assert!(run(&c, &ConnectorSelector::default(), &["twitch"], true, &FULL).is_err());
         let sel =
-            OverlaySelector::parse(&env(&[("OVERLAY_YOUTUBE_ENABLED", "true")]), true).unwrap();
+            ConnectorSelector::parse(&env(&[("CONNECTOR_YOUTUBE_ENABLED", "true")]), true).unwrap();
         assert!(run(&c, &sel, &["twitch"], true, &FULL).is_err());
     }
 

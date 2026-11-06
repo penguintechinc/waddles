@@ -1,7 +1,7 @@
 //! Shared helpers for the generic WebSocket and poll transports: endpoint
 //! validation, per-call secret resolution and handshake-slot substitution.
 //! Everything platform-specific (URL, auth slots, cursor shape) arrives via
-//! the overlay's config; nothing here names a platform.
+//! the connector's config; nothing here names a platform.
 
 use std::collections::HashMap;
 
@@ -279,7 +279,7 @@ pub const MAX_REPLY_TOKEN_LEN: usize = 256;
 /// One declarative, host-owned auto-reply rule: an inbound line that starts
 /// with `prefix` is answered with `reply_prefix + <echoed token> +
 /// reply_suffix`, built by the HOST. Nothing platform-named lives in the
-/// transport: an IRC overlay configures `PING :` -> `PONG :`, another
+/// transport: an IRC connector configures `PING :` -> `PONG :`, another
 /// protocol configures its own pair. The only inbound bytes ever reflected
 /// are the token after `prefix`, validated against a strict charset
 /// (`[A-Za-z0-9.:_/+=@-]`) and `max_token_len`; no guest byte is ever
@@ -295,7 +295,7 @@ pub struct AutoReplyRule {
     /// Longest accepted token, `1..=`[`MAX_REPLY_TOKEN_LEN`].
     pub max_token_len: usize,
     /// When true the matched line is ALSO delivered to the connector; the
-    /// default (false) consumes it so the overlay never sees keepalives.
+    /// default (false) consumes it so the connector never sees keepalives.
     pub forward_to_guest: bool,
 }
 

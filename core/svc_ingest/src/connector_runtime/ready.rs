@@ -20,7 +20,7 @@ pub const DEGRADE_AFTER: Duration = Duration::from_secs(300);
 /// A platform's readiness as the runtime sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Readiness {
-    /// The platform's overlay is not enabled; nothing to wait for.
+    /// The platform's connector is not enabled; nothing to wait for.
     Disabled,
     /// Enabled but not serving; the reason is a fixed, PII-free label.
     NotReady(&'static str),
@@ -61,7 +61,7 @@ impl<T: ExecutorStatus + ?Sized> ExecutorStatus for Arc<T> {
 /// One platform's `/readyz` fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlatformSnapshot {
-    /// Overlay platform slug.
+    /// Connector platform slug.
     pub platform: &'static str,
     /// The platform is enabled (always true for a registered platform).
     pub enabled: bool,
@@ -109,7 +109,7 @@ pub struct RuntimeStatus {
 }
 
 impl RuntimeStatus {
-    /// Tracks `platforms` (the enabled overlay set) against `executor`.
+    /// Tracks `platforms` (the enabled connector set) against `executor`.
     pub fn new(platforms: &[&'static str], executor: Arc<dyn ExecutorStatus>) -> Self {
         Self {
             states: platforms

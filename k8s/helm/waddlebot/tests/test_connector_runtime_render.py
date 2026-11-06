@@ -1,9 +1,9 @@
 """Helm-template assertions for PR-H (connector runtime / inbound manager wiring).
 
 Spec: docs/superpowers/specs/2026-11-05-connector-runtime-inbound-manager.md SS1.3/SS2/SS5/SS7/SS8.
-All overlays OFF (default, incl. values-alpha/dal2alpha) must render none of it; each ON
+All connectors OFF (default, incl. values-alpha/dal2alpha) must render none of it; each ON
 combination must render the right env on the right deployments; missing prerequisites and a
-Discord overlay must fail the render. Zero rendered documents / zero matches is a hard failure.
+Discord connector must fail the render. Zero rendered documents / zero matches is a hard failure.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ _D = "sha256:" + "b" * 64
 _RT = "pipeline.rustDataPlane.svcIngest.connectorRuntime"
 _CT = "pipeline.rustDataPlane.svcIngest.connectorTools"
 _BASE = [
-    "--set", "pipeline.svcIngest.enabled=true",  # the Python svc-ingest (off in alpha) must see the overlay env too
+    "--set", "pipeline.svcIngest.enabled=true",  # the Python svc-ingest (off in alpha) must see the connector env too
     "--set", f"{_CT}.enabled=true",
     "--set", f"pipeline.connectors.digests.twitch={_D}",
     "--set", f"pipeline.connectors.digests.discord={_D}",
@@ -31,7 +31,7 @@ _BASE = [
 
 
 def _yt(*extra: str) -> list[str]:
-    return [*_BASE, "--set", f"{_RT}.overlay.youtube.enabled=true", *extra]
+    return [*_BASE, "--set", f"{_RT}.connector.youtube.enabled=true", *extra]
 
 
 def _render(*extra: str, values: str = "values-alpha.yaml") -> subprocess.CompletedProcess[str]:
@@ -65,8 +65,8 @@ def _secret_vols(dep: dict[str, Any]) -> set[str]:
 
 
 _RUNTIME_ENV = (
-    "CONNECTOR_RUNTIME_ENABLED", "OVERLAY_TWITCH_ENABLED", "OVERLAY_DISCORD_ENABLED",
-    "OVERLAY_YOUTUBE_ENABLED", "CONNECTOR_RECONCILE_INTERVAL_SECS", "CONNECTOR_HEARTBEAT_ENABLED", "CONNECTOR_MAX_CONNECTIONS",
+    "CONNECTOR_RUNTIME_ENABLED", "CONNECTOR_TWITCH_ENABLED", "CONNECTOR_DISCORD_ENABLED",
+    "CONNECTOR_YOUTUBE_ENABLED", "CONNECTOR_RECONCILE_INTERVAL_SECS", "CONNECTOR_HEARTBEAT_ENABLED", "CONNECTOR_MAX_CONNECTIONS",
     "CONNECTOR_START_CONCURRENCY", "CONNECTOR_DISCORD_START_PACE_MS",
     "CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS", "CONNECTOR_ROUTE_KEY_SECRET",
     "CONNECTOR_HOST_API_ADDR", "CONNECTOR_HOST_API_IDENTITY", "EXECUTOR_CONNECTOR_CONNECTIONS",
@@ -91,9 +91,9 @@ def test_youtube_on_renders_env_on_both_ingest_deployments_from_one_value() -> N
     rust, py, ex = (_dep(docs, "-svc-ingest-rust"), _dep(docs, "-svc-ingest"), _dep(docs, "-bundle-executor"))
     for dep in (rust, py):
         env = _env(dep)
-        assert env["OVERLAY_YOUTUBE_ENABLED"]["value"] == "true"
-        assert env["OVERLAY_TWITCH_ENABLED"]["value"] == "false"
-        assert env["OVERLAY_DISCORD_ENABLED"]["value"] == "false"
+        assert env["CONNECTOR_YOUTUBE_ENABLED"]["value"] == "true"
+        assert env["CONNECTOR_TWITCH_ENABLED"]["value"] == "false"
+        assert env["CONNECTOR_DISCORD_ENABLED"]["value"] == "false"
         assert env["CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS"]["value"] == ""
     penv = _env(py)
     assert "CONNECTOR_RECONCILE_INTERVAL_SECS" not in penv and "CONNECTOR_ROUTE_KEY_SECRET" not in penv
@@ -146,7 +146,7 @@ def test_executor_client_cert_san_is_executor_identity_only() -> None:
 
 
 def test_twitch_webhook_route_key_comes_from_existing_secret_only() -> None:
-    extra = ["--set", f"{_RT}.overlay.twitch.enabled=true", "--set", f"{_RT}.webhookPlatforms={{twitch}}",
+    extra = ["--set", f"{_RT}.connector.twitch.enabled=true", "--set", f"{_RT}.webhookPlatforms={{twitch}}",
              "--set", f"{_RT}.routeKeySecret.existingSecret=ops-route-key"]
     res = _render(*_BASE, *extra)
     assert res.returncode == 0, res.stderr[-600:]
@@ -166,9 +166,9 @@ def test_twitch_webhook_route_key_comes_from_existing_secret_only() -> None:
 @pytest.mark.parametrize(
     ("bad", "needle"),
     [
-        (["--set", f"{_RT}.overlay.youtube.enabled=true"], "connectorTools"),
-        ([*_BASE[:8], "--set", f"{_RT}.overlay.youtube.enabled=true"], "digests.youtube"),
-        ([*_BASE, "--set", f"{_RT}.overlay.twitch.enabled=true", "--set", f"{_RT}.webhookPlatforms={{twitch}}"],
+        (["--set", f"{_RT}.connector.youtube.enabled=true"], "connectorTools"),
+        ([*_BASE[:8], "--set", f"{_RT}.connector.youtube.enabled=true"], "digests.youtube"),
+        ([*_BASE, "--set", f"{_RT}.connector.twitch.enabled=true", "--set", f"{_RT}.webhookPlatforms={{twitch}}"],
          "routeKeySecret"),
         ([*_BASE, "--set", f"{_RT}.webhookPlatforms={{slack}}", "--set", f"{_RT}.enabled=true"], "webhookPlatforms"),
         ([*_BASE, "--set", f"{_CT}.digests.twitch={_D}"], "single source of truth"),
@@ -182,11 +182,11 @@ def test_missing_prerequisites_fail_render(bad: list[str], needle: str) -> None:
     assert needle in res.stderr, res.stderr[-500:]
 
 
-def test_discord_overlay_rejected_until_identify_budget_ready() -> None:
-    on = [*_BASE, "--set", f"{_RT}.overlay.discord.enabled=true"]
+def test_discord_connector_rejected_until_identify_budget_ready() -> None:
+    on = [*_BASE, "--set", f"{_RT}.connector.discord.enabled=true"]
     res = _render(*on)
     assert res.returncode != 0
-    assert "discord overlay requires the identify budget (not yet ported)" in res.stderr
+    assert "discord connector requires the identify budget (not yet ported)" in res.stderr
     ok = _render(*on, "--set", f"{_RT}.identifyBudgetReady=true")
     assert ok.returncode == 0, ok.stderr[-500:]
 
@@ -292,8 +292,8 @@ def test_external_connector_secrets_require_executor_ca_bundle_secret() -> None:
 
 
 @pytest.mark.parametrize("values", ["values-alpha.yaml", "values-dal2alpha.yaml", "values-local.yaml"])
-def test_overlays_off_mints_no_connector_secrets_and_never_fails(values: str) -> None:
-    """Connector overlays OFF: render succeeds, no connector Secret is emitted, and the stage
+def test_connectors_off_mints_no_connector_secrets_and_never_fails(values: str) -> None:
+    """Connector connectors OFF: render succeeds, no connector Secret is emitted, and the stage
     Secret is rendered exactly as before (the connector branch is gated on connectorTools.enabled;
     helm template cannot stub `lookup`, so the existing-stage-Secret case is covered by that gate)."""
     docs = _docs([], values)

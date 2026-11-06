@@ -1,4 +1,4 @@
-//! The YouTube [`OverlayProfile`] (spec 1.2, PR-F3): derives one
+//! The YouTube [`ConnectorProfile`] (spec 1.2, PR-F3): derives one
 //! `liveChat/messages` [`PollConfig`] per binding.
 //!
 //! Everything security-relevant is a host constant here: the endpoint, the
@@ -6,7 +6,7 @@
 //! bounds, the error rules and the secret handle. The ONLY binding-derived
 //! value that reaches the URL is `metadata.live_chat_id`, which must match
 //! `^[A-Za-z0-9_-]{1,128}$` (the same contract the outbound path and the
-//! overlay enforce) and is then added through `Url::query_pairs_mut`, which
+//! connector enforce) and is then added through `Url::query_pairs_mut`, which
 //! percent-encodes -- never by string concatenation.
 //!
 //! | Metadata key | Role |
@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 use crate::connector::lifecycle::{HttpAction, HttpErrorRule, IntervalHint, PollLifecycle};
 use crate::connector::poll::{PollAuth, PollConfig};
 use crate::connector_runtime::feed::{ConnKey, DesiredConnection, TransportPlan};
-use crate::connector_runtime::plan::{OverlayProfile, PlanError, RuntimeEnv};
+use crate::connector_runtime::plan::{ConnectorProfile, PlanError, RuntimeEnv};
 use crate::outbound_creds_youtube::{is_live_chat_id, META_LIVE_CHAT_ID};
 
 /// Platform slug.
@@ -49,7 +49,7 @@ pub const CAPABILITY: &str = "chat_ingest";
 pub const POLL_URL: &str = "https://www.googleapis.com/youtube/v3/liveChat/messages";
 /// `part` query value requested from the API.
 pub const POLL_PART: &str = "id,snippet,authorDetails";
-/// `maxResults` requested per poll (API allows 200..=2000; overlay bound 1..=2000).
+/// `maxResults` requested per poll (API allows 200..=2000; connector bound 1..=2000).
 pub const POLL_MAX_RESULTS: u32 = 200;
 /// Secret handle the bearer token resolves through.
 pub const HANDLE_OAUTH: &str = "youtube.oauth";
@@ -196,7 +196,7 @@ fn fingerprint(cfg: &PollConfig, tenant: i64, secret_version: i64) -> u64 {
     u64::from_be_bytes(b)
 }
 
-impl OverlayProfile for YoutubeProfile {
+impl ConnectorProfile for YoutubeProfile {
     fn platform(&self) -> &'static str {
         PLATFORM
     }

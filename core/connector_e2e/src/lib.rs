@@ -110,9 +110,9 @@ impl WireRig {
 
     /// As [`WireRig::start`], granting every pinned connector the manifest
     /// `permissions` (e.g. `connector.pii.read`, which the real platform
-    /// overlays import `identity` under) and answering `flags.enabled`
-    /// host-calls `true` for `enabled_flags` (the boot path's overlay cutover
-    /// flags, `svc_ingest::outbound_boot::OVERLAY_FLAGS`).
+    /// connectors import `identity` under) and answering `flags.enabled`
+    /// host-calls `true` for `enabled_flags` (the boot path's connector cutover
+    /// flags, `svc_ingest::outbound_boot::CONNECTOR_FLAGS`).
     ///
     /// # Panics
     /// Test harness: any setup failure is a loud panic naming the cause.
