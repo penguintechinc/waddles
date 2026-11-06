@@ -821,7 +821,7 @@ async def oauth_start(platform: str) -> OAuthStartResponse | tuple[dict[str, obj
             binding_nonce=nonce,
         )
     except ApiError as exc:
-        logger.warning("oauth start rejected: %s", type(exc).__name__)
+        logger.warning("auth.oauth_start.refused type=%s code=%s", type(exc).__name__, exc.code)
         return _err(exc)
 
     @after_this_request
@@ -869,6 +869,7 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
             binding_nonce=request.cookies.get(LOGIN_BINDING_COOKIE),
         )
     except ApiError as exc:
+        logger.warning("auth.oauth_callback.refused type=%s code=%s", type(exc).__name__, exc.code)
         error = (
             exc.code
             if exc.code in (binding.ERR_BINDING, binding.ERR_STATE, ERR_PROVIDER_DISABLED)
@@ -876,11 +877,17 @@ async def oauth_callback(platform: str):  # type: ignore[no-untyped-def]
         )
         return redirect(f"{frontend_origin}/login?error={error}")
 
-    exchange_code = await oauth_service.create_oauth_exchange_code(
+    exchange_code, exchange_nonce = await oauth_service.create_oauth_exchange_code(
         async_dal, dal, token=token, platform=platform
     )
     page = redirect(f"{frontend_origin}/auth/callback?code={exchange_code}")
     binding.clear_binding_cookie(page, LOGIN_BINDING_COOKIE)
+    binding.set_binding_cookie(
+        page,
+        oauth_service.EXCHANGE_BINDING_COOKIE,
+        exchange_nonce,
+        oauth_service.EXCHANGE_CODE_TTL_SECONDS,
+    )
     return page
 
 
@@ -899,9 +906,22 @@ async def exchange_oauth_code(
     """
     async_dal, dal = _dal()
     try:
-        token = await oauth_service.redeem_oauth_exchange_code(async_dal, dal, code=data.code)
+        token = await oauth_service.redeem_oauth_exchange_code(
+            async_dal,
+            dal,
+            code=data.code,
+            binding_nonce=request.cookies.get(oauth_service.EXCHANGE_BINDING_COOKIE),
+        )
     except ApiError as exc:
+        logger.warning("auth.exchange.refused type=%s code=%s", type(exc).__name__, exc.code)
         return _err(exc)
+
+    @after_this_request
+    def _clear_exchange_binding(response: Any) -> Any:
+        """Redeemed: the binding cookie has done its job."""
+        binding.clear_binding_cookie(response, oauth_service.EXCHANGE_BINDING_COOKIE)
+        return response
+
     issue_session_cookie(token)
     return ExchangeCodeResponse(success=True, token=token)
 
@@ -923,7 +943,9 @@ async def oauth_link_start(platform: str) -> OAuthStartResponse | tuple[dict[str
             binding_nonce=nonce,
         )
     except ApiError as exc:
-        logger.warning("oauth start rejected: %s", type(exc).__name__)
+        logger.warning(
+            "auth.oauth_link_start.refused type=%s code=%s", type(exc).__name__, exc.code
+        )
         return _err(exc)
 
     @after_this_request
@@ -957,6 +979,9 @@ async def oauth_link_callback(platform: str):  # type: ignore[no-untyped-def]
             binding_nonce=request.cookies.get(LINK_BINDING_COOKIE),
         )
     except ApiError as exc:
+        logger.warning(
+            "auth.oauth_link_callback.refused type=%s code=%s", type(exc).__name__, exc.code
+        )
         error = (
             exc.code
             if exc.code in (binding.ERR_BINDING, binding.ERR_STATE, ERR_PROVIDER_DISABLED)

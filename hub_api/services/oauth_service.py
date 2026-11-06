@@ -37,6 +37,8 @@ from services.install_state_binding import (
     ERR_STATE,
     InstallStateError,
     bound_state,
+    cookie_name,
+    new_nonce,
     verify_state_binding,
 )
 
@@ -52,6 +54,9 @@ VALID_PLATFORMS = ("discord", "twitch", "slack", "google")
 #: enough that a leaked code (e.g. still visible in a browser history entry
 #: for the split-second before it's consumed) is worthless shortly after.
 EXCHANGE_CODE_TTL_SECONDS = 60
+
+#: ``__Host-`` cookie binding an exchange code to the browser the login completed in.
+EXCHANGE_BINDING_COOKIE = cookie_name("oauth_xchg")
 
 _AUTHORIZE_URLS = {
     "discord": "https://discord.com/api/oauth2/authorize",
@@ -466,7 +471,9 @@ async def oauth_callback(
     )
 
 
-async def create_oauth_exchange_code(async_dal: Any, dal: Any, *, token: str, platform: str) -> str:
+async def create_oauth_exchange_code(
+    async_dal: Any, dal: Any, *, token: str, platform: str
+) -> tuple[str, str]:
     """Mint a short-lived, single-use opaque code standing in for a just-issued session JWT.
 
     Used by `blueprints/v1/auth.py::oauth_callback` to hand the session off
@@ -475,8 +482,13 @@ async def create_oauth_exchange_code(async_dal: Any, dal: Any, *, token: str, pl
     and the `Referer` header of any outbound request the callback page
     happens to make. The code is redeemed exactly once, server-side, via
     `redeem_oauth_exchange_code` (`POST /api/v1/auth/exchange`).
+
+    Returns `(code, binding_nonce)`: the code embeds only SHA-256(nonce), and the caller MUST set
+    the nonce as the `EXCHANGE_BINDING_COOKIE` on the redirect, so a code leaked or injected into
+    another browser cannot be redeemed there (login CSRF / session fixation).
     """
-    code = secrets.token_urlsafe(32)
+    nonce = new_nonce()
+    code = bound_state(secrets.token_urlsafe(32), nonce)
     await async_dal.insert_async(
         dal.hub_oauth_exchange_codes,
         code=code,
@@ -486,10 +498,12 @@ async def create_oauth_exchange_code(async_dal: Any, dal: Any, *, token: str, pl
         expires_at=datetime.now(UTC) + timedelta(seconds=EXCHANGE_CODE_TTL_SECONDS),
         created_at=datetime.now(UTC),
     )
-    return code
+    return code, nonce
 
 
-async def redeem_oauth_exchange_code(async_dal: Any, dal: Any, *, code: str) -> str:
+async def redeem_oauth_exchange_code(
+    async_dal: Any, dal: Any, *, code: str, binding_nonce: str | None
+) -> str:
     """Redeem a single-use OAuth exchange code for the session JWT it stands in for.
 
     The `UPDATE ... WHERE used = FALSE AND expires_at > NOW()` clause is the
@@ -497,8 +511,14 @@ async def redeem_oauth_exchange_code(async_dal: Any, dal: Any, *, code: str) -> 
     which concurrent caller, if any, wins a race against the same code,
     mirroring `community_welcomed_users`'s `ON CONFLICT DO NOTHING` pattern
     (migration 068). A second redemption attempt against the same code
-    updates zero rows and is rejected, same as an unknown or expired one.
+    updates zero rows and is rejected, same as an unknown or expired one. The browser binding is
+    verified in constant time BEFORE the claim, so a foreign browser cannot burn the code
+    (typed `ApiError`: `state_binding_mismatch` / `invalid_or_expired_state`).
     """
+    try:
+        verify_state_binding(code, binding_nonce)
+    except InstallStateError as exc:
+        raise ApiError("exchange code is not bound to this browser", 400, exc.code) from exc
     claimed = await async_dal.update_async(
         (dal.hub_oauth_exchange_codes.code == code)
         & (dal.hub_oauth_exchange_codes.used == False)  # noqa: E712 - pydal Field comparison
@@ -507,7 +527,7 @@ async def redeem_oauth_exchange_code(async_dal: Any, dal: Any, *, code: str) -> 
         used_at=datetime.now(UTC),
     )
     if not claimed:
-        raise bad_request("Invalid or expired exchange code")
+        raise ApiError("Invalid or expired exchange code", 400, ERR_STATE)
 
     rows = await async_dal.select_async(dal(dal.hub_oauth_exchange_codes.code == code))
     return str(rows.first().token)

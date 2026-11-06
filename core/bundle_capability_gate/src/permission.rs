@@ -12,6 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use crate::platform_table::TableOp;
+use crate::storage_access::StorageOp;
 
 /// No `net.http.private-ip` grant may be coarser than this -- mirrors
 /// hub-api's own `_MAX_PRIVATE_PREFIX_V4/6` (`bundle_permission_catalog.py`).
@@ -325,6 +326,13 @@ pub enum PermissionFamily {
     PlatformTableRead,
     /// `platform.table.write:<table>.<column>` -- as above, write.
     PlatformTableWrite,
+    /// `storage.<read|list|write|delete>:<prefix_owner>` -- access another
+    /// bundle's object-storage prefix (spec 2026-11-06-bundle-object-storage).
+    /// `Dangerous`, never auto-granted; tag-filtered host-side even once granted.
+    StorageRead,
+    StorageList,
+    StorageWrite,
+    StorageDelete,
 }
 
 /// One row of the catalog table (spec SS1).
@@ -378,6 +386,10 @@ impl PermissionFamily {
         Self::ToolCall,
         Self::PlatformTableRead,
         Self::PlatformTableWrite,
+        Self::StorageRead,
+        Self::StorageList,
+        Self::StorageWrite,
+        Self::StorageDelete,
     ];
 
     /// The static catalog id prefix -- for a parameterized family
@@ -422,6 +434,10 @@ impl PermissionFamily {
             Self::ToolCall => "tool.call",
             Self::PlatformTableRead => "platform.table.read",
             Self::PlatformTableWrite => "platform.table.write",
+            Self::StorageRead => "storage.read",
+            Self::StorageList => "storage.list",
+            Self::StorageWrite => "storage.write",
+            Self::StorageDelete => "storage.delete",
         }
     }
 
@@ -443,6 +459,10 @@ impl PermissionFamily {
                 | Self::ToolCall
                 | Self::PlatformTableRead
                 | Self::PlatformTableWrite
+                | Self::StorageRead
+                | Self::StorageList
+                | Self::StorageWrite
+                | Self::StorageDelete
         )
     }
 
@@ -799,6 +819,22 @@ impl PermissionFamily {
                         the id and allowlisted; row scope is host-injected community+tenant; \
                         never auto-granted, every grant needs an explicit global-admin approval",
             },
+            Self::StorageRead | Self::StorageList | Self::StorageWrite | Self::StorageDelete => {
+                CatalogEntry {
+                    family: *self,
+                    risk: Risk::Dangerous,
+                    capability_kind: CapabilityKind::Db,
+                    default_quota: Quota::CallsPerWindow {
+                        max_calls: if matches!(self, Self::StorageRead | Self::StorageList) {
+                            20
+                        } else {
+                            5
+                        },
+                        window: Duration::from_secs(1),
+                    },
+                    notes: "cross-prefix object-storage access (2026-11-06 spec); owner app_id encoded in the id; never auto-granted; host additionally tag-filters every op",
+                }
+            }
             Self::ToolCall => CatalogEntry {
                 family: *self,
                 risk: Risk::Dangerous,
@@ -959,6 +995,11 @@ pub enum PermissionId {
         table: String,
         column: String,
     },
+    /// `storage.<op>:<prefix_owner>`.
+    StorageAccess {
+        op: StorageOp,
+        owner: String,
+    },
 }
 
 /// Platforms compiled into this build's relay/moderation providers (spec
@@ -1035,6 +1076,12 @@ impl PermissionId {
             Self::PlatformTable {
                 op: TableOp::Write, ..
             } => PermissionFamily::PlatformTableWrite,
+            Self::StorageAccess { op, .. } => match op {
+                StorageOp::Read => PermissionFamily::StorageRead,
+                StorageOp::List => PermissionFamily::StorageList,
+                StorageOp::Write => PermissionFamily::StorageWrite,
+                StorageOp::Delete => PermissionFamily::StorageDelete,
+            },
         }
     }
 
@@ -1059,6 +1106,7 @@ impl PermissionId {
             Self::DmSend(platform) => format!("dm.send:{platform}"),
             Self::Moderation(platform) => format!("moderation.{platform}"),
             Self::ToolCall { target, tool } => format!("tool.call:{target}:{tool}"),
+            Self::StorageAccess { op, owner } => format!("storage.{}:{owner}", op.as_str()),
             Self::PlatformTable { op, table, column } => {
                 format!("platform.table.{}:{table}.{column}", op.as_str())
             }
@@ -1220,6 +1268,22 @@ impl PermissionId {
                 });
             }
         }
+        for (prefix, op) in [
+            ("storage.read:", StorageOp::Read),
+            ("storage.list:", StorageOp::List),
+            ("storage.write:", StorageOp::Write),
+            ("storage.delete:", StorageOp::Delete),
+        ] {
+            if let Some(owner) = raw.strip_prefix(prefix) {
+                if !crate::storage_access::is_valid_owner(owner) {
+                    return Err(ParsePermissionIdError::UnknownPermission(raw.to_string()));
+                }
+                return Ok(Self::StorageAccess {
+                    op,
+                    owner: owner.to_string(),
+                });
+            }
+        }
         if let Some(rest) = raw.strip_prefix("tool.call:") {
             let (target, tool) =
                 rest.rsplit_once(':')
@@ -1300,6 +1364,29 @@ impl fmt::Display for PermissionId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_access_ids_are_dangerous_validated_and_round_trip() {
+        let id = PermissionId::parse("storage.read:waddles.harness.media").unwrap();
+        assert_eq!(id.family(), PermissionFamily::StorageRead);
+        assert_eq!(id.risk(), Risk::Dangerous);
+        assert_eq!(id.canonical_id(), "storage.read:waddles.harness.media");
+        for op in ["list", "write", "delete"] {
+            let raw = format!("storage.{op}:a.b");
+            assert_eq!(PermissionId::parse(&raw).unwrap().canonical_id(), raw);
+        }
+        for bad in [
+            "storage.read:",
+            "storage.read:../x",
+            "storage.read:A",
+            "storage.read:a/b",
+            "storage.read:a b",
+            "storage.rm:a",
+            "storage.read",
+        ] {
+            assert!(PermissionId::parse(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn platform_table_ids_are_dangerous_allowlist_only_and_round_trip() {

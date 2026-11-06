@@ -37,11 +37,16 @@ class AccessGrantKind:
     """
 
     kind: str
-    id_prefix: str
+    id_prefix: str | tuple[str, ...]
     summary_key: str
     requests_of: Callable[[Any], tuple[Any, ...]]
     summarize: Callable[[tuple[Any, ...]], list[dict[str, Any]]]
     atoms: Callable[[dict[str, Any]], set[str]]
+
+    @property
+    def prefixes(self) -> tuple[str, ...]:
+        """The id prefix(es) as a tuple (a kind may own several, e.g. one per op)."""
+        return (self.id_prefix,) if isinstance(self.id_prefix, str) else self.id_prefix
 
 
 _KINDS: dict[str, AccessGrantKind] = {}
@@ -49,7 +54,7 @@ _KINDS: dict[str, AccessGrantKind] = {}
 
 def register_kind(kind: AccessGrantKind) -> None:
     """Register `kind`; a duplicate kind name or id prefix is a programming error."""
-    if kind.kind in _KINDS or any(k.id_prefix == kind.id_prefix for k in _KINDS.values()):
+    if kind.kind in _KINDS or any(set(k.prefixes) & set(kind.prefixes) for k in _KINDS.values()):
         raise ValueError(f"access grant kind already registered: {kind.kind!r}")
     _KINDS[kind.kind] = kind
 
@@ -61,7 +66,7 @@ def kinds() -> tuple[AccessGrantKind, ...]:
 
 def is_access_grant_id(permission_id: str) -> bool:
     """`True` for any permission id in a registered grant-kind family (never auto-granted)."""
-    return any(permission_id.startswith(k.id_prefix) for k in _KINDS.values())
+    return any(permission_id.startswith(k.prefixes) for k in _KINDS.values())
 
 
 def summarize_access_grants(manifest: Any) -> dict[str, list[dict[str, Any]]]:

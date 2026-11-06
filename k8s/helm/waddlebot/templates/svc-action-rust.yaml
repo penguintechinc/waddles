@@ -280,6 +280,9 @@ spec:
         - name: ENVELOPE_BINDING_ACTIVE_KID
           value: {{ .Values.pipeline.rustDataPlane.svcAction.envelopeBindingActiveKid | quote }}
         {{- end }}
+        # Bundle object storage (spec 2026-11-06-bundle-object-storage): host-side S3 endpoint +
+        # credentials -- bundles never see these (host-mediated `storage` capability).
+        {{- include "waddlebot.bundleStorage.env" . | nindent 8 }}
         {{- /* Durable VALKEY_URL override below is TLS-only: fail the render rather than leave the spine on the cache/plaintext envFrom VALKEY_URL. */}}
         {{- include "waddlebot.assertDurableTls" . }}
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}

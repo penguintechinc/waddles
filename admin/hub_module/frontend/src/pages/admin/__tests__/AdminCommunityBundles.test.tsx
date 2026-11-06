@@ -21,7 +21,12 @@ vi.mock('@penguintechinc/react-libs', async () => ({
   FormModalBuilder: (await import('../../../test/formModalStub')).FormModalStub,
 }));
 vi.mock('../../../services/bundleActivationApi', () => ({
-  bundleActivationApi: { list: vi.fn(), activate: vi.fn(), deactivate: vi.fn() },
+  bundleActivationApi: {
+    list: vi.fn(),
+    activate: vi.fn(),
+    deactivate: vi.fn(),
+    accessGrants: vi.fn(),
+  },
 }));
 
 const flag = vi.mocked(useFeatureFlag);
@@ -63,6 +68,13 @@ beforeEach(() => {
   api.list.mockResolvedValue(ROWS);
   api.activate.mockResolvedValue({ success: true, message: 'ok' });
   api.deactivate.mockResolvedValue({ success: true, message: 'ok' });
+  api.accessGrants.mockResolvedValue({
+    success: true,
+    requestedIds: [],
+    approvedIds: [],
+    dangerousIds: [],
+    tableAccess: [],
+  });
   vi.spyOn(console, 'debug').mockImplementation(() => undefined);
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
 });
@@ -144,7 +156,7 @@ describe('AdminCommunityBundles activate', () => {
     fireEvent.change(dialog.getByLabelText('App ID'), { target: { value: '  waddles.core.new  ' } });
     fireEvent.click(dialog.getByRole('button', { name: 'Activate' }));
 
-    await waitFor(() => expect(api.activate).toHaveBeenCalledWith(7, 'waddles.core.new'));
+    await waitFor(() => expect(api.activate).toHaveBeenCalledWith(7, 'waddles.core.new', []));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Activate Bundle' })).not.toBeInTheDocument());
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
   });
@@ -177,6 +189,56 @@ describe('AdminCommunityBundles activate', () => {
     const dialog = within(await openActivate());
     fireEvent.click(dialog.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('dialog', { name: 'Activate Bundle' })).not.toBeInTheDocument();
+  });
+
+  describe('dangerous platform-table access', () => {
+    const IDS = [
+      'platform.table.read:community_members.role',
+      'platform.table.write:community_members.role',
+    ];
+
+    async function startActivation() {
+      api.accessGrants.mockResolvedValue({
+        success: true,
+        requestedIds: IDS,
+        approvedIds: IDS,
+        dangerousIds: IDS,
+        tableAccess: [
+          {
+            table: 'community_members',
+            columns: ['role'],
+            ops: ['read', 'write'],
+            reason: 'Mirror Discord role to community role',
+          },
+        ],
+      });
+      const dialog = within(await openActivate());
+      fireEvent.change(dialog.getByLabelText('App ID'), { target: { value: 'waddles.core.rolesync' } });
+      fireEvent.click(dialog.getByRole('button', { name: 'Activate' }));
+      return screen.findByTestId('access-grants-dialog');
+    }
+
+    it('shows the bold red warning and does not activate until acknowledged', async () => {
+      const grants = within(await startActivation());
+      expect(api.accessGrants).toHaveBeenCalledWith(7, 'waddles.core.rolesync');
+      expect(grants.getByTestId('access-grant-warning').className).toContain('border-red-500');
+      expect(grants.getByTestId('access-grant-entry')).toHaveTextContent('community_members');
+      expect(grants.getByTestId('access-grant-entry')).toHaveTextContent('ops: read, write');
+      expect(grants.getByTestId('access-grant-entry')).toHaveTextContent(
+        'Mirror Discord role to community role',
+      );
+      expect(api.activate).not.toHaveBeenCalled();
+      expect(grants.getByTestId('access-grants-confirm')).toBeDisabled();
+    });
+
+    it('activates with every approved id acknowledged once confirmed', async () => {
+      const grants = within(await startActivation());
+      fireEvent.click(grants.getByTestId('access-grant-ack'));
+      fireEvent.click(grants.getByTestId('access-grants-confirm'));
+      await waitFor(() =>
+        expect(api.activate).toHaveBeenCalledWith(7, 'waddles.core.rolesync', IDS),
+      );
+    });
   });
 });
 

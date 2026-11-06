@@ -50,6 +50,7 @@ convention = "google"
 "blueprints/v1/bot.py" = ["N815", "S101"]
 "services/bot_shoutout.py" = ["N815"]
 "services/bot_ai_knowledge.py" = ["N815"]
+"services/access_grant_dto.py" = ["N815"]  # wire DTOs are camelCase by API contract
 # M1 Core Identity/Auth group -- postcondition asserts, same rationale as
 # blueprints/v2/platform.py above (register()/get_my_profile() always
 # return a populated result on this code path; worst case under -O is an

@@ -49,6 +49,7 @@ pub mod platform_table;
 pub mod quota;
 pub mod resource;
 pub mod scope;
+pub mod storage_access;
 
 pub use denied::Denied;
 pub use gate::CapabilityGate;

@@ -4,7 +4,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FormModalBuilder, type FormField } from '@penguintechinc/react-libs';
 import { useAuth } from '../../contexts/AuthContext';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
-import { bundleActivationApi } from '../../services/bundleActivationApi';
+import { bundleActivationApi, type StorageAccess, type TableAccess } from '../../services/bundleActivationApi';
+import AccessGrantWarning from '../../components/bundles/AccessGrantWarning';
 
 /**
  * Community Bundles ("app bundle modularity") admin page -- COMMUNITY tier
@@ -51,6 +52,15 @@ export default function AdminCommunityBundles() {
   const queryClient = useQueryClient();
   const [activateOpen, setActivateOpen] = useState(false);
   const [deactivateTarget, setDeactivateTarget] = useState<string | null>(null);
+  // Set when the app to activate carries approved dangerous access grants: the
+  // admin must see the bold-red warning and acknowledge it before activation.
+  const [pendingGrants, setPendingGrants] = useState<{
+    appId: string;
+    ids: string[];
+    tableAccess: TableAccess[];
+    storageAccess: StorageAccess[];
+  } | null>(null);
+  const [grantsAck, setGrantsAck] = useState(false);
 
   const communityId = Number(communityIdParam);
   const hasValidCommunity = Number.isFinite(communityId);
@@ -67,13 +77,16 @@ export default function AdminCommunityBundles() {
   });
 
   const activateMutation = useMutation({
-    mutationFn: (appId: string) => bundleActivationApi.activate(communityId, appId),
-    onSuccess: (_result, appId) => {
+    mutationFn: ({ appId, ack }: { appId: string; ack: string[] }) =>
+      bundleActivationApi.activate(communityId, appId, ack),
+    onSuccess: (_result, { appId }) => {
       console.debug('[CommunityBundles] Activate', { communityId, appId });
       void queryClient.invalidateQueries({ queryKey: bundleActivationKeys.list(communityId) });
       setActivateOpen(false);
+      setPendingGrants(null);
+      setGrantsAck(false);
     },
-    onError: (err, appId) => {
+    onError: (err, { appId }) => {
       console.error('[CommunityBundles] ActivateFailed', { communityId, appId, error: String(err) });
     },
   });
@@ -198,10 +211,68 @@ export default function AdminCommunityBundles() {
         onSubmit={async (data) => {
           const appId = String(data.appId ?? '').trim();
           if (!appId) return;
-          await activateMutation.mutateAsync(appId);
+          // Re-show dangerous access grants (red warning) BEFORE activating.
+          const grants = await bundleActivationApi.accessGrants(communityId, appId);
+          if (grants.approvedIds.length > 0) {
+            setActivateOpen(false);
+            setGrantsAck(false);
+            setPendingGrants({
+              appId,
+              ids: grants.approvedIds,
+              tableAccess: grants.tableAccess,
+              storageAccess: grants.storageAccess ?? [],
+            });
+            return;
+          }
+          await activateMutation.mutateAsync({ appId, ack: [] });
         }}
         submitButtonText="Activate"
       />
+
+      {pendingGrants && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Approve access for ${pendingGrants.appId}`}
+          data-testid="access-grants-dialog"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+        >
+          <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-navy-700 bg-navy-800 p-6">
+            <h2 className="mb-3 text-lg font-bold text-white">Activate {pendingGrants.appId}</h2>
+            <AccessGrantWarning
+              summary={{
+                tableAccess: pendingGrants.tableAccess,
+                storageAccess: pendingGrants.storageAccess,
+              }}
+              requireAck
+              onAckChange={setGrantsAck}
+            />
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setPendingGrants(null)}
+                className="rounded bg-navy-700 px-4 py-2 text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="access-grants-confirm"
+                disabled={!grantsAck || activateMutation.isPending}
+                onClick={() =>
+                  void activateMutation.mutateAsync({
+                    appId: pendingGrants.appId,
+                    ack: pendingGrants.ids,
+                  })
+                }
+                className="rounded bg-red-600 px-4 py-2 font-semibold text-white disabled:opacity-50"
+              >
+                Activate with this access
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <FormModalBuilder
         title={deactivateTarget ? `Deactivate ${deactivateTarget}?` : 'Deactivate Bundle'}

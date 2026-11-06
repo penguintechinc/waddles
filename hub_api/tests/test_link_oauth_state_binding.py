@@ -93,7 +93,9 @@ def sessions(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     monkeypatch.setattr(
         oauth_service, "_find_or_create_user_from_oauth", AsyncMock(return_value=object())
     )
-    monkeypatch.setattr(oauth_service, "create_oauth_exchange_code", AsyncMock(return_value="xc"))
+    monkeypatch.setattr(
+        oauth_service, "create_oauth_exchange_code", AsyncMock(return_value=("xc", "n"))
+    )
     return minted
 
 
@@ -212,3 +214,32 @@ class TestLinkBinding:
         assert ERR_STATE in _loc(await h.finish("plain-unbound-state", nonce))
         assert ERR_BINDING in _loc(await h.finish("forged.state-hash", nonce))
         assert h.linked() == 0
+
+
+class TestRefusalsAreLogged:
+    async def test_login_start_failure_is_a_typed_refusal_and_logged(
+        self, app: Quart, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = app.test_client(use_cookies=False)
+        with caplog.at_level("WARNING", logger=auth_module.logger.name):
+            resp = await client.get("/api/v1/auth/oauth/not-a-platform")
+        assert resp.status_code == 400
+        assert any("auth.oauth_start.refused" in r.getMessage() for r in caplog.records)
+        assert not any(
+            h.startswith(f"{auth_module.LOGIN_BINDING_COOKIE}=")
+            for h in resp.headers.getlist("Set-Cookie")
+        )
+
+    async def test_callback_refusal_is_logged_with_its_typed_code(
+        self, h: Harness, auth_db: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        if h.flow == "login":
+            tag = "auth.oauth_callback.refused"
+        elif h.flow == "auth":
+            tag = "auth.oauth_link_callback.refused"
+        else:
+            tag = "identity.link_callback.refused"
+        state, _ = await h.start(_user(auth_db, "alice"))
+        with caplog.at_level("WARNING"):
+            await h.finish(state, None)
+        assert any(tag in r.getMessage() and ERR_BINDING in r.getMessage() for r in caplog.records)
