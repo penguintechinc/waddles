@@ -1,7 +1,9 @@
 """Discord adapter: a community's bot token + the one guild it serves.
 
-Models the *outbound bot presence* the data plane's Discord host duties need (``dm.send``,
-``role.add``, ``role.remove`` in core/svc_ingest ``sender_exec/discord_duties.rs``):
+Capabilities: ``chat_ingest`` (the gateway inbound feed the connector runtime opens with the bot
+token) and ``action_relay``. Models the *outbound bot presence* the data plane's Discord host
+duties need (``dm.send``, ``role.add``, ``role.remove`` in core/svc_ingest
+``sender_exec/discord_duties.rs``):
 
 * **Credential** -- the bot token, verified with Discord's ``GET /users/@me`` using the ``Bot``
   scheme (a user/OAuth token has no ``bot`` flag and is rejected). Bot tokens never expire and have
@@ -61,6 +63,7 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_ID: Final = "discord"
 RESOURCE_TYPE_GUILD: Final = "discord_guild"
+CAPABILITY_CHAT_INGEST: Final = "chat_ingest"
 CAPABILITY_ACTION_RELAY: Final = "action_relay"
 
 DISCORD_API_BASE: Final = "https://discord.com/api/v10"
@@ -124,7 +127,7 @@ DISCORD_SPEC: Final = AdapterSpec(
     platform=PROVIDER_ID,
     resource_type=RESOURCE_TYPE_GUILD,
     install_kind=INSTALL_KIND_CREDENTIALS,
-    capabilities=frozenset({CAPABILITY_ACTION_RELAY}),
+    capabilities=frozenset({CAPABILITY_CHAT_INGEST, CAPABILITY_ACTION_RELAY}),
     required_scopes=(),
     credential_fields=(
         CredentialField(

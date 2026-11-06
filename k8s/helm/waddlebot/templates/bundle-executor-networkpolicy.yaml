@@ -46,6 +46,17 @@ spec:
         - ports:
             - port: {{ .Values.pipeline.rustDataPlane.bundleExecutor.stagePort | quote }}
               protocol: TCP
+    {{- if include "waddlebot.connectorRuntimeActive" . }}
+    # PR-H: the executor's ONE dial to svc-ingest's host-api, that port only.
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: svc-ingest-rust
+      toPorts:
+        - ports:
+            - port: {{ (.Values.pipeline.rustDataPlane.svcIngest.connectorTools).hostApiPort | default 8301 | quote }}
+              protocol: TCP
+    {{- end }}
     # SeaweedFS pods carry app.kubernetes.io/name: seaweedfs (templates/infrastructure/
     # seaweedfs.yaml), NOT the chart-wide selectorLabels name -- the previous
     # selectorLabels-based match here selected zero endpoints, so the bundle bucket fetch

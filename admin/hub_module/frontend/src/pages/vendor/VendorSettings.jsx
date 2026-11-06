@@ -4,7 +4,7 @@
  */
 import { useEffect, useState } from 'react';
 import { Cog6ToothIcon, CheckCircleIcon, XCircleIcon } from '@heroicons/react/24/outline';
-import api from '../../services/api';
+import { vendorApi } from '../../services/api';
 
 const PAYOUT_METHODS = [
   { value: 'stripe_connect', label: 'Stripe Connect' },
@@ -38,8 +38,9 @@ function VendorSettings() {
   const loadProfile = async () => {
     try {
       setLoading(true);
-      const response = await api.get('/vendor/profile');
-      const data = response.data;
+      const response = await vendorApi.getProfile();
+      // hub-api wraps the profile as `{ success, seller }`.
+      const data = response.data?.seller ?? {};
       setForm({
         displayName: data.displayName || '',
         description: data.description || '',
@@ -58,7 +59,7 @@ function VendorSettings() {
     e.preventDefault();
     try {
       setSaving(true);
-      await api.put('/vendor/profile', form);
+      await vendorApi.updateProfile(form);
       showToast('success', 'Settings saved successfully');
     } catch (err) {
       showToast('error', err.response?.data?.error?.message || 'Failed to save settings');

@@ -19,9 +19,9 @@ _CHART_DIR = Path(__file__).resolve().parents[1]
 _DIGEST = "sha256:" + "a" * 64
 _ON = [
     "--set", "pipeline.rustDataPlane.svcIngest.connectorTools.enabled=true",
-    "--set", f"pipeline.rustDataPlane.svcIngest.connectorTools.digests.twitch={_DIGEST}",
-    "--set", f"pipeline.rustDataPlane.svcIngest.connectorTools.digests.discord={_DIGEST}",
-    "--set", f"pipeline.rustDataPlane.svcIngest.connectorTools.digests.youtube={_DIGEST}",
+    "--set", f"pipeline.connectors.digests.twitch={_DIGEST}",
+    "--set", f"pipeline.connectors.digests.discord={_DIGEST}",
+    "--set", f"pipeline.connectors.digests.youtube={_DIGEST}",
 ]
 
 
@@ -111,7 +111,7 @@ def test_shared_cert_sans_are_not_widened_and_dedicated_secrets_are_minted() -> 
     "bad",
     [
         ["--set", "pipeline.rustDataPlane.svcIngest.connectorTools.enabled=true"],
-        [*_ON[:2], "--set", "pipeline.rustDataPlane.svcIngest.connectorTools.digests.twitch=latest"],
+        [*_ON[:2], "--set", "pipeline.connectors.digests.twitch=latest"],
         [*_ON, "--set", "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false"],
     ],
 )

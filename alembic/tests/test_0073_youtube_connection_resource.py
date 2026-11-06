@@ -42,10 +42,12 @@ def test_chain_and_id_length() -> None:
     assert len(module.revision) <= 32
 
 
-def test_history_has_exactly_one_head_and_it_is_0073() -> None:
+def test_history_has_exactly_one_head_and_0073_is_in_it() -> None:
     cfg = Config(str(_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0073_youtube_connection_resource"]
+    script = ScriptDirectory.from_config(cfg)
+    assert len(script.get_heads()) == 1
+    assert "0073_youtube_connection_resource" in {r.revision for r in script.walk_revisions()}
 
 
 def _tenant(cur: psycopg2.extensions.cursor, slug: str) -> int:

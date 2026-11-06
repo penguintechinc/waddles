@@ -69,20 +69,44 @@ export function backendRoutes(dir = BLUEPRINTS_DIR) {
   return routes;
 }
 
-/** Compile a normalised backend path into a regex where `<p>` matches any one segment. */
-function toRegex(path) {
-  const esc = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/<p>/g, '[^/]+');
-  return new RegExp(`^${esc}$`);
+/** True when a backend route segment is a `(a|b)` alternation, e.g. `(discord|twitch)`. */
+function alternation(segment) {
+  const m = segment.match(/^\(([^()]+\|[^()]+)\)$/);
+  return m ? m[1].split('|') : null;
+}
+
+/**
+ * Does one frontend call segment match one backend route segment?
+ * A backend `<p>` matches any non-empty call segment. A call segment containing `<p>` (a
+ * `${var}` interpolation, alone or mixed with literal text like `v-<p>`) is a wildcard ONLY
+ * against a route alternation `(a|b)` whose option it can stand for -- never against a bare
+ * literal, so `/admin/${id}/domains` is not "served" by `/admin/domains/<id>`.
+ */
+function segmentMatches(callSeg, routeSeg) {
+  if (routeSeg === '<p>') return callSeg !== '';
+  const options = alternation(routeSeg);
+  if (options) {
+    if (!callSeg.includes('<p>')) return options.includes(callSeg);
+    const pattern = new RegExp(`^${callSeg.split('<p>').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^/]+')}$`);
+    return options.some((o) => pattern.test(o));
+  }
+  return callSeg === routeSeg;
 }
 
 /**
  * Build `isServed(call)` for `{ method, path }` where `path` is already `norm`-ed.
- * A frontend `<p>` placeholder is treated as one segment too -- lenient on purpose so
- * literal-vs-param differences (`/auth/oauth/discord` vs `/auth/oauth/<provider>`)
- * never invent a gap.
+ * Matching is segment-wise: a call `<p>` matches a backend `<p>` or a route alternation, and a
+ * literal call segment matches a backend `<p>` (`/auth/oauth/discord` vs `/auth/oauth/<provider>`).
  */
 export function buildIsServed(routes) {
-  const compiled = routes.map((r) => ({ method: r.method, re: toRegex(r.path) }));
-  return (c) =>
-    compiled.some((r) => (!c.method || r.method === c.method) && (r.re.test(c.path) || r.re.test(c.path.replace(/<p>/g, 'x'))));
+  const compiled = routes.map((r) => ({ method: r.method, segments: r.path.split('/') }));
+  return (c) => {
+    const callSegments = c.path.split('/');
+    return compiled.some(
+      (r) =>
+        (!c.method || r.method === c.method) &&
+        r.segments.length === callSegments.length &&
+        r.segments.every((seg, i) => segmentMatches(callSegments[i], seg)),
+    );
+  };
 }

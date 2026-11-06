@@ -366,7 +366,7 @@ class TestAdapter:
             await adapter.refresh("r", {})
 
     def test_capabilities(self, adapter: DiscordAdapter) -> None:
-        assert adapter.granted_capabilities(()) == frozenset({"action_relay"})
+        assert adapter.granted_capabilities(()) == frozenset({"chat_ingest", "action_relay"})
 
     async def test_token_only_ever_travels_in_the_authorization_header(
         self, adapter: DiscordAdapter, fake_discord: FakeDiscord

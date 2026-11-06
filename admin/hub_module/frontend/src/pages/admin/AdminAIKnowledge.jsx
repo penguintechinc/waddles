@@ -175,10 +175,10 @@ function SourceModal({ open, editTarget, communityId, onClose, onSaved, showToas
     try {
       setSaving(true);
       if (editTarget?.id) {
-        await api.put(`/ai-knowledge/sources/${editTarget.id}`, { ...form, community_id: communityId });
+        await api.put(`/api/v1/admin/ai-knowledge/sources/${editTarget.id}`, { ...form, community_id: communityId });
         showToast('success', 'Source updated');
       } else {
-        await api.post('/ai-knowledge/sources', { ...form, community_id: communityId });
+        await api.post('/api/v1/admin/ai-knowledge/sources', { ...form, community_id: communityId });
         showToast('success', 'Knowledge source added');
       }
       onSaved();
@@ -394,9 +394,9 @@ function AdminAIKnowledge() {
     try {
       setLoading(true);
       const [sourcesRes, settingsRes, healthRes] = await Promise.all([
-        api.get('/ai-knowledge/sources', { params: { community_id: communityId } }),
-        api.get(`/ai-knowledge/settings/${communityId}`).catch(() => ({ data: {} })),
-        api.get(`/ai-knowledge/health/${communityId}`).catch(() => ({ data: null })),
+        api.get('/api/v1/admin/ai-knowledge/sources', { params: { community_id: communityId } }),
+        api.get(`/api/v1/admin/ai-knowledge/settings/${communityId}`).catch(() => ({ data: {} })),
+        api.get(`/api/v1/admin/ai-knowledge/health/${communityId}`).catch(() => ({ data: null })),
       ]);
       setSources(sourcesRes.data?.sources || []);
       if (settingsRes.data?.settings) {
@@ -432,7 +432,7 @@ function AdminAIKnowledge() {
   const handleDelete = async () => {
     if (!confirmDelete) return;
     try {
-      await api.delete(`/ai-knowledge/sources/${confirmDelete.id}`);
+      await api.delete(`/api/v1/admin/ai-knowledge/sources/${confirmDelete.id}`);
       showToast('success', `Deleted "${confirmDelete.name}"`);
       loadData();
     } catch (err) {
@@ -445,7 +445,7 @@ function AdminAIKnowledge() {
   const handleReindex = async (source) => {
     try {
       setReindexingId(source.id);
-      await api.post(`/ai-knowledge/sources/${source.id}/reindex`);
+      await api.post(`/api/v1/admin/ai-knowledge/sources/${source.id}/reindex`);
       showToast('success', `Reindex triggered for "${source.name}"`);
       loadData();
     } catch (err) {
@@ -458,7 +458,7 @@ function AdminAIKnowledge() {
   const handleSaveSettings = async () => {
     try {
       setSavingSettings(true);
-      await api.put(`/ai-knowledge/settings/${communityId}`, settings);
+      await api.put(`/api/v1/admin/ai-knowledge/settings/${communityId}`, settings);
       showToast('success', 'Settings saved');
     } catch (err) {
       showToast('error', err.response?.data?.error?.message || 'Failed to save settings');

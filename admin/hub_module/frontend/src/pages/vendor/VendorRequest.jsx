@@ -5,7 +5,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
-import api from '../../services/api';
+import { vendorApi } from '../../services/api';
 
 function VendorRequest() {
   const { user } = useAuth();
@@ -30,7 +30,7 @@ function VendorRequest() {
 
   const checkExistingRequest = async () => {
     try {
-      const response = await api.get('/vendor/request/status');
+      const response = await vendorApi.getRequest();
       if (response.data?.request) {
         setExistingRequest(response.data.request);
       }
@@ -53,7 +53,7 @@ function VendorRequest() {
     setError(null);
 
     try {
-      const response = await api.post('/vendor/request', {
+      const response = await vendorApi.createRequest({
         ...formData,
         userEmail: user?.email,
         userDisplayName: user?.username,

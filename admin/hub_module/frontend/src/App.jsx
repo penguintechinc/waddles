@@ -1,4 +1,4 @@
-import { lazy } from 'react';
+import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { LoadingState, ServedFeature } from './components/ui';
@@ -224,7 +224,7 @@ function App() {
         <Route
           path="/secret"
           element={
-            <Suspense fallback={<LoadingSpinner />}>
+            <Suspense fallback={<LoadingState fullPage label="Loading" />}>
               <SecretPullPage />
             </Suspense>
           }
@@ -292,13 +292,13 @@ function App() {
 
         {/* Vendor dashboard routes (authenticated vendors) */}
         <Route path="/vendor/dashboard" element={<VendorDashboard />} />
-        <Route path="/vendor/submissions" element={<VendorSubmissions />} />
+        <Route path="/vendor/submissions" element={<ServedFeature feature="vendor-submissions"><VendorSubmissions /></ServedFeature>} />
         <Route path="/vendor/request" element={<VendorRequest />} />
         <Route path="/vendor/modules" element={<VendorModules />} />
         <Route path="/vendor/analytics" element={<VendorAnalytics />} />
         <Route path="/vendor/discount-codes" element={<VendorDiscountCodes />} />
         <Route path="/vendor/settings" element={<VendorSettings />} />
-        <Route path="/vendor/github-sync" element={<VendorGithubSync />} />
+        <Route path="/vendor/github-sync" element={<ServedFeature feature="vendor-github-sync"><VendorGithubSync /></ServedFeature>} />
       </Route>
 
       {/* Admin routes (community admin) */}
@@ -313,7 +313,7 @@ function App() {
         <Route path="/admin/:communityId/live-activity" element={<LiveActivity />} />
         <Route path="/admin/:communityId/members" element={<AdminMembers />} />
         <Route path="/admin/:communityId/workflows" element={<AdminWorkflows />} />
-        <Route path="/admin/:communityId/modules" element={<AdminModules />} />
+        <Route path="/admin/:communityId/modules" element={<ServedFeature feature="community-marketplace-modules"><AdminModules /></ServedFeature>} />
         <Route path="/admin/:communityId/modules/lfg/config" element={<AdminLfgConfig />} />
         <Route path="/admin/:communityId/modules/clip/config" element={<AdminClipConfig />} />
         <Route path="/admin/:communityId/modules/alias/config" element={<AdminAliasConfig />} />
@@ -321,12 +321,12 @@ function App() {
         <Route path="/admin/:communityId/modules/server-status/config" element={<AdminServerStatusConfig />} />
         <Route path="/admin/:communityId/modules/server-manager/config" element={<AdminServerManagerConfig />} />
         <Route path="/admin/:communityId/marketplace" element={<MarketplaceRedirect />} />
-        <Route path="/admin/:communityId/marketplace/:source/:id" element={<AdminMarketplaceModuleDetail />} />
+        <Route path="/admin/:communityId/marketplace/:source/:id" element={<ServedFeature feature="community-marketplace-install"><AdminMarketplaceModuleDetail /></ServedFeature>} />
         <Route path="/admin/:communityId/premium" element={<AdminCommunityPremium />} />
-        <Route path="/admin/:communityId/stream-overlays" element={<AdminStreamOverlays />} />
+        <Route path="/admin/:communityId/stream-overlays" element={<ServedFeature feature="browser-sources"><AdminStreamOverlays /></ServedFeature>} />
         <Route path="/admin/:communityId/domains" element={<ServedFeature feature="custom-domains"><AdminDomains /></ServedFeature>} />
         <Route path="/admin/:communityId/servers" element={<ServedFeature feature="linked-servers"><AdminServers /></ServedFeature>} />
-        <Route path="/admin/:communityId/connected-platforms" element={<AdminConnectedPlatforms />} />
+        <Route path="/admin/:communityId/connected-platforms" element={<ServedFeature feature="community-oauth-credentials"><AdminConnectedPlatforms /></ServedFeature>} />
         <Route path="/admin/:communityId/mirror-groups" element={<ServedFeature feature="mirror-groups"><AdminMirrorGroups /></ServedFeature>} />
         <Route path="/admin/:communityId/leaderboard" element={<AdminLeaderboardConfig />} />
         <Route path="/admin/:communityId/profile" element={<AdminCommunityProfile />} />
@@ -337,7 +337,7 @@ function App() {
         <Route path="/admin/:communityId/bot-detection" element={<ServedFeature feature="bot-detection"><AdminBotDetection /></ServedFeature>} />
         <Route path="/admin/:communityId/announcements" element={<AdminAnnouncements />} />
         <Route path="/admin/:communityId/analytics" element={<ServedFeature feature="community-analytics"><AdminAnalytics /></ServedFeature>} />
-        <Route path="/admin/:communityId/security" element={<AdminSecurity />} />
+        <Route path="/admin/:communityId/security" element={<ServedFeature feature="community-security"><AdminSecurity /></ServedFeature>} />
         <Route path="/admin/:communityId/loyalty" element={<LoyaltySettings />} />
         <Route path="/admin/:communityId/loyalty/leaderboard" element={<LoyaltyLeaderboard />} />
         <Route path="/admin/:communityId/loyalty/giveaways" element={<LoyaltyGiveaways />} />
@@ -347,7 +347,7 @@ function App() {
         <Route path="/admin/:communityId/raffle-customization" element={<AdminRaffleCustomization />} />
         <Route path="/admin/:communityId/shoutouts" element={<AdminShoutouts />} />
         <Route path="/admin/:communityId/translation" element={<ServedFeature feature="translation"><AdminTranslation /></ServedFeature>} />
-        <Route path="/admin/:communityId/music" element={<AdminMusicDashboard />} />
+        <Route path="/admin/:communityId/music" element={<ServedFeature feature="music-playback"><AdminMusicDashboard /></ServedFeature>} />
         <Route path="/admin/:communityId/music/settings" element={<AdminMusicSettings />} />
         <Route path="/admin/:communityId/music/providers" element={<AdminMusicProviders />} />
         <Route path="/admin/:communityId/music/radio" element={<AdminRadioStations />} />
@@ -370,7 +370,7 @@ function App() {
         <Route path="/admin/:communityId/interaction-channels" element={<AdminInteractionChannels />} />
         <Route path="/admin/:communityId/roles" element={<AdminCommunityRoles />} />
         <Route path="/admin/:communityId/members/:userId/analytics" element={<AdminMemberAnalytics />} />
-        <Route path="/admin/:communityId/ai-knowledge" element={<AdminAIKnowledge />} />
+        <Route path="/admin/:communityId/ai-knowledge" element={<ServedFeature feature="ai-knowledge"><AdminAIKnowledge /></ServedFeature>} />
         {/* Wave-1 stub: community bundles slice */}
         <Route path="/admin/:communityId/bundles" element={<AdminCommunityBundles />} />
         <Route path="/admin/:communityId/role-sync" element={<AdminRoleSyncMapping />} />

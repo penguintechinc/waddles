@@ -50,6 +50,7 @@ def bind_bot_tables(dal: Any) -> None:
         dal.define_table(
             "hub_users",
             dal.Field("display_name", "string", length=255),
+            dal.Field("is_super_admin", "boolean", default=False),
             migrate=False,
         )
 

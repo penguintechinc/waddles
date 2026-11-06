@@ -14,7 +14,7 @@ import {
   ClockIcon,
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
-import api from '../../services/api';
+import { vendorApi } from '../../services/api';
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
 
@@ -231,9 +231,9 @@ function CodeModal({ open, onClose, onSaved, editCode, modules }) {
 
     try {
       if (editCode) {
-        await api.put(`/vendor/discount-codes/${editCode.id}`, payload);
+        await vendorApi.updateDiscountCode(editCode.id, payload);
       } else {
-        await api.post('/vendor/discount-codes', payload);
+        await vendorApi.createDiscountCode(payload);
       }
       onSaved(editCode ? 'Code updated.' : 'Code created.');
     } catch (err) {
@@ -523,7 +523,7 @@ function VendorDiscountCodes() {
       setLoading(true);
       const params = { page: pageNum, limit: LIMIT };
       if (statusFilter !== 'all') params.status = statusFilter;
-      const response = await api.get('/vendor/discount-codes', { params });
+      const response = await vendorApi.getDiscountCodes(params);
       const data = response.data;
       setCodes(data?.codes || data?.items || []);
       const total = data?.total || data?.pagination?.total || 0;
@@ -539,7 +539,7 @@ function VendorDiscountCodes() {
 
   const loadModules = useCallback(async () => {
     try {
-      const response = await api.get('/vendor/modules');
+      const response = await vendorApi.getModules();
       setModules(response.data?.modules || []);
     } catch {
       setModules([]);
@@ -590,7 +590,7 @@ function VendorDiscountCodes() {
     setConfirm(null);
     setActionLoading(code.id + '-delete');
     try {
-      await api.delete(`/vendor/discount-codes/${code.id}`);
+      await vendorApi.deleteDiscountCode(code.id);
       addToast(`Code "${code.code}" deleted.`, 'success');
       loadCodes(page, filter);
     } catch (err) {
@@ -611,7 +611,7 @@ function VendorDiscountCodes() {
     setConfirm(null);
     setActionLoading(code.id + '-toggle');
     try {
-      await api.put(`/vendor/discount-codes/${code.id}`, { is_active: !code.is_active });
+      await vendorApi.updateDiscountCode(code.id, { is_active: !code.is_active });
       addToast(
         `Code "${code.code}" ${code.is_active ? 'deactivated' : 'activated'}.`,
         'success'
