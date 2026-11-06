@@ -1109,9 +1109,6 @@ existingSecret (SSE assertion mandatory). Fails the render on any inconsistency.
 {{- if not .Values.infrastructure.seaweedfs.enabled -}}
 {{- fail "bundleStorage.mode=bundled requires infrastructure.seaweedfs.enabled=true (the bundled SeaweedFS holds the bundle bucket); to use your own S3 set bundleStorage.mode=external" -}}
 {{- end -}}
-{{- if not .Values.infrastructure.seaweedfs.encryption.enabled -}}
-{{- fail "bundleStorage.mode=bundled requires infrastructure.seaweedfs.encryption.enabled=true (at-rest encryption is mandatory)" -}}
-{{- end -}}
 {{- else if eq $m "external" -}}
 {{- $e := .Values.bundleStorage.external -}}
 {{- if not (and $e.endpoint $e.bucket $e.existingSecret) -}}

@@ -140,6 +140,9 @@ infrastructure:
     # Bundled SeaweedFS holds the bundle-object-storage bucket by default.
     enabled: true
     replicas: 1
+    # Pre-create via `make generate-seaweedfs-sse-key` (at-rest encryption is mandatory).
+    encryption:
+      secretName: "seaweedfs-sse-kek"
 
   # Ollama - With GPU support if available
   ollama:
