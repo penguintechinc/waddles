@@ -94,7 +94,13 @@ def _pc_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     real_getaddrinfo = socket.getaddrinfo
 
     def fake_getaddrinfo(host: str, *args: Any, **kwargs: Any) -> Any:
-        if host in ("id.twitch.tv", "api.twitch.tv"):
+        if host in (
+            "id.twitch.tv",
+            "api.twitch.tv",
+            "accounts.google.com",
+            "oauth2.googleapis.com",
+            "www.googleapis.com",
+        ):
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
         return real_getaddrinfo(host, *args, **kwargs)
 
@@ -180,7 +186,7 @@ def build_pc_metadata() -> MetaData:
         CheckConstraint("status IN ('active', 'revoked', 'expired')"),
         CheckConstraint(
             "resource_type IN ('discord_guild', 'twitch_channel', 'fake_room', "
-            "'external_http', 'aws_lambda', 'gcp_function')"
+            "'external_http', 'aws_lambda', 'gcp_function', 'youtube_channel')"
         ),
         CheckConstraint("connection_kind BETWEEN 1 AND 4"),
         CheckConstraint(
@@ -434,3 +440,16 @@ def admin_headers(
         "Authorization": f"Bearer {make_user_token(user_id=uid, scope=scope, tenant=tenant)}",
         "Content-Type": "application/json",
     }
+
+
+# YouTube fixtures live in their own module; re-exported here so pytest discovers them.
+from tests.provider_connections.youtube_fixtures import (  # noqa: E402, F401
+    acme_google_app,
+    fake_google,
+    fake_redis,
+    yt_app,
+    yt_client,
+    yt_db,
+    yt_service,
+    yt_tokens,
+)

@@ -10,6 +10,7 @@ Guide, API reference, security model, data-plane contract and the "adding a prov
 |---|---|
 | `adapter.py` | `AdapterSpec` (declarative provider description) + `ProviderAdapter` protocol + metadata/credential validation + `AdapterRegistry`. No Waddles-specific imports. |
 | `twitch.py` | The first adapter: bot account token -> channel resolution -> refresh via the platform Twitch app. |
+| `youtube.py` | Channel owner's Google OAuth token -> channel -> `live_chat_id` binding (typed or discovered) -> refresh via the tenant's own Google app. Install flow: `services/youtube_install.py`. |
 | `kinds.py` | `ConnectionKind` / `SecretScheme` int enums -- the cross-task code contract (mirrors migration 0064's CHECK and the Rust enum). |
 | `static_secret.py` | `external_http` / `aws_lambda` / `gcp_function` adapters + `validate_endpoint_url` / `validate_secret_document`; credential check is structural only (no outbound call at write time). |
 | `registry.py` | **The only wiring point** -- adding a provider is its adapter module plus one line here. |

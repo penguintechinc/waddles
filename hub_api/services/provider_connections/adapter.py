@@ -34,6 +34,9 @@ from services.provider_connections.kinds import ConnectionKind, SecretScheme
 #: kind implemented by this foundation; ``oauth_connect`` / ``bot_invite_link`` / ``app_manifest``
 #: are reserved for the redirect-style installs described in docs/CONNECTION_MODEL.local.md.
 INSTALL_KIND_CREDENTIALS: Final = "credentials"
+#: Redirect-style install: the admin authorises on the provider's consent screen and the
+#: hub-api callback (state + PKCE verified) stores the resulting token pair. Used by YouTube.
+INSTALL_KIND_OAUTH_CONNECT: Final = "oauth_connect"
 
 #: Longest access/refresh token accepted. Real provider tokens are tens of bytes (Twitch 30,
 #: Discord ~70, Slack ~60); a few KiB covers JWT-shaped tokens and bounds the ciphertext column.
@@ -217,6 +220,22 @@ class ProviderAdapter(Protocol):
 
     def granted_capabilities(self, scopes: Sequence[str]) -> frozenset[str]:
         """Return the subset of ``spec.capabilities`` the given ``scopes`` actually grant."""
+        ...
+
+
+@runtime_checkable
+class MetadataDiscoverer(Protocol):
+    """Optional adapter capability: find the binding metadata an admin would otherwise paste.
+
+    ``discover_metadata`` receives a *fresh* plaintext access token and the stored facts, makes a
+    bounded number of provider calls, and returns raw (unvalidated) metadata input -- the service
+    runs it through :func:`validate_metadata` exactly like admin-typed input.
+    """
+
+    async def discover_metadata(
+        self, credentials: Credentials, facts: Mapping[str, Any]
+    ) -> Mapping[str, str]:
+        """Return discovered metadata, or raise :class:`ResourceUnresolvable` if there is none."""
         ...
 
 
