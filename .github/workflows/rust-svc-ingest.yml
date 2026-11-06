@@ -71,14 +71,10 @@ jobs:
         with:
           toolchain: "1.97.1"
 
-      - name: Install build deps (C toolchain, cmake, protoc)
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          sudo -E apt-get -y -o Dpkg::Use-Pty=0 update
-          sudo -E apt-get -y -o Dpkg::Use-Pty=0 install --no-install-recommends build-essential cmake protobuf-compiler
-
+      - name: Setup build deps (C toolchain, cmake, protoc)
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages: 'cmake build-essential protobuf-compiler'
       - name: Live e2e (starts its own Valkey + Postgres containers)
         env:
           HUB_PYTHON: ${{ runner.temp }}/hub-venv/bin/python
