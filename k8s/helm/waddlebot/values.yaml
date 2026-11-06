@@ -1614,12 +1614,14 @@ pipeline:
         overlay:
           twitch:
             enabled: false
-          # REJECTED at render until the identify budget is ported (flip identifyBudgetReady).
+          # REJECTED at render unless identifyBudgetReady is true (alpha/dal2alpha/local only).
           discord:
             enabled: false
           youtube:
             enabled: false
-        # Flipped to true ONLY by the identify-budget PR (spec SS5.4 / row I).
+        # The Valkey IDENTIFY budget is wired in the binary; the chart default stays false so beta/
+        # gamma/production REJECT discord until it is deliberately enabled there (values-alpha,
+        # values-dal2alpha and values-local set true).
         identifyBudgetReady: false
         reconcileIntervalSecs: 60
         maxConnections: 500

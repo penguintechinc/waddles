@@ -282,11 +282,19 @@ refusal: Exhausted{retry_after} -> close, reconnect delay floored at retry_after
 | Metric | `connector_identify_budget_total{outcome}`: `granted waited exhausted store_error limit_unavailable limit_fallback low_headroom resume_skipped credential_rejected`; plus `svc_ingest_connector_connects_total{outcome="gate_denied"}`. |
 | Fail-closed | Valkey outage/stall (2s deadline) => `GateError::Retryable`; an unseeded counter is refused until seeded. |
 
-Wiring (Discord, single shard): build one `DiscordIdentifyGate` per bot connection from a `RedisIdentifyBudget` (shared
-Valkey connection), a `GatewayBotSource` and `IdentifyBudgetMetrics::register`, and pass it to the driver. The flag-flip
-that lets the host selector accept `OVERLAY_DISCORD_ENABLED=true` is NOT in this module: after this PR merges and the
-flag-on Discord e2e passes, set `IDENTIFY_BUDGET_READY = true` (connector_runtime selector) and the helm value
-`identifyBudgetReady`.
+Wiring (Discord, single shard): the connector runtime builds one `DiscordIdentifyGate` per Discord connection
+(`connector_runtime::boot::DiscordGateFactory`, a `HandshakeGateFactory` the supervisor consults for every connection
+before the driver runs). The gate wraps a `RedisIdentifyBudget` over a Valkey connection (the same Valkey as the lease, so
+the budget is fleet-wide), a `GatewayBotSource` over that connection's own community-bound secrets, and
+`IdentifyBudgetMetrics`. `assemble` REFUSES a Discord runtime without the budget backend
+(`BootError::Missing("the Valkey identify budget backend")`); a gate that cannot be built parks the connection
+(`transport_build`), so Discord never runs ungated.
+
+Flag-on: `IDENTIFY_BUDGET_READY = true` (connector_runtime selector; mirrored in `overlay_selector.py`) and the helm
+`identifyBudgetReady` default `true` for values-alpha / values-dal2alpha / values-local ONLY (base, beta, gamma and
+production stay `false` and reject Discord at render). Proven by `core/connector_e2e/tests/discord_acceptance.rs`: real
+Discord bundle 1.0.1, fake gateway + `/gateway/bot`, real Valkey: one IDENTIFY per bucket fleet-wide, RESUME exempt, an
+exhausted budget or dead Valkey sends no IDENTIFY, own message dropped, tokenized actor published under the resolved scope.
 
 ### Poll: `PollConfig.lifecycle: PollLifecycle`
 

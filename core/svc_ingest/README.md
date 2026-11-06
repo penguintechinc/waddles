@@ -391,7 +391,7 @@ Env baselines, default OFF, strict booleans, read identically by the Rust and Py
 | Env | Effect when ON |
 |---|---|
 | `OVERLAY_TWITCH_ENABLED` | legacy Twitch IRC inbound off; Twitch outbound drains off only if `CONNECTOR_TOOLS_ENABLED`; legacy EventSub stays unless `twitch` in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` |
-| `OVERLAY_DISCORD_ENABLED` | FATAL until the identify budget is ported (`IDENTIFY_BUDGET_READY`) |
+| `OVERLAY_DISCORD_ENABLED` | legacy Discord inbound off; needs the Valkey IDENTIFY budget (`IDENTIFY_BUDGET_READY`, wired via `boot::DiscordGateFactory`; `assemble` refuses Discord without it) and `CONNECTOR_HEARTBEAT_ENABLED=true` |
 | `OVERLAY_YOUTUBE_ENABLED` | Python `youtube_live_poll` off |
 | `CONNECTOR_RUNTIME_ENABLED`, `CONNECTOR_RECONCILE_INTERVAL_SECS` (60), `CONNECTOR_MAX_CONNECTIONS` (500), `CONNECTOR_START_CONCURRENCY` (8), `CONNECTOR_DISCORD_START_PACE_MS` (5500), `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` | see spec 2026-11-05 section 1.3 |
 
@@ -466,8 +466,8 @@ three connectors pinned (`Executor::pin_connector`) and a host-call bridge so th
 
 ## Connector runtime boot (PR-E, spec `2026-11-05-connector-runtime-inbound-manager.md`)
 
-Opt-in per platform by the env baselines `OVERLAY_{TWITCH,DISCORD,YOUTUBE}_ENABLED` (default OFF, strict bool; Discord stays a fatal boot error while
-`IDENTIFY_BUDGET_READY` is `false`). With every overlay OFF (and `CONNECTOR_RUNTIME_ENABLED` unset) nothing below is built, bound or spawned --
+Opt-in per platform by the env baselines `OVERLAY_{TWITCH,DISCORD,YOUTUBE}_ENABLED` (default OFF, strict bool; Discord is a fatal boot error only if
+`IDENTIFY_BUDGET_READY` is `false`, which it no longer is). With every overlay OFF (and `CONNECTOR_RUNTIME_ENABLED` unset) nothing below is built, bound or spawned --
 `tests/connector_runtime_default_boot.rs` pins it (no `connector_runtime_*`/host-call series, no overlay in `/readyz`, webhook ingress stays 503).
 
 ```text

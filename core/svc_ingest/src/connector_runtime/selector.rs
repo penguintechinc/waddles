@@ -19,11 +19,13 @@
 
 use crate::config::CliConfig;
 
-/// Flipped to `true` by the identify-budget PR once the Valkey-backed Discord
-/// IDENTIFY budget is ported into the runtime. While `false`,
-/// `OVERLAY_DISCORD_ENABLED=true` is a fatal boot error: without the budget a
-/// restart storm would trip Discord's session-start limits.
-pub const IDENTIFY_BUDGET_READY: bool = false;
+/// `true` now the Valkey-backed Discord IDENTIFY budget is wired into the
+/// runtime (`boot::DiscordGateFactory`, proven by `connector_e2e`'s
+/// `discord_acceptance`). While `false`, `OVERLAY_DISCORD_ENABLED=true` is a
+/// fatal boot error: without the budget a restart storm would trip Discord's
+/// session-start limits. `assemble` additionally refuses Discord without the
+/// budget backend.
+pub const IDENTIFY_BUDGET_READY: bool = true;
 
 /// Platforms the selector knows, in validation order.
 pub const PLATFORMS: [&str; 3] = ["twitch", "discord", "youtube"];
@@ -400,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn discord_on_is_fatal_while_identify_budget_is_not_ported() {
+    fn discord_on_is_fatal_while_the_budget_flag_is_off() {
         let e = env(&[("OVERLAY_DISCORD_ENABLED", "true")]);
         let err = OverlaySelector::parse(&e, false).unwrap_err();
         assert_eq!(
@@ -412,10 +414,12 @@ mod tests {
 
     #[test]
     fn from_env_follows_the_identify_budget_const() {
-        // Fails while the const is false; the identify-budget PR flips it and
-        // this assertion flips with it.
         let r = OverlaySelector::from_env(&env(&[("OVERLAY_DISCORD_ENABLED", "true")]));
         assert_eq!(r.is_ok(), IDENTIFY_BUDGET_READY);
+        assert!(
+            r.unwrap().overlay("discord"),
+            "Discord ON starts with the budget wired"
+        );
     }
 
     #[test]

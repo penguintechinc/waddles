@@ -644,3 +644,10 @@ spire:
 # R5: no Tetragon agent on local clusters (networkPolicy.enabled is already false above).
 tetragon:
   enabled: false
+
+# Discord connector service bundle: the Valkey IDENTIFY budget is wired (see values.yaml).
+pipeline:
+  rustDataPlane:
+    svcIngest:
+      connectorRuntime:
+        identifyBudgetReady: true

@@ -5,8 +5,7 @@
 //! Twitch AND YouTube ON, a REAL bundle executor pinning the REAL compiled
 //! Twitch and YouTube bundles over the host-API wire, a REAL Valkey spine, a fake
 //! IRC server, a fake YouTube API and a fake hub-api (bindings, scope authority,
-//! identity tokenizer). Discord stays blocked: the boot refuses it while
-//! `IDENTIFY_BUDGET_READY` is false.
+//! identity tokenizer). Discord is proven by `discord_acceptance.rs`.
 //!
 //! Per platform it proves: a message is ingested, tokenized (the actor on the
 //! stream decrypts to the hub's pseudonym UUID, no raw handle appears in any
@@ -642,6 +641,7 @@ impl Rig {
         let runtime = assemble(
             &settings,
             AssembleDeps {
+                identify_budget: None,
                 resolver: hub,
                 scope: Arc::new(FakeScope {
                     tw_slug: ctx.tw_slug.clone(),
@@ -968,10 +968,10 @@ impl LegacyStarters for Counting {
     }
 }
 
-/// Discord ON is refused at boot while the identify budget is unported; the
-/// legacy starters of the ON platforms are NOT called, the others still are.
+/// Discord ON is accepted (budget wired, `discord_acceptance.rs` proves it
+/// end to end); the legacy starters of the ON platforms are NOT called, the others still are.
 #[tokio::test]
-async fn discord_is_refused_and_legacy_is_suppressed_for_the_on_platforms() {
+async fn discord_is_accepted_and_legacy_is_suppressed_for_the_on_platforms() {
     let env = |pairs: &'static [(&'static str, &'static str)]| {
         move |k: &str| {
             pairs
@@ -985,17 +985,13 @@ async fn discord_is_refused_and_legacy_is_suppressed_for_the_on_platforms() {
         ("OVERLAY_YOUTUBE_ENABLED", "true"),
         ("OVERLAY_DISCORD_ENABLED", "true"),
     ]));
-    assert_eq!(
-        discord.is_ok(),
-        IDENTIFY_BUDGET_READY,
-        "Discord ON must be refused exactly while IDENTIFY_BUDGET_READY is false"
+    // Spec change (Discord flag-on): Discord ON is accepted now the identify
+    // budget is wired; it was refused while IDENTIFY_BUDGET_READY was false.
+    assert!(std::hint::black_box(IDENTIFY_BUDGET_READY));
+    assert!(
+        discord.is_ok_and(|s| s.overlay("discord")),
+        "Discord ON must be accepted with the identify budget wired"
     );
-    if !IDENTIFY_BUDGET_READY {
-        assert!(
-            matches!(discord, Err(BootError::Blocked(m)) if m.contains("identify budget")),
-            "refusal must name the identify budget: {discord:?}"
-        );
-    }
     let malformed = OverlaySelector::from_env(&env(&[("OVERLAY_TWITCH_ENABLED", "yes")]));
     assert_eq!(
         malformed,

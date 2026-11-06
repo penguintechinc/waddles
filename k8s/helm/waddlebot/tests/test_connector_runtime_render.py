@@ -182,13 +182,39 @@ def test_missing_prerequisites_fail_render(bad: list[str], needle: str) -> None:
     assert needle in res.stderr, res.stderr[-500:]
 
 
-def test_discord_overlay_rejected_until_identify_budget_ready() -> None:
+def test_discord_overlay_rejected_unless_identify_budget_ready() -> None:
+    # Spec change (Discord flag-on): alpha/dal2alpha now default identifyBudgetReady=true, so the
+    # refusal is pinned by forcing it false (the base/beta/gamma/production default).
     on = [*_BASE, "--set", f"{_RT}.overlay.discord.enabled=true"]
-    res = _render(*on)
+    res = _render(*on, "--set", f"{_RT}.identifyBudgetReady=false")
     assert res.returncode != 0
     assert "discord overlay requires the identify budget (not yet ported)" in res.stderr
     ok = _render(*on, "--set", f"{_RT}.identifyBudgetReady=true")
     assert ok.returncode == 0, ok.stderr[-500:]
+
+
+@pytest.mark.parametrize(
+    ("values", "want"),
+    [
+        ("values-alpha.yaml", True),
+        ("values-dal2alpha.yaml", True),
+        ("values-local.yaml", True),
+        ("values.yaml", False),
+        ("values-beta.yaml", False),
+        ("values-gamma.yaml", False),
+        ("values-production.yaml", False),
+    ],
+)
+def test_identify_budget_ready_only_in_alpha_and_local_values(values: str, want: bool) -> None:
+    loaded = yaml.safe_load((_CHART_DIR / values).read_text()) or {}
+    rt = (
+        loaded.get("pipeline", {}).get("rustDataPlane", {}).get("svcIngest", {}).get("connectorRuntime", {})
+    )
+    assert bool(rt.get("identifyBudgetReady", False)) is want, values
+    if values == "values-alpha.yaml":  # the only file whose other render prerequisites _BASE satisfies
+        on = [*_BASE, "--set", f"{_RT}.overlay.discord.enabled=true"]
+        res = _render(*on, values=values)
+        assert res.returncode == 0, res.stderr[-500:]
 
 
 def test_network_policies_are_cilium_and_scoped() -> None:

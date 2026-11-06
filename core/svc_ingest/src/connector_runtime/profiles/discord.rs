@@ -26,8 +26,10 @@
 //!
 //! Discord must not run without the fleet-wide IDENTIFY budget (a single
 //! process bursting IDENTIFYs exhausts the ~1000/24h `session_start_limit` and
-//! gets the bot token reset). Until PR-I flips [`IDENTIFY_BUDGET_READY`] the
-//! profile refuses every binding ([`PlanError::IdentifyBudgetNotReady`]).
+//! gets the bot token reset). The budget is the `HandshakeGate` the supervisor
+//! attaches to every Discord driver (`boot::DiscordGateFactory`); while
+//! [`IDENTIFY_BUDGET_READY`] is false the profile refuses every binding
+//! ([`PlanError::IdentifyBudgetNotReady`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -96,10 +98,9 @@ impl DiscordProfile {
     /// Production constructor: readiness follows [`IDENTIFY_BUDGET_READY`].
     #[must_use]
     pub fn new() -> Self {
-        // SEAM(PR-I): the identify budget's `HandshakeGate` (awaited before
-        // IDENTIFY, never before RESUME) is attached to the transport by the
-        // supervisor, not carried by the plan; once PR-I lands this profile
-        // only needs the readiness constant flipped.
+        // The identify budget's `HandshakeGate` (awaited before IDENTIFY,
+        // never before RESUME) is attached to the driver by the supervisor
+        // (`boot::DiscordGateFactory`), not carried by the plan.
         Self {
             budget_ready: IDENTIFY_BUDGET_READY,
         }
@@ -744,27 +745,26 @@ mod tests {
         assert_eq!(plan_ok(&b).fingerprint, base);
     }
 
+    /// Spec change (Discord flag-on): the production constructor follows
+    /// `IDENTIFY_BUDGET_READY`, now true, so it plans; a profile told the
+    /// budget is not ready still refuses every binding.
     #[test]
-    fn identify_budget_gate_blocks_discord_until_ready() {
-        // The production constructor follows the constant, which is false.
+    fn identify_budget_gate_follows_the_readiness_flag() {
         let budget_ready = std::hint::black_box(IDENTIFY_BUDGET_READY);
-        assert!(!budget_ready, "flipped only by the budget PR");
-        let p = DiscordProfile::new();
-        assert_eq!(
-            p.plan(&binding(Some(GUILD)), &env()).err(),
-            Some(PlanError::IdentifyBudgetNotReady)
-        );
-        assert!(DiscordProfile::default()
-            .plan(&binding(Some(GUILD)), &env())
-            .is_err());
+        assert!(budget_ready, "the budget is wired (DiscordGateFactory)");
         assert!(DiscordProfile::new()
-            .with_budget_ready(true)
             .plan(&binding(Some(GUILD)), &env())
             .is_ok());
-        assert!(DiscordProfile::new()
-            .with_budget_ready(false)
+        assert!(DiscordProfile::default()
             .plan(&binding(Some(GUILD)), &env())
-            .is_err());
+            .is_ok());
+        assert_eq!(
+            DiscordProfile::new()
+                .with_budget_ready(false)
+                .plan(&binding(Some(GUILD)), &env())
+                .err(),
+            Some(PlanError::IdentifyBudgetNotReady)
+        );
     }
 
     #[test]
