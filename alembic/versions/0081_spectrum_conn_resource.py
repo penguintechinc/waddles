@@ -2,12 +2,12 @@
 
 The RSI Spectrum provider adapter (``hub_api/services/provider_connections/spectrum.py``) stores a
 community's ingested Spectrum community as the connection's resource. The ``resource_type``
-allow-list CHECK (0035, extended by 0064 and 0073) must name it or every Spectrum insert is refused
-by the database. Pure CHECK swap -- no column, no data change. The new constraint is added
+allow-list CHECK (0035, extended by 0064, 0073 and 0078_wix) must name it or every Spectrum insert
+is refused by the database. Pure CHECK swap -- no column, no data change. The new constraint is added
 ``NOT VALID`` then validated, so the table is never scanned under an ACCESS EXCLUSIVE lock.
 
-Revision ID: 0078_spectrum_conn_resource
-Revises: 0077_stream_keys_destinations
+Revision ID: 0081_spectrum_conn_resource
+Revises: 0080_bundle_storage_audit
 Create Date: 2026-11-06
 """
 
@@ -15,15 +15,15 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0078_spectrum_conn_resource"
-down_revision = "0077_stream_keys_destinations"
+revision = "0081_spectrum_conn_resource"
+down_revision = "0080_bundle_storage_audit"
 branch_labels = None
 depends_on = None
 
 _RESOURCE_CHECK = "platform_connections_resource_type_check"
-_BASE_TYPES = (
+_PRIOR_TYPES = (
     "'discord_guild', 'twitch_channel', 'external_http', 'aws_lambda', 'gcp_function', "
-    "'youtube_channel'"
+    "'youtube_channel', 'wix_site'"
 )
 
 
@@ -39,7 +39,7 @@ def _swap_check(allowed: str) -> None:
 
 def upgrade() -> None:
     """Extend the allow-list with ``spectrum_community``."""
-    _swap_check(f"{_BASE_TYPES}, 'spectrum_community'")
+    _swap_check(f"{_PRIOR_TYPES}, 'spectrum_community'")
 
 
 def downgrade() -> None:
@@ -50,11 +50,11 @@ def downgrade() -> None:
         BEGIN
             IF EXISTS (SELECT 1 FROM platform_connections WHERE resource_type = 'spectrum_community') THEN
                 RAISE EXCEPTION
-                    '0078 downgrade refused: spectrum_community connections exist and the previous '
+                    '0081 downgrade refused: spectrum_community connections exist and the previous '
                     'release cannot represent them';
             END IF;
         END
         $$
         """
     )
-    _swap_check(_BASE_TYPES)
+    _swap_check(_PRIOR_TYPES)
