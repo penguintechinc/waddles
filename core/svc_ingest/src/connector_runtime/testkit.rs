@@ -378,9 +378,10 @@ impl Capture {
     /// Everything this thread logged so far, joined.
     pub fn text(&self) -> String {
         let g = self.0.buffers.lock().expect("lock");
-        g.get(&std::thread::current().id())
-            .map(|v| v.join(" | "))
-            .unwrap_or_default()
+        match g.get(&std::thread::current().id()) {
+            Some(v) => v.join(" | "),
+            None => String::new(),
+        }
     }
 }
 
