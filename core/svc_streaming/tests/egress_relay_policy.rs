@@ -56,7 +56,8 @@ async fn free_tier_pipeline_accepts_exactly_three_destinations() {
     .map(|(k, v)| EnvVarGuard::set(k, v))
     .collect();
 
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     for var in [
         "SVC_STREAMING_RELAY_POLICY_A",
@@ -95,7 +96,8 @@ async fn free_tier_pipeline_rejects_a_fourth_destination_with_the_documented_mes
     .map(|(k, v)| EnvVarGuard::set(k, v))
     .collect();
 
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     for var in [
         "SVC_STREAMING_RELAY_POLICY4_A",
@@ -135,7 +137,8 @@ async fn professional_policy_pipeline_accepts_a_fourth_destination() {
     .map(|(k, v)| EnvVarGuard::set(k, v))
     .collect();
 
-    let sink: RelaySink = RelaySink::with_policy(RelayPolicy::PROFESSIONAL);
+    let sink: RelaySink = RelaySink::with_policy(RelayPolicy::PROFESSIONAL)
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     for var in [
         "SVC_STREAMING_RELAY_PRO_A",
@@ -162,7 +165,8 @@ async fn separate_pipelines_have_independent_destination_counts() {
     .map(|(k, v)| EnvVarGuard::set(k, v))
     .collect();
 
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_a = Uuid::new_v4();
     let pipeline_b = Uuid::new_v4();
 

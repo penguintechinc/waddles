@@ -230,6 +230,7 @@ async fn run_scenario(sc: Scenario) {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             community_id INTEGER NOT NULL UNIQUE,
             source_url TEXT NOT NULL,
+            stream_key_hash TEXT,
             source_type TEXT NOT NULL DEFAULT 'rtmp',
             enabled INTEGER NOT NULL DEFAULT 1,
             record_enabled INTEGER NOT NULL DEFAULT 0,
@@ -250,12 +251,12 @@ async fn run_scenario(sc: Scenario) {
         );
         INSERT OR IGNORE INTO tenants (id, slug) VALUES (1, 'tenant-1');
         INSERT OR REPLACE INTO communities (id, tenant_id) VALUES ({cid}, 1);
-        INSERT OR REPLACE INTO streaming_configs (id, community_id, source_url, enabled, record_enabled, transcode_enabled, transcode_bitrate_kbps)
-            VALUES ({config_id}, {cid}, '{key}', 1, 0, {transcode}, 800);
+        INSERT OR REPLACE INTO streaming_configs (id, community_id, source_url, stream_key_hash, enabled, record_enabled, transcode_enabled, transcode_bitrate_kbps)
+            VALUES ({config_id}, {cid}, 'hubapi-unset:fixture', '{key_hash}', 1, 0, {transcode}, 800);
         "#,
         cid = sc.community_id,
         config_id = sc.config_id,
-        key = sc.stream_key,
+        key_hash = svc_streaming::stream_key::hash(&sc.stream_key),
     ))
     .await
     .expect("seed schema");

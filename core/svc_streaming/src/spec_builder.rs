@@ -297,6 +297,7 @@ mod tests {
             transcode_bitrate_kbps: 4000,
             video_codec: video.into(),
             audio_codec: audio.into(),
+            stream_key_hash: None,
         }
     }
 

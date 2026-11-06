@@ -5217,6 +5217,59 @@ components:
       - active30d
       title: StatsUsersDTO
       type: object
+    StreamConfigDTO:
+      description: Wire DTO for a community's stream config -- never includes the
+        key or its hash.
+      properties:
+        audio_codec:
+          title: Audio Codec
+          type: string
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        enabled:
+          title: Enabled
+          type: boolean
+        ingest_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Ingest Url
+        stream_key_fingerprint:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stream Key Fingerprint
+        stream_key_rotated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stream Key Rotated At
+        stream_key_set:
+          title: Stream Key Set
+          type: boolean
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+        video_codec:
+          title: Video Codec
+          type: string
+      required:
+      - enabled
+      - ingest_url
+      - stream_key_set
+      - stream_key_fingerprint
+      - stream_key_rotated_at
+      - video_codec
+      - audio_codec
+      - created_at
+      - updated_at
+      title: StreamConfigDTO
+      type: object
     StreamDTO:
       description: Stream DTO (list row).
       properties:
@@ -5254,6 +5307,47 @@ components:
       - game
       - thumbnailUrl
       title: StreamDTO
+      type: object
+    StreamDestinationDTO:
+      description: Wire DTO for one restream destination -- URL redacted to scheme://host,
+        key never sent.
+      properties:
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        enabled:
+          title: Enabled
+          type: boolean
+        force_cut:
+          title: Force Cut
+          type: boolean
+        id:
+          title: Id
+          type: string
+        max_resolution:
+          title: Max Resolution
+          type: string
+        platform:
+          title: Platform
+          type: string
+        rtmp_url:
+          title: Rtmp Url
+          type: string
+        video_codec:
+          title: Video Codec
+          type: string
+      required:
+      - id
+      - platform
+      - rtmp_url
+      - max_resolution
+      - video_codec
+      - enabled
+      - force_cut
+      - created_at
+      title: StreamDestinationDTO
       type: object
     StreamDetailDTO:
       description: Stream detail DTO.
@@ -5365,6 +5459,30 @@ components:
       - game
       - thumbnailUrl
       title: StreamDetailsDTO
+      type: object
+    StreamStatusDTO:
+      description: Wire DTO for live status derived from svc-streaming's `streaming_sessions`.
+      properties:
+        destinations_enabled:
+          title: Destinations Enabled
+          type: integer
+        is_streaming:
+          title: Is Streaming
+          type: boolean
+        started_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Started At
+        transcode_applied:
+          title: Transcode Applied
+          type: boolean
+      required:
+      - is_streaming
+      - started_at
+      - transcode_applied
+      - destinations_enabled
+      title: StreamStatusDTO
       type: object
     TenantAdminDTO:
       description: Tenant admin DTO.
@@ -11110,9 +11228,29 @@ paths:
         schema:
           type: integer
       responses:
-        default:
-          description: Undocumented response
-      summary: Get stream configuration for a community.
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET .../streams` -- `config` is null
+                  until one is created.
+                properties:
+                  config:
+                    anyOf:
+                    - $ref: '#/components/schemas/StreamConfigDTO'
+                    - type: 'null'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - config
+                title: ConfigResponse
+                type: object
+          description: Response DTO for `GET .../streams` -- `config` is null until
+            one is created.
+      summary: Get the stream configuration (never the key); Professional-tier gated
+        as before.
     post:
       description: ''
       operationId: post_create_stream_config
@@ -11123,9 +11261,31 @@ paths:
         schema:
           type: integer
       responses:
-        default:
-          description: Undocumented response
-      summary: Create stream configuration for a community.
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for create/regenerate -- the ONLY place
+                  a plaintext stream key is returned.
+                properties:
+                  config:
+                    $ref: '#/components/schemas/StreamConfigDTO'
+                  streamKey:
+                    title: Streamkey
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - config
+                - streamKey
+                title: KeyRevealResponse
+                type: object
+          description: Response DTO for create/regenerate -- the ONLY place a plaintext
+            stream key is returned.
+      summary: Create the community's stream config; the one-time plaintext key is
+        in `streamKey`.
   /api/v1/admin/{community_id}/streams/destinations:
     get:
       description: ''
@@ -11137,9 +11297,28 @@ paths:
         schema:
           type: integer
       responses:
-        default:
-          description: Undocumented response
-      summary: Get streaming destinations for a community.
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET .../streams/destinations`.
+                properties:
+                  destinations:
+                    items:
+                      $ref: '#/components/schemas/StreamDestinationDTO'
+                    title: Destinations
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - destinations
+                title: DestinationsResponse
+                type: object
+          description: Response DTO for `GET .../streams/destinations`.
+      summary: List restream destinations (URL redacted to scheme://host, key never
+        returned).
     post:
       description: ''
       operationId: post_add_destination
@@ -11150,9 +11329,24 @@ paths:
         schema:
           type: integer
       responses:
-        default:
-          description: Undocumented response
-      summary: Add streaming destination for a community.
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for destination create / force-cut.
+                properties:
+                  destination:
+                    $ref: '#/components/schemas/StreamDestinationDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - destination
+                title: DestinationResponse
+                type: object
+          description: Response DTO for destination create / force-cut.
+      summary: Add a restream destination; its URL and key are sealed at rest.
   /api/v1/admin/{community_id}/streams/destinations/{destination_id}:
     delete:
       description: ''
@@ -11167,11 +11361,27 @@ paths:
         name: destination_id
         required: true
         schema:
-          type: integer
+          type: string
       responses:
-        default:
-          description: Undocumented response
-      summary: Remove streaming destination.
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for destination delete.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - message
+                title: MessageResponse
+                type: object
+          description: Response DTO for destination delete.
+      summary: Remove a restream destination (404 if it is not this community's).
   /api/v1/admin/{community_id}/streams/destinations/{destination_id}/force-cut:
     put:
       description: ''
@@ -11186,11 +11396,27 @@ paths:
         name: destination_id
         required: true
         schema:
-          type: integer
+          type: string
       responses:
-        default:
-          description: Undocumented response
-      summary: Toggle force cut for a destination.
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for destination create / force-cut.
+                properties:
+                  destination:
+                    $ref: '#/components/schemas/StreamDestinationDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - destination
+                title: DestinationResponse
+                type: object
+          description: Response DTO for destination create / force-cut.
+      summary: Set force-cut from a boolean body field, or toggle it when the body
+        omits one.
   /api/v1/admin/{community_id}/streams/key/regenerate:
     post:
       description: ''
@@ -11202,9 +11428,30 @@ paths:
         schema:
           type: integer
       responses:
-        default:
-          description: Undocumented response
-      summary: Regenerate stream key for a community.
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for create/regenerate -- the ONLY place
+                  a plaintext stream key is returned.
+                properties:
+                  config:
+                    $ref: '#/components/schemas/StreamConfigDTO'
+                  streamKey:
+                    title: Streamkey
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - config
+                - streamKey
+                title: KeyRevealResponse
+                type: object
+          description: Response DTO for create/regenerate -- the ONLY place a plaintext
+            stream key is returned.
+      summary: Rotate the stream key; the old key stops authorizing immediately.
   /api/v1/admin/{community_id}/streams/status:
     get:
       description: ''
@@ -11216,9 +11463,24 @@ paths:
         schema:
           type: integer
       responses:
-        default:
-          description: Undocumented response
-      summary: Get streaming status for a community.
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET .../streams/status`.
+                properties:
+                  status:
+                    $ref: '#/components/schemas/StreamStatusDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - status
+                title: StatusResponse
+                type: object
+          description: Response DTO for `GET .../streams/status`.
+      summary: Get live streaming status for a community.
   /api/v1/admin/{community_id}/support/categories:
     get:
       description: ''

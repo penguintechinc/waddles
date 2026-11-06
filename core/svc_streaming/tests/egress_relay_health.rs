@@ -59,7 +59,9 @@ async fn connection_refused_marks_the_indexed_target_failing() {
 
     let registry = prometheus::Registry::new();
     let metrics = register_relay_metrics(&registry).unwrap();
-    let sink: RelaySink = RelaySink::new().with_metrics(metrics.clone());
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled())
+        .with_metrics(metrics.clone());
     let pipeline_id = Uuid::new_v4();
     sink.start(pipeline_id, rtmp_spec("SVC_STREAMING_RELAY_HEALTH_A"))
         .await
@@ -97,7 +99,8 @@ async fn dns_lookup_failure_is_classified_correctly() {
         "SVC_STREAMING_RELAY_HEALTH_DNS",
         "rtmp://bad.invalid/app/k1",
     );
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     sink.start(pipeline_id, rtmp_spec("SVC_STREAMING_RELAY_HEALTH_DNS"))
         .await
@@ -123,7 +126,8 @@ async fn stream_key_rejection_is_classified_correctly() {
         "SVC_STREAMING_RELAY_HEALTH_KEY",
         "rtmp://ingest.example.com/app/bad_key",
     );
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     sink.start(pipeline_id, rtmp_spec("SVC_STREAMING_RELAY_HEALTH_KEY"))
         .await
@@ -145,7 +149,8 @@ async fn progress_lines_leave_target_health_active() {
         "SVC_STREAMING_RELAY_HEALTH_PROGRESS",
         "rtmp://a.example.com/app/k1",
     );
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     sink.start(
         pipeline_id,
@@ -169,7 +174,8 @@ async fn progress_lines_leave_target_health_active() {
 
 #[tokio::test]
 async fn observe_stderr_line_on_an_untracked_pipeline_is_a_no_op() {
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     sink.observe_stderr_line(Uuid::new_v4(), "Connection refused")
         .await;
     assert!(sink.target_health(Uuid::new_v4()).await.is_empty());
@@ -183,7 +189,9 @@ async fn record_bytes_increments_the_target_labeled_counter() {
     );
     let registry = prometheus::Registry::new();
     let metrics = register_relay_metrics(&registry).unwrap();
-    let sink: RelaySink = RelaySink::new().with_metrics(metrics.clone());
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled())
+        .with_metrics(metrics.clone());
     let pipeline_id = Uuid::new_v4();
     sink.start(pipeline_id, rtmp_spec("SVC_STREAMING_RELAY_HEALTH_BYTES"))
         .await

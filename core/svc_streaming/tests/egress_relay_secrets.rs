@@ -30,7 +30,8 @@ async fn resolves_an_rtmp_target_from_an_env_secret() {
         );
     }
 
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     let spec = OutputSpec::RtmpPush {
         url_secret_ref: SecretRef::Env {
@@ -73,7 +74,8 @@ async fn resolves_an_srt_target_from_a_mounted_secret_file() {
     )
     .unwrap();
 
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     let spec = OutputSpec::SrtPush {
         url_secret_ref: SecretRef::File {
@@ -105,7 +107,8 @@ async fn missing_env_secret_surfaces_as_a_sink_error() {
     // SAFETY: serialized by ENV_LOCK.
     unsafe { std::env::remove_var("SVC_STREAMING_RELAY_TEST_MISSING") };
 
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let spec = OutputSpec::RtmpPush {
         url_secret_ref: SecretRef::Env {
             var: "SVC_STREAMING_RELAY_TEST_MISSING".to_string(),
@@ -118,7 +121,8 @@ async fn missing_env_secret_surfaces_as_a_sink_error() {
 
 #[tokio::test]
 async fn missing_secret_file_surfaces_as_a_sink_error() {
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let spec = OutputSpec::SrtPush {
         url_secret_ref: SecretRef::File {
             path: "/nonexistent/path/for/svc-streaming-relay-tests".to_string(),
@@ -143,7 +147,8 @@ async fn a_file_resolved_secret_never_appears_in_tee_slave_debug_or_display() {
     )
     .unwrap();
 
-    let sink: RelaySink = RelaySink::new();
+    let sink: RelaySink = RelaySink::new()
+        .with_egress_guard(svc_streaming::egress::relay::guard::EgressGuard::disabled());
     let pipeline_id = Uuid::new_v4();
     sink.start(
         pipeline_id,

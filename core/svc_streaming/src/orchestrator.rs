@@ -165,8 +165,8 @@ impl RunningPipelines for PipelineRegistry {
 // DB-backed ingest authorization
 // ---------------------------------------------------------------------
 
-/// Resolves an enabled `streaming_configs` row whose `source_url` matches
-/// `key` -- the same match `api::internal::ingest_auth` performs over HTTP,
+/// Resolves an enabled `streaming_configs` row whose `stream_key_hash` equals
+/// `sha256(key)` (empty/short keys are refused outright) -- the same match `api::internal::ingest_auth` performs over HTTP,
 /// used directly against the DB here (RTMP/WHIP auth and the orchestrator's
 /// own pipeline-spec lookup both need it, and both already hold a
 /// [`DatabaseConnection`] rather than being HTTP clients of this process).
@@ -176,8 +176,14 @@ async fn find_enabled_config(
     db: &DatabaseConnection,
     key: &str,
 ) -> Option<streaming_config::Model> {
+    // Reject empty/short keys before any lookup, and match ONLY the hash column: `source_url`
+    // is never an authorization credential (a config created with `source_url = ''` must not
+    // be reachable with an empty key).
+    if !crate::stream_key::is_acceptable(key) {
+        return None;
+    }
     match streaming_config::Entity::find()
-        .filter(streaming_config::Column::SourceUrl.eq(key))
+        .filter(streaming_config::Column::StreamKeyHash.eq(crate::stream_key::hash(key)))
         .filter(streaming_config::Column::Enabled.eq(true))
         .one(db)
         .await
@@ -234,7 +240,7 @@ impl IngestAuth for DbIngestAuth {
                     config_id: cfg.id.to_string(),
                 }),
                 None => Err(anyhow::anyhow!(
-                    "stream key does not match any enabled streaming_configs.source_url"
+                    "stream key does not match any enabled streaming_configs.stream_key_hash"
                 )),
             }
         })
@@ -301,7 +307,7 @@ impl RefreshingSrtAuth {
                 {
                     Ok(rows) => {
                         let keys: HashSet<String> =
-                            rows.into_iter().map(|r| r.source_url).collect();
+                            rows.into_iter().filter_map(|r| r.stream_key_hash).collect();
                         let count = keys.len();
                         *allowed
                             .write()
@@ -329,7 +335,8 @@ impl SrtAuth for RefreshingSrtAuth {
             .allowed
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if allowed.contains(key) {
+        if crate::stream_key::is_acceptable(key) && allowed.contains(&crate::stream_key::hash(key))
+        {
             Ok(())
         } else {
             Err("unknown, disabled, or not-yet-cached stream key")
@@ -897,6 +904,7 @@ mod tests {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 community_id INTEGER NOT NULL UNIQUE,
                 source_url TEXT NOT NULL,
+                stream_key_hash TEXT,
                 source_type TEXT NOT NULL DEFAULT 'rtmp',
                 enabled INTEGER NOT NULL DEFAULT 1,
                 record_enabled INTEGER NOT NULL DEFAULT 0,
@@ -919,22 +927,61 @@ mod tests {
             INSERT INTO communities (id, tenant_id) VALUES (42, 1);
             INSERT INTO communities (id, tenant_id) VALUES (99, 404);
             INSERT INTO streaming_configs (id, community_id, source_url, enabled, record_enabled, transcode_enabled, transcode_bitrate_kbps)
-                VALUES (1, 42, 'sk_enabled', 1, 0, 0, 4000);
+                VALUES (1, 42, 'sk_enabled_0123456789abcdef', 1, 0, 0, 4000);
             INSERT INTO streaming_configs (id, community_id, source_url, enabled)
-                VALUES (2, 43, 'sk_disabled', 0);
+                VALUES (2, 43, 'sk_disabled_0123456789abcdef', 0);
             "#,
         )
         .await
         .expect("seed schema");
+        crate::stream_key::backfill_hashes_from_source_url_for_tests(&db).await;
         db
     }
 
     // --- find_enabled_config ---
 
     #[tokio::test]
+    async fn find_enabled_config_refuses_empty_short_and_null_hash_keys() {
+        let db = seed_db().await;
+        db.execute_unprepared(
+            "INSERT INTO streaming_configs (id, community_id, source_url, enabled) VALUES (9, 90, '', 1)",
+        )
+        .await
+        .unwrap();
+        assert!(find_enabled_config(&db, "").await.is_none());
+        assert!(find_enabled_config(&db, "short").await.is_none());
+        // plaintext source_url of a hash-less row is not a credential
+        assert!(find_enabled_config(&db, "sk_enabled_0123456789abcdef")
+            .await
+            .is_some());
+        db.execute_unprepared("UPDATE streaming_configs SET stream_key_hash = NULL WHERE id = 1")
+            .await
+            .unwrap();
+        assert!(find_enabled_config(&db, "sk_enabled_0123456789abcdef")
+            .await
+            .is_none());
+    }
+
+    #[test]
+    fn srt_auth_matches_hash_and_refuses_empty_or_short() {
+        let auth = RefreshingSrtAuth::new();
+        let key = "srt-key-0123456789abcdef"; // gitleaks:allow (test fixture)
+        auth.allowed
+            .write()
+            .unwrap()
+            .insert(crate::stream_key::hash(key));
+        assert!(SrtAuth::authorize(&auth, key).is_ok());
+        assert!(SrtAuth::authorize(&auth, "").is_err());
+        assert!(SrtAuth::authorize(&auth, "short").is_err());
+        assert!(SrtAuth::authorize(&auth, "other-key-0123456789abc").is_err());
+    }
+
+    #[tokio::test]
     async fn find_enabled_config_matches_an_enabled_source_url() {
         let db = seed_db().await;
-        let cfg = find_enabled_config(&db, "sk_enabled").await.expect("found");
+        let cfg = find_enabled_config(&db, "sk_enabled_0123456789abcdef")
+            .await
+            .expect("found");
         assert_eq!(cfg.id, 1);
         assert_eq!(cfg.community_id, 42);
     }
@@ -942,15 +989,19 @@ mod tests {
     #[tokio::test]
     async fn find_enabled_config_rejects_a_disabled_row() {
         let db = seed_db().await;
-        assert!(find_enabled_config(&db, "sk_disabled").await.is_none());
+        assert!(find_enabled_config(&db, "sk_disabled_0123456789abcdef")
+            .await
+            .is_none());
     }
 
     #[tokio::test]
     async fn find_enabled_config_rejects_an_unknown_key() {
         let db = seed_db().await;
-        assert!(find_enabled_config(&db, "sk_does_not_exist")
-            .await
-            .is_none());
+        assert!(
+            find_enabled_config(&db, "sk_does_not_exist_0123456789abcdef")
+                .await
+                .is_none()
+        );
     }
 
     // --- resolve_tenant_slug ---
@@ -988,7 +1039,7 @@ mod tests {
         streaming_config::Model {
             id,
             community_id,
-            source_url: "sk_enabled".into(),
+            source_url: "sk_enabled_0123456789abcdef".into(),
             source_type: "rtmp".into(),
             enabled: true,
             record_enabled,
@@ -996,6 +1047,7 @@ mod tests {
             transcode_bitrate_kbps: 4000,
             video_codec: "h264".into(),
             audio_codec: "copy".into(),
+            stream_key_hash: Some(crate::stream_key::hash("sk_enabled_0123456789abcdef")),
         }
     }
 
@@ -1008,7 +1060,7 @@ mod tests {
             &config,
             "tenant-1",
             InputSpec::Rtmp {
-                stream_key: "sk_enabled".into(),
+                stream_key: "sk_enabled_0123456789abcdef".into(),
             },
         )
         .await
@@ -1033,7 +1085,7 @@ mod tests {
             &config,
             "tenant-1",
             InputSpec::Rtmp {
-                stream_key: "sk_enabled".into(),
+                stream_key: "sk_enabled_0123456789abcdef".into(),
             },
         )
         .await
@@ -1060,7 +1112,7 @@ mod tests {
             &config,
             "tenant-1",
             InputSpec::Rtmp {
-                stream_key: "sk_enabled".into(),
+                stream_key: "sk_enabled_0123456789abcdef".into(),
             },
         )
         .await
@@ -1125,7 +1177,7 @@ mod tests {
             &config,
             "tenant-1",
             InputSpec::Rtmp {
-                stream_key: "sk_enabled".into(),
+                stream_key: "sk_enabled_0123456789abcdef".into(),
             },
         )
         .await
@@ -1154,7 +1206,7 @@ mod tests {
             &config,
             "tenant-1",
             InputSpec::Rtmp {
-                stream_key: "sk_enabled".into(),
+                stream_key: "sk_enabled_0123456789abcdef".into(),
             },
         )
         .await
@@ -1193,7 +1245,7 @@ mod tests {
 
     fn rtmp_input() -> InputSpec {
         InputSpec::Rtmp {
-            stream_key: "sk_enabled".into(),
+            stream_key: "sk_enabled_0123456789abcdef".into(),
         }
     }
 
@@ -1351,7 +1403,10 @@ mod tests {
             crate::pipeline::SupervisorConfig::default(),
         ));
         let hls = Arc::new(HlsSink::new(stream_data_dir, &registry));
-        let relay = Arc::new(RelaySink::new());
+        let relay = Arc::new(
+            RelaySink::new()
+                .with_egress_guard(crate::egress::relay::guard::EgressGuard::disabled()),
+        );
         let pipeline_registry = Arc::new(PipelineRegistry::new());
         let rtc_config = crate::rtc::RtcConfig::from_config(&config).unwrap();
         let factory = Arc::new(crate::rtc::PeerConnectionFactory::new(rtc_config).unwrap());

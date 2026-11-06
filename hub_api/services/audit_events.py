@@ -523,7 +523,7 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
             ("POST", f"{_ADM}/music/providers/<provider>/oauth"),
             ("DELETE", f"{_ADM}/music/providers/<provider>"),
             ("POST", f"{_ADM}/streams/destinations"),
-            ("DELETE", f"{_ADM}/streams/destinations/<int:destination_id>"),
+            ("DELETE", f"{_ADM}/streams/destinations/<destination_id>"),
         ),
     ),
     (
@@ -636,7 +636,7 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         _ra(AuditCategory.ADMIN, AuditAction.ADMIN_STREAM_CONFIG_CHANGED),
         (
             ("POST", f"{_ADM}/streams"),
-            ("PUT", f"{_ADM}/streams/destinations/<int:destination_id>/force-cut"),
+            ("PUT", f"{_ADM}/streams/destinations/<destination_id>/force-cut"),
         ),
     ),
     (

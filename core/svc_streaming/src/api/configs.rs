@@ -104,6 +104,7 @@ pub async fn create_config(
             transcode_bitrate_kbps: body.transcode_bitrate_kbps,
             video_codec: video_codec.clone(),
             audio_codec: audio_codec.clone(),
+            stream_key_hash: None,
         },
         &[],
     )?;
