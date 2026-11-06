@@ -32,6 +32,8 @@ impl ResolverMetrics for NoMetrics {
 
 fn binding() -> BindingSummary {
     BindingSummary {
+        tenant_id: 1,
+        secret_version: 1,
         community_id: 7,
         connection_id: 12,
         provider: "youtube".to_owned(),

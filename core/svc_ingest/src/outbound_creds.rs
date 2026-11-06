@@ -309,6 +309,8 @@ impl<R: ConnectionResolve> ResolverTwitchCredentials<R> {
             return Err(CredError::NotUsable);
         }
         let resolved_spec = SessionSpec::from_summary(&BindingSummary {
+            tenant_id: 1,
+            secret_version: 1,
             community_id: resolved.community_id,
             connection_id: resolved.connection_id,
             provider: resolved.provider.clone(),
@@ -425,6 +427,8 @@ pub(crate) fn test_binding(
     metadata.insert("channel".to_owned(), channel.to_owned());
     metadata.insert(META_BOT_LOGIN.to_owned(), bot.to_owned());
     BindingSummary {
+        tenant_id: 1,
+        secret_version: 1,
         community_id: community,
         connection_id: connection,
         provider: PROVIDER.to_owned(),

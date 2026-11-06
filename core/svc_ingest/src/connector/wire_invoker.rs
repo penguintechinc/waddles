@@ -55,7 +55,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use super::host_calls::HostCallHandler;
+use super::host_calls::{CallOrigin, HostCallHandler};
 use super::invoker::{ConnectorInvokeError, ConnectorInvoker};
 use super::registry::ConnectorRegistry;
 use super::types::{ConnectionCtx, ConnectorEvent, ConnectorFrameError, Handshake, RawFrame};
@@ -101,10 +101,18 @@ pub enum AttachError {
 /// An executor's answer to one `invoke`: its `result` or typed `error`.
 type Reply = Result<ResultBody, ErrorBody>;
 
+/// One awaiting invocation: where its reply goes and what it is, as the HOST
+/// recorded it when sending. The origin is how a host-call arriving during this
+/// invocation (its `call_id` is this entry's id) is attributed -- never guest data.
+struct Pending {
+    tx: oneshot::Sender<Reply>,
+    origin: CallOrigin,
+}
+
 /// One accepted executor connection's request/reply bookkeeping.
 struct Session {
     writer: mpsc::Sender<Frame>,
-    pending: Mutex<HashMap<u64, oneshot::Sender<Reply>>>,
+    pending: Mutex<HashMap<u64, Pending>>,
     next_id: AtomicU64,
     closed: AtomicBool,
     max_in_flight: usize,
@@ -146,7 +154,10 @@ impl Session {
 
     /// Registers a reply slot for a fresh correlation id, refusing when the
     /// session is closed or already at its in-flight cap.
-    fn register(&self) -> Result<(u64, oneshot::Receiver<Reply>), ConnectorInvokeError> {
+    fn register(
+        &self,
+        origin: CallOrigin,
+    ) -> Result<(u64, oneshot::Receiver<Reply>), ConnectorInvokeError> {
         if self.is_closed() {
             return Err(unavailable("executor connection is closed"));
         }
@@ -159,7 +170,7 @@ impl Session {
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        pending.insert(id, tx);
+        pending.insert(id, Pending { tx, origin });
         Ok((id, rx))
     }
 
@@ -171,6 +182,17 @@ impl Session {
         }
     }
 
+    /// The host-recorded origin of the invocation `call_id` names. An unknown
+    /// or already-finished id is [`CallOrigin::Other`]: it unlocks nothing.
+    fn origin_of(&self, call_id: u64) -> CallOrigin {
+        match self.pending.lock() {
+            Ok(pending) => pending
+                .get(&call_id)
+                .map_or(CallOrigin::Other, |p| p.origin.clone()),
+            Err(_) => CallOrigin::Other,
+        }
+    }
+
     /// Routes a `result`/`error` reply to the call awaiting `id`. An unknown
     /// id (a reply after its call timed out) is logged and dropped.
     fn deliver(&self, id: u64, reply: Reply) {
@@ -179,9 +201,9 @@ impl Session {
             Err(_) => None,
         };
         match slot {
-            Some(tx) => {
+            Some(p) => {
                 // The caller may have just timed out; nothing to do then.
-                let _ = tx.send(reply);
+                let _ = p.tx.send(reply);
             }
             None => warn!(
                 id,
@@ -382,7 +404,16 @@ impl ExecutorLink {
         let session = self
             .current_session()
             .ok_or_else(|| unavailable("no executor is connected to this stage"))?;
-        let (id, rx) = session.register()?;
+        // `build-request` has no `ConnectionCtx`: the host records the
+        // invocation so the cutover-flag read it triggers can be attributed
+        // (see `CallOrigin::BuildRequest`); everything else is `Other`.
+        let origin = match export {
+            ExportKind::ConnectorBuildRequest => CallOrigin::BuildRequest {
+                app_id: app_id.to_string(),
+            },
+            _ => CallOrigin::Other,
+        };
+        let (id, rx) = session.register(origin)?;
         // Frees the slot however this future ends, including being dropped
         // mid-await (cancellation); `forget` is idempotent.
         let _slot = SlotGuard {
@@ -457,8 +488,11 @@ async fn read_loop<R: AsyncRead + Unpin>(reader: &mut R, session: &Arc<Session>)
                 if let Some(handler) = session.host_calls.clone() {
                     let session = Arc::clone(session);
                     let id = frame.id;
+                    // Attributed on the read loop, before the spawn, so the
+                    // invocation cannot finish and drop its entry first.
+                    let origin = session.origin_of(call.call_id);
                     tokio::spawn(async move {
-                        let outcome = handler.handle(&call).await;
+                        let outcome = handler.handle_from(&call, &origin).await;
                         let reply = Message::HostResult(match outcome {
                             Ok(value) => HostResultBody {
                                 result: Some(value),
@@ -1396,5 +1430,146 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(labels.len(), 3);
+    }
+
+    /// An identity tokenizer that must never be reached by a flag read.
+    struct NoTokenizer;
+
+    impl super::super::host_calls::IdentityTokenizer for NoTokenizer {
+        fn tokenize<'a>(
+            &'a self,
+            _scope: &'a super::super::host_calls::CallScope,
+            _platform_user_id: &'a str,
+        ) -> super::super::webhook::BoxFut<
+            'a,
+            Result<String, super::super::host_calls::TokenizeError>,
+        > {
+            Box::pin(async { Err(super::super::host_calls::TokenizeError::Unavailable) })
+        }
+    }
+
+    const TWITCH_APP: &str = "waddles.core.service.twitch";
+
+    /// A link whose handler is the production allowlist (twitch overlay ON).
+    async fn handler_rig() -> (Arc<ExecutorLink>, FakeExecutor) {
+        use super::super::host_calls::{ActiveConnections, HostCallConfig, OverlayHostCalls};
+        let handler = OverlayHostCalls::new(
+            Arc::new(ActiveConnections::new()),
+            Arc::new(NoTokenizer),
+            HostCallConfig::new(["twitch"]).unwrap(),
+        );
+        let link = Arc::new(
+            ExecutorLink::new()
+                .with_call_timeout(Duration::from_secs(5))
+                .with_host_calls(Arc::new(handler)),
+        );
+        let exec = FakeExecutor::attach(&link).await;
+        (link, exec)
+    }
+
+    fn flag_call(app: &str, call_id: u64) -> Message {
+        Message::HostCall(HostCallBody {
+            app_id: app.to_string(),
+            capability: CapabilityKind::Flags,
+            op: "enabled".to_string(),
+            args: serde_json::json!({"key": "waddles.overlay-twitch"}),
+            call_id,
+        })
+    }
+
+    async fn host_result(exec: &mut FakeExecutor) -> HostResultBody {
+        match read_frame(&mut exec.io).await.unwrap().message {
+            Message::HostResult(r) => r,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The A2 open issue, over the real link: with the handler installed a flag
+    /// read made DURING a build-request invocation is answered, because the link
+    /// itself recorded that invocation (the call's `call_id`).
+    #[tokio::test]
+    async fn a_flag_read_during_build_request_is_answered_with_the_handler_installed() {
+        let (link, mut exec) = handler_rig().await;
+        let call = tokio::spawn({
+            let link = Arc::clone(&link);
+            async move {
+                link.call(
+                    TWITCH_APP,
+                    DIGEST,
+                    ExportKind::ConnectorBuildRequest,
+                    serde_json::json!({}),
+                )
+                .await
+            }
+        });
+        let (id, body) = exec.next_invoke().await;
+        assert_eq!(body.export, ExportKind::ConnectorBuildRequest);
+        exec.reply(900, flag_call(TWITCH_APP, id)).await;
+        let r = host_result(&mut exec).await;
+        assert_eq!(r.error, None);
+        assert_eq!(r.result.unwrap()["enabled"], true);
+        exec.reply_ok(id, serde_json::json!({})).await;
+        call.await.unwrap().unwrap();
+    }
+
+    /// Mutation target (unscoped denial): the SAME flag read is denied when the
+    /// `call_id` is unknown / stale, or when it happened during a non-build-request
+    /// invocation (a tool-call), or when the overlay is not the invoked one.
+    #[tokio::test]
+    async fn the_flag_read_is_denied_without_a_build_request_invocation() {
+        let (link, mut exec) = handler_rig().await;
+        // No invocation in flight at all: a guessed / stale call_id.
+        for stale in [0u64, 1, 424_242] {
+            exec.reply(901, flag_call(TWITCH_APP, stale)).await;
+            let r = host_result(&mut exec).await;
+            let e = r.error.expect("denied");
+            assert_eq!(
+                (e.code.as_str(), e.message.as_str()),
+                ("denied", "unscoped_call")
+            );
+        }
+        // During a tool-call invocation (origin Other): still denied.
+        let call = tokio::spawn({
+            let link = Arc::clone(&link);
+            async move {
+                link.call(
+                    TWITCH_APP,
+                    DIGEST,
+                    ExportKind::ToolCall,
+                    serde_json::json!({}),
+                )
+                .await
+            }
+        });
+        let (id, _) = exec.next_invoke().await;
+        exec.reply(902, flag_call(TWITCH_APP, id)).await;
+        let e = host_result(&mut exec).await.error.expect("denied");
+        assert_eq!(e.message, "unscoped_call");
+        exec.reply_ok(id, serde_json::json!({})).await;
+        call.await.unwrap().unwrap();
+        // During a build-request for twitch, a host-call naming ANOTHER overlay.
+        let call = tokio::spawn({
+            let link = Arc::clone(&link);
+            async move {
+                link.call(
+                    TWITCH_APP,
+                    DIGEST,
+                    ExportKind::ConnectorBuildRequest,
+                    serde_json::json!({}),
+                )
+                .await
+            }
+        });
+        let (id, _) = exec.next_invoke().await;
+        exec.reply(903, flag_call("waddles.core.service.discord", id))
+            .await;
+        let e = host_result(&mut exec).await.error.expect("denied");
+        assert_eq!(e.message, "unknown_overlay");
+        exec.reply_ok(id, serde_json::json!({})).await;
+        call.await.unwrap().unwrap();
+        // After the invocation finished its id unlocks nothing.
+        exec.reply(904, flag_call(TWITCH_APP, id)).await;
+        let e = host_result(&mut exec).await.error.expect("denied");
+        assert_eq!(e.message, "unscoped_call");
     }
 }

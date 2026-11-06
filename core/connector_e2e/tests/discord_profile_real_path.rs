@@ -285,6 +285,8 @@ async fn discord_profile_drives_the_real_overlay_through_the_whole_gateway_lifec
         heartbeat_enabled: true,
     };
     let binding = BindingSummary {
+        tenant_id: 1,
+        secret_version: 1,
         community_id: 7,
         connection_id: 11,
         provider: "discord".into(),

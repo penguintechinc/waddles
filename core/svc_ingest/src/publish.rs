@@ -45,6 +45,12 @@ pub fn install_scope_resolver(resolver: Arc<ScopeResolver<HubScopeSource>>) -> b
     SCOPE_RESOLVER.set(resolver).is_ok()
 }
 
+/// The installed process-wide resolver, if any (the connector runtime shares
+/// it for its per-connection tenant refusal and sink scope).
+pub fn installed_scope_resolver() -> Option<Arc<ScopeResolver<HubScopeSource>>> {
+    SCOPE_RESOLVER.get().cloned()
+}
+
 /// `true` once [`install_scope_resolver`] has run -- dynamic Twitch sessions
 /// publish under per-community scope from it and refuse to start without.
 pub fn scope_resolver_installed() -> bool {
@@ -343,7 +349,7 @@ pub async fn publish_event_with_binding<
     source_id: &str,
     workstream_id: &str,
     session_id: Option<&str>,
-    mut event: PlatformEvent,
+    event: PlatformEvent,
     dek_provider: &D,
     identity_metrics: &prometheus::IntCounterVec,
 ) -> Result<String, PublishError> {
@@ -385,6 +391,78 @@ pub async fn publish_event_with_binding<
             });
         }
     }
+    publish_resolved(
+        resolved,
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        source_id,
+        workstream_id,
+        session_id,
+        event,
+        dek_provider,
+        identity_metrics,
+    )
+    .await
+}
+
+/// [`publish_event`] for a connection whose authoritative scope is ALREADY
+/// known: the connector runtime resolves each connection's tenant and community
+/// once (and refuses the connection on mismatch), then every event of that
+/// connection is stamped with exactly that scope -- no per-event source lookup.
+/// The connector transports' `source_id` is an opaque hash, so a lookup by it
+/// could never resolve; the connection's own resolved scope is the authority.
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_event_scoped<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
+    resolved: &ResolvedScope,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    source_id: &str,
+    workstream_id: &str,
+    session_id: Option<&str>,
+    event: PlatformEvent,
+    dek_provider: &D,
+    identity_metrics: &prometheus::IntCounterVec,
+) -> Result<String, PublishError> {
+    let scope = resolved.spine_scope();
+    publish_resolved(
+        Some(resolved.clone()),
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        &scope,
+        source_id,
+        workstream_id,
+        session_id,
+        event,
+        dek_provider,
+        identity_metrics,
+    )
+    .await
+}
+
+/// The shared stamping/encryption/append body. `resolved: Some` publishes a
+/// schema-v3 envelope under the resolved scope; `None` the v2 static-`scope` one.
+#[allow(clippy::too_many_arguments)]
+async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
+    resolved: Option<ResolvedScope>,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    source_id: &str,
+    workstream_id: &str,
+    session_id: Option<&str>,
+    mut event: PlatformEvent,
+    dek_provider: &D,
+    identity_metrics: &prometheus::IntCounterVec,
+) -> Result<String, PublishError> {
     let v3_scope = resolved.as_ref().map(ResolvedScope::spine_scope);
     let scope = match (&resolved, &v3_scope) {
         (Some(res), Some(sc)) => {

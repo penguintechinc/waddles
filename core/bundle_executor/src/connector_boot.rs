@@ -66,7 +66,7 @@ pub const CONNECTOR_PLATFORMS: [ConnectorPlatform; 3] = [
     ConnectorPlatform {
         platform: "twitch",
         app_id: "waddles.core.service.twitch",
-        grants: &[PERM_CONNECTOR_PII_READ, "flags.read"],
+        grants: &[PERM_CONNECTOR_PII_READ, "flags.read", "platform.log"],
     },
     ConnectorPlatform {
         platform: "discord",

@@ -17,6 +17,8 @@ fn env() -> RuntimeEnv {
 
 fn binding(meta: &[(&str, &str)]) -> BindingSummary {
     BindingSummary {
+        tenant_id: 1,
+        secret_version: 1,
         community_id: 7,
         connection_id: 12,
         provider: "youtube".to_owned(),
@@ -65,7 +67,7 @@ fn derived_poll_config_golden() {
             connection_id: 12
         }
     );
-    assert_eq!(d.tenant_id, TENANT_UNRESOLVED);
+    assert_eq!(d.tenant_id, 1, "the feed's tenant, not a placeholder");
     let c = poll_of(&d);
     assert_eq!(c.platform, "youtube");
     assert_eq!(
@@ -255,42 +257,36 @@ fn wrong_provider_and_kind_are_typed_errors() {
 }
 
 #[test]
-fn tenant_is_never_taken_from_editable_metadata() {
+fn tenant_is_the_feed_tenant_and_never_editable_metadata() {
     for t in ["3", "999", "0", "-1", "abc", ""] {
         let b = binding(&[("live_chat_id", CHAT), ("tenant_id", t)]);
         let d = one(&b);
-        assert_eq!(
-            d.tenant_id, TENANT_UNRESOLVED,
-            "metadata tenant {t:?} ignored"
-        );
+        assert_eq!(d.tenant_id, 1, "metadata tenant {t:?} ignored");
         assert_eq!(d.fingerprint, one(&good()).fingerprint);
     }
-    assert_eq!(one(&good()).tenant_id, 0);
+    let mut moved = good();
+    moved.tenant_id = 9;
+    assert_eq!(one(&moved).tenant_id, 9);
+    assert_ne!(one(&moved).fingerprint, one(&good()).fingerprint);
 }
 
 #[test]
-fn secret_version_is_bounded_charset() {
+fn a_feed_row_without_a_positive_tenant_or_secret_version_is_refused() {
     let p = YoutubeProfile::new();
-    let long = "v".repeat(65);
-    for bad in ["", "a b", "a/b", "a&b", long.as_str()] {
-        let b = binding(&[
-            ("live_chat_id", CHAT),
-            ("tenant_id", "3"),
-            ("secret_version", bad),
-        ]);
+    for bad in [0_i64, -3] {
+        let mut b = good();
+        b.tenant_id = bad;
         assert_eq!(
             p.plan(&b, &env()).err(),
-            Some(PlanError::InvalidValue("secret_version")),
-            "{bad:?}"
+            Some(PlanError::Config("binding tenant is not positive"))
+        );
+        let mut b = good();
+        b.secret_version = bad;
+        assert_eq!(
+            p.plan(&b, &env()).err(),
+            Some(PlanError::Config("binding secret version is not positive"))
         );
     }
-    let ok = "v".repeat(64);
-    let b = binding(&[
-        ("live_chat_id", CHAT),
-        ("tenant_id", "3"),
-        ("secret_version", ok.as_str()),
-    ]);
-    assert_eq!(p.plan(&b, &env()).unwrap().len(), 1);
 }
 
 #[test]
@@ -359,22 +355,23 @@ fn fingerprint_changes_on_chat_or_secret_version_only() {
     assert_eq!(one(&good()).fingerprint, base, "deterministic");
     let chat2 = binding(&[("live_chat_id", "OtherChat_1"), ("tenant_id", "3")]);
     assert_ne!(one(&chat2).fingerprint, base, "new live_chat_id restarts");
-    let v1 = binding(&[
-        ("live_chat_id", CHAT),
-        ("tenant_id", "3"),
-        ("secret_version", "1"),
-    ]);
-    let v2 = binding(&[
-        ("live_chat_id", CHAT),
-        ("tenant_id", "3"),
-        ("secret_version", "2"),
-    ]);
-    assert_ne!(one(&v1).fingerprint, base, "version appearing restarts");
+    let mut v2 = good();
+    v2.secret_version = 2;
+    let mut v3 = good();
+    v3.secret_version = 3;
+    assert_ne!(one(&v2).fingerprint, base, "a rotation restarts");
     assert_ne!(
-        one(&v1).fingerprint,
         one(&v2).fingerprint,
-        "rotation restarts"
+        one(&v3).fingerprint,
+        "each rotation restarts"
     );
+    // The old metadata marker is inert: only the feed counter counts.
+    let marker = binding(&[
+        ("live_chat_id", CHAT),
+        ("tenant_id", "3"),
+        ("secret_version", "77"),
+    ]);
+    assert_eq!(one(&marker).fingerprint, base, "metadata marker is inert");
     let noise = binding(&[
         ("live_chat_id", CHAT),
         ("tenant_id", "3"),
