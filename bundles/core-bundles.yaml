@@ -1514,6 +1514,18 @@ bundles:
       - tenant_slug: global
         community_id: null
 
+  # Community feed reader (#484): `!feed` events/info from a per-community configured public
+  # JSON feed url; the operator grants net.http.fqdn:<host> per community (no fixed host).
+  - app_id: waddles.core.community.feed
+    version: "1.0.1"
+    language: python
+    source_dir: python/community_feed
+    manifest_path: community-feed.manifest.yaml
+    artifact_path: community-feed.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
   # Wix webhook connector (Rust `kind: service`, inbound-only, `connector-tools` world, egress []).
   # Verified by svc-ingest Scheme::WixJwt; the cutover flag waddles.connector-wix defaults OFF.
   - app_id: waddles.core.service.wix
