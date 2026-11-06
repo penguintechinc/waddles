@@ -1,0 +1,3253 @@
+{
+"_doc": "Shared decision table: Python overlay_selector + Rust connector_runtime::selector. Env only, never a flag; CONNECTOR_RUNTIME_ENABLED never changes the decision.",
+"cases": [
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "false",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "false",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"OVERLAY_DISCORD_ENABLED": "true",
+"OVERLAY_TWITCH_ENABLED": "true",
+"OVERLAY_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false
+},
+"identify_budget_ready": true
+}
+]
+}
