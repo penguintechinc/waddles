@@ -802,17 +802,43 @@ mod tests {
         assert!(PollTransport::new(c, s()).is_err());
     }
 
+    const PROXY_CHILD_MARK: &str = "SVC_INGEST_POLL_PROXY_CHILD";
+    const PROXY_CHILD_TEST: &str = "connector::poll::tests::ambient_proxy_env_pin_child";
+
+    /// Re-runs the child test in its own process with a dead ambient proxy.
+    /// Mutating `HTTP_PROXY` in this shared test process would leak into every
+    /// parallel test that builds an env-reading HTTP client (a process-wide
+    /// race), so the env only ever exists in the child.
+    #[test]
+    fn ambient_proxy_env_does_not_bypass_pin() {
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(exe)
+            .args([PROXY_CHILD_TEST, "--exact", "--test-threads=1"])
+            .env(PROXY_CHILD_MARK, "1")
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("http_proxy", "http://127.0.0.1:1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "child failed or did not run: {stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Body of the proxy-pin check; a no-op unless launched by the parent
+    /// test above (which asserts it actually ran, so this cannot pass vacuously).
     #[tokio::test]
-    async fn ambient_proxy_env_does_not_bypass_pin() {
-        let _env = crate::connector::transport_common::PROXY_ENV.write().await;
+    async fn ambient_proxy_env_pin_child() {
+        if std::env::var_os(PROXY_CHILD_MARK).is_none() {
+            return;
+        }
+        assert!(std::env::var_os("HTTP_PROXY").is_some(), "dead proxy set");
         let (addr, srv) = start().await;
         // A dead proxy: if honored the request would fail / not reach srv.
-        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:1");
-        std::env::set_var("http_proxy", "http://127.0.0.1:1");
         let (mut t, _) = mk(addr);
         let r = t.next_frame().await;
-        std::env::remove_var("HTTP_PROXY");
-        std::env::remove_var("http_proxy");
         assert!(r.unwrap().is_some());
         assert_eq!(
             srv.seen.lock().unwrap().len(),
