@@ -1,5 +1,5 @@
 {
-"_doc": "Shared decision table: Python connector_selector + Rust connector_runtime::selector. Env only, never a flag; CONNECTOR_RUNTIME_ENABLED never changes the decision.",
+"_doc": "Shared decision table: Python connector_selector + Rust connector_runtime::selector. Env only (CONNECTOR_SPECTRUM_ENABLED gates the Spectrum receivers), never a flag; CONNECTOR_RUNTIME_ENABLED never changes the decision.",
 "cases": [
 {
 "env": {
@@ -15,7 +15,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -34,7 +55,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -53,7 +96,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -71,7 +136,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -90,7 +176,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -109,7 +217,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -127,7 +257,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -146,7 +297,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -165,7 +338,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -183,7 +378,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -202,7 +418,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -221,7 +459,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -239,7 +499,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -258,7 +539,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -277,7 +580,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -295,7 +620,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -314,7 +660,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -333,7 +701,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -351,7 +741,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -370,7 +781,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -389,7 +822,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -407,7 +862,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -426,7 +902,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -445,7 +943,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -463,7 +983,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -482,7 +1023,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -501,7 +1064,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -519,7 +1104,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -538,7 +1144,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -557,7 +1185,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -575,7 +1225,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -594,7 +1265,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -613,7 +1306,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -631,7 +1346,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -650,7 +1386,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -669,7 +1427,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -687,7 +1467,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -706,7 +1507,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -725,7 +1548,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -743,7 +1588,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -762,7 +1628,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -781,7 +1669,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -799,7 +1709,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -818,7 +1749,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -837,7 +1790,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -855,7 +1830,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -874,7 +1870,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -893,7 +1911,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -981,7 +2021,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1000,7 +2061,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1019,7 +2102,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1037,7 +2142,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1056,7 +2182,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1075,7 +2223,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1163,7 +2333,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1182,7 +2373,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1201,7 +2414,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1219,7 +2454,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1238,7 +2494,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1257,7 +2535,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1345,7 +2645,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1364,7 +2685,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1383,7 +2726,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1401,7 +2766,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1420,7 +2806,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1439,7 +2847,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1527,7 +2957,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1546,7 +2997,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1565,7 +3038,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1583,7 +3078,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1602,7 +3118,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1621,7 +3159,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": true,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1639,7 +3199,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1658,7 +3239,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1677,7 +3280,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1695,7 +3320,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1714,7 +3360,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1733,7 +3401,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1751,7 +3441,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1770,7 +3481,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1789,7 +3522,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1807,7 +3562,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1826,7 +3602,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1845,7 +3643,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1863,7 +3683,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1882,7 +3723,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1901,7 +3764,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1919,7 +3804,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1938,7 +3844,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1957,7 +3885,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -1975,7 +3925,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -1994,7 +3965,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2013,7 +4006,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2031,7 +4046,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2050,7 +4086,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2069,7 +4127,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2087,7 +4167,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2106,7 +4207,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2125,7 +4248,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2143,7 +4288,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2162,7 +4328,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2181,7 +4369,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2199,7 +4409,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2218,7 +4449,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2237,7 +4490,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2255,7 +4530,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2274,7 +4570,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2293,7 +4611,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2311,7 +4651,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2330,7 +4691,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2349,7 +4732,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2367,7 +4772,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2386,7 +4812,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2405,7 +4853,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": false
 },
@@ -2423,7 +4893,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2442,7 +4933,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2461,7 +4974,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2479,7 +5014,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2498,7 +5054,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2517,7 +5095,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2605,7 +5205,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2624,7 +5245,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2643,7 +5286,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2661,7 +5326,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2680,7 +5366,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2699,7 +5407,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2787,7 +5517,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2806,7 +5557,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2825,7 +5598,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2843,7 +5638,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2862,7 +5678,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -2881,143 +5719,20 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": true
+"youtube_inbound": true,
+"spectrum_inbound": true
 },
 "identify_budget_ready": true
 },
 {
 "env": {
-"CONNECTOR_RUNTIME_ENABLED": "false",
-"CONNECTOR_TOOLS_ENABLED": "false",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": "error",
-"identify_budget_ready": false
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "false",
-"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
-"CONNECTOR_TOOLS_ENABLED": "false",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": "error",
-"identify_budget_ready": false
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "false",
-"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
-"CONNECTOR_TOOLS_ENABLED": "false",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": "error",
-"identify_budget_ready": false
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "false",
-"CONNECTOR_TOOLS_ENABLED": "true",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": "error",
-"identify_budget_ready": false
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "false",
-"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
-"CONNECTOR_TOOLS_ENABLED": "true",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": "error",
-"identify_budget_ready": false
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_ENABLED": "true",
 "CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
 "CONNECTOR_TOOLS_ENABLED": "true",
 "CONNECTOR_DISCORD_ENABLED": "true",
 "CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": "error",
-"identify_budget_ready": false
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "false",
-"CONNECTOR_TOOLS_ENABLED": "false",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": {
-"discord_inbound": false,
-"discord_outbound": true,
-"twitch_eventsub": true,
-"twitch_inbound": false,
-"twitch_outbound": true,
-"youtube_inbound": false
-},
-"identify_budget_ready": true
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "false",
-"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
-"CONNECTOR_TOOLS_ENABLED": "false",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": {
-"discord_inbound": false,
-"discord_outbound": true,
-"twitch_eventsub": false,
-"twitch_inbound": false,
-"twitch_outbound": true,
-"youtube_inbound": false
-},
-"identify_budget_ready": true
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "false",
-"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
-"CONNECTOR_TOOLS_ENABLED": "false",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": {
-"discord_inbound": false,
-"discord_outbound": true,
-"twitch_eventsub": true,
-"twitch_inbound": false,
-"twitch_outbound": true,
-"youtube_inbound": false
-},
-"identify_budget_ready": true
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "false",
-"CONNECTOR_TOOLS_ENABLED": "true",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
 },
 "expect": {
 "discord_inbound": false,
@@ -3025,9 +5740,56 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
 },
 {
 "env": {
@@ -3038,15 +5800,8 @@
 "CONNECTOR_TWITCH_ENABLED": "true",
 "CONNECTOR_YOUTUBE_ENABLED": "true"
 },
-"expect": {
-"discord_inbound": false,
-"discord_outbound": false,
-"twitch_eventsub": false,
-"twitch_inbound": false,
-"twitch_outbound": false,
-"youtube_inbound": false
-},
-"identify_budget_ready": true
+"expect": "error",
+"identify_budget_ready": false
 },
 {
 "env": {
@@ -3057,89 +5812,12 @@
 "CONNECTOR_TWITCH_ENABLED": "true",
 "CONNECTOR_YOUTUBE_ENABLED": "true"
 },
-"expect": {
-"discord_inbound": false,
-"discord_outbound": false,
-"twitch_eventsub": true,
-"twitch_inbound": false,
-"twitch_outbound": false,
-"youtube_inbound": false
-},
-"identify_budget_ready": true
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "true",
-"CONNECTOR_TOOLS_ENABLED": "false",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
 "expect": "error",
 "identify_budget_ready": false
 },
 {
 "env": {
-"CONNECTOR_RUNTIME_ENABLED": "true",
-"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
-"CONNECTOR_TOOLS_ENABLED": "false",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": "error",
-"identify_budget_ready": false
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "true",
-"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
-"CONNECTOR_TOOLS_ENABLED": "false",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": "error",
-"identify_budget_ready": false
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "true",
-"CONNECTOR_TOOLS_ENABLED": "true",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": "error",
-"identify_budget_ready": false
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "true",
-"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
-"CONNECTOR_TOOLS_ENABLED": "true",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": "error",
-"identify_budget_ready": false
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "true",
-"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
-"CONNECTOR_TOOLS_ENABLED": "true",
-"CONNECTOR_DISCORD_ENABLED": "true",
-"CONNECTOR_TWITCH_ENABLED": "true",
-"CONNECTOR_YOUTUBE_ENABLED": "true"
-},
-"expect": "error",
-"identify_budget_ready": false
-},
-{
-"env": {
-"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_ENABLED": "false",
 "CONNECTOR_TOOLS_ENABLED": "false",
 "CONNECTOR_DISCORD_ENABLED": "true",
 "CONNECTOR_TWITCH_ENABLED": "true",
@@ -3151,13 +5829,34 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
 },
 "identify_budget_ready": true
 },
 {
 "env": {
-"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
 "CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
 "CONNECTOR_TOOLS_ENABLED": "false",
 "CONNECTOR_DISCORD_ENABLED": "true",
@@ -3170,7 +5869,341 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": "error",
+"identify_budget_ready": false
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -3189,7 +6222,29 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": true,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": true,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -3207,7 +6262,28 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -3226,7 +6302,29 @@
 "twitch_eventsub": false,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "twitch",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": false,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 },
@@ -3245,7 +6343,157 @@
 "twitch_eventsub": true,
 "twitch_inbound": false,
 "twitch_outbound": false,
-"youtube_inbound": false
+"youtube_inbound": false,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "true",
+"CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS": "discord",
+"CONNECTOR_TOOLS_ENABLED": "true",
+"CONNECTOR_DISCORD_ENABLED": "true",
+"CONNECTOR_TWITCH_ENABLED": "true",
+"CONNECTOR_YOUTUBE_ENABLED": "true",
+"CONNECTOR_SPECTRUM_ENABLED": "true"
+},
+"expect": {
+"discord_inbound": false,
+"discord_outbound": false,
+"twitch_eventsub": true,
+"twitch_inbound": false,
+"twitch_outbound": false,
+"youtube_inbound": false,
+"spectrum_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "on"
+},
+"expect": "error",
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": ""
+},
+"expect": "error",
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "tru"
+},
+"expect": "error",
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "yes"
+},
+"expect": "error",
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "false"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "0"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": true
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": "1"
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
+},
+"identify_budget_ready": true
+},
+{
+"env": {
+"CONNECTOR_RUNTIME_ENABLED": "false",
+"CONNECTOR_TOOLS_ENABLED": "false",
+"CONNECTOR_DISCORD_ENABLED": "false",
+"CONNECTOR_TWITCH_ENABLED": "false",
+"CONNECTOR_YOUTUBE_ENABLED": "false",
+"CONNECTOR_SPECTRUM_ENABLED": " TRUE "
+},
+"expect": {
+"discord_inbound": true,
+"discord_outbound": true,
+"twitch_eventsub": true,
+"twitch_inbound": true,
+"twitch_outbound": true,
+"youtube_inbound": true,
+"spectrum_inbound": false
 },
 "identify_budget_ready": true
 }

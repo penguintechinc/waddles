@@ -19,7 +19,7 @@ class TestSelectorParsing:
 
     def test_default_is_all_legacy(self) -> None:
         sel = ConnectorSelector.from_env({})
-        assert all(sel.legacy(p) for p in ("twitch", "discord", "youtube"))
+        assert all(sel.legacy(p) for p in ("twitch", "discord", "youtube", "spectrum"))
         assert not sel.connector("nonsense")
 
     def test_on_values(self) -> None:
@@ -34,9 +34,18 @@ class TestSelectorParsing:
         )
         assert not sel.twitch and not sel.youtube
 
+    def test_spectrum_on_is_independent(self) -> None:
+        sel = ConnectorSelector.from_env({"CONNECTOR_SPECTRUM_ENABLED": "true"})
+        assert sel.connector("spectrum") and sel.legacy("twitch") and sel.legacy("youtube")
+
     @pytest.mark.parametrize(
         "name",
-        ["CONNECTOR_TWITCH_ENABLED", "CONNECTOR_DISCORD_ENABLED", "CONNECTOR_YOUTUBE_ENABLED"],
+        [
+            "CONNECTOR_TWITCH_ENABLED",
+            "CONNECTOR_DISCORD_ENABLED",
+            "CONNECTOR_YOUTUBE_ENABLED",
+            "CONNECTOR_SPECTRUM_ENABLED",
+        ],
     )
     @pytest.mark.parametrize("bad", ["yes", "", "tru"])
     def test_malformed_is_fatal_and_names_item_only(self, name: str, bad: str) -> None:
@@ -170,6 +179,20 @@ class TestAppSuppression:
             assert not any(r.startswith("youtube") for r in reg)
             assert "twitch_irc:somechannel" in reg
 
+    async def test_spectrum_off_registers_spectrum_receivers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import app as app_mod
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            app_mod, "_register_spectrum_receivers", lambda *a, **k: calls.append("spectrum")
+        )
+        monkeypatch.delenv("CONNECTOR_SPECTRUM_ENABLED", raising=False)
+        async with quart_app.test_app():
+            pass
+        assert calls == ["spectrum"]
+
     async def test_discord_connector_on_starts_with_the_identify_budget_wired(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -225,6 +248,7 @@ class TestSharedDecisionTable:
         assert sel.twitch_outbound_legacy is exp["twitch_outbound"]
         assert sel.legacy("discord") is exp["discord_inbound"]
         assert sel.legacy("youtube") is exp["youtube_inbound"]
+        assert sel.legacy("spectrum") is exp["spectrum_inbound"]
 
 
 class TestSuppressedFactoriesNeverInvoked:
@@ -238,6 +262,7 @@ class TestSuppressedFactoriesNeverInvoked:
         calls: list[str] = []
         names = {
             "_register_youtube_live_receiver": "youtube",
+            "_register_spectrum_receivers": "spectrum",
             "_register_twitch_eventsub": "eventsub",
         }
         for attr, tag in names.items():
@@ -250,13 +275,14 @@ class TestSuppressedFactoriesNeverInvoked:
 
         monkeypatch.setattr(app_mod, "_register_twitch_receivers", spy)
         monkeypatch.setenv("CONNECTOR_YOUTUBE_ENABLED", "true")
+        monkeypatch.setenv("CONNECTOR_SPECTRUM_ENABLED", "true")
         monkeypatch.setenv("CONNECTOR_TWITCH_ENABLED", "true")
         monkeypatch.setenv("CONNECTOR_RUNTIME_ENABLED", "true")
         monkeypatch.setenv("CONNECTOR_TOOLS_ENABLED", "true")
         monkeypatch.setenv("CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS", "twitch")
         async with quart_app.test_app():
             pass
-        assert calls == ["twitch:in=False:out=False"]  # youtube + eventsub never called
+        assert calls == ["twitch:in=False:out=False"]  # youtube + spectrum + eventsub never called
 
     async def test_flag_fetch_is_never_attempted(self) -> None:
         # fail-safe direction: with no env, legacy runs; there is no flag/network input at all

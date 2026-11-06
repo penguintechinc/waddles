@@ -17,7 +17,7 @@ byte-identical to a render without this feature.
 {{/* "true" when the runtime is active: master switch OR any platform connector ON. */}}
 {{- define "waddlebot.connectorRuntimeActive" -}}
 {{- $cr := .Values.pipeline.rustDataPlane.svcIngest.connectorRuntime | default dict -}}
-{{- if or $cr.enabled (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "twitch")) (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "discord")) (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "youtube")) -}}true{{- end -}}
+{{- if or $cr.enabled (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "twitch")) (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "discord")) (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "youtube")) (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "spectrum")) -}}true{{- end -}}
 {{- end }}
 
 {{/* Single source of truth for connector digests (dict "root" . "platform" "twitch"). */}}
@@ -56,6 +56,8 @@ Emits nothing while the runtime is inactive.
   value: {{ ternary "true" "false" (eq (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "discord")) "true") | quote }}
 - name: CONNECTOR_YOUTUBE_ENABLED
   value: {{ ternary "true" "false" (eq (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "youtube")) "true") | quote }}
+- name: CONNECTOR_SPECTRUM_ENABLED
+  value: {{ ternary "true" "false" (eq (include "waddlebot.connectorPlatformOn" (dict "root" . "platform" "spectrum")) "true") | quote }}
 - name: CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS
   value: {{ join "," ($cr.webhookPlatforms | default list) | quote }}
 {{- end -}}
@@ -82,7 +84,7 @@ Emits nothing while the runtime is inactive.
 {{- if not $ct.enabled -}}
 {{- fail "svcIngest.connectorRuntime (any connector ON) requires svcIngest.connectorTools.enabled (host-api listener, TLS secrets, hub-api resolver)" -}}
 {{- end -}}
-{{- range $p := list "twitch" "discord" "youtube" -}}
+{{- range $p := list "twitch" "discord" "youtube" "spectrum" -}}
 {{- if include "waddlebot.connectorPlatformOn" (dict "root" $ "platform" $p) -}}
 {{- $d := include "waddlebot.connectorDigest" (dict "root" $ "platform" $p) -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $d) -}}

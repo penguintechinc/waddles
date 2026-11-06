@@ -2098,6 +2098,26 @@ def test_real_catalog_has_the_three_connector_tools_rows() -> None:
         assert row["manifest_path"] == f"{stem}.manifest.yaml"
 
 
+def test_real_catalog_has_the_spectrum_connector_row() -> None:
+    """#486: the inbound-only Spectrum connector is a catalog row on the `connector` world."""
+    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+    entry = {e.app_id: e for e in load_catalog(bundles_dir / "core-bundles.yaml")}[
+        "waddles.core.service.spectrum"
+    ]
+    raw = {
+        r["app_id"]: r
+        for r in yaml.safe_load((bundles_dir / "core-bundles.yaml").read_text())["bundles"]
+    }["waddles.core.service.spectrum"]
+    assert (raw["language"], raw["wit_world"], raw["kind"]) == ("rust", "connector", "service")
+    assert raw["source_dir"] == "rust/spectrum"
+    assert (raw["manifest_path"], raw["artifact_path"]) == (
+        "spectrum.manifest.yaml",
+        "spectrum.wasm",
+    )
+    hub = yaml.safe_load((bundles_dir / "rust/spectrum/hub-manifest.yaml").read_text())
+    seeder._assert_manifest_files_agree(entry, bundles_dir, hub)
+
+
 @pytest.mark.parametrize("app_id", _CONNECTOR_APP_IDS)
 async def test_seed_one_seeds_each_real_connector_row_and_grants_pii_read(
     app_id: str, install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
