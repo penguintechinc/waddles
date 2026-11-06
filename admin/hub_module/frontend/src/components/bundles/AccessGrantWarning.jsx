@@ -12,6 +12,12 @@ export const ACCESS_GRANT_KINDS = {
     describe: (e) =>
       `${e.table} -- columns: ${e.columns.join(', ')} -- ops: ${e.ops.join(', ')}`,
   },
+  storageAccess: {
+    title: 'OBJECT STORAGE ACCESS',
+    blurb:
+      "This bundle asks to access ANOTHER bundle's object-storage prefix. It will only ever see objects the owner tagged for it.",
+    describe: (e) => `${e.prefixOwner} -- ops: ${e.ops.join(', ')}`,
+  },
 };
 
 /**

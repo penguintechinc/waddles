@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CheckCircleIcon, XCircleIcon, ClockIcon, EyeIcon } from '@heroicons/react/24/outline';
 import { bundleAdminApi, bundleApi } from '../../services/api';
-import AccessGrantWarning from '../../components/bundles/AccessGrantWarning';
+import AccessGrantWarning, { ACCESS_GRANT_KINDS } from '../../components/bundles/AccessGrantWarning';
 
 /**
  * Global-admin bundle-version INSTALL queue (three-tier app lifecycle,
@@ -93,7 +93,9 @@ function SuperAdminBundleApprovals() {
     setPanelError(null);
   }
 
-  const hasAccessGrants = Boolean(summary && summary.tableAccess && summary.tableAccess.length);
+  const hasAccessGrants = Boolean(
+    summary && Object.keys(ACCESS_GRANT_KINDS).some((key) => summary[key] && summary[key].length),
+  );
 
   async function handleInstall() {
     if (!reviewing) return;

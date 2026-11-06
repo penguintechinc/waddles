@@ -168,3 +168,22 @@ async def test_system_reseed_preserves_human_approved_storage_access(install_dal
     assert ids == frozenset(
         {"storage.read:waddles.harness.media", "storage.list:waddles.harness.media"}
     )
+
+
+def test_access_grants_response_carries_storage_blocks_explicitly() -> None:
+    from services.access_grant_dto import access_grants_response
+
+    resp = access_grants_response(
+        {
+            "storageAccess": [
+                {"prefixOwner": "waddles.harness.media", "ops": ["read"], "reason": "r"}
+            ]
+        },
+        frozenset({"storage.read:waddles.harness.media"}),
+        frozenset(),
+        frozenset({"storage.read:waddles.harness.media"}),
+    )
+    assert [(s.prefixOwner, s.ops, s.reason) for s in resp.storageAccess] == [
+        ("waddles.harness.media", ["read"], "r")
+    ]
+    assert resp.tableAccess == []

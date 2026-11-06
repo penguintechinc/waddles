@@ -17,6 +17,15 @@ class TableAccessDTO:
 
 
 @dataclass(slots=True, frozen=True)
+class StorageAccessDTO:
+    """One requested cross-prefix object-storage access block -- explicit shape."""
+
+    prefixOwner: str
+    ops: list[str]
+    reason: str
+
+
+@dataclass(slots=True, frozen=True)
 class AccessGrantsResponse:
     """Response DTO: the dangerous access grants a version requests and their approval state.
 
@@ -31,6 +40,7 @@ class AccessGrantsResponse:
     approvedIds: list[str]
     dangerousIds: list[str]
     tableAccess: list[TableAccessDTO] = field(default_factory=list)
+    storageAccess: list[StorageAccessDTO] = field(default_factory=list)
 
 
 def access_grants_response(
@@ -50,5 +60,9 @@ def access_grants_response(
                 table=e["table"], columns=list(e["columns"]), ops=list(e["ops"]), reason=e["reason"]
             )
             for e in blocks.get("tableAccess", [])
+        ],
+        storageAccess=[
+            StorageAccessDTO(prefixOwner=e["prefixOwner"], ops=list(e["ops"]), reason=e["reason"])
+            for e in blocks.get("storageAccess", [])
         ],
     )

@@ -57,4 +57,42 @@ describe('AccessGrantWarning', () => {
     fireEvent.click(screen.getByTestId('access-grant-ack'));
     expect(onAck).toHaveBeenCalledWith(true);
   });
+
+  it('renders table and storage access together in ONE bold red alert', () => {
+    render(
+      <AccessGrantWarning
+        summary={{
+          ...SUMMARY,
+          storageAccess: [
+            { prefixOwner: 'waddles.harness.media', ops: ['list', 'read'], reason: 'Fetch clips' },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getAllByTestId('access-grant-warning')).toHaveLength(1);
+    expect(screen.getByTestId('access-grant-tableAccess')).toBeInTheDocument();
+    const storage = screen.getByTestId('access-grant-storageAccess');
+    expect(storage).toHaveTextContent('OBJECT STORAGE ACCESS');
+    expect(storage).toHaveTextContent('only ever see objects the owner tagged for it');
+    const entry = storage.querySelector('[data-testid="access-grant-entry"]');
+    expect(entry.className).toContain('text-red-500');
+    expect(entry.className).toContain('font-bold');
+    expect(entry).toHaveTextContent('waddles.harness.media');
+    expect(entry).toHaveTextContent('ops: list, read');
+    expect(entry).toHaveTextContent('Reason: Fetch clips');
+  });
+
+  it('renders storage access alone and requires the ack', () => {
+    const onAck = vi.fn();
+    render(
+      <AccessGrantWarning
+        summary={{ storageAccess: [{ prefixOwner: 'a.b', ops: ['read'], reason: 'r' }] }}
+        requireAck
+        onAckChange={onAck}
+      />,
+    );
+    expect(screen.queryByTestId('access-grant-tableAccess')).toBeNull();
+    fireEvent.click(screen.getByTestId('access-grant-ack'));
+    expect(onAck).toHaveBeenCalledWith(true);
+  });
 });

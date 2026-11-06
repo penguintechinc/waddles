@@ -36,6 +36,13 @@ export interface TableAccess {
   reason: string;
 }
 
+/** One requested cross-prefix object-storage access block. */
+export interface StorageAccess {
+  prefixOwner: string;
+  ops: string[];
+  reason: string;
+}
+
 /** Dangerous access grants activating an app would carry (`.../activation/<appId>/access-grants`). */
 export interface AccessGrants {
   success: boolean;
@@ -43,6 +50,7 @@ export interface AccessGrants {
   approvedIds: string[];
   dangerousIds: string[];
   tableAccess: TableAccess[];
+  storageAccess?: StorageAccess[];
 }
 
 export const bundleActivationApi = {

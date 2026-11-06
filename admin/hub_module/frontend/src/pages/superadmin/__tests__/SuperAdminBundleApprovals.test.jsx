@@ -247,6 +247,47 @@ describe('SuperAdminBundleApprovals', () => {
       );
     });
 
+    it('storage-access-only bundles get the same red warning and ack gate', async () => {
+      bundleAdminApi.listPendingVersions.mockResolvedValue(listResponse());
+      bundleApi.getPermissions.mockResolvedValue({
+        data: {
+          success: true,
+          summary: {
+            egress: [],
+            storageAccess: [
+              { prefixOwner: 'waddles.harness.media', ops: ['read'], reason: 'Fetch clips' },
+            ],
+          },
+          permissionHash: 'sha256:abc',
+        },
+      });
+      bundleApi.approveVersion.mockResolvedValue({ data: { success: true } });
+      bundleApi.getAccessGrants.mockResolvedValue({
+        data: { success: true, dangerousIds: ['storage.read:waddles.harness.media'] },
+      });
+      bundleApi.approvePermissions.mockResolvedValue({ data: { success: true } });
+      render(<SuperAdminBundleApprovals />);
+      await screen.findAllByTestId('bundle-approvals-row');
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('bundle-approvals-review-7'));
+      });
+      await screen.findByTestId('bundle-approvals-summary');
+      expect(screen.getByTestId('access-grant-storageAccess')).toHaveTextContent(
+        'waddles.harness.media',
+      );
+      const install = screen.getByTestId('bundle-approvals-install-button');
+      expect(install).toBeDisabled();
+      fireEvent.click(screen.getByTestId('access-grant-ack'));
+      await act(async () => {
+        fireEvent.click(install);
+      });
+      expect(bundleApi.approvePermissions).toHaveBeenCalledWith(
+        'waddles.integrations.vendor-42.mybundle',
+        '1.0.0',
+        ['storage.read:waddles.harness.media'],
+      );
+    });
+
     it('does not show the warning or require an ack for a bundle without access grants', async () => {
       bundleAdminApi.listPendingVersions.mockResolvedValue(listResponse());
       bundleApi.getPermissions.mockResolvedValue({

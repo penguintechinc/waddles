@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FormModalBuilder, type FormField } from '@penguintechinc/react-libs';
 import { useAuth } from '../../contexts/AuthContext';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
-import { bundleActivationApi, type TableAccess } from '../../services/bundleActivationApi';
+import { bundleActivationApi, type StorageAccess, type TableAccess } from '../../services/bundleActivationApi';
 import AccessGrantWarning from '../../components/bundles/AccessGrantWarning';
 
 /**
@@ -58,6 +58,7 @@ export default function AdminCommunityBundles() {
     appId: string;
     ids: string[];
     tableAccess: TableAccess[];
+    storageAccess: StorageAccess[];
   } | null>(null);
   const [grantsAck, setGrantsAck] = useState(false);
 
@@ -215,7 +216,12 @@ export default function AdminCommunityBundles() {
           if (grants.approvedIds.length > 0) {
             setActivateOpen(false);
             setGrantsAck(false);
-            setPendingGrants({ appId, ids: grants.approvedIds, tableAccess: grants.tableAccess });
+            setPendingGrants({
+              appId,
+              ids: grants.approvedIds,
+              tableAccess: grants.tableAccess,
+              storageAccess: grants.storageAccess ?? [],
+            });
             return;
           }
           await activateMutation.mutateAsync({ appId, ack: [] });
@@ -234,7 +240,10 @@ export default function AdminCommunityBundles() {
           <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-navy-700 bg-navy-800 p-6">
             <h2 className="mb-3 text-lg font-bold text-white">Activate {pendingGrants.appId}</h2>
             <AccessGrantWarning
-              summary={{ tableAccess: pendingGrants.tableAccess }}
+              summary={{
+                tableAccess: pendingGrants.tableAccess,
+                storageAccess: pendingGrants.storageAccess,
+              }}
               requireAck
               onAckChange={setGrantsAck}
             />
