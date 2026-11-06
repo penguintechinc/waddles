@@ -37,7 +37,7 @@ pub(crate) fn ws_config(platform: &str, port: u16, source_key: &str) -> WsConfig
         max_frame_bytes: 4096,
         dedup_window: 0,
         allow_loopback_insecure: true,
-        slot_prefixes: vec![],
+        slot_prefixes: HashMap::new(),
         auto_replies: vec![],
         self_echo: None,
         heartbeat_interval: None,

@@ -41,8 +41,11 @@ pub const DEFAULT_INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 15);
 pub const TOKEN_SLOT: &str = "{{DISCORD_BOT_TOKEN}}";
 /// Opaque secret handle the host maps to the bot-token connection.
 pub const TOKEN_HANDLE: &str = "discord-bot";
-/// The exact bytes that precede [`TOKEN_SLOT`] in both IDENTIFY and RESUME.
-pub const TOKEN_PREFIX: &str = r#""token":""#;
+/// The bytes that precede [`TOKEN_SLOT`] in IDENTIFY (op 2); the host anchors
+/// the full leading context at frame offset 0.
+pub const TOKEN_PREFIX: &str = r#"{"op":2,"d":{"token":""#;
+/// RESUME (op 6) counterpart of [`TOKEN_PREFIX`].
+pub const TOKEN_PREFIX_RESUME: &str = r#"{"op":6,"d":{"token":""#;
 
 /// The `{op, d, s, t}` envelope every gateway frame uses.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -154,19 +157,30 @@ fn str_at(v: &Value, path: &[&str]) -> Option<String> {
 /// # Errors
 /// [`OverlayError::Backend`] only if JSON serialization fails (it cannot).
 pub fn build_identify(intents: u64) -> Result<Vec<u8>> {
-    let v = json!({
-        "op": OP_IDENTIFY,
-        "d": {
-            "token": TOKEN_SLOT,
+    token_first(
+        OP_IDENTIFY,
+        &json!({
             "intents": intents,
             "properties": {
                 "os": "linux",
                 "browser": "penguin-connector-discord",
                 "device": "penguin-connector-discord",
             },
-        },
-    });
-    serde_json::to_vec(&v).map_err(|e| OverlayError::Backend(e.to_string()))
+        }),
+    )
+}
+
+/// Serializes `{"op":<op>,"d":{"token":"<slot>",<rest...>}}` with the token
+/// slot FIRST. `serde_json` sorts map keys, which would bury the slot behind
+/// other fields; the host pins an offset-0-anchored prefix
+/// (`{"op":N,"d":{"token":"`) so the leading context must be stable.
+fn token_first(op: u8, rest: &Value) -> Result<Vec<u8>> {
+    let r = serde_json::to_string(rest).map_err(|e| OverlayError::Backend(e.to_string()))?;
+    let inner = r
+        .strip_prefix('{')
+        .filter(|i| i.len() > 1)
+        .ok_or_else(|| OverlayError::Backend("handshake fields must be a non-empty object".into()))?;
+    Ok(format!(r#"{{"op":{op},"d":{{"token":"{TOKEN_SLOT}",{inner}}}"#).into_bytes())
 }
 
 /// Builds the RESUME handshake bytes from a persisted session (token slot only).
@@ -178,11 +192,7 @@ pub fn build_resume(session: &SessionState) -> Result<Vec<u8>> {
         .session_id
         .as_deref()
         .ok_or_else(|| OverlayError::Malformed("resume needs a session_id".into()))?;
-    let v = json!({
-        "op": OP_RESUME,
-        "d": { "token": TOKEN_SLOT, "session_id": id, "seq": session.seq },
-    });
-    serde_json::to_vec(&v).map_err(|e| OverlayError::Backend(e.to_string()))
+    token_first(OP_RESUME, &json!({ "session_id": id, "seq": session.seq }))
 }
 
 /// Builds a HEARTBEAT body carrying the last-seen sequence (`null` before any).
@@ -229,7 +239,7 @@ mod tests {
         let bytes = build_identify(DEFAULT_INTENTS).unwrap();
         let text = String::from_utf8(bytes).unwrap();
         assert!(
-            text.contains(&format!("{TOKEN_PREFIX}{TOKEN_SLOT}\"")),
+            text.starts_with(&format!("{TOKEN_PREFIX}{TOKEN_SLOT}\"")),
             "{text}"
         );
         assert_eq!(text.matches(TOKEN_SLOT).count(), 1);
@@ -247,7 +257,7 @@ mod tests {
             ..SessionState::default()
         };
         let text = String::from_utf8(build_resume(&s).unwrap()).unwrap();
-        assert!(text.contains(&format!("{TOKEN_PREFIX}{TOKEN_SLOT}\"")));
+        assert!(text.starts_with(&format!("{TOKEN_PREFIX_RESUME}{TOKEN_SLOT}\"")), "{text}");
         let v: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["op"], 6);
         assert_eq!(v["d"]["session_id"], "sess9");
