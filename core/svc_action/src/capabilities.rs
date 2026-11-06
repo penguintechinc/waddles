@@ -64,6 +64,7 @@ use crate::pin_sig::{PinFields, PinKeys};
 use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
+mod discord_role_tools;
 mod tool;
 pub use tool::ToolWiring;
 

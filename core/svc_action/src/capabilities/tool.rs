@@ -158,6 +158,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             "tool.invoke authorized"
         );
 
+        // 5b. Host-mediated Discord role tools: served by the pinned outbound role
+        // producer, never by a nested guest call (the guest has no mutating egress).
+        if let Some(op) = super::discord_role_tools::host_mediated_op(&plan.target_app_id, &plan.tool)
+        {
+            return self.run_discord_role_tool(scope, op, &plan).await;
+        }
+
         // 6. Nested invoke on the active executor connection.
         let deadline = bundle_tool_call::nested_deadline(scope.deadline_at)?;
         let conn = wiring.connections.active().ok_or_else(|| {
@@ -185,6 +192,26 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             );
         }
         result
+    }
+}
+
+impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
+    /// Serves `discord.member.roles.add|remove`: validates the args (injection refused), then
+    /// runs the SAME guild-pinned producer as `relay.push` `role.add|role.remove` (the
+    /// `tool.call` grant already passed in `plan_tool_call`). Returns the `{ok}` envelope with
+    /// the drain-confirmed result; producer refusals map onto a typed [`ToolRefusal`].
+    async fn run_discord_role_tool(
+        &self,
+        scope: &InvokeScope,
+        op: super::RelayOp,
+        plan: &bundle_tool_call::ToolPlan,
+    ) -> Result<serde_json::Value, ToolRefusal> {
+        let message = super::discord_role_tools::relay_message(op, &plan.args)?;
+        match self.handle_discord_queued_op(scope, op, &message).await {
+            Ok(confirmed) => Ok(serde_json::json!({ "ok": confirmed })),
+            Err(e) if e.code == "invalid_args" => Err(ToolRefusal::InvalidArgs(e.message)),
+            Err(e) => Err(ToolRefusal::TargetUnavailable(format!("{}: {}", e.code, e.message))),
+        }
     }
 }
 
