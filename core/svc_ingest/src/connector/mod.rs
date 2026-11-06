@@ -49,6 +49,7 @@ mod lifecycle_tests;
 pub mod metrics;
 pub mod poll;
 pub(crate) mod ratelimit;
+pub mod rediscover;
 pub mod registry;
 pub mod secrets;
 pub mod sender_exec;
@@ -82,6 +83,7 @@ pub use lifecycle::{
 };
 pub use metrics::{register_connector_metrics, ConnectorMetrics};
 pub use poll::{PollAuth, PollConfig, PollTransport};
+pub use rediscover::{Rediscover, RediscoverConfig, RediscoverError, RediscoverOutcome};
 pub use registry::{
     ConnectorRegistry, EventLimits, PinnedConnector, RegistryError, MAX_EVENTS_PER_FRAME,
 };

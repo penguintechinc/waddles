@@ -107,7 +107,7 @@ def _pair(dal: Any, community_id: int, n: int = 1) -> list[int]:
             community_id,
             discord_guild_id=GUILDS[i],
             direction="bidirectional",
-            role_name_prefix="[BC]",
+            role_name_prefix="[AC]",
             actor_user_id=None,
         ).id
         for i in range(n)

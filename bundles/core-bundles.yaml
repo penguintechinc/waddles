@@ -156,7 +156,7 @@ bundles:
   # (`community_id: null` below) instead of only erroring -- scoped under
   # `waddle_sdk.community_kv.TENANT_WIDE_SENTINEL`, see src/app.py's module docstring.
   - app_id: waddles.core.example.lurk
-    version: "1.0.11"
+    version: "1.0.12"
     language: python
     source_dir: python/lurk
     manifest_path: lurk.manifest.yaml
@@ -430,7 +430,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.shoutout
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/shoutout
     manifest_path: shoutout.manifest.yaml
@@ -1489,7 +1489,7 @@ bundles:
   # bundle-MCP-tools P6b: discord platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-discord defaults OFF.
   - app_id: waddles.core.service.discord
-    version: "1.0.3"
+    version: "1.0.5"
     language: rust
     wit_world: connector-tools
     kind: service

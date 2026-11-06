@@ -724,6 +724,11 @@ pub enum HttpAction {
     },
     /// Terminal: the source parks (`TransportError::Fatal`).
     Park,
+    /// The polled target ended (e.g. a live chat): ask the upstream for the
+    /// source's current target through the transport's rediscovery hook, then
+    /// end the connection so the runtime restarts it on the new plan. Needs
+    /// `PollConfig::rediscover`.
+    Rediscover,
 }
 
 /// Classifies an HTTP error status by a `reason` in the JSON body.
@@ -803,7 +808,7 @@ impl PollLifecycle {
                 HttpAction::Backoff { base, max, .. } => {
                     *base < Duration::from_millis(1) || max < base || *max > MAX_BACKOFF
                 }
-                HttpAction::Park => false,
+                HttpAction::Park | HttpAction::Rediscover => false,
             };
             if !(400..=599).contains(&r.status)
                 || !pointer_ok(&r.reason_pointer)

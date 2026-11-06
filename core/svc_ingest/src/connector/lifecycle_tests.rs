@@ -621,6 +621,7 @@ fn poll_cfg(addr: SocketAddr, lifecycle: PollLifecycle) -> PollConfig {
         egress_allow: vec!["127.0.0.1".parse().unwrap()],
         allow_loopback_insecure: true,
         lifecycle,
+        rediscover: None,
     }
 }
 
@@ -991,4 +992,241 @@ impl tracing::Subscriber for Logs {
     }
     fn enter(&self, _: &tracing::span::Id) {}
     fn exit(&self, _: &tracing::span::Id) {}
+}
+
+// ------------------------------------------------------ rediscovery ----
+
+use super::poll::PollAuth;
+use super::rediscover::{Rediscover, RediscoverConfig, RediscoverError, RediscoverOutcome};
+
+/// Records what the transport handed it and answers a scripted result.
+#[derive(Debug)]
+struct Hook {
+    result: Result<RediscoverOutcome, RediscoverError>,
+    bodies: Mutex<Vec<Vec<u8>>>,
+    outcome: Mutex<Option<RediscoverOutcome>>,
+}
+
+impl Hook {
+    fn new(result: Result<RediscoverOutcome, RediscoverError>) -> Arc<Self> {
+        Arc::new(Self {
+            result,
+            bodies: Mutex::default(),
+            outcome: Mutex::default(),
+        })
+    }
+}
+
+impl Rediscover for Hook {
+    fn apply(&self, body: &[u8]) -> Result<RediscoverOutcome, RediscoverError> {
+        self.bodies.lock().unwrap().push(body.to_vec());
+        if let Ok(o) = self.result {
+            *self.outcome.lock().unwrap() = Some(o);
+        }
+        self.result
+    }
+
+    fn take_outcome(&self) -> Option<RediscoverOutcome> {
+        self.outcome.lock().unwrap().take()
+    }
+}
+
+/// `/poll` answers 403 liveChatEnded; `/discover` answers the scripted reply.
+/// Records `(path, authorization)` per request.
+type RouteSeen = Vec<(String, Option<String>)>;
+
+#[derive(Clone)]
+struct TwoRoute {
+    discover: Reply,
+    seen: Arc<Mutex<RouteSeen>>,
+}
+
+async fn two_route(scripted: Reply) -> (SocketAddr, TwoRoute) {
+    let s = TwoRoute {
+        discover: scripted,
+        seen: Arc::default(),
+    };
+    async fn poll(
+        axum::extract::State(s): axum::extract::State<TwoRoute>,
+        h: axum::http::HeaderMap,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        s.seen.lock().unwrap().push((
+            "/poll".into(),
+            h.get("authorization").map(|v| v.to_str().unwrap().into()),
+        ));
+        (axum::http::StatusCode::FORBIDDEN, yt_error("liveChatEnded")).into_response()
+    }
+    async fn discover(
+        axum::extract::State(s): axum::extract::State<TwoRoute>,
+        h: axum::http::HeaderMap,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        s.seen.lock().unwrap().push((
+            "/discover".into(),
+            h.get("authorization").map(|v| v.to_str().unwrap().into()),
+        ));
+        (
+            axum::http::StatusCode::from_u16(s.discover.0).unwrap(),
+            s.discover.2.clone(),
+        )
+            .into_response()
+    }
+    let app = axum::Router::new()
+        .route("/poll", axum::routing::get(poll))
+        .route("/discover", axum::routing::get(discover))
+        .with_state(s.clone());
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (addr, s)
+}
+
+fn rd_lifecycle() -> PollLifecycle {
+    PollLifecycle {
+        interval_hint: None,
+        error_rules: vec![HttpErrorRule {
+            status: 403,
+            reason_pointer: "/error/errors/0/reason".into(),
+            reasons: vec!["liveChatEnded".into()],
+            action: HttpAction::Rediscover,
+        }],
+        query_secret: None,
+    }
+}
+
+fn rd_cfg(addr: SocketAddr, hook: Arc<Hook>) -> PollConfig {
+    let mut c = poll_cfg(addr, rd_lifecycle());
+    c.auth = Some(PollAuth {
+        header: "Authorization".into(),
+        prefix: "Bearer ".into(),
+        handle: "h1".into(),
+    });
+    c.rediscover = Some(RediscoverConfig {
+        url: format!("http://{addr}/discover?x=1"),
+        hook,
+    });
+    c
+}
+
+#[tokio::test]
+async fn live_chat_ended_rediscovers_with_the_connections_own_credential_then_ends_the_run() {
+    for (outcome, label) in [
+        (RediscoverOutcome::Rediscovered, "rediscovered"),
+        (RediscoverOutcome::WaitingForLive, "waiting_for_live"),
+    ] {
+        let (addr, srv) = two_route(ok(r#"{"items":[{"id":"b"}]}"#)).await;
+        let hook = Hook::new(Ok(outcome));
+        let (m, reg) = metrics();
+        let mut t = PollTransport::new(rd_cfg(addr, hook.clone()), Fixed::new("tok"))
+            .unwrap()
+            .with_metrics(m);
+        t.connect().await.unwrap();
+        let e = t.next_frame().await.unwrap_err();
+        assert!(
+            e.is_fatal(),
+            "the run ends so the runtime can retarget: {e}"
+        );
+        assert_eq!(hook.take_outcome(), Some(outcome));
+        assert_eq!(
+            hook.bodies.lock().unwrap().as_slice(),
+            &[br#"{"items":[{"id":"b"}]}"#.to_vec()],
+            "the hook got the discovery response verbatim"
+        );
+        let seen = srv.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                ("/poll".to_owned(), Some("Bearer tok".to_owned())),
+                ("/discover".to_owned(), Some("Bearer tok".to_owned())),
+            ],
+            "discovery used the same bearer credential, once"
+        );
+        assert_eq!(count(&reg, "poll_http", "rediscover"), 1);
+        assert_eq!(count(&reg, "poll_rediscover", label), 1);
+    }
+}
+
+#[tokio::test]
+async fn rediscovery_failures_are_classified_not_swallowed() {
+    // (discover reply, hook result, fatal?, metric outcome)
+    let cases: Vec<(
+        Reply,
+        Result<RediscoverOutcome, RediscoverError>,
+        bool,
+        &str,
+    )> = vec![
+        (
+            (401, vec![], String::new()),
+            Ok(RediscoverOutcome::Rediscovered),
+            true,
+            "rejected",
+        ),
+        (
+            (403, vec![], yt_error("forbidden")),
+            Ok(RediscoverOutcome::Rediscovered),
+            true,
+            "rejected",
+        ),
+        (
+            (500, vec![], String::new()),
+            Ok(RediscoverOutcome::Rediscovered),
+            false,
+            "http_error",
+        ),
+        (
+            ok("not json"),
+            Err(RediscoverError::Malformed),
+            false,
+            "malformed",
+        ),
+        (ok("{}"), Err(RediscoverError::Refused), true, "refused"),
+    ];
+    for (reply, result, fatal, label) in cases {
+        let (addr, _s) = two_route(reply).await;
+        let hook = Hook::new(result);
+        let (m, reg) = metrics();
+        let mut t = PollTransport::new(rd_cfg(addr, hook.clone()), Fixed::new("tok"))
+            .unwrap()
+            .with_metrics(m);
+        let e = t.next_frame().await.unwrap_err();
+        assert_eq!(e.is_fatal(), fatal, "{label}: {e}");
+        assert_eq!(count(&reg, "poll_rediscover", label), 1, "{label}");
+        if label != "refused" {
+            assert_eq!(hook.take_outcome(), None, "{label}: no outcome recorded");
+        }
+    }
+}
+
+#[tokio::test]
+async fn rediscovery_config_is_validated_at_construction() {
+    let (addr, _s) = two_route(ok("{}")).await;
+    // A rediscover rule with no rediscovery config.
+    let mut c = poll_cfg(addr, rd_lifecycle());
+    c.rediscover = None;
+    assert!(PollTransport::new(c, Fixed::new("x")).is_err());
+    // A different port = a different credential destination.
+    let mut c = rd_cfg(addr, Hook::new(Ok(RediscoverOutcome::WaitingForLive)));
+    let other = c.rediscover.as_mut().unwrap();
+    other.url = format!("http://127.0.0.1:{}/discover", addr.port().wrapping_add(1));
+    assert!(PollTransport::new(c, Fixed::new("x")).is_err());
+    // A different host.
+    let mut c = rd_cfg(addr, Hook::new(Ok(RediscoverOutcome::WaitingForLive)));
+    c.rediscover.as_mut().unwrap().url = format!("http://localhost:{}/discover", addr.port());
+    assert!(PollTransport::new(c, Fixed::new("x")).is_err());
+    // Plain http without the loopback test allowance.
+    let mut c = rd_cfg(addr, Hook::new(Ok(RediscoverOutcome::WaitingForLive)));
+    c.allow_loopback_insecure = false;
+    assert!(PollTransport::new(c, Fixed::new("x")).is_err());
+    // A hook without any rule that triggers it is allowed (inert).
+    let mut c = rd_cfg(addr, Hook::new(Ok(RediscoverOutcome::WaitingForLive)));
+    c.lifecycle = PollLifecycle::default();
+    assert!(PollTransport::new(c, Fixed::new("x")).is_ok());
+    // Debug never prints the URL.
+    let dbg = format!(
+        "{:?}",
+        rd_cfg(addr, Hook::new(Ok(RediscoverOutcome::WaitingForLive))).rediscover
+    );
+    assert!(!dbg.contains("/discover"), "{dbg}");
+    assert_eq!(RediscoverOutcome::Rediscovered.label(), "rediscovered");
 }

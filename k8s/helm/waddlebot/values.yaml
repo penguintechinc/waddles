@@ -1010,6 +1010,12 @@ outboundPin:
   existingSecret: ""
   activeKid: "k1"
 
+# Event-sync request integrity key (hub-api / event-sync CronJob sign, svc-action verifies); a
+# DEDICATED ring, see templates/event-sync-request-secret.yaml. existingSecret key: EVENT_SYNC_REQUEST_KEYS.
+eventSyncRequest:
+  existingSecret: ""
+  activeKid: "r1"
+
 pipeline:
   pythonBaseImage: "python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb"
   nodeBaseImage: "node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"
@@ -1025,6 +1031,11 @@ pipeline:
   # (sha256:<64 lowercase hex>; empty = unset). Rendered into svc-ingest
   # SENDER_EXEC_DIGEST_<P> AND bundle-executor CONNECTOR_PIN_DIGEST_<P>.
   connectors:
+    # Seeder Job publishes connectors/<p>/<digest>.{wasm,json} (signed with the platform key) from
+    # the reproducibly-built wasm in its image and logs the digests to set below. Digests are
+    # build outputs, NOT committed per-env: copy them from the seeder log or the output of
+    # `make publish-connector-bundles ENV=<env>` (scripts/publish-connector-bundles.sh).
+    publishAtSeed: false
     digests:
       twitch: ""
       discord: ""
@@ -1121,10 +1132,10 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
-  # Bar Citizen role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
+  # Role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
   # deploy-time kill switch, defaulted OFF (critical-rules.md Feature Flags: every feature
   # flagged OFF until validated) -- see templates/role-sync-cronjob.yaml's own header comment.
-  # The engine's own FEATURE_BAR_CITIZEN_ROLE_SYNC PostHog flag is the separate per-tenant
+  # The engine's own FEATURE_ROLE_SYNC PostHog flag is the separate per-tenant
   # RUNTIME gate; this value controls whether the CronJob is deployed at all.
   roleSync:
     enabled: false
@@ -1216,6 +1227,9 @@ pipeline:
     enabled: true
     port: 8204
     grpcPort: 50204
+    # ANALYTICS_CORE_API_URL for hub-api's analytics proxy (gh-894). Empty = derive from the
+    # core-data Service ("http://<fullname>-core-data.<namespace>.svc:<modules.coreData.service.port>").
+    analyticsCoreUrl: ""
     # SPIFFE_PEER_TRUST / SPIFFE_PEER_ID_HEADER (hub_api/services/machine_auth.py). Default OFF.
     # Enable ONLY behind an mTLS terminator that strips the header from non-mTLS traffic AND
     # after a per-identity community allow-list exists -- see docs/PROVIDER_CONNECTIONS.md.
@@ -2919,9 +2933,9 @@ config:
   spectrumOrgSyncEnabled: false
   # ENV baseline for flag waddles.calendar.event_discord_sync (default OFF; PostHog overrides when connected)
   eventDiscordSyncEnabled: false
-  # ENV baseline for flag waddles.bar_citizen.role_sync -> FLAG_WADDLES_BAR_CITIZEN_ROLE_SYNC (default OFF;
+  # ENV baseline for flag waddles.role_sync -> FLAG_WADDLES_ROLE_SYNC (default OFF;
   # PostHog overrides when connected). Also needs pipeline.roleSync.enabled for the reconcile CronJob.
-  barCitizenRoleSyncEnabled: false
+  roleSyncEnabled: false
   spectrumOrgPollIntervalS: 300
   # A roster shrinking by more than this fraction in one poll is held back as an RSI glitch, not emitted
   spectrumRosterMaxDepartureRatio: 0.5

@@ -52,7 +52,7 @@ from services.credential_resolver import (  # noqa: E402
     upsert_platform_connection,
 )
 from services.errors import ApiError  # noqa: E402
-from services.schema import bind_bar_citizen_tables  # noqa: E402
+from services.schema import bind_guild_pairing_tables  # noqa: E402
 
 requires_docker = pytest.mark.skipif(
     not DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
@@ -85,9 +85,9 @@ def dal(pg_db: PgTestDatabase) -> Iterator[Any]:
     """
     pydal_uri = pg_db.dsn.replace("postgresql://", "postgres://", 1)
     connection = DAL(pydal_uri, pool_size=1)
-    # `bind_auth_tables()` (called by `bind_bar_citizen_tables()`) assumes `tenants`/
+    # `bind_auth_tables()` (called by `bind_guild_pairing_tables()`) assumes `tenants`/
     # `communities` are already bound by the caller -- same precondition
-    # `tests/conftest.py::bar_citizen_db` satisfies for the sqlite fixture; mirrored here
+    # `tests/conftest.py::guild_pairing_db` satisfies for the sqlite fixture; mirrored here
     # against the real, already-migrated columns (`alembic/tests/pg_docker.py`'s own
     # bootstrap SQL -- see that module's docstring).
     connection.define_table(
@@ -109,7 +109,7 @@ def dal(pg_db: PgTestDatabase) -> Iterator[Any]:
     # every OTHER defaulted column `bind_auth_tables()` defines for `communities`
     # (a much larger production column set, out of scope for this minimal schema).
     connection.executesql("ALTER TABLE communities ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
-    bind_bar_citizen_tables(connection, migrate=False)
+    bind_guild_pairing_tables(connection, migrate=False)
     yield connection
     connection.close()
 

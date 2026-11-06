@@ -970,3 +970,17 @@ Contributions are welcome! Please read the development guidelines in `/docs/deve
 ## License
 
 WaddleBot is licensed under the terms specified in the LICENSE file. Integration with PenguinTech License Server is required for production deployments when `RELEASE_MODE=true`.
+
+## Connector service bundles (Twitch / Discord / YouTube) -- publish + pin
+
+The executor boot-pins `connectors/<p>/<digest>.wasm` plus a signed sidecar
+`connectors/<p>/<digest>.json` (key in `BUNDLE_SIGNING_PUBLIC_KEYS`) and needs
+`pipeline.connectors.digests.<p>` (feeds `CONNECTOR_PIN_DIGEST_<P>` and `SENDER_EXEC_DIGEST_<P>`).
+
+- **At deploy (alpha/dal2alpha, `pipeline.connectors.publishAtSeed: true`)**: the core-bundle-seeder
+  Job signs with the platform key it already holds and uploads the wasm built into its image, then
+  logs the digests as a values snippet. Set `digests.<p>` from that log, then enable the connector.
+- **By hand**: `make publish-connector-bundles ENV=dal2alpha` (`scripts/publish-connector-bundles.sh`) --
+  needs `BUNDLE_SIGNING_KEY_FILE` (0600 file with the base64 seed -- user-held), `BUNDLE_SIGNING_KEY_ID`,
+  `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
+- Digests are build outputs and are not committed per environment. Verify with `make test-connector-publish`.

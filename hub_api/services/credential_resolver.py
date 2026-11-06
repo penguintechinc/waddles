@@ -1,4 +1,4 @@
-"""`CredentialResolver` -- per-tenant platform-credential seam for Bar Citizen (migration 0035).
+"""`CredentialResolver` -- per-tenant platform-credential seam for guild pairing (migration 0035).
 
 See `docs/CONNECTION_MODEL.local.md` for the full three-layer design.
 
@@ -80,7 +80,7 @@ from services.provider_connections.vault import (
     reseal_if_legacy,
     seal_secret,
 )
-from services.schema import bind_bar_citizen_tables
+from services.schema import bind_guild_pairing_tables
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +147,7 @@ def _saas_env_payload(platform: str) -> dict[str, Any] | None:
 
 
 def _select_tenant_credentials_row(dal: Any, tenant_id: int, platform: str) -> Any | None:
-    bind_bar_citizen_tables(dal)
+    bind_guild_pairing_tables(dal)
     t = dal.tenant_platform_apps
     return dal((t.tenant_id == tenant_id) & (t.platform == platform)).select().first()
 
@@ -222,7 +222,7 @@ def store_tenant_credentials(
     if is_global_tenant:
         raise bad_request("the global tenant cannot store platform credentials")
 
-    bind_bar_citizen_tables(dal)
+    bind_guild_pairing_tables(dal)
     t = dal.tenant_platform_apps
     ciphertext = seal_secret(json.dumps(payload))
     now = datetime.now(UTC)
@@ -380,7 +380,7 @@ def upsert_platform_connection(
     caller in this PR -- see module docstring) pass this straight to
     `grant_community_connection_access()`.
     """
-    bind_bar_citizen_tables(dal)
+    bind_guild_pairing_tables(dal)
     t = dal.platform_connections
     now = datetime.now(UTC)
     try:
@@ -443,7 +443,7 @@ def get_platform_connection(
     alone, so one tenant can never read back another tenant's connection
     even if both happen to reference the same `resource_id` string.
     """
-    bind_bar_citizen_tables(dal)
+    bind_guild_pairing_tables(dal)
     t = dal.platform_connections
     row = (
         dal((t.tenant_id == tenant_id) & (t.platform == platform) & (t.resource_id == resource_id))
@@ -467,7 +467,7 @@ def get_platform_connection_for_tenant(
     connection()`'s job, and community-scoped resolution across many
     tenants' connections is `resolve_community_connection()`'s job.
     """
-    bind_bar_citizen_tables(dal)
+    bind_guild_pairing_tables(dal)
     t = dal.platform_connections
     row = (
         dal((t.tenant_id == tenant_id) & (t.platform == platform) & (t.status == "active"))
@@ -485,12 +485,12 @@ def delete_platform_connection(dal: Any, *, connection_id: int) -> None:
     rows explicitly, application-side, before the connection row -- pydal
     uses plain `integer`/`bigint` FK-shaped columns here (this file's own
     "FK-shaped columns, not pydal `reference` fields" convention, see
-    `bind_bar_citizen_tables()`'s docstring), so sqlite test DBs (no real
+    `bind_guild_pairing_tables()`'s docstring), so sqlite test DBs (no real
     FK, no cascade) would otherwise leave an orphaned grant behind -- this
     keeps both backends' observable behavior identical rather than
     silently relying on a cascade sqlite can't express.
     """
-    bind_bar_citizen_tables(dal)
+    bind_guild_pairing_tables(dal)
     try:
         dal(dal.community_connection_access.connection_id == connection_id).delete()
         dal(dal.platform_connections.id == connection_id).delete()
@@ -527,7 +527,7 @@ def grant_community_connection_access(
     isolation depends on every grant row satisfying it, not on a query
     filter alone).
     """
-    bind_bar_citizen_tables(dal)
+    bind_guild_pairing_tables(dal)
     # Explicit column lists, never a bare `.select()`/`ALL` -- this repo has hit
     # pydal-vs-Postgres column drift before (`community_connections.py`'s own module
     # docstring); `communities` in particular carries many more production columns
@@ -601,7 +601,7 @@ def resolve_community_connection(
     (never a bare `resource_id`/tenant lookup), so this can never return a
     different tenant's connection for a community it doesn't belong to.
     """
-    bind_bar_citizen_tables(dal)
+    bind_guild_pairing_tables(dal)
     access = dal.community_connection_access
     grants = dal((access.community_id == community_id) & (access.status == "approved")).select(
         access.connection_id

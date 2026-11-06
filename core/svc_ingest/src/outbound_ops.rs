@@ -8,6 +8,7 @@
 //! {"v":1,"op":"chat.send","platform":"twitch","channel":"#c","text":"hi"}
 //! {"v":1,"op":"chat.delete","platform":"twitch","channel":"#c","message_id":"m1"}
 //! {"v":1,"op":"dm.send","platform":"discord","user_id":"u1","text":"hi","origin_channel":"c1"}
+//! {"v":1,"op":"event.create","platform":"discord","text":"{event json}","origin_channel":"<guild>"}
 //! ```
 //!
 //! * `v` -- schema version. Absent = the legacy text-only
@@ -103,6 +104,52 @@ pub enum OutboundAction {
         /// Numeric tenant id from the MAC-bound stamp, as for [`Self::DmSend`].
         tenant_id: Option<i64>,
     },
+    /// `event.create|update|cancel|delete` (executor path only) -- mirror a
+    /// Waddles calendar event onto the community's Discord guild as a
+    /// scheduled event. The guild is NEVER named by the producer: the host
+    /// pins it from the community's binding. `expect_guild` (the wire
+    /// `origin_channel`, MAC-covered) is only an ASSERTION the host compares to
+    /// that binding and refuses on mismatch -- it is not a destination.
+    EventOp {
+        kind: EventKind,
+        /// The Discord scheduled-event id (wire `message_id`); `Some` for
+        /// update/cancel/delete, `None` for create.
+        event_id: Option<String>,
+        /// The event field object (wire `text`, a JSON object); `Some` for
+        /// create/update, `None` for cancel/delete.
+        event_json: Option<String>,
+        /// The guild the producer expects the binding to resolve to; `None`
+        /// (wire `-`) = no assertion, the host pins from the binding alone.
+        expect_guild: Option<String>,
+        /// Numeric tenant id from the MAC-bound stamp.
+        tenant_id: Option<i64>,
+    },
+}
+
+/// Which guild scheduled-event operation an [`OutboundAction::EventOp`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    /// `event.create` -- `POST .../scheduled-events`.
+    Create,
+    /// `event.update` -- `PATCH .../scheduled-events/{id}` (full field set).
+    Update,
+    /// `event.cancel` -- `PATCH` with `status=CANCELED` (history preserved).
+    Cancel,
+    /// `event.delete` -- `DELETE .../scheduled-events/{id}`.
+    Delete,
+}
+
+impl EventKind {
+    /// The wire spelling of this op.
+    #[must_use]
+    pub fn op(self) -> &'static str {
+        match self {
+            Self::Create => "event.create",
+            Self::Update => "event.update",
+            Self::Cancel => "event.cancel",
+            Self::Delete => "event.delete",
+        }
+    }
 }
 
 impl OutboundAction {
@@ -115,6 +162,7 @@ impl OutboundAction {
             Self::DmSend { .. } => "dm.send",
             Self::RoleOp { add: true, .. } => "role.add",
             Self::RoleOp { add: false, .. } => "role.remove",
+            Self::EventOp { kind, .. } => kind.op(),
         }
     }
 }
@@ -208,6 +256,79 @@ fn role_op_name(op: &str) -> &'static str {
     }
 }
 
+/// The `&'static` spelling of an event op (error payloads are static).
+fn event_kind(op: &str) -> Option<EventKind> {
+    match op {
+        "event.create" => Some(EventKind::Create),
+        "event.update" => Some(EventKind::Update),
+        "event.cancel" => Some(EventKind::Cancel),
+        "event.delete" => Some(EventKind::Delete),
+        _ => None,
+    }
+}
+
+/// Builds the [`OutboundAction::EventOp`] for `kind`, enforcing the field
+/// shape per kind: create has text and no event id; update has both; cancel
+/// and delete have an event id and no text. A field a kind does not take is
+/// refused, never ignored (it is MAC-covered, so it would be a producer bug).
+fn parse_event_op(
+    kind: EventKind,
+    wire: &WireEnvelope,
+) -> Result<OutboundAction, OutboundParseError> {
+    let op = kind.op();
+    let non_empty = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
+    let (event_id, event_json) = (non_empty(&wire.message_id), non_empty(&wire.text));
+    let unexpected =
+        |field: &'static str| OutboundParseError::Malformed(format!("{op} must not carry {field}"));
+    let (event_id, event_json) = match kind {
+        EventKind::Create => {
+            if event_id.is_some() {
+                return Err(unexpected("message_id"));
+            }
+            (
+                None,
+                Some(event_json.ok_or(OutboundParseError::MissingField { op, field: "text" })?),
+            )
+        }
+        EventKind::Update => (
+            Some(event_id.ok_or(OutboundParseError::MissingField {
+                op,
+                field: "message_id",
+            })?),
+            Some(event_json.ok_or(OutboundParseError::MissingField { op, field: "text" })?),
+        ),
+        EventKind::Cancel | EventKind::Delete => {
+            if event_json.is_some() {
+                return Err(unexpected("text"));
+            }
+            (
+                Some(event_id.ok_or(OutboundParseError::MissingField {
+                    op,
+                    field: "message_id",
+                })?),
+                None,
+            )
+        }
+    };
+    Ok(OutboundAction::EventOp {
+        kind,
+        event_id,
+        event_json,
+        expect_guild: match require(wire.origin_channel.clone(), op, "origin_channel")?.as_str() {
+            "-" => None,
+            g if !g.is_empty() && g.len() <= 20 && g.bytes().all(|b| b.is_ascii_digit()) => {
+                Some(g.to_string())
+            }
+            _ => {
+                return Err(OutboundParseError::Malformed(format!(
+                    "{op} origin_channel must be a guild snowflake or -"
+                )))
+            }
+        },
+        tenant_id: wire.tenant_id.filter(|t| *t > 0),
+    })
+}
+
 fn require(
     value: Option<String>,
     op: &'static str,
@@ -294,7 +415,10 @@ pub fn parse_outbound_entry(
                 tenant_id: wire.tenant_id.filter(|t| *t > 0),
             }
         }
-        other => return Err(OutboundParseError::UnknownOp(other.to_string())),
+        other => match event_kind(other) {
+            Some(kind) => parse_event_op(kind, &wire)?,
+            None => return Err(OutboundParseError::UnknownOp(other.to_string())),
+        },
     };
     Ok(OutboundEntry {
         action,
@@ -417,12 +541,14 @@ pub async fn dispatch_to<S: PlatformSender>(
             origin_channel,
             ..
         } => sender.send_dm(user_id, text, origin_channel).await,
-        // Role ops exist only on the generic executor path; a per-platform
+        // Role and event ops exist only on the generic executor path; a per-platform
         // sender has no such method -- fail loud, never a silent no-op.
-        OutboundAction::RoleOp { .. } => Err(SenderError::Unsupported {
-            platform: sender.platform().to_string(),
-            op: action.op(),
-        }),
+        OutboundAction::RoleOp { .. } | OutboundAction::EventOp { .. } => {
+            Err(SenderError::Unsupported {
+                platform: sender.platform().to_string(),
+                op: action.op(),
+            })
+        }
     }
 }
 
@@ -432,7 +558,9 @@ pub async fn dispatch_to<S: PlatformSender>(
 /// implementation re-applies the destination pin before anything else.
 #[allow(async_fn_in_trait)] // pub trait, service binary only -- see outbound.rs::IrcOutbound's doc
 pub trait ActionExecutor: Send + Sync {
-    /// Runs `action` for `platform` on behalf of `community_id`.
+    /// Runs `action` for `platform` on behalf of `community_id`. `Ok(Some(id))`
+    /// carries the platform id a create-style op produced (a new Discord
+    /// scheduled event's snowflake); every other op is `Ok(None)`.
     ///
     /// # Errors
     /// [`SenderError`] -- `Unsupported` for a kind/platform/host duty the
@@ -443,7 +571,7 @@ pub trait ActionExecutor: Send + Sync {
         platform: &'static str,
         community_id: Option<i64>,
         action: &OutboundAction,
-    ) -> Result<(), SenderError>;
+    ) -> Result<Option<String>, SenderError>;
 }
 
 /// The "no executor configured" marker: lets the legacy drain paths be
@@ -457,7 +585,7 @@ impl ActionExecutor for NoExecutor {
         platform: &'static str,
         _community_id: Option<i64>,
         action: &OutboundAction,
-    ) -> Result<(), SenderError> {
+    ) -> Result<Option<String>, SenderError> {
         Err(SenderError::Unsupported {
             platform: platform.to_string(),
             op: action.op(),
@@ -479,6 +607,13 @@ pub(crate) fn exec_to_sender_error(
         | ExecError::HostDutyMissing => SenderError::Unsupported {
             platform: platform.to_string(),
             op,
+        },
+        // A scheduled event deleted out of band (Discord 404 on update/cancel/
+        // delete): a distinct stable code so the producer can recreate it.
+        ExecError::Upstream(404) if op.starts_with("event.") => SenderError::Rejected {
+            platform,
+            op,
+            reason: "upstream_not_found",
         },
         e if e.is_policy_refusal() => SenderError::Rejected {
             platform,
@@ -505,7 +640,7 @@ where
         platform: &'static str,
         community_id: Option<i64>,
         action: &OutboundAction,
-    ) -> Result<(), SenderError> {
+    ) -> Result<Option<String>, SenderError> {
         // The same pin gate `dispatch_to` applies, so a destination the
         // stamp does not prove is refused (and counted) before the executor
         // builds anything.
@@ -524,7 +659,9 @@ where
             } => {
                 enforce_pin(platform, "chat.delete", channel, origin_channel)?;
             }
-            OutboundAction::DmSend { .. } | OutboundAction::RoleOp { .. } => {}
+            OutboundAction::DmSend { .. }
+            | OutboundAction::RoleOp { .. }
+            | OutboundAction::EventOp { .. } => {}
         }
         self.execute(&ExecRequest {
             platform,
@@ -532,7 +669,7 @@ where
             community_id,
         })
         .await
-        .map(|_| ())
+        .map(|o| o.result_id)
         .map_err(|e| exec_to_sender_error(platform, action.op(), &e))
     }
 }
