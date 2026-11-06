@@ -200,7 +200,39 @@ pub struct CliConfig {
     /// discovery for dynamic Twitch sessions. Must be non-zero.
     #[arg(long, env = "TWITCH_RESOLVE_TIMEOUT_SECS", default_value_t = 10)]
     pub twitch_resolve_timeout_secs: u64,
+
+    /// Master switch for the connector runtime. The per-platform
+    /// `OVERLAY_<P>_ENABLED` baselines (read by
+    /// `connector_runtime::selector`, never via the flag client) decide which
+    /// platforms run on it; this ON with every overlay OFF is a boot error.
+    #[arg(long, env = "CONNECTOR_RUNTIME_ENABLED", default_value_t = false)]
+    pub connector_runtime_enabled: bool,
+
+    /// Seconds between connector-runtime reconcile passes (plus 0-20% jitter).
+    #[arg(long, env = "CONNECTOR_RECONCILE_INTERVAL_SECS", default_value_t = 60)]
+    pub connector_reconcile_interval_secs: u64,
+
+    /// Hard cap on supervised connector connections per replica.
+    #[arg(long, env = "CONNECTOR_MAX_CONNECTIONS", default_value_t = 500)]
+    pub connector_max_connections: usize,
+
+    /// Bounded number of concurrent connector connects.
+    #[arg(long, env = "CONNECTOR_START_CONCURRENCY", default_value_t = 8)]
+    pub connector_start_concurrency: usize,
+
+    /// Minimum gap (ms) between Discord IDENTIFYs per process.
+    #[arg(long, env = "CONNECTOR_DISCORD_START_PACE_MS", default_value_t = 5500)]
+    pub connector_discord_start_pace_ms: u64,
+
+    /// Csv of platforms whose webhook routes the runtime registers (empty:
+    /// none, legacy webhook handlers stay). Parsed by
+    /// `connector_runtime::selector::parse_webhook_platforms`.
+    #[arg(long, env = "CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS", default_value = "")]
+    pub connector_runtime_webhook_platforms: String,
 }
+
+/// Bounds for the connector-runtime numeric settings.
+pub const MAX_CONNECTOR_RECONCILE_INTERVAL_SECS: u64 = 3600;
 
 /// Floor for `TWITCH_RECONCILE_INTERVAL_SECS`.
 pub const MIN_TWITCH_RECONCILE_INTERVAL_SECS: u64 = 10;
@@ -257,7 +289,34 @@ impl CliConfig {
                 reason: "port 0 is not a valid bind port".to_string(),
             });
         }
-        self.validate_twitch_timing()
+        self.validate_twitch_timing()?;
+        self.validate_connector_runtime()
+    }
+
+    /// Validates the connector-runtime numeric settings (all must be sane
+    /// even while the runtime is OFF, so a bad helm value fails at boot).
+    fn validate_connector_runtime(&self) -> Result<(), ConfigError> {
+        let bad = |field: &'static str, reason: &str| {
+            Err(ConfigError::InvalidValue {
+                field,
+                reason: reason.to_string(),
+            })
+        };
+        if self.connector_reconcile_interval_secs < MIN_TWITCH_RECONCILE_INTERVAL_SECS
+            || self.connector_reconcile_interval_secs > MAX_CONNECTOR_RECONCILE_INTERVAL_SECS
+        {
+            return bad(
+                "CONNECTOR_RECONCILE_INTERVAL_SECS",
+                "must be between 10 and 3600",
+            );
+        }
+        if self.connector_max_connections == 0 {
+            return bad("CONNECTOR_MAX_CONNECTIONS", "must be greater than zero");
+        }
+        if self.connector_start_concurrency == 0 {
+            return bad("CONNECTOR_START_CONCURRENCY", "must be greater than zero");
+        }
+        Ok(())
     }
 
     /// Validates the dynamic-Twitch timing settings.
@@ -537,6 +596,48 @@ mod tests {
             validate_twitch_mode(&mode_cfg(false, "bot", "chan", None)),
             Ok(TwitchMode::Off)
         );
+    }
+
+    #[test]
+    fn connector_runtime_defaults_match_the_spec_table() {
+        let cli = CliConfig::parse_from(["svc-ingest"]);
+        assert!(!cli.connector_runtime_enabled);
+        assert_eq!(cli.connector_reconcile_interval_secs, 60);
+        assert_eq!(cli.connector_max_connections, 500);
+        assert_eq!(cli.connector_start_concurrency, 8);
+        assert_eq!(cli.connector_discord_start_pace_ms, 5500);
+        assert_eq!(cli.connector_runtime_webhook_platforms, "");
+    }
+
+    #[test]
+    fn connector_runtime_bounds_are_enforced() {
+        let ok = CliConfig::parse_from(["svc-ingest"]);
+        type Mutation = fn(&mut CliConfig);
+        let cases: [(&str, Mutation); 5] = [
+            ("CONNECTOR_RECONCILE_INTERVAL_SECS", |c| {
+                c.connector_reconcile_interval_secs = 9
+            }),
+            ("CONNECTOR_RECONCILE_INTERVAL_SECS", |c| {
+                c.connector_reconcile_interval_secs = MAX_CONNECTOR_RECONCILE_INTERVAL_SECS + 1
+            }),
+            ("CONNECTOR_MAX_CONNECTIONS", |c| {
+                c.connector_max_connections = 0
+            }),
+            ("CONNECTOR_START_CONCURRENCY", |c| {
+                c.connector_start_concurrency = 0
+            }),
+            ("CONNECTOR_RECONCILE_INTERVAL_SECS", |c| {
+                c.connector_reconcile_interval_secs = 0
+            }),
+        ];
+        for (field, mutate) in cases {
+            let mut c = ok.clone();
+            mutate(&mut c);
+            match c.validate() {
+                Err(ConfigError::InvalidValue { field: f, .. }) => assert_eq!(f, field),
+                other => panic!("expected {field} error, got {other:?}"),
+            }
+        }
     }
 
     #[test]
