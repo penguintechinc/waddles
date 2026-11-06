@@ -59,7 +59,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from config import HubAPIConfig
-from services.errors import not_found
+from services.errors import ApiError, not_found
 from services.schema import bind_overlay_tables, bind_streaming_tables
 
 logger = logging.getLogger(__name__)
@@ -540,6 +540,60 @@ async def rotate_overlay_key(
         rotated_at=_iso(now),
         overlayUrl=_overlay_url(cfg, new_key),
     )
+
+
+#: Webui source type -> svc-presentation surface (`docs/guides/overlay-browser-source.md`).
+BROWSER_SOURCE_SURFACES: dict[str, str] = {
+    "ticker": "ticker",
+    "media": "media",
+    "general": "full_screen",
+}
+
+
+@dataclass(slots=True, frozen=True)
+class BrowserSourceRecord:
+    """One OBS browser source -- `{sourceType, url, isActive, createdAt}`, camelCase.
+
+    `url` embeds the VIEW key (`?key=`), so this DTO is only ever built for a
+    community admin and the key is never logged.
+    """
+
+    sourceType: str
+    url: str
+    isActive: bool
+    createdAt: str | None
+
+
+def _browser_source_url(cfg: HubAPIConfig, code: str, surface: str, overlay_key: str) -> str:
+    """Build `{base}/{overlay_code}/{surface}?key={key}` for svc-presentation."""
+    return f"{cfg.overlay_base_url}/{code}/{surface}?key={overlay_key}"
+
+
+async def get_browser_sources(
+    async_dal: Any, dal: Any, cfg: HubAPIConfig, *, community_id: int
+) -> list[BrowserSourceRecord]:
+    """List the community's browser-source URLs, minting the view credential on first use.
+
+    Backed by the single overlay VIEW key + `communities.overlay_code`; fails loud (503) when the
+    overlay code is unavailable (alembic 0057 unapplied) rather than emitting a dead URL.
+    """
+    record = await get_or_create_overlay(async_dal, dal, cfg, community_id=community_id)
+    code = await _ensure_overlay_code(async_dal, dal, community_id)
+    if code is None:
+        raise ApiError(
+            "Overlay code unavailable; browser sources cannot be built",
+            status_code=503,
+            code="SERVICE_UNAVAILABLE",
+        )
+    return [
+        BrowserSourceRecord(
+            sourceType=source_type,
+            url=_browser_source_url(cfg, code, surface, record.overlay_key),
+            isActive=record.is_active,
+            createdAt=record.created_at,
+        )
+        for source_type, surface in BROWSER_SOURCE_SURFACES.items()
+    ]
 
 
 async def get_overlay_stats(

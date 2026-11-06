@@ -69,6 +69,29 @@ pub struct AppState {
     /// `crate::api::lifecycle::start`'s TRANSCODE admission check. Always
     /// present (cheap to construct, holds no connection state).
     pub token_ledger: Arc<TokenLedgerClient>,
+    /// Whether the S3 recording sink came up. Surfaced by `/readyz` so a pod
+    /// that silently cannot record is visible to operators and probes, not
+    /// only to whoever greps the startup log.
+    /// [`crate::run_with_shutdown`] sets this from `RecordSink::from_env`.
+    pub record: RecordReadiness,
+}
+
+/// Recording-sink readiness, reported by `/readyz`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordReadiness {
+    /// The S3 sink was constructed; recordings are uploaded.
+    Enabled,
+    /// Recording is off; the string says why (names the missing env var --
+    /// never a credential value).
+    Disabled(String),
+}
+
+impl Default for RecordReadiness {
+    /// Disabled until the real sink is built -- a state that was never
+    /// initialised must not claim recording works.
+    fn default() -> Self {
+        Self::Disabled("record sink not initialised".to_string())
+    }
 }
 
 impl AppState {
@@ -137,6 +160,7 @@ impl AppState {
             whip_state,
             whep_state,
             token_ledger: Arc::new(TokenLedgerClient::new()),
+            record: RecordReadiness::default(),
         }
     }
 }
