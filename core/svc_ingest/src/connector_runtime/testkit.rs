@@ -401,6 +401,11 @@ pub(crate) fn capture() -> Capture {
             .expect("no other global tracing subscriber may be installed in lib tests");
         leaked
     });
+    // Registering a dispatcher rebuilds tracing's process-wide callsite
+    // interest cache. A callsite first hit by a parallel test before (or while)
+    // the global subscriber was installed can otherwise stay cached as
+    // "never" and silently drop this test's events.
+    drop(tracing::Dispatch::new(*cap));
     cap.buffers
         .lock()
         .expect("lock")
