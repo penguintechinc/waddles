@@ -40,6 +40,8 @@ concurrency:
 
 jobs:
   lint-test:
+    # Main-only tier: skipped on PRs into release/** (see scripts/ci/ci-gate-tier.py)
+    if: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}
     name: fmt + clippy + deny + coverage
     uses: ./.github/workflows/rust-crate-ci.yml
     with:

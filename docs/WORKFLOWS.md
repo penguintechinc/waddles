@@ -495,6 +495,29 @@ login, single amd64 build, gated Trivy scan on the local image):
 
 ---
 
+## ci-gate Tiers (merge bar by target branch)
+
+`ci-gate` runs on PRs into `release/**` and into `main` and picks its tier from the base branch
+(`scripts/ci/ci-gate-tier.py`; unknown base = full tier, fail closed).
+
+| Check group | PR into `release/**` (fast tier + coverage) | PR into `main` (release -> main) |
+|---|---|---|
+| build-all (every core crate), fmt/lint/clippy, unit tests + coverage for touched crates/services | required | required |
+| check-no-stubs, gate integrity | required | required |
+| secrets scan + advisories (cargo deny, pip-audit, npm audit) | required | required |
+| alembic single-head + chain on real Postgres, helm lint/render, openapi drift | required | required |
+| Container image builds + Trivy, supply-chain, notify | not examined (also skipped by `if:`) | required |
+| CodeQL | skipped on release PRs, not examined | required |
+| connector-e2e / tool-invoke-e2e (real-media/real-path) | skipped on release PRs | required |
+| kind install/upgrade, upgrade-path | main only (push to main) | required |
+
+- The release -> `main` PR runs EVERYTHING; it is always user-approved, never auto-merged.
+- Main-only workflows still run on push to `main`/`release/**` where they already did.
+- Zero checks examined, a failed required check, or a missing always-reporting check (listed in
+  `FAST_REQUIRED_PRESENT`) fails the gate. Self-test: `scripts/ci/tests/test_ci_gate_tier.py`
+  (snapshot: main drops nothing; release drops exactly the main-only set).
+- Known limit: the full Python suite is still area-scoped (`changes` job), not split by tier.
+
 ## Merging a PR into a Release Branch
 
 `make release-merge PR=<n> [HEAD=<sha-prefix>] [DRY=1]` (wraps `scripts/release-merge.sh`) is the
