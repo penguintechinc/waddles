@@ -137,7 +137,8 @@ infrastructure:
 
   # SeaweedFS - Single instance for local
   seaweedfs:
-    enabled: false
+    # Bundled SeaweedFS holds the bundle-object-storage bucket by default.
+    enabled: true
     replicas: 1
 
   # Ollama - With GPU support if available

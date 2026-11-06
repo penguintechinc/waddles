@@ -126,6 +126,7 @@ from services.bundle_manifest_v2 import (
     parse_requested_tools,
     requested_tool_declarations,
 )
+from services.bundle_storage_access import parse_storage_access, storage_access_permission_ids
 from services.bundle_table_access import parse_table_access, table_access_permission_ids
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, conflict, not_found
@@ -196,6 +197,12 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         for req in table_access
         for pid in table_access_permission_ids((req,))
     )
+    storage_access = parse_storage_access(raw.get("storage_access"), own_app_id=raw["app_id"])
+    permission_declarations = permission_declarations + tuple(
+        PermissionDeclaration(id=pid, risk="dangerous", justification=req.reason)
+        for req in storage_access
+        for pid in storage_access_permission_ids((req,))
+    )
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -239,6 +246,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         # the trusted-source gate at ingest, so keep its service capability.
         trusted_source=True,
         table_access=table_access,
+        storage_access=storage_access,
     )
 
 

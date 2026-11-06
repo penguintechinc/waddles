@@ -254,8 +254,8 @@ async def record_permission_requests(
         # neither write nor erase a human-approved dangerous access-grant row.
         declarations = tuple(d for d in declarations if not is_access_grant_id(d.id))
         for grant_kind in access_grant_kinds():
-            like = f"{grant_kind.id_prefix}%"
-            delete_where = delete_where & ~table.c.permission_id.like(like)
+            for prefix in grant_kind.prefixes:
+                delete_where = delete_where & ~table.c.permission_id.like(f"{prefix}%")
     async with install_dal.engine.begin() as conn:
         await conn.execute(table.delete().where(delete_where))
         if declarations:

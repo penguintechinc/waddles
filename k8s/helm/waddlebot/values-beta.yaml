@@ -74,7 +74,12 @@ infrastructure:
       requests: { cpu: "50m", memory: "128Mi" }
       limits: { cpu: "250m", memory: "256Mi" }
   seaweedfs:
-    enabled: false
+    # Bundled SeaweedFS holds the bundle-object-storage bucket by default (spec
+    # 2026-11-06-bundle-object-storage). Pre-create the SSE KEK Secret first
+    # (`make generate-seaweedfs-sse-key`) -- the template fails closed without it.
+    enabled: true
+    encryption:
+      secretName: "seaweedfs-sse-kek"
   ollama:
     enabled: false
   qdrant:

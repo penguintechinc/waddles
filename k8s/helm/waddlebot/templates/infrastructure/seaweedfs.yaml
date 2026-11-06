@@ -1,4 +1,5 @@
 {{- if .Values.infrastructure.seaweedfs.enabled }}
+{{- include "waddlebot.bundleStorage.validate" . }}
 {{- if .Values.infrastructure.seaweedfs.encryption.enabled }}
 {{- if not .Values.infrastructure.seaweedfs.encryption.secretName }}
 {{- if ne .Values.global.deploymentTier "alpha" }}
@@ -90,7 +91,7 @@ spec:
           # both consumers expect their bucket to already exist; previously
           # only bucketName + "recordings" were created here, leaving
           # "waddles-bundles" as a pre-existing gap.
-          for bucket in "{{ .Values.infrastructure.seaweedfs.bucketName }}" "recordings" "{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}"; do
+          for bucket in "{{ .Values.infrastructure.seaweedfs.bucketName }}" "recordings" "{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}"{{ if eq .Values.bundleStorage.mode "bundled" }} "{{ .Values.bundleStorage.bucketName }}"{{ end }}; do
             aws --endpoint-url "$ENDPOINT" s3 mb "s3://${bucket}" --region us-east-1 2>&1 | grep -qi "already" && true || true
             aws --endpoint-url "$ENDPOINT" s3api head-bucket --bucket "${bucket}" 2>/dev/null \
               || aws --endpoint-url "$ENDPOINT" s3api create-bucket --bucket "${bucket}" --region us-east-1
@@ -233,6 +234,20 @@ spec:
                 ],
                 "actions": ["Read:recordings", "Write:recordings"]
               }
+              {{- if eq .Values.bundleStorage.mode "bundled" }},
+              {
+                "name": "bundle-storage",
+                "credentials": [
+                  {"accessKey": "${BUNDLE_STORAGE_S3_ACCESS_KEY_ID}", "secretKey": "${BUNDLE_STORAGE_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": [
+                  "Read:{{ .Values.bundleStorage.bucketName }}",
+                  "Write:{{ .Values.bundleStorage.bucketName }}",
+                  "List:{{ .Values.bundleStorage.bucketName }}",
+                  "Tagging:{{ .Values.bundleStorage.bucketName }}"
+                ]
+              }
+              {{- end }}
             ]
             {{- with (include "waddlebot.kms.seaweedfsConfigBlock" .) }}{{ . | nindent 12 }}{{- end }}
           }
@@ -296,6 +311,18 @@ spec:
             secretKeyRef:
               name: waddlebot-secrets
               key: STREAMING_S3_SECRET_ACCESS_KEY
+        {{- if eq .Values.bundleStorage.mode "bundled" }}
+        - name: BUNDLE_STORAGE_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: BUNDLE_STORAGE_S3_ACCESS_KEY_ID
+        - name: BUNDLE_STORAGE_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: BUNDLE_STORAGE_S3_SECRET_ACCESS_KEY
+        {{- end }}
         {{- if and .Values.infrastructure.seaweedfs.encryption.enabled .Values.infrastructure.seaweedfs.encryption.secretName }}
         - name: WEED_S3_SSE_KEK
           valueFrom:

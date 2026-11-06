@@ -667,6 +667,13 @@ infrastructure:
       streaming:
         accessKey: "REPLACE_ME"
         secretKey: "REPLACE_ME"
+      # core host stages (svc-process/svc-action `storage` capability, spec
+      # 2026-11-06-bundle-object-storage) -- Read/Write/List/Tagging scoped to
+      # bundleStorage.bucketName ONLY. Never given to a bundle (host-mediated).
+      # Only rendered when bundleStorage.mode=bundled.
+      bundleStorage:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
     service:
       name: "infra-seaweedfs"
       type: ClusterIP
@@ -3724,3 +3731,29 @@ supplyChain:
     issuer: "https://token.actions.githubusercontent.com"
     # Must match the identity regex in scripts/ci/supply-chain.sh (test enforces parity).
     subjectRegExp: "^https://github\\.com/penguintechinc/waddles/\\.github/workflows/containers\\.yml@refs/(heads|tags)/.+$"
+
+# Bundle object storage (spec docs/superpowers/specs/2026-11-06-bundle-object-storage.md).
+# ONE bucket, one prefix per bundle, host-mediated (bundles never hold S3 creds).
+# Flag: waddles.bundle-object-storage (default OFF) gates the capability itself; this
+# block only decides WHERE the bucket lives.
+bundleStorage:
+  # bundled (default, every environment): the chart's own SeaweedFS (Apache-2.0,
+  # infrastructure.seaweedfs -- MUST stay enabled) holds the bucket; created
+  # idempotently by the seaweedfs-bucket-init hook Job with default SSE-S3 bucket
+  # encryption; credentials from the chart Secret (never literals).
+  # external: opt-in override -- an operator-supplied S3-compatible service; the bundled
+  # bucket is NOT created and the bundle-storage identity is not rendered.
+  mode: bundled
+  bucketName: "waddles-bundle-storage"
+  region: "us-east-1"
+  external:
+    endpoint: ""
+    bucket: ""
+    region: "us-east-1"
+    # Pre-created Secret holding the access/secret keys (never literals in values).
+    existingSecret: ""
+    accessKeyKey: "S3_ACCESS_KEY_ID"
+    secretKeyKey: "S3_SECRET_ACCESS_KEY"
+    # security.md: object storage holding sensitive data needs server-side encryption.
+    # The operator MUST assert the external bucket has it enabled (render fails otherwise).
+    serverSideEncryptionConfirmed: false

@@ -12,9 +12,24 @@ Flag: `waddles.bundle-object-storage` (default OFF; unwired -> `not_implemented`
   manifest entry, no approval. Always further scoped by tenant+community.
 - Other bundles' prefixes: only via manifest `storage_access` + global-admin
   approval (same bold-red warning flow as `table_access`) -- Sec 3.
-- TAGS on top: even with an approved prefix grant a consumer sees ONLY objects
-  carrying its own tag `app-bundle:<its app_id>` (list/get/presign filtered
-  host-side; the tag check runs AFTER the grant check).
+- TAGS on top -- UNIVERSAL INVARIANT (every cross-prefix grant, any producer, no
+  special cases): an accessing bundle sees ONLY objects tagged `app-bundle:<its
+  app_id>`. Prefix permission alone NEVER exposes untagged objects or objects
+  tagged for other bundles. The OWNER of a prefix sees all of its own objects.
+  Enforced in ONE place host-side (`StorageHost::visible`, reached via
+  `resolve` + `require_visible`) for get / head / list / presign-get / delete
+  (and the put-overwrite check); the tag check runs AFTER the grant check;
+  tag-hidden == not-found (no existence oracle).
+- Sharing = explicit: a producer (media harness or any service/app bundle) must
+  tag EACH object for EACH consumer with the OWNER-ONLY `tag-add` / `tag-remove`
+  host calls (audited, Allowed and Denied). Non-owners cannot add/remove tags.
+- SYSTEM TAGS (immutable, host-written on every put from the VERIFIED scope; a
+  guest can never set/change any `waddles-*` tag): `waddles-tenant=<id>`,
+  `waddles-community=<id>`. EVERY op (owners included -- defense in depth against
+  prefix-path mistakes) requires both to match the caller's own tenant/community;
+  an object missing them is hidden. `waddles-request-id=<id>` is provenance only
+  (audit/correlation), NOT an access input in v3.0. Object TTL and per-request
+  isolation are deferred (not built).
 - Bundles NEVER hold S3 credentials. All access is host-mediated; the host
   signs. Tenant/community come from the invocation scope, never guest args.
 
@@ -33,19 +48,27 @@ interface storage {
   list: func(owner: option<string>, key-prefix: string, cursor: option<string>, limit: u32) -> result<list-page, error>;
   delete: func(owner: option<string>, key: string) -> result<_, error>;
   presign-get: func(owner: option<string>, key: string, ttl-seconds: u32) -> result<string, error>;
+  head: func(owner: option<string>, key: string) -> result<object-info, error>;
+  /// OWNER-ONLY + audited: share/unshare one of your objects with `consumer`
+  /// (adds/removes tag `app-bundle:<consumer>`); non-owner -> not-granted.
+  tag-add:    func(owner: option<string>, key: string, consumer: string) -> result<_, error>;
+  tag-remove: func(owner: option<string>, key: string, consumer: string) -> result<_, error>;
 }
 ```
+(The authoritative file is `wit/waddle-bundle/storage.wit`; it uses `%list` as the escaped name.)
 
 Producer contract (media harness, `feature/harness-media-rust`): call
 `put(none, "<output-key>", bytes, {content-type, tags: ["app-bundle:<requester_app_id>"]})`.
-The harness writes under its OWN prefix; the requester (an app bundle holding an
-approved `storage_access: [{prefix_owner: "<harness app_id>", ops: [read,list]}]`)
+The harness writes under its OWN prefix, then calls
+`tag-add(none, key, requester_app_id)` (or passes the tag in `put-options.tags`);
+the requester (an app bundle holding an approved
+`storage_access: [{prefix_owner: "<harness app_id>", ops: [read,list]}]`)
 then reads with `get(some(harness_app_id), key)` and sees only objects tagged
 `app-bundle:<requester>`. Rules: tags must match `^[a-z0-9-]{1,32}:[A-Za-z0-9._-]{1,128}$`,
 <= 8 per object, accepted ONLY when writing to the caller's own prefix (a
 cross-prefix writer's object is auto-tagged `app-bundle:<writer>`, no free tags).
 `presign-get` TTL is clamped to 1..=300s (default max 300), scoped to ONE object key, GET only.
-Host-side Rust API: `bundle_host_storage::StorageHost::{put,get,list,delete,presign_get}(&StorageScope, StorageRequest..)`.
+Host-side Rust API (`core/bundle_host_storage`): `StorageHost::{put,get,head,list,delete,presign_get,tag_add,tag_remove}(&StorageScope, owner: Option<&str>, ..)`; `StorageScope{app_id,tenant,community,grants,enabled,request_id}` is built from the verified invocation scope, never guest args. Backends: `S3Backend` (SeaweedFS/any S3; tags ride as user-metadata `waddles-tags`), `MemoryBackend` (tests).
 
 ## 3. Manifest + approval
 
@@ -81,9 +104,13 @@ rate limit (default 20 ops/s per replica). 7. Audit EVERY cross-prefix access
 `waddles_bundle_storage_{op_duration_seconds,denied_total{reason},bytes_total{dir},quota_rejections_total}`.
 Tag-hidden == not-found (no existence oracle).
 
-## 5. Delivery (stacked PR into feature/bundle-table-access-grants)
-Spec -> crate + gate family + Python manifest/summary + WIT -> helm.
-Executor linker wiring for `storage` follows once the table-access `platform-table` linker lands (same dispatch point).
+## 5. Delivery (PR stacked on feature/bundle-table-access-grants)
+Spec -> crate + gate family + Python manifest/summary (registers a
+`storage_prefix` kind in `bundle_access_grants`, so never-auto-grant, hashed
+summary `storageAccess`, widening diff and the bold-red webui block come from the
+table-access registry) + WIT -> helm. Executor linker wiring for the `storage`
+import follows the table-access `platform-table` linker (same dispatch point);
+until then the capability is not linked into any world a bundle can import.
 
 ## 8. Helm: bundled SeaweedFS by default, external opt-in
 `bundleStorage.mode: bundled` (default, every values file) -> bucket
