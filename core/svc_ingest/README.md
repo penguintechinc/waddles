@@ -433,6 +433,28 @@ refused.
 `connectorTools.enabled=true`. **Rollback = flag OFF** (restarts onto the legacy drains; in-flight queue
 entries are consumed by whichever path is running).
 
+**Connector host-call bridge (`connector/host_calls.rs`, runtime spec decision 2.4).** `ExecutorLink::with_host_calls(Arc<dyn
+HostCallHandler>)` plugs in `OverlayHostCalls`, the explicit allowlist for the host-calls an overlay makes (default stays deny-all).
+The executor stamps `args._scope = {connection_id}` after guest code for every export that carries a `ConnectionCtx`; the handler
+maps it through the host-owned `ActiveConnections` table (`connection_id -> platform/community/tenant`) to a `CallScope`.
+`tool-call`/`build-request` exports carry no ctx, so their host-calls are UNSCOPED and **denied** (typed `denied`/`unscoped_call`,
+counted, no fallback). Also denied: unknown/stale connection, unknown overlay, an overlay acting on another platform's
+connection, and any op needing a grant the overlay's `hub-manifest.yaml` lacks (twitch: `connector.pii.read`, `flags.read`;
+discord: `connector.pii.read`, `platform.log`; youtube: `connector.pii.read`; a unit test parses the real manifests).
+
+| Capability / op | Behavior |
+|---|---|
+| `context get-context` | tenant + community from the `CallScope` (needs `connector.pii.read`) |
+| `db identity.lookup` | `platform-identity` only; `args.tenant`/`platform` cross-checked against the scope; returns `{uuid, linked:false, handle:null, display_name:null, tenant}` via `HubIdentityTokenizer` (`MintEphemeralPseudonyms`, scope `identity:ephemeral:mint`, no handle sent); 200/s per overlay; uuid-kind (detokenize) denied |
+| `flags enabled/tier` | own `waddles.overlay-<platform>` key only, answered from the env baseline (needs `flags.read`) |
+| `log write` | fixed-field PII-free line, guest text dropped (needs `platform.log`) |
+| `clock now-millis/now-rfc3339/monotonic-nanos` | served |
+| everything else (http, kv, relay, other db ops) | `denied` / `not_serviced` |
+
+Limits: 2 s deadline, 16 in flight per overlay, 4 per connection (over cap = `quota_exceeded`, never queued). Metrics:
+`connector_host_call_total{capability,outcome}`, `connector_host_call_denied_total{reason}` (bounded labels, no ids). Not yet wired
+at boot: the supervisor must `activate`/`deactivate` each connection, and `build-request` flag reads need a scoped path (see PR notes).
+
 **Known prerequisite outside this crate:** a `bundle-executor` must dial this pod's host-api port with the
 three connectors pinned (`Executor::pin_connector`) and a host-call bridge so the twitch overlay's
 `waddles.overlay-twitch` gate can read the flag. Neither exists in the production executor yet

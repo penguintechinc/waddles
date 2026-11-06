@@ -402,6 +402,106 @@ mod tests {
             .map_err(|e| e.to_string())
     }
 
+    /// Real path end to end: a CA-signed executor over real mTLS reaches the
+    /// real [`OverlayHostCalls`]: an unscoped call is denied, a scoped one served.
+    #[tokio::test]
+    async fn host_calls_are_scope_checked_over_the_real_mtls_listener() {
+        use crate::connector::host_calls::{
+            ActiveConnections, CallScope, HostCallConfig, IdentityTokenizer, OverlayHostCalls,
+            TokenizeError,
+        };
+        use crate::connector::webhook::BoxFut;
+        use penguin_bundle_host::wire::{CapabilityKind, HostCallBody};
+
+        struct Fixed;
+        impl IdentityTokenizer for Fixed {
+            fn tokenize<'a>(
+                &'a self,
+                _: &'a CallScope,
+                _: &'a str,
+            ) -> BoxFut<'a, Result<String, TokenizeError>> {
+                Box::pin(async { Ok("123e4567-e89b-12d3-a456-426614174000".to_string()) })
+            }
+        }
+        let table = Arc::new(ActiveConnections::new());
+        table
+            .activate(CallScope {
+                platform: "twitch",
+                community_id: 5,
+                tenant_id: 9,
+                connection_id: 11,
+            })
+            .unwrap();
+        let handler = OverlayHostCalls::new(
+            table,
+            Arc::new(Fixed),
+            HostCallConfig::new(["twitch"]).unwrap(),
+        );
+        let p = pki("hostcalls");
+        let acceptor = build_acceptor(&p.tls).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let link = Arc::new(ExecutorLink::new().with_host_calls(Arc::new(handler)));
+        let (_stop, rx) = oneshot::channel();
+        tokio::spawn(serve(listener, acceptor, Arc::clone(&link), rx));
+
+        let c = client(&p, &p.client_cert_pem, &p.client_key_pem);
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
+        let mut tls = c.connect(name, tcp).await.unwrap();
+        let hello = Message::Hello(HelloBody {
+            protocol_version: u32::from(PROTOCOL_VERSION),
+            executor_version: "t".to_string(),
+            wasmtime_version: "t".to_string(),
+            wasmtime_abi: "t".to_string(),
+            collector: "drc".to_string(),
+            sandbox: SandboxInfo {
+                runtime: "runc".to_string(),
+                verified: false,
+            },
+        });
+        write_frame(&mut tls, &Frame::new(1, hello)).await.unwrap();
+        assert!(matches!(
+            read_frame(&mut tls).await.unwrap().message,
+            Message::HelloOk(_)
+        ));
+        let lookup = |scope: Option<&str>| {
+            let mut args = serde_json::json!({
+                "kind": "platform-identity", "platform": "twitch",
+                "platform_user_id": "u-1", "tenant": "9",
+            });
+            if let Some(c) = scope {
+                args["_scope"] = serde_json::json!({ "connection_id": c });
+            }
+            Message::HostCall(HostCallBody {
+                app_id: "waddles.core.service.twitch".to_string(),
+                capability: CapabilityKind::Db,
+                op: "identity.lookup".to_string(),
+                args,
+                call_id: 1,
+            })
+        };
+        for (id, scope, want_ok) in [
+            (10, None, false),
+            (11, Some("999"), false),
+            (12, Some("11"), true),
+        ] {
+            write_frame(&mut tls, &Frame::new(id, lookup(scope)))
+                .await
+                .unwrap();
+            let f = read_frame(&mut tls).await.unwrap();
+            assert_eq!(f.id, id);
+            match f.message {
+                Message::HostResult(r) => {
+                    assert_eq!(r.result.is_some(), want_ok, "{scope:?}");
+                    assert_eq!(r.error.is_none(), want_ok, "{scope:?}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        drop(p.dir);
+    }
+
     #[tokio::test]
     async fn a_ca_signed_executor_attaches_and_gets_hello_ok() {
         let p = pki("ok");

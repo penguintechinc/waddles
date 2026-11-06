@@ -40,6 +40,7 @@ pub(crate) mod egress_guard;
 pub mod gateway_rules;
 pub mod handshake_gate;
 pub mod host_api_listener;
+pub mod host_calls;
 pub mod identify_budget;
 pub mod invoker;
 pub mod lifecycle;
@@ -69,6 +70,9 @@ pub use handshake_gate::{GateCtx, GateError, GatePermit, HandshakeGate, NoopGate
 pub use identify_budget::{
     BotIdentity, BudgetError, DiscordIdentifyGate, GatewayBotSource, GatewayInfoSource,
     IdentifyBudget, IdentifyBudgetMetrics, RedisIdentifyBudget, SessionStartLimit,
+};
+pub use host_calls::{
+    ActiveConnections, CallScope, HostCallError, HostCallHandler, OverlayHostCalls,
 };
 pub use invoker::{ConnectorInvokeError, ConnectorInvoker};
 pub use lifecycle::{
