@@ -62,7 +62,10 @@ try_rerun() {
   if [ "$DRY" = 1 ]; then log "pr=$1 head=${2:0:12} run=$3 DRY-RUN would rerun --failed ($4)"; return 0; fi
   log "pr=$1 head=${2:0:12} run=$3 RERUN --failed ($4) attempt=$((n + 1))"
   bump_rerun "$3"
-  gh run rerun "$3" --failed -R "$REPO" >/dev/null
+  if ! gh run rerun "$3" --failed -R "$REPO" >/dev/null 2>"$STATE/rerun-err-$3"; then
+    log "pr=$1 head=${2:0:12} run=$3 RERUN refused by GitHub (run likely still in progress): $(head -c 200 "$STATE/rerun-err-$3"); will retry next tick"
+    echo $(( $(rerun_count "$3") - 1 )) >"$STATE/rerun-$3"
+  fi
 }
 
 # is_flake_job <jobid>: 0 if the job log shows an apt-mirror timeout/retry-exhaustion (captured, not piped,
