@@ -602,6 +602,7 @@ version = "0.1.0"
 dependencies = [
  "bundle-executor",
  "clap",
+ "connection_resolver",
  "penguin-spine",
  "prometheus",
  "serde_json",

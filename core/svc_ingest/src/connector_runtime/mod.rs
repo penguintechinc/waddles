@@ -13,6 +13,7 @@
 pub mod feed;
 pub mod metrics;
 pub mod plan;
+pub mod profiles;
 pub mod ready;
 pub mod supervisor;
 
