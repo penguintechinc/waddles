@@ -104,15 +104,27 @@ if [ "${force_all}" = "true" ]; then
   exit 0
 fi
 
-changed=""
+# Change set is kept NUL-delimited in a file so unusual names (spaces, unicode,
+# quotes) are never quoted/mangled. --no-renames makes a rename report BOTH the
+# old and new path (moving a file OUT of a gated area must still trigger it).
+list0="$(mktemp)"
+trap 'rm -f "${list0}"' EXIT
 if [ -n "${files_from}" ]; then
-  changed="$(cat "${files_from}")"
+  tr '\n' '\0' <"${files_from}" >"${list0}"
 elif [ -n "${base}" ] && [ -n "${head}" ] \
   && [ "${base}" != "0000000000000000000000000000000000000000" ]; then
   # Callers pass exact endpoints (see .github/actions/changed-paths), so a plain
   # two-dot diff is correct and works on shallow clones (no merge base needed). If
   # the base is stale it can only OVER-include files, which is the safe direction.
-  if ! changed="$(git diff --name-only "${base}" "${head}" 2>/dev/null)"; then
+  if git -c core.quotePath=false diff --no-renames --name-only -z "${base}" "${head}" >"${list0}" 2>/dev/null; then
+    # A path containing a newline cannot be represented safely: fail closed.
+    if [ "$(tr -cd '\n' <"${list0}" | wc -c)" -ne 0 ]; then
+      echo "changed-paths: unparseable path (embedded newline) -> failing OPEN (every area on)" >&2
+      all_on
+      emit
+      exit 0
+    fi
+  else
     echo "changed-paths: cannot diff ${base}..${head} -> failing OPEN (every area on)" >&2
     all_on
     emit
@@ -125,7 +137,7 @@ else
   exit 0
 fi
 
-if [ -z "${changed}" ]; then
+if [ ! -s "${list0}" ]; then
   # An empty diff means "nothing to prove" but is also what a bad ref can look
   # like; fail open rather than skip everything on an unverifiable empty set.
   echo "changed-paths: empty change set -> failing OPEN (every area on)" >&2
@@ -135,7 +147,7 @@ if [ -z "${changed}" ]; then
 fi
 
 non_docs=0
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -z "${f}" ] && continue
 
   # --- CI edits exercise everything -----------------------------------------
@@ -225,7 +237,7 @@ while IFS= read -r f; do
     processing/*|trigger/*|action/*|admin/*|core/*|libs/flask_core/*)
       HIT[docker]=true ;;
   esac
-done <<<"${changed}"
+done <"${list0}"
 
 if [ "${non_docs}" -eq 0 ]; then
   HIT[docs_only]=true

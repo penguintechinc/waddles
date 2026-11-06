@@ -179,6 +179,33 @@ expect_out "release PR undiffable base -> fail open" "match=true ${ALL_ON}" "${o
 # openapi/ change counts as python (spec drift job).
 run_files "python=true" openapi/v1.yaml
 
+
+# ---- gate-bypass hardening: renames, odd paths (real git repos) ----------------
+rr="${tmp}/repo2"
+mkdir -p "${rr}"
+(
+  cd "${rr}"
+  git init -q . && mkdir -p hub_api core/svc_ingest/src docs
+  echo 'print(1)' >hub_api/a.py
+  printf 'x\n' >"core/svc_ingest/src/we ird \"q\" \303\251.rs"
+  git add -A && git -c user.email=t@t -c user.name=t commit -q -m base
+  git mv hub_api/a.py docs/a.md          # rename OUT of the python area
+  git mv "core/svc_ingest/src/we ird \"q\" \303\251.rs" docs/b.md  # rename OUT of rust glob
+  git -c user.email=t@t -c user.name=t commit -q -am mv
+)
+out="$(cd "${rr}" && env -u GITHUB_OUTPUT "${script}" --base HEAD~1 --head HEAD --globs "${tmp}/globs" --area python --tier-base release/v3.0.X 2>/dev/null)"
+expect_out "rename out of python area still runs python" "python=true docs_only=false" "${out}"
+out="$(cd "${rr}" && env -u GITHUB_OUTPUT "${script}" --base HEAD~1 --head HEAD --globs "${tmp}/globs" --area rust --tier-base release/v3.0.X 2>/dev/null)"
+expect_out "odd (space/unicode/quote) old path matched by glob" "match=true rust=true" "${out}"
+# Newline in a path -> unparseable -> fail closed.
+(
+  cd "${rr}"
+  printf 'x\n' >"$(printf 'nl\nname.md')"
+  git add -A && git -c user.email=t@t -c user.name=t commit -q -m nl
+)
+out="$(cd "${rr}" && env -u GITHUB_OUTPUT "${script}" --base HEAD~1 --head HEAD --globs "${tmp}/globs" --area rust --tier-base release/v3.0.X 2>/dev/null)"
+expect_out "newline path fails closed" "match=true ${ALL_ON}" "${out}"
+
 # GITHUB_OUTPUT is written in name=value form.
 printf '%s\n' docs/a.md >"${tmp}/files"
 : >"${tmp}/gh_out"
