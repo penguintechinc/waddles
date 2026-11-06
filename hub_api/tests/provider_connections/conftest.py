@@ -170,6 +170,8 @@ def build_pc_metadata() -> MetaData:
         # + the AAD-sealed static-secret document.
         Column("connection_kind", Integer, nullable=False, server_default="1"),
         Column("sealed_secret", Text),
+        # migration 0074: credential-rotation counter (bumped on admin credential replacement).
+        Column("secret_version", Integer, nullable=False, server_default="1"),
         Column(
             "created_at",
             DateTime(timezone=True),
