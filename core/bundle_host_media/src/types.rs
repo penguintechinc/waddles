@@ -190,8 +190,12 @@ impl Handle {
     pub fn parse(s: &str) -> Option<Self> {
         let rest = s.strip_prefix(HANDLE_SCHEME)?;
         let mut parts = rest.split('/');
-        let tenant_id = parts.next()?.parse::<i64>().ok()?;
-        let community_id = parts.next()?.parse::<i32>().ok()?;
+        let Ok(tenant_id) = parts.next()?.parse::<i64>() else {
+            return None;
+        };
+        let Ok(community_id) = parts.next()?.parse::<i32>() else {
+            return None;
+        };
         let file = parts.next()?;
         if parts.next().is_some() {
             return None;
