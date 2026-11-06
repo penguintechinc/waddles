@@ -6,7 +6,7 @@
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
         check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
-        test-seaweedfs-sse-kms test-helm-pending-recover \
+        test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
         test-data-plane-parity test-connector-parity gen-connector-parity-expected check-builtin-handler-inventory
@@ -407,6 +407,19 @@ generate-seaweedfs-sse-key:
 # image (docker + helm required; the image must already be pulled -- this target never pulls
 # implicitly). A missing prerequisite FAILS the target, it is never a skip. See
 # hub_api/tests/envelope/test_seaweedfs_sse_kms_e2e.py and docs/guides/external-kms-byok.md.
+# Publishes the connector service bundles (wasm + signed sidecar) the executor boot-pins:
+# connectors/<p>/<digest>.{wasm,json}. Builds the reproducible core-bundles image and prints the
+# digests + a values snippet. Signing key = USER-held file (BUNDLE_SIGNING_KEY_FILE), S3 creds env.
+# Usage: make publish-connector-bundles ENV=dal2alpha  (see scripts/publish-connector-bundles.sh)
+publish-connector-bundles:
+	@test -n "$(ENV)" || { echo "ENV is required (alpha|dal2alpha|local)" >&2; exit 1; }
+	@bash scripts/publish-connector-bundles.sh "$(ENV)"
+
+# Real-path: publish to a pinned SeaweedFS container, then the executor's own pin loader verifies
+# + loads the connector; bad signature / digest mismatch / missing sidecar must fail.
+test-connector-publish:
+	@bash scripts/test-connector-publish.sh
+
 test-seaweedfs-sse-kms:
 	@cd hub_api && WADDLES_E2E_SEAWEEDFS=1 python3 -m pytest tests/envelope/test_seaweedfs_sse_kms_e2e.py -v -p no:cacheprovider
 
