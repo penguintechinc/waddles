@@ -39,6 +39,8 @@ permissions:
       methods: ["GET", "POST"]
   - id: chat.send:youtube
     justification: Post chat messages into the host-pinned live chat via liveChatMessages.insert
+  - id: connector.pii.read
+    justification: "gates identity.lookup, used to tokenize each chat author to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw author id leaves the overlay)"
 routes_to: []
 exported_tools:
   - name: discovery_request
