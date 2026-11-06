@@ -1,6 +1,6 @@
 """Stream-key and restream-destination management for a community (svc-streaming's tables).
 
-Security model (see alembic 0076):
+Security model (see alembic 0077):
 
 - The community's inbound RTMP/SRT/WHIP stream key is generated here with a CSPRNG, only its
   SHA-256 is stored (`streaming_configs.stream_key_hash`; svc-streaming's ingest-auth hashes the

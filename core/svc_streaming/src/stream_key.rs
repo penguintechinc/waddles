@@ -1,6 +1,6 @@
 //! Stream-key handling shared by every ingest listener (RTMP/SRT/WHIP) and `ingest-auth`.
 //!
-//! hub-api (alembic 0076) stores only `hex(sha256(key))` in
+//! hub-api (alembic 0077) stores only `hex(sha256(key))` in
 //! `streaming_configs.stream_key_hash`; the plaintext key is never persisted. Every
 //! authorization path therefore (1) rejects an empty or too-short key outright -- the legacy
 //! plaintext match on `source_url` let an empty key match a config created with

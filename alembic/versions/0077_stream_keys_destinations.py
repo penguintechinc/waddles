@@ -17,8 +17,8 @@ legacy DB where ``streaming_configs`` MUST exist (missing raises); without the l
 minimal CI bootstrap) the DDL is skipped with a WARNING. Downgrade drops only the destinations table;
 the hash columns are retained so minted keys survive a rollback.
 
-Revision ID: 0076_stream_keys_destinations
-Revises: 0075_ai_knowledge_token_enc
+Revision ID: 0077_stream_keys_destinations
+Revises: 0076_suggestion_community_id
 Create Date: 2026-11-06
 """
 
@@ -31,8 +31,8 @@ from sqlalchemy.engine import Connection
 
 from alembic import op
 
-revision = "0076_stream_keys_destinations"
-down_revision = "0075_ai_knowledge_token_enc"
+revision = "0077_stream_keys_destinations"
+down_revision = "0076_suggestion_community_id"
 branch_labels = None
 depends_on = None
 
@@ -104,11 +104,11 @@ def upgrade() -> None:
     if not present:
         if _legacy_ledger_present(conn):
             raise RuntimeError(
-                "0076: legacy ledger is populated but streaming_configs (legacy SQL 079) is "
+                "0077: legacy ledger is populated but streaming_configs (legacy SQL 079) is "
                 "missing; refusing to continue on an incomplete baseline."
             )
         _LOG.warning(
-            "0076: streaming_configs absent (minimal/CI bootstrap) -- skipping DDL"
+            "0077: streaming_configs absent (minimal/CI bootstrap) -- skipping DDL"
         )
         return
     for statement in _STATEMENTS:

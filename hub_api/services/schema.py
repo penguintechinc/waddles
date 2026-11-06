@@ -2965,10 +2965,10 @@ def bind_calendar_sync_tables(dal: Any, *, migrate: bool = False) -> None:
 
 
 def bind_stream_keys_tables(dal: Any, *, migrate: bool = False) -> None:
-    """Bind the stream-key/destination tables (svc-streaming `streaming_configs` + 0076).
+    """Bind the stream-key/destination tables (svc-streaming `streaming_configs` + 0077).
 
-    `streaming_configs` is svc-streaming's table (legacy SQL 079/103) plus the 0076 key-hash
-    columns; `streaming_destinations` is hub-api-owned (0076); `streaming_sessions` is read-only
+    `streaming_configs` is svc-streaming's table (legacy SQL 079/103) plus the 0077 key-hash
+    columns; `streaming_destinations` is hub-api-owned (0077); `streaming_sessions` is read-only
     here (status). Idempotent per-DAL via the `streaming_destinations` guard.
     """
     if "streaming_destinations" in dal.tables:

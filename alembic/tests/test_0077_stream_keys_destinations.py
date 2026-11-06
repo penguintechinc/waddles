@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0076_stream_keys_destinations.
+"""Real-Postgres tests for 0077_stream_keys_destinations.
 
 A fresh DB goes through the whole chain (baseline replay creates `streaming_configs`, 0076 adds the
 key-hash columns + `streaming_destinations`); the minimal CI bootstrap has no streaming tables so the
@@ -51,13 +51,13 @@ def _exists(dsn: str, table: str) -> bool:
 
 @pytest.fixture(scope="module")
 def fresh_db() -> Iterator[PgTestDatabase]:
-    with empty_postgres("0076-fresh") as db:
+    with empty_postgres("0077-fresh") as db:
         alembic_cli("upgrade", "head", dsn=db.dsn)
         yield db
 
 
 def test_revision_id_within_limit() -> None:
-    assert len("0076_stream_keys_destinations") <= 32
+    assert len("0077_stream_keys_destinations") <= 32
 
 
 def test_fresh_db_has_columns_and_table(fresh_db: PgTestDatabase) -> None:
@@ -73,7 +73,7 @@ def test_key_hash_is_unique_and_nulls_allowed(fresh_db: PgTestDatabase) -> None:
             _q(
                 fresh_db.dsn,
                 "INSERT INTO communities (name, tenant_id) VALUES (%s, %s) RETURNING id",
-                (f"c0076-{n}", tenant),
+                (f"c0077-{n}", tenant),
             )[0][0]
         )
     for cid, digest in ((ids[0], "a" * 64), (ids[2], None)):
@@ -114,9 +114,9 @@ def test_destination_constraints(fresh_db: PgTestDatabase) -> None:
 
 
 def test_downgrade_removes_everything_and_upgrade_restores() -> None:
-    with empty_postgres("0076-down") as db:
+    with empty_postgres("0077-down") as db:
         alembic_cli("upgrade", "head", dsn=db.dsn)
-        alembic_cli("downgrade", "0075_ai_knowledge_token_enc", dsn=db.dsn)
+        alembic_cli("downgrade", "0076_suggestion_community_id", dsn=db.dsn)
         assert not _exists(db.dsn, "streaming_destinations")
         assert _NEW_COLUMNS <= _config_columns(db.dsn)  # retained on purpose
         alembic_cli("upgrade", "head", dsn=db.dsn)
@@ -124,6 +124,6 @@ def test_downgrade_removes_everything_and_upgrade_restores() -> None:
 
 
 def test_minimal_bootstrap_skips_without_error() -> None:
-    with migrated_postgres("0076-min") as db:
+    with migrated_postgres("0077-min") as db:
         assert not _exists(db.dsn, "streaming_configs")
         assert not _exists(db.dsn, "streaming_destinations")
