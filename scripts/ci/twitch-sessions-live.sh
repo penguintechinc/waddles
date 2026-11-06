@@ -57,7 +57,9 @@ fi
 echo "valkey ready"
 
 cd "$ROOT/hub_api"
-PYTHONPATH="$ROOT/libs/flask_core:$ROOT/hub_api" "$HUB_PYTHON" -m tests.live.live_hub "$MANIFEST" >"$HUB_LOG" 2>&1 &
+# Harness-only: hub-api defaults LOG_DIR to /var/log/waddlebotlog (unwritable on CI runners);
+# point it at the per-run scratch dir. Production keeps its default and logs a loud error if unwritable.
+LOG_DIR="$WORK/hub-logs" PYTHONPATH="$ROOT/libs/flask_core:$ROOT/hub_api" "$HUB_PYTHON" -m tests.live.live_hub "$MANIFEST" >"$HUB_LOG" 2>&1 &
 HUB_PID=$!
 
 waited=0
