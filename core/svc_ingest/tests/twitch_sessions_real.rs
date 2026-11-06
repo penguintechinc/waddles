@@ -232,6 +232,8 @@ impl ConnectionResolve for Hub {
             .iter()
             .filter(|((_, conn), _)| *conn > after)
             .map(|((community, conn), b)| BindingSummary {
+                tenant_id: 1,
+                secret_version: 1,
                 community_id: *community,
                 connection_id: *conn,
                 provider: "twitch".into(),

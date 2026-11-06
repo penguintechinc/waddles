@@ -110,6 +110,8 @@ pub(crate) fn desired_webhook(
 /// A binding as hub-api lists it.
 pub(crate) fn binding(community: i64, conn: i64, meta: &[(&str, &str)]) -> BindingSummary {
     BindingSummary {
+        tenant_id: 1,
+        secret_version: 1,
         community_id: community,
         connection_id: conn,
         provider: "twitchprov".to_owned(),

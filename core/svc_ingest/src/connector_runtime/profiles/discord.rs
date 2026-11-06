@@ -80,12 +80,6 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// Snowflake length bounds for `guild_id`.
 const SNOWFLAKE_LEN: std::ops::RangeInclusive<usize> = 17..=20;
 
-/// `DesiredConnection::tenant_id` placeholder: `BindingSummary` carries no
-/// tenant (the wire's `tenantId` is dropped by the resolver). The supervisor
-/// derives the sink scope from the numeric community id through
-/// `scope_resolver`, so this value is never used as a scope.
-pub const TENANT_UNRESOLVED: i64 = 0;
-
 /// The Discord overlay profile.
 #[derive(Debug, Clone)]
 pub struct DiscordProfile {
@@ -251,11 +245,14 @@ fn ws_config(guild_id: &str, conn: ConnectionRef, env: &RuntimeEnv) -> WsConfig 
 }
 
 /// Deterministic digest of the derived config (host constants + guild +
-/// connection ids). `WsConfig` holds no secret, so its `Debug` form is safe to
-/// hash; the secret version is not part of `BindingSummary`.
-fn fingerprint(cfg: &WsConfig) -> u64 {
+/// connection ids), the feed tenant and the credential-rotation counter.
+/// `WsConfig` holds no secret, so its `Debug` form is safe to hash; the
+/// counter is not secret material either.
+fn fingerprint(cfg: &WsConfig, tenant: i64, secret_version: i64) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     format!("{cfg:?}").hash(&mut h);
+    tenant.hash(&mut h);
+    secret_version.hash(&mut h);
     h.finish()
 }
 
@@ -293,6 +290,12 @@ impl OverlayProfile for DiscordProfile {
         if !env.heartbeat_enabled {
             return Err(PlanError::Config(HEARTBEAT_REQUIRED));
         }
+        let tenant = Some(b.tenant_id)
+            .filter(|t| *t >= 1)
+            .ok_or(PlanError::Config("binding tenant is not positive"))?;
+        let version = Some(b.secret_version)
+            .filter(|v| *v >= 1)
+            .ok_or(PlanError::Config("binding secret version is not positive"))?;
         let guild_id = metadata_guild_id(&b.metadata)?;
         let cfg = ws_config(
             guild_id,
@@ -302,14 +305,14 @@ impl OverlayProfile for DiscordProfile {
             },
             env,
         );
-        let fingerprint = fingerprint(&cfg);
+        let fingerprint = fingerprint(&cfg, tenant, version);
         Ok(vec![DesiredConnection {
             key: ConnKey {
                 platform: PLATFORM,
                 community_id: b.community_id,
                 connection_id: b.connection_id,
             },
-            tenant_id: TENANT_UNRESOLVED,
+            tenant_id: tenant,
             plan: TransportPlan::Ws(Box::new(cfg)),
             fingerprint,
         }])
@@ -356,6 +359,8 @@ mod tests {
             metadata.insert(META_GUILD_ID.to_string(), g.to_string());
         }
         BindingSummary {
+            tenant_id: 1,
+            secret_version: 1,
             community_id: 7,
             connection_id: 11,
             provider: "discord".into(),
@@ -414,7 +419,7 @@ mod tests {
                 connection_id: 11
             }
         );
-        assert_eq!(d.tenant_id, TENANT_UNRESOLVED);
+        assert_eq!(d.tenant_id, 1, "the feed's tenant");
         let c = ws(d);
         assert_eq!(c.platform, "discord");
         assert_eq!(c.url, "wss://gateway.discord.gg/?v=10&encoding=json");
@@ -835,7 +840,7 @@ mod tests {
         assert!(secrets.resolve(other, gw).await.is_err(), "other community");
     }
 
-    /// The tenant is never read from (editable) binding metadata.
+    /// The tenant is the feed's, never read from (editable) binding metadata.
     #[test]
     fn tenant_never_comes_from_binding_metadata() {
         let mut b = binding(Some(GUILD));
@@ -843,8 +848,35 @@ mod tests {
             b.metadata.insert(k.into(), "424242".into());
         }
         let d = plan_ok(&b);
-        assert_eq!(d.tenant_id, TENANT_UNRESOLVED);
+        assert_eq!(d.tenant_id, 1);
         assert_eq!(d.fingerprint, plan_ok(&binding(Some(GUILD))).fingerprint);
+    }
+
+    /// A rotation (secret_version bump) or a tenant change restarts the
+    /// connection; a non-positive feed tenant/version is refused.
+    #[test]
+    fn rotation_and_tenant_move_the_fingerprint_and_bad_feed_values_are_refused() {
+        let base = plan_ok(&binding(Some(GUILD))).fingerprint;
+        let mut rotated = binding(Some(GUILD));
+        rotated.secret_version = 2;
+        assert_ne!(plan_ok(&rotated).fingerprint, base);
+        let mut moved = binding(Some(GUILD));
+        moved.tenant_id = 9;
+        assert_ne!(plan_ok(&moved).fingerprint, base);
+        for bad in [0_i64, -1] {
+            let mut b = binding(Some(GUILD));
+            b.tenant_id = bad;
+            assert_eq!(
+                ready_profile().plan(&b, &env()).err(),
+                Some(PlanError::Config("binding tenant is not positive"))
+            );
+            let mut b = binding(Some(GUILD));
+            b.secret_version = bad;
+            assert_eq!(
+                ready_profile().plan(&b, &env()).err(),
+                Some(PlanError::Config("binding secret version is not positive"))
+            );
+        }
     }
 
     #[test]

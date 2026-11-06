@@ -172,6 +172,13 @@ impl std::fmt::Debug for ResolvedConnection {
 pub struct BindingSummary {
     pub community_id: i64,
     pub connection_id: i64,
+    /// Server-derived tenant of the community the grant points at (hub-api
+    /// `communities.tenant_id`), always `>= 1`. NEVER taken from `metadata`.
+    pub tenant_id: i64,
+    /// Credential-rotation counter (`>= 1`): bumped when an admin replaces the
+    /// credential, not on a token refresh. Part of the connection fingerprint
+    /// so a rotation restarts the connection. A counter, never secret material.
+    pub secret_version: i64,
     pub provider: String,
     pub kind: ConnectionKind,
     pub metadata: BTreeMap<String, String>,
@@ -222,6 +229,8 @@ struct ListWire {
 struct BindingWire {
     community_id: i64,
     connection_id: i64,
+    tenant_id: i64,
+    secret_version: i64,
     provider: String,
     #[serde(default = "default_kind")]
     kind: i16,
@@ -355,9 +364,22 @@ pub(crate) fn parse_page(body: &[u8]) -> Result<BindingPage, ResolveError> {
         .items
         .into_iter()
         .map(|b| {
+            // The binding-feed contract (docs/PROVIDER_CONNECTIONS.md) makes both
+            // >= 1 on every served row; anything else is a hub-api bug and the
+            // whole page fails closed rather than running a tenant-less binding.
+            if b.tenant_id < 1 {
+                return Err(ResolveError::Malformed("binding tenantId must be >= 1"));
+            }
+            if b.secret_version < 1 {
+                return Err(ResolveError::Malformed(
+                    "binding secretVersion must be >= 1",
+                ));
+            }
             Ok(BindingSummary {
                 community_id: b.community_id,
                 connection_id: b.connection_id,
+                tenant_id: b.tenant_id,
+                secret_version: b.secret_version,
                 provider: b.provider,
                 kind: ConnectionKind::from_code(b.kind)?,
                 metadata: b.metadata,
@@ -613,16 +635,49 @@ mod tests {
     #[test]
     fn list_page_parses_and_defaults_kind() {
         let body = br#"{"success":true,"items":[{"communityId":1,"connectionId":2,"tenantId":3,
-            "provider":"twitch","metadata":{"a":"b"}},{"communityId":1,"connectionId":3,"kind":2,
+            "secretVersion":4,"provider":"twitch","metadata":{"a":"b"}},{"communityId":1,
+            "connectionId":3,"tenantId":3,"secretVersion":1,"kind":2,
             "provider":"x","metadata":{}}],"nextAfter":9}"#;
         let page = parse_page(body).unwrap();
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].kind, ConnectionKind::PlatformOauth);
         assert_eq!(page.items[1].kind, ConnectionKind::ExternalHttp);
         assert_eq!(page.next_after, Some(9));
-        let bad = br#"{"items":[{"communityId":1,"connectionId":2,"provider":"x","kind":9}]}"#;
+        let bad = br#"{"items":[{"communityId":1,"connectionId":2,"tenantId":3,
+            "secretVersion":1,"provider":"x","kind":9}]}"#;
         assert!(parse_page(bad).is_err());
         assert!(parse_page(b"{").is_err());
+    }
+
+    #[test]
+    fn list_page_carries_the_feed_tenant_and_secret_version() {
+        let body = br#"{"items":[{"communityId":7,"connectionId":9,"tenantId":42,
+            "secretVersion":5,"provider":"twitch","metadata":{}}]}"#;
+        let item = &parse_page(body).unwrap().items[0];
+        assert_eq!((item.tenant_id, item.secret_version), (42, 5));
+    }
+
+    /// regression: a binding without a server-derived tenant (or a rotation
+    /// counter) must fail the page closed, never run tenant-less.
+    #[test]
+    fn list_page_refuses_a_missing_or_non_positive_tenant_or_version() {
+        let row = |extra: &str| {
+            format!(r#"{{"items":[{{"communityId":1,"connectionId":2,"provider":"x",{extra}}}]}}"#)
+        };
+        for extra in [
+            r#""secretVersion":1"#,              // tenantId absent
+            r#""tenantId":3"#,                   // secretVersion absent
+            r#""tenantId":0,"secretVersion":1"#, // tenant not positive
+            r#""tenantId":-1,"secretVersion":1"#,
+            r#""tenantId":3,"secretVersion":0"#, // version not positive
+            r#""tenantId":3,"secretVersion":-2"#,
+        ] {
+            assert!(
+                parse_page(row(extra).as_bytes()).is_err(),
+                "{extra} must be refused"
+            );
+        }
+        assert!(parse_page(row(r#""tenantId":3,"secretVersion":1"#).as_bytes()).is_ok());
     }
 
     #[test]

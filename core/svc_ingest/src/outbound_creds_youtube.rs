@@ -279,6 +279,8 @@ mod tests {
 
     fn summary(community: i64, conn: i64, m: BTreeMap<String, String>) -> BindingSummary {
         BindingSummary {
+            tenant_id: 1,
+            secret_version: 1,
             community_id: community,
             connection_id: conn,
             provider: PROVIDER.to_string(),

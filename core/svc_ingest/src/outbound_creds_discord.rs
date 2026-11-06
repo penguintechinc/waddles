@@ -261,6 +261,8 @@ mod tests {
 
     fn summary(community: i64, conn: i64, m: BTreeMap<String, String>) -> BindingSummary {
         BindingSummary {
+            tenant_id: 1,
+            secret_version: 1,
             community_id: community,
             connection_id: conn,
             provider: PROVIDER.to_string(),
@@ -548,7 +550,7 @@ mod tests {
                 .and(path("/api/v1/internal/provider-connections"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "success": true,
-                    "items": [{"communityId": 7, "connectionId": 12, "provider": "discord",
+                    "items": [{"communityId": 7, "connectionId": 12, "tenantId": 3, "secretVersion": 1, "provider": "discord",
                                "kind": 1, "metadata": list_meta}],
                     "nextAfter": null
                 })))

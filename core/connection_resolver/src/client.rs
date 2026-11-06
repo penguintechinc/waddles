@@ -830,7 +830,7 @@ mod tests {
         };
         let item = |c: i64| {
             format!(
-                r#"{{"communityId":{c},"connectionId":{c},"provider":"twitch","metadata":{{"channel":"x"}}}}"#
+                r#"{{"communityId":{c},"connectionId":{c},"tenantId":3,"secretVersion":1,"provider":"twitch","metadata":{{"channel":"x"}}}}"#
             )
         };
         page("0", &item(1), "1").mount(&server).await;
