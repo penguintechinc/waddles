@@ -301,6 +301,24 @@ pub struct CliConfig {
     )]
     pub bundle_reputation_membership_refresh_s: u64,
 
+    /// Production wiring for the bundle `platform-table` host capability
+    /// (`bundle_host_platform_table::connect`) -- the least-privilege
+    /// `waddles_platform_table` role (`alembic/versions/
+    /// 0078_bundle_platform_table.py`): column-scoped SELECT/UPDATE on the
+    /// allowlisted `community_members` columns + audit INSERT, nothing else.
+    #[arg(long, env = "BUNDLE_PLATFORM_TABLE_HOST", default_value = "localhost")]
+    pub bundle_platform_table_host: String,
+    #[arg(long, env = "BUNDLE_PLATFORM_TABLE_PORT", default_value_t = 5432)]
+    pub bundle_platform_table_port: u16,
+    #[arg(long, env = "BUNDLE_PLATFORM_TABLE_NAME", default_value = "waddlebot")]
+    pub bundle_platform_table_name: String,
+    #[arg(
+        long,
+        env = "BUNDLE_PLATFORM_TABLE_USER",
+        default_value = "waddles_platform_table"
+    )]
+    pub bundle_platform_table_user: String,
+
     /// Production wiring for the bundle `economy` host capability (issue
     /// #714, `bundle_host_economy::connect`) -- the least-privilege
     /// `waddles_economy_runtime` role (`alembic/versions/
@@ -672,6 +690,11 @@ pub struct Config {
     /// unprovisioned deployment must start; the capability then denies
     /// `not_implemented`. An empty value is treated as unset.
     pub bundle_economy_password: Option<Secret>,
+    /// `BUNDLE_PLATFORM_TABLE_PASSWORD` for the `platform-table` capability's
+    /// `waddles_platform_table` connection. `Option`: flag defaults OFF, an
+    /// unprovisioned deployment must start; the capability then denies
+    /// `not_implemented`. Empty is treated as unset.
+    pub bundle_platform_table_password: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -696,6 +719,13 @@ impl fmt::Debug for Config {
                 "bundle_reputation_password",
                 &self
                     .bundle_reputation_password
+                    .as_ref()
+                    .map(|_| Secret::new("")),
+            )
+            .field(
+                "bundle_platform_table_password",
+                &self
+                    .bundle_platform_table_password
                     .as_ref()
                     .map(|_| Secret::new("")),
             )
@@ -758,6 +788,10 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .map(Secret::new);
+        let bundle_platform_table_password = std::env::var("BUNDLE_PLATFORM_TABLE_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
         Ok(Self {
             cli,
             db_password,
@@ -768,6 +802,7 @@ impl Config {
             bundle_db_password,
             bundle_reputation_password,
             bundle_economy_password,
+            bundle_platform_table_password,
         })
     }
 }
@@ -795,6 +830,7 @@ mod tests {
             "BUNDLE_DB_PASSWORD",
             "BUNDLE_REPUTATION_PASSWORD",
             "BUNDLE_ECONOMY_PASSWORD",
+            "BUNDLE_PLATFORM_TABLE_PASSWORD",
         ] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.

@@ -959,6 +959,62 @@ async fn try_build_reputation_wiring(
     }
 }
 
+/// Builds the `platform-table` bundle host capability's production wiring
+/// (spec 2026-11-06-bundle-table-access-grants): connects as the least-privilege
+/// `waddles_platform_table` role and gates every call on
+/// `BUNDLE_PLATFORM_TABLE_CAPABILITY_FLAG` (default OFF).
+///
+/// `password` unset is an INFO-level "never opted in" `None`; a configured
+/// password whose connection fails is an ERROR-level `None` (an outage must never
+/// read as "not configured"). Either way every `platform_table.*` call denies
+/// `not_implemented` -- fail-closed.
+async fn try_build_platform_table_wiring(
+    cfg: &bundle_host_platform_table::ConnectConfig,
+    password: Option<&config::Secret>,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+) -> Option<capabilities::PlatformTableWiring> {
+    let Some(password) = password else {
+        tracing::info!(
+            "BUNDLE_PLATFORM_TABLE_PASSWORD not set; platform-table capability unavailable \
+             (every platform_table host-call will report not_implemented until provisioned)"
+        );
+        return None;
+    };
+    match bundle_host_platform_table::connect(cfg, password.expose()).await {
+        Ok(conn) => {
+            tracing::info!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                "platform-table capability: connected to the platform-table Postgres role"
+            );
+            Some(capabilities::PlatformTableWiring {
+                store: Arc::new(bundle_host_platform_table::PostgresPlatformTableStore::new(
+                    conn,
+                )),
+                flag: Arc::new(license::BundlePlatformTableCapabilityGate::new(Arc::clone(
+                    license_client,
+                ))),
+            })
+        }
+        Err(err) => {
+            tracing::error!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                error = %err,
+                "platform-table capability: BUNDLE_PLATFORM_TABLE_PASSWORD is configured but \
+                 the waddles_platform_table connection failed -- capability unavailable (every \
+                 platform_table host-call will report not_implemented); this is a \
+                 misconfiguration or outage, not an intentional opt-out"
+            );
+            None
+        }
+    }
+}
+
 /// Builds the `economy` bundle host capability's production wiring (issue
 /// #714, `spine::ProcessDeps::economy_wiring`): connects to the shared
 /// `waddles` Postgres as the least-privilege `waddles_economy_runtime` role
@@ -1258,6 +1314,13 @@ fn try_start_process_loop(
     };
     let bundle_economy_password = config.bundle_economy_password.clone();
     let bundle_economy_refresh = cli.bundle_economy_membership_refresh();
+    let bundle_platform_table_cfg = bundle_host_platform_table::ConnectConfig {
+        host: cli.bundle_platform_table_host.clone(),
+        port: cli.bundle_platform_table_port,
+        name: cli.bundle_platform_table_name.clone(),
+        user: cli.bundle_platform_table_user.clone(),
+    };
+    let bundle_platform_table_password = config.bundle_platform_table_password.clone();
 
     tokio::spawn(async move {
         // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
@@ -1325,6 +1388,12 @@ fn try_start_process_loop(
             &bundle_db_license_client,
             Arc::clone(&membership),
             bundle_reputation_refresh,
+        )
+        .await;
+        let platform_table_wiring = try_build_platform_table_wiring(
+            &bundle_platform_table_cfg,
+            bundle_platform_table_password.as_ref(),
+            &bundle_db_license_client,
         )
         .await;
         let economy_wiring = try_build_economy_wiring(
@@ -1477,6 +1546,7 @@ fn try_start_process_loop(
                 db_wiring: db_wiring.clone(),
                 reputation_wiring: reputation_wiring.clone(),
                 economy_wiring: economy_wiring.clone(),
+                platform_table_wiring: platform_table_wiring.clone(),
                 // The legacy single-bundle path runs at the `(0, 0)` fail-closed
                 // scope (no resolved tenant/community), where every
                 // community-scoped capability -- `identity` included -- refuses
@@ -1881,6 +1951,13 @@ fn try_start_changelog_consumer(
     };
     let bundle_economy_password = config.bundle_economy_password.clone();
     let bundle_economy_refresh = config.cli.bundle_economy_membership_refresh();
+    let bundle_platform_table_cfg = bundle_host_platform_table::ConnectConfig {
+        host: config.cli.bundle_platform_table_host.clone(),
+        port: config.cli.bundle_platform_table_port,
+        name: config.cli.bundle_platform_table_name.clone(),
+        user: config.cli.bundle_platform_table_user.clone(),
+    };
+    let bundle_platform_table_password = config.bundle_platform_table_password.clone();
     // One process-wide membership snapshot: every per-scope gate reads it,
     // the reputation wiring's refresh task writes it (empty = fail-closed).
     let membership = Arc::new(bundle_capability_gate::SnapshotMembership::new());
@@ -1978,6 +2055,17 @@ fn try_start_changelog_consumer(
                     };
                     // `economy` host capability (issue #714): same
                     // license-client dependency as `reputation` above.
+                    deps.platform_table_wiring = match &bundle_db_license_client {
+                        Some(client) => {
+                            try_build_platform_table_wiring(
+                                &bundle_platform_table_cfg,
+                                bundle_platform_table_password.as_ref(),
+                                client,
+                            )
+                            .await
+                        }
+                        None => None,
+                    };
                     deps.economy_wiring = match &bundle_db_license_client {
                         Some(client) => {
                             try_build_economy_wiring(
@@ -2126,6 +2214,7 @@ async fn build_source_supervisor_deps(
         breaker: Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics)),
         reputation_wiring: None,
         economy_wiring: None,
+        platform_table_wiring: None,
         identity_wiring: None,
         ai_wiring: None,
     })
@@ -2383,6 +2472,7 @@ mod tests {
             bundle_db_password: None,
             bundle_reputation_password: None,
             bundle_economy_password: None,
+            bundle_platform_table_password: None,
         }
     }
 
@@ -3227,6 +3317,7 @@ mod tests {
             bundle_db_password: None,
             bundle_reputation_password: None,
             bundle_economy_password: None,
+            bundle_platform_table_password: None,
         };
         let state = crate::http::AppState::new(
             config,

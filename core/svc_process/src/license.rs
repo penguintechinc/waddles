@@ -336,6 +336,31 @@ impl FeatureGate for BundleEconomyCapabilityGate {
     }
 }
 
+/// Gates the bundle `platform-table` host capability (`crate::capabilities::
+/// StageCapabilities::handle_platform_table`) -- plain opt-in flag; unseen/OFF/
+/// license-server-unreachable means every `platform_table.*` call is denied
+/// `feature_disabled`.
+pub const BUNDLE_PLATFORM_TABLE_CAPABILITY_FLAG: &str = "waddles.bundle-platform-table-capability";
+
+/// Production [`FeatureGate`] for [`BUNDLE_PLATFORM_TABLE_CAPABILITY_FLAG`].
+pub struct BundlePlatformTableCapabilityGate(Arc<LicenseClient>);
+
+impl BundlePlatformTableCapabilityGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for BundlePlatformTableCapabilityGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            self.0
+                .flag_enabled(BUNDLE_PLATFORM_TABLE_CAPABILITY_FLAG)
+                .await
+        })
+    }
+}
+
 /// Gates the bundle `identity` host capability (`crate::capabilities::
 /// StageCapabilities::handle_identity`) -- a plain opt-in flag, same shape as
 /// [`BUNDLE_ECONOMY_CAPABILITY_FLAG`]: unseen/OFF/license-server-unreachable
@@ -1305,6 +1330,14 @@ mod tests {
         assert_eq!(
             BUNDLE_ECONOMY_CAPABILITY_FLAG,
             "waddles.bundle-economy-capability"
+        );
+    }
+
+    #[test]
+    fn bundle_platform_table_capability_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(
+            BUNDLE_PLATFORM_TABLE_CAPABILITY_FLAG,
+            "waddles.bundle-platform-table-capability"
         );
     }
 
