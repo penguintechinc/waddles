@@ -38,8 +38,8 @@
 pub mod driver;
 pub(crate) mod egress_guard;
 pub mod gateway_rules;
-pub mod host_api_listener;
 pub mod handshake_gate;
+pub mod host_api_listener;
 pub mod identify_budget;
 pub mod invoker;
 pub mod lifecycle;
