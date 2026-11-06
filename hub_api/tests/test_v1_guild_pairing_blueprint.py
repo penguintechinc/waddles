@@ -20,8 +20,8 @@ from blueprints.v1.guild_pairing import guild_pairing_bp
 
 
 @pytest.fixture
-def app(bar_citizen_db: Any) -> Quart:
-    dal, _community_id, _tenant_id, _global_id = bar_citizen_db
+def app(guild_pairing_db: Any) -> Quart:
+    dal, _community_id, _tenant_id, _global_id = guild_pairing_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     quart_app.register_blueprint(guild_pairing_bp)
@@ -47,7 +47,7 @@ async def _create_pairing(
     body = {
         "discord_guild_id": "123456789012345678",  # gitleaks:allow - fake snowflake, not a secret
         "direction": "bidirectional",
-        "role_name_prefix": "[BCSEA]",
+        "role_name_prefix": "[ACSEA]",
     }
     body.update(overrides)
     return await client.post(
@@ -64,9 +64,9 @@ async def _create_pairing(
 
 class TestListPairings:
     async def test_wrong_scope_is_403(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         response = await client.get(
             f"/api/v1/communities/{community_id}/guild-pairings",
             headers=auth_headers(scope="community.guild_pairing:write"),
@@ -74,9 +74,9 @@ class TestListPairings:
         assert response.status_code == 403
 
     async def test_empty_list_shape(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         response = await client.get(
             f"/api/v1/communities/{community_id}/guild-pairings",
             headers=auth_headers(scope="community.guild_pairing:read"),
@@ -86,7 +86,7 @@ class TestListPairings:
         assert body == {"success": True, "pairings": []}
 
     async def test_unknown_community_is_error(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
         response = await client.get(
             "/api/v1/communities/999999/guild-pairings",
@@ -95,9 +95,9 @@ class TestListPairings:
         assert response.status_code == 404
 
     async def test_cross_tenant_community_is_rejected(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        dal, _community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, _community_id, _tenant_id, _global_id = guild_pairing_db
         other_tenant_id = dal.tenants.insert(slug="other-corp", is_active=True, is_global=False)
         other_community_id = dal.communities.insert(name="other", tenant_id=other_tenant_id)
         dal.commit()
@@ -111,9 +111,9 @@ class TestListPairings:
 
 class TestCreatePairing:
     async def test_create_returns_201_with_pairing_fields(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         response = await _create_pairing(client, auth_headers, community_id)
         assert response.status_code == 201
         body = await response.get_json()
@@ -134,9 +134,9 @@ class TestCreatePairing:
         assert body["pairing"]["event_sync_enabled"] is False
 
     async def test_create_wrong_scope_is_403(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         response = await client.post(
             f"/api/v1/communities/{community_id}/guild-pairings",
             headers={
@@ -150,16 +150,16 @@ class TestCreatePairing:
         assert response.status_code == 403
 
     async def test_invalid_direction_is_400(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         response = await _create_pairing(client, auth_headers, community_id, direction="sideways")
         assert response.status_code == 400
 
     async def test_duplicate_pairing_is_409(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         first = await _create_pairing(client, auth_headers, community_id)
         assert first.status_code == 201
         second = await _create_pairing(client, auth_headers, community_id)
@@ -168,9 +168,9 @@ class TestCreatePairing:
 
 class TestUpdateAndDeletePairing:
     async def test_update_sync_enabled(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         created = await _create_pairing(client, auth_headers, community_id)
         pairing_id = (await created.get_json())["pairing"]["id"]
 
@@ -187,9 +187,9 @@ class TestUpdateAndDeletePairing:
         assert body["pairing"]["sync_enabled"] is True
 
     async def test_update_unknown_pairing_is_error(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         response = await client.patch(
             f"/api/v1/communities/{community_id}/guild-pairings/999999",
             headers={
@@ -201,9 +201,9 @@ class TestUpdateAndDeletePairing:
         assert response.status_code == 404
 
     async def test_delete_pairing_is_204_then_404_on_redelete(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         created = await _create_pairing(client, auth_headers, community_id)
         pairing_id = (await created.get_json())["pairing"]["id"]
 
@@ -226,9 +226,9 @@ class TestRoleSyncBindings:
         return int((await created.get_json())["pairing"]["id"])
 
     async def test_create_and_list_binding(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing_id = await self._pairing_id(client, auth_headers, community_id)
 
         create_response = await client.post(
@@ -253,10 +253,10 @@ class TestRoleSyncBindings:
         assert body["bindings"][0]["subscriber_tier"] == 1
 
     async def test_create_and_list_community_role_binding(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
         """The hub-api endpoint the webui maps Discord roles -> community scopes through."""
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing_id = await self._pairing_id(client, auth_headers, community_id)
 
         create_response = await client.post(
@@ -286,9 +286,9 @@ class TestRoleSyncBindings:
         assert body["bindings"][0]["community_role"] == "moderator"
 
     async def test_community_role_missing_role_value_is_400(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing_id = await self._pairing_id(client, auth_headers, community_id)
 
         response = await client.post(
@@ -302,9 +302,9 @@ class TestRoleSyncBindings:
         assert response.status_code == 400
 
     async def test_invalid_scope_tier_combo_is_400(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing_id = await self._pairing_id(client, auth_headers, community_id)
 
         response = await client.post(
@@ -320,9 +320,9 @@ class TestRoleSyncBindings:
         assert response.status_code == 400
 
     async def test_delete_binding(
-        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        _, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing_id = await self._pairing_id(client, auth_headers, community_id)
 
         create_response = await client.post(

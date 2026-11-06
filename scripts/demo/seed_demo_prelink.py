@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Idempotent Bar Citizen demo pre-link seed (role sync + event sync).
+"""Idempotent demo pre-link seed (role sync + event sync).
 
 Pre-links one demo Discord identity + community membership, a Discord-role ->
 community-role binding, and an enabled guild pairing on the alpha `waddlebot`
@@ -10,12 +10,12 @@ baseline unless it is `community-owner`).
 Config (env, never CLI args; no secrets besides DATABASE_URL):
   DATABASE_URL            required, libpq DSN for the hub database
   DEMO_COMMUNITY_ID       default 1
-  DEMO_GUILD_ID           default 474965105759748096 (Bar Citizen Discord guild)
+  DEMO_GUILD_ID           default 474965105759748096 (demo Discord guild)
   DEMO_DISCORD_USER_ID    Discord snowflake of the demo member (SWAP IN the real one)
-  DEMO_DISCORD_ROLE_ID    Discord role snowflake to sync (SWAP IN BC's real role)
+  DEMO_DISCORD_ROLE_ID    Discord role snowflake to sync (SWAP IN the customer's real role)
   DEMO_COMMUNITY_ROLE     Waddles role the Discord role grants (default `moderator`)
   DEMO_BASELINE_ROLE      role the member is reset to / demoted to (default `member`)
-  DEMO_ROLE_NAME_PREFIX   pairing role-name prefix (default `[BC]`)
+  DEMO_ROLE_NAME_PREFIX   pairing role-name prefix (default `[DEMO]`)
   DEMO_DIRECTION          pairing direction (default `discord_to_twitch`)
 
 Logging is PII-free: only community_id, op names and counts are ever emitted.
@@ -30,7 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-logger = logging.getLogger("seed_bc_demo")
+logger = logging.getLogger("seed_demo_prelink")
 
 #: Roles `community_role_sync_bindings.community_role` CHECK accepts (migration 0036);
 #: `community-owner` is deliberately never assignable by sync.
@@ -128,7 +128,7 @@ def load_config(env: Mapping[str, str]) -> DemoConfig:
         ),
         community_role=env.get("DEMO_COMMUNITY_ROLE", "moderator"),
         baseline_role=env.get("DEMO_BASELINE_ROLE", "member"),
-        role_name_prefix=env.get("DEMO_ROLE_NAME_PREFIX", "[BC]"),
+        role_name_prefix=env.get("DEMO_ROLE_NAME_PREFIX", "[DEMO]"),
         direction=env.get("DEMO_DIRECTION", "discord_to_twitch"),
     )
     if cfg.community_role not in VALID_COMMUNITY_ROLES:
@@ -182,7 +182,7 @@ def verify_schema(cur: Any) -> None:
     ]
     if missing:
         raise SeedError(f"schema check failed, missing: {sorted(set(missing))}")
-    logger.info("seed_bc_demo.schema_ok tables=%d", len(REQUIRED_SCHEMA))
+    logger.info("seed_demo_prelink.schema_ok tables=%d", len(REQUIRED_SCHEMA))
 
 
 def verify_community(cur: Any, cfg: DemoConfig) -> None:
@@ -199,7 +199,7 @@ def verify_community(cur: Any, cfg: DemoConfig) -> None:
         if role not in found:
             # Demote aborts without a baseline row; a missing target row only loses scopes.
             logger.warning(
-                "seed_bc_demo.role_row_missing community_id=%s role=%s",
+                "seed_demo_prelink.role_row_missing community_id=%s role=%s",
                 cfg.community_id,
                 role,
             )
@@ -223,7 +223,7 @@ def upsert_identity(cur: Any, cfg: DemoConfig) -> int:
         cur.execute(
             "INSERT INTO hub_users (username, display_name, is_active) VALUES (%s, %s, TRUE) "
             "ON CONFLICT (username) DO UPDATE SET is_active = TRUE RETURNING id",
-            (f"bc-demo-{cfg.discord_user_id}", "BC Demo Member"),
+            (f"demo-prelink-{cfg.discord_user_id}", "Demo Member"),
         )
         hub_user_id = int(cur.fetchone()[0])
         cur.execute(
@@ -231,7 +231,7 @@ def upsert_identity(cur: Any, cfg: DemoConfig) -> int:
             "VALUES (%s, %s, %s, TRUE) ON CONFLICT (platform, platform_user_id) DO NOTHING",
             (hub_user_id, DISCORD, cfg.discord_user_id),
         )
-    logger.info("seed_bc_demo.identity_ok op=upsert_identity")
+    logger.info("seed_demo_prelink.identity_ok op=upsert_identity")
     return hub_user_id
 
 
@@ -274,7 +274,7 @@ def upsert_membership(cur: Any, cfg: DemoConfig, hub_user_id: int) -> None:
         ),
     )
     logger.info(
-        "seed_bc_demo.membership_ok op=upsert_membership community_id=%s",
+        "seed_demo_prelink.membership_ok op=upsert_membership community_id=%s",
         cfg.community_id,
     )
 
@@ -304,7 +304,7 @@ def verify_binding(cur: Any, cfg: DemoConfig, hub_user_id: int) -> None:
         raise SeedError(
             "seeded member user_uuid is not the hub user's uuid (binding inconsistent)"
         )
-    logger.info("seed_bc_demo.binding_resolvable community_id=%s", cfg.community_id)
+    logger.info("seed_demo_prelink.binding_resolvable community_id=%s", cfg.community_id)
 
 
 def upsert_pairing(cur: Any, cfg: DemoConfig) -> int:
@@ -319,7 +319,7 @@ def upsert_pairing(cur: Any, cfg: DemoConfig) -> int:
     )
     pairing_id = int(cur.fetchone()[0])
     logger.info(
-        "seed_bc_demo.pairing_ok op=upsert_pairing community_id=%s", cfg.community_id
+        "seed_demo_prelink.pairing_ok op=upsert_pairing community_id=%s", cfg.community_id
     )
     return pairing_id
 
@@ -338,7 +338,7 @@ def upsert_binding(cur: Any, cfg: DemoConfig, pairing_id: int) -> int:
         (pairing_id,),
     )
     count = int(cur.fetchone()[0])
-    logger.info("seed_bc_demo.binding_ok op=upsert_binding bindings=%d", count)
+    logger.info("seed_demo_prelink.binding_ok op=upsert_binding bindings=%d", count)
     return count
 
 
@@ -378,13 +378,13 @@ def main() -> int:
         finally:
             conn.close()
     except SeedError as exc:
-        logger.error("seed_bc_demo.failed exc_type=SeedError message=%s", exc)
+        logger.error("seed_demo_prelink.failed exc_type=SeedError message=%s", exc)
         return 2
     except Exception as exc:  # noqa: BLE001 -- surfaced loudly with traceback, never swallowed
-        logger.exception("seed_bc_demo.failed exc_type=%s", type(exc).__name__)
+        logger.exception("seed_demo_prelink.failed exc_type=%s", type(exc).__name__)
         return 1
     logger.info(
-        "seed_bc_demo.done community_id=%s pairing_id=%s bindings=%d "
+        "seed_demo_prelink.done community_id=%s pairing_id=%s bindings=%d "
         "(set pipeline.roleSync.demotePairingIds=%s)",
         cfg.community_id,
         result.pairing_id,

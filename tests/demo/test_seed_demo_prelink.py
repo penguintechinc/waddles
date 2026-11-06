@@ -1,4 +1,4 @@
-"""Tests for scripts/demo/seed_bc_demo.py against a real Postgres 17 container.
+"""Tests for scripts/demo/seed_demo_prelink.py against a real Postgres 17 container.
 
 DDL below mirrors the real columns/constraints of 0034/0036/0039 + legacy SQL 000/058
 (only the parts the seed touches). Skipped only when docker is unavailable, matching
@@ -27,7 +27,7 @@ def _load(name: str, rel: str):  # type: ignore[no-untyped-def]
     return mod
 
 
-seed_mod = _load("seed_bc_demo", "scripts/demo/seed_bc_demo.py")
+seed_mod = _load("seed_demo_prelink", "scripts/demo/seed_demo_prelink.py")
 pg = _load("pg_docker_demo", "alembic/tests/pg_docker.py")
 
 pytestmark = pytest.mark.skipif(not pg.DOCKER_AVAILABLE, reason="docker not available")
@@ -338,12 +338,12 @@ def test_logs_are_pii_free(
     conn: psycopg2.extensions.connection, caplog: pytest.LogCaptureFixture
 ) -> None:
     cfg = seed_mod.load_config({})
-    with caplog.at_level("DEBUG", logger="seed_bc_demo"):
+    with caplog.at_level("DEBUG", logger="seed_demo_prelink"):
         seed_mod.seed(conn, cfg)
     text = caplog.text
     assert cfg.discord_user_id not in text
-    assert "BC Demo Member" not in text
-    assert "seed_bc_demo.binding_ok" in text
+    assert "Demo Member" not in text
+    assert "seed_demo_prelink.binding_ok" in text
 
 
 def test_main_requires_database_url(monkeypatch: pytest.MonkeyPatch) -> None:

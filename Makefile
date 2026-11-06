@@ -1,4 +1,4 @@
-.PHONY: seed-bc-demo reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -221,10 +221,10 @@ seed-mock-data:
 seed-ui-mock-data:
 	@bash scripts/seed-ui-mock-data.sh $(filter --docker,$(SEED_ARGS))
 
-# Bar Citizen demo pre-link (idempotent upsert; needs DATABASE_URL, see
-# scripts/demo/seed_bc_demo.py header for DEMO_* overrides, docs/demo/ runbook).
-seed-bc-demo:
-	@python3 scripts/demo/seed_bc_demo.py
+# demo pre-link (idempotent upsert; needs DATABASE_URL, see
+# scripts/demo/seed_demo_prelink.py header for DEMO_* overrides, docs/demo/ runbook).
+seed-demo-prelink:
+	@python3 scripts/demo/seed_demo_prelink.py
 
 # Marketing screenshots -> docs/screenshots/ (pinned Playwright, see
 # tests/screenshots). Needs a running hub-webui at BASE_URL and seeded data;

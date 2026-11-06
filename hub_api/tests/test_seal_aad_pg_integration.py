@@ -39,7 +39,7 @@ from services.platform_integrations_crypto import (  # noqa: E402
 from services.provider_connections.vault import open_secret, seal_secret  # noqa: E402
 from services.schema import (  # noqa: E402
     bind_auth_tables,
-    bind_bar_citizen_tables,
+    bind_guild_pairing_tables,
     bind_marketplace_module_tables,
     bind_platform_tables,
 )
@@ -123,7 +123,7 @@ def cr_dal(pg_db: PgTestDatabase) -> Iterator[Any]:
         migrate=False,
     )
     bind_auth_tables(dal, migrate=False)
-    bind_bar_citizen_tables(dal, migrate=False)
+    bind_guild_pairing_tables(dal, migrate=False)
     yield dal
     dal.close()
 

@@ -92,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counters (`waddles_bundle_capability_{authorized,denied}_total`), which were silently dropped by an uninstalled
   `metrics`-facade recorder, now export through an OTel-backed recorder. New dashboard `waddles-stage-pipeline`. See
   `docs/observability/data-plane-metrics.md`.
-- Star Citizen Spectrum org sync (gh #101, Bar Citizen): svc-ingest now diffs a Spectrum community's member roster and event
+- Star Citizen Spectrum org sync (gh #101): svc-ingest now diffs a Spectrum community's member roster and event
   list into change events -- `member_joined` / `member_left` / `member_roles_changed` and `org_event_created` / `_updated` /
   `_cancelled` / `_removed` / `_rsvp_changed` -- under the new `spectrum.org` consume tag. Valkey-backed snapshots survive
   restarts (downtime changes still detected), a shrink guard holds back RSI glitches instead of emitting mass departures,

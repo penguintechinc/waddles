@@ -1121,10 +1121,10 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
-  # Bar Citizen role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
+  # Role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
   # deploy-time kill switch, defaulted OFF (critical-rules.md Feature Flags: every feature
   # flagged OFF until validated) -- see templates/role-sync-cronjob.yaml's own header comment.
-  # The engine's own FEATURE_BAR_CITIZEN_ROLE_SYNC PostHog flag is the separate per-tenant
+  # The engine's own FEATURE_ROLE_SYNC PostHog flag is the separate per-tenant
   # RUNTIME gate; this value controls whether the CronJob is deployed at all.
   roleSync:
     enabled: false
@@ -2915,9 +2915,9 @@ config:
   spectrumOrgSyncEnabled: false
   # ENV baseline for flag waddles.calendar.event_discord_sync (default OFF; PostHog overrides when connected)
   eventDiscordSyncEnabled: false
-  # ENV baseline for flag waddles.bar_citizen.role_sync -> FLAG_WADDLES_BAR_CITIZEN_ROLE_SYNC (default OFF;
+  # ENV baseline for flag waddles.role_sync -> FLAG_WADDLES_ROLE_SYNC (default OFF;
   # PostHog overrides when connected). Also needs pipeline.roleSync.enabled for the reconcile CronJob.
-  barCitizenRoleSyncEnabled: false
+  roleSyncEnabled: false
   spectrumOrgPollIntervalS: 300
   # A roster shrinking by more than this fraction in one poll is held back as an RSI glitch, not emitted
   spectrumRosterMaxDepartureRatio: 0.5
