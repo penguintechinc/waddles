@@ -924,7 +924,61 @@ async fn build_stage_capabilities(
         connections,
         snapshot: app_version_snapshot,
     });
-    Some(Arc::new(caps))
+    // Event-sync requests from hub-api (`EVENT_SYNC_REQUEST_KEYS`, a DEDICATED
+    // verify-only ring). Without it the consumer is not started: hub-api's
+    // enqueue then times out loudly instead of anything running unauthenticated.
+    let (caps, event_sync_enabled) = match resolve_event_sync_request_keys() {
+        Some(keys) => (caps.with_event_sync_request_keys(keys), true),
+        None => (caps, false),
+    };
+    let caps = Arc::new(caps);
+    if event_sync_enabled {
+        start_event_sync_consumer(&spine_cfg, Arc::clone(&caps)).await;
+    }
+    Some(caps)
+}
+
+/// Opens the two dedicated connections (blocking pop + result post) and spawns
+/// the event-sync consumer for the process lifetime. A connect failure is
+/// logged loudly and leaves the consumer off (hub-api's enqueue times out).
+async fn start_event_sync_consumer(
+    spine_cfg: &penguin_spine::SpineConfig,
+    caps: Arc<
+        capabilities::StageCapabilities<
+            redis::aio::MultiplexedConnection,
+            redis::aio::MultiplexedConnection,
+        >,
+    >,
+) {
+    let (pop, post) = match (
+        usage::connect(spine_cfg).await,
+        usage::connect(spine_cfg).await,
+    ) {
+        (Ok(pop), Ok(post)) => (pop, post),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!(error = %e, "event-sync consumer NOT started: valkey connection failed");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        capabilities::run_event_sync_consumer(caps, pop, post, shutdown_signal()).await;
+    });
+}
+
+/// Loads the verify-only event-sync request ring from `EVENT_SYNC_REQUEST_KEYS`
+/// (`kid:hexkey[,...]`); logs and returns `None` when unset or unusable.
+fn resolve_event_sync_request_keys() -> Option<pin_sig::PinKeys> {
+    let Ok(raw) = std::env::var("EVENT_SYNC_REQUEST_KEYS") else {
+        tracing::warn!("EVENT_SYNC_REQUEST_KEYS not set; discord event-sync consumer disabled");
+        return None;
+    };
+    match pin_sig::PinKeys::parse(&raw, None) {
+        Ok(keys) => Some(keys),
+        Err(err) => {
+            tracing::error!(error = %err, "EVENT_SYNC_REQUEST_KEYS unusable; discord event-sync consumer disabled");
+            None
+        }
+    }
 }
 
 /// Loads the outbound `pin_sig` signing keys from the DEDICATED

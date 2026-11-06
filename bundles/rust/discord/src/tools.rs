@@ -81,6 +81,29 @@ pub fn call(name: &str, args: &[u8]) -> Result<Vec<u8>, ToolFail> {
                 })?;
             json!({"class": class_name(classify_close_code(code))})
         }
+        // Host-mediated write tools: the HOST executes the pinned scheduled-event
+        // sender template (guild + credential from the community's binding). The
+        // guest only validates the arguments through the SAME template builder the
+        // sender uses, so a tool can never accept what the sender would refuse
+        // (notably any `guild_id` / `channel_id`).
+        other if other.starts_with("discord.scheduled_event.") => {
+            let kind = match &other["discord.scheduled_event.".len()..] {
+                "create" => "event.create",
+                "update" => "event.update",
+                "cancel" => "event.cancel",
+                "delete" => "event.delete",
+                _ => return Err(ToolFail::Unknown),
+            };
+            let payload = serde_json::to_string(&a)
+                .map_err(|_| ToolFail::InvalidArgs("args not serializable".into()))?;
+            crate::sender::build_request(&crate::sender::Action {
+                kind: kind.to_string(),
+                target_source_id: "tool".to_string(),
+                payload_json: payload,
+            })
+            .map_err(|e| ToolFail::InvalidArgs(e.to_string()))?;
+            json!({"validated": true, "op": kind})
+        }
         _ => return Err(ToolFail::Unknown),
     };
     serde_json::to_vec(&out).map_err(|e| ToolFail::InvalidArgs(e.to_string()))
@@ -174,6 +197,39 @@ mod tests {
         assert!(matches!(
             call("classify_frame", b"nope"),
             Err(ToolFail::InvalidArgs(_))
+        ));
+    }
+
+    #[test]
+    fn scheduled_event_tools_validate_through_the_sender_templates() {
+        let ev = json!({"name":"n","scheduled_start_time":"2026-12-01T19:00:00Z","scheduled_end_time":"2026-12-01T20:00:00Z","location":"l"});
+        assert_eq!(
+            run("discord.scheduled_event.create", ev.clone()).unwrap(),
+            json!({"validated":true,"op":"event.create"})
+        );
+        let mut upd = ev.clone();
+        upd["event_id"] = json!("42");
+        assert!(run("discord.scheduled_event.update", upd).is_ok());
+        assert!(run("discord.scheduled_event.cancel", json!({"event_id":"42"})).is_ok());
+        assert!(run("discord.scheduled_event.delete", json!({"event_id":"42"})).is_ok());
+        // a guild / channel can never be supplied, nor a malformed id
+        let mut g = ev.clone();
+        g["guild_id"] = json!("9");
+        assert!(matches!(
+            run("discord.scheduled_event.create", g),
+            Err(ToolFail::InvalidArgs(_))
+        ));
+        assert!(
+            run(
+                "discord.scheduled_event.delete",
+                json!({"event_id":"42","guild_id":"9"})
+            )
+            .is_err()
+        );
+        assert!(run("discord.scheduled_event.delete", json!({"event_id":"../x"})).is_err());
+        assert!(matches!(
+            run("discord.scheduled_event.explode", json!({})),
+            Err(ToolFail::Unknown)
         ));
     }
 }
