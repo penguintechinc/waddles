@@ -353,16 +353,13 @@ where
     let tools_enabled = connector_runtime::selector::tools_enabled(&env_lookup)?;
     let legacy_plan =
         connector_runtime::selector::LegacyPlan::new(&selector, &webhook_platforms, tools_enabled);
-    // `/readyz` reports every overlay-ON platform; until the runtime handle is
-    // wired below it is NotReady("runtime_not_wired") -- loud, never silent.
-    state
-        .receiver_readiness
-        .set_overlay(selector.enabled_platforms(), None);
-    // SEAM (PR-C/PR-D): when `selector.any_overlay()` the ConnectorRuntime is
-    // built and spawned here, `webhook_boot::build_ingress` is called and its
-    // result set on `state.webhook` BEFORE `http::router(state)`, and
-    // `ConnectorRuntime::ready_handle()` is stored on `receiver_readiness`.
-    // With every overlay OFF nothing is built.
+    // Webhook env (PR-D call-site contract): parsed strictly even when OFF.
+    let webhook_env = Arc::new(connector_runtime::webhook_boot::WebhookEnv::from_lookup(
+        &env_lookup,
+    )?);
+    // The runtime's readiness handle, once (and only if) it is built below.
+    // With every overlay OFF nothing is built, bound or spawned.
+    let mut overlay_ready: Option<Arc<dyn connector_runtime::RuntimeReady>> = None;
     let license_client = license::build_license_client();
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
         // Schema-v3 producer: resolver is installed BEFORE any receiver can
@@ -382,10 +379,28 @@ where
         // onto the same underlying TTL cache / HTTP client.
         let dek_provider = build_dek_provider(&config, reqwest::Client::new());
 
+        // Connector overlay runtime (spec 2026-11-05 PR-E): only when an
+        // `OVERLAY_<P>_ENABLED` baseline is ON. It owns the single executor
+        // link + listener; the outbound executor path rides the same link.
+        let mut shared_link = None;
+        if selector.any_overlay() {
+            let started = connector_runtime::boot::start_overlay(
+                &config,
+                &selector,
+                &webhook_env,
+                &mut state,
+                ingest_metrics.clone(),
+                dek_provider.clone(),
+            )
+            .await?;
+            shared_link = Some(Arc::clone(&started.link));
+            overlay_ready = Some(started.ready);
+        }
+
         // Outbound drains are owned by `start_outbound` (the
         // `waddles.connector-tools` mode picks executor vs legacy for every
         // platform); the selector's outbound callbacks are therefore no-ops.
-        start_outbound(&config).await?;
+        start_outbound(&config, shared_link).await?;
         let mut legacy = RealLegacy {
             config: &config,
             metrics: ingest_metrics.clone(),
@@ -395,6 +410,14 @@ where
         };
         connector_runtime::selector::start_legacy(&legacy_plan, &mut legacy).await?;
     } else {
+        if selector.any_overlay() {
+            // Overlay ON but the data plane is OFF: the runtime can never run.
+            // Fatal and named, never a silent fallback to nothing.
+            return Err(connector_runtime::selector::BootError::Prerequisite(
+                license::RUST_DATA_PLANE_FLAG,
+            )
+            .into());
+        }
         // WARN, not INFO: with the flag OFF no outbound drain runs, so
         // `svc_action` refuses every Discord chat.delete/dm.send (no
         // drain-ready key) -- that must be visible to an operator.
@@ -403,6 +426,11 @@ where
             "flag is OFF; receive/produce/outbound-drain NOT started -- discord chat.delete/dm.send bundle ops will be refused until it is ON"
         );
     }
+
+    // `/readyz` reports every overlay-ON platform (none by default).
+    state
+        .receiver_readiness
+        .set_overlay(selector.enabled_platforms(), overlay_ready);
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
@@ -487,10 +515,13 @@ fn shutdown_receiver() -> tokio::sync::oneshot::Receiver<()> {
 /// exactly as before this flag existed. ON: the generic executor path, where
 /// ANY missing/malformed prerequisite is a fatal `Err` -- never a silent
 /// downgrade to legacy.
-async fn start_outbound(config: &config::Config) -> anyhow::Result<()> {
+async fn start_outbound(
+    config: &config::Config,
+    shared_link: Option<Arc<connector::ExecutorLink>>,
+) -> anyhow::Result<()> {
     match outbound_boot::mode(&config.cli) {
         outbound_boot::OutboundMode::Executor => {
-            outbound_boot::start(&config.cli, shutdown_receiver).await
+            outbound_boot::start_shared(&config.cli, shutdown_receiver, shared_link).await
         }
         outbound_boot::OutboundMode::Legacy => {
             if config.cli.dynamic_connections {
@@ -1727,7 +1758,7 @@ mod tests {
             outbound_boot::mode(&config.cli),
             outbound_boot::OutboundMode::Legacy
         );
-        start_outbound(&config).await.unwrap();
+        start_outbound(&config, None).await.unwrap();
     }
 
     /// Flag ON with the executor prerequisites absent is FATAL -- no silent
@@ -1736,7 +1767,7 @@ mod tests {
     async fn connector_tools_on_without_prerequisites_is_fatal_not_legacy() {
         let mut config = base_config();
         config.cli.connector_tools = true;
-        let err = start_outbound(&config).await.unwrap_err();
+        let err = start_outbound(&config, None).await.unwrap_err();
         assert!(
             err.to_string().contains("waddles.connector-tools is ON"),
             "{err}"

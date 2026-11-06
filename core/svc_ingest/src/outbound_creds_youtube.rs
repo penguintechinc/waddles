@@ -606,7 +606,7 @@ mod tests {
                 .and(path("/api/v1/internal/provider-connections"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "success": true,
-                    "items": [{"communityId": 7, "connectionId": 12, "provider": "youtube",
+                    "items": [{"communityId": 7, "connectionId": 12, "tenantId": 3, "secretVersion": 1, "provider": "youtube",
                                "kind": 1, "metadata": {"live_chat_id": CHAT}}],
                     "nextAfter": null
                 })))

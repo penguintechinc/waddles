@@ -242,6 +242,32 @@ impl<R: ConnectionResolve + 'static> SecretsFactory for ResolverSecrets<R> {
     }
 }
 
+/// Publishes a running connection to the host-owned table the host-call bridge
+/// scopes by (`connection_id -> platform/community/tenant`). The supervisor
+/// `activate`s once the tenant is resolved and BEFORE any frame is driven, and
+/// `deactivate`s on EVERY exit (stop, park, failure, panic, abort), so a host
+/// call naming a stale or unknown connection id is refused.
+pub trait ConnectionActivator: Send + Sync {
+    /// Makes `key` callable with the RESOLVED `tenant_id`. A refusal (fixed
+    /// reason, no values) parks the connection: it must never run unscoped.
+    fn activate(&self, key: &ConnKey, tenant_id: i64) -> Result<(), &'static str>;
+    /// Removes `key`; later host calls naming it are denied. Idempotent.
+    fn deactivate(&self, key: &ConnKey);
+}
+
+/// Deactivates its connection when dropped, however the connection future
+/// ends (including cancellation by the runtime's shutdown abort).
+struct ActiveGuard {
+    activator: Arc<dyn ConnectionActivator>,
+    key: ConnKey,
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.activator.deactivate(&self.key);
+    }
+}
+
 /// Registers/binds the webhook routes of a connection (implemented by the
 /// webhook boot; absent means webhook plans park loudly).
 pub trait WebhookAttach: Send + Sync {
@@ -285,6 +311,9 @@ where
     pub frame_metrics: Option<FrameRuleMetrics>,
     /// Webhook binder; `None` parks webhook plans.
     pub webhook: Option<Arc<dyn WebhookAttach>>,
+    /// Active-connection table for the host-call bridge; `None` when no host
+    /// calls are serviced (the link then denies every call).
+    pub activator: Option<Arc<dyn ConnectionActivator>>,
 }
 
 /// How one connection future ended.
@@ -315,6 +344,7 @@ struct Shared<I: ConnectorInvoker, S: EventSink, L: SessionLease> {
     metrics: RuntimeMetrics,
     frame_metrics: Option<FrameRuleMetrics>,
     webhook: Option<Arc<dyn WebhookAttach>>,
+    activator: Option<Arc<dyn ConnectionActivator>>,
     start_sem: Arc<Semaphore>,
     pacers: BTreeMap<&'static str, Arc<Pacer>>,
     heartbeat_enabled: bool,
@@ -371,7 +401,8 @@ where
         key.platform,
         sh.pacers.get(key.platform).cloned(),
         Some(permit),
-    );
+    )
+    .with_connection_id(key.connection_id.to_string());
     tokio::select! {
         r = driver.run(observed, stop_rx) => match r {
             Ok(RunEnd::Shutdown) => TaskEnd::Stopped,
@@ -406,6 +437,7 @@ async fn prepare<I, S, L>(
         tokio::sync::OwnedSemaphorePermit,
         S,
         SharedSecrets,
+        i64,
     ),
     TaskEnd,
 >
@@ -484,7 +516,7 @@ where
             return Err(TaskEnd::Parked(ParkReason::TransportBuild));
         }
     };
-    Ok((tuple, permit, sink, secrets))
+    Ok((tuple, permit, sink, secrets, tenant_id))
 }
 
 /// One connection's whole life: prepare, transport, driver. A stop request
@@ -505,9 +537,29 @@ where
         _ = &mut stop_rx => return TaskEnd::Stopped,
         r = prepare(&sh, &desired) => r,
     };
-    let (tuple, permit, sink, secrets) = match prepared {
+    let (tuple, permit, sink, secrets, tenant_id) = match prepared {
         Ok(p) => p,
         Err(end) => return end,
+    };
+    // Held for the whole connection: dropped on every exit path.
+    let _active = match &sh.activator {
+        Some(activator) => match activator.activate(key, tenant_id) {
+            Ok(()) => Some(ActiveGuard {
+                activator: Arc::clone(activator),
+                key: key.clone(),
+            }),
+            Err(reason) => {
+                tracing::warn!(
+                    platform = key.platform,
+                    community_id = key.community_id,
+                    connection_id = key.connection_id,
+                    reason,
+                    "could not activate the connection for host calls; parking it"
+                );
+                return TaskEnd::Parked(ParkReason::ActivationFailed);
+            }
+        },
+        None => None,
     };
     let driver = ConnectorDriver::new(
         sh.registry.clone(),
@@ -952,6 +1004,7 @@ impl<
             metrics: deps.metrics,
             frame_metrics: deps.frame_metrics,
             webhook: deps.webhook,
+            activator: deps.activator,
             start_sem: Arc::new(Semaphore::new(config.start_concurrency)),
             pacers,
             heartbeat_enabled: config.heartbeat_enabled,

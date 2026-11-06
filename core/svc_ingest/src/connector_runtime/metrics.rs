@@ -79,6 +79,8 @@ pub enum ParkReason {
     TenantUnresolved,
     /// The tenant the profile supplied disagrees with the resolved one.
     TenantMismatch,
+    /// The host-call bridge refused to register the connection.
+    ActivationFailed,
 }
 
 impl ParkReason {
@@ -92,6 +94,7 @@ impl ParkReason {
             Self::WebhookUnavailable => "webhook_unavailable",
             Self::TenantUnresolved => "tenant_unresolved",
             Self::TenantMismatch => "tenant_mismatch",
+            Self::ActivationFailed => "activation_failed",
         }
     }
 }
