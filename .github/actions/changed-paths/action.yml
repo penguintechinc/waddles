@@ -5,7 +5,24 @@ description: >-
   the diff cannot be computed, every area is reported as changed. Requires the
   repo to be checked out with fetch-depth >= 2 and scripts/ci sparse-checked-out.
 
+inputs:
+  globs:
+    description: >-
+      Newline-separated path globs (the workflow's dependency closure). When
+      set, the `match` output is true if any changed file matches one.
+    required: false
+    default: ''
+  area:
+    description: Shared-dependency area for `match` (rust, python, node or none)
+    required: false
+    default: none
+
 outputs:
+  match:
+    description: >-
+      true when this workflow's globs/area are affected, or when path gating
+      does not apply (base is not release/**, push, dispatch) or the diff failed
+    value: ${{ steps.paths.outputs.match }}
   rust:
     description: Rust crates / WIT / proto / SQL embedded by Rust changed
     value: ${{ steps.paths.outputs.rust }}
@@ -42,29 +59,44 @@ runs:
         MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         PUSH_BEFORE: ${{ github.event.before }}
         PUSH_AFTER: ${{ github.sha }}
+        BASE_REF: ${{ github.base_ref }}
+        MG_BASE_REF: ${{ github.event.merge_group.base_ref }}
+        GLOBS: ${{ inputs.globs }}
+        AREA: ${{ inputs.area }}
       run: |
         set -euo pipefail
         script="${GITHUB_WORKSPACE}/scripts/ci/changed-paths.sh"
+        # Path gating applies ONLY to PRs / merge-groups targeting release/**.
+        # Everything else (main PRs, pushes, dispatch, schedule) runs everything.
+        extra=(--area "${AREA:-none}")
+        globs_file="${RUNNER_TEMP}/changed-paths-globs"
+        printf '%s\n' "${GLOBS}" >"${globs_file}"
+        extra+=(--globs "${globs_file}")
+        # Fail closed: any detector error turns every area/match on instead of
+        # failing the job (a failed detector must never skip real checks).
+        run_detector() {
+          "${script}" "$@" "${extra[@]}" || {
+            echo "::warning::changed-paths detector failed -> running everything" >&2
+            "${script}" --all "${extra[@]}"
+          }
+        }
 
         case "${EVENT_NAME}" in
           pull_request)
             # actions/checkout checks out refs/pull/N/merge: HEAD^1 is the base
             # tip the PR is being merged into, so HEAD^1..HEAD is exactly the
             # PR's own change set.
-            exec "${script}" --base "HEAD^1" --head "HEAD"
+            run_detector --tier-base "${BASE_REF}" --base "HEAD^1" --head "HEAD"
             ;;
           merge_group)
             # The queue head commit sits on base_sha plus every queued PR, so
             # base..head is the union of what this group will merge.
-            git fetch --no-tags --depth=1 origin "${MG_BASE_SHA}" || true
-            exec "${script}" --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}"
-            ;;
-          push)
-            git fetch --no-tags --depth=1 origin "${PUSH_BEFORE}" || true
-            exec "${script}" --base "${PUSH_BEFORE}" --head "${PUSH_AFTER}"
+            git fetch --no-tags --depth=1 origin "${MG_BASE_SHA}" || echo "::warning::could not fetch merge-group base; detector will fail open"
+            run_detector --tier-base "${MG_BASE_REF}" --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}"
             ;;
           *)
-            # workflow_dispatch / schedule / release: run everything.
-            exec "${script}" --all
+            # push (incl. main / release), workflow_dispatch, schedule, release:
+            # no path gating, run everything.
+            run_detector --all
             ;;
         esac

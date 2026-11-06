@@ -408,7 +408,7 @@ impl IdentifyBudget for RedisIdentifyBudget {
 
 /// `connector_identify_budget_total{outcome}` -- bounded `outcome` labels:
 /// `granted`, `waited`, `exhausted`, `store_error`, `limit_unavailable`,
-/// `limit_fallback`, `low_headroom`, `resume_skipped`, `credential_rejected`.
+/// `limit_fallback`, `low_headroom`, `resume_skipped`, `resume_mismatch`, `credential_rejected`.
 #[derive(Clone)]
 pub struct IdentifyBudgetMetrics {
     total: IntCounterVec,
@@ -607,6 +607,56 @@ pub fn session_token_is_resumable(token: Option<&str>) -> bool {
     }
 }
 
+/// The only shape a budget-exempt handshake may have. serde's derived struct
+/// deserializer REJECTS duplicate fields, unknown fields and missing fields
+/// (a plain `Value` would silently keep the last duplicate -- a parser
+/// differential against Discord's own parser).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeFrame {
+    op: i64,
+    d: ResumeData,
+}
+
+/// `d` of a RESUME: exactly these three keys, no IDENTIFY fields.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeData {
+    // Present (and a string) by construction; the secret slot lives here.
+    #[allow(dead_code)]
+    token: String,
+    session_id: String,
+    seq: u64,
+}
+
+/// `true` ONLY when `handshake` is exactly the RESUME the host's own session
+/// state calls for: one JSON document (trailing data rejected), top level
+/// exactly `{op, d}` with `op == 6`, `d` exactly `{token, session_id, seq}`
+/// with no duplicate keys at either level, and `session_id`/`seq` equal to the
+/// host session token's. An IDENTIFY, an extra or duplicate key, or IDENTIFY
+/// fields smuggled into `d` is NOT a RESUME and must take a budget slot.
+#[must_use]
+pub fn is_host_resume(handshake: &[u8], session_token: Option<&str>) -> bool {
+    #[derive(Deserialize)]
+    struct Session {
+        session_id: String,
+        seq: u64,
+    }
+    let Some(token) = session_token else {
+        return false;
+    };
+    let Ok(session) = serde_json::from_str::<Session>(token) else {
+        return false;
+    };
+    let Ok(frame) = serde_json::from_slice::<ResumeFrame>(handshake) else {
+        return false;
+    };
+    frame.op == 6
+        && !session.session_id.is_empty()
+        && frame.d.session_id == session.session_id
+        && frame.d.seq == session.seq
+}
+
 /// The Discord [`HandshakeGate`]: RESUME skips the budget; IDENTIFY acquires
 /// a slot (seeding the counter from `/gateway/bot` when needed), waiting with
 /// jitter up to `max_wait`.
@@ -735,9 +785,18 @@ where
 {
     fn acquire<'a>(&'a self, ctx: &'a GateCtx<'a>) -> BoxFut<'a, Result<GatePermit, GateError>> {
         Box::pin(async move {
-            if session_token_is_resumable(ctx.session_token) {
+            // The decision is bound to the bytes that will be sent: only a frame
+            // that STRICTLY parses as the host's own RESUME is budget-exempt.
+            // A guest-rendered IDENTIFY (or anything else) takes a slot even when
+            // the host session looks resumable -- fail closed.
+            if is_host_resume(ctx.handshake, ctx.session_token) {
                 self.metrics.inc("resume_skipped");
                 return Ok(GatePermit::not_required());
+            }
+            if session_token_is_resumable(ctx.session_token) {
+                self.metrics.inc("resume_mismatch");
+                tracing::warn!(platform = %ctx.platform,
+                    "resumable session but the rendered handshake is not a RESUME; taking an IDENTIFY slot");
             }
             match self.acquire_slot().await {
                 Ok(waited) => Ok(GatePermit {
@@ -904,22 +963,135 @@ mod tests {
             .map_or(0, |m| m.get_counter().value() as u64)
     }
 
+    /// The host session state the RESUME frames below are built from.
+    const TOK: &str = r#"{"session_id":"x","seq":1,"self_user_id":"9"}"#;
+    const RESUME_FRAME: &[u8] =
+        br#"{"op":6,"d":{"token":"{{discord-bot}}","session_id":"x","seq":1}}"#;
+    const IDENTIFY_FRAME: &[u8] = br#"{"op":2,"d":{"token":"{{discord-bot}}","intents":1}}"#;
+
+    /// A session token present means the host expects a RESUME; the frame the
+    /// helper pairs with it is the matching RESUME, otherwise an IDENTIFY.
     fn cx(token: Option<&str>) -> GateCtx<'_> {
+        cx_with(
+            token,
+            if token.is_some() {
+                RESUME_FRAME
+            } else {
+                IDENTIFY_FRAME
+            },
+        )
+    }
+
+    fn cx_with<'a>(token: Option<&'a str>, handshake: &'a [u8]) -> GateCtx<'a> {
         GateCtx {
             platform: "discord",
             source_id: "s",
             connection_id: "c",
             session_token: token,
+            handshake,
         }
     }
 
     #[tokio::test]
     async fn resume_never_touches_the_budget() {
         let (g, b, reg) = gate(vec![], false, lim());
-        let p = g.acquire(&cx(Some(r#"{"session_id":"x"}"#))).await.unwrap();
+        let p = g.acquire(&cx(Some(TOK))).await.unwrap();
         assert!(!p.consumed);
         assert_eq!(*b.acquires.lock().unwrap(), 0);
         assert_eq!(count(&reg, "resume_skipped"), 1);
+    }
+
+    /// Security regression: the exemption is bound to the bytes SENT. A guest
+    /// that renders an IDENTIFY (op 2) while the host session looks resumable
+    /// must still take a slot; a RESUME (op 6) must not; an anything-else frame
+    /// or a RESUME with no resumable session is not exempt either.
+    #[tokio::test]
+    async fn the_budget_decision_follows_the_rendered_frame_not_the_session_token() {
+        let tok = Some(TOK);
+        // guest renders op 2 although a session exists -> slot acquired
+        let (g, b, reg) = gate(vec![Ok(AcquireOutcome::Granted)], false, lim());
+        let p = g.acquire(&cx_with(tok, IDENTIFY_FRAME)).await.unwrap();
+        assert!(
+            p.consumed,
+            "an IDENTIFY consumes a slot even with a session"
+        );
+        assert_eq!(*b.acquires.lock().unwrap(), 1);
+        assert_eq!(count(&reg, "resume_mismatch"), 1);
+        assert_eq!(count(&reg, "resume_skipped"), 0);
+        // op 6 + resumable session -> no slot
+        let (g, b, reg) = gate(vec![], false, lim());
+        let p = g.acquire(&cx_with(tok, RESUME_FRAME)).await.unwrap();
+        assert!(!p.consumed);
+        assert_eq!(*b.acquires.lock().unwrap(), 0);
+        assert_eq!(count(&reg, "resume_skipped"), 1);
+        // an unrecognised frame (not the anchored prefix) is never exempt
+        for odd in [
+            &b""[..],
+            br#" {"op":6,"d":{"token":"x"}}"#,
+            br#"{"d":{"token":"x"},"op":6}"#,
+        ] {
+            let (g, b, _) = gate(vec![Ok(AcquireOutcome::Granted)], false, lim());
+            assert!(g.acquire(&cx_with(tok, odd)).await.unwrap().consumed);
+            assert_eq!(*b.acquires.lock().unwrap(), 1);
+        }
+        // exhausted budget refuses the guest IDENTIFY: nothing may be sent
+        let (g, _, _) = gate(
+            vec![Ok(AcquireOutcome::Exhausted {
+                retry_after: Duration::from_secs(9),
+            })],
+            false,
+            lim(),
+        );
+        assert!(matches!(
+            g.acquire(&cx_with(tok, IDENTIFY_FRAME)).await,
+            Err(GateError::Exhausted { .. })
+        ));
+    }
+
+    /// Security regression (parser differential): only a STRICT, exact RESUME
+    /// built from the host session is exempt. Duplicate `op`, trailing keys or
+    /// data, IDENTIFY fields in `d`, a foreign session id/seq: all take a slot.
+    #[tokio::test]
+    async fn only_a_strict_host_resume_is_exempt() {
+        assert!(is_host_resume(RESUME_FRAME, Some(TOK)));
+        // whitespace/key order inside the two exact objects is irrelevant to JSON
+        assert!(is_host_resume(
+            br#"{ "d" : {"seq":1,"session_id":"x","token":"t"}, "op" : 6 }"#,
+            Some(TOK)
+        ));
+        let bad: [&[u8]; 11] = [
+            // duplicate op (a lenient parser keeps the LAST one: IDENTIFY)
+            br#"{"op":6,"d":{"token":"t","session_id":"x","seq":1},"op":2}"#,
+            br#"{"op":2,"op":6,"d":{"token":"t","session_id":"x","seq":1}}"#,
+            // trailing key after d
+            br#"{"op":6,"d":{"token":"t","session_id":"x","seq":1},"x":1}"#,
+            // trailing data after the document
+            br#"{"op":6,"d":{"token":"t","session_id":"x","seq":1}}{"op":2}"#,
+            // IDENTIFY fields smuggled into d
+            br#"{"op":6,"d":{"token":"t","session_id":"x","seq":1,"properties":{}}}"#,
+            br#"{"op":6,"d":{"token":"t","session_id":"x","seq":1,"intents":1}}"#,
+            br#"{"op":6,"d":{"token":"t","session_id":"x","seq":1,"shard":[0,1]}}"#,
+            // duplicate keys inside d
+            br#"{"op":6,"d":{"token":"t","session_id":"x","seq":1,"seq":2}}"#,
+            // foreign session id / seq, wrong op, non-integer op
+            br#"{"op":6,"d":{"token":"t","session_id":"y","seq":1}}"#,
+            br#"{"op":6,"d":{"token":"t","session_id":"x","seq":2}}"#,
+            br#"{"op":6.0,"d":{"token":"t","session_id":"x","seq":1}}"#,
+        ];
+        for (i, frame) in bad.iter().enumerate() {
+            assert!(
+                !is_host_resume(frame, Some(TOK)),
+                "case {i} must not be exempt"
+            );
+            let (g, b, reg) = gate(vec![Ok(AcquireOutcome::Granted)], false, lim());
+            let p = g.acquire(&cx_with(Some(TOK), frame)).await.unwrap();
+            assert!(p.consumed, "case {i} must take a slot");
+            assert_eq!(*b.acquires.lock().unwrap(), 1, "case {i}");
+            assert_eq!(count(&reg, "resume_skipped"), 0, "case {i}");
+        }
+        // no session -> never exempt, however perfect the frame
+        assert!(!is_host_resume(RESUME_FRAME, None));
+        assert!(!is_host_resume(RESUME_FRAME, Some("not json")));
     }
 
     #[tokio::test]

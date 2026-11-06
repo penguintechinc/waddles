@@ -24,7 +24,8 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use connection_resolver::ConnectionResolve;
+use bundle_host_http::guarded::{GuardedClient, GuardedLimits};
+use connection_resolver::{ConnectionRef, ConnectionResolve};
 use penguin_spine::{KeyRing, SpineMetrics};
 
 use super::feed::{ConnKey, DynFeed, FeedSet, HubBindingFeed, TransportPlan, WebhookPlan};
@@ -34,8 +35,8 @@ use super::profiles::{discord, twitch, youtube};
 use super::scoped::{ConnectionSink, ScopeLookup, ScopeTenantResolve, ScopedSinkFactory};
 use super::selector::{BootError, ConnectorSelector, IDENTIFY_BUDGET_READY};
 use super::supervisor::{
-    ConnectionActivator, ConnectorRuntime, ResolverSecrets, RuntimeConfig, RuntimeDeps,
-    RuntimeError, SecretsWrapper, WebhookAttach,
+    ConnectionActivator, ConnectorRuntime, HandshakeGateFactory, ResolverSecrets, RuntimeConfig,
+    RuntimeDeps, RuntimeError, SecretsWrapper, WebhookAttach,
 };
 use super::webhook_boot::{self, WebhookEnv};
 use super::ConnectorValkeyLease;
@@ -46,8 +47,9 @@ use crate::connector::host_calls::{
 use crate::connector::secrets::TransportSecretSource;
 use crate::connector::webhook::{WebhookIngress, WebhookTransport};
 use crate::connector::{
-    register_connector_metrics, ConnectorRegistry, ExecutorLink, FrameRuleMetrics, PinnedConnector,
-    TransportError, WireConnectorInvoker,
+    register_connector_metrics, ConnectorRegistry, DiscordIdentifyGate, ExecutorLink,
+    FrameRuleMetrics, GatewayBotSource, HandshakeGate, IdentifyBudgetMetrics, PinnedConnector,
+    RedisIdentifyBudget, TransportError, WireConnectorInvoker,
 };
 use crate::identity_crypto::DekProvider;
 use crate::publish::EventAppender;
@@ -298,6 +300,94 @@ pub fn twitch_secrets_wrapper() -> SecretsWrapper {
     })
 }
 
+/// Scope namespacing the Discord IDENTIFY budget keys in Valkey (host constant).
+pub const IDENTIFY_BUDGET_SCOPE: &str = "discord";
+/// Deadline of one `GET /gateway/bot` limit fetch.
+const GATEWAY_BOT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Ceiling of the `GET /gateway/bot` body.
+const GATEWAY_BOT_MAX_BYTES: usize = 64 * 1024;
+
+/// The Valkey-backed IDENTIFY budget the Discord connector requires. Without it
+/// Discord ON cannot start: a restart storm would burn the bot's daily
+/// `session_start_limit`.
+pub struct IdentifyBudgetBackend {
+    /// Connected Valkey shared by every replica (the fleet-wide budget).
+    pub conn: redis::aio::MultiplexedConnection,
+    /// Discord REST base for `GET /gateway/bot` (production:
+    /// [`crate::connector::identify_budget::DISCORD_API_BASE`]).
+    pub api_base: String,
+    /// Per-bucket window; production keeps Discord's 5s
+    /// ([`crate::connector::identify_budget::IDENTIFY_WINDOW`]).
+    pub window: Duration,
+}
+
+/// [`HandshakeGateFactory`] giving every Discord connection a
+/// [`DiscordIdentifyGate`]: one IDENTIFY per bucket fleet-wide, RESUME exempt,
+/// Valkey/limit failures fail closed. Other platforms get no gate.
+pub struct DiscordGateFactory {
+    budget: Arc<RedisIdentifyBudget>,
+    client: GuardedClient,
+    api_base: String,
+    metrics: IdentifyBudgetMetrics,
+}
+
+impl DiscordGateFactory {
+    /// Builds the factory over `backend`; `egress_allow` is the SSRF guard's
+    /// allow-list (empty in production).
+    #[must_use]
+    pub fn new(
+        backend: IdentifyBudgetBackend,
+        egress_allow: Vec<IpAddr>,
+        metrics: IdentifyBudgetMetrics,
+    ) -> Self {
+        Self {
+            budget: Arc::new(
+                RedisIdentifyBudget::new(backend.conn, IDENTIFY_BUDGET_SCOPE)
+                    .with_window(backend.window),
+            ),
+            client: GuardedClient::new(
+                GuardedLimits {
+                    max_redirects: 0,
+                    timeout: GATEWAY_BOT_TIMEOUT,
+                    max_response_bytes: GATEWAY_BOT_MAX_BYTES,
+                },
+                egress_allow,
+            ),
+            api_base: backend.api_base,
+            metrics,
+        }
+    }
+}
+
+impl HandshakeGateFactory for DiscordGateFactory {
+    fn for_connection(
+        &self,
+        desired: &super::feed::DesiredConnection,
+        secrets: Arc<dyn TransportSecretSource>,
+    ) -> Result<Option<Arc<dyn HandshakeGate>>, TransportError> {
+        if desired.key.platform != discord::PLATFORM {
+            return Ok(None);
+        }
+        let source = GatewayBotSource::new(
+            self.client.clone(),
+            Arc::new(super::observed::SharedSecrets(secrets)),
+            ConnectionRef {
+                community_id: desired.key.community_id,
+                connection_id: desired.key.connection_id,
+            },
+            self.api_base.clone(),
+        )
+        .with_metrics(self.metrics.clone());
+        let gate = DiscordIdentifyGate::new(
+            Arc::clone(&self.budget),
+            Arc::new(source),
+            0,
+            self.metrics.clone(),
+        );
+        Ok(Some(Arc::new(gate)))
+    }
+}
+
 /// Wraps one platform's feed (a loopback test rewrites the host-constant URL).
 pub type FeedWrap = Arc<dyn Fn(&'static str, Arc<dyn DynFeed>) -> Arc<dyn DynFeed> + Send + Sync>;
 
@@ -343,6 +433,9 @@ where
     pub bridge: HostBridge,
     /// Webhook ingress + env when any webhook platform is listed.
     pub webhook: Option<(Arc<WebhookIngress>, Arc<WebhookEnv>)>,
+    /// The Discord IDENTIFY budget backend. REQUIRED when Discord is ON:
+    /// [`assemble`] refuses to build a Discord runtime without it.
+    pub identify_budget: Option<IdentifyBudgetBackend>,
     /// Registry that receives the runtime/connector series.
     pub registry: prometheus::Registry,
     /// Loopback test seams (`Default` in production).
@@ -415,6 +508,20 @@ where
     let frame_metrics = FrameRuleMetrics::register(&deps.registry)
         .map_err(|_| BootError::Malformed("frame rule metrics"))?;
 
+    let gates: Option<Arc<dyn HandshakeGateFactory>> = if settings.platforms.contains(&"discord") {
+        let backend = deps
+            .identify_budget
+            .ok_or(BootError::Missing("the Valkey identify budget backend"))?;
+        let metrics = IdentifyBudgetMetrics::register(&deps.registry)
+            .map_err(|_| BootError::Malformed("identify budget metrics"))?;
+        Some(Arc::new(DiscordGateFactory::new(
+            backend,
+            settings.egress_allow.clone(),
+            metrics,
+        )))
+    } else {
+        None
+    };
     let env = settings.runtime_env();
     let mut feeds = FeedSet::new();
     let mut providers = BTreeMap::new();
@@ -460,6 +567,7 @@ where
             Some(custom) => custom,
             None => Arc::new(secrets),
         },
+        gates,
         tenants: Arc::new(ScopeTenantResolve::new(deps.scope)),
         executor: Arc::clone(&deps.bridge.link) as _,
         connector_metrics,
@@ -649,6 +757,7 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
         .map_err(|e| {
             anyhow::anyhow!("connector runtime: valkey connect failed ({:?})", e.kind())
         })?;
+    let budget_conn = lease_conn.clone();
     let link = Arc::clone(&bridge.link);
     let runtime = assemble(
         settings,
@@ -662,6 +771,13 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
             dek: Arc::new(dek),
             identity_metrics: metrics.identity_encryption_total.clone(),
             lease_conn,
+            identify_budget: settings.platforms.contains(&"discord").then(|| {
+                IdentifyBudgetBackend {
+                    conn: budget_conn,
+                    api_base: crate::connector::identify_budget::DISCORD_API_BASE.to_owned(),
+                    window: crate::connector::identify_budget::IDENTIFY_WINDOW,
+                }
+            }),
             bridge,
             webhook,
             registry,
@@ -1212,6 +1328,11 @@ mod tests {
         registry: prometheus::Registry,
     ) -> AssembleDeps<EmptyHub, NullAppender, FixedDek> {
         AssembleDeps {
+            identify_budget: Some(IdentifyBudgetBackend {
+                conn: lease_conn().await,
+                api_base: "http://127.0.0.1:9".into(),
+                window: Duration::from_secs(5),
+            }),
             resolver: hub,
             scope: Arc::new(NoScope),
             appender: Arc::new(NullAppender),
@@ -1270,6 +1391,25 @@ mod tests {
             again.err(),
             Some(BootError::Malformed("connector runtime metrics")),
             "duplicate series on one registry"
+        );
+    }
+
+    /// Discord ON without the Valkey identify budget backend is refused at
+    /// assembly (fail closed), while a runtime with Discord OFF needs none.
+    #[tokio::test]
+    async fn assemble_refuses_discord_without_the_identify_budget_backend() {
+        let hub = Arc::new(EmptyHub(std::sync::atomic::AtomicUsize::new(0)));
+        let mut d = deps(hub.clone(), prometheus::Registry::new()).await;
+        d.identify_budget = None;
+        assert_eq!(
+            assemble(&settings(vec!["discord"]), d).err(),
+            Some(BootError::Missing("the Valkey identify budget backend"))
+        );
+        let mut d = deps(hub, prometheus::Registry::new()).await;
+        d.identify_budget = None;
+        assert!(
+            assemble(&settings(vec!["twitch", "youtube"]), d).is_ok(),
+            "no Discord, no budget needed"
         );
     }
 

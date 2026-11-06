@@ -10,10 +10,6 @@ on:
       - '.github/workflows/node-waddle-sdk-js.yml'
   pull_request:
     branches: [main, 'release/**']
-    paths:
-      - 'sdk/waddle-sdk-js/**'
-      - 'wit/waddle-bundle/**'
-      - 'bundles/javascript/example/**'
   workflow_dispatch:
 
 permissions:
@@ -24,7 +20,38 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Path gate (release PRs only): shared detector, fails closed. A job skipped
+  # here means "not affected"; main PRs / pushes / dispatch run everything.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      match: ${{ steps.paths.outputs.match }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+        with:
+          area: node
+          globs: |
+            sdk/waddle-sdk-js/**
+            wit/waddle-bundle/**
+            bundles/javascript/example/**
+
   test:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
     name: typecheck + lint + test + conformance
     runs-on: ubuntu-latest
     defaults:

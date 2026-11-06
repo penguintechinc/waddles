@@ -14,10 +14,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-# Flipped to True by the identify-budget PR (together with the Rust const
-# `connector_runtime::selector::IDENTIFY_BUDGET_READY`) once the Discord
-# IDENTIFY budget is ported. While False, a Discord connector ON is fatal.
-IDENTIFY_BUDGET_READY = False
+# Mirrors the Rust const `connector_runtime::selector::IDENTIFY_BUDGET_READY`:
+# True now the Discord IDENTIFY budget is wired into the runtime. While False,
+# a Discord connector ON is fatal.
+IDENTIFY_BUDGET_READY = True
 
 PLATFORMS = ("twitch", "discord", "youtube")
 WEBHOOK_CAPABLE = ("twitch", "discord")

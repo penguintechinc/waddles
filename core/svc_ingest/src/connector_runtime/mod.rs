@@ -37,7 +37,7 @@ pub use lease::ConnectorValkeyLease;
 pub use plan::{ConnectorProfile, PlanError, RuntimeEnv};
 pub use ready::{Readiness, RuntimeReady};
 pub use supervisor::{
-    ConnectionActivator, ConnectorRuntime, ResolverSecrets, RuntimeConfig, RuntimeDeps,
-    RuntimeError, SecretsFactory, SinkBuildError, SinkFactory, WebhookAttach,
+    ConnectionActivator, ConnectorRuntime, HandshakeGateFactory, ResolverSecrets, RuntimeConfig,
+    RuntimeDeps, RuntimeError, SecretsFactory, SinkBuildError, SinkFactory, WebhookAttach,
 };
 pub use tenant::{TenantError, TenantResolve, TENANT_UNRESOLVED};
