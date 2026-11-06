@@ -42,6 +42,7 @@ use super::metrics::{
 use super::observed::{ObservedInvoker, ObservedTransport, Pacer, SharedSecrets};
 use super::ready::{ExecutorStatus, RuntimeReady, RuntimeStatus};
 use super::tenant::{TenantError, TenantResolve, TENANT_UNRESOLVED};
+use crate::connector::spectrum::{SpectrumStore, SpectrumTransport};
 use crate::connector::webhook::BoxFut;
 use crate::connector::webhook::WebhookTransport;
 use crate::connector::ConnectorInvoker;
@@ -337,6 +338,8 @@ where
     /// Active-connection table for the host-call bridge; `None` when no host
     /// calls are serviced (the link then denies every call).
     pub activator: Option<Arc<dyn ConnectionActivator>>,
+    /// Dedupe/snapshot state for Spectrum plans; `None` parks them loudly.
+    pub spectrum: Option<Arc<dyn SpectrumStore>>,
 }
 
 /// How one connection future ended.
@@ -369,6 +372,7 @@ struct Shared<I: ConnectorInvoker, S: EventSink, L: SessionLease> {
     frame_metrics: Option<FrameRuleMetrics>,
     webhook: Option<Arc<dyn WebhookAttach>>,
     activator: Option<Arc<dyn ConnectionActivator>>,
+    spectrum: Option<Arc<dyn SpectrumStore>>,
     start_sem: Arc<Semaphore>,
     pacers: BTreeMap<&'static str, Arc<Pacer>>,
     heartbeat_enabled: bool,
@@ -636,6 +640,20 @@ where
                 Ok(t) => t,
                 Err(e) => return build_failed(e.kind()),
             };
+            if let Some(m) = &sh.frame_metrics {
+                t = t.with_metrics(m.clone());
+            }
+            drive(&sh, &driver, t, key, tuple, permit, stop_rx).await
+        }
+        TransportPlan::Spectrum(plan) => {
+            let Some(store) = &sh.spectrum else {
+                return build_failed("spectrum_store_missing");
+            };
+            let poll = match PollTransport::new(plan.poll.clone(), secrets) {
+                Ok(t) => t,
+                Err(e) => return build_failed(e.kind()),
+            };
+            let mut t = SpectrumTransport::new(poll, Arc::clone(store), plan.spec.clone());
             if let Some(m) = &sh.frame_metrics {
                 t = t.with_metrics(m.clone());
             }
@@ -1047,6 +1065,7 @@ impl<
             frame_metrics: deps.frame_metrics,
             webhook: deps.webhook,
             activator: deps.activator,
+            spectrum: deps.spectrum,
             start_sem: Arc::new(Semaphore::new(config.start_concurrency)),
             pacers,
             heartbeat_enabled: config.heartbeat_enabled,

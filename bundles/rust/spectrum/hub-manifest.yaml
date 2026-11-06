@@ -1,0 +1,33 @@
+# hub-api install-pipeline manifest for the Spectrum connector (gh #486); identical contract to bundle.yaml,
+# present because svc-ingest's host-call grant table is verified against bundles/rust/<platform>/hub-manifest.yaml.
+# RSI Spectrum platform CONNECTOR (gh #486): one-way INBOUND `kind: service` bundle on the
+# `connector` world. NOT yet registered in bundles/core-bundles.yaml and NOT wired to a
+# svc_ingest profile -- see README "Remaining work". Cutover flag (when wired): PostHog
+# `waddles.connector-spectrum` / env `CONNECTOR_SPECTRUM_ENABLED`, default OFF.
+# No outbound capability is requested on purpose (#101: writing to RSI's undocumented API
+# risks banning the org). The session credential never enters this component.
+schema_version: 2
+app_id: waddles.core.service.spectrum
+name: RSI Spectrum Platform Connector (Rust, inbound-only)
+version: 0.1.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+artifact: component
+execution_model: wasi-component
+is_default: false
+kind: service
+# Guest egress is EMPTY by design: the RSI poll host allowlist + session credential live in the
+# host-side poll transport config (svc_ingest Spectrum profile), exactly as for YouTube.
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 0
+permissions:
+  - id: connector.pii.read
+    justification: "gates identity.lookup, used to tokenize each Spectrum member to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw member id or handle leaves the connector)"
+routes_to: []

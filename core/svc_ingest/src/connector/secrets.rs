@@ -58,6 +58,8 @@ pub fn approved_hosts(provider: &str) -> &'static [&'static str] {
         "discord" => &["discord.com", "gateway.discord.gg"],
         "youtube" => &["www.googleapis.com", "youtube.googleapis.com"],
         "slack" => &["slack.com", "www.slack.com"],
+        // RSI Spectrum (gh #486): the one host its session token may reach.
+        "spectrum" => &["robertsspaceindustries.com"],
         // Test-only provider whose upstream is the loopback mock server.
         #[cfg(test)]
         "testprov" => &["127.0.0.1"],
@@ -295,6 +297,34 @@ mod tests {
             true,
             &d
         ));
+    }
+
+    /// The RSI session token may only ever reach the RSI host over TLS:443.
+    #[test]
+    fn spectrum_token_only_reaches_the_rsi_host() {
+        for (url, ok) in [
+            ("https://robertsspaceindustries.com/api/spectrum/x", true),
+            ("http://robertsspaceindustries.com/api/spectrum/x", false),
+            ("https://robertsspaceindustries.com:8443/x", false),
+            ("https://www.robertsspaceindustries.com/x", false),
+            ("https://robertsspaceindustries.com.evil.example/x", false),
+            ("https://api.twitch.tv/x", false),
+        ] {
+            assert_eq!(
+                destination_approved("spectrum", None, false, &dest_of(url)),
+                ok,
+                "{url}"
+            );
+        }
+        // a static row must also carry a matching endpoint
+        let d = dest_of("https://robertsspaceindustries.com/api/spectrum/x");
+        assert!(destination_approved(
+            "spectrum",
+            Some("https://robertsspaceindustries.com/api"),
+            true,
+            &d
+        ));
+        assert!(!destination_approved("spectrum", None, true, &d));
     }
 
     /// Mounts one resolve answer with an arbitrary body.

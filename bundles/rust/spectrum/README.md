@@ -21,9 +21,18 @@ sender.build-request --> ALWAYS Unsupported (one-way inbound by design, #101)
 | `author_id`/`member_id`/`display_name`/`organizer_id` in payload | present | **removed** (PII boundary); actor is the tokenized UUID |
 | anonymous author | actor `"unknown"` | actor `None` |
 
-## Remaining work (NOT in this crate -- host/runtime, see PR description)
+## Host side (slice 2b, `core/svc_ingest`)
 
-1. svc_ingest `PollTransport` is GET + cursor only; Spectrum needs **POST + JSON body + `Cookie`/`X-Rsi-Token` header** (profile-derived, host-constant).
-2. **Seen-id dedupe + priming** (no backlog flood) and the **roster/events snapshot store + diff** (Valkey) are stateful and must live host-side (guests are stateless; pinned connectors have no host-call bridge).
-3. `SpectrumProfile`, selector entry (`CONNECTOR_SPECTRUM_ENABLED`) + legacy-suppression parity fixtures, helm `connectors.spectrum.*`, hub-api provider (`spectrum`, RSI session token as `platform_credential`), `core-bundles.yaml` entry, `connector_e2e` against a fake Spectrum API.
-4. Identity: `identity.lookup(("spectrum", member_id))` needs the `spectrum` platform registered with the identity backend.
+| Piece | Where |
+|---|---|
+| POST + JSON body + `Cookie`/`X-Rsi-Token` | `connector/poll.rs` `PollRequest` (slice 2a) |
+| Host-owned page cursor (host writes the integer `page` field; never guest/metadata controlled) | `PollRequest::page_field`, `PollTransport::fetch_page` |
+| Seen-id dedupe + priming (no history flood), roster/org-event snapshot store + diff (Valkey, community-scoped numeric keys, ids/fingerprints only) | `connector/spectrum.rs`, `connector/spectrum_org.rs` |
+| `SpectrumProfile` (RSI host pinned; tenant = feed's server-derived tenant) | `connector_runtime/profiles/spectrum.rs`, `connector/secrets.rs` `approved_hosts("spectrum")` |
+| `identity.lookup` for platform `spectrum` | `connector/host_calls.rs` `CONNECTORS` |
+| Real-path proof (real wasm, fake RSI API, runtime tenant park) | `core/connector_e2e/tests/spectrum_profile.rs` |
+
+## Remaining work (NOT in this slice)
+
+1. Selector entry (`CONNECTOR_SPECTRUM_ENABLED`) + boot wiring of the Valkey store (`RuntimeDeps::spectrum`) + legacy-suppression parity fixtures.
+2. helm `connectors.spectrum.*`, hub-api provider (`spectrum`, RSI session token credential), `core-bundles.yaml` entry.
