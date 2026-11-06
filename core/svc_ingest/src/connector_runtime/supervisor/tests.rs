@@ -1806,3 +1806,104 @@ async fn the_connection_ctx_carries_the_hub_connection_id() {
         .any(|id| id == "4242"));
     r.stop().await;
 }
+
+// ---- target rediscovery ends ---------------------------------------------
+
+/// A hook whose recorded outcome is fixed.
+#[derive(Debug)]
+struct FixedHook(Mutex<Option<crate::connector::RediscoverOutcome>>);
+
+impl crate::connector::Rediscover for FixedHook {
+    fn apply(
+        &self,
+        _body: &[u8],
+    ) -> Result<crate::connector::RediscoverOutcome, crate::connector::RediscoverError> {
+        Err(crate::connector::RediscoverError::Malformed)
+    }
+
+    fn take_outcome(&self) -> Option<crate::connector::RediscoverOutcome> {
+        self.0.lock().expect("lock").take()
+    }
+}
+
+fn hook_cfg(o: Option<crate::connector::RediscoverOutcome>) -> crate::connector::RediscoverConfig {
+    crate::connector::RediscoverConfig {
+        url: "https://example.invalid/x".into(),
+        hook: Arc::new(FixedHook(Mutex::new(o))),
+    }
+}
+
+#[test]
+fn rediscovery_end_refines_only_a_fatal_park_with_a_recorded_outcome() {
+    use crate::connector::RediscoverOutcome::{Rediscovered, WaitingForLive};
+    let fatal = TaskEnd::Parked(ParkReason::Fatal);
+    assert_eq!(
+        rediscovery_end(fatal, Some(&hook_cfg(Some(Rediscovered)))),
+        TaskEnd::Rediscovered
+    );
+    assert_eq!(
+        rediscovery_end(fatal, Some(&hook_cfg(Some(WaitingForLive)))),
+        TaskEnd::WaitingForLive
+    );
+    // No recorded outcome (a real credential failure) and no hook stay fatal.
+    assert_eq!(rediscovery_end(fatal, Some(&hook_cfg(None))), fatal);
+    assert_eq!(rediscovery_end(fatal, None), fatal);
+    // Other ends are never reinterpreted, and the hook is not consumed.
+    let c = hook_cfg(Some(Rediscovered));
+    for other in [
+        TaskEnd::Stopped,
+        TaskEnd::Parked(ParkReason::TransportBuild),
+        TaskEnd::LeaseLost,
+    ] {
+        assert_eq!(rediscovery_end(other, Some(&c)), other);
+    }
+    assert_eq!(c.hook.take_outcome(), Some(Rediscovered));
+}
+
+#[tokio::test]
+async fn core_rediscovery_ends_restart_at_the_next_reconcile_not_terminally() {
+    let (mut core, _store, m) = core_rig(fast_config());
+    for c in 1..=2 {
+        core.slots.insert(
+            key(c, c * 10),
+            Slot {
+                desired: Arc::new(d(c, c * 10, 1)),
+                state: SlotState::Active,
+                stopping: false,
+                pending: None,
+                stop: None,
+            },
+        );
+    }
+    core.on_end(key(1, 10), TaskEnd::Rediscovered).await;
+    core.on_end(key(2, 20), TaskEnd::WaitingForLive).await;
+    assert_eq!(core.state_of(&key(1, 10)), Some("cooldown"));
+    assert_eq!(core.state_of(&key(2, 20)), Some("cooldown"));
+    assert_eq!(
+        m.parked_total
+            .with_label_values(&[PLATFORM, "waiting_for_live"])
+            .get(),
+        1,
+        "only waiting is a (non-terminal) park metric"
+    );
+    assert_eq!(
+        m.parked_total.with_label_values(&[PLATFORM, "fatal"]).get(),
+        0
+    );
+    // The next reconcile restarts both: the retargeted one on its new
+    // fingerprint, the waiting one (unchanged) as a re-check.
+    core.apply(PLATFORM, vec![d(1, 10, 2), d(2, 20, 1)]);
+    assert!(is_active(&core, &key(1, 10)) && is_active(&core, &key(2, 20)));
+    assert_eq!(
+        m.restarts_total
+            .with_label_values(&[PLATFORM, "fingerprint"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        m.restarts_total
+            .with_label_values(&[PLATFORM, "waiting_for_live"])
+            .get(),
+        1
+    );
+}

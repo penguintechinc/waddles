@@ -402,6 +402,7 @@ mod tests {
                 egress_allow: vec![server.address().ip()],
                 allow_loopback_insecure: true,
                 lifecycle: Default::default(),
+                rediscover: None,
             },
             source,
         )
@@ -716,6 +717,7 @@ mod tests {
                 egress_allow: vec![attacker.address().ip()],
                 allow_loopback_insecure: true,
                 lifecycle: Default::default(),
+                rediscover: None,
             },
             source,
         )
@@ -813,6 +815,7 @@ mod tests {
                 egress_allow: vec![server.address().ip()],
                 allow_loopback_insecure: true,
                 lifecycle: Default::default(),
+                rediscover: None,
             },
             source,
         )

@@ -47,8 +47,8 @@ use crate::connector::webhook::WebhookTransport;
 use crate::connector::ConnectorInvoker;
 use crate::connector::{
     ConnectorDriver, ConnectorMetrics, ConnectorRegistry, EventSink, FrameRuleMetrics,
-    HandshakeGate, PollTransport, RunEnd, Transport, TransportError, TransportSecretSource,
-    TransportSecrets, WsTransport,
+    HandshakeGate, PollTransport, RediscoverConfig, RediscoverOutcome, RunEnd, Transport,
+    TransportError, TransportSecretSource, TransportSecrets, WsTransport,
 };
 use crate::twitch_sessions::SessionLease;
 
@@ -352,6 +352,12 @@ enum TaskEnd {
     LeaseDenied,
     /// The lease was lost while running.
     LeaseLost,
+    /// The polled target ended and a new one was recorded; restart at the
+    /// next reconcile on the re-derived plan.
+    Rediscovered,
+    /// The polled target ended and none is live yet; re-check at the next
+    /// reconcile.
+    WaitingForLive,
 }
 
 /// State shared by every connection future.
@@ -437,6 +443,20 @@ where
             sh.metrics.lease(key.platform, LeaseOutcome::Lost);
             TaskEnd::LeaseLost
         }
+    }
+}
+
+/// Refines a terminal poll end: when the transport ended itself because its
+/// target ended, the rediscovery hook's recorded outcome says whether to
+/// restart on a new target or wait for one. Any other end passes through.
+fn rediscovery_end(end: TaskEnd, rediscover: Option<&RediscoverConfig>) -> TaskEnd {
+    if end != TaskEnd::Parked(ParkReason::Fatal) {
+        return end;
+    }
+    match rediscover.and_then(|r| r.hook.take_outcome()) {
+        Some(RediscoverOutcome::Rediscovered) => TaskEnd::Rediscovered,
+        Some(RediscoverOutcome::WaitingForLive) => TaskEnd::WaitingForLive,
+        None => end,
     }
 }
 
@@ -639,7 +659,8 @@ where
             if let Some(m) = &sh.frame_metrics {
                 t = t.with_metrics(m.clone());
             }
-            drive(&sh, &driver, t, key, tuple, permit, stop_rx).await
+            let end = drive(&sh, &driver, t, key, tuple, permit, stop_rx).await;
+            rediscovery_end(end, cfg.rediscover.as_ref())
         }
         TransportPlan::Webhook(plan) => {
             let Some(binder) = &sh.webhook else {
@@ -810,6 +831,23 @@ where
                 slot.state = SlotState::Cooldown {
                     until: Instant::now() + self.config.restart_cooldown,
                     reason: RestartReason::Ended,
+                };
+            }
+            // Not terminal: restart at the next reconcile (immediately due),
+            // on the re-derived plan when the target changed.
+            TaskEnd::Rediscovered => {
+                slot.state = SlotState::Cooldown {
+                    until: Instant::now(),
+                    reason: RestartReason::Rediscovered,
+                };
+            }
+            TaskEnd::WaitingForLive => {
+                self.sh
+                    .metrics
+                    .parked(key.platform, ParkReason::WaitingForLive);
+                slot.state = SlotState::Cooldown {
+                    until: Instant::now(),
+                    reason: RestartReason::WaitingForLive,
                 };
             }
             // No lease: drop the slot; the next pass re-acquires.

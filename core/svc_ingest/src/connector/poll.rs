@@ -33,6 +33,7 @@ use zeroize::Zeroizing;
 
 use super::egress_guard::resolve_pinned;
 use super::lifecycle::{backoff_wait, HttpAction, PollLifecycle};
+use super::rediscover::{RediscoverConfig, RediscoverError, RediscoverOutcome};
 use super::secrets::{Destination, TransportSecretSource};
 use super::transport::{FrameOutcome, Transport, TransportError};
 use super::transport_common::{opaque_id, resolve_handle, validate_endpoint, FrameRuleMetrics};
@@ -88,12 +89,17 @@ pub struct PollConfig {
     /// Host-owned poll lifecycle (interval hint, HTTP error classification,
     /// API-key query slot); `PollLifecycle::default()` = none.
     pub lifecycle: PollLifecycle,
+    /// Target rediscovery (required when a lifecycle rule is
+    /// [`HttpAction::Rediscover`]); `None` = the source never retargets.
+    pub rediscover: Option<RediscoverConfig>,
 }
 
 /// Polling transport over reqwest (rustls, redirects disabled).
 pub struct PollTransport<S: TransportSecretSource> {
     cfg: PollConfig,
     url: reqwest::Url,
+    /// Validated rediscovery request URL (same host as `url`).
+    rediscover_url: Option<reqwest::Url>,
     source_id: String,
     connection_id: String,
     secrets: S,
@@ -140,6 +146,32 @@ impl<S: TransportSecretSource> PollTransport<S> {
         cfg.lifecycle
             .validate(&cfg.handles, cfg.cursor_param.as_deref(), &url)
             .map_err(|e| TransportError::Connect(e.to_string()))?;
+        let needs_rediscover = cfg
+            .lifecycle
+            .error_rules
+            .iter()
+            .any(|r| r.action == HttpAction::Rediscover);
+        let rediscover_url = match &cfg.rediscover {
+            Some(rd) => {
+                let ru =
+                    validate_endpoint(&rd.url, &["https"], "http", cfg.allow_loopback_insecure)
+                        .map_err(TransportError::Connect)?;
+                // The credential is bound to the poll host; the rediscovery
+                // request must go to that same host and port.
+                if Destination::from_url(&ru) != Destination::from_url(&url) {
+                    return Err(TransportError::Connect(
+                        "rediscovery host must match the poll host".into(),
+                    ));
+                }
+                Some(ru)
+            }
+            None if needs_rediscover => {
+                return Err(TransportError::Connect(
+                    "rediscover rule needs a rediscovery config".into(),
+                ));
+            }
+            None => None,
+        };
         if let Some(a) = &cfg.auth {
             HeaderName::from_bytes(a.header.as_bytes())
                 .map_err(|_| TransportError::Connect("invalid auth header name".into()))?;
@@ -152,6 +184,7 @@ impl<S: TransportSecretSource> PollTransport<S> {
             connection_id: uuid::Uuid::new_v4().to_string(),
             committed: cfg.initial_cursor.clone(),
             url,
+            rediscover_url,
             secrets,
             pending: None,
             pending_digest: None,
@@ -211,13 +244,14 @@ impl<S: TransportSecretSource> PollTransport<S> {
             .map_err(|e| TransportError::Connect(e.to_string()))
     }
 
-    /// One request; `Ok(None)` = nothing new.
-    async fn fetch(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+    /// One authenticated GET of `url` (the poll URL with its cursor, or the
+    /// rediscovery URL) through the pinned client: the query secret and the
+    /// auth header are resolved per request and never leave this function.
+    async fn send_authed(
+        &self,
+        mut url: reqwest::Url,
+    ) -> Result<reqwest::Response, TransportError> {
         let client = self.pinned_client().await?;
-        let mut url = self.url.clone();
-        if let (Some(p), Some(c)) = (&self.cfg.cursor_param, &self.committed) {
-            url.query_pairs_mut().append_pair(p, c);
-        }
         if let Some(q) = &self.cfg.lifecycle.query_secret {
             let dest = Destination::from_url(&self.url)
                 .ok_or_else(|| TransportError::Fatal("secret unavailable for handle".into()))?;
@@ -255,7 +289,7 @@ impl<S: TransportSecretSource> PollTransport<S> {
             req = req.header(name, v);
         }
         // reqwest errors can embed the URL; report the kind only.
-        let mut resp = req.send().await.map_err(|e| {
+        req.send().await.map_err(|e| {
             TransportError::Read(
                 if e.is_timeout() {
                     "timeout"
@@ -264,7 +298,56 @@ impl<S: TransportSecretSource> PollTransport<S> {
                 }
                 .into(),
             )
-        })?;
+        })
+    }
+
+    /// Asks the upstream for the source's current target and hands the
+    /// response to the rediscovery hook. The credential is the connection's
+    /// own (same handle, same pinned host), so only this connection's own
+    /// channel can answer; the hook still validates the candidate.
+    async fn rediscover(&mut self) -> Result<RediscoverOutcome, TransportError> {
+        let (Some(rd), Some(url)) = (self.cfg.rediscover.clone(), self.rediscover_url.clone())
+        else {
+            return Err(TransportError::Fatal("rediscovery not configured".into()));
+        };
+        let mut resp = self.send_authed(url).await?;
+        let status = resp.status();
+        if matches!(status.as_u16(), 401 | 403) {
+            self.count("poll_rediscover", "rejected");
+            return Err(TransportError::Fatal(format!(
+                "rediscovery rejected by upstream ({status})"
+            )));
+        }
+        if !status.is_success() {
+            self.count("poll_rediscover", "http_error");
+            return Err(TransportError::Read(format!("rediscovery http {status}")));
+        }
+        let body = self.read_body(&mut resp).await?;
+        match rd.hook.apply(&body) {
+            Ok(outcome) => {
+                self.count("poll_rediscover", outcome.label());
+                Ok(outcome)
+            }
+            Err(RediscoverError::Malformed) => {
+                self.count("poll_rediscover", "malformed");
+                Err(TransportError::Read(
+                    "rediscovery response malformed".into(),
+                ))
+            }
+            Err(RediscoverError::Refused) => {
+                self.count("poll_rediscover", "refused");
+                Err(TransportError::Fatal("rediscovery target refused".into()))
+            }
+        }
+    }
+
+    /// One request; `Ok(None)` = nothing new.
+    async fn fetch(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
+        let mut url = self.url.clone();
+        if let (Some(p), Some(c)) = (&self.cfg.cursor_param, &self.committed) {
+            url.query_pairs_mut().append_pair(p, c);
+        }
+        let mut resp = self.send_authed(url).await?;
         let status = resp.status();
         let code = status.as_u16();
         // Host-classified error responses (e.g. quota 403 -> back off, not
@@ -319,6 +402,18 @@ impl<S: TransportSecretSource> PollTransport<S> {
                         "poll upstream classified as quota/rate limited; backing off"
                     );
                     return Ok(None);
+                }
+                Some(HttpAction::Rediscover) => {
+                    self.count("poll_http", "rediscover");
+                    // Always ends the run: either the hook recorded a new
+                    // target (restart on the new plan) or none is live yet
+                    // (the runtime waits and re-checks); errors retry under
+                    // the driver's backoff or park.
+                    let outcome = self.rediscover().await?;
+                    return Err(TransportError::Fatal(format!(
+                        "poll target ended ({})",
+                        outcome.label()
+                    )));
                 }
                 Some(HttpAction::Park) => {
                     self.count("poll_http", "park");
@@ -623,6 +718,7 @@ mod tests {
             egress_allow: vec!["127.0.0.1".parse().unwrap()],
             allow_loopback_insecure: true,
             lifecycle: PollLifecycle::default(),
+            rediscover: None,
         }
     }
 
