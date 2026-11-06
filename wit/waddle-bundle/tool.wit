@@ -54,6 +54,7 @@ world stage-tools {
   import economy;
   import identity;
   import ai;
+  import media;
   import tool;
 
   export tool-provider;

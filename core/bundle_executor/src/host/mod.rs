@@ -13,6 +13,7 @@ pub mod stage_next_ai;
 pub mod stage_next_economy;
 pub mod stage_next_identity;
 pub mod stage_next_imports;
+pub mod stage_next_media;
 pub mod stage_tools;
 
 use std::sync::atomic::{AtomicBool, Ordering};
