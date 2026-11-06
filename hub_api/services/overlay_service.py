@@ -148,7 +148,11 @@ OVERLAY_URL_SURFACE = "alert_box"
 
 
 def _browser_source_url(cfg: HubAPIConfig, code: str, surface: str, overlay_key: str) -> str:
-    """Build `{base}/{overlay_code}/{surface}?key={key}` (the only form svc-presentation serves)."""
+    """Build `{base}/{overlay_code}/{surface}?key={key}` (the only form svc-presentation serves).
+
+    Single builder shared by the all-in-one `overlayUrl` (alert_box surface) and the
+    browser-sources listing (one URL per `BROWSER_SOURCE_SURFACES` entry).
+    """
     return f"{cfg.overlay_base_url}/{code}/{surface}?key={overlay_key}"
 
 
@@ -581,11 +585,6 @@ class BrowserSourceRecord:
     url: str
     isActive: bool
     createdAt: str | None
-
-
-def _browser_source_url(cfg: HubAPIConfig, code: str, surface: str, overlay_key: str) -> str:
-    """Build `{base}/{overlay_code}/{surface}?key={key}` for svc-presentation."""
-    return f"{cfg.overlay_base_url}/{code}/{surface}?key={overlay_key}"
 
 
 async def get_browser_sources(
