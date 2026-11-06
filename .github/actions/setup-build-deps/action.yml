@@ -1,0 +1,58 @@
+name: Setup build deps (no apt)
+description: >-
+  Verifies the C/C++ toolchain + cmake already preinstalled on GitHub-hosted
+  ubuntu runners (needed by ring / aws-lc-sys) and optionally installs a
+  sha256-pinned protoc (needed by hub_client's build.rs). Replaces the old
+  apt-get install steps, which flaked on mirror timeouts. Fails loudly.
+
+inputs:
+  protoc:
+    description: "'true' to install the pinned protoc and export PROTOC/PROTOC_INCLUDE"
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Verify preinstalled toolchain (gcc, g++, make, cmake)
+      shell: bash
+      run: |
+        set -euo pipefail
+        missing=0
+        for t in gcc g++ make cmake; do
+          if command -v "$t" >/dev/null 2>&1; then
+            echo "found $t: $(command -v "$t")"
+          else
+            echo "MISSING required build tool: $t" >&2
+            missing=1
+          fi
+        done
+        exit "$missing"
+
+    - name: Install pinned protoc (sha256-verified)
+      if: inputs.protoc == 'true'
+      shell: bash
+      env:
+        PROTOC_VERSION: '31.1'
+        PROTOC_SHA256_X86_64: 96553041f1a91ea0efee963cb16f462f5985b4d65365f3907414c360044d8065
+        PROTOC_SHA256_AARCH64: 6c554de11cea04c56ebf8e45b54434019b1cd85223d4bbd25c282425e306ecc2
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64)  arch=linux-x86_64;  sha="$PROTOC_SHA256_X86_64" ;;
+          aarch64) arch=linux-aarch_64; sha="$PROTOC_SHA256_AARCH64" ;;
+          *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;;
+        esac
+        dest="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}"
+        mkdir -p "$dest"
+        zip="${RUNNER_TEMP}/protoc-${PROTOC_VERSION}.zip"
+        curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+          --connect-timeout 15 --max-time 120 -o "$zip" \
+          "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-${arch}.zip"
+        echo "${sha}  ${zip}" | sha256sum --check --strict -
+        unzip -q -o "$zip" -d "$dest"
+        chmod +x "$dest/bin/protoc"
+        "$dest/bin/protoc" --version
+        echo "$dest/bin" >> "$GITHUB_PATH"
+        echo "PROTOC=$dest/bin/protoc" >> "$GITHUB_ENV"
+        echo "PROTOC_INCLUDE=$dest/include" >> "$GITHUB_ENV"
