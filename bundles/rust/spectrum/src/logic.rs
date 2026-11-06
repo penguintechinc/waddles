@@ -91,7 +91,12 @@ fn str_list(v: Option<&Value>) -> Value {
 fn epoch_of(v: Option<&Value>) -> Option<f64> {
     match v {
         Some(Value::Number(n)) => n.as_f64(),
-        Some(Value::String(s)) => s.trim().parse::<f64>().ok().filter(|f| f.is_finite()),
+        // A non-numeric string is "no timestamp" (Python `_epoch`); the caller then
+        // falls back to the host's `received_at`, which is a stated, tested fallback.
+        Some(Value::String(s)) => match s.trim().parse::<f64>() {
+            Ok(f) if f.is_finite() => Some(f),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -341,7 +346,12 @@ fn item_to_raw(
             .and_then(epoch_to_iso)
             .map_or(Value::Null, Value::String),
     );
-    Some((created.unwrap_or(0.0), id, m))
+    // Items with no timestamp sort first (Python `created_epoch or 0.0`).
+    let sort_key = match created {
+        Some(c) => c,
+        None => 0.0,
+    };
+    Some((sort_key, id, m))
 }
 
 /// Parses an RSI `{success, code, data}` poll response. `source_id` is the host's
