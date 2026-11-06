@@ -5,7 +5,7 @@ credentials`, a single table that conflates two distinct concepts: a
 tenant's own platform *app* credentials (client_id/secret, bot_token)
 and the *connection* of that app into a specific Discord guild or Twitch
 channel (the OAuth install, holding per-resource access/refresh tokens).
-PRs #565/#566 (`feature/bar-citizen-pairing-api`, still stacked behind
+PRs #565/#566 (`feature/guild-pairing-api`, still stacked behind
 open PR #563 -- not yet on this release branch) built their bot-install
 flows against that conflated shape via `services.credential_resolver.
 store_tenant_credentials()`. This migration splits the conflated table
@@ -50,7 +50,7 @@ into the owner-confirmed three-layer model, documented in full at
    traffic can use the shared connection.
 
 **Backward-compatibility shim for PR #563 (open, stacked on
-`feature/bar-citizen-pairing-api`).** That branch's `credential_resolver.
+`feature/guild-pairing-api`).** That branch's `credential_resolver.
 py`, `discord_install_service.py`, `twitch_install_credentials.py`, and
 `hub_api/services/schema.py` all reference `tenant_platform_credentials`
 by name (via `dal.tenant_platform_credentials`, penguin-dal's PyDAL-style

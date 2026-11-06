@@ -140,6 +140,8 @@ def s3_config(script: str, env: dict[str, str], tmp_path: Path) -> dict[str, Any
             "BUCKET_INIT_S3_SECRET_ACCESS_KEY",
             "STREAMING_S3_ACCESS_KEY_ID",
             "STREAMING_S3_SECRET_ACCESS_KEY",
+            "BUNDLE_STORAGE_S3_ACCESS_KEY_ID",
+            "BUNDLE_STORAGE_S3_SECRET_ACCESS_KEY",
         )
     }
     subprocess.run(  # noqa: S603 - the rendered script, test-only
@@ -185,7 +187,8 @@ class TestDefaultOffIsTheBaseline:
     def test_the_identities_config_is_unchanged_json(self, tmp_path: Path) -> None:
         config = s3_config(seaweedfs_script(render_docs(tmp_path)), {}, tmp_path)
         assert set(config) == {"identities"}
-        assert len(config["identities"]) == 4
+        # 4 pre-existing identities + the bundled bundle-storage identity
+        assert len(config["identities"]) == 5
 
 
 def tenant_keys(**overrides: Any) -> dict[str, Any]:
@@ -334,8 +337,8 @@ class TestObjectStorageAws:
             "config" not in provider
         )  # nested "config" is silently ignored by SeaweedFS
         assert (
-            len(config["identities"]) == 4
-        )  # the existing least-privilege identities survive
+            len(config["identities"]) == 5
+        )  # the existing least-privilege identities (+ bundle-storage) survive
 
     def test_credentials_come_only_from_the_existing_secret(
         self, tmp_path: Path

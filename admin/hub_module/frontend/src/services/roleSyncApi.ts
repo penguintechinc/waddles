@@ -1,6 +1,6 @@
 import { apiClient } from '../lib/apiClient';
 
-// Typed client for the Bar Citizen guild-pairing / role-sync binding CRUD --
+// Typed client for the guild-pairing / role-sync binding CRUD --
 // mirrors `hub_api/blueprints/v1/guild_pairing.py` + `services/guild_pairing.py`
 // exactly (field names, casing, status codes, error envelope). Unlike
 // `bundleActivationApi.ts`'s DTO (which hand-picked camelCase field names),

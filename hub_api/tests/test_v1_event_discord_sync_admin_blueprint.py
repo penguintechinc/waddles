@@ -54,7 +54,7 @@ def _pair(dal: Any, community_id: int) -> None:
         community_id,
         discord_guild_id="123456789012345678",  # gitleaks:allow - fake snowflake
         direction="bidirectional",
-        role_name_prefix="[BC]",
+        role_name_prefix="[AC]",
         actor_user_id=None,
     )
 

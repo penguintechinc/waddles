@@ -86,7 +86,7 @@ into one `tenant_platform_credentials` row (migration 0034's documented shape:
 **Library-extractability note (flagged for the future `penguin-aaa` move):** the resolver core
 (`resolve()`/`store_tenant_credentials()`/the layer-2/3 primitives) stays Waddles-agnostic in
 its own right — it takes a bound `dal` + plain scalars, no Waddles-specific types in its
-signatures. The one piece of real, unavoidable coupling: `bind_bar_citizen_tables()`
+signatures. The one piece of real, unavoidable coupling: `bind_guild_pairing_tables()`
 (`services/schema.py`) assumes its caller has already bound `tenants`/`communities` under
 those exact names (pydal's own idiom throughout this codebase, not specific to this module) —
 a future library extraction needs an explicit table-name mapping seam here rather than the

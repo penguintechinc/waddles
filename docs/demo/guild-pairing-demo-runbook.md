@@ -1,6 +1,6 @@
-# Bar Citizen Monday Demo: Role Sync + Event Sync Rehearsal Runbook
+# customer-A Monday Demo: Role Sync + Event Sync Rehearsal Runbook
 
-Target: alpha `waddlebot` community (id 1), Discord guild `474965105759748096`,
+Target: alpha `waddlebot` community (id 1), Discord guild (set `DEMO_GUILD_ID`),
 Twitch channel `penguinzplays`. Run top to bottom after the deploy lands.
 
 ## Honest limits (say these out loud)
@@ -16,7 +16,7 @@ Twitch channel `penguinzplays`. Run top to bottom after the deploy lands.
 | # | Pre-req | How to set / verify |
 |---|---------|---------------------|
 | 1 | Event-sync flag ON for the demo tenant | PostHog flag `waddles.calendar.event_discord_sync` (env baseline `FLAG_WADDLES_CALENDAR_EVENT_DISCORD_SYNC=true`) |
-| 2 | Role-sync flag ON for the demo tenant | PostHog flag `waddles.bar_citizen.role_sync` |
+| 2 | Role-sync flag ON for the demo tenant | PostHog flag `waddles.role_sync` |
 | 3 | Role-sync CronJob deployed | Helm `pipeline.roleSync.enabled=true` (schedule `*/1 * * * *`); `kubectl get cronjob` shows it |
 | 4 | Event-sync backstop CronJob (optional) | Helm `pipeline.eventSync.enabled=true` (`*/5`); the immediate push path does not need it |
 | 5 | Demote opt-in | Helm `pipeline.roleSync.demotePairingIds="<pairing id>"` (id printed by the seed script) |
@@ -31,12 +31,12 @@ Twitch channel `penguinzplays`. Run top to bottom after the deploy lands.
 ```bash
 # DATABASE_URL = hub DB DSN (from the secret; never typed into shell history)
 export DEMO_DISCORD_USER_ID=<demo member's Discord user id>     # Discord: right-click > Copy User ID
-export DEMO_DISCORD_ROLE_ID=<BC's real role id to sync>         # Server Settings > Roles > Copy Role ID
+export DEMO_DISCORD_ROLE_ID=<real role id to sync>         # Server Settings > Roles > Copy Role ID
 # optional: DEMO_COMMUNITY_ROLE=moderator (vip|member|community-admin), DEMO_BASELINE_ROLE=member
-make seed-bc-demo
+make seed-demo-prelink
 ```
 
-Expected final log line: `seed_bc_demo.done ... pairing_id=N`. Put `N` in `demotePairingIds` (pre-req 5) and apply. Re-running is safe and also resets the demo member to the baseline role (rehearsal reset). It fails loudly if any table/column, the community, or the baseline role row is missing.
+Expected final log line: `seed_demo_prelink.done ... pairing_id=N`. Put `N` in `demotePairingIds` (pre-req 5) and apply. Re-running is safe and also resets the demo member to the baseline role (rehearsal reset). It fails loudly if any table/column, the community, or the baseline role row is missing.
 
 The seed sets: pairing `sync_enabled=true`, `event_sync_enabled=true`, `direction=discord_to_twitch` (the direction that runs the Discord -> Waddles pass); binding `sync_scope=community_role`, Discord role -> `moderator` by default.
 
@@ -61,11 +61,11 @@ curl -s -X PUT -H "Authorization: Bearer $JWT" -H 'Content-Type: application/jso
 **2b. API**
 ```bash
 curl -s -X POST -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
-  -d '{"title":"BC Demo Night","description":"Rehearsal","event_date":"2026-10-19T20:00:00Z","end_date":"2026-10-19T22:00:00Z"}' \
+  -d '{"title":"Demo Night","description":"Rehearsal","event_date":"2026-10-19T20:00:00Z","end_date":"2026-10-19T22:00:00Z"}' \
   https://<hub>/api/v1/admin/1/calendar/events      # expect 201
 ```
 
-**Verify:** in the Bar Citizen Discord server open the **Events** list (sidebar). The scheduled event appears within seconds (immediate push) or by the next 5-min backstop. DB check:
+**Verify:** in the customer-A Discord server open the **Events** list (sidebar). The scheduled event appears within seconds (immediate push) or by the next 5-min backstop. DB check:
 ```sql
 SELECT sync_status, last_sync_at FROM calendar_event_discord_syncs ORDER BY id DESC LIMIT 1;  -- synced
 ```
@@ -89,12 +89,12 @@ SELECT role FROM community_members
 2. Wait ~1 min. Expected: role returns to the baseline (`member`); log `role_sync.demote_pass ... demoted=1`.
 3. If it does not demote, check in order: pairing id in `demotePairingIds`; baseline role exists (pre-req 6); the role was granted by sync (manually set roles are `unmanaged_untouched` and left alone); member is not `community-owner`; Server Members intent on (an empty member read aborts demote).
 
-**3c. Reset between rehearsals:** `make seed-bc-demo` (member back to baseline; pairing and binding re-asserted).
+**3c. Reset between rehearsals:** `make seed-demo-prelink` (member back to baseline; pairing and binding re-asserted).
 
 ## 4. Go/no-go checklist (5 min before)
 
 - [ ] Both flags ON, tenant Professional
-- [ ] `make seed-bc-demo` ran clean with BC's real role and user ids
+- [ ] `make seed-demo-prelink` ran clean with the real role and user ids
 - [ ] `demotePairingIds` + `demoteBaselineRole=member` deployed
 - [ ] One full promote + demote cycle rehearsed; one event created and seen in Discord
 - [ ] Demo member reset to baseline

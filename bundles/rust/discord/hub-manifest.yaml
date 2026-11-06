@@ -8,7 +8,7 @@
 schema_version: 2
 app_id: waddles.core.service.discord
 name: Discord Platform Connector (Rust)
-version: 1.0.2
+version: 1.0.5
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -71,6 +71,136 @@ exported_tools:
           maximum: 65535
       required:
         - code
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: discord.scheduled_event.create
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1000
+        scheduled_start_time:
+          type: string
+          description: RFC 3339 timestamp
+        scheduled_end_time:
+          type: string
+          description: RFC 3339 timestamp
+        location:
+          type: string
+          minLength: 1
+          maxLength: 100
+      required:
+        - name
+        - scheduled_start_time
+        - scheduled_end_time
+        - location
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: discord.scheduled_event.update
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        event_id:
+          type: string
+          pattern: "^[0-9]{1,20}$"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 1000
+        scheduled_start_time:
+          type: string
+          description: RFC 3339 timestamp
+        scheduled_end_time:
+          type: string
+          description: RFC 3339 timestamp
+        location:
+          type: string
+          minLength: 1
+          maxLength: 100
+      required:
+        - event_id
+        - name
+        - scheduled_start_time
+        - scheduled_end_time
+        - location
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: discord.scheduled_event.cancel
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        event_id:
+          type: string
+          pattern: "^[0-9]{1,20}$"
+      required:
+        - event_id
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: discord.scheduled_event.delete
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        event_id:
+          type: string
+          pattern: "^[0-9]{1,20}$"
+      required:
+        - event_id
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: discord.member.roles.add
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+        role_key:
+          type: string
+          pattern: "^[a-z][a-z0-9_-]{0,31}$"
+      required:
+        - user
+        - role_key
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: discord.member.roles.remove
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+        role_key:
+          type: string
+          pattern: "^[a-z][a-z0-9_-]{0,31}$"
+      required:
+        - user
+        - role_key
       additionalProperties: false
     output_schema:
       type: object

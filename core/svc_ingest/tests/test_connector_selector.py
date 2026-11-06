@@ -225,6 +225,8 @@ class TestSharedDecisionTable:
         assert sel.twitch_outbound_legacy is exp["twitch_outbound"]
         assert sel.legacy("discord") is exp["discord_inbound"]
         assert sel.legacy("youtube") is exp["youtube_inbound"]
+        if "wix_connector" in exp:
+            assert sel.connector("wix") is exp["wix_connector"]
 
 
 class TestSuppressedFactoriesNeverInvoked:

@@ -47,6 +47,10 @@ pub enum RestartReason {
     Ended,
     /// The tenant lookup failed transiently.
     TenantLookup,
+    /// The polled target ended and a new one was found; restart on it.
+    Rediscovered,
+    /// The polled target ended and none is live yet; re-check.
+    WaitingForLive,
 }
 
 impl RestartReason {
@@ -59,6 +63,8 @@ impl RestartReason {
             Self::SinkBuild => "sink_build",
             Self::Ended => "ended",
             Self::TenantLookup => "tenant_lookup",
+            Self::Rediscovered => "rediscovered",
+            Self::WaitingForLive => "waiting_for_live",
         }
     }
 }
@@ -81,6 +87,9 @@ pub enum ParkReason {
     TenantMismatch,
     /// The host-call bridge refused to register the connection.
     ActivationFailed,
+    /// The polled target ended and no replacement is live yet; the connection
+    /// is re-checked on the next reconcile (not terminal).
+    WaitingForLive,
 }
 
 impl ParkReason {
@@ -95,6 +104,7 @@ impl ParkReason {
             Self::TenantUnresolved => "tenant_unresolved",
             Self::TenantMismatch => "tenant_mismatch",
             Self::ActivationFailed => "activation_failed",
+            Self::WaitingForLive => "waiting_for_live",
         }
     }
 }

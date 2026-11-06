@@ -11,6 +11,9 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
+use crate::platform_table::TableOp;
+use crate::storage_access::StorageOp;
+
 /// No `net.http.private-ip` grant may be coarser than this -- mirrors
 /// hub-api's own `_MAX_PRIVATE_PREFIX_V4/6` (`bundle_permission_catalog.py`).
 /// A /8 would hand a bundle the whole RFC1918 `10.0.0.0/8` block; /16 (v4) /
@@ -317,6 +320,19 @@ pub enum PermissionFamily {
     /// `tool.call:<target_app_id>:<tool>` -- invoke a named tool exported by
     /// another bundle (bundle-MCP-tools P2).  `Dangerous`.
     ToolCall,
+    /// `platform.table.read:<table>.<column>` -- read one allowlisted platform
+    /// table column, row-scoped to the invocation's community+tenant.
+    /// `Dangerous`, NEVER auto-granted (not even to `waddles.core.*`).
+    PlatformTableRead,
+    /// `platform.table.write:<table>.<column>` -- as above, write.
+    PlatformTableWrite,
+    /// `storage.<read|list|write|delete>:<prefix_owner>` -- access another
+    /// bundle's object-storage prefix (spec 2026-11-06-bundle-object-storage).
+    /// `Dangerous`, never auto-granted; tag-filtered host-side even once granted.
+    StorageRead,
+    StorageList,
+    StorageWrite,
+    StorageDelete,
 }
 
 /// One row of the catalog table (spec SS1).
@@ -368,6 +384,12 @@ impl PermissionFamily {
         Self::InteractionPiiReceive,
         Self::StreamingLifecycleSubscribe,
         Self::ToolCall,
+        Self::PlatformTableRead,
+        Self::PlatformTableWrite,
+        Self::StorageRead,
+        Self::StorageList,
+        Self::StorageWrite,
+        Self::StorageDelete,
     ];
 
     /// The static catalog id prefix -- for a parameterized family
@@ -410,6 +432,12 @@ impl PermissionFamily {
             Self::InteractionPiiReceive => "interaction.pii.receive",
             Self::StreamingLifecycleSubscribe => "streaming.lifecycle.subscribe",
             Self::ToolCall => "tool.call",
+            Self::PlatformTableRead => "platform.table.read",
+            Self::PlatformTableWrite => "platform.table.write",
+            Self::StorageRead => "storage.read",
+            Self::StorageList => "storage.list",
+            Self::StorageWrite => "storage.write",
+            Self::StorageDelete => "storage.delete",
         }
     }
 
@@ -429,6 +457,12 @@ impl PermissionFamily {
                 | Self::DmSend
                 | Self::Moderation
                 | Self::ToolCall
+                | Self::PlatformTableRead
+                | Self::PlatformTableWrite
+                | Self::StorageRead
+                | Self::StorageList
+                | Self::StorageWrite
+                | Self::StorageDelete
         )
     }
 
@@ -769,6 +803,38 @@ impl PermissionFamily {
                 },
                 notes: "P4 Task 1; atomic multi-winner payout from the reserved community pot account (explicit amounts, remainder stays in the pot); moves existing currency, never mints",
             },
+            Self::PlatformTableRead | Self::PlatformTableWrite => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Db,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: if matches!(self, Self::PlatformTableWrite) {
+                        5
+                    } else {
+                        20
+                    },
+                    window: Duration::from_secs(1),
+                },
+                notes: "platform-table access (2026-11-06 spec); table+column encoded in \
+                        the id and allowlisted; row scope is host-injected community+tenant; \
+                        never auto-granted, every grant needs an explicit global-admin approval",
+            },
+            Self::StorageRead | Self::StorageList | Self::StorageWrite | Self::StorageDelete => {
+                CatalogEntry {
+                    family: *self,
+                    risk: Risk::Dangerous,
+                    capability_kind: CapabilityKind::Db,
+                    default_quota: Quota::CallsPerWindow {
+                        max_calls: if matches!(self, Self::StorageRead | Self::StorageList) {
+                            20
+                        } else {
+                            5
+                        },
+                        window: Duration::from_secs(1),
+                    },
+                    notes: "cross-prefix object-storage access (2026-11-06 spec); owner app_id encoded in the id; never auto-granted; host additionally tag-filters every op",
+                }
+            }
             Self::ToolCall => CatalogEntry {
                 family: *self,
                 risk: Risk::Dangerous,
@@ -922,6 +988,18 @@ pub enum PermissionId {
         target: String,
         tool: String,
     },
+    /// `platform.table.<read|write>:<table>.<column>` -- allowlisted only
+    /// (see [`crate::platform_table::ALLOWLIST`]).
+    PlatformTable {
+        op: TableOp,
+        table: String,
+        column: String,
+    },
+    /// `storage.<op>:<prefix_owner>`.
+    StorageAccess {
+        op: StorageOp,
+        owner: String,
+    },
 }
 
 /// Platforms compiled into this build's relay/moderation providers (spec
@@ -992,6 +1070,18 @@ impl PermissionId {
             Self::InteractionPiiReceive => PermissionFamily::InteractionPiiReceive,
             Self::StreamingLifecycleSubscribe => PermissionFamily::StreamingLifecycleSubscribe,
             Self::ToolCall { .. } => PermissionFamily::ToolCall,
+            Self::PlatformTable {
+                op: TableOp::Read, ..
+            } => PermissionFamily::PlatformTableRead,
+            Self::PlatformTable {
+                op: TableOp::Write, ..
+            } => PermissionFamily::PlatformTableWrite,
+            Self::StorageAccess { op, .. } => match op {
+                StorageOp::Read => PermissionFamily::StorageRead,
+                StorageOp::List => PermissionFamily::StorageList,
+                StorageOp::Write => PermissionFamily::StorageWrite,
+                StorageOp::Delete => PermissionFamily::StorageDelete,
+            },
         }
     }
 
@@ -1016,6 +1106,10 @@ impl PermissionId {
             Self::DmSend(platform) => format!("dm.send:{platform}"),
             Self::Moderation(platform) => format!("moderation.{platform}"),
             Self::ToolCall { target, tool } => format!("tool.call:{target}:{tool}"),
+            Self::StorageAccess { op, owner } => format!("storage.{}:{owner}", op.as_str()),
+            Self::PlatformTable { op, table, column } => {
+                format!("platform.table.{}:{table}.{column}", op.as_str())
+            }
             other => other.family().id_prefix().to_string(),
         }
     }
@@ -1156,6 +1250,40 @@ impl PermissionId {
             Self::validate_platform(platform)?;
             return Ok(Self::Moderation(platform.to_string()));
         }
+        for (prefix, op) in [
+            ("platform.table.read:", TableOp::Read),
+            ("platform.table.write:", TableOp::Write),
+        ] {
+            if let Some(rest) = raw.strip_prefix(prefix) {
+                let (table, column) = rest
+                    .split_once('.')
+                    .ok_or_else(|| ParsePermissionIdError::UnknownPermission(raw.to_string()))?;
+                if !crate::platform_table::is_allowed(op, table, column) {
+                    return Err(ParsePermissionIdError::UnknownPermission(raw.to_string()));
+                }
+                return Ok(Self::PlatformTable {
+                    op,
+                    table: table.to_string(),
+                    column: column.to_string(),
+                });
+            }
+        }
+        for (prefix, op) in [
+            ("storage.read:", StorageOp::Read),
+            ("storage.list:", StorageOp::List),
+            ("storage.write:", StorageOp::Write),
+            ("storage.delete:", StorageOp::Delete),
+        ] {
+            if let Some(owner) = raw.strip_prefix(prefix) {
+                if !crate::storage_access::is_valid_owner(owner) {
+                    return Err(ParsePermissionIdError::UnknownPermission(raw.to_string()));
+                }
+                return Ok(Self::StorageAccess {
+                    op,
+                    owner: owner.to_string(),
+                });
+            }
+        }
         if let Some(rest) = raw.strip_prefix("tool.call:") {
             let (target, tool) =
                 rest.rsplit_once(':')
@@ -1236,6 +1364,52 @@ impl fmt::Display for PermissionId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_access_ids_are_dangerous_validated_and_round_trip() {
+        let id = PermissionId::parse("storage.read:waddles.harness.media").unwrap();
+        assert_eq!(id.family(), PermissionFamily::StorageRead);
+        assert_eq!(id.risk(), Risk::Dangerous);
+        assert_eq!(id.canonical_id(), "storage.read:waddles.harness.media");
+        for op in ["list", "write", "delete"] {
+            let raw = format!("storage.{op}:a.b");
+            assert_eq!(PermissionId::parse(&raw).unwrap().canonical_id(), raw);
+        }
+        for bad in [
+            "storage.read:",
+            "storage.read:../x",
+            "storage.read:A",
+            "storage.read:a/b",
+            "storage.read:a b",
+            "storage.rm:a",
+            "storage.read",
+        ] {
+            assert!(PermissionId::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn platform_table_ids_are_dangerous_allowlist_only_and_round_trip() {
+        let id = PermissionId::parse("platform.table.write:community_members.role").unwrap();
+        assert_eq!(id.family(), PermissionFamily::PlatformTableWrite);
+        assert_eq!(id.risk(), Risk::Dangerous);
+        assert_eq!(
+            id.canonical_id(),
+            "platform.table.write:community_members.role"
+        );
+        assert!(PermissionFamily::PlatformTableRead.is_parameterized());
+        for bad in [
+            "platform.table.write:community_members.is_active",
+            "platform.table.read:community_members.display_name",
+            "platform.table.read:hub_users.email",
+            "platform.table.read:community_members",
+            "platform.table.read:",
+            "platform.table.delete:community_members.role",
+            "platform.table.write",
+        ] {
+            assert!(PermissionId::parse(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn every_family_has_a_catalog_entry_with_a_matching_family_field() {

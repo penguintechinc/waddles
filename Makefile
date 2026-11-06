@@ -1,4 +1,4 @@
-.PHONY: seed-bc-demo reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -6,7 +6,7 @@
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
         check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
-        test-seaweedfs-sse-kms test-helm-pending-recover \
+        test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
         test-data-plane-parity test-connector-parity gen-connector-parity-expected check-builtin-handler-inventory
@@ -221,10 +221,10 @@ seed-mock-data:
 seed-ui-mock-data:
 	@bash scripts/seed-ui-mock-data.sh $(filter --docker,$(SEED_ARGS))
 
-# Bar Citizen demo pre-link (idempotent upsert; needs DATABASE_URL, see
-# scripts/demo/seed_bc_demo.py header for DEMO_* overrides, docs/demo/ runbook).
-seed-bc-demo:
-	@python3 scripts/demo/seed_bc_demo.py
+# demo pre-link (idempotent upsert; needs DATABASE_URL, see
+# scripts/demo/seed_demo_prelink.py header for DEMO_* overrides, docs/demo/ runbook).
+seed-demo-prelink:
+	@python3 scripts/demo/seed_demo_prelink.py
 
 # Marketing screenshots -> docs/screenshots/ (pinned Playwright, see
 # tests/screenshots). Needs a running hub-webui at BASE_URL and seeded data;
@@ -407,6 +407,19 @@ generate-seaweedfs-sse-key:
 # image (docker + helm required; the image must already be pulled -- this target never pulls
 # implicitly). A missing prerequisite FAILS the target, it is never a skip. See
 # hub_api/tests/envelope/test_seaweedfs_sse_kms_e2e.py and docs/guides/external-kms-byok.md.
+# Publishes the connector service bundles (wasm + signed sidecar) the executor boot-pins:
+# connectors/<p>/<digest>.{wasm,json}. Builds the reproducible core-bundles image and prints the
+# digests + a values snippet. Signing key = USER-held file (BUNDLE_SIGNING_KEY_FILE), S3 creds env.
+# Usage: make publish-connector-bundles ENV=dal2alpha  (see scripts/publish-connector-bundles.sh)
+publish-connector-bundles:
+	@test -n "$(ENV)" || { echo "ENV is required (alpha|dal2alpha|local)" >&2; exit 1; }
+	@bash scripts/publish-connector-bundles.sh "$(ENV)"
+
+# Real-path: publish to a pinned SeaweedFS container, then the executor's own pin loader verifies
+# + loads the connector; bad signature / digest mismatch / missing sidecar must fail.
+test-connector-publish:
+	@bash scripts/test-connector-publish.sh
+
 test-seaweedfs-sse-kms:
 	@cd hub_api && WADDLES_E2E_SEAWEEDFS=1 python3 -m pytest tests/envelope/test_seaweedfs_sse_kms_e2e.py -v -p no:cacheprovider
 

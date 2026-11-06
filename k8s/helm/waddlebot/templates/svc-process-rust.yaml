@@ -196,6 +196,9 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: REDIS_PASSWORD
+        # Bundle object storage (spec 2026-11-06-bundle-object-storage): host-side S3 endpoint +
+        # credentials -- bundles never see these (host-mediated `storage` capability).
+        {{- include "waddlebot.bundleStorage.env" . | nindent 8 }}
         {{- /* Durable VALKEY_URL override below is TLS-only: fail the render rather than leave the spine on the cache/plaintext envFrom VALKEY_URL. */}}
         {{- include "waddlebot.assertDurableTls" . }}
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
@@ -311,6 +314,27 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_READER_PASSWORD
+        {{- /* Bundle platform-table capability (spec 2026-11-06-bundle-table-access-grants):
+        EXPLICIT OPT-IN (infrastructure.postgresql.platformTable.enabled, default false -> no env
+        at all, capability fail-closed). Its OWN least-privilege Postgres role
+        (waddles_platform_table, alembic 0079); the password is read by secretKeyRef from
+        <release>-db-credentials ONLY (never the envFrom'd waddlebot-secrets). The capability also
+        stays OFF behind waddles.bundle-platform-table-capability. */}}
+        {{- if (.Values.infrastructure.postgresql.platformTable | default dict).enabled }}
+        - name: BUNDLE_PLATFORM_TABLE_HOST
+          value: {{ .Values.infrastructure.postgresql.service.name | quote }}
+        - name: BUNDLE_PLATFORM_TABLE_PORT
+          value: {{ .Values.infrastructure.postgresql.service.port | quote }}
+        - name: BUNDLE_PLATFORM_TABLE_NAME
+          value: {{ .Values.infrastructure.postgresql.database | quote }}
+        - name: BUNDLE_PLATFORM_TABLE_USER
+          value: "waddles_platform_table"
+        - name: BUNDLE_PLATFORM_TABLE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.db.credentialsSecretName" . }}
+              key: PW_WADDLES_PLATFORM_TABLE
+        {{- end }}
         {{- /* BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED (dataplane
         scale design, multi-tenant change-log consumer -- user requirement: "every
         svc_process/svc_action pod serves ALL tenants"). This loader now discovers

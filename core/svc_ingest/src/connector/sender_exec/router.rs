@@ -104,6 +104,7 @@ mod tests {
 
     fn req(platform: &str) -> SlotRequest<'_> {
         SlotRequest {
+            guild_scoped: false,
             platform,
             community_id: Some(7),
             pinned_channel: Some("#chan"),

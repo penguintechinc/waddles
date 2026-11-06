@@ -65,6 +65,15 @@ spec:
             - secretRef:
                 name: {{ include "waddlebot.fullname" . }}-secrets
             env:
+            # Event-sync request key (hub-api signs, svc-action verifies) -- templates/event-sync-request-secret.yaml.
+            - name: EVENT_SYNC_REQUEST_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "waddlebot.eventSyncRequestSecretName" . }}
+                  key: EVENT_SYNC_REQUEST_KEYS
+                  optional: true  # absent when the Rust data plane is off; the client then fails loud at use
+            - name: EVENT_SYNC_REQUEST_ACTIVE_KID
+              value: {{ .Values.eventSyncRequest.activeKid | default "r1" | quote }}
             # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_hub_api;
             # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
             # owner/superuser credential is NOT in waddlebot-secrets any more.

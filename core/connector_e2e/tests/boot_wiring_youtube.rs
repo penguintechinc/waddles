@@ -195,6 +195,12 @@ impl DynFeed for Rewrite {
                         .expect("the profile's host constant");
                     cfg.url = format!("http://127.0.0.1:{}{rest}", self.port);
                     cfg.allow_loopback_insecure = true;
+                    let rd = cfg.rediscover.as_mut().expect("youtube plans rediscover");
+                    let rest = rd
+                        .url
+                        .strip_prefix("https://www.googleapis.com")
+                        .expect("the profile's discovery host constant");
+                    rd.url = format!("http://127.0.0.1:{}{rest}", self.port);
                 }
             }
             Ok(out)

@@ -184,6 +184,10 @@ rcgen = "=0.14.10"
 e2e-main-tier = []
 
 [[test]]
+name = "connector_publish_pin_e2e"
+required-features = ["e2e-main-tier"]
+
+[[test]]
 name = "flag_on_command_e2e"
 required-features = ["e2e-main-tier"]
 

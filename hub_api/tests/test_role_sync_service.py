@@ -2,8 +2,8 @@
 
 Twitch/Discord HTTP calls are mocked via the module's own `TwitchRoleSource
 Client`/`DiscordRoleTargetClient` Protocols (fakes below) -- no real network
-access, no `httpx.AsyncClient` constructed. DB state uses `bar_citizen_db`
-(real `bind_bar_citizen_tables()`/`bind_auth_tables()` sqlite, migration
+access, no `httpx.AsyncClient` constructed. DB state uses `guild_pairing_db`
+(real `bind_guild_pairing_tables()`/`bind_auth_tables()` sqlite, migration
 0034/0036's field list) -- same fixture `test_guild_pairing_service.py` uses.
 
 `TestOptInGating`/`TestMappingAndReconciliation`/`TestMultiCommunityIsolation`/
@@ -166,7 +166,7 @@ def _make_pairing(
         community_id,
         discord_guild_id=_DISCORD_GUILD_ID,
         direction=direction,
-        role_name_prefix="[BC]",
+        role_name_prefix="[AC]",
         actor_user_id=None,
     )
     if sync_enabled:
@@ -189,8 +189,8 @@ async def _always_token(community_id: int) -> str | None:
 
 
 class TestOptInGating:
-    async def test_disabled_pairing_is_noop(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+    async def test_disabled_pairing_is_noop(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id, sync_enabled=False)
         twitch = _FakeTwitchClient(tiers={_TWITCH_SUB_USER: 1})
 
@@ -208,10 +208,10 @@ class TestOptInGating:
         assert twitch.calls == []  # never even queried Twitch
 
     async def test_bidirectional_runs_twitch_to_discord_half_in_reconcile_pairing(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
         """`bidirectional` runs BOTH halves -- this is the twitch_to_discord one."""
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id, direction="bidirectional")
         twitch = _FakeTwitchClient(tiers={_TWITCH_SUB_USER: 1})
 
@@ -228,10 +228,10 @@ class TestOptInGating:
         assert twitch.calls != []  # bidirectional DOES run the twitch_to_discord half
 
     async def test_discord_to_twitch_direction_is_noop_in_reconcile_pairing(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
         """A pure `discord_to_twitch` pairing never runs `reconcile_pairing()` at all."""
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id, direction="discord_to_twitch")
         twitch = _FakeTwitchClient(tiers={_TWITCH_SUB_USER: 1})
 
@@ -249,10 +249,10 @@ class TestOptInGating:
         assert twitch.calls == []
 
     async def test_feature_flag_off_skips_pairing(
-        self, bar_citizen_db: Any, _flag_on: AsyncMock
+        self, guild_pairing_db: Any, _flag_on: AsyncMock
     ) -> None:
         _flag_on.return_value = False
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
         _link_identity(dal, hub_user_id=1, platform="twitch", platform_user_id=_TWITCH_SUB_USER)
         _link_identity(dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_SUB_USER)
@@ -274,9 +274,9 @@ class TestOptInGating:
 
 class TestMappingAndReconciliation:
     async def test_adds_tier_and_moderator_roles_for_linked_users(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
         _link_identity(dal, hub_user_id=1, platform="twitch", platform_user_id=_TWITCH_SUB_USER)
         _link_identity(dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_SUB_USER)
@@ -302,9 +302,9 @@ class TestMappingAndReconciliation:
         assert (_DISCORD_MOD_USER, _MOD_ROLE) in discord_client.add_calls
 
     async def test_removes_managed_role_when_no_longer_subscribed(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
         _link_identity(dal, hub_user_id=1, platform="twitch", platform_user_id=_TWITCH_SUB_USER)
         _link_identity(dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_SUB_USER)
@@ -329,9 +329,9 @@ class TestMappingAndReconciliation:
         assert result.roles_removed == 0
 
     async def test_tier_change_removes_old_tier_role_and_adds_new(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
         create_binding(
             dal,
@@ -362,8 +362,8 @@ class TestMappingAndReconciliation:
         assert (_DISCORD_SUB_USER, _TIER1_ROLE) in discord_client.remove_calls
         assert (_DISCORD_SUB_USER, "333333333333333333") in discord_client.add_calls
 
-    async def test_unlinked_twitch_user_is_skipped_not_errored(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+    async def test_unlinked_twitch_user_is_skipped_not_errored(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
         twitch = _FakeTwitchClient(tiers={_TWITCH_UNLINKED_USER: 1})
         discord_client = _FakeDiscordClient({})
@@ -381,8 +381,8 @@ class TestMappingAndReconciliation:
         assert result.users_skipped_unlinked == 1
         assert result.roles_added == 0
 
-    async def test_non_guild_member_is_skipped(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+    async def test_non_guild_member_is_skipped(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
         _link_identity(dal, hub_user_id=1, platform="twitch", platform_user_id=_TWITCH_SUB_USER)
         _link_identity(dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_SUB_USER)
@@ -406,9 +406,9 @@ class TestMappingAndReconciliation:
 
 class TestMultiCommunityIsolation:
     async def test_two_communities_sharing_a_guild_use_independent_bindings(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, tenant_id, _global_id = bar_citizen_db
+        dal, community_id, tenant_id, _global_id = guild_pairing_db
         other_community_id = dal.communities.insert(name="other", tenant_id=tenant_id)
         dal.commit()
 
@@ -463,9 +463,9 @@ class TestMultiCommunityIsolation:
 
 class TestFailClosed:
     async def test_credential_failure_skips_pairing_without_raising(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
 
         result = await svc.reconcile_pairing(
@@ -480,8 +480,8 @@ class TestFailClosed:
         assert result.error == "TransportUnavailable"
         assert result.roles_added == 0
 
-    async def test_missing_broadcaster_token_skips_pairing(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+    async def test_missing_broadcaster_token_skips_pairing(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
 
         async def _no_token(community_id: int) -> str | None:
@@ -498,8 +498,8 @@ class TestFailClosed:
 
         assert result.error == "TransportUnavailable"
 
-    async def test_twitch_api_failure_skips_pairing(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+    async def test_twitch_api_failure_skips_pairing(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
 
         class _BoomTwitchClient(_FakeTwitchClient):
@@ -517,8 +517,8 @@ class TestFailClosed:
 
         assert result.error == "TwitchSyncError"
 
-    async def test_one_pairing_failure_does_not_affect_batch(self, bar_citizen_db: Any) -> None:
-        dal, community_id, tenant_id, _global_id = bar_citizen_db
+    async def test_one_pairing_failure_does_not_affect_batch(self, guild_pairing_db: Any) -> None:
+        dal, community_id, tenant_id, _global_id = guild_pairing_db
         other_community_id = dal.communities.insert(name="other2", tenant_id=tenant_id)
         dal.commit()
 
@@ -569,10 +569,10 @@ class TestFailClosed:
 
 class TestLoggingHygiene:
     async def test_no_raw_twitch_or_discord_identifiers_logged(
-        self, bar_citizen_db: Any, caplog: pytest.LogCaptureFixture
+        self, guild_pairing_db: Any, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Only counts/pairing/community/guild ids appear in log output, never a login/username."""
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id)
         _link_identity(dal, hub_user_id=1, platform="twitch", platform_user_id=_TWITCH_SUB_USER)
         _link_identity(dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_SUB_USER)
@@ -649,7 +649,7 @@ def _make_platform_pairing(
         community_id,
         discord_guild_id=guild_id,
         direction=direction,
-        role_name_prefix="[BC]",
+        role_name_prefix="[AC]",
         actor_user_id=None,
     )
     update_pairing(dal, community_id, created.id, sync_enabled=True)
@@ -666,9 +666,9 @@ def _make_platform_pairing(
 
 class TestDiscordToPlatformDirection:
     async def test_grants_mapped_community_role_to_linked_active_member(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
         _link_identity(
             dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_PLATFORM_USER
@@ -694,8 +694,8 @@ class TestDiscordToPlatformDirection:
         assert result.community_roles_applied == 1
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
 
-    async def test_idempotent_second_pass_applies_nothing(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+    async def test_idempotent_second_pass_applies_nothing(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
         _link_identity(
             dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_PLATFORM_USER
@@ -728,9 +728,9 @@ class TestDiscordToPlatformDirection:
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "member"
 
     async def test_conflict_precedence_highest_priority_role_wins(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
         create_binding(
             dal,
@@ -767,9 +767,9 @@ class TestDiscordToPlatformDirection:
         assert result.community_roles_applied == 1
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "community-admin"
 
-    async def test_losing_mapped_role_never_auto_demotes(self, bar_citizen_db: Any) -> None:
+    async def test_losing_mapped_role_never_auto_demotes(self, guild_pairing_db: Any) -> None:
         """Grant-only: a member who no longer holds any mapped Discord role keeps their role."""
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
         _link_identity(
             dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_PLATFORM_USER
@@ -793,8 +793,8 @@ class TestDiscordToPlatformDirection:
         assert result.community_roles_applied == 0
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "moderator"
 
-    async def test_community_owner_is_never_touched(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+    async def test_community_owner_is_never_touched(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
         _link_identity(
             dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_PLATFORM_USER
@@ -822,9 +822,9 @@ class TestDiscordToPlatformDirection:
         assert _get_member_role(dal, community_id=community_id, hub_user_id=1) == "community-owner"
 
     async def test_unlinked_discord_member_is_skipped_not_errored(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
         discord_client = _FakeDiscordClient(
             {},
@@ -847,10 +847,10 @@ class TestDiscordToPlatformDirection:
         assert result.community_roles_applied == 0
 
     async def test_linked_user_without_membership_is_skipped_not_created(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
         """Role-sync never creates `community_members` rows -- only adjusts an existing one."""
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
         _link_identity(
             dal, hub_user_id=1, platform="discord", platform_user_id=_DISCORD_PLATFORM_USER
@@ -877,9 +877,9 @@ class TestDiscordToPlatformDirection:
         assert dal(dal.community_members.community_id == community_id).count() == 0
 
     async def test_twitch_to_discord_only_pairing_never_reads_guild_members(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id, direction="twitch_to_discord")
         discord_client = _FakeDiscordClient({})
 
@@ -894,8 +894,8 @@ class TestDiscordToPlatformDirection:
         assert result.community_roles_applied == 0
         assert discord_client.list_guild_members_calls == 0
 
-    async def test_missing_discord_credentials_fails_closed(self, bar_citizen_db: Any) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+    async def test_missing_discord_credentials_fails_closed(self, guild_pairing_db: Any) -> None:
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_platform_pairing(dal, community_id)
 
         result = await svc.reconcile_pairing_discord_to_platform(
@@ -909,9 +909,9 @@ class TestDiscordToPlatformDirection:
         assert result.community_roles_applied == 0
 
     async def test_tenant_isolation_two_communities_sharing_guild(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, tenant_id, _global_id = bar_citizen_db
+        dal, community_id, tenant_id, _global_id = guild_pairing_db
         other_community_id = dal.communities.insert(name="other-platform", tenant_id=tenant_id)
         dal.commit()
 
@@ -953,9 +953,9 @@ class TestDiscordToPlatformDirection:
 
 class TestBidirectionalBatch:
     async def test_bidirectional_pairing_runs_both_directions_in_one_batch(
-        self, bar_citizen_db: Any
+        self, guild_pairing_db: Any
     ) -> None:
-        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        dal, community_id, _tenant_id, _global_id = guild_pairing_db
         pairing = _make_pairing(dal, community_id, direction="bidirectional")
         create_binding(
             dal,
@@ -1123,9 +1123,9 @@ async def _run(dal: Any, pairing: Any, client: _FakeDiscordClient) -> Any:
 
 class TestGuardedDemote:
     async def test_present_without_mapped_role_managed_role_demoted(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, cid, _t, _g = bar_citizen_db
+        dal, cid, _t, _g = guild_pairing_db
         pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "member")})
         client = _FakeDiscordClient({}, guild_members=[_present(_DEMOTE_USER_A)])
         result = await _run(dal, pairing, client)
@@ -1134,9 +1134,9 @@ class TestGuardedDemote:
         assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "community-member"
 
     async def test_present_with_mapped_role_stays(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, cid, _t, _g = bar_citizen_db
+        dal, cid, _t, _g = guild_pairing_db
         pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "member")})
         client = _FakeDiscordClient(
             {}, guild_members=[_present(_DEMOTE_USER_A, _MEMBER_ROLE_DISCORD)]
@@ -1146,9 +1146,9 @@ class TestGuardedDemote:
         assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "member"
 
     async def test_empty_member_list_demotes_nobody(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, cid, _t, _g = bar_citizen_db
+        dal, cid, _t, _g = guild_pairing_db
         pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "member")})
         client = _FakeDiscordClient({}, guild_members=[], complete=True)
         # `guild_members or default` -> default from empty member_roles == [] as well
@@ -1157,9 +1157,9 @@ class TestGuardedDemote:
         assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "member"
 
     async def test_partial_or_truncated_read_demotes_nobody(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, cid, _t, _g = bar_citizen_db
+        dal, cid, _t, _g = guild_pairing_db
         pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "member")})
         client = _FakeDiscordClient({}, guild_members=[_present(_DEMOTE_USER_A)], complete=False)
         result = await _run(dal, pairing, client)
@@ -1168,9 +1168,9 @@ class TestGuardedDemote:
         assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "member"
 
     async def test_absent_from_list_never_demoted(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, cid, _t, _g = bar_citizen_db
+        dal, cid, _t, _g = guild_pairing_db
         pairing = _demote_setup(
             dal,
             cid,
@@ -1185,9 +1185,9 @@ class TestGuardedDemote:
         assert _get_member_role(dal, community_id=cid, hub_user_id=2) == "member"
 
     async def test_unmanaged_manual_role_untouched(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, cid, _t, _g = bar_citizen_db
+        dal, cid, _t, _g = guild_pairing_db
         pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "vip")})
         client = _FakeDiscordClient({}, guild_members=[_present(_DEMOTE_USER_A)])
         result = await _run(dal, pairing, client)
@@ -1195,9 +1195,9 @@ class TestGuardedDemote:
         assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "vip"
 
     async def test_community_owner_never_demoted(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, cid, _t, _g = bar_citizen_db
+        dal, cid, _t, _g = guild_pairing_db
         pairing = _demote_setup(
             dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "community-owner")}
         )
@@ -1207,9 +1207,9 @@ class TestGuardedDemote:
         assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "community-owner"
 
     async def test_default_grant_only_without_opt_in(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, cid, _t, _g = bar_citizen_db
+        dal, cid, _t, _g = guild_pairing_db
         pairing = _demote_setup(
             dal, cid, monkeypatch, enable=False, users={1: (_DEMOTE_USER_A, "member")}
         )
@@ -1219,9 +1219,9 @@ class TestGuardedDemote:
         assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "member"
 
     async def test_missing_baseline_role_aborts(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, cid, _t, _g = bar_citizen_db
+        dal, cid, _t, _g = guild_pairing_db
         pairing = _demote_setup(dal, cid, monkeypatch, users={1: (_DEMOTE_USER_A, "member")})
         monkeypatch.setenv(svc.DEMOTE_BASELINE_ROLE_ENV, "no-such-role")
         client = _FakeDiscordClient({}, guild_members=[_present(_DEMOTE_USER_A)])
@@ -1230,9 +1230,9 @@ class TestGuardedDemote:
         assert _get_member_role(dal, community_id=cid, hub_user_id=1) == "member"
 
     async def test_circuit_breaker_blocks_mass_demote(
-        self, bar_citizen_db: Any, monkeypatch: pytest.MonkeyPatch
+        self, guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        dal, cid, _t, _g = bar_citizen_db
+        dal, cid, _t, _g = guild_pairing_db
         users = {i: (f"9000{i}", "member") for i in range(1, 6)}
         pairing = _demote_setup(dal, cid, monkeypatch, users=users)
         client = _FakeDiscordClient({}, guild_members=[_present(d) for d, _r in users.values()])
