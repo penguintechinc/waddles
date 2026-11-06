@@ -208,6 +208,20 @@ frame-announced heartbeat interval, reconnect/park directives and WS close-code 
 YouTube), limits, metrics: `docs/connector-host-capability.md` "Session lifecycle". Tests:
 `cargo test --locked --lib connector::lifecycle`, `--test connector_session_lifecycle`, `--test connector_heartbeat`.
 
+## Connector IDENTIFY budget (`src/connector/identify_budget.rs`, `handshake_gate.rs`)
+
+Fleet-wide Discord IDENTIFY budget as a reusable host module (port of the legacy `ingest::discord_identify_budget`, which
+stays until T4). The WS driver awaits a `HandshakeGate` after `on-connect` and before the handshake is sent;
+`DiscordIdentifyGate` skips the budget for a RESUME (session token carries `session_id`) and otherwise takes one slot from
+Valkey (atomic Lua: daily `session_start_limit` counter + `shard % max_concurrency` 5s bucket windows, keys hold only a
+SHA-256 of the bot token). **Fails CLOSED**: a Valkey outage is a retryable `GateError`, never an unchecked IDENTIFY (the
+legacy path failed open); exhaustion is a typed `retry_after` the driver honours instead of hammering. `session_start_limit`
+comes from `GET /gateway/bot` through the guarded client (or an explicit host-config fallback, logged and counted).
+Metric: `connector_identify_budget_total{outcome}`. Details: `docs/connector-host-capability.md` "IDENTIFY budget".
+
+Tests: `cargo test --test connector_identify_budget` needs Docker (real Valkey via `core/test_support`, one container per
+test); `--test connector_handshake_gate` and the module unit tests need nothing.
+
 ## Connector egress (SSRF guard)
 
 Poll/WebSocket connector transports resolve and pin their endpoint through `connector::egress_guard`, a thin
@@ -369,6 +383,19 @@ accepts a `{user:<uuid>}` recipient, the only form this executor's duty accepts.
 **Gaps (not silent):** (1) YouTube has a slot source and a hub-api
 provider adapter (see "YouTube slot source"); (2) the executor and `HubPlatformUserResolver::connect` are not wired at boot (T6d-1 status above);
 the default `NoUserResolver` refuses every DM/role op loudly until it is.
+
+## Overlay host selector (connector runtime)
+
+Env baselines, default OFF, strict booleans, read identically by the Rust and Python svc-ingest (never the PostHog client: the `*.waddles.app` bypass would read every flag ON).
+
+| Env | Effect when ON |
+|---|---|
+| `OVERLAY_TWITCH_ENABLED` | legacy Twitch IRC inbound off; Twitch outbound drains off only if `CONNECTOR_TOOLS_ENABLED`; legacy EventSub stays unless `twitch` in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` |
+| `OVERLAY_DISCORD_ENABLED` | FATAL until the identify budget is ported (`IDENTIFY_BUDGET_READY`) |
+| `OVERLAY_YOUTUBE_ENABLED` | Python `youtube_live_poll` off |
+| `CONNECTOR_RUNTIME_ENABLED`, `CONNECTOR_RECONCILE_INTERVAL_SECS` (60), `CONNECTOR_MAX_CONNECTIONS` (500), `CONNECTOR_START_CONCURRENCY` (8), `CONNECTOR_DISCORD_START_PACE_MS` (5500), `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` | see spec 2026-11-05 section 1.3 |
+
+Any overlay ON validates, in order and naming the item: `INGEST_DYNAMIC_CONNECTIONS`, `HUB_API_GRPC_ENDPOINT`, `SERVICE_JWT_TOKEN_ENDPOINT`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_SERVER_CERT_FILE`/`_KEY_FILE`/`HOST_API_CLIENT_CA_FILE`/`HOST_API_CLIENT_IDENTITY`, spine config, `CONNECTOR_ROUTE_KEY_SECRET` (when webhooks listed). `/readyz` reports each overlay platform (`overlay[]`, reason while not ready).
 
 ## Outbound executor — boot wiring & rollout order (P6a, `src/outbound_boot.rs`)
 
