@@ -27,6 +27,7 @@ from quart_schema import QuartSchema
 
 os.environ.setdefault("RCON_ENCRYPTION_KEY", "ab" * 32)
 
+from blueprints.v1 import bot as bot_blueprint  # noqa: E402
 from blueprints.v1.bot import bot_bp  # noqa: E402 - env var must be set first
 from services import bot_ai_chatter, bot_ai_knowledge, bot_rcon  # noqa: E402
 from services.bot_tables import bind_bot_tables  # noqa: E402
@@ -428,6 +429,11 @@ class TestAIChatter:
 
 
 class TestAIKnowledgeSources:
+    @pytest.fixture(autouse=True)
+    def _caller_is_super_admin(self, monkeypatch: Any) -> None:
+        """These contract tests are scope-agnostic; authz lives in `TestAIKnowledgeAuthz`."""
+        monkeypatch.setattr(bot_blueprint, "_is_super_admin_sync", lambda _dal, _uid: True)
+
     async def test_list_empty(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
             "/api/v1/admin/ai-knowledge/sources",
@@ -562,6 +568,11 @@ class TestAIKnowledgeSourceSSRFGuard:
     malicious `source_url` never even gets persisted through.
     """
 
+    @pytest.fixture(autouse=True)
+    def _caller_is_super_admin(self, monkeypatch: Any) -> None:
+        """These contract tests are scope-agnostic; authz lives in `TestAIKnowledgeAuthz`."""
+        monkeypatch.setattr(bot_blueprint, "_is_super_admin_sync", lambda _dal, _uid: True)
+
     async def test_create_rejects_loopback_url(self, client: Any, auth_headers: Any) -> None:
         response = await client.post(
             "/api/v1/admin/ai-knowledge/sources",
@@ -688,6 +699,11 @@ class TestAIKnowledgeSourceSSRFGuard:
 
 
 class TestAIKnowledgeSearchAndSuggest:
+    @pytest.fixture(autouse=True)
+    def _caller_is_super_admin(self, monkeypatch: Any) -> None:
+        """Scope-agnostic contract tests; scoping is covered in `TestAIKnowledgeAuthz`."""
+        monkeypatch.setattr(bot_blueprint, "_is_super_admin_sync", lambda _dal, _uid: True)
+
     async def test_search_missing_query_is_400(self, client: Any, auth_headers: Any) -> None:
         response = await client.post(
             "/api/v1/admin/ai-knowledge/search",
