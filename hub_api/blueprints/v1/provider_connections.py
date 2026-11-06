@@ -71,6 +71,7 @@ from services.provider_connections.service import (
     ResolvedCredentials,
 )
 from services.provider_connections.telemetry import log_failure
+from services.youtube_install import make_app_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +327,7 @@ NOT_USABLE_REASONS: Final = frozenset(
         "token_expired",
         "refresh_rejected",
         "refresh_not_configured",
+        "app_replaced",
     }
 )
 
@@ -484,7 +486,11 @@ def _service() -> ProviderConnectionService:
     existing = current_app.config.get(SERVICE_CONFIG_KEY)
     if existing is None:
         existing = ProviderConnectionService(
-            current_app.config["install_dal"], build_default_registry(), PlatformKeyVault()
+            current_app.config["install_dal"],
+            build_default_registry(
+                youtube_app_credentials=make_app_credentials(current_app.config["dal"])
+            ),
+            PlatformKeyVault(),
         )
         current_app.config[SERVICE_CONFIG_KEY] = existing
     return cast(ProviderConnectionService, existing)
@@ -506,6 +512,7 @@ _STATUS_BY_ERROR: dict[type[pc_errors.ProviderConnectionError], tuple[int, str]]
     pc_errors.InsufficientScopes: (422, "INSUFFICIENT_SCOPES"),
     pc_errors.ResourceUnresolvable: (422, "RESOURCE_NOT_FOUND"),
     pc_errors.ProviderUnavailable: (502, "PROVIDER_UNAVAILABLE"),
+    pc_errors.ProviderQuotaExceeded: (429, "PROVIDER_QUOTA_EXCEEDED"),
     pc_errors.ConnectionNotFound: (404, "NOT_FOUND"),
     pc_errors.ConnectionConflict: (409, "CONFLICT"),
     pc_errors.ConnectionNotUsable: (409, "CONNECTION_NOT_USABLE"),

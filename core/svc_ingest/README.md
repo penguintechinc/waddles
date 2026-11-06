@@ -318,10 +318,12 @@ live chat from the queue payload or guest is never used; an unstamped YouTube `c
 `channel_not_owned`, `connection_not_usable`, `token_expired`, `credential_unavailable` (several of the community's connections owning
 the same chat resolve to the lowest connection id).
 
-**Gap (hub-api):** there is NO `youtube` provider adapter in `hub_api/services/provider_connections` (only Twitch, Discord and the
-static-secret providers). A YouTube connection therefore cannot be created with `live_chat_id` metadata or an OAuth refresh yet; until
-the adapter lands (OAuth install + `refreshable=True`, `BindingKey("live_chat_id", "live_chat_id", required=True)`, admin-only writes,
-`^[A-Za-z0-9_-]{1,128}$`) every YouTube send refuses `no_connection`. The executor side is complete and tested against the wire shapes.
+**hub-api side (shipped):** the `youtube` provider adapter (`hub_api/services/provider_connections/youtube.py`; guide:
+`docs/PROVIDER_CONNECTIONS.md` "YouTube provider") creates the connection through a Google OAuth connect flow (code + PKCE), refreshes
+the token (`refreshable=True`, per-tenant Google app), and carries the `live_chat_id` binding (`^[A-Za-z0-9_-]{1,128}$`, admin-only
+writes, set by `PATCH` or discovered from the channel's active broadcast). It serves the access token as kind-1 `accessToken` + `expiresAt`
++ `metadata {live_chat_id}` -- exactly what `ResolverYoutubeCredentials` parses. A connection with no `live_chat_id` yet is skipped by the
+list and `409 metadata_incomplete` on resolve, so its sends refuse `no_connection` until it is bound.
 
 ### Discord host duties (T6d-2)
 
@@ -364,7 +366,7 @@ ignored; throttled 20/min per (tenant, community, app); the role KEY rides in th
 `tenant_id` + `community_id` from the verified invoke scope on `dm.send` and the role ops (never from the bundle). `dm.send` also
 accepts a `{user:<uuid>}` recipient, the only form this executor's duty accepts. Every signed entry carries a unique `op_id`.
 
-**Gaps (not silent):** (1) YouTube has a slot source now but no hub-api
+**Gaps (not silent):** (1) YouTube has a slot source and a hub-api
 provider adapter (see "YouTube slot source"); (2) the executor and `HubPlatformUserResolver::connect` are not wired at boot (T6d-1 status above);
 the default `NoUserResolver` refuses every DM/role op loudly until it is.
 
