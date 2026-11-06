@@ -610,6 +610,7 @@ dependencies = [
 name = "connector-e2e"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bundle-executor",
  "bundle-host-http",
  "clap",
@@ -623,6 +624,8 @@ dependencies = [
  "svc-ingest",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 

@@ -11,6 +11,8 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/connector_e2e/**'
+      - 'core/svc_process/runner.py'
+      - 'core/svc_process/tests/test_connector_event_accrual_contract.py'
       - 'core/svc_ingest/**'
       - 'core/discord_mentions/**'
       - 'core/hub_client/**'
@@ -23,6 +25,8 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/connector_e2e/**'
+      - 'core/svc_process/runner.py'
+      - 'core/svc_process/tests/test_connector_event_accrual_contract.py'
       - 'core/svc_ingest/**'
       - 'core/discord_mentions/**'
       - 'core/hub_client/**'
@@ -51,3 +55,34 @@ jobs:
       # protoc: hub_client's build.rs (svc-ingest path dependency).
       extra_apt_packages: 'cmake build-essential protobuf-compiler'
       extra_apt_reason: 'for aws-lc-sys/ring (cmake, C/C++ toolchain) + hub_client (protoc)'
+
+  # Beta-trio reputation leg: the decrypted event the real connector bundles publish
+  # (tests/fixtures/accrual_contract.json, byte-compared by connector_acceptance.rs)
+  # must drive svc_process's ordinary-activity accrual. A zero-test run FAILS.
+  accrual-contract:
+    name: connector event -> reputation accrual contract (svc_process)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install svc_process deps (hash-pinned) + local libs
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --require-hashes -r core/svc_process/requirements.txt
+          python3 -m pip install libs/flask_core libs/moderation_module
+
+      - name: Run the accrual contract (exactly 2 platform cases must run)
+        working-directory: core/svc_process
+        run: |
+          set -euo pipefail
+          PYTHONPATH=. python3 -m pytest tests/test_connector_event_accrual_contract.py -q --no-cov -W ignore | tee "$RUNNER_TEMP/accrual.log"
+          grep -qE '^2 passed' "$RUNNER_TEMP/accrual.log"
