@@ -688,6 +688,14 @@ impl WebhookIngress {
         WebhookOutcome::Unavailable
     }
 
+    /// Registered owner platform of `route_key` (HTTP layer: platform-specific
+    /// response contracts such as Discord's interaction acks). `None` when the
+    /// route is unknown.
+    #[must_use]
+    pub fn owner_of(&self, route_key: &str) -> Option<String> {
+        self.entry(route_key).map(|e| e.route.owner_bundle.clone())
+    }
+
     /// Per-route hard body cap used by the HTTP layer's coarse limit.
     #[must_use]
     pub fn body_limit_for(&self, route_key: &str) -> Option<usize> {

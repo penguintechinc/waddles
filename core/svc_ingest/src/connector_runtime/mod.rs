@@ -24,6 +24,7 @@ pub mod supervisor;
 pub mod tenant;
 #[cfg(test)]
 pub(crate) mod testkit;
+pub mod webhook_boot;
 
 pub use feed::{
     BindingFeed, ConnKey, DesiredConnection, DynFeed, FeedError, FeedSet, HubBindingFeed,
