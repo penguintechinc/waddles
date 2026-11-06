@@ -25,5 +25,5 @@ sender.build-request --> ALWAYS Unsupported (one-way inbound by design, #101)
 
 1. svc_ingest `PollTransport` is GET + cursor only; Spectrum needs **POST + JSON body + `Cookie`/`X-Rsi-Token` header** (profile-derived, host-constant).
 2. **Seen-id dedupe + priming** (no backlog flood) and the **roster/events snapshot store + diff** (Valkey) are stateful and must live host-side (guests are stateless; pinned connectors have no host-call bridge).
-3. `SpectrumProfile`, selector entry (`CONNECTOR_SPECTRUM_ENABLED`) + legacy-suppression parity fixtures, helm `connectors.spectrum.*`, hub-api provider (`spectrum`, RSI session token as `platform_credential`), `core-bundles.yaml` entry, `connector_e2e` against a fake Spectrum API.
+3. `SpectrumProfile` + `connector_e2e` against a fake Spectrum API (host-side). DONE in the wiring slice: selector entry (`CONNECTOR_SPECTRUM_ENABLED`, default OFF, suppresses the legacy `spectrum_{poll,org}` receivers) + parity fixtures, helm `connectors.spectrum.*`, hub-api provider `spectrum` (RSI session token sealed at rest, `chat_ingest` only), `core-bundles.yaml` row. Still open: executor `CONNECTOR_PIN_DIGEST_SPECTRUM` field (`core/bundle_executor/src/config.rs`).
 4. Identity: `identity.lookup(("spectrum", member_id))` needs the `spectrum` platform registered with the identity backend.

@@ -28,7 +28,7 @@ use crate::config::CliConfig;
 pub const IDENTIFY_BUDGET_READY: bool = true;
 
 /// Platforms the selector knows, in validation order.
-pub const PLATFORMS: [&str; 3] = ["twitch", "discord", "youtube"];
+pub const PLATFORMS: [&str; 4] = ["twitch", "discord", "youtube", "spectrum"];
 
 /// Platforms whose webhook routes the runtime can own.
 pub const WEBHOOK_CAPABLE: [&str; 2] = ["twitch", "discord"];
@@ -74,10 +74,11 @@ pub struct ConnectorSelector {
     twitch: bool,
     discord: bool,
     youtube: bool,
+    spectrum: bool,
 }
 
 impl ConnectorSelector {
-    /// Reads `CONNECTOR_{TWITCH,DISCORD,YOUTUBE}_ENABLED` via `lookup` (env in
+    /// Reads `CONNECTOR_{TWITCH,DISCORD,YOUTUBE,SPECTRUM}_ENABLED` via `lookup` (env in
     /// production). Default OFF; malformed is fatal; Discord ON is fatal
     /// while [`IDENTIFY_BUDGET_READY`] is `false`.
     ///
@@ -96,6 +97,7 @@ impl ConnectorSelector {
             twitch: parse_bool(lookup, "CONNECTOR_TWITCH_ENABLED")?,
             discord: parse_bool(lookup, "CONNECTOR_DISCORD_ENABLED")?,
             youtube: parse_bool(lookup, "CONNECTOR_YOUTUBE_ENABLED")?,
+            spectrum: parse_bool(lookup, "CONNECTOR_SPECTRUM_ENABLED")?,
         };
         if sel.discord && !identify_budget_ready {
             return Err(BootError::Blocked(
@@ -112,6 +114,7 @@ impl ConnectorSelector {
             "twitch" => self.twitch,
             "discord" => self.discord,
             "youtube" => self.youtube,
+            "spectrum" => self.spectrum,
             _ => false,
         }
     }
@@ -125,7 +128,7 @@ impl ConnectorSelector {
     /// `true` when any platform runs on the connector runtime.
     #[must_use]
     pub fn any_connector(&self) -> bool {
-        self.twitch || self.discord || self.youtube
+        self.twitch || self.discord || self.youtube || self.spectrum
     }
 
     /// Platforms with the connector ON, in [`PLATFORMS`] order.
@@ -285,6 +288,7 @@ fn digest_name(platform: &str) -> &'static str {
     match platform {
         "twitch" => "SENDER_EXEC_DIGEST_TWITCH",
         "discord" => "SENDER_EXEC_DIGEST_DISCORD",
+        "spectrum" => "SENDER_EXEC_DIGEST_SPECTRUM",
         _ => "SENDER_EXEC_DIGEST_YOUTUBE",
     }
 }
@@ -383,6 +387,17 @@ mod tests {
     }
 
     #[test]
+    fn spectrum_on_is_independent_and_ordered_last() {
+        let s = ConnectorSelector::from_env(&env(&[
+            ("CONNECTOR_SPECTRUM_ENABLED", "true"),
+            ("CONNECTOR_TWITCH_ENABLED", "1"),
+        ]))
+        .unwrap();
+        assert!(s.connector("spectrum") && s.legacy("discord") && s.legacy("youtube"));
+        assert_eq!(s.enabled_platforms(), vec!["twitch", "spectrum"]);
+    }
+
+    #[test]
     fn explicit_false_is_off() {
         let s = ConnectorSelector::from_env(&env(&[
             ("CONNECTOR_TWITCH_ENABLED", " FALSE "),
@@ -398,6 +413,7 @@ mod tests {
             ("CONNECTOR_TWITCH_ENABLED", "yes"),
             ("CONNECTOR_DISCORD_ENABLED", ""),
             ("CONNECTOR_YOUTUBE_ENABLED", "tru"),
+            ("CONNECTOR_SPECTRUM_ENABLED", "on"),
         ] {
             let err = ConnectorSelector::from_env(&env(&[(name, bad)])).unwrap_err();
             assert_eq!(err, BootError::Malformed(name));
@@ -488,6 +504,11 @@ mod tests {
             assert_eq!(
                 sel.legacy("youtube"),
                 e["youtube_inbound"].as_bool().unwrap(),
+                "{case}"
+            );
+            assert_eq!(
+                sel.legacy("spectrum"),
+                e["spectrum_inbound"].as_bool().unwrap(),
                 "{case}"
             );
         }
@@ -756,6 +777,7 @@ mod tests {
     fn digest_name_per_platform() {
         assert_eq!(digest_name("discord"), "SENDER_EXEC_DIGEST_DISCORD");
         assert_eq!(digest_name("youtube"), "SENDER_EXEC_DIGEST_YOUTUBE");
+        assert_eq!(digest_name("spectrum"), "SENDER_EXEC_DIGEST_SPECTRUM");
     }
 
     #[test]

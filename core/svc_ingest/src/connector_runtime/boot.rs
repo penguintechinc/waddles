@@ -66,6 +66,7 @@ fn digest_env(platform: &str) -> &'static str {
     match platform {
         "twitch" => "SENDER_EXEC_DIGEST_TWITCH",
         "discord" => "SENDER_EXEC_DIGEST_DISCORD",
+        "spectrum" => "SENDER_EXEC_DIGEST_SPECTRUM",
         _ => "SENDER_EXEC_DIGEST_YOUTUBE",
     }
 }

@@ -1029,6 +1029,8 @@ pipeline:
       twitch: ""
       discord: ""
       youtube: ""
+      # Inbound-only RSI Spectrum connector (gh #486); required only when connector.spectrum is ON.
+      spectrum: ""
 
   # T10 (v3 demo) — pre-install/pre-upgrade Helm hook Job (templates/migrations-job.yaml)
   # that applies config/postgres/migrations/*.sql to completion before any pipeline
@@ -1618,6 +1620,11 @@ pipeline:
           discord:
             enabled: false
           youtube:
+            enabled: false
+          # RSI Spectrum (gh #486): inbound-only; flag waddles.connector-spectrum / env
+          # CONNECTOR_SPECTRUM_ENABLED. ON suppresses the legacy spectrum_{poll,org} receivers.
+          # No webhook surface (webhookPlatforms stays twitch/discord only).
+          spectrum:
             enabled: false
         # The Valkey IDENTIFY budget is wired in the binary; the chart default stays false so beta/
         # gamma/production REJECT discord until it is deliberately enabled there (values-alpha,

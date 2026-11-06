@@ -1,6 +1,5 @@
 # RSI Spectrum platform CONNECTOR (gh #486): one-way INBOUND `kind: service` bundle on the
-# `connector` world. NOT yet registered in bundles/core-bundles.yaml and NOT wired to a
-# svc_ingest profile -- see README "Remaining work". Cutover flag (when wired): PostHog
+# `connector` world, registered in bundles/core-bundles.yaml. Cutover flag: PostHog
 # `waddles.connector-spectrum` / env `CONNECTOR_SPECTRUM_ENABLED`, default OFF.
 # No outbound capability is requested on purpose (#101: writing to RSI's undocumented API
 # risks banning the org). The session credential never enters this component.
