@@ -39,6 +39,8 @@ from typing import Any
 import httpx
 from flask_core.safe_logging import log_exc_safe, url_host
 
+from .errors import ApiError
+from .github_sync_service import decrypt_token, encrypt_token
 from .url_guard import SSRFError, guarded_get, validate_url
 
 logger = logging.getLogger(__name__)
@@ -448,7 +450,8 @@ class KnowledgeSourceCreate:
     branch: str = "main"
     docs_path: str = "/"
     refresh_interval: str = "weekly"
-    encrypted_token: str | None = None
+    #: Plaintext access token -- encrypted before it touches the DB; never repr'd or logged.
+    token: str | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
@@ -512,8 +515,9 @@ def _iso(value: Any) -> str | None:
 def _to_source(row: Any) -> KnowledgeSource:
     return KnowledgeSource(
         id=row.id,
-        community_id=row.community_id,
-        vendor_id=row.vendor_id,
+        # pydal returns `reference` columns as a `Reference` int subclass pydantic cannot dump.
+        community_id=None if row.community_id is None else int(row.community_id),
+        vendor_id=None if row.vendor_id is None else int(row.vendor_id),
         module_id=row.module_id,
         source_name=row.source_name,
         source_type=row.source_type,
@@ -569,7 +573,7 @@ def add_knowledge_source(dal: Any, payload: KnowledgeSourceCreate) -> KnowledgeS
         branch=payload.branch,
         docs_path=payload.docs_path,
         refresh_interval=payload.refresh_interval,
-        encrypted_token=payload.encrypted_token,
+        encrypted_token=_seal_token(payload.token),
         is_active=True,
     )
     dal.commit()
@@ -591,14 +595,29 @@ _ALLOWED_UPDATE_FIELDS = {
     "branch",
     "docs_path",
     "refresh_interval",
-    "encrypted_token",
+    "token",
     "is_active",
 }
+
+
+def _seal_token(token: str | None) -> str | None:
+    """Encrypt a plaintext access token for storage (AES-256-GCM); empty/None -> None."""
+    if not token:
+        return None
+    try:
+        return encrypt_token(token)
+    except ApiError as exc:
+        raise KnowledgeServiceError("Token encryption is not configured", status=500) from exc
 
 
 def update_knowledge_source(dal: Any, source_id: int, updates: dict[str, Any]) -> KnowledgeSource:
     """`PUT .../ai-knowledge/sources/:id` -- only `_ALLOWED_UPDATE_FIELDS` are writable."""
     fields = {k: v for k, v in updates.items() if k in _ALLOWED_UPDATE_FIELDS}
+    if "token" in fields:
+        # Empty string = "leave the stored token unchanged" (the admin edit form posts '').
+        token = fields.pop("token")
+        if token:
+            fields["encrypted_token"] = _seal_token(token)
     if not fields:
         raise KnowledgeServiceError("No valid fields provided for update", status=400)
     if "source_url" in fields:
@@ -683,8 +702,14 @@ async def index_source(dal: Any, source_id: int) -> None:
     pages: list[_Page] = []
     try:
         if source.source_type in ("github_wiki", "github_repo_markdown"):
+            try:
+                token = decrypt_token(source.encrypted_token) if source.encrypted_token else None
+            except ApiError as exc:
+                raise KnowledgeServiceError(
+                    "Stored access token could not be decrypted -- re-enter it", status=500
+                ) from exc
             pages = await _fetch_github_markdown(
-                source.source_url, source.branch, source.docs_path, source.encrypted_token
+                source.source_url, source.branch, source.docs_path, token
             )
         elif source.source_type in ("mkdocs", "docusaurus", "generic_url"):
             pages = await _fetch_sitemap_pages(source.source_url)

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- hub-api AI-knowledge sources (`/api/v1/admin/ai-knowledge/sources*`): update/delete/reindex now authorize against the source's community (tenant-checked) / vendor owner and answer 404 for foreign ids (cross-community IDOR); list requires `communityId` for non-super-admins; access tokens are encrypted at rest (AES-256-GCM, `GITHUB_SYNC_ENCRYPTION_KEY`) and decrypted only in `index_source`. Request field renamed `token` (`encrypted_token` accepted as a DEPRECATED plaintext alias). Migration `0074_ai_knowledge_token_enc` seals existing plaintext rows (needs `GITHUB_SYNC_ENCRYPTION_KEY` when any exist). See `docs/ai-knowledge-sources.md`.
+
 ### Added
 - `sender.build-request` over the executor wire (P6a T6d wire follow-up; needs penguin-libs#151, `penguin-bundle-host` 0.5.0
   `ExportKind::ConnectorBuildRequest`): `bundle_executor` `ConnectorHost::build_request` + `connector_wire` dispatch (digest-pinned
