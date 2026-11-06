@@ -141,7 +141,14 @@ async def test_access_grants_lists_table_access_with_explicit_dto(app: Quart) ->
     )
     assert response.status_code == 200
     body = await response.get_json()
-    assert set(body) == {"success", "requestedIds", "approvedIds", "dangerousIds", "tableAccess"}
+    assert set(body) == {
+        "success",
+        "requestedIds",
+        "approvedIds",
+        "dangerousIds",
+        "tableAccess",
+        "storageAccess",
+    }
     assert body["requestedIds"] == _ROLE_IDS
     assert body["approvedIds"] == []  # never auto-granted: nothing approved yet
     assert body["dangerousIds"] == _ROLE_IDS
