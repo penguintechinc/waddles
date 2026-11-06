@@ -367,3 +367,16 @@ accepts a `{user:<uuid>}` recipient, the only form this executor's duty accepts.
 **Gaps (not silent):** (1) YouTube has a slot source now but no hub-api
 provider adapter (see "YouTube slot source"); (2) the executor and `HubPlatformUserResolver::connect` are not wired at boot (T6d-1 status above);
 the default `NoUserResolver` refuses every DM/role op loudly until it is.
+
+## Overlay host selector (connector runtime)
+
+Env baselines, default OFF, strict booleans, read identically by the Rust and Python svc-ingest (never the PostHog client: the `*.waddles.app` bypass would read every flag ON).
+
+| Env | Effect when ON |
+|---|---|
+| `OVERLAY_TWITCH_ENABLED` | legacy Twitch IRC inbound off; Twitch outbound drains off only if `CONNECTOR_TOOLS_ENABLED`; legacy EventSub stays unless `twitch` in `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` |
+| `OVERLAY_DISCORD_ENABLED` | FATAL until the identify budget is ported (`IDENTIFY_BUDGET_READY`) |
+| `OVERLAY_YOUTUBE_ENABLED` | Python `youtube_live_poll` off |
+| `CONNECTOR_RUNTIME_ENABLED`, `CONNECTOR_RECONCILE_INTERVAL_SECS` (60), `CONNECTOR_MAX_CONNECTIONS` (500), `CONNECTOR_START_CONCURRENCY` (8), `CONNECTOR_DISCORD_START_PACE_MS` (5500), `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS` | see spec 2026-11-05 section 1.3 |
+
+Any overlay ON validates, in order and naming the item: `INGEST_DYNAMIC_CONNECTIONS`, `HUB_API_GRPC_ENDPOINT`, `SERVICE_JWT_TOKEN_ENDPOINT`, `SENDER_EXEC_DIGEST_<P>`, `HOST_API_SERVER_CERT_FILE`/`_KEY_FILE`/`HOST_API_CLIENT_CA_FILE`/`HOST_API_CLIENT_IDENTITY`, spine config, `CONNECTOR_ROUTE_KEY_SECRET` (when webhooks listed). `/readyz` reports each overlay platform (`overlay[]`, reason while not ready).
