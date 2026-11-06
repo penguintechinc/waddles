@@ -112,6 +112,7 @@ from services import (
     bundle_signing_service,
     valkey_admin_client,
 )
+from services.bundle_access_grants import access_grant_diff_atoms
 from services.bundle_manifest_v2 import (
     BundleManifestV2,
     ConsumeRule,
@@ -557,12 +558,7 @@ def classify_diff(new_summary: dict[str, Any], previous_summary: dict[str, Any] 
             f"calls:{t['target']}:{t['tool']}:{t['access']}"
             for t in summary.get("requestedTools", [])
         }
-        parts |= {
-            f"tableaccess:{op}:{t['table']}.{col}"
-            for t in summary.get("tableAccess", [])
-            for col in t["columns"]
-            for op in t["ops"]
-        }
+        parts |= access_grant_diff_atoms(summary)
         return parts
 
     new_set, old_set = _flatten(new_summary), _flatten(previous_summary)

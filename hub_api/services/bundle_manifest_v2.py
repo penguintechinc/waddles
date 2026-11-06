@@ -31,6 +31,7 @@ from flask_core.bundle_attribution import (
     valid_notice,
 )
 
+from services.bundle_access_grants import is_access_grant_id
 from services.bundle_permission_catalog import (
     NET_HTTP_IP_PREFIXES,
     NET_HTTP_PREFIXES,
@@ -40,7 +41,6 @@ from services.bundle_permission_catalog import (
 from services.bundle_table_access import (
     TableAccessError,
     TableAccessRequest,
-    is_table_access_id,
     parse_table_access,
     table_access_permission_ids,
 )
@@ -689,7 +689,7 @@ def parse_permission_declarations(
     for entry in raw_entries:
         permission_id = entry.get("id", "")
         _require(
-            not is_table_access_id(str(permission_id)),
+            not is_access_grant_id(str(permission_id)),
             "use_table_access_block",
             f"{permission_id!r}: declare platform-table access via the table_access block",
         )

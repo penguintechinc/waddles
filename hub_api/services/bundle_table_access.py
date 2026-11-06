@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
+
+from services.bundle_access_grants import AccessGrantKind, register_kind
 
 #: table -> column -> permitted ops. Deliberately narrow; never an auth/credential/
 #: PII identity table or PII column (see the spec's "never allowlisted" list).
@@ -144,3 +147,35 @@ def table_access_permission_ids(requests: tuple[TableAccessRequest, ...]) -> tup
             }
         )
     )
+
+
+def _summarize(requests: tuple[Any, ...]) -> list[dict[str, Any]]:
+    """Consent-summary entries (table/columns/ops/reason), sorted by table."""
+    return sorted(
+        (
+            {"table": r.table, "columns": list(r.columns), "ops": list(r.ops), "reason": r.reason}
+            for r in requests
+        ),
+        key=lambda e: e["table"],
+    )
+
+
+def _atoms(entry: dict[str, Any]) -> set[str]:
+    """One diff atom per (op, table, column) of a summary entry."""
+    return {
+        f"tableaccess:{op}:{entry['table']}.{col}"
+        for col in entry["columns"]
+        for op in entry["ops"]
+    }
+
+
+register_kind(
+    AccessGrantKind(
+        kind="table",
+        id_prefix=TABLE_ACCESS_PREFIX,
+        summary_key="tableAccess",
+        requests_of=lambda manifest: manifest.table_access,
+        summarize=_summarize,
+        atoms=_atoms,
+    )
+)

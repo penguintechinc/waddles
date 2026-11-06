@@ -36,10 +36,11 @@ from penguin_dal import AsyncDB
 from sqlalchemy import func, select
 
 from services import bundle_audit, valkey_admin_client
+from services.bundle_access_grants import is_access_grant_id
+from services.bundle_access_grants import kinds as access_grant_kinds
 from services.bundle_approval_service import _reparse_trusted
 from services.bundle_manifest_v2 import BundleManifestV2, PermissionDeclaration
 from services.bundle_permission_catalog import CORE_NAMESPACE_PREFIX, is_dangerous
-from services.bundle_table_access import is_table_access_id
 from services.errors import ApiError, forbidden, not_found
 
 logger = logging.getLogger(__name__)
@@ -250,9 +251,11 @@ async def record_permission_requests(
     delete_where = (table.c.app_id == app_id) & (table.c.version == version)
     if approval_source == _SYSTEM_APPROVAL_SOURCE:
         # Defense in depth for the never-auto-granted rule: the system path can
-        # neither write nor erase a human-approved platform.table.* row.
-        declarations = tuple(d for d in declarations if not is_table_access_id(d.id))
-        delete_where = delete_where & ~table.c.permission_id.like("platform.table.%")
+        # neither write nor erase a human-approved dangerous access-grant row.
+        declarations = tuple(d for d in declarations if not is_access_grant_id(d.id))
+        for grant_kind in access_grant_kinds():
+            like = f"{grant_kind.id_prefix}%"
+            delete_where = delete_where & ~table.c.permission_id.like(like)
     async with install_dal.engine.begin() as conn:
         await conn.execute(table.delete().where(delete_where))
         if declarations:
@@ -304,7 +307,7 @@ async def seed_core_permission_requests(
         app_id=app_id,
         version=version,
         declarations=tuple(
-            d for d in manifest.permission_declarations if not is_table_access_id(d.id)
+            d for d in manifest.permission_declarations if not is_access_grant_id(d.id)
         ),
         approved_by=None,
         approval_source=_SYSTEM_APPROVAL_SOURCE,

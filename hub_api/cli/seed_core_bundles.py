@@ -71,6 +71,7 @@ from penguin_dal import AsyncDB
 from config import HubAPIConfig
 from services import app_command_backfill, vendor_bundle_authz
 from services.app_source_binding_service import TENANT_WIDE_COMMUNITY_SENTINEL
+from services.bundle_access_grants import is_access_grant_id
 from services.bundle_approval_service import (
     activate_for_community,
     activate_tenant_wide,
@@ -85,7 +86,6 @@ from services.bundle_permission_service import (
     grant_community_permissions,
     seed_core_permission_requests,
 )
-from services.bundle_table_access import is_table_access_id
 from services.bundle_telemetry import get_meter
 from services.bundle_version_service import (
     STATUS_ADDRESSING,
@@ -1221,7 +1221,7 @@ async def _grant_core_bundle_permissions(
     # `platform.table.*` is never auto-granted (spec 2026-11-06 Sec3): a human
     # global admin must approve it, so the seeder neither approves nor grants it.
     required = frozenset(
-        d.id for d in manifest.permission_declarations if not is_table_access_id(d.id)
+        d.id for d in manifest.permission_declarations if not is_access_grant_id(d.id)
     )
     if not required:
         return
@@ -1233,7 +1233,7 @@ async def _grant_core_bundle_permissions(
             for pid in await get_community_granted_ids(
                 install_dal, community_id=community_id, app_id=app_id
             )
-            if is_table_access_id(pid)
+            if is_access_grant_id(pid)
         )
         await grant_community_permissions(
             install_dal,
