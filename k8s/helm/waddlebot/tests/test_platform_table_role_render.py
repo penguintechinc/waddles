@@ -114,10 +114,9 @@ def test_only_svc_process_and_migrate_reference_it_never_envfrom(
     docs = _render(_ENABLE)
     refs = _workload_refs(docs)
     assert refs, "no workload references the credential"
-    assert all("svc-process" in n or "db-migrate" in n for n in refs), refs
-    assert any("svc-process" in n for n in refs) and any(
-        "db-migrate" in n for n in refs
-    )
+    # The migrate Job gets it only via its dedicated hook Secret (envFrom of -db-migrate-secret,
+    # asserted in the previous test), so the only workload naming it is svc-process-rust.
+    assert all("svc-process" in n for n in refs), refs
     for d in docs:
         pod = (d.get("spec") or {}).get("template", {}).get("spec", {})
         for c in pod.get("containers", []) + pod.get("initContainers", []):
