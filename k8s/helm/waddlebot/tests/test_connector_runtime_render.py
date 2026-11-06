@@ -66,7 +66,7 @@ def _secret_vols(dep: dict[str, Any]) -> set[str]:
 
 _RUNTIME_ENV = (
     "CONNECTOR_RUNTIME_ENABLED", "OVERLAY_TWITCH_ENABLED", "OVERLAY_DISCORD_ENABLED",
-    "OVERLAY_YOUTUBE_ENABLED", "CONNECTOR_RECONCILE_INTERVAL_SECS", "CONNECTOR_MAX_CONNECTIONS",
+    "OVERLAY_YOUTUBE_ENABLED", "CONNECTOR_RECONCILE_INTERVAL_SECS", "CONNECTOR_HEARTBEAT_ENABLED", "CONNECTOR_MAX_CONNECTIONS",
     "CONNECTOR_START_CONCURRENCY", "CONNECTOR_DISCORD_START_PACE_MS",
     "CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS", "CONNECTOR_ROUTE_KEY_SECRET",
     "CONNECTOR_HOST_API_ADDR", "CONNECTOR_HOST_API_IDENTITY", "EXECUTOR_CONNECTOR_CONNECTIONS",
@@ -299,3 +299,11 @@ def test_overlays_off_mints_no_connector_secrets_and_never_fails(values: str) ->
     docs = _docs([], values)
     names = [d["metadata"]["name"] for d in docs if d.get("kind") == "Secret"]
     assert not [n for n in names if n.endswith(("-ingest-executor-tls", "-svc-ingest-host-api-tls"))]
+
+
+def test_heartbeat_env_defaults_false_and_is_settable() -> None:
+    """CONNECTOR_HEARTBEAT_ENABLED mirrors the Rust default (false) and a strict "true"/"false" value."""
+    ing = _dep(_docs(_yt()), "-svc-ingest-rust")
+    assert _env(ing)["CONNECTOR_HEARTBEAT_ENABLED"]["value"] == "false"
+    on = _dep(_docs(_yt("--set", f"{_RT}.heartbeatEnabled=true")), "-svc-ingest-rust")
+    assert _env(on)["CONNECTOR_HEARTBEAT_ENABLED"]["value"] == "true"

@@ -1625,6 +1625,9 @@ pipeline:
         maxConnections: 500
         startConcurrency: 8
         discordStartPaceMs: 5500
+        # CONNECTOR_HEARTBEAT_ENABLED on the Rust svc-ingest (boot.rs ENV_HEARTBEAT, strict bool; the
+        # Rust default when unset is false). Driver heartbeat baseline (`ingest.connector-heartbeat`).
+        heartbeatEnabled: false
         # csv-rendered subset of [twitch, discord] whose webhook routes are registered.
         webhookPlatforms: []
         # HMAC key deriving webhook route keys: an EXISTING Secret only (never a literal here).
