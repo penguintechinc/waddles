@@ -131,22 +131,28 @@ impl<C: DiscordCredentialSource> SlotSource for DiscordSlots<C> {
         if req.handles.iter().any(|h| *h != BOT_HANDLE) {
             return Err(SlotError::Refused("unknown_handle"));
         }
-        let channel = req
-            .pinned_channel
-            .ok_or(SlotError::Refused("no_origin_pin"))?;
+        // A guild-scoped op (scheduled events) has no channel to prove; every
+        // other op must carry the stamp-verified channel.
+        let channel = match (req.pinned_channel, req.guild_scoped) {
+            (Some(c), false) => Some(c),
+            (None, true) => None,
+            _ => return Err(SlotError::Refused("no_origin_pin")),
+        };
         // Fresh on every send; never another community's credential.
         let binding = self
             .creds
             .binding(req.community_id)
             .await
             .map_err(map_cred)?;
-        let rest = Rest {
-            client: &self.client,
-            base: &self.api_base,
-            token: binding.bot_token.expose(),
-        };
-        if rest.channel_guild(channel).await?.as_deref() != Some(binding.guild_id.as_str()) {
-            return Err(SlotError::Refused("channel_not_owned"));
+        if let Some(channel) = channel {
+            let rest = Rest {
+                client: &self.client,
+                base: &self.api_base,
+                token: binding.bot_token.expose(),
+            };
+            if rest.channel_guild(channel).await?.as_deref() != Some(binding.guild_id.as_str()) {
+                return Err(SlotError::Refused("channel_not_owned"));
+            }
         }
         let mut out = HashMap::new();
         out.insert(

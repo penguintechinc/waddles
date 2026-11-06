@@ -360,6 +360,45 @@ through `tool.invoke`, never a platform-specific host path.
 - **Tests.** `core/bundle_executor/tests/connector_tools.rs` (real compiled fixtures through the production
   engine/linker/wire path), `src/connector_wire.rs` and `src/manifest.rs` unit tests.
 
+## Discord service-bundle tools (host-mediated `tool.invoke`)
+
+The Discord service bundle (`waddles.core.service.discord`) **declares** these tools
+(`exported_tools`: names + JSON arg schemas). The **host** executes them -- the guest has no
+mutating egress -- through the existing binding-pinned outbound producers, so every pin
+(guild from the binding, credential, managed-role allowlist, `pin_sig`, `op_id` replay guard,
+rate limit, drain confirmation) applies unchanged. One dispatch path: `svc_action`
+`capabilities/tool.rs` step 5b, after the generic planner's checks.
+
+**Caller convention** (an APP bundle; app -> app is forbidden, app -> service only):
+
+* manifest `requested_tools`: `{target_app_id: waddles.core.service.discord, tool: <name>, access: write}`
+* grant: `tool.call:waddles.core.service.discord:<tool>` with params `{"write": true}` (dangerous, consent-ack)
+* call `tool.invoke(target, tool, args, idempotency-key)`; write tools REQUIRE the key.
+* Result: `{"ok": true, ...}`; refusal codes are the standard `tool.invoke` set
+  (`invalid_args`, `not_granted`, `forbidden`, `target_unavailable`, ...).
+
+Arguments are **closed objects**: any key not listed (`guild_id`, `role_id`, `channel`,
+`tenant_id`, ...) is REFUSED with `invalid_args`, never ignored -- the guild, channel and role
+snowflake are the host's to pin.
+
+| Tool | Access | Args (JSON schema, `additionalProperties:false`) | Result | Notes |
+|---|---|---|---|---|
+| `discord.member.roles.add` | write, dangerous | `user` (lowercase UUID, required), `role_key` (`^[a-z][a-z0-9_-]{0,31}$`, required) | `{"ok":true,"op":"role.add"}` | managed-role KEY mapped through the binding allowlist; never a snowflake |
+| `discord.member.roles.remove` | write, dangerous | same | `{"ok":true,"op":"role.remove"}` | same pins |
+| `discord.scheduled_event.create` | write, dangerous | `name`, `scheduled_start_time`, `scheduled_end_time`, `location` (required), `description` | `{"ok":true,"event_id":".."}` | see event sync |
+| `discord.scheduled_event.update` | write, dangerous | `event_id` + the create fields | `{"ok":true,"event_id":null}` | |
+| `discord.scheduled_event.cancel` / `.delete` | write, dangerous | `event_id` (`^[0-9]{1,20}$`) | `{"ok":true,...}` | |
+| `classify_frame`, `classify_close_code` | read | gateway frame / close code | classification | guest-run (pure) |
+
+**Role-tool constraints (inherited from the `role.add|remove` producer):** the user is the
+tokenized UUID (the host detokenizes for the drain); the call must run under a Discord-origin
+dispatch (the pinned origin channel is how the community is proven), so it cannot be issued from a
+non-Discord event or an event without a channel; a role KEY absent from the community's managed
+roles is refused by the drain and surfaced as `target_unavailable`. **Not yet served:**
+`discord.member.roles.set` and `discord.roles.list` are NOT declared or executed (they need a
+host-side read of the current member roles / managed-role data) -- calling them is refused
+(`forbidden`: the target does not export them), never a silent no-op.
+
 ## Not in B0 (explicit, typed, not silent)
 
 - **A production listener + pinned set.** The wire invoker takes any accepted duplex stream

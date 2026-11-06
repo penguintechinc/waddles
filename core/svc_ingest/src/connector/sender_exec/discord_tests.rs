@@ -26,7 +26,7 @@ use super::tests::Flag;
 use super::*;
 use crate::outbound_creds::CredError;
 use crate::outbound_creds_discord::{DiscordBinding, DiscordCredentialSource};
-use crate::outbound_ops::parse_outbound_entry;
+use crate::outbound_ops::{parse_outbound_entry, EventKind};
 
 const DIGEST: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const TOKEN: &str = "BOT-SECRET-ONE";
@@ -1089,12 +1089,14 @@ async fn the_slot_source_refuses_foreign_platforms_unknown_handles_and_missing_p
     let src =
         DiscordSlots::with_endpoint(Creds::new(), guard(), "http://127.0.0.1:1/api/v10".into());
     let base = SlotRequest {
+        guild_scoped: false,
         platform: "discord",
         community_id: Some(1),
         pinned_channel: Some(CHANNEL),
         handles: &["discord-bot"],
     };
     let mut r = SlotRequest {
+        guild_scoped: false,
         platform: "twitch",
         ..clone_req(&base)
     };
@@ -1103,6 +1105,7 @@ async fn the_slot_source_refuses_foreign_platforms_unknown_handles_and_missing_p
         SlotError::Refused("unsupported_platform")
     );
     r = SlotRequest {
+        guild_scoped: false,
         handles: &["token"],
         ..clone_req(&base)
     };
@@ -1111,6 +1114,7 @@ async fn the_slot_source_refuses_foreign_platforms_unknown_handles_and_missing_p
         SlotError::Refused("unknown_handle")
     );
     r = SlotRequest {
+        guild_scoped: false,
         pinned_channel: None,
         ..clone_req(&base)
     };
@@ -1125,6 +1129,7 @@ async fn the_slot_source_refuses_foreign_platforms_unknown_handles_and_missing_p
     );
     // a non-snowflake channel never reaches the wire
     r = SlotRequest {
+        guild_scoped: false,
         pinned_channel: Some("../x"),
         ..clone_req(&base)
     };
@@ -1136,6 +1141,7 @@ async fn the_slot_source_refuses_foreign_platforms_unknown_handles_and_missing_p
 
 fn clone_req<'a>(r: &SlotRequest<'a>) -> SlotRequest<'a> {
     SlotRequest {
+        guild_scoped: false,
         platform: r.platform,
         community_id: r.community_id,
         pinned_channel: r.pinned_channel,
@@ -1354,5 +1360,383 @@ async fn resolver_failures_map_to_distinct_typed_outcomes() {
         assert_eq!(code(&e), expect);
         assert_eq!(!e.is_policy_refusal(), retryable, "{expect}");
         assert_eq!(writes(&r.server).await, 0);
+    }
+}
+
+// ---- guild scheduled events ---------------------------------------------
+
+const EVENT_ID: &str = "900000000000000001";
+const EVENT_JSON: &str = r#"{"name":"n","scheduled_start_time":"2026-12-01T19:00:00Z","scheduled_end_time":"2026-12-01T20:00:00Z","location":"l"}"#;
+
+fn event(kind: EventKind, guild: &str, tenant: Option<i64>) -> OutboundAction {
+    let (event_id, event_json) = match kind {
+        EventKind::Create => (None, Some(EVENT_JSON.to_string())),
+        EventKind::Update => (Some(EVENT_ID.to_string()), Some(EVENT_JSON.to_string())),
+        EventKind::Cancel | EventKind::Delete => (Some(EVENT_ID.to_string()), None),
+    };
+    OutboundAction::EventOp {
+        kind,
+        event_id,
+        event_json,
+        expect_guild: (guild != "-").then(|| guild.to_string()),
+        tenant_id: tenant,
+    }
+}
+
+fn event_tpl(base: &str, method: &str, id: Option<&str>) -> RequestTpl {
+    let tail = id.map_or_else(String::new, |i| format!("/{i}"));
+    RequestTpl {
+        method: method.into(),
+        url: format!("{base}/api/v10/guilds/{{target.guild_id}}/scheduled-events{tail}"),
+        headers: if method == "DELETE" {
+            vec![]
+        } else {
+            vec![("Content-Type".into(), "application/json".into())]
+        },
+        body: (method != "DELETE").then(|| br#"{"name":"n"}"#.to_vec()),
+        secret_refs: vec![("Authorization".into(), "discord-bot".into())],
+    }
+}
+
+async fn mock_events(s: &MockServer, verb: &str, p: &str, status: u16, body: serde_json::Value) {
+    Mock::given(method(verb))
+        .and(path(p.to_string()))
+        .respond_with(ResponseTemplate::new(status).set_body_json(body))
+        .mount(s)
+        .await;
+}
+
+#[tokio::test]
+async fn event_create_pins_the_binding_guild_and_returns_the_new_event_id() {
+    let r = rig(|b| event_tpl(b, "POST", None)).await;
+    mock_events(
+        &r.server,
+        "POST",
+        &format!("/api/v10/guilds/{GUILD}/scheduled-events"),
+        200,
+        json!({"id": EVENT_ID}),
+    )
+    .await;
+    let out = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, GUILD, Some(9)), 1))
+        .await
+        .unwrap();
+    assert_eq!(out.result_id.as_deref(), Some(EVENT_ID));
+    let reqs = r.server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs.len(),
+        1,
+        "no channel/role/membership lookups for events"
+    );
+    assert_eq!(
+        reqs[0].headers.get("authorization").unwrap(),
+        &format!("Bot {TOKEN}")
+    );
+    // The connector payload carries the producer's fields and NO guild/channel.
+    let calls = r.tpl.calls.lock().unwrap().clone();
+    assert_eq!(calls[0].kind, "event.create");
+    let p: serde_json::Value = serde_json::from_str(&calls[0].payload_json).unwrap();
+    assert_eq!(p["name"], "n");
+    assert!(p.get("guild_id").is_none() && p.get("channel_id").is_none());
+    assert!(p.get("event_id").is_none());
+}
+
+#[tokio::test]
+async fn event_update_cancel_delete_address_the_event_in_the_binding_guild() {
+    for (kind, verb, status) in [
+        (EventKind::Update, "PATCH", 200),
+        (EventKind::Cancel, "PATCH", 200),
+        (EventKind::Delete, "DELETE", 204),
+    ] {
+        let r = rig(|b| event_tpl(b, verb, Some(EVENT_ID))).await;
+        let p = format!("/api/v10/guilds/{GUILD}/scheduled-events/{EVENT_ID}");
+        mock_events(&r.server, verb, &p, status, json!({})).await;
+        let out = r
+            .exec
+            .execute(&rq(&event(kind, GUILD, Some(9)), 1))
+            .await
+            .unwrap();
+        assert_eq!(out.result_id, None, "{kind:?}");
+        let calls = r.tpl.calls.lock().unwrap().clone();
+        let payload: serde_json::Value = serde_json::from_str(&calls[0].payload_json).unwrap();
+        assert_eq!(payload["event_id"], EVENT_ID);
+        assert_eq!(seen(&r.server).await, vec![(verb.to_string(), p)]);
+    }
+}
+
+#[tokio::test]
+async fn an_event_guild_assertion_that_differs_from_the_binding_is_refused_before_the_connector() {
+    let r = rig(|b| event_tpl(b, "POST", None)).await;
+    mock_events(
+        &r.server,
+        "POST",
+        &format!("/api/v10/guilds/{GUILD}/scheduled-events"),
+        200,
+        json!({"id": EVENT_ID}),
+    )
+    .await;
+    let before = refusal_count("event.create", "guild_mismatch");
+    // regression: guild pinning -- the producer's guild is an assertion only.
+    let e = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, "222000", Some(9)), 1))
+        .await
+        .unwrap_err();
+    assert_eq!(e, ExecError::Slot(SlotError::Refused("guild_mismatch")));
+    assert!(e.is_policy_refusal());
+    assert_eq!(r.tpl.calls(), 0, "refused before the connector ran");
+    assert!(seen(&r.server).await.is_empty());
+    assert!(refusal_count("event.create", "guild_mismatch") > before);
+    // Community 2's binding is another guild: its own assertion passes the gate
+    // only for ITS guild, never community 1's.
+    let e = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, GUILD, Some(9)), 2))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), "guild_mismatch");
+    assert!(seen(&r.server).await.is_empty());
+}
+
+#[tokio::test]
+async fn event_ops_without_tenant_or_community_scope_are_refused() {
+    let r = rig(|b| event_tpl(b, "POST", None)).await;
+    let e = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, GUILD, None), 1))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&e), "no_tenant_scope");
+    let e = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, GUILD, Some(9)), 99))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, ExecError::Slot(_)), "{e:?}");
+    assert!(seen(&r.server).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_create_reply_without_a_snowflake_id_fails_loudly() {
+    for body in [json!({}), json!({"id": "abc"}), json!({"id": 5})] {
+        let r = rig(|b| event_tpl(b, "POST", None)).await;
+        mock_events(
+            &r.server,
+            "POST",
+            &format!("/api/v10/guilds/{GUILD}/scheduled-events"),
+            200,
+            body,
+        )
+        .await;
+        let e = r
+            .exec
+            .execute(&rq(&event(EventKind::Create, GUILD, Some(9)), 1))
+            .await
+            .unwrap_err();
+        assert_eq!(e, ExecError::Egress("bad_response"));
+        assert!(!e.is_policy_refusal());
+    }
+}
+
+#[tokio::test]
+async fn a_template_naming_another_guild_or_path_for_an_event_is_refused_by_the_verifier() {
+    for url_tail in [
+        "/api/v10/guilds/999/scheduled-events",
+        "/api/v10/guilds/{target.guild_id}/scheduled-events/../roles",
+        "/api/v10/guilds/{target.guild_id}/roles",
+        "/api/v10/channels/{target.channel_id}/messages",
+    ] {
+        let r = rig(|b| {
+            let mut t = event_tpl(b, "POST", None);
+            t.url = format!("{b}{url_tail}");
+            t
+        })
+        .await;
+        let res = r
+            .exec
+            .execute(&rq(&event(EventKind::Create, GUILD, Some(9)), 1))
+            .await;
+        assert!(res.is_err(), "{url_tail}");
+        assert!(
+            r.server.received_requests().await.unwrap().is_empty(),
+            "{url_tail}"
+        );
+    }
+}
+
+#[test]
+fn event_payload_shapes_per_kind_and_malformed_inputs() {
+    use super::discord_duties::event_payload as ep;
+    let v = |s: String| serde_json::from_str::<serde_json::Value>(&s).unwrap();
+    assert_eq!(
+        v(ep(EventKind::Create, None, Some(EVENT_JSON)).unwrap())["name"],
+        "n"
+    );
+    let u = v(ep(EventKind::Update, Some("7"), Some(EVENT_JSON)).unwrap());
+    assert_eq!(
+        (u["name"].as_str(), u["event_id"].as_str()),
+        (Some("n"), Some("7"))
+    );
+    assert_eq!(
+        v(ep(EventKind::Cancel, Some("7"), None).unwrap()),
+        json!({"event_id": "7"})
+    );
+    assert_eq!(
+        v(ep(EventKind::Delete, Some("7"), None).unwrap()),
+        json!({"event_id": "7"})
+    );
+    for bad in [
+        ep(EventKind::Create, Some("7"), Some(EVENT_JSON)),
+        ep(EventKind::Create, None, None),
+        ep(EventKind::Create, None, Some("[]")),
+        ep(EventKind::Create, None, Some("nope")),
+        ep(EventKind::Update, None, Some(EVENT_JSON)),
+        ep(EventKind::Cancel, None, None),
+        ep(EventKind::Cancel, Some("7"), Some(EVENT_JSON)),
+        ep(EventKind::Delete, Some("7"), Some("{}")),
+    ] {
+        assert_eq!(bad, Err(ExecError::BadAction));
+    }
+}
+
+#[test]
+fn event_wire_entries_parse_with_per_kind_field_rules() {
+    let base = |op: &str, extra: &str| {
+        format!(
+            r#"{{"v":1,"op":"{op}","platform":"discord","origin_channel":"111","tenant_id":9{extra}}}"#
+        )
+    };
+    let ok = |op: &str, extra: &str| parse_outbound_entry(&base(op, extra), "discord");
+    let t = r#","text":"{\"name\":\"n\"}""#;
+    let m = r#","message_id":"42""#;
+    assert!(matches!(
+        ok("event.create", t).unwrap().action,
+        OutboundAction::EventOp {
+            kind: EventKind::Create,
+            event_id: None,
+            ..
+        }
+    ));
+    let u = ok("event.update", &format!("{t}{m}")).unwrap().action;
+    assert!(matches!(
+        u,
+        OutboundAction::EventOp { kind: EventKind::Update, ref event_id, ref expect_guild, tenant_id: Some(9), .. }
+            if event_id.as_deref() == Some("42") && expect_guild.as_deref() == Some("111")
+    ));
+    for op in ["event.cancel", "event.delete"] {
+        assert_eq!(ok(op, m).unwrap().action.op(), op);
+        assert!(
+            ok(op, &format!("{m}{t}")).is_err(),
+            "{op} must not carry text"
+        );
+        assert!(ok(op, "").is_err(), "{op} needs an id");
+    }
+    assert!(ok("event.create", "").is_err());
+    assert!(ok("event.create", &format!("{t}{m}")).is_err());
+    assert!(ok("event.update", t).is_err());
+    assert!(ok("event.update", m).is_err());
+    // `-` = no assertion; anything else that is not a snowflake is refused
+    assert!(matches!(
+        parse_outbound_entry(
+            &base("event.delete", m).replace("\"111\"", "\"-\""),
+            "discord"
+        )
+        .unwrap()
+        .action,
+        OutboundAction::EventOp {
+            expect_guild: None,
+            ..
+        }
+    ));
+    assert!(parse_outbound_entry(
+        &base("event.delete", m).replace("\"111\"", "\"12ab\""),
+        "discord"
+    )
+    .is_err());
+    let no_guild = r#"{"v":1,"op":"event.delete","platform":"discord","message_id":"42"}"#;
+    assert!(parse_outbound_entry(no_guild, "discord").is_err());
+    // never defaulted: an unknown event op is an unknown op
+    assert!(ok("event.explode", m).is_err());
+}
+
+#[test]
+fn only_the_event_kinds_declared_in_policy_are_executable() {
+    let p = PlatformPolicy::discord();
+    for (k, method) in [
+        ("event.create", "POST"),
+        ("event.update", "PATCH"),
+        ("event.cancel", "PATCH"),
+        ("event.delete", "DELETE"),
+    ] {
+        let kp = p.kind(k).unwrap();
+        assert_eq!(kp.method, method);
+        assert!(kp.needs_duty && kp.slots == vec!["target.guild_id"]);
+    }
+    assert!(p.kind("event.fetch").is_none());
+}
+
+#[tokio::test]
+async fn guild_scoped_slot_requests_skip_the_channel_proof_and_nothing_else_does() {
+    let r = rig(|b| event_tpl(b, "POST", None)).await;
+    let slots = DiscordSlots::with_endpoint(
+        r.creds.clone(),
+        guard(),
+        format!("{}/api/v10", r.server.uri()),
+    );
+    let req = |pin: Option<&'static str>, guild_scoped: bool, community: i64| SlotRequest {
+        guild_scoped,
+        platform: "discord",
+        community_id: Some(community),
+        pinned_channel: pin,
+        handles: &["discord-bot"],
+    };
+    // guild-scoped, no channel: the community's own token, no channel lookup.
+    let ok = slots.resolve(&req(None, true, 1)).await.unwrap();
+    assert_eq!(ok["discord-bot"].expose(), TOKEN);
+    assert!(seen(&r.server).await.is_empty());
+    // every mismatch between pin and scope is refused loudly
+    for (pin, scoped) in [(None, false), (Some(CHANNEL), true)] {
+        assert_eq!(
+            slots.resolve(&req(pin, scoped, 1)).await.unwrap_err(),
+            SlotError::Refused("no_origin_pin")
+        );
+    }
+    // never another community's credential
+    assert!(slots.resolve(&req(None, true, 99)).await.is_err());
+}
+
+#[tokio::test]
+async fn an_event_with_no_guild_assertion_pins_from_the_binding_alone() {
+    let r = rig(|b| event_tpl(b, "POST", None)).await;
+    mock_events(
+        &r.server,
+        "POST",
+        &format!("/api/v10/guilds/{GUILD}/scheduled-events"),
+        200,
+        json!({"id": EVENT_ID}),
+    )
+    .await;
+    let out = r
+        .exec
+        .execute(&rq(&event(EventKind::Create, "-", Some(9)), 1))
+        .await
+        .unwrap();
+    assert_eq!(out.result_id.as_deref(), Some(EVENT_ID));
+}
+
+#[test]
+fn a_discord_404_on_an_event_op_acks_a_distinct_not_found_code() {
+    use crate::outbound_ops::exec_to_sender_error;
+    let nf = exec_to_sender_error("discord", "event.update", &ExecError::Upstream(404));
+    assert_eq!(nf.ack_code(), "upstream_not_found");
+    // other ops / statuses keep the generic failed code
+    for (op, st) in [
+        ("chat.delete", 404),
+        ("event.update", 500),
+        ("event.create", 403),
+    ] {
+        let e = exec_to_sender_error("discord", op, &ExecError::Upstream(st));
+        assert_eq!(e.ack_code(), "failed", "{op} {st}");
     }
 }

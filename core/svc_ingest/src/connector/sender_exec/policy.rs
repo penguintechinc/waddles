@@ -193,6 +193,39 @@ fn role_kind(kind: &'static str, method: &'static str, cred: HeaderCred) -> Kind
     }
 }
 
+/// Discord `POST|PATCH|DELETE /guilds/{guild}/scheduled-events[/{id}]`: the
+/// guild is the host-filled binding slot; the optional event id is a validated
+/// snowflake path segment. The credential is the same per-community bot handle.
+fn event_kind(
+    kind: &'static str,
+    method: &'static str,
+    with_id: bool,
+    max_body: Option<usize>,
+    cred: HeaderCred,
+) -> KindPolicy {
+    let mut path = vec![
+        PathSeg::Lit("api"),
+        PathSeg::Lit("v10"),
+        PathSeg::Lit("guilds"),
+        PathSeg::Slot("target.guild_id"),
+        PathSeg::Lit("scheduled-events"),
+    ];
+    if with_id {
+        path.push(PathSeg::Id);
+    }
+    KindPolicy {
+        kind,
+        method,
+        path,
+        query: vec![],
+        slots: vec!["target.guild_id"],
+        header_creds: vec![cred],
+        max_body,
+        text_key: "content",
+        needs_duty: true,
+    }
+}
+
 impl PlatformPolicy {
     /// Index of the slot declared as `name`.
     pub(crate) fn slot_index(&self, name: &str) -> Option<usize> {
@@ -312,9 +345,10 @@ impl PlatformPolicy {
     }
 
     /// Discord REST policy (connector README "Outbound (T6d)"). Only
-    /// `{target.channel_id}` is a stamp slot; `dm.send` needs a host duty
-    /// and `role.*` are host duties (`discord_duties`): their
-    /// placeholders are normalized by the hook, then filled by it.
+    /// `{target.channel_id}` is a stamp slot; `dm.send`, `role.*` and
+    /// `event.*` are host duties (`discord_duties`): their placeholders are
+    /// normalized by the hook, then filled by it (the event guild comes only
+    /// from the community's binding).
     #[must_use]
     pub fn discord() -> Self {
         let cred = HeaderCred {
@@ -392,6 +426,10 @@ impl PlatformPolicy {
                 },
                 role_kind("role.add", "PUT", cred),
                 role_kind("role.remove", "DELETE", cred),
+                event_kind("event.create", "POST", false, Some(4_096), cred),
+                event_kind("event.update", "PATCH", true, Some(4_096), cred),
+                event_kind("event.cancel", "PATCH", true, Some(256), cred),
+                event_kind("event.delete", "DELETE", true, None, cred),
             ],
             auth_prefixes: vec![],
             allowed_headers: vec!["content-type", "accept", "user-agent"],

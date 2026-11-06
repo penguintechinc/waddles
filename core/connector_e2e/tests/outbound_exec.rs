@@ -457,13 +457,13 @@ async fn wait_for(server: &MockServer, method_name: &str, want: usize) -> Vec<wi
             "{o}={}",
             ["twitch", "discord", "youtube"]
                 .iter()
-                .map(|p| exec_count(p, "chat.send", o))
+                .map(|p| exec_count(p, "chat.send", o) + exec_count(p, "event.create", o))
                 .sum::<u64>()
         )
     })
     .collect();
     panic!(
-        "timed out waiting for {want} {method_name} request(s); chat.send outcomes: {outcomes:?}"
+        "timed out waiting for {want} {method_name} request(s); chat.send/event.create outcomes: {outcomes:?}"
     );
 }
 
@@ -682,6 +682,174 @@ async fn discord_chat_dm_and_role_flow_through_the_real_connector() {
         format!("/api/v10/guilds/{GUILD}/members/{USER_RAW}/roles/222")
     );
     assert_eq!(header(&put[0], "authorization"), format!("Bot {DC_TOKEN}"));
+    stop(tx, h).await;
+}
+
+/// A producer-stamped guild scheduled-event entry exactly as `svc_action`
+/// writes it: no channel, the expected guild in `origin_channel`, the event id
+/// in `message_id`, the event JSON in `text`. Returns `(raw, op_id)`.
+fn event_entry(op: &str, expect_guild: &str, event_id: &str, text: &str) -> (String, String) {
+    let op_id = format!(
+        "e2e-ev-{}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst),
+        now_ms()
+    );
+    let exp_ms = now_ms() + 60_000;
+    let sig = pin()
+        .sign(&PinFields {
+            platform: "discord",
+            op,
+            channel: "",
+            origin_channel: expect_guild,
+            message_id: event_id,
+            text,
+            user_id: "",
+            op_id: &op_id,
+            exp_ms,
+            community_id: COMMUNITY,
+            tenant_id: TENANT,
+        })
+        .unwrap();
+    let mut v = json!({
+        "v": 1, "op": op, "platform": "discord", "origin_channel": expect_guild,
+        "op_id": op_id, "exp_ms": exp_ms, "community_id": COMMUNITY,
+        "tenant_id": TENANT, "pin_sig": sig,
+    });
+    if !text.is_empty() {
+        v["text"] = json!(text);
+    }
+    if !event_id.is_empty() {
+        v["message_id"] = json!(event_id);
+    }
+    (v.to_string(), op_id)
+}
+
+/// Polls the drain's result key for `op_id` (what svc-action's producer reads).
+async fn ack_for(op_id: &str) -> serde_json::Value {
+    let client = redis::Client::open(std::env::var("VALKEY_URL").unwrap()).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    for _ in 0..200 {
+        let raw: Option<String> = redis::cmd("GET")
+            .arg(format!("waddles:transport:discord:ack:{op_id}"))
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        if let Some(raw) = raw {
+            return serde_json::from_str(&raw).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no ack for {op_id}");
+}
+
+const EVENT_ID: &str = "900000000000000001";
+const EVENT_FIELDS: &str = r#"{"name":"Movie night","description":"snacks","scheduled_start_time":"2026-12-01T19:00:00+00:00","scheduled_end_time":"2026-12-01T21:00:00+00:00","location":"Online"}"#;
+
+/// Guild scheduled events: create / update / cancel / delete flow queue ->
+/// real connector -> real executor -> wire, the guild comes ONLY from the
+/// binding, the create reply's id reaches the producer through the ack, a
+/// guild assertion mismatch and a payload-supplied guild never reach the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn discord_scheduled_events_flow_through_the_real_connector_pinned_to_the_binding_guild() {
+    let rig = rig(true).await;
+    let s = &rig.dc;
+    let events = format!("/api/v10/guilds/{GUILD}/scheduled-events");
+    Mock::given(method("POST"))
+        .and(path(events.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": EVENT_ID})))
+        .mount(s)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path(format!("{events}/{EVENT_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": EVENT_ID})))
+        .mount(s)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("{events}/{EVENT_ID}")))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(s)
+        .await;
+    let (tx, h) = drain(&rig, "discord");
+
+    // create: exact request on the wire + the new id returned in the ack.
+    let (raw, op_id) = event_entry("event.create", GUILD, "", EVENT_FIELDS);
+    push(DISCORD_OUTBOUND_QUEUE_KEY, &raw).await;
+    let posts = wait_for(s, "POST", 1).await;
+    assert_eq!(posts[0].url.path(), events);
+    assert_eq!(
+        header(&posts[0], "authorization"),
+        format!("Bot {DC_TOKEN}")
+    );
+    let body: serde_json::Value = serde_json::from_slice(&posts[0].body).unwrap();
+    assert_eq!(body["name"], "Movie night");
+    assert_eq!(body["entity_type"], 3);
+    assert_eq!(body["privacy_level"], 2);
+    assert_eq!(body["entity_metadata"]["location"], "Online");
+    assert_eq!(body["scheduled_start_time"], "2026-12-01T19:00:00+00:00");
+    assert_eq!(ack_for(&op_id).await, json!({"ok": true, "id": EVENT_ID}));
+
+    // update (full field set) and cancel (status=4) are PATCHes of that event.
+    let (raw, op_id) = event_entry("event.update", GUILD, EVENT_ID, EVENT_FIELDS);
+    push(DISCORD_OUTBOUND_QUEUE_KEY, &raw).await;
+    assert_eq!(ack_for(&op_id).await, json!({"ok": true}));
+    let (raw, op_id) = event_entry("event.cancel", GUILD, EVENT_ID, "");
+    push(DISCORD_OUTBOUND_QUEUE_KEY, &raw).await;
+    assert_eq!(ack_for(&op_id).await, json!({"ok": true}));
+    let patches = wait_for(s, "PATCH", 2).await;
+    assert!(patches
+        .iter()
+        .all(|r| r.url.path() == format!("{events}/{EVENT_ID}")));
+    let bodies: Vec<serde_json::Value> = patches
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert!(bodies.iter().any(|b| b["name"] == "Movie night"));
+    assert!(bodies.iter().any(|b| b == &json!({"status": 4})));
+
+    // delete
+    let (raw, op_id) = event_entry("event.delete", GUILD, EVENT_ID, "");
+    push(DISCORD_OUTBOUND_QUEUE_KEY, &raw).await;
+    assert_eq!(ack_for(&op_id).await, json!({"ok": true}));
+    wait_for(s, "DELETE", 1).await;
+
+    // guild pinning: an assertion for another guild is refused before the wire.
+    let before = s.received_requests().await.unwrap().len();
+    let (raw, op_id) = event_entry("event.create", "222", "", EVENT_FIELDS);
+    push(DISCORD_OUTBOUND_QUEUE_KEY, &raw).await;
+    assert_eq!(
+        ack_for(&op_id).await,
+        json!({"ok": false, "code": "guild_mismatch"})
+    );
+    // ...and a guild smuggled inside the (validly signed) event JSON is refused
+    // by the connector: nothing is sent, nothing names guild 999.
+    let smuggled = EVENT_FIELDS.replace('{', r#"{"guild_id":"999","#);
+    let (raw, op_id) = event_entry("event.create", GUILD, "", &smuggled);
+    push(DISCORD_OUTBOUND_QUEUE_KEY, &raw).await;
+    assert_eq!(
+        ack_for(&op_id).await,
+        json!({"ok": false, "code": "build_refused"})
+    );
+    // replay of an already-executed stamp is dropped (no second create).
+    let (raw, op_id) = event_entry("event.create", GUILD, "", EVENT_FIELDS);
+    push(DISCORD_OUTBOUND_QUEUE_KEY, &raw).await;
+    let _ = ack_for(&op_id).await;
+    let after_first = s.received_requests().await.unwrap().len();
+    push(DISCORD_OUTBOUND_QUEUE_KEY, &raw).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let all = s.received_requests().await.unwrap();
+    assert_eq!(
+        all.len(),
+        after_first,
+        "replayed stamp must not reach the wire"
+    );
+    assert_eq!(
+        after_first,
+        before + 1,
+        "only the one good create after the refusals"
+    );
+    assert!(all.iter().all(|r| !r.url.path().contains("999")));
+    assert!(replay_count("discord", "event.create") >= 1);
     stop(tx, h).await;
 }
 

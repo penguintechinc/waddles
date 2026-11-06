@@ -12,21 +12,17 @@
 use bundle_tool_call::ToolRefusal;
 use serde_json::{json, Value};
 
-use super::{is_role_key, RelayOp};
+use super::{is_role_key, RelayOp, RelayQueue, StageCapabilities};
+use bundle_host_kv::KvBackend;
 
-/// `app_id` of the Discord platform service bundle (the tool target).
-pub(crate) const DISCORD_SERVICE_APP_ID: &str = "waddles.core.service.discord";
 /// Tool name: grant a managed role.
 pub(crate) const TOOL_ROLES_ADD: &str = "discord.member.roles.add";
 /// Tool name: revoke a managed role.
 pub(crate) const TOOL_ROLES_REMOVE: &str = "discord.member.roles.remove";
 
-/// The outbound op a `(target, tool)` is host-mediated to, `None` when the pair is not one of
-/// the host-served Discord role tools (it then takes the normal nested-guest path).
-pub(crate) fn host_mediated_op(target: &str, tool: &str) -> Option<RelayOp> {
-    if target != DISCORD_SERVICE_APP_ID {
-        return None;
-    }
+/// The outbound op a role tool NAME maps to; `None` for any other tool (the caller has already
+/// matched the Discord service target).
+fn role_tool_op(tool: &str) -> Option<RelayOp> {
     match tool {
         TOOL_ROLES_ADD => Some(RelayOp::RoleAdd),
         TOOL_ROLES_REMOVE => Some(RelayOp::RoleRemove),
@@ -55,7 +51,9 @@ fn is_canonical_uuid(s: &str) -> bool {
 /// role value that is not a managed-role key (a Discord snowflake can never match).
 pub(crate) fn relay_message(op: RelayOp, args: &Value) -> Result<Value, ToolRefusal> {
     let bad = |m: &str| ToolRefusal::InvalidArgs(m.to_string());
-    let obj = args.as_object().ok_or_else(|| bad("args must be an object"))?;
+    let obj = args
+        .as_object()
+        .ok_or_else(|| bad("args must be an object"))?;
     if let Some(extra) = obj.keys().find(|k| *k != "user" && *k != "role_key") {
         return Err(ToolRefusal::InvalidArgs(format!(
             "unexpected argument {extra:?}: the guild, channel and role id are host-pinned"
@@ -78,25 +76,41 @@ pub(crate) fn relay_message(op: RelayOp, args: &Value) -> Result<Value, ToolRefu
     }))
 }
 
+impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
+    /// Executes a `discord.member.roles.add|remove` tool call authorized by the generic
+    /// `tool.invoke` planner (manifest `requested_tools` + approved `tool.call` grant + write
+    /// key). The HOST runs it through the SAME guild-pinned producer as `relay.push`
+    /// `role.add|role.remove` (`handle_discord_queued_op`): managed-role KEY allowlist, origin
+    /// channel pin, tokenized user, per-community throttle, `pin_sig`, `op_id` and drain
+    /// confirmation. Returns `None` for any other tool (the caller continues its dispatch).
+    pub(crate) async fn run_discord_role_tool(
+        &self,
+        scope: &super::InvokeScope,
+        tool: &str,
+        args: &Value,
+    ) -> Option<Result<Value, ToolRefusal>> {
+        let op = role_tool_op(tool)?;
+        let result = async {
+            let message = relay_message(op, args)?;
+            match self.handle_discord_queued_op(scope, op, &message).await {
+                Ok(_confirmed) => Ok(json!({"ok": true, "op": op.as_str()})),
+                Err(e) if e.code == "invalid_args" => Err(ToolRefusal::InvalidArgs(e.message)),
+                Err(e) => Err(ToolRefusal::TargetUnavailable(format!(
+                    "discord role tool refused: {}",
+                    e.code
+                ))),
+            }
+        }
+        .await;
+        Some(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const UUID_A: &str = "3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5f";
-
-    #[test]
-    fn only_the_discord_service_role_tools_are_host_mediated() {
-        assert_eq!(
-            host_mediated_op(DISCORD_SERVICE_APP_ID, TOOL_ROLES_ADD),
-            Some(RelayOp::RoleAdd)
-        );
-        assert_eq!(
-            host_mediated_op(DISCORD_SERVICE_APP_ID, TOOL_ROLES_REMOVE),
-            Some(RelayOp::RoleRemove)
-        );
-        assert_eq!(host_mediated_op(DISCORD_SERVICE_APP_ID, "classify_frame"), None);
-        assert_eq!(host_mediated_op("waddles.core.service.other", TOOL_ROLES_ADD), None);
-    }
 
     #[test]
     fn valid_args_become_the_pinned_relay_message() {
@@ -109,8 +123,11 @@ mod tests {
             m,
             json!({"op":"role.add","user_id":format!("{{user:{UUID_A}}}"),"role_key":"vip"})
         );
-        let r = relay_message(RelayOp::RoleRemove, &json!({"user": UUID_A, "role_key": "a-b_1"}))
-            .unwrap();
+        let r = relay_message(
+            RelayOp::RoleRemove,
+            &json!({"user": UUID_A, "role_key": "a-b_1"}),
+        )
+        .unwrap();
         assert_eq!(r["op"], "role.remove");
     }
 
@@ -138,6 +155,111 @@ mod tests {
                     Err(ToolRefusal::InvalidArgs(_))
                 ),
                 "{bad}"
+            );
+        }
+    }
+
+    use super::super::tests::{caps, discord_scope, scope, FakeRelayQueue};
+
+    fn args(extra: Value) -> Value {
+        let mut v = json!({"user": UUID_A, "role_key": "vip"});
+        for (k, val) in extra.as_object().unwrap() {
+            v[k] = val.clone();
+        }
+        v
+    }
+
+    #[tokio::test]
+    async fn tool_queues_the_guild_pinned_role_op_and_returns_ok() {
+        for (tool, op) in [
+            (TOOL_ROLES_ADD, "role.add"),
+            (TOOL_ROLES_REMOVE, "role.remove"),
+        ] {
+            let c = caps(FakeRelayQueue::with_live_drain());
+            let out = c
+                .run_discord_role_tool(&discord_scope(), tool, &args(json!({})))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(out, json!({"ok": true, "op": op}));
+            let envs = c.relay_queue.envelopes();
+            let e = &envs[0];
+            assert_eq!(e["op"], op);
+            assert_eq!(e["platform"], "discord");
+            assert_eq!(e["text"], "vip", "role KEY rides in the MAC-covered text");
+            assert_eq!(e["user_id"], format!("{{user:{UUID_A}}}"));
+            assert_eq!(
+                e["origin_channel"], "123456789012345678",
+                "host-pinned origin"
+            );
+            assert_eq!(
+                (e["tenant_id"].as_i64(), e["community_id"].as_i64()),
+                (Some(7), Some(3))
+            );
+            for never in ["guild_id", "role_id", "channel"] {
+                assert!(e.get(never).is_none(), "{never} must not reach the queue");
+            }
+            assert!(e["pin_sig"].as_str().is_some() && e["op_id"].as_str().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_arguments_are_refused_and_queue_nothing() {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        for extra in [
+            json!({"guild_id": "111111111111111111"}),
+            json!({"role_id": "222222222222222222"}),
+            json!({"channel": "9"}),
+            json!({"tenant_id": 99}),
+            json!({"origin_channel": "9"}),
+        ] {
+            let r = c
+                .run_discord_role_tool(&discord_scope(), TOOL_ROLES_ADD, &args(extra.clone()))
+                .await
+                .unwrap();
+            assert!(matches!(r, Err(ToolRefusal::InvalidArgs(_))), "{extra}");
+        }
+        assert!(c.relay_queue.envelopes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_discord_origin_unready_drain_and_other_tools_are_handled_loudly() {
+        // A non-Discord origin event cannot pin a channel: invalid_args, nothing queued.
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let r = c
+            .run_discord_role_tool(&scope(), TOOL_ROLES_ADD, &args(json!({})))
+            .await
+            .unwrap();
+        assert!(matches!(r, Err(ToolRefusal::InvalidArgs(_))));
+        assert!(c.relay_queue.envelopes().is_empty());
+        // No drain advertising readiness: refused before queueing, as target_unavailable.
+        let c = caps(FakeRelayQueue::default());
+        let r = c
+            .run_discord_role_tool(&discord_scope(), TOOL_ROLES_REMOVE, &args(json!({})))
+            .await
+            .unwrap();
+        assert!(matches!(r, Err(ToolRefusal::TargetUnavailable(_))));
+        assert!(c.relay_queue.envelopes().is_empty());
+        // A drain refusal (e.g. role key not in the binding allowlist) is surfaced, not swallowed.
+        let c = caps(FakeRelayQueue::with_drain_result(
+            r#"{"ok":false,"code":"role_not_managed"}"#,
+        ));
+        let r = c
+            .run_discord_role_tool(&discord_scope(), TOOL_ROLES_ADD, &args(json!({})))
+            .await
+            .unwrap();
+        assert!(matches!(r, Err(ToolRefusal::TargetUnavailable(_))), "{r:?}");
+        // Not a role tool -> not handled (dispatch continues).
+        for t in [
+            "classify_frame",
+            "discord.scheduled_event.create",
+            "discord.member.roles.set",
+        ] {
+            assert!(
+                c.run_discord_role_tool(&discord_scope(), t, &json!({}))
+                    .await
+                    .is_none(),
+                "{t}"
             );
         }
     }
