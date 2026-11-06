@@ -34,7 +34,9 @@ sentinel). Keys use `.` only (gh-631):
 - `bcf.status.<user_uuid>`  -- cached Wix status (TTL `STATUS_TTL_SECONDS`, rate-limit kindness)
 - `bcf.news`                -- JSON `[{"ms": int, "text": str}, ...]`, newest last
 
-Activation-gated only (OFF until a community admin activates it; repo command-bundle convention).
+Activation-gated AND license-gated: every command needs the Professional tier
+(`tier_at_least("professional")`, hard block + upgrade reply; an unknown/unavailable tier degrades
+to `free`, i.e. fails closed). Feed host / Wix endpoint are single constants the customer confirms.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ from typing import Any, cast
 
 from waddle_sdk import clock, community_kv, identity, log, relay
 from waddle_sdk.flask_core import get_bundle_context
+from waddle_sdk.flask_core.feature_flags import tier_at_least
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.http import HttpClient, resolve_secret
 from waddle_sdk.safe_text import guard_leading_command, sanitize_user_text
@@ -67,6 +70,9 @@ _WIX_STATUSES = frozenset({"APPROVED", "PENDING", "BLOCKED", "OFFLINE"})
 _USAGE = (
     "Usage: !bcm [status [@user]] | !bcm news | !bcm unlink | "
     "!bcm link @user <wix-member-id> (mod) | !bcm announce <text> (mod) | !bcm unlink @user (mod)"
+)
+_UPGRADE = (
+    "Bar Citizen member tools need the Professional tier - ask an admin to upgrade the license."
 )
 _DENIED = "only moderators/broadcasters can do that"
 _UNAVAILABLE = "Bar Citizen member services are unavailable right now - please try again later."
@@ -349,6 +355,15 @@ async def _run(rest: str, payload: dict[str, Any], community: str | None) -> str
     return _USAGE
 
 
+async def _licensed() -> bool:
+    """True iff the tenant tier is Professional+; any tier-lookup failure fails closed (False)."""
+    try:
+        return await tier_at_least("professional")
+    except Exception as exc:  # noqa: BLE001 - a host-call failure must deny, never crash or allow
+        log.error("bcf.tier_error", error_type=type(getattr(exc, "value", exc)).__name__)
+        return False
+
+
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
     """Implement `process-stage.transform`: recognize `!bcm ...`, do the work, build the reply.
 
@@ -363,7 +378,11 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
     community = get_bundle_context().community
     try:
-        reply = await _run(rest, event.payload, community)
+        if not await _licensed():
+            log.info("bcf.tier_denied")
+            reply = _UPGRADE
+        else:
+            reply = await _run(rest, event.payload, community)
     except _KvFailureError as exc:
         log.error("bcf.kv_error", reason=str(exc))
         reply = _UNAVAILABLE
