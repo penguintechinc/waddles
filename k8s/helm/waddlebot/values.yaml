@@ -3555,6 +3555,12 @@ serviceJwt:
         # to this identity alone and, like the grant above, only rendered while
         # pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled is true.
         - "dataplane:resolve-scope"
+        # feature/hubapi-slash-command-registry -- the Discord connector (svc-ingest) reconciles slash
+        # commands from hub-api's desired-state API (app-commands/sources + /desired), and the ingest
+        # router reads/writes the user's active community (active-context). Two scopes (least
+        # privilege: desired state is read-only, context is read-write), ids/UUIDs only, no secret.
+        - "dataplane:app-commands"
+        - "dataplane:active-context"
         # feature/hubapi-platform-user-and-binding-meta -- the ONE detokenization point: the
         # outbound executor (Discord dm.send / role.add / role.remove) resolves a tokenized
         # user UUID to the raw platform user id through IdentityService.ResolvePlatformUser

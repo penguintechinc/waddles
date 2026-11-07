@@ -62,6 +62,23 @@ def test_wrong_schema_version_rejected() -> None:
     assert exc.value.reason == "unsupported_schema_version"
 
 
+def test_empty_stages_rejected_for_an_app() -> None:
+    for trusted in (False, True):
+        with pytest.raises(ManifestV2Error) as exc:
+            _parse({"stages": {}}, trusted_source=trusted)
+        assert exc.value.reason == "no_stages_declared"
+
+
+def test_empty_stages_allowed_only_for_trusted_service_kind() -> None:
+    """An inbound-only connector (e.g. Spectrum) runs no pluggable stage."""
+    manifest = _parse_trusted({"stages": {}, "kind": "service"})
+    assert manifest.kind == "service"  # type: ignore[attr-defined]
+    assert manifest.stages == {}  # type: ignore[attr-defined]
+    with pytest.raises(ManifestV2Error) as exc:  # untrusted path is refused before stages matter
+        _parse({"stages": {}, "kind": "service"}, trusted_source=False)
+    assert exc.value.reason == "untrusted_service_kind"
+
+
 def test_ingest_stage_rejected() -> None:
     manifest = {**_VALID_MANIFEST, "stages": {"ingest": {"entry": "x:y"}}}
     with pytest.raises(ManifestV2Error) as exc:

@@ -54,6 +54,7 @@ tables:
   - sso_identities
   - suppression_records
   - app_commands
+  - user_active_context
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -911,4 +912,31 @@ grants:
     privileges: []
   - role: migration_runner
     table: app_commands
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # 0082_user_active_context: per-user active community for slash routing. Hub-api only;
+  # explicit empty rows for every other role keep the equality check honest.
+  - role: hub_api
+    table: user_active_context
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: user_active_context
+    privileges: []
+  - role: svc_ingest
+    table: user_active_context
+    privileges: []
+  - role: svc_process
+    table: user_active_context
+    privileges: []
+  - role: svc_action
+    table: user_active_context
+    privileges: []
+  - role: svc_streaming
+    table: user_active_context
+    privileges: []
+  - role: webui
+    table: user_active_context
+    privileges: []
+  - role: migration_runner
+    table: user_active_context
     privileges: [SELECT, INSERT, UPDATE, DELETE]

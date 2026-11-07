@@ -5005,6 +5005,54 @@ components:
       - channels
       title: SlackStatsDTO
       type: object
+    SlashCommandDTO:
+      description: One command to register; ``name``/``description`` is the payload,
+        the rest is context.
+      properties:
+        appPublicIds:
+          items:
+            type: string
+          title: Apppublicids
+          type: array
+        builtin:
+          title: Builtin
+          type: boolean
+        communityPublicIds:
+          items:
+            type: string
+          title: Communitypublicids
+          type: array
+        description:
+          title: Description
+          type: string
+        name:
+          title: Name
+          type: string
+      required:
+      - name
+      - description
+      - builtin
+      title: SlashCommandDTO
+      type: object
+    SlashCommunityDTO:
+      description: A community switchable on the source (``position`` 0 = first-registered
+        default).
+      properties:
+        displayName:
+          title: Displayname
+          type: string
+        position:
+          title: Position
+          type: integer
+        publicId:
+          title: Publicid
+          type: string
+      required:
+      - publicId
+      - displayName
+      - position
+      title: SlashCommunityDTO
+      type: object
     SpotlightedCommunityDTO:
       description: Spotlighted community DTO.
       properties:
@@ -17376,6 +17424,236 @@ paths:
             community, 503 unavailable).
       summary: '``POST .../resolve`` -- endpoint + credential for one usable binding
         of the BOUND community.'
+  /api/v1/internal/dataplane/active-context:
+    delete:
+      description: ''
+      operationId: delete_clear_context_route
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Result of a DELETE (``cleared`` False = there was no
+                  explicit choice).
+                properties:
+                  cleared:
+                    title: Cleared
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - cleared
+                title: SlashClearDTO
+                type: object
+          description: Result of a DELETE (``cleared`` False = there was no explicit
+            choice).
+      summary: '``DELETE`` -- drop the user''s explicit choice (revert to the source
+        default).'
+    get:
+      description: ''
+      operationId: get_get_context_route
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: A user's active community for a source.
+                properties:
+                  communities:
+                    items:
+                      $ref: '#/components/schemas/SlashCommunityDTO'
+                    title: Communities
+                    type: array
+                  communityName:
+                    title: Communityname
+                    type: string
+                  communityPublicId:
+                    title: Communitypublicid
+                    type: string
+                  explicit:
+                    title: Explicit
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantPublicId:
+                    title: Tenantpublicid
+                    type: string
+                required:
+                - success
+                - tenantPublicId
+                - communityPublicId
+                - communityName
+                - explicit
+                title: SlashContextDTO
+                type: object
+          description: A user's active community for a source.
+      summary: '``GET`` -- the user''s active community (default: first-registered)
+        + switchable list.'
+    put:
+      description: ''
+      operationId: put_set_context_route
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Body of the PUT: ``community`` is the community ``public_id``
+                UUID (names never resolve).'
+              properties:
+                community:
+                  title: Community
+                  type: string
+                platform:
+                  title: Platform
+                  type: string
+                sourceId:
+                  title: Sourceid
+                  type: string
+                user:
+                  title: User
+                  type: string
+              required:
+              - platform
+              - sourceId
+              - user
+              - community
+              title: SlashSetContextRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: A user's active community for a source.
+                properties:
+                  communities:
+                    items:
+                      $ref: '#/components/schemas/SlashCommunityDTO'
+                    title: Communities
+                    type: array
+                  communityName:
+                    title: Communityname
+                    type: string
+                  communityPublicId:
+                    title: Communitypublicid
+                    type: string
+                  explicit:
+                    title: Explicit
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantPublicId:
+                    title: Tenantpublicid
+                    type: string
+                required:
+                - success
+                - tenantPublicId
+                - communityPublicId
+                - communityName
+                - explicit
+                title: SlashContextDTO
+                type: object
+          description: A user's active community for a source.
+      summary: '``PUT`` -- switch the user''s active community (community public_id
+        UUID).'
+  /api/v1/internal/dataplane/app-commands/desired:
+    get:
+      description: ''
+      operationId: get_desired_route
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Desired state for one source. ``changed`` False (``if_version``
+                  matched) carries no list.
+                properties:
+                  changed:
+                    title: Changed
+                    type: boolean
+                  commands:
+                    items:
+                      $ref: '#/components/schemas/SlashCommandDTO'
+                    title: Commands
+                    type: array
+                  platform:
+                    title: Platform
+                    type: string
+                  sourceId:
+                    title: Sourceid
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantPublicId:
+                    title: Tenantpublicid
+                    type: string
+                  truncated:
+                    title: Truncated
+                    type: boolean
+                  version:
+                    title: Version
+                    type: string
+                required:
+                - success
+                - version
+                - changed
+                - tenantPublicId
+                - platform
+                - sourceId
+                - truncated
+                title: SlashDesiredDTO
+                type: object
+          description: Desired state for one source. ``changed`` False (``if_version``
+            matched) carries no list.
+      summary: '``GET`` -- the desired slash registration of one source, with its
+        idempotency version.'
+  /api/v1/internal/dataplane/app-commands/sources:
+    get:
+      description: ''
+      operationId: get_list_sources_route
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: One page of reconcile-eligible source ids.
+                properties:
+                  items:
+                    items:
+                      type: string
+                    title: Items
+                    type: array
+                  limit:
+                    title: Limit
+                    type: integer
+                  offset:
+                    title: Offset
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  total:
+                    title: Total
+                    type: integer
+                required:
+                - success
+                - items
+                - total
+                - limit
+                - offset
+                title: SlashSourcesDTO
+                type: object
+          description: One page of reconcile-eligible source ids.
+      summary: '``GET`` -- one page of sources of a platform that have a paired community.'
   /api/v1/internal/dataplane/resolve-scope:
     get:
       description: ''

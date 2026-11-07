@@ -112,6 +112,8 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
         "connections:resolve",
         "connections:list",
         "dataplane:resolve-scope",
+        "dataplane:app-commands",
+        "dataplane:active-context",
         "identity:platform-user:resolve",
     ]
     assert entry["tenant"] == "system"
