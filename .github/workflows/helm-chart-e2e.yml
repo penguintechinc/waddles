@@ -151,9 +151,9 @@ jobs:
             "migrations:ci:migrations/Dockerfile:."
             "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
             "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
-            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core"
-            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:core"
-            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:core"
+            "svc-ingest:ci:core/svc_ingest/Dockerfile.rust:core"
+            "svc-process:ci:core/svc_process/Dockerfile.rust:core"
+            "svc-action:ci:core/svc_action/Dockerfile.rust:core"
           )
           built=0
           for entry in "${IMAGES[@]}"; do
@@ -502,9 +502,9 @@ jobs:
             "migrations:ci:migrations/Dockerfile:."
             "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
             "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
-            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core"
-            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:core"
-            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:core"
+            "svc-ingest:ci:core/svc_ingest/Dockerfile.rust:core"
+            "svc-process:ci:core/svc_process/Dockerfile.rust:core"
+            "svc-action:ci:core/svc_action/Dockerfile.rust:core"
           )
           built=0
           for entry in "${IMAGES[@]}"; do

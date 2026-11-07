@@ -1537,7 +1537,7 @@ pipeline:
       # fix/helm-alpha-self-provisioning -- image repository (formerly kept distinct from the
       # removed Python svc-ingest Deployment's so the two never raced on a shared tag). Matches
       # core/svc_ingest/Dockerfile.rust's build tag.
-      imageRepository: "svc-ingest-rust"
+      imageRepository: "svc-ingest"
       port: 8200
       metricsPort: 9090
       replicas: 1
@@ -1650,7 +1650,7 @@ pipeline:
     svcProcess:
       enabled: true
       # fix/helm-alpha-self-provisioning -- see svcIngest.imageRepository's comment above.
-      imageRepository: "svc-process-rust"
+      imageRepository: "svc-process"
       port: 8201
       metricsPort: 9090
       replicas: 1
@@ -1733,7 +1733,7 @@ pipeline:
       enabled: true
       # fix/helm-alpha-self-provisioning -- see rustDataPlane.svcIngest.imageRepository's
       # comment above.
-      imageRepository: "svc-action-rust"
+      imageRepository: "svc-action"
       port: 8202
       metricsPort: 9090
       replicas: 1
@@ -1928,7 +1928,7 @@ presentation:
   # scripts/alpha-deploy.sh), like svc-action-rust.
   rust:
     enabled: true
-    imageRepository: "svc-presentation-rust"
+    imageRepository: "svc-presentation"
     # Alpha-only on-host access to the overlay view/SSE port: when true the Service becomes
     # NodePort (presentation.rust.nodePort.port). Base/beta/prod stay ClusterIP
     # (devops-kubernetes.md: no NodePort outside alpha).

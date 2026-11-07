@@ -287,15 +287,10 @@ service_context() {
     esac
 }
 
-# Image repository name (differs from the service name for the 3 Rust
-# stages -- see the comment above; egress-proxy pushes under its
-# own name, matching egressProxy.image in values.yaml).
+# Image repository name (== the service name for every service now that the Rust
+# stages dropped their `-rust` suffix; kept as a function so a future rename stays one edit).
 service_image_repo() {
     case "$1" in
-        svc-ingest) echo "svc-ingest-rust" ;;
-        svc-process) echo "svc-process-rust" ;;
-        svc-action) echo "svc-action-rust" ;;
-        svc-presentation) echo "svc-presentation-rust" ;;
         *) echo "$1" ;;
     esac
 }
