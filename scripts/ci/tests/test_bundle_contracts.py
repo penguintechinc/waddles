@@ -50,9 +50,10 @@ def contract_tools() -> dict[str, dict]:
     clip = _load("twitch-clip-tools.v1.json")
     for n, t in clip["tools"].items():
         out[n] = t
-    live = _load("live-channels.v1.json")
+    live = _load("live-channels-contract.v1.json")
+    tool = _inline(live["tools"]["channels"], live["definitions"])
     for p in live["platforms"]:
-        out[f"{p}.live.channels"] = live["tool"]
+        out[live["tool_name_template"].format(platform=p)] = tool
     return out
 
 
@@ -138,7 +139,7 @@ def test_contracts_are_well_formed() -> None:
     flat = contract_tools()
     for p in ("youtube",):
         flat |= music_tools(p)
-    assert len(flat) >= 4 + 3 + 3 + 4, f"only {len(flat)} contract tools loaded"
+    assert len(flat) >= 4 + 3 + 4 + 4, f"only {len(flat)} contract tools loaded"
     for n, t in flat.items():
         for k in SCHEMA_KEYS[:1] + SCHEMA_KEYS[2:]:
             assert k in t, f"{n} missing {k}"
