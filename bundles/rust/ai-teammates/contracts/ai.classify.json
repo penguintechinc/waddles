@@ -1,0 +1,51 @@
+{
+  "tool": "ai.classify",
+  "target": "waddles.core.service.ai",
+  "access": "read",
+  "request": {
+    "type": "object",
+    "required": [
+      "text",
+      "labels",
+      "purpose"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "text": {
+        "type": "string",
+        "maxLength": 2000
+      },
+      "labels": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "minItems": 2,
+        "maxItems": 16
+      },
+      "purpose": {
+        "type": "string",
+        "enum": [
+          "producer_moderation"
+        ]
+      }
+    }
+  },
+  "response": {
+    "type": "object",
+    "required": [
+      "label",
+      "score"
+    ],
+    "properties": {
+      "label": {
+        "type": "string"
+      },
+      "score": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      }
+    }
+  }
+}

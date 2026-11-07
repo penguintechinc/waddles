@@ -1,0 +1,42 @@
+{
+  "tool": "discord.live.channels",
+  "target": "waddles.core.service.discord",
+  "access": "read",
+  "request": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "response": {
+    "type": "object",
+    "required": [
+      "channels"
+    ],
+    "properties": {
+      "channels": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "channel_id",
+            "live"
+          ],
+          "properties": {
+            "channel_id": {
+              "type": "string"
+            },
+            "live": {
+              "type": "boolean"
+            },
+            "title": {
+              "type": "string"
+            },
+            "game": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

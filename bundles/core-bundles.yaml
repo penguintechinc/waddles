@@ -1565,3 +1565,16 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+
+  # AI Teammates APP bundle (Rust, `stage-next-tools` world): Researcher, Receptionist, Producer --
+  # each default OFF per community, configured via config_schema. Consumes the AI service tools.
+  - app_id: waddles.core.example.ai_teammates
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/ai-teammates
+    manifest_path: ai-teammates.manifest.yaml
+    artifact_path: ai-teammates.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
