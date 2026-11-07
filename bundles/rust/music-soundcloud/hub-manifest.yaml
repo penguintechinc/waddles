@@ -1,0 +1,112 @@
+# hub-api install-pipeline manifest (schema_version 2) for the SoundCloud music SERVICE bundle.
+# `kind: service` is accepted only via the trusted core-bundle seeder. Tools: music.soundcloud.
+# {search,track,playlist.get,resolve} -- metadata + license/permission flags only, never audio or
+# a stream URL. Credentials: the OAuth client-credentials token lives in the host connection
+# store (handle soundcloud.access_token, host-formatted as `OAuth <token>` into the Authorization
+# header); the component only names the secret ref. exported_tools is identical in bundle.yaml and
+# hub-manifest.yaml (the seeder's agreement check fails on drift).
+schema_version: 2
+app_id: waddles.core.service.music-soundcloud
+name: SoundCloud Music Service Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+kind: service
+stages:
+  action:
+    entry: "waddle:bundle/tool-provider#call"
+egress:
+- host: api.soundcloud.com
+  methods: ["GET"]
+data:
+  tables: []
+limits:
+  timeout_ms: 5000
+  memory_mb: 64
+  egress_rps: 1
+permissions:
+- id: net.http.fqdn:api.soundcloud.com
+  justification: SoundCloud public API v2 (tracks, playlists, resolve) read-only; the OAuth client-credentials token is a host-injected Authorization secret ref (soundcloud.access_token), never visible to the component
+  params:
+    methods: ["GET"]
+routes_to: []
+exported_tools:
+- name: music.soundcloud.search
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      q: {type: string, minLength: 1, maxLength: 200}
+      limit: {type: integer, minimum: 1, maximum: 50}
+      offset: {type: integer, minimum: 0, maximum: 1000}
+      access:
+        type: array
+        minItems: 1
+        maxItems: 3
+        items: {type: string, enum: [playable, preview, blocked]}
+    required: [q]
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      provider: {type: string, enum: [soundcloud]}
+      tracks: {type: array, items: {type: object}}
+      next_offset: {type: [integer, 'null']}
+    required: [provider, tracks, next_offset]
+- name: music.soundcloud.track
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      id: {type: string, description: "track id or soundcloud:tracks:<id> URN"}
+    required: [id]
+    additionalProperties: false
+  output_schema:
+    type: object
+    required: [provider, id, title, artist, url, duration_s, explicit, license, capability]
+- name: music.soundcloud.playlist.get
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      id: {type: string, description: "playlist id or soundcloud:playlists:<id> URN"}
+      limit: {type: integer, minimum: 1, maximum: 50}
+    required: [id]
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      tracks: {type: array, items: {type: object}}
+      truncated: {type: boolean}
+    required: [provider, id, title, license, tracks, truncated]
+- name: music.soundcloud.resolve
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      url: {type: string, maxLength: 200, description: "https://soundcloud.com permalink"}
+    required: [url]
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      kind: {type: string, enum: [track, playlist]}
+      track: {type: object}
+      playlist: {type: object}
+    required: [kind]
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null
