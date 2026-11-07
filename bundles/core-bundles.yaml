@@ -1526,6 +1526,21 @@ bundles:
       - tenant_slug: global
         community_id: null
 
+  # Kick platform service bundle (`kind: service`, `connector-tools` world): Pusher chat + signed
+  # webhook normalization, chat send/delete templates, `kick.live.channels`. Cutover flag
+  # waddles.connector-kick defaults OFF.
+  - app_id: waddles.core.service.kick
+    version: "1.0.0"
+    language: rust
+    wit_world: connector-tools
+    kind: service
+    source_dir: rust/kick
+    manifest_path: kick.manifest.yaml
+    artifact_path: kick.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
   # Community feed reader (#484): `!feed` events/info from a per-community configured public
   # JSON feed url; the operator grants net.http.fqdn:<host> per community (no fixed host).
   - app_id: waddles.core.community.feed

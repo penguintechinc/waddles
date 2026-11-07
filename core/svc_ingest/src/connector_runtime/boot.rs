@@ -31,7 +31,7 @@ use penguin_spine::{KeyRing, SpineMetrics};
 use super::feed::{ConnKey, DynFeed, FeedSet, HubBindingFeed, TransportPlan, WebhookPlan};
 use super::metrics::RuntimeMetrics;
 use super::plan::{ConnectorProfile, RuntimeEnv};
-use super::profiles::{discord, spectrum, twitch, wix, youtube};
+use super::profiles::{discord, kick, spectrum, twitch, wix, youtube};
 use super::scoped::{ConnectionSink, ScopeLookup, ScopeTenantResolve, ScopedSinkFactory};
 use super::selector::{BootError, ConnectorSelector, IDENTIFY_BUDGET_READY};
 use super::supervisor::{
@@ -69,6 +69,7 @@ fn digest_env(platform: &str) -> &'static str {
         "discord" => "SENDER_EXEC_DIGEST_DISCORD",
         "spectrum" => "SENDER_EXEC_DIGEST_SPECTRUM",
         "wix" => "SENDER_EXEC_DIGEST_WIX",
+        "kick" => "SENDER_EXEC_DIGEST_KICK",
         _ => "SENDER_EXEC_DIGEST_YOUTUBE",
     }
 }
@@ -81,6 +82,7 @@ fn platform_consts(platform: &str) -> Option<(&'static str, &'static str)> {
         "youtube" => Some((youtube::APP_ID, youtube::PROVIDER)),
         "spectrum" => Some((spectrum::APP_ID, spectrum::PROVIDER)),
         "wix" => Some((wix::APP_ID, wix::PROVIDER)),
+        "kick" => Some((kick::APP_ID, kick::PROVIDER)),
         _ => None,
     }
 }
@@ -305,6 +307,23 @@ pub fn twitch_secrets_wrapper() -> SecretsWrapper {
     })
 }
 
+/// The Kick secrets wrapper: the Pusher socket carries no credential, so the community-bound
+/// source is dropped and only the validated `chatrooms.<id>.v2` channel name is answered.
+#[must_use]
+pub fn kick_secrets_wrapper() -> SecretsWrapper {
+    Arc::new(|_inner, desired| {
+        let TransportPlan::Ws(cfg) = &desired.plan else {
+            return Err(TransportError::Connect(
+                "kick plan is not a websocket".into(),
+            ));
+        };
+        let source = kick::KickFieldSecrets::from_config(cfg)
+            .map_err(|_| TransportError::Connect("kick secrets could not be derived".into()))?;
+        let wrapped: Arc<dyn TransportSecretSource> = Arc::new(source);
+        Ok(wrapped)
+    })
+}
+
 /// Scope namespacing the Discord IDENTIFY budget keys in Valkey (host constant).
 pub const IDENTIFY_BUDGET_SCOPE: &str = "discord";
 /// Deadline of one `GET /gateway/bot` limit fetch.
@@ -489,6 +508,7 @@ fn feed_for<R: ConnectionResolve + 'static>(
             metrics,
         )),
         "youtube" => Some(make(resolver, youtube::YoutubeProfile::new(), env, metrics)),
+        "kick" => Some(make(resolver, kick::KickProfile::from_feed(), env, metrics)),
         "spectrum" => Some(make(
             resolver,
             spectrum::SpectrumProfile::new(),
@@ -561,6 +581,9 @@ where
     let mut secrets = ResolverSecrets::new(Arc::clone(&deps.resolver), providers);
     if settings.platforms.contains(&"twitch") {
         secrets = secrets.with_wrapper("twitch", twitch_secrets_wrapper());
+    }
+    if settings.platforms.contains(&"kick") {
+        secrets = secrets.with_wrapper("kick", kick_secrets_wrapper());
     }
 
     let registry = Arc::new(settings.registry()?);

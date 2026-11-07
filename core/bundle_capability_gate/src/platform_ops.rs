@@ -54,8 +54,10 @@ pub const RELAY_OPS: &[(&str, &[&str])] = &[
             "mod.remove",
         ],
     ),
-    // Declared, no ops yet: every Kick op is an unknown-op refusal until the Kick bundle lands.
-    ("kick", &[]),
+    // Kick: `chat.send` only. `chat.delete` (global message id, needs a channel pin the executor
+    // cannot enforce for kick yet) and `mod.*` (integer body ids) are absent on purpose, so they
+    // stay unknown-op refusals until their host seams exist.
+    ("kick", &["chat.send"]),
 ];
 
 /// The static op spelling registered for `(platform, op)`, or `None`.
@@ -150,7 +152,7 @@ mod tests {
                 n += 1;
             }
         }
-        assert_eq!(n, 9 + 13 + 6);
+        assert_eq!(n, 9 + 13 + 6 + 1);
     }
 
     #[test]
@@ -184,7 +186,8 @@ mod tests {
     fn unknown_or_cross_platform_ops_are_refused_never_defaulted() {
         assert!(permission_for("twitch", "mod.kick").is_none());
         assert!(permission_for("youtube", "eventsub.list").is_none());
-        assert!(permission_for("kick", "chat.send").is_none());
+        assert!(permission_for("kick", "mod.ban").is_none());
+        assert!(permission_for("kick", "chat.delete").is_none());
         assert!(permission_for("slack", "chat.send").is_none());
         assert!(permission_for("discord", "role.add").is_none());
         assert!(registered_on_any_platform("mod.kick").is_some());

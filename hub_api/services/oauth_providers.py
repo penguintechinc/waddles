@@ -155,7 +155,14 @@ PROVIDERS: dict[str, ProviderSpec] = {
         display_name="Kick",
         authorize_url="https://id.kick.com/oauth/authorize",
         token_url="https://id.kick.com/oauth/token",  # noqa: S106 - URL, not a credential
-        scopes=("user:read", "channel:read", "chat:write", "moderation:ban"),
+        scopes=(
+            "user:read",
+            "channel:read",
+            "chat:write",
+            "moderation:ban",
+            "moderation:chat_message:manage",
+            "events:subscribe",
+        ),
         extra_authorize_params=MappingProxyType({}),
         uses_pkce=True,
         client_id_env="KICK_CLIENT_ID",
