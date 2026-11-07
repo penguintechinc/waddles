@@ -372,22 +372,33 @@ fn drifted_remote_is_recreated_once_and_cancel_of_gone_remote_is_satisfied() {
 }
 
 #[test]
-fn enabling_sync_backfills_upcoming_scheduled_events_only() {
+fn backfill_queues_upcoming_scheduled_events_only_and_needs_hub_enabled_sync() {
     let w = World::new();
     let ctx = w.ctx();
-    let cfg = Config::default();
-    let a = service::create(&ctx, &cfg, &approver(), new_ev("Upcoming", SOON)).unwrap();
-    let b = service::create(&ctx, &cfg, &approver(), new_ev("Cancelled", SOON)).unwrap();
-    service::cancel(&ctx, &cfg, &approver(), b.id).unwrap();
+    let off = Config::default();
+    let a = service::create(&ctx, &off, &approver(), new_ev("Upcoming", SOON)).unwrap();
+    let b = service::create(&ctx, &off, &approver(), new_ev("Cancelled", SOON)).unwrap();
+    service::cancel(&ctx, &off, &approver(), b.id).unwrap();
+    let admin = |cfg: &Config, args: Value| app::run_admin(&ctx, cfg, Some(MOD), "backfill", &args);
+    // Sync disabled in hub config: refused, nothing queued.
+    assert!(matches!(
+        admin(&off, json!({"target": "discord"})),
+        Err(CalError::Conflict(_))
+    ));
+    assert!(matches!(
+        admin(&cfg_sync(true), json!({"target": "myspace"})),
+        Err(CalError::Validation(_))
+    ));
+    let on = cfg_sync(true);
     assert_eq!(
-        service::set_sync(&ctx, &cfg, &member(USER), Target::Discord, true).unwrap_err(),
-        CalError::Forbidden
+        admin(&on, json!({"target": "discord"})).unwrap(),
+        json!({"queued": 1})
     );
-    let (next, n) = service::set_sync(&ctx, &cfg, &approver(), Target::Discord, true).unwrap();
-    assert_eq!(n, 1);
-    assert!(next.sync_discord);
-    sync::reconcile(&ctx, &next, 5).unwrap();
-    assert_eq!(w.calls().len(), 1);
+    assert_eq!(
+        w.calls().len(),
+        1,
+        "reconcile after the touch pushed the queued event"
+    );
     assert!(
         store::sync_record(ctx.kv, a.id, Target::Discord)
             .unwrap()
@@ -395,12 +406,6 @@ fn enabling_sync_backfills_upcoming_scheduled_events_only() {
             .remote_id
             .is_some()
     );
-    // The override persists across invocations via effective_config.
-    let eff = store::effective_config(ctx.kv, "{}").unwrap();
-    assert!(eff.sync_discord);
-    let (off, _) = service::set_sync(&ctx, &eff, &approver(), Target::Discord, false).unwrap();
-    assert!(!off.sync_discord);
-    assert!(!store::effective_config(ctx.kv, "{}").unwrap().sync_discord);
 }
 
 #[test]
@@ -478,7 +483,7 @@ fn chat(w: &World, cfg: &Config, actor: &str, text: &str, badge: bool) -> String
 
 #[test]
 fn grammar_parses_all_verbs() {
-    use Command::{Add, Approve, List, Reject, Remove, Set, Sync, Usage, View};
+    use Command::{Add, Approve, List, Reject, Remove, Set, Usage, View};
     assert_eq!(cmd::parse("!calendar", ""), List);
     assert_eq!(cmd::parse("!event", "list"), List);
     assert_eq!(cmd::parse("!calendar", "view #4"), View { id: 4 });
@@ -489,20 +494,6 @@ fn grammar_parses_all_verbs() {
         Reject {
             id: 3,
             reason: Some("too loud".into())
-        }
-    );
-    assert_eq!(
-        cmd::parse("!calendar", "enable sync discord"),
-        Sync {
-            target: Target::Discord,
-            on: true
-        }
-    );
-    assert_eq!(
-        cmd::parse("!calendar", "disable sync wix"),
-        Sync {
-            target: Target::Wix,
-            on: false
         }
     );
     assert_eq!(
@@ -553,7 +544,8 @@ fn grammar_parses_all_verbs() {
         "view 0",
         "add nothing",
         "rsvp 3 purple",
-        "enable sync myspace",
+        "enable sync discord",
+        "disable sync wix",
         "remove 99999999999",
         "set 1 title",
         "list extra",
@@ -663,28 +655,120 @@ fn echoed_text_cannot_mass_mention_and_dst_gaps_are_rejected() {
 }
 
 #[test]
-fn chat_sync_toggle_and_approval_flow() {
+fn chat_cannot_disable_approval_or_enable_sync() {
     let w = World::new();
-    let cfg0 = Config {
+    let cfg = Config {
         approval_required: true,
         ..Config::default()
     };
     let r = chat(
         &w,
-        &cfg0,
+        &cfg,
         USER,
         "!calendar add Pending @ 2027-02-01 19:00",
         false,
     );
     assert!(r.contains("(awaiting approval)"), "{r}");
-    assert!(
-        chat(&w, &cfg0, MOD, "!calendar enable sync discord", true)
-            .contains("discord sync enabled")
+    // Even a mod/broadcaster cannot flip security toggles from chat: the verbs are just usage.
+    for text in [
+        "!calendar enable sync discord",
+        "!calendar disable approval",
+        "!calendar set approval_required false",
+    ] {
+        assert!(
+            chat(&w, &cfg, MOD, text, true).starts_with("Usage:"),
+            "{text}"
+        );
+    }
+    assert!(!store::effective_config("{}").unwrap().sync_discord);
+    // No kv key can alter the effective config: it is derived from hub config only.
+    w.kv.0.borrow_mut().insert(
+        "cal.cfg".into(),
+        br#"{"sync_discord":true,"approval_required":false}"#.to_vec(),
     );
-    let cfg = store::effective_config(&w.kv, r#"{"approval_required":true}"#).unwrap();
-    assert!(cfg.sync_discord);
-    assert!(chat(&w, &cfg, MOD, "!calendar approve 1", true).starts_with("Approved #1"));
+    let eff = store::effective_config(r#"{"approval_required":true}"#).unwrap();
+    assert!(eff.approval_required && !eff.sync_discord);
+    assert!(chat(&w, &eff, MOD, "!calendar approve 1", true).starts_with("Approved #1"));
+    assert!(w.calls().is_empty(), "sync stayed off");
+}
+
+#[test]
+fn owner_edit_of_approved_event_requires_reapproval_and_does_not_sync() {
+    let w = World::new();
+    let ctx = w.ctx();
+    let cfg = Config {
+        approval_required: true,
+        sync_discord: true,
+        ..Config::default()
+    };
+    let ev = service::create(&ctx, &cfg, &member(USER), new_ev("Orig", SOON)).unwrap();
+    service::approve(&ctx, &cfg, &approver(), ev.id).unwrap();
     assert_eq!(w.calls().len(), 1);
+    // Owner edit: back to Pending, remote untouched, hidden from the public list.
+    let edited = service::update(
+        &ctx,
+        &cfg,
+        &member(USER),
+        ev.id,
+        Patch {
+            title: Some("Sneaky".into()),
+            ..Patch::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(edited.status, Status::Pending);
+    assert_eq!(edited.approved_by, None);
+    assert_eq!(w.calls().len(), 1, "no update pushed without re-approval");
+    assert!(service::list_upcoming(&ctx, false, 10).unwrap().is_empty());
+    // Re-approval pushes the edited content as an update to the same remote event.
+    service::approve(&ctx, &cfg, &approver(), ev.id).unwrap();
+    let calls = w.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].tool, "discord.scheduled_event.update");
+    assert_eq!(calls[1].args["name"], "Sneaky");
+}
+
+#[test]
+fn approver_edit_syncs_immediately_and_owner_edit_without_approval_mode_is_unchanged() {
+    let w = World::new();
+    let ctx = w.ctx();
+    let strict = Config {
+        approval_required: true,
+        sync_discord: true,
+        ..Config::default()
+    };
+    let ev = service::create(&ctx, &strict, &approver(), new_ev("Mod made", SOON)).unwrap();
+    let e = service::update(
+        &ctx,
+        &strict,
+        &approver(),
+        ev.id,
+        Patch {
+            title: Some("Mod edit".into()),
+            ..Patch::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(e.status, Status::Scheduled);
+    assert_eq!(
+        w.calls().last().unwrap().tool,
+        "discord.scheduled_event.update"
+    );
+
+    // Approval off: only approvers can create, owners (approvers) edit as before.
+    let loose = cfg_sync(true);
+    let n = service::update(
+        &ctx,
+        &loose,
+        &approver(),
+        ev.id,
+        Patch {
+            title: Some("again".into()),
+            ..Patch::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(n.status, Status::Scheduled);
 }
 
 #[test]
@@ -875,24 +959,12 @@ fn enum_codes_roundtrip_and_reject_unknown() {
 }
 
 #[test]
-fn effective_config_rejects_garbage_and_applies_overrides() {
-    let w = World::new();
-    assert!(store::effective_config(&w.kv, "not json").is_err());
-    let c = store::effective_config(&w.kv, r#"{"default_tz":"Europe/Berlin","sync_wix":true}"#)
-        .unwrap();
+fn effective_config_comes_from_hub_json_only() {
+    assert!(store::effective_config("not json").is_err());
+    let c = store::effective_config(r#"{"default_tz":"Europe/Berlin","sync_wix":true}"#).unwrap();
     assert_eq!(c.default_tz, "Europe/Berlin");
-    assert!(c.sync_wix && !c.sync_discord);
-    store::put_overrides(
-        &w.kv,
-        &store::Overrides {
-            approval_required: Some(true),
-            sync_twitch: Some(true),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let c = store::effective_config(&w.kv, "").unwrap();
-    assert!(c.approval_required && c.sync_twitch);
+    assert!(c.sync_wix && !c.sync_discord && !c.approval_required);
+    assert_eq!(store::effective_config("").unwrap(), Config::default());
 }
 
 #[test]

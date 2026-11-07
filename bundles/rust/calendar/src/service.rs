@@ -176,6 +176,12 @@ pub fn update(
         (None, None) => {}
     }
     check_window(ev.start, ev.end)?;
+    // Approval gate: a non-approver's edit of an approved event sends it back to Pending (no
+    // sync; any remote copy is left unchanged) until an approver re-approves it.
+    if cfg.approval_required && !caller.approver && ev.status == Status::Scheduled {
+        ev.status = Status::Pending;
+        ev.approved_by = None;
+    }
     ev.version += 1;
     store::put_event(ctx.kv, &ev)?;
     if ev.status == Status::Scheduled {
@@ -357,35 +363,6 @@ pub fn list_all(ctx: &Ctx, status: Option<Status>, limit: usize) -> Result<Vec<E
         }
     }
     Ok(out)
-}
-
-/// Switches sync for `t` on/off for this community (kv override) and, when enabling, queues
-/// existing upcoming events. Returns the updated effective config and the backfilled count.
-pub fn set_sync(
-    ctx: &Ctx,
-    cfg: &Config,
-    caller: &Caller,
-    t: Target,
-    on: bool,
-) -> Result<(Config, usize), CalError> {
-    if !caller.approver {
-        return Err(CalError::Forbidden);
-    }
-    let mut o = store::overrides(ctx.kv)?;
-    match t {
-        Target::Discord => o.sync_discord = Some(on),
-        Target::Twitch => o.sync_twitch = Some(on),
-        Target::Wix => o.sync_wix = Some(on),
-    }
-    store::put_overrides(ctx.kv, &o)?;
-    let mut next = cfg.clone();
-    next.set_sync(t, on);
-    let n = if on {
-        sync::backfill(ctx, &next, t)?
-    } else {
-        0
-    };
-    Ok((next, n))
 }
 
 /// Parses `when` text in the event's zone (helper shared by chat and admin paths).

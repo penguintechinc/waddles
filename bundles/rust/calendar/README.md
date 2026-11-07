@@ -13,7 +13,6 @@ events adapters). WASM component on the `stage-next-tools` world; it CALLS servi
 | `add <title> @ <when> [tz=Zone] [end=<when>] [loc="Place"]` | mod/broadcaster; any linked member when `approval_required` (lands `pending`) |
 | `set <id> <title\|description\|start\|end\|tz\|location> <value>` / `remove <id>` | owner or mod/broadcaster |
 | `approve <id>` / `reject <id> [reason]` | mod/broadcaster |
-| `enable\|disable sync <discord\|twitch\|wix>` | mod/broadcaster (kv override of config) |
 | `rsvp <id> [yes\|no\|maybe]` | linked members |
 
 `<when>` is RFC 3339 or `YYYY-MM-DD HH:MM` in the event timezone (DST gaps/ambiguity rejected).
@@ -28,7 +27,7 @@ The host `db` capability is ONE table per bundle with insert/get/`query(limit, o
 update/delete and no filter, so upcoming/approval-queue/per-event-RSVP queries (the spec's
 events/rsvps/event_sync tables) would need full scans. kv keys (all `.`-separated, community
 scoped by the host): `cal.seq`, `cal.index`, `cal.ev.<id>`, `cal.rsvp.<id>`,
-`cal.sync.<id>.<target>`, `cal.pendq`, `cal.idem.<hash>`, `cal.cfg`. kv has no list/CAS: index and
+`cal.sync.<id>.<target>`, `cal.pendq`, `cal.idem.<hash>`. kv has no list/CAS: index and
 RSVP updates are read-modify-write and a concurrent writer in one community can lose an update
 (accepted at chat scale, not hidden). Cap 400 events (oldest terminal event is purged to make
 room) and 500 RSVPs/event. Revisit when `db.query` gains filters.
@@ -60,7 +59,7 @@ payload against them and cross-checks the Discord ones with `bundles/rust/discor
 
 ## Admin actions (hub-api bundle-admin gateway)
 
-`list`/`get`/`create`/`update`/`cancel`/`approve`/`reject`/`delete` arrive as a
+`list`/`get`/`create`/`update`/`cancel`/`approve`/`reject`/`delete`/`backfill` (queue upcoming events for a hub-enabled target) arrive as a
 `platform=hub`, `event_type=bundle.admin` event with payload `{"action", "args"}` (already
 authorized by OIDC scope + tenant + community in hub-api); the JSON result is returned in
 `TransportResult.detail`. Responses are explicit DTOs (`app::event_json`), never raw records.
@@ -68,10 +67,10 @@ No generic bundle-admin API exists in hub-api yet (spec Q2) and the manifest has
 consumes rule yet, so this path is code-complete and tested but not reachable until the gateway
 lands.
 
-## Config (`config_json`, kv-overridable for approval and sync toggles)
+## Config (`config_json`, hub-resolved; the ONLY source of security toggles)
 
 `approval_required`, `default_tz`, `default_duration_minutes`, `default_location`,
-`sync_discord`, `sync_twitch`, `sync_wix` (see `config_schema`). Sync defaults OFF.
+`sync_discord`, `sync_twitch`, `sync_wix` (see `config_schema`). Sync defaults OFF. Chat can never change `approval_required` or `sync_*`; they are set via the hub config / bundle-admin gateway. With `approval_required`, a non-approver's edit of an approved event returns it to `pending` (remote copy unchanged, no sync) until re-approved.
 
 ## Security / privacy
 
@@ -84,7 +83,7 @@ Discord guild/credential is resolved host-side from the community's own connecti
 ## Build / test
 
 ```bash
-cargo test                                         # 30 tests (flow + contract)
+cargo test                                         # 32 tests (flow + contract)
 cargo component build --release --target wasm32-wasip2 --locked
 wasm-tools component wit target/wasm32-wasip2/release/waddle_bundle_calendar_rust.wasm
 ```

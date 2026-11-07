@@ -5,11 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Rsvp, Target};
+use crate::model::Rsvp;
 use crate::timeutil::has_control;
 
 pub const HEADS: [&str; 3] = ["!calendar", "!event", "!rsvp"];
-pub const USAGE: &str = "Usage: !calendar [list] | view <id> | add <title> @ <when> [tz=Zone] [end=<when>] [loc=\"Place\"] | set <id> <title|description|start|end|tz|location> <value> | remove <id> | approve <id> | reject <id> [reason] | enable|disable sync <discord|twitch|wix> | !rsvp <id> [yes|no|maybe]";
+pub const USAGE: &str = "Usage: !calendar [list] | view <id> | add <title> @ <when> [tz=Zone] [end=<when>] [loc=\"Place\"] | set <id> <title|description|start|end|tz|location> <value> | remove <id> | approve <id> | reject <id> [reason] | !rsvp <id> [yes|no|maybe]";
 
 /// A parsed command (serialized across the process -> action stage boundary).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,10 +40,6 @@ pub enum Command {
     Reject {
         id: u64,
         reason: Option<String>,
-    },
-    Sync {
-        target: Target,
-        on: bool,
     },
     Rsvp {
         id: u64,
@@ -191,21 +187,6 @@ pub fn parse(head: &str, rest: &str) -> Command {
             let mut full = String::from(tail);
             full.insert(0, ' ');
             parse("!rsvp", &full)
-        }
-        "enable" | "disable" => {
-            let mut it = tail.split_whitespace();
-            match (
-                it.next(),
-                it.next()
-                    .and_then(|t| Target::parse(&t.to_ascii_lowercase())),
-                it.next(),
-            ) {
-                (Some("sync"), Some(target), None) => Command::Sync {
-                    target,
-                    on: verb == "enable",
-                },
-                _ => Command::Usage,
-            }
         }
         _ => Command::Usage,
     }

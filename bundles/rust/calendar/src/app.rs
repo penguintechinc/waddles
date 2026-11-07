@@ -203,18 +203,6 @@ fn run_command(
             let ev = service::reject(ctx, caller, id, reason)?;
             Ok(r(format!("Rejected #{}", ev.id), "reject", Some(id)))
         }
-        Command::Sync { target, on } => {
-            let (_, n) = service::set_sync(ctx, cfg, caller, target, on)?;
-            let state = if on { "enabled" } else { "disabled" };
-            Ok(r(
-                format!(
-                    "{} sync {state} ({n} existing events queued)",
-                    target.name()
-                ),
-                "sync_toggle",
-                None,
-            ))
-        }
         Command::Rsvp {
             id,
             answer: Some(a),
@@ -290,7 +278,6 @@ fn op_name(c: &Command) -> &'static str {
         Command::Remove { .. } => "remove",
         Command::Approve { .. } => "approve",
         Command::Reject { .. } => "reject",
-        Command::Sync { .. } => "sync_toggle",
         Command::Rsvp { .. } => "rsvp",
         Command::Usage => "usage",
     }
@@ -449,6 +436,18 @@ pub fn run_admin(
         "reject" => {
             let ev = service::reject(ctx, &caller, req_id(args)?, opt_str(args, "reason"))?;
             json!({"event": event_json(ctx, &ev)?})
+        }
+        "backfill" => {
+            let t = Target::parse(&req_str(args, "target")?)
+                .ok_or_else(|| CalError::Validation("unknown sync target".into()))?;
+            if !cfg.sync_enabled(t) {
+                return Err(CalError::Conflict(format!(
+                    "{} sync is not enabled in the bundle config",
+                    t.name()
+                )));
+            }
+            let n = sync::backfill(ctx, cfg, t)?;
+            json!({"queued": n})
         }
         "delete" => {
             service::delete(ctx, cfg, &caller, req_id(args)?)?;

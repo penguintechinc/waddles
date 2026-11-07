@@ -161,7 +161,7 @@ mod component {
                 tenant: &ctx_in.tenant,
                 community: &community,
             };
-            let cfg = store::effective_config(&kv_h, &ctx_in.config_json).map_err(|e| {
+            let cfg = store::effective_config(&ctx_in.config_json).map_err(|e| {
                 log_h.log(
                     "error",
                     "calendar config unreadable",

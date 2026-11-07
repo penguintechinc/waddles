@@ -3,7 +3,7 @@
 //! Layout (all community-scoped by the host):
 //! `cal.seq` id counter | `cal.index` live ids | `cal.ev.<id>` event | `cal.rsvp.<id>` RSVP map |
 //! `cal.sync.<id>.<target>` mapping | `cal.pendq` ids owing a sync op | `cal.idem.<hash>` applied
-//! idempotency keys | `cal.cfg` config overrides.
+//! idempotency keys.
 //!
 //! kv has no list/CAS, so index and RSVP updates are read-modify-write; a concurrent writer in
 //! one community can lose an update (documented in the README, not hidden). Corrupt stored state
@@ -21,7 +21,6 @@ pub const MAX_RSVPS: usize = 500;
 const SEQ: &str = "cal.seq";
 const INDEX: &str = "cal.index";
 const PENDQ: &str = "cal.pendq";
-const CFG: &str = "cal.cfg";
 
 fn load<T: DeserializeOwned>(kv: &dyn Kv, key: &str) -> Result<Option<T>, CalError> {
     match kv.get(key)? {
@@ -121,46 +120,13 @@ pub fn mark_idem(kv: &dyn Kv, key_hash: &str) -> Result<(), CalError> {
     kv.set(&idem_key(key_hash), b"1")
 }
 
-/// kv-level config overrides (set by chat toggles); `None` fields fall back to hub config.
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct Overrides {
-    pub approval_required: Option<bool>,
-    pub sync_discord: Option<bool>,
-    pub sync_twitch: Option<bool>,
-    pub sync_wix: Option<bool>,
-}
-
-/// Loads the kv overrides.
-pub fn overrides(kv: &dyn Kv) -> Result<Overrides, CalError> {
-    Ok(load(kv, CFG)?.unwrap_or_default())
-}
-
-/// Persists the kv overrides.
-pub fn put_overrides(kv: &dyn Kv, o: &Overrides) -> Result<(), CalError> {
-    save(kv, CFG, o)
-}
-
-/// Effective config: hub-resolved `config_json` (strictly parsed) with kv overrides applied.
-pub fn effective_config(kv: &dyn Kv, config_json: &str) -> Result<Config, CalError> {
-    let mut cfg: Config = if config_json.trim().is_empty() {
-        Config::default()
-    } else {
-        serde_json::from_str(config_json)
-            .map_err(|_| CalError::Storage("bundle config is not valid".into()))?
-    };
-    let o = overrides(kv)?;
-    if let Some(v) = o.approval_required {
-        cfg.approval_required = v;
+/// Effective config: the hub-resolved `config_json` (strictly parsed) and nothing else.
+/// Security toggles (`approval_required`, `sync_*`) are set only through the hub config /
+/// bundle-admin gateway; nothing a chat user can write may loosen them.
+pub fn effective_config(config_json: &str) -> Result<Config, CalError> {
+    if config_json.trim().is_empty() {
+        return Ok(Config::default());
     }
-    if let Some(v) = o.sync_discord {
-        cfg.sync_discord = v;
-    }
-    if let Some(v) = o.sync_twitch {
-        cfg.sync_twitch = v;
-    }
-    if let Some(v) = o.sync_wix {
-        cfg.sync_wix = v;
-    }
-    Ok(cfg)
+    serde_json::from_str(config_json)
+        .map_err(|_| CalError::Storage("bundle config is not valid".into()))
 }
