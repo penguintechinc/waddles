@@ -1565,3 +1565,18 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+
+  # Spotify music SERVICE bundle (Rust `kind: service`, world stage-tools): music.spotify.*
+  # metadata + Connect player tools. Credentials are host-resolved secret-refs
+  # (spotify.app / spotify.oauth); built by rust-bundle-builder.
+  - app_id: waddles.core.service.music-spotify
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/music-spotify
+    manifest_path: music-spotify.manifest.yaml
+    artifact_path: music-spotify.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null

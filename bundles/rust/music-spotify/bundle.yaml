@@ -1,0 +1,453 @@
+# Spotify music SERVICE bundle (Rust, world stage-tools). Tool contract: README.md.
+# Credentials are NEVER here or in the component: requests carry secret-ref NAMES `spotify.app`
+# (client-credentials bearer, catalog metadata) and `spotify.oauth` (the community's connected
+# Spotify account, player control); the host resolves/refreshes them and injects Authorization.
+# exported_tools are identical in hub-manifest.yaml and bundle.yaml (seeder agreement check).
+schema_version: 2
+app_id: waddles.core.service.music-spotify
+name: Spotify Music Service Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+is_default: false
+kind: service
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/music-spotify
+artifact: component
+execution_model: wasi-component
+stages:
+  action:
+    entry: waddle:bundle/tool-provider#call
+    config: {}
+    spec:
+      required_config: []
+egress:
+- host: api.spotify.com
+  methods:
+  - GET
+  - POST
+  - PUT
+data:
+  tables: []
+limits:
+  timeout_ms: 10000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: net.http.fqdn:api.spotify.com
+  justification: Spotify Web API (search, tracks, playlists, Connect player control); GET plus PUT/POST for player commands. Credentials are host-resolved secret-refs spotify.app / spotify.oauth, never
+    in the component
+  params:
+    methods:
+    - GET
+    - POST
+    - PUT
+- id: storage.kv
+  justification: per-community metadata cache with TTL, upstream rate-limit window, 429 Retry-After backoff, write idempotency records and optional config
+exported_tools:
+- name: music.spotify.search
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      query:
+        type: string
+        minLength: 1
+        maxLength: 200
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 50
+      auth:
+        type: string
+        enum:
+        - app
+        - connection
+    required:
+    - query
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      count:
+        type: integer
+      tracks:
+        type: array
+        items:
+          type: object
+          properties:
+            provider: {}
+            external_id: {}
+            title: {}
+            artist: {}
+            artists: {}
+            album: {}
+            duration_ms: {}
+            artwork_url: {}
+            url: {}
+            uri: {}
+            explicit: {}
+          required:
+          - provider
+          - external_id
+          - title
+          - artist
+          - duration_ms
+          - url
+          - uri
+      capability:
+        type: object
+    required:
+    - count
+    - tracks
+    - capability
+- name: music.spotify.track
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      track:
+        type: string
+        maxLength: 200
+      auth:
+        type: string
+        enum:
+        - app
+        - connection
+    required:
+    - track
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      track:
+        type: object
+        properties:
+          provider: {}
+          external_id: {}
+          title: {}
+          artist: {}
+          artists: {}
+          album: {}
+          duration_ms: {}
+          artwork_url: {}
+          url: {}
+          uri: {}
+          explicit: {}
+        required:
+        - provider
+        - external_id
+        - title
+        - artist
+        - duration_ms
+        - url
+        - uri
+      capability:
+        type: object
+    required:
+    - track
+    - capability
+- name: music.spotify.playlist.get
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      playlist:
+        type: string
+        maxLength: 200
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+      offset:
+        type: integer
+        minimum: 0
+        maximum: 100000
+      auth:
+        type: string
+        enum:
+        - app
+        - connection
+    required:
+    - playlist
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      playlist:
+        type: object
+      tracks:
+        type: array
+        items:
+          type: object
+          properties:
+            provider: {}
+            external_id: {}
+            title: {}
+            artist: {}
+            artists: {}
+            album: {}
+            duration_ms: {}
+            artwork_url: {}
+            url: {}
+            uri: {}
+            explicit: {}
+          required:
+          - provider
+          - external_id
+          - title
+          - artist
+          - duration_ms
+          - url
+          - uri
+      capability:
+        type: object
+    required:
+    - playlist
+    - tracks
+    - capability
+- name: music.spotify.resolve
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      url:
+        type: string
+        maxLength: 200
+      auth:
+        type: string
+        enum:
+        - app
+        - connection
+    required:
+    - url
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      kind:
+        type: string
+        enum:
+        - track
+        - playlist
+      id:
+        type: string
+      track:
+        type: object
+        properties:
+          provider: {}
+          external_id: {}
+          title: {}
+          artist: {}
+          artists: {}
+          album: {}
+          duration_ms: {}
+          artwork_url: {}
+          url: {}
+          uri: {}
+          explicit: {}
+        required:
+        - provider
+        - external_id
+        - title
+        - artist
+        - duration_ms
+        - url
+        - uri
+      playlist:
+        type: object
+      tracks:
+        type: array
+        items:
+          type: object
+          properties:
+            provider: {}
+            external_id: {}
+            title: {}
+            artist: {}
+            artists: {}
+            album: {}
+            duration_ms: {}
+            artwork_url: {}
+            url: {}
+            uri: {}
+            explicit: {}
+          required:
+          - provider
+          - external_id
+          - title
+          - artist
+          - duration_ms
+          - url
+          - uri
+      capability:
+        type: object
+    required:
+    - kind
+    - id
+    - capability
+- name: music.spotify.player.state
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      active:
+        type: boolean
+      is_playing:
+        type: boolean
+      device:
+        type: object
+      track:
+        type:
+        - object
+        - 'null'
+      capability:
+        type: object
+    required:
+    - active
+    - is_playing
+    - capability
+- name: music.spotify.player.play
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      uris:
+        type: array
+        items:
+          type: string
+          maxLength: 200
+        minItems: 1
+        maxItems: 100
+      context_uri:
+        type: string
+        maxLength: 200
+      offset:
+        type: integer
+        minimum: 0
+      position_ms:
+        type: integer
+        minimum: 0
+        maximum: 86400000
+      device_id:
+        type: string
+        maxLength: 80
+        pattern: ^[A-Za-z0-9_-]+$
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      ok:
+        type: boolean
+      action:
+        type: string
+      capability:
+        type: object
+    required:
+    - ok
+    - action
+    - capability
+- name: music.spotify.player.pause
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      device_id:
+        type: string
+        maxLength: 80
+        pattern: ^[A-Za-z0-9_-]+$
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      ok:
+        type: boolean
+      action:
+        type: string
+      capability:
+        type: object
+    required:
+    - ok
+    - action
+    - capability
+- name: music.spotify.player.next
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      device_id:
+        type: string
+        maxLength: 80
+        pattern: ^[A-Za-z0-9_-]+$
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      ok:
+        type: boolean
+      action:
+        type: string
+      capability:
+        type: object
+    required:
+    - ok
+    - action
+    - capability
+- name: music.spotify.player.queue_add
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      track:
+        type: string
+        maxLength: 200
+      device_id:
+        type: string
+        maxLength: 80
+        pattern: ^[A-Za-z0-9_-]+$
+    required:
+    - track
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      ok:
+        type: boolean
+      action:
+        type: string
+      uri:
+        type: string
+      capability:
+        type: object
+    required:
+    - ok
+    - action
+    - uri
+    - capability
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: 1.0.0
+  min_version: 1.0.0
+  max_version: null
