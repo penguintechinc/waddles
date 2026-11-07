@@ -364,6 +364,25 @@ fixtures: `hub_api/tests/fixtures/resolve_v2_*.json` (parsed byte-for-byte by th
 Responses are `Cache-Control: no-store`. The Rust client is `core/connection_resolver`: one authenticated
 call per send, no credential cache, zeroizing secrets, `Debug` redacts them.
 
+## Wix outbound API credential, SoundCloud and YouTube API-key connections
+
+- **Wix API credential** (`api_credential: {api_key, site_id}` on `POST`/`PATCH` of a `wix` connection):
+  sealed (AES-256-GCM, row-bound AAD) in `platform_connections.sealed_api_credential` (migration `0082`),
+  **write-only** -- admin DTOs carry only `hasApiCredential`. Wix API keys authenticate with the
+  `Authorization` header + `wix-site-id` ([auth docs](https://dev.wix.com/docs/rest/articles/getting-started/authentication));
+  Wix states keys are unavailable to third-party apps (those use an OAuth app-instance token, a separate,
+  deferred flow). Resolve returns it ONLY to a caller holding `connections:resolve:static` as
+  `secret = {scheme: 6 (wix_api_key), fields: {apiKey, siteId}}` next to the public key in `accessToken`;
+  `connections:resolve` (svc-ingest) never sees it. Replacing it bumps `secretVersion`.
+- **SoundCloud** (`soundcloud`, resource `soundcloud_app`): `credentials.access_token` = app client secret,
+  `metadata.client_id` = public app id. **YouTube Data API key** (`youtube_api`, resource `youtube_api_key`):
+  `credentials.access_token` = Google API key, `metadata.key_label` = admin name. Both resolve under the base
+  `connections:resolve` scope (secret as `accessToken`, ids in `metadata`); structural validation only, no
+  outbound call. Spotify app credentials are platform env/secret, not per community.
+- **OAuth PKCE audit** (`services/oauth_providers.py`): S256 PKCE is on for YouTube/Google, Spotify and Kick
+  (a missing challenge fails closed); Twitch, Discord and Slack do not document PKCE for the code grant.
+  `state` is single-use (`GETDEL`) and bound to the initiating browser (cookie nonce hash) and user.
+
 ## Scope matrix
 
 Each service identity mints only what it needs (chart `serviceJwt.identities`, rendered into hub-api's

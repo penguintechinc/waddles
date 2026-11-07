@@ -54,6 +54,7 @@ _REQUIRED_CONNECTION_COLUMNS: Final = (
     "connection_kind",
     "sealed_secret",
     "secret_version",
+    "sealed_api_credential",
 )
 
 
@@ -71,6 +72,8 @@ class SealedSecrets:
     #: so forgetting it can never silently mark a ciphertext AAD-bound.
     seal_version: int
     sealed_secret: str | None = field(default=None, repr=False)
+    #: Outbound API credential of a kind-1 row that needs one (Wix): sealed JSON document.
+    sealed_api_credential: str | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True, frozen=True)
@@ -95,6 +98,8 @@ class ConnectionRow:
     connection_kind: int = 1
     #: Credential-rotation counter (migration 0074): bumped when an admin replaces the credential.
     secret_version: int = 1
+    #: Whether an outbound API credential is stored (a flag; the ciphertext is never read here).
+    has_api_credential: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -211,6 +216,7 @@ def _connection_columns(t: _Tables) -> list[Any]:
         c.updated_at,
         c.connection_kind,
         c.secret_version,
+        c.sealed_api_credential.is_not(None).label("has_api_credential"),
     ]
 
 
@@ -248,6 +254,7 @@ def _connection_from(row: Any) -> ConnectionRow:
         updated_at=_aware(row.updated_at),
         connection_kind=int(row.connection_kind),
         secret_version=int(row.secret_version),
+        has_api_credential=bool(row.has_api_credential),
     )
 
 
@@ -388,6 +395,7 @@ async def insert_connection(
                     seal_version=secrets.seal_version,
                     connection_kind=connection_kind,
                     sealed_secret=secrets.sealed_secret,
+                    sealed_api_credential=secrets.sealed_api_credential,
                     status=STATUS_ACTIVE,
                     status_reason=None,
                     resource_metadata=dict(resource_metadata),
@@ -487,7 +495,7 @@ def _with_rotation(t: _Tables, values: Mapping[str, Any]) -> dict[str, Any]:
     refresh writes through ``lock_for_refresh`` and deliberately does not bump the counter.
     """
     out = dict(values)
-    if "access_token" in out:
+    if "access_token" in out or "sealed_api_credential" in out:
         out["secret_version"] = t.connections.c.secret_version + 1
     return out
 
@@ -659,6 +667,7 @@ def _resolve_columns(t: _Tables) -> list[Any]:
         c.refresh_token,
         c.seal_version,
         c.sealed_secret,
+        c.sealed_api_credential,
     ]
 
 
@@ -671,6 +680,7 @@ def _resolve_state_from(row: Any) -> ResolveState:
             refresh_token=row.refresh_token,
             seal_version=int(row.seal_version),
             sealed_secret=row.sealed_secret,
+            sealed_api_credential=row.sealed_api_credential,
         ),
     )
 

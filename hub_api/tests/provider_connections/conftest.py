@@ -172,6 +172,8 @@ def build_pc_metadata() -> MetaData:
         Column("sealed_secret", Text),
         # migration 0074: credential-rotation counter (bumped on admin credential replacement).
         Column("secret_version", Integer, nullable=False, server_default="1"),
+        # migration 0082: sealed outbound API credential (Wix), kind-1 rows only.
+        Column("sealed_api_credential", Text),
         Column(
             "created_at",
             DateTime(timezone=True),
@@ -188,9 +190,11 @@ def build_pc_metadata() -> MetaData:
         CheckConstraint("status IN ('active', 'revoked', 'expired')"),
         CheckConstraint(
             "resource_type IN ('discord_guild', 'twitch_channel', 'fake_room', "
-            "'external_http', 'aws_lambda', 'gcp_function', 'youtube_channel', 'spectrum_community')"
+            "'external_http', 'aws_lambda', 'gcp_function', 'youtube_channel', 'spectrum_community', "
+            "'wix_site', 'soundcloud_app', 'youtube_api_key')"
         ),
         CheckConstraint("connection_kind BETWEEN 1 AND 4"),
+        CheckConstraint("sealed_api_credential IS NULL OR connection_kind = 1"),
         CheckConstraint(
             "(connection_kind = 1 AND access_token IS NOT NULL AND sealed_secret IS NULL) OR "
             "(connection_kind <> 1 AND access_token IS NULL AND refresh_token IS NULL "
