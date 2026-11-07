@@ -58,6 +58,7 @@ _work_size = _meter.create_histogram(
 CALLBACK_PATH: Final = "/eventsub/twitch/webhook"
 MAX_WORK: Final = 200
 MAX_COMMUNITIES_PER_SWEEP: Final = 500
+MAX_ENABLED_IDS: Final = 5000
 _BACKOFF_BASE_S: Final = 30
 _BACKOFF_CAP_S: Final = 3600
 _TABLE: Final = "twitch_eventsub_subscriptions"
@@ -198,6 +199,20 @@ class WorkItem:
     callback_url: str
     twitch_subscription_id: str | None
     callback_key: str
+    nonce: str
+
+
+@dataclass(slots=True, frozen=True)
+class EnabledSet:
+    """Twitch ids of ENABLED subscriptions in the swept communities.
+
+    ``complete`` is true ONLY when this list covers every community in the ledger (sweep started
+    at 0, no further page, not truncated). A hook MUST NOT garbage-collect Twitch-side
+    subscriptions against an incomplete list.
+    """
+
+    ids: list[str]
+    complete: bool
 
 
 @dataclass(slots=True, frozen=True)
@@ -208,6 +223,7 @@ class Report:
     outcome: Outcome
     twitch_subscription_id: str | None = None
     failure_reason: FailureReason | None = None
+    nonce: str | None = None
 
 
 def _event_pattern_matches(pattern: str, event_type: str) -> bool:
@@ -464,11 +480,11 @@ async def reconcile(
     after_community_id: int = 0,
     limit: int = MAX_WORK,
     now: datetime | None = None,
-) -> tuple[SyncSummary, list[WorkItem], list[str]]:
+) -> tuple[SyncSummary, list[WorkItem], EnabledSet]:
     """Sweep desired state (one bounded page of communities) and return the pending work.
 
-    Returns ``(summary, work, enabled_twitch_ids)``; the last lets the hook garbage-collect
-    Twitch-side subscriptions the ledger does not know. Empty ``base_url`` raises
+    Returns ``(summary, work, enabled)``; ``enabled`` is scoped to the swept communities and only
+    safe for orphan GC when ``enabled.complete``. Empty ``base_url`` raises
     :class:`NotConfiguredError` before any DB work.
     """
     callback_url(base_url, "x")  # fail loud before touching the DB
@@ -495,7 +511,9 @@ async def reconcile(
                     )
                     for k, v in done.items():
                         totals[k] += v
-                work, enabled = await _collect_work(conn, now, limit)
+                work, enabled = await _collect_work(
+                    conn, now, limit, cids, complete_scope=after_community_id == 0 and nxt is None
+                )
         except BaseException as exc:
             span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
             _ops.add(1, {"op": "reconcile", "outcome": "error"})
@@ -516,8 +534,14 @@ async def reconcile(
     return summary, work, enabled
 
 
-async def _collect_work(conn: Any, now: datetime, limit: int) -> tuple[list[WorkItem], list[str]]:
-    """Actionable rows (create/delete) plus the Twitch ids of ENABLED subscriptions."""
+async def _collect_work(
+    conn: Any, now: datetime, limit: int, cids: list[int], *, complete_scope: bool
+) -> tuple[list[WorkItem], EnabledSet]:
+    """Actionable rows (create/delete, each stamped with a fresh single-use nonce) + enabled ids.
+
+    The nonce/issued action recorded here is what :func:`report_results` requires back, so only
+    the most recently issued, still-outstanding action can be reported.
+    """
     rows = (
         await conn.execute(
             text(
@@ -539,10 +563,18 @@ async def _collect_work(conn: Any, now: datetime, limit: int) -> tuple[list[Work
         if is_delete and not r.twitch_subscription_id:
             continue  # nothing exists on Twitch to delete
         t = EventSubType(r.sub_type)
+        nonce = uuid.uuid4()
+        action = Action.DELETE if is_delete else Action.CREATE
+        await conn.execute(
+            text(
+                f"UPDATE {_TABLE} SET issued_action = :a, issued_nonce = :n WHERE public_id = :p"  # noqa: S608  # nosec B608 -- _TABLE is a module constant
+            ),
+            {"a": int(action), "n": nonce, "p": r.public_id},
+        )
         work.append(
             WorkItem(
                 public_id=str(r.public_id),
-                action=Action.DELETE if is_delete else Action.CREATE,
+                action=action,
                 tenant_id=int(r.tenant_id),
                 community_id=int(r.community_id),
                 connection_id=int(r.connection_id),
@@ -552,17 +584,22 @@ async def _collect_work(conn: Any, now: datetime, limit: int) -> tuple[list[Work
                 callback_url=r.callback_url,
                 twitch_subscription_id=r.twitch_subscription_id,
                 callback_key=r.callback_key,
+                nonce=str(nonce),
             )
         )
     enabled_rows = (
         await conn.execute(
             text(
                 f"SELECT twitch_subscription_id FROM {_TABLE} "  # noqa: S608  # nosec B608 -- _TABLE is a module constant
-                "WHERE status = 2 AND twitch_subscription_id IS NOT NULL ORDER BY id LIMIT 5000"
-            )
+                "WHERE status = 2 AND twitch_subscription_id IS NOT NULL "
+                "AND community_id = ANY(:cids) ORDER BY id LIMIT :n"
+            ),
+            {"cids": cids, "n": MAX_ENABLED_IDS + 1},
         )
     ).all()
-    return work, [str(r.twitch_subscription_id) for r in enabled_rows]
+    truncated = len(enabled_rows) > MAX_ENABLED_IDS
+    ids = [str(r.twitch_subscription_id) for r in enabled_rows[:MAX_ENABLED_IDS]]
+    return work, EnabledSet(ids=ids, complete=complete_scope and not truncated)
 
 
 _TWITCH_ID_RE: Final = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -607,6 +644,53 @@ async def report_results(
     return len(reports)
 
 
+_CREATE_STATES: Final = frozenset({SubStatus.PENDING, SubStatus.FAILED})
+_DELETE_STATES: Final = frozenset({SubStatus.DELETE_PENDING, SubStatus.STALE})
+
+
+def _reject(code: str) -> InvalidReportError:
+    """Log the bounded rejection code only (never ids/payload) and build the error."""
+    _ops.add(1, {"op": "report", "outcome": f"rejected_{code}"})
+    logger.warning("eventsub.report_rejected", extra={"reason": code})
+    return InvalidReportError(code)
+
+
+def _guard_transition(row: Any, rep: Report, status: SubStatus) -> None:
+    """Accept a report only for the outstanding issued action, in the expected row state.
+
+    CREATED/FAILED/DELETED must echo the nonce issued with the work item (single-use) and match
+    the issued action and the row's current state. REVOKED (Twitch-initiated, no work item) is
+    accepted only from ENABLED for the exact Twitch subscription id the ledger holds.
+    """
+    if rep.outcome is Outcome.REVOKED:
+        if status != SubStatus.ENABLED:
+            raise _reject("revoke_not_enabled")
+        if not rep.twitch_subscription_id or rep.twitch_subscription_id != (
+            row.twitch_subscription_id
+        ):
+            raise _reject("revoke_id_mismatch")
+        return
+    if row.issued_action is None or row.issued_nonce is None:
+        raise _reject("no_outstanding_action")
+    try:
+        supplied = uuid.UUID(rep.nonce or "")
+    except ValueError as exc:
+        raise _reject("bad_nonce") from exc
+    if supplied != row.issued_nonce:
+        raise _reject("nonce_mismatch")
+    issued = Action(row.issued_action)
+    if rep.outcome is Outcome.CREATED:
+        ok = issued is Action.CREATE and status in _CREATE_STATES
+    elif rep.outcome is Outcome.DELETED:
+        ok = issued is Action.DELETE and status in _DELETE_STATES
+    else:
+        ok = (issued is Action.CREATE and status in _CREATE_STATES) or (
+            issued is Action.DELETE and status in _DELETE_STATES
+        )
+    if not ok:
+        raise _reject("illegal_transition")
+
+
 async def _apply(conn: Any, rep: Report, now: datetime) -> None:
     """Apply one report to its row (locked), enforcing the allowed transitions."""
     try:
@@ -616,7 +700,9 @@ async def _apply(conn: Any, rep: Report, now: datetime) -> None:
     row = (
         await conn.execute(
             text(
-                f"SELECT id, public_id, status, failure_count, callback_url FROM {_TABLE} "  # noqa: S608  # nosec B608 -- _TABLE is a module constant
+                "SELECT id, public_id, status, failure_count, callback_url, "  # noqa: S608  # nosec B608 -- _TABLE is a module constant
+                "twitch_subscription_id, issued_action, issued_nonce "
+                f"FROM {_TABLE} "
                 "WHERE public_id = :p FOR UPDATE"
             ),
             {"p": pid},
@@ -625,6 +711,7 @@ async def _apply(conn: Any, rep: Report, now: datetime) -> None:
     if row is None:
         raise UnknownSubscriptionError("unknown subscription")
     status = SubStatus(row.status)
+    _guard_transition(row, rep, status)
     if rep.outcome is Outcome.CREATED:
         tid = rep.twitch_subscription_id
         if not tid or not _TWITCH_ID_RE.fullmatch(tid):
@@ -669,6 +756,11 @@ async def _apply(conn: Any, rep: Report, now: datetime) -> None:
             ),
             {"fr": int(FailureReason.TWITCH_REVOKED), "now": now, "i": row.id},
         )
+    # Single-use: the issued action/nonce is consumed, so a replayed report is rejected.
+    await conn.execute(
+        text(f"UPDATE {_TABLE} SET issued_action = NULL, issued_nonce = NULL WHERE id = :i"),  # noqa: S608  # nosec B608 -- _TABLE is a module constant
+        {"i": row.id},
+    )
 
 
 async def secret_for_callback_key(install_dal: AsyncDB, callback_key: str) -> str:

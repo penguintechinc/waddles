@@ -60,6 +60,7 @@ class WorkItemDTO:
     version: int
     callbackUrl: str
     callbackKey: str
+    nonce: str
     twitchSubscriptionId: str | None = None
 
 
@@ -78,22 +79,24 @@ class SweepDTO:
 
 @dataclass(slots=True, frozen=True)
 class ReconcileResponse:
-    """Work plan plus the ledger's live Twitch ids (for orphan garbage collection)."""
+    """Work plan plus the swept communities' live Twitch ids; GC only if ``enabledIdsComplete``."""
 
     success: bool
     sweep: SweepDTO
     work: list[WorkItemDTO] = field(default_factory=list)
     enabledTwitchSubscriptionIds: list[str] = field(default_factory=list)
+    enabledIdsComplete: bool = False
 
 
 @dataclass(slots=True, frozen=True)
 class ReportItem:
-    """Outcome code: 1 created, 2 deleted, 3 failed, 4 revoked; failureReason = FailureReason."""
+    """Outcome code: 1 created, 2 deleted, 3 failed, 4 revoked; echo the work item's ``nonce``."""
 
     subscriptionId: str
     outcome: int
     twitchSubscriptionId: str | None = None
     failureReason: int | None = None
+    nonce: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -200,11 +203,13 @@ async def reconcile_route(data: ReconcileRequest) -> Any:
                 version=w.version,
                 callbackUrl=w.callback_url,
                 callbackKey=w.callback_key,
+                nonce=w.nonce,
                 twitchSubscriptionId=w.twitch_subscription_id,
             )
             for w in work
         ],
-        enabledTwitchSubscriptionIds=enabled,
+        enabledTwitchSubscriptionIds=enabled.ids,
+        enabledIdsComplete=enabled.complete,
     )
 
 
@@ -224,6 +229,7 @@ async def results_route(data: ResultsRequest) -> Any:
                 public_id=r.subscriptionId,
                 outcome=es.Outcome(r.outcome),
                 twitch_subscription_id=r.twitchSubscriptionId,
+                nonce=r.nonce,
                 failure_reason=(
                     es.FailureReason(r.failureReason) if r.failureReason is not None else None
                 ),

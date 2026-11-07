@@ -326,6 +326,7 @@ class TestLifecycle:
                 es.Report(
                     x.public_id,
                     es.Outcome.CREATED,
+                    nonce=x.nonce,
                     twitch_subscription_id=f"tw-{i}-{x.public_id[:8]}",
                 )
                 for i, x in enumerate(mine)
@@ -339,7 +340,8 @@ class TestLifecycle:
         assert [r.status for r in rows] == [int(es.SubStatus.ENABLED)]
         _, work, enabled = await _reconcile(world)
         assert _mine(work, world) == []
-        assert rows[0].twitch_subscription_id in enabled
+        assert rows[0].twitch_subscription_id in enabled.ids
+        assert enabled.complete
         assert mine[0].public_id == str(rows[0].public_id)
 
     async def test_idempotent_second_sweep_changes_nothing(self, world: World) -> None:
@@ -357,7 +359,9 @@ class TestLifecycle:
         mine = _mine(work, world)
         assert [x.action for x in mine] == [es.Action.DELETE]
         assert mine[0].twitch_subscription_id
-        await es.report_results(world.dal, [es.Report(mine[0].public_id, es.Outcome.DELETED)])
+        await es.report_results(
+            world.dal, [es.Report(mine[0].public_id, es.Outcome.DELETED, nonce=mine[0].nonce)]
+        )
         assert await world.rows() == []
 
     async def test_never_created_row_is_dropped_when_no_longer_desired(self, world: World) -> None:
@@ -384,7 +388,9 @@ class TestLifecycle:
         mine = _mine(work, world)
         assert [x.action for x in mine] == [es.Action.DELETE]
         old_secret = (await world.rows())[0].secret_enc
-        await es.report_results(world.dal, [es.Report(mine[0].public_id, es.Outcome.DELETED)])
+        await es.report_results(
+            world.dal, [es.Report(mine[0].public_id, es.Outcome.DELETED, nonce=mine[0].nonce)]
+        )
         row = (await world.rows())[0]
         assert row.status == int(es.SubStatus.PENDING)
         assert row.twitch_subscription_id is None
@@ -409,7 +415,11 @@ class TestLifecycle:
     async def test_revoked_is_recreated_with_rotated_secret(self, world: World) -> None:
         mine = await self._create_all(world, ["channel.raid"])
         old = (await world.rows())[0].secret_enc
-        await es.report_results(world.dal, [es.Report(mine[0].public_id, es.Outcome.REVOKED)])
+        tid = (await world.rows())[0].twitch_subscription_id
+        await es.report_results(
+            world.dal,
+            [es.Report(mine[0].public_id, es.Outcome.REVOKED, twitch_subscription_id=tid)],
+        )
         row = (await world.rows())[0]
         assert (row.status, row.failure_reason) == (4, int(es.FailureReason.TWITCH_REVOKED))
         _, work, _ = await _reconcile(world)
@@ -420,11 +430,18 @@ class TestLifecycle:
     async def test_retryable_failure_backs_off_then_retries(self, world: World) -> None:
         await world.activate(["channel.raid"])
         _, work, _ = await _reconcile(world)
-        pid = _mine(work, world)[0].public_id
+        it = _mine(work, world)[0]
         t0 = datetime.now(UTC)
         await es.report_results(
             world.dal,
-            [es.Report(pid, es.Outcome.FAILED, failure_reason=es.FailureReason.RATE_LIMITED)],
+            [
+                es.Report(
+                    it.public_id,
+                    es.Outcome.FAILED,
+                    nonce=it.nonce,
+                    failure_reason=es.FailureReason.RATE_LIMITED,
+                )
+            ],
             now=t0,
         )
         row = (await world.rows())[0]
@@ -444,10 +461,17 @@ class TestLifecycle:
     async def test_permanent_failure_waits_for_connection_change(self, world: World) -> None:
         await world.activate(["channel.raid"])
         _, work, _ = await _reconcile(world)
-        pid = _mine(work, world)[0].public_id
+        it = _mine(work, world)[0]
         await es.report_results(
             world.dal,
-            [es.Report(pid, es.Outcome.FAILED, failure_reason=es.FailureReason.MISSING_SCOPE)],
+            [
+                es.Report(
+                    it.public_id,
+                    es.Outcome.FAILED,
+                    nonce=it.nonce,
+                    failure_reason=es.FailureReason.MISSING_SCOPE,
+                )
+            ],
         )
         row = (await world.rows())[0]
         assert row.next_attempt_at is None
@@ -466,10 +490,17 @@ class TestLifecycle:
         await self._create_all(world, ["channel.raid"])
         await world.sql("DELETE FROM app_active_versions WHERE tenant_id = :t", t=world.tenant)
         _, work, _ = await _reconcile(world)
-        pid = _mine(work, world)[0].public_id
+        it = _mine(work, world)[0]
         await es.report_results(
             world.dal,
-            [es.Report(pid, es.Outcome.FAILED, failure_reason=es.FailureReason.TRANSPORT_ERROR)],
+            [
+                es.Report(
+                    it.public_id,
+                    es.Outcome.FAILED,
+                    nonce=it.nonce,
+                    failure_reason=es.FailureReason.TRANSPORT_ERROR,
+                )
+            ],
         )
         assert (await world.rows())[0].status == int(es.SubStatus.DELETE_PENDING)
 
@@ -491,6 +522,229 @@ class TestLifecycle:
         assert await world.rows() == []
 
 
+class TestTransitionGuard:
+    async def _issued(self, w: World) -> es.WorkItem:
+        await w.activate(["channel.raid"])
+        _, work, _ = await _reconcile(w)
+        return _mine(work, w)[0]
+
+    async def _enabled(self, w: World) -> es.WorkItem:
+        it = await self._issued(w)
+        await es.report_results(
+            w.dal,
+            [
+                es.Report(
+                    it.public_id, es.Outcome.CREATED, nonce=it.nonce, twitch_subscription_id="tw-1"
+                )
+            ],
+        )
+        return it
+
+    async def test_replayed_created_report_is_rejected(self, world: World) -> None:
+        it = await self._enabled(world)
+        with pytest.raises(es.InvalidReportError):
+            await es.report_results(
+                world.dal,
+                [
+                    es.Report(
+                        it.public_id,
+                        es.Outcome.CREATED,
+                        nonce=it.nonce,
+                        twitch_subscription_id="tw-2",
+                    )
+                ],
+            )
+        assert (await world.rows())[0].twitch_subscription_id == "tw-1"
+
+    @pytest.mark.parametrize("nonce", [None, "not-a-uuid", "00000000-0000-0000-0000-000000000000"])
+    async def test_missing_bad_or_wrong_nonce_rejected(
+        self, world: World, nonce: str | None
+    ) -> None:
+        it = await self._issued(world)
+        with pytest.raises(es.InvalidReportError):
+            await es.report_results(
+                world.dal,
+                [
+                    es.Report(
+                        it.public_id, es.Outcome.CREATED, nonce=nonce, twitch_subscription_id="tw"
+                    )
+                ],
+            )
+        assert (await world.rows())[0].status == int(es.SubStatus.PENDING)
+
+    async def test_no_outstanding_action_rejects_failed_and_created(self, world: World) -> None:
+        await world.activate(["channel.raid"])
+        await _reconcile(world)  # row exists; reconcile issues work, so clear it to simulate none
+        await world.sql(
+            "UPDATE twitch_eventsub_subscriptions SET issued_action = NULL, issued_nonce = NULL"
+        )
+        row = (await world.rows())[0]
+        for rep in (
+            es.Report(
+                str(row.public_id), es.Outcome.FAILED, failure_reason=es.FailureReason.RATE_LIMITED
+            ),
+            es.Report(str(row.public_id), es.Outcome.CREATED, twitch_subscription_id="tw"),
+        ):
+            with pytest.raises(es.InvalidReportError):
+                await es.report_results(world.dal, [rep])
+
+    async def test_new_reconcile_invalidates_prior_nonce(self, world: World) -> None:
+        old = await self._issued(world)
+        _, work, _ = await _reconcile(world)
+        new = _mine(work, world)[0]
+        assert new.nonce != old.nonce
+        with pytest.raises(es.InvalidReportError):
+            await es.report_results(
+                world.dal,
+                [
+                    es.Report(
+                        old.public_id,
+                        es.Outcome.CREATED,
+                        nonce=old.nonce,
+                        twitch_subscription_id="t",
+                    )
+                ],
+            )
+        await es.report_results(
+            world.dal,
+            [
+                es.Report(
+                    new.public_id, es.Outcome.CREATED, nonce=new.nonce, twitch_subscription_id="t"
+                )
+            ],
+        )
+
+    async def test_created_cannot_resurrect_a_delete_pending_row(self, world: World) -> None:
+        it = await self._enabled(world)
+        await world.sql("DELETE FROM app_active_versions WHERE tenant_id = :t", t=world.tenant)
+        _, work, _ = await _reconcile(world)
+        dele = _mine(work, world)[0]
+        assert dele.action is es.Action.DELETE
+        with pytest.raises(es.InvalidReportError):  # CREATED against a delete-issued row
+            await es.report_results(
+                world.dal,
+                [
+                    es.Report(
+                        it.public_id,
+                        es.Outcome.CREATED,
+                        nonce=dele.nonce,
+                        twitch_subscription_id="x",
+                    )
+                ],
+            )
+        assert (await world.rows())[0].status == int(es.SubStatus.DELETE_PENDING)
+
+    async def test_deleted_rejected_for_create_issued_row(self, world: World) -> None:
+        it = await self._issued(world)
+        with pytest.raises(es.InvalidReportError):
+            await es.report_results(
+                world.dal, [es.Report(it.public_id, es.Outcome.DELETED, nonce=it.nonce)]
+            )
+
+    async def test_revoked_only_from_enabled_with_matching_twitch_id(self, world: World) -> None:
+        it = await self._issued(world)  # PENDING
+        with pytest.raises(es.InvalidReportError):
+            await es.report_results(
+                world.dal,
+                [es.Report(it.public_id, es.Outcome.REVOKED, twitch_subscription_id="tw-1")],
+            )
+        await es.report_results(
+            world.dal,
+            [
+                es.Report(
+                    it.public_id, es.Outcome.CREATED, nonce=it.nonce, twitch_subscription_id="tw-1"
+                )
+            ],
+        )
+        for bad in (None, "tw-other"):
+            with pytest.raises(es.InvalidReportError):
+                await es.report_results(
+                    world.dal,
+                    [es.Report(it.public_id, es.Outcome.REVOKED, twitch_subscription_id=bad)],
+                )
+        assert (await world.rows())[0].status == int(es.SubStatus.ENABLED)
+
+    async def test_failed_replay_does_not_inflate_backoff(self, world: World) -> None:
+        it = await self._issued(world)
+        rep = es.Report(
+            it.public_id,
+            es.Outcome.FAILED,
+            nonce=it.nonce,
+            failure_reason=es.FailureReason.RATE_LIMITED,
+        )
+        await es.report_results(world.dal, [rep])
+        with pytest.raises(es.InvalidReportError):
+            await es.report_results(world.dal, [rep])
+        assert (await world.rows())[0].failure_count == 1
+
+    async def test_rejection_logs_code_only(
+        self, world: World, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        it = await self._issued(world)
+        caplog.set_level("DEBUG")
+        with pytest.raises(es.InvalidReportError):
+            await es.report_results(
+                world.dal,
+                [
+                    es.Report(
+                        it.public_id, es.Outcome.CREATED, nonce=None, twitch_subscription_id="tw"
+                    )
+                ],
+            )
+        assert "eventsub.report_rejected" in caplog.text
+        assert it.public_id not in caplog.text and it.nonce not in caplog.text
+
+
+class TestEnabledIdsScoping:
+    async def test_truncation_marks_incomplete(
+        self, world: World, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await world.activate(["channel.**", "stream.*"])  # 7 subscriptions
+        _, work, _ = await _reconcile(world)
+        await es.report_results(
+            world.dal,
+            [
+                es.Report(
+                    x.public_id, es.Outcome.CREATED, nonce=x.nonce, twitch_subscription_id=f"tw-{i}"
+                )
+                for i, x in enumerate(_mine(work, world))
+            ],
+        )
+        _, _, full = await _reconcile(world)
+        assert full.complete and len(full.ids) >= 7
+        monkeypatch.setattr(es, "MAX_ENABLED_IDS", 3)
+        _, _, cut = await _reconcile(world)
+        assert not cut.complete and len(cut.ids) == 3
+
+    async def test_paged_sweep_is_incomplete_and_scoped(
+        self, world: World, pg_dal: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await world.activate(["channel.raid"])
+        _, work, _ = await _reconcile(world)
+        it = _mine(work, world)[0]
+        await es.report_results(
+            world.dal,
+            [
+                es.Report(
+                    it.public_id,
+                    es.Outcome.CREATED,
+                    nonce=it.nonce,
+                    twitch_subscription_id="tw-scoped",
+                )
+            ],
+        )
+        # starting after this community: its id is neither swept nor listed, and never complete
+        _, _, later = await es.reconcile(
+            world.dal, base_url=BASE, after_community_id=world.community
+        )
+        assert "tw-scoped" not in later.ids and not later.complete
+        # multi-page sweep (page size 1): first page lists only its own community, incomplete
+        monkeypatch.setattr(es, "MAX_COMMUNITIES_PER_SWEEP", 1)
+        summary, _, first = await es.reconcile(world.dal, base_url=BASE, after_community_id=0)
+        assert summary.next_community_id is not None
+        assert not first.complete
+
+
 class TestReportValidation:
     async def test_unknown_subscription(self, pg_dal: Any) -> None:  # noqa: F811
         import uuid
@@ -505,32 +759,49 @@ class TestReportValidation:
     async def test_created_needs_valid_twitch_id(self, world: World) -> None:
         await world.activate(["channel.raid"])
         _, work, _ = await _reconcile(world)
-        pid = _mine(work, world)[0].public_id
+        it = _mine(work, world)[0]
         for bad in (None, "", "has space", "x" * 65):
             with pytest.raises(es.InvalidReportError):
                 await es.report_results(
-                    world.dal, [es.Report(pid, es.Outcome.CREATED, twitch_subscription_id=bad)]
+                    world.dal,
+                    [
+                        es.Report(
+                            it.public_id,
+                            es.Outcome.CREATED,
+                            nonce=it.nonce,
+                            twitch_subscription_id=bad,
+                        )
+                    ],
                 )
 
     async def test_failed_needs_reason_and_deleted_needs_pending_delete(self, world: World) -> None:
         await world.activate(["channel.raid"])
         _, work, _ = await _reconcile(world)
-        pid = _mine(work, world)[0].public_id
+        it = _mine(work, world)[0]
         with pytest.raises(es.InvalidReportError):
-            await es.report_results(world.dal, [es.Report(pid, es.Outcome.FAILED)])
+            await es.report_results(
+                world.dal, [es.Report(it.public_id, es.Outcome.FAILED, nonce=it.nonce)]
+            )
         with pytest.raises(es.InvalidReportError):
-            await es.report_results(world.dal, [es.Report(pid, es.Outcome.DELETED)])
+            await es.report_results(
+                world.dal, [es.Report(it.public_id, es.Outcome.DELETED, nonce=it.nonce)]
+            )
 
     async def test_batch_is_atomic(self, world: World) -> None:
         await world.activate(["channel.raid"])
         _, work, _ = await _reconcile(world)
-        pid = _mine(work, world)[0].public_id
+        it = _mine(work, world)[0]
         with pytest.raises(es.InvalidReportError):
             await es.report_results(
                 world.dal,
                 [
-                    es.Report(pid, es.Outcome.CREATED, twitch_subscription_id="tw-ok"),
-                    es.Report(pid, es.Outcome.FAILED),
+                    es.Report(
+                        it.public_id,
+                        es.Outcome.CREATED,
+                        nonce=it.nonce,
+                        twitch_subscription_id="tw-ok",
+                    ),
+                    es.Report(it.public_id, es.Outcome.FAILED, nonce=it.nonce),
                 ],
             )
         assert (await world.rows())[0].status == int(es.SubStatus.PENDING)
@@ -646,7 +917,12 @@ class TestContractHttp:
         assert "bc-" not in json.dumps(mine)
 
         results = [
-            {"subscriptionId": w["subscriptionId"], "outcome": 1, "twitchSubscriptionId": f"tw-{i}"}
+            {
+                "subscriptionId": w["subscriptionId"],
+                "outcome": 1,
+                "nonce": w["nonce"],
+                "twitchSubscriptionId": f"tw-{i}",
+            }
             for i, w in enumerate(mine)
         ]
         resp = await client.post(
@@ -654,10 +930,15 @@ class TestContractHttp:
         )
         assert resp.status_code == 200
         assert (await resp.get_json())["applied"] == 2
+        replay = await client.post(
+            "/api/v1/internal/eventsub/results", json={"results": results}, headers=_h(issuer)
+        )
+        assert replay.status_code == 400  # single-use nonce
         resp = await client.post("/api/v1/internal/eventsub/reconcile", json={}, headers=_h(issuer))
         body = await resp.get_json()
         assert not [w for w in body["work"] if w["communityId"] == world.community]
         assert {"tw-0", "tw-1"} <= set(body["enabledTwitchSubscriptionIds"])
+        assert body["enabledIdsComplete"] is True
 
     async def test_secret_route_matches_work_item(
         self, world: World, issuer: ServiceJwtIssuer

@@ -30,3 +30,14 @@ fetches the secret via `GET /api/v1/internal/eventsub/secret/<callback_key>` and
 `transport.secret` of the request body as a host-filled slot. The S0 host-seam policy must define
 that slot: name `transport.secret`, origin `eventsub_secret` (keyed by `callbackKey`). Grant
 `eventsub:secret-read` ONLY to the svc-ingest identity, never the bundle identity.
+
+## Result integrity and GC safety
+
+- Every work item carries a single-use `nonce` (issued action + nonce stored on the row). `results`
+  for created/deleted/failed must echo it and match the issued action and the row's state
+  (created from PENDING/FAILED, deleted from DELETE_PENDING/STALE); a replayed, stale or forged
+  report is a 400. A new `reconcile` re-issues nonces. `revoked` (Twitch-initiated) is accepted only
+  from ENABLED and only with the exact `twitchSubscriptionId` the ledger holds.
+- `enabledTwitchSubscriptionIds` is scoped to the swept communities. The hook MUST NOT delete
+  Twitch-side subscriptions against it unless `enabledIdsComplete` is true (full sweep from
+  `afterCommunityId` 0, no `nextCommunityId`, not truncated at 5000).

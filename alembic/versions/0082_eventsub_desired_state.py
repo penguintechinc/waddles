@@ -46,6 +46,8 @@ def upgrade() -> None:
             failure_reason SMALLINT
                 CHECK (failure_reason IS NULL OR failure_reason BETWEEN 1 AND 7),
             failure_count INTEGER NOT NULL DEFAULT 0,
+            issued_action SMALLINT CHECK (issued_action IS NULL OR issued_action IN (1, 2)),
+            issued_nonce UUID,
             next_attempt_at TIMESTAMPTZ,
             last_reconciled_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
