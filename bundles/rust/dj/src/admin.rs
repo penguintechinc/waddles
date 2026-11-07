@@ -497,28 +497,31 @@ impl Engine<'_> {
     /// `!dj playlist import <name> <provider> <playlist id/url>`.
     fn pl_import(&self, name: &str, provider: Option<&str>, reference: Option<&str>) -> Reply {
         let (Some(provider), Some(reference)) = (provider, reference) else {
-            return Ok("usage: !dj playlist import <name> <youtube|spotify|soundcloud> <playlist id or link>".into());
+            return Ok("usage: !dj playlist import <name> <youtube|spotify|soundcloud> <playlist id>".into());
         };
         let provider = provider.to_ascii_lowercase();
         if !PROVIDERS.contains(&provider.as_str()) {
             return Ok(format!("provider must be one of {}", PROVIDERS.join(", ")));
         }
-        if reference.starts_with("http")
-            && music::provider_for_url(reference)
-                != PROVIDERS.iter().find(|p| **p == provider).copied()
-        {
-            return Ok("that link does not match the provider".into());
+        let id_ok = !reference.is_empty()
+            && reference.len() <= 64
+            && reference
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !id_ok {
+            return Ok(
+                "use the provider's playlist id (letters, digits, - and _), not a link".into(),
+            );
         }
         let Some(mut tracks) = self.require_pl(name)? else {
             return Ok("no such playlist".into());
         };
         let cfg = self.config()?;
         let st = self.state()?;
-        let fetched =
-            match music::playlist(self.host, &provider, reference, MAX_PLAYLIST_TRACKS as u32) {
-                Ok(t) => t,
-                Err(e) => return Ok(e.to_string()),
-            };
+        let fetched = match music::playlist(self.host, &provider, reference, MAX_PLAYLIST_TRACKS) {
+            Ok(t) => t,
+            Err(e) => return Ok(e.to_string()),
+        };
         let (mut added, mut skipped) = (0usize, 0usize);
         for t in fetched {
             if tracks.len() >= MAX_PLAYLIST_TRACKS

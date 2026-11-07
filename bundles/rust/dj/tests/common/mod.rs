@@ -1,7 +1,11 @@
+#![allow(dead_code)]
 //! Shared test host: in-memory kv + a contract-enforcing fake for the tool
-//! services. Every consumed-tool call is validated against
-//! `tests/fixtures/contract.json` (args AND the fake's own result), so a
-//! schema drift on either side fails here.
+//! services. Schemas are DERIVED at compile time from the shared contract
+//! files (`bundles/contracts/{music-tool-contract,ai-tools}.v1.json`) via
+//! `include_str!`: every consumed-tool call is validated (args AND the fake's
+//! own result) against them, so a contract change breaks this build instead of
+//! drifting silently. Spotify player + economy have no shared contract file;
+//! their minimal schemas (taken from the producers' manifests) are inline.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -13,11 +17,16 @@ use waddle_bundle_dj_app::host::{Host, Level, ToolErr};
 pub const USER_A: &str = "11111111-1111-4111-8111-111111111111";
 pub const USER_B: &str = "22222222-2222-4222-8222-222222222222";
 
+pub const MUSIC_CONTRACT: &str = include_str!("../../../../contracts/music-tool-contract.v1.json");
+pub const AI_CONTRACT: &str = include_str!("../../../../contracts/ai-tools.v1.json");
+
 /// Subset JSON-schema validator (type, enum, required, properties,
-/// additionalProperties, items, min/max, maxLength, maxItems, minItems, $ref).
-pub fn validate(schema: &Value, defs: &Value, v: &Value, path: &str) -> Result<(), String> {
+/// additionalProperties, items, min/max, min/maxLength, min/maxItems,
+/// uniqueItems, local `#/definitions/..` $ref).
+pub fn validate(schema: &Value, root: &Value, v: &Value, path: &str) -> Result<(), String> {
     if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
-        return validate(&defs[r], defs, v, path);
+        let name = r.trim_start_matches("#/definitions/");
+        return validate(&root["definitions"][name], root, v, path);
     }
     if let Some(t) = schema.get("type") {
         let types: Vec<&str> = match t {
@@ -54,10 +63,18 @@ pub fn validate(schema: &Value, defs: &Value, v: &Value, path: &str) -> Result<(
     {
         return Err(format!("{path}: {n} > {max}"));
     }
-    if let (Some(s), Some(m)) = (v.as_str(), schema.get("maxLength").and_then(Value::as_u64))
-        && s.chars().count() as u64 > m
-    {
-        return Err(format!("{path}: string longer than {m}"));
+    if let Some(s) = v.as_str() {
+        let len = s.chars().count() as u64;
+        if let Some(m) = schema.get("maxLength").and_then(Value::as_u64)
+            && len > m
+        {
+            return Err(format!("{path}: string longer than {m}"));
+        }
+        if let Some(m) = schema.get("minLength").and_then(Value::as_u64)
+            && len < m
+        {
+            return Err(format!("{path}: string shorter than {m}"));
+        }
     }
     if let Some(a) = v.as_array() {
         if let Some(m) = schema.get("maxItems").and_then(Value::as_u64)
@@ -70,9 +87,16 @@ pub fn validate(schema: &Value, defs: &Value, v: &Value, path: &str) -> Result<(
         {
             return Err(format!("{path}: fewer than {m} items"));
         }
+        if schema.get("uniqueItems") == Some(&json!(true)) {
+            for (i, x) in a.iter().enumerate() {
+                if a[..i].contains(x) {
+                    return Err(format!("{path}: duplicate item {x}"));
+                }
+            }
+        }
         if let Some(items) = schema.get("items") {
             for (i, x) in a.iter().enumerate() {
-                validate(items, defs, x, &format!("{path}[{i}]"))?;
+                validate(items, root, x, &format!("{path}[{i}]"))?;
             }
         }
     }
@@ -91,7 +115,7 @@ pub fn validate(schema: &Value, defs: &Value, v: &Value, path: &str) -> Result<(
         let props = schema.get("properties").and_then(Value::as_object);
         for (k, x) in o {
             match props.and_then(|p| p.get(k)) {
-                Some(s) => validate(s, defs, x, &format!("{path}.{k}"))?,
+                Some(s) => validate(s, root, x, &format!("{path}.{k}"))?,
                 None if schema.get("additionalProperties") == Some(&json!(false)) => {
                     return Err(format!("{path}: unexpected property '{k}'"));
                 }
@@ -102,7 +126,8 @@ pub fn validate(schema: &Value, defs: &Value, v: &Value, path: &str) -> Result<(
     Ok(())
 }
 
-/// A catalog row served by the fake music/ai services.
+/// A catalog row in the provider wire shape (`music-tool-contract.v1`);
+/// `channel_id` is an optional extra provider field.
 pub fn track(
     provider: &str,
     id: &str,
@@ -111,7 +136,15 @@ pub fn track(
     channel: &str,
     dur: u32,
 ) -> Value {
-    json!({"provider": provider, "id": id, "title": title, "artist": artist, "channel_id": channel, "duration_s": dur, "explicit": false})
+    json!({
+        "provider": provider, "id": id, "title": title, "artist": artist,
+        "duration_ms": u64::from(dur) * 1000, "thumbnail": null, "explicit": false,
+        "source_url": format!("https://example.test/{id}"), "channel_id": channel
+    })
+}
+
+fn capability() -> Value {
+    json!({"playback": "embed", "server_audio": false, "queue_add": false})
 }
 
 /// One recorded tool call: (target, tool, args, idempotency key).
@@ -120,7 +153,7 @@ pub type Call = (String, String, Value, Option<String>);
 pub struct FakeHost {
     pub kv: RefCell<BTreeMap<String, Vec<u8>>>,
     pub now: Cell<u64>,
-    /// provider -> tracks searchable/resolvable.
+    /// Tracks searchable/resolvable (all providers).
     pub catalog: RefCell<Vec<Value>>,
     pub calls: RefCell<Vec<Call>>,
     pub logs: RefCell<Vec<String>>,
@@ -130,13 +163,14 @@ pub struct FakeHost {
     pub ai_classify: RefCell<Option<(String, f64)>>,
     pub fail_tools: RefCell<Vec<String>>,
     pub balance: Cell<i64>,
-    contract: Value,
+    /// When > 0, `playlist.get` serves pages of this many tracks.
+    pub page_size: Cell<usize>,
+    music: Value,
+    ai: Value,
 }
 
 impl FakeHost {
     pub fn new() -> Self {
-        let contract: Value = serde_json::from_str(include_str!("../fixtures/contract.json"))
-            .expect("contract fixture parses");
         FakeHost {
             kv: RefCell::default(),
             now: Cell::new(1_000_000),
@@ -147,7 +181,9 @@ impl FakeHost {
             ai_classify: RefCell::new(Some(("allowed".into(), 0.95))),
             fail_tools: RefCell::default(),
             balance: Cell::new(100),
-            contract,
+            page_size: Cell::new(0),
+            music: serde_json::from_str(MUSIC_CONTRACT).expect("music contract parses"),
+            ai: serde_json::from_str(AI_CONTRACT).expect("ai contract parses"),
         }
     }
 
@@ -155,16 +191,89 @@ impl FakeHost {
         self.catalog.borrow_mut().push(t);
     }
 
-    fn check(&self, key: &str, part: &str, v: &Value) {
-        let s = &self.contract["tools"][key][part];
-        assert!(!s.is_null(), "no contract for {key}");
-        if let Err(e) = validate(s, &self.contract["defs"], v, key) {
-            panic!("contract violation ({key}.{part}): {e}\nvalue: {v}");
+    fn check_schema(&self, root: &Value, schema: &Value, what: &str, v: &Value) {
+        if let Err(e) = validate(schema, root, v, what) {
+            panic!("contract violation ({what}): {e}\nvalue: {v}");
         }
+    }
+
+    fn check_music(&self, op: &str, part: &str, v: &Value) {
+        let s = &self.music["tools"][op][format!("{part}_schema")];
+        assert!(!s.is_null(), "no music contract for op {op}");
+        self.check_schema(&self.music, s, &format!("music.{op}.{part}"), v);
+    }
+
+    fn check_ai(&self, tool: &str, part: &str, v: &Value) {
+        let s = &self.ai["tools"][tool][format!("{part}_schema")];
+        assert!(!s.is_null(), "no ai contract for {tool}");
+        self.check_schema(&self.ai, s, &format!("{tool}.{part}"), v);
     }
 
     pub fn calls_to(&self, tool: &str) -> usize {
         self.calls.borrow().iter().filter(|c| c.1 == tool).count()
+    }
+
+    fn music_call(&self, provider: &str, op: &str, args: &Value) -> Result<Value, ToolErr> {
+        self.check_music(op, "input", args);
+        let all: Vec<Value> = self
+            .catalog
+            .borrow()
+            .iter()
+            .filter(|t| t["provider"] == provider)
+            .cloned()
+            .collect();
+        let result = match op {
+            "search" => {
+                let q = args["query"].as_str().unwrap().to_lowercase();
+                let hits: Vec<Value> = all
+                    .into_iter()
+                    .filter(|t| {
+                        q.split(' ').all(|w| {
+                            format!(
+                                "{} {}",
+                                t["title"].as_str().unwrap(),
+                                t["artist"].as_str().unwrap()
+                            )
+                            .to_lowercase()
+                            .contains(w)
+                        })
+                    })
+                    .take(args["limit"].as_u64().unwrap() as usize)
+                    .collect();
+                json!({"tracks": hits, "capability": capability()})
+            }
+            "resolve" => {
+                let u = args["url"].as_str().unwrap();
+                match all.iter().find(|t| u.contains(t["id"].as_str().unwrap())) {
+                    Some(t) => json!({"track": t, "capability": capability()}),
+                    None => return Err(ToolErr::InvalidArgs("not_found".into())),
+                }
+            }
+            "playlist.get" => {
+                let size = self.page_size.get();
+                let page: usize = args
+                    .get("page_token")
+                    .and_then(Value::as_str)
+                    .and_then(|t| t.strip_prefix('p'))
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
+                if size == 0 {
+                    json!({"tracks": all, "next_page_token": null, "capability": capability()})
+                } else {
+                    let chunk: Vec<Value> =
+                        all.iter().skip(page * size).take(size).cloned().collect();
+                    let next = if (page + 1) * size < all.len() {
+                        json!(format!("p{}", page + 1))
+                    } else {
+                        Value::Null
+                    };
+                    json!({"tracks": chunk, "next_page_token": next, "capability": capability()})
+                }
+            }
+            other => panic!("dj must not call music op {other}"),
+        };
+        self.check_music(op, "output", &result);
+        Ok(result)
     }
 }
 
@@ -206,94 +315,58 @@ impl Host for FakeHost {
         {
             return Err(ToolErr::TargetUnavailable);
         }
-        let mut parts = tool.splitn(3, '.');
-        let (ns, provider, op) = (
-            parts.next().unwrap_or(""),
-            parts.next().unwrap_or(""),
-            parts.next().unwrap_or(""),
-        );
-        let (key, result) = match (ns, op) {
-            ("music", "search") => {
-                assert_eq!(target, format!("waddles.core.service.music-{provider}"));
-                self.check("music.search", "args", args);
-                let q = args["query"].as_str().unwrap().to_lowercase();
-                let hits: Vec<Value> = self
-                    .catalog
-                    .borrow()
-                    .iter()
-                    .filter(|t| {
-                        t["provider"] == provider
-                            && q.split(' ').all(|w| {
-                                format!(
-                                    "{} {}",
-                                    t["title"].as_str().unwrap(),
-                                    t["artist"].as_str().unwrap()
-                                )
-                                .to_lowercase()
-                                .contains(w)
-                            })
-                    })
-                    .take(args["limit"].as_u64().unwrap() as usize)
-                    .cloned()
-                    .collect();
-                ("music.search", json!({"tracks": hits}))
+        if let Some(rest) = tool.strip_prefix("music.") {
+            let (provider, op) = rest.split_once('.').expect("music.<provider>.<op>");
+            assert_eq!(target, format!("waddles.core.service.music-{provider}"));
+            if provider == "spotify" && op == "player.play" {
+                assert!(
+                    idem.is_some(),
+                    "player.play is a write: needs an idempotency key"
+                );
+                let uris = args["uris"].as_array().expect("uris array");
+                assert!(
+                    uris.iter()
+                        .all(|u| u.as_str().unwrap().starts_with("spotify:track:"))
+                );
+                return Ok(json!({"ok": true, "action": "play", "capability": capability()}));
             }
-            ("music", "track") => {
-                self.check("music.track", "args", args);
-                let r = args["ref"].as_str().unwrap();
-                let t = self
-                    .catalog
-                    .borrow()
-                    .iter()
-                    .find(|t| t["provider"] == provider && r.contains(t["id"].as_str().unwrap()))
-                    .cloned();
-                ("music.track", json!({"track": t}))
-            }
-            ("music", "playlist.get") => {
-                self.check("music.playlist.get", "args", args);
-                let all: Vec<Value> = self
-                    .catalog
-                    .borrow()
-                    .iter()
-                    .filter(|t| t["provider"] == provider)
-                    .cloned()
-                    .collect();
-                ("music.playlist.get", json!({"tracks": all, "title": "pl"}))
-            }
-            ("music", "playback") => {
-                self.check("music.playback", "args", args);
-                ("music.playback", json!({"capability": {"embed": true}}))
-            }
-            ("ai", _) if provider == "complete" => {
+            return self.music_call(provider, op, args);
+        }
+        let result = match tool {
+            "ai.complete" => {
                 assert_eq!(target, "waddles.core.service.ai");
-                self.check("ai.complete", "args", args);
+                self.check_ai("ai.complete", "input", args);
                 let text = self.ai_complete.borrow_mut().remove(0);
-                ("ai.complete", json!({"text": text}))
+                json!({"text": text})
             }
-            ("ai", _) if provider == "classify" => {
-                self.check("ai.classify", "args", args);
+            "ai.classify" => {
+                assert_eq!(target, "waddles.core.service.ai");
+                self.check_ai("ai.classify", "input", args);
                 match self.ai_classify.borrow().clone() {
-                    Some((l, c)) => ("ai.classify", json!({"label": l, "confidence": c})),
+                    Some((l, c)) => json!({"label": l, "confidence": c, "reason": "scripted"}),
                     None => return Err(ToolErr::TargetUnavailable),
                 }
             }
-            _ if tool == "adjust_balance" => {
+            "adjust_balance" => {
+                // Producer: bundles/rust/economy (`adjust_balance {user, delta}`; delta<0 debits,
+                // insufficient funds is a tool error; writes need an idempotency key).
                 assert_eq!(target, "waddles.core.service.economy");
                 assert!(idem.is_some(), "writes need an idempotency key");
-                self.check("economy.adjust_balance", "args", args);
+                let keys: Vec<&String> = args.as_object().unwrap().keys().collect();
+                assert_eq!(keys.len(), 2, "only user+delta: {keys:?}");
                 let d = args["delta"].as_i64().unwrap();
+                assert!(d != 0 && args["user"].as_str().unwrap().len() == 36);
                 if self.balance.get() + d < 0 {
                     return Err(ToolErr::InvalidArgs("insufficient_funds".into()));
                 }
                 self.balance.set(self.balance.get() + d);
-                (
-                    "economy.adjust_balance",
-                    json!({"balance": self.balance.get()}),
-                )
+                json!({"user": args["user"], "balance": self.balance.get(), "alias": "wb"})
             }
             _ => panic!("unexpected tool call {target} {tool}"),
         };
-        self.check(key, "result", &result);
+        if tool.starts_with("ai.") {
+            self.check_ai(tool, "output", &result);
+        }
         Ok(result)
     }
     fn log(&self, _l: Level, message: &str, fields: Value) {

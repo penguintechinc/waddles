@@ -80,12 +80,48 @@ pub struct Track {
     #[serde(default)]
     pub channel_id: Option<String>,
     pub duration_s: u32,
+    /// `None` = the provider does not know (fail-closed when explicit songs are disallowed).
     #[serde(default)]
-    pub explicit: bool,
+    pub explicit: Option<bool>,
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
     pub license: Option<String>,
+}
+
+/// A track exactly as the provider tools return it (`music-tool-contract.v1`).
+/// Extra provider fields (`channel_id`, `license`) are optional and used when present.
+#[derive(Clone, Debug, Deserialize)]
+pub struct WireTrack {
+    pub provider: String,
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub explicit: Option<bool>,
+    #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+}
+
+impl From<WireTrack> for Track {
+    fn from(w: WireTrack) -> Track {
+        Track {
+            provider: w.provider,
+            id: w.id,
+            title: w.title,
+            artist: w.artist,
+            channel_id: w.channel_id,
+            duration_s: u32::try_from(w.duration_ms.div_ceil(1000)).unwrap_or(u32::MAX),
+            explicit: w.explicit,
+            url: w.source_url,
+            license: w.license,
+        }
+    }
 }
 
 /// Strips control chars, collapses whitespace and caps the length (in chars).

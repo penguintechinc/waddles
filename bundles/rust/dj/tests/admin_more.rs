@@ -254,36 +254,99 @@ fn the_skip_audits_and_ai_mode_without_ai_fails_loud() {
 }
 
 #[test]
-fn playback_handoff_failure_is_reported_not_swallowed() {
+fn spotify_handoff_uses_the_player_tool_with_an_idempotency_key_and_failure_is_reported() {
     let h = host();
-    say(&h, &user(USER_A, false, "1"), "!sr alpha");
+    m(&h, "!dj set providers spotify");
+    say(&h, &user(USER_A, false, "1"), "!sr gamma");
+    let r = m(&h, "!music skip");
+    assert!(r.starts_with("now playing: Gamma Song"), "{r}");
+    let calls = h.calls.borrow();
+    let c = calls
+        .iter()
+        .find(|c| c.1 == "music.spotify.player.play")
+        .expect("player.play called");
+    assert_eq!(c.2, json!({"uris": ["spotify:track:sp1"]}));
+    assert_eq!(c.3.as_deref(), Some("dj.play.1"));
+    drop(calls);
+    h.add(track(
+        "spotify",
+        "sp2",
+        "Delta Song",
+        "Artist Five",
+        "",
+        200,
+    ));
+    say(&h, &user(USER_B, false, "2"), "!sr delta");
     h.fail_tools
         .borrow_mut()
-        .push("music.youtube.playback".into());
+        .push("music.spotify.player".into());
     let r = m(&h, "!music skip");
     assert!(
-        r.starts_with("now playing: Alpha Song") && r.contains("playback handoff unavailable"),
-        "{r}"
+        r.contains("player handoff unavailable"),
+        "a failed handoff must be reported: {r}"
     );
-    assert_eq!(h.calls_to("music.youtube.playback"), 1);
 }
 
 #[test]
-fn providers_without_a_playback_tool_make_no_playback_call() {
+fn providers_without_a_player_tool_make_no_handoff_call() {
     let h = host();
-    let t = Track {
-        provider: "soundcloud".into(),
-        id: "sc1".into(),
-        title: "t".into(),
-        artist: "a".into(),
-        channel_id: None,
-        duration_s: 10,
-        explicit: false,
-        url: None,
-        license: None,
-    };
-    assert!(music::playback_play(&h, &t).is_ok());
-    assert!(h.calls.borrow().is_empty());
+    say(&h, &user(USER_A, false, "1"), "!sr alpha");
+    let r = m(&h, "!music skip");
+    assert!(r.starts_with("now playing: Alpha Song"), "{r}");
+    assert_eq!(h.calls_to("music.youtube.player.play"), 0);
+    assert!(h.calls.borrow().iter().all(|c| !c.1.contains("playback")));
+}
+
+#[test]
+fn playlist_import_follows_next_page_token() {
+    let h = host();
+    for i in 0..5 {
+        h.add(track(
+            "youtube",
+            &format!("pg{i}"),
+            &format!("Paged {i}"),
+            "Pager",
+            "UC_P",
+            100,
+        ));
+    }
+    h.page_size.set(2);
+    m(&h, "!dj playlist create paged");
+    let r = m(&h, "!dj playlist import paged youtube PLabc");
+    assert!(r.contains("imported 7 songs"), "{r}"); // 2 host() + 5 added youtube tracks
+    assert!(h.calls_to("music.youtube.playlist.get") >= 4);
+    let page_calls: Vec<_> = h
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.1 == "music.youtube.playlist.get")
+        .map(|c| c.2.clone())
+        .collect();
+    assert!(page_calls[0].get("page_token").is_none());
+    assert_eq!(page_calls[1]["page_token"], "p1");
+}
+
+#[test]
+fn unresolvable_urls_read_as_not_found_not_as_an_outage() {
+    let h = host();
+    let r = say(
+        &h,
+        &user(USER_A, false, "1"),
+        "!sr https://www.youtube.com/watch?v=nothere",
+    );
+    assert!(r.contains("could not find"), "{r}");
+}
+
+#[test]
+fn unknown_explicit_status_fails_closed_when_explicit_is_disallowed() {
+    let h = FakeHost::new();
+    let mut t = track("youtube", "unk", "Unknown Flag", "Someone", "UC_Z", 100);
+    t["explicit"] = serde_json::Value::Null;
+    h.add(t);
+    assert!(say(&h, &user(USER_A, false, "1"), "!sr unknown flag").starts_with("queued"));
+    m(&h, "!dj set explicit off");
+    let r = say(&h, &user(USER_B, false, "2"), "!sr unknown flag");
+    assert!(r.contains("cannot confirm"), "{r}");
 }
 
 #[test]
@@ -326,10 +389,10 @@ fn provider_error_mapping_and_invalid_responses() {
                 "music.youtube.track" => Ok(json!({"nope": 1})),
                 "music.spotify.search" => Err(ToolErr::InvalidArgs("x".into())),
                 _ => Ok(
-                    json!({"tracks": [{"provider":"youtube","id":"bad id!","title":"t","artist":"a","duration_s":1},
-                                          {"provider":"spotify","id":"ok1","title":"cross provider","artist":"a","duration_s":1},
-                                          {"provider":"youtube","id":"ok2","title":"   ","artist":"a","duration_s":1},
-                                          {"provider":"youtube","id":"good","title":"Fine\u{0007}   Song","artist":"A","duration_s":9,"url":"http://insecure"}]}),
+                    json!({"tracks": [{"provider":"youtube","id":"bad id!","title":"t","artist":"a","duration_ms":1000,"thumbnail":null,"explicit":false,"source_url":"https://x/y"},
+                                          {"provider":"spotify","id":"ok1","title":"cross provider","artist":"a","duration_ms":1000,"thumbnail":null,"explicit":false,"source_url":"https://x/y"},
+                                          {"provider":"youtube","id":"ok2","title":"   ","artist":"a","duration_ms":1000,"thumbnail":null,"explicit":false,"source_url":"https://x/y"},
+                                          {"provider":"youtube","id":"good","title":"Fine\u{0007}   Song","artist":"A","duration_ms":9000,"thumbnail":null,"explicit":null,"source_url":"http://insecure"}]}),
                 ),
             }
         }
@@ -372,7 +435,7 @@ fn sanitization_and_int_enum_codes() {
         artist: "a".into(),
         channel_id: Some("  ".into()),
         duration_s: 1,
-        explicit: false,
+        explicit: Some(false),
         url: None,
         license: None,
     };

@@ -460,8 +460,15 @@ pub fn evaluate(
             format!("songs must be at most {}:{:02} long", max / 60, max % 60),
         );
     }
-    if track.explicit && (!cfg.explicit_allowed || rules.explicit_allowed == Some(false)) {
+    let no_explicit = !cfg.explicit_allowed || rules.explicit_allowed == Some(false);
+    if no_explicit && track.explicit == Some(true) {
         return v("explicit", "explicit songs are not allowed here");
+    }
+    if no_explicit && track.explicit.is_none() {
+        return v(
+            "explicit_unknown",
+            "the provider cannot confirm this song is clean",
+        );
     }
     let key = track.key();
     let cool_ms = u64::from(cfg.replay_cooldown_s) * 1000;

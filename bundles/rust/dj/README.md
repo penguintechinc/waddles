@@ -45,13 +45,17 @@ pushes it through the same policy; unresolved tracks are never played. Hourly ca
 next 25 queued, no requester ids). Requesters are stored as community `user_uuid` only.
 kv has no compare-and-swap: concurrent writers in one community are last-write-wins.
 
-## Consumed tool contract (fixtures: `tests/fixtures/contract.json`, enforced on every call in tests)
+## Consumed tool contract (derived from `bundles/contracts/*.v1.json`; tests `include_str!` them, so drift fails the build)
 
-`music.<p>.search {query,limit}`, `music.<p>.track {ref}`, `music.<p>.playlist.get {ref,limit}`,
-`music.<p>.playback {action:"play",ref}` (youtube/spotify), `ai.complete {prompt,json,max_tokens}`,
-`ai.classify {text,labels,context}`, `economy.adjust_balance {user,delta}` (optional cost/refund,
-idempotent keys `dj.sr.<message_id>` / `dj.refund.<item_id>`). Targets:
-`waddles.core.service.music-<p>`, `waddles.core.service.ai`, `waddles.core.service.economy`.
+`music.<p>.search {query,limit<=25}`, `music.<p>.resolve {url}`, `music.<p>.playlist.get {playlist_id,limit,page_token}`
+(providers: youtube, spotify, soundcloud; track shape per `music-tool-contract.v1`, `explicit` null = unknown, which
+fails closed when explicit songs are disallowed). There is no generic playback tool: YouTube/SoundCloud play through
+the Music Station; Spotify hands off with `music.spotify.player.play {uris}` (moderator scope, idempotency key
+`dj.play.<item_id>`, failure reported in chat). `ai.complete {system<=1200,prompt<=3500,max_tokens,temperature}` and
+`ai.classify {text,labels,instructions}` -> `{label,confidence,reason}` per `ai-tools.v1`. Optional cost/refund:
+`economy.adjust_balance {user,delta}` (delta<0 debits; idempotency keys `dj.sr.<message_id>` / `dj.refund.<item_id>`).
+Targets: `waddles.core.service.music-<p>`, `waddles.core.service.ai`, `waddles.core.service.economy`.
+DMCA allowlists match `artist` (or the optional extra provider field `channel_id` when present).
 
 ## Build / test
 

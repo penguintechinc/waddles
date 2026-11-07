@@ -1,10 +1,13 @@
 //! Typed client for the `music-<provider>` service bundles' tools.
 //!
-//! Contract (catalog spec section 3/4; fixtures in `tests/fixtures/`):
-//! - `music.<p>.search`        `{query, limit}`        -> `{tracks: [Track]}`
-//! - `music.<p>.track`         `{ref}` (id or URL)     -> `{track: Track}`
-//! - `music.<p>.playlist.get`  `{ref, limit}`          -> `{tracks: [Track], title?}`
-//! - `music.<p>.playback`      `{action:"play", ref}`  -> `{capability: {...}}` (youtube/spotify)
+//! Contract: `bundles/contracts/music-tool-contract.v1.json` (the tests derive
+//! their schemas from that file, so drift fails the build):
+//! - `music.<p>.search`        `{query, limit<=25}`            -> `{tracks, capability}`
+//! - `music.<p>.resolve`       `{url}`                         -> `{track, capability}`
+//! - `music.<p>.playlist.get`  `{playlist_id, limit, page_token}` -> `{tracks, next_page_token, capability}`
+//! - Spotify only: `music.spotify.player.play {uris}` (moderator scope, write) hands a
+//!   track to the streamer's Connect device. There is no generic playback tool;
+//!   other providers play through the Music Station / presentation.
 //!
 //! Every returned track is untrusted third-party data: it is sanitized and
 //! provider-checked before it can enter state, and never interpreted as an
@@ -13,7 +16,7 @@
 use serde_json::{Value, json};
 
 use crate::host::{Host, Level, ToolErr};
-use crate::model::{PROVIDERS, Track};
+use crate::model::{PROVIDERS, Track, WireTrack};
 
 /// Service-bundle app id for a provider (`waddles.core.service.music-<p>`).
 pub fn target(provider: &str) -> String {
@@ -46,11 +49,17 @@ fn map_err(provider: &str, e: ToolErr) -> MusicError {
     }
 }
 
-fn call(host: &dyn Host, provider: &str, op: &str, args: Value) -> Result<Value, MusicError> {
+fn call(
+    host: &dyn Host,
+    provider: &str,
+    op: &str,
+    args: Value,
+    idem: Option<&str>,
+) -> Result<Value, MusicError> {
     if !PROVIDERS.contains(&provider) {
         return Err(MusicError::UnknownProvider);
     }
-    host.invoke(&target(provider), &tool(provider, op), &args, None)
+    host.invoke(&target(provider), &tool(provider, op), &args, idem)
         .map_err(|e| {
             host.log(
                 Level::Warn,
@@ -69,8 +78,8 @@ fn parse_tracks(host: &dyn Host, provider: &str, v: &Value) -> Result<Vec<Track>
     let total = arr.len();
     let tracks: Vec<Track> = arr
         .iter()
-        .filter_map(|t| serde_json::from_value::<Track>(t.clone()).ok())
-        .filter_map(|t| t.sanitized(provider))
+        .filter_map(|t| serde_json::from_value::<WireTrack>(t.clone()).ok())
+        .filter_map(|t| Track::from(t).sanitized(provider))
         .collect();
     if tracks.len() != total {
         host.log(
@@ -93,57 +102,74 @@ pub fn search(
         host,
         provider,
         "search",
-        json!({"query": query, "limit": limit}),
+        json!({"query": query, "limit": limit.min(25)}),
+        None,
     )?;
     parse_tracks(host, provider, &v)
 }
 
-/// Resolves one track by provider id or URL.
-pub fn resolve(
-    host: &dyn Host,
-    provider: &str,
-    reference: &str,
-) -> Result<Option<Track>, MusicError> {
-    let v = call(host, provider, "track", json!({"ref": reference}))?;
+/// Resolves a pasted track URL (`music.<p>.resolve`).
+pub fn resolve(host: &dyn Host, provider: &str, url: &str) -> Result<Option<Track>, MusicError> {
+    // A provider rejecting the url (unknown/removed track) is "not found", not an outage.
+    let v = match call(host, provider, "resolve", json!({"url": url}), None) {
+        Err(MusicError::BadResponse(_)) => return Ok(None),
+        other => other?,
+    };
     let t = v
         .get("track")
         .ok_or_else(|| MusicError::BadResponse(provider.to_string()))?;
     if t.is_null() {
         return Ok(None);
     }
-    let track: Track = serde_json::from_value(t.clone())
+    let track: WireTrack = serde_json::from_value(t.clone())
         .map_err(|_| MusicError::BadResponse(provider.to_string()))?;
-    Ok(track.sanitized(provider))
+    Ok(Track::from(track).sanitized(provider))
 }
 
-/// Fetches the tracks of a provider playlist.
+/// Fetches up to `max` tracks of a provider playlist, following `next_page_token`.
 pub fn playlist(
     host: &dyn Host,
     provider: &str,
-    reference: &str,
-    limit: u32,
+    playlist_id: &str,
+    max: usize,
 ) -> Result<Vec<Track>, MusicError> {
-    let v = call(
-        host,
-        provider,
-        "playlist.get",
-        json!({"ref": reference, "limit": limit}),
-    )?;
-    parse_tracks(host, provider, &v)
+    let mut out: Vec<Track> = Vec::new();
+    let mut page: Option<String> = None;
+    for _ in 0..8 {
+        let mut args = json!({"playlist_id": playlist_id, "limit": 50});
+        if let Some(p) = &page {
+            args["page_token"] = json!(p);
+        }
+        let v = call(host, provider, "playlist.get", args, None)?;
+        out.extend(parse_tracks(host, provider, &v)?);
+        page = v
+            .get("next_page_token")
+            .and_then(Value::as_str)
+            .map(String::from);
+        if page.is_none() || out.len() >= max {
+            break;
+        }
+    }
+    out.truncate(max);
+    Ok(out)
 }
 
-/// Best-effort playback handoff (overlay player / Spotify Connect). Providers
-/// without a playback tool are skipped; failures are returned so the caller
-/// can degrade loudly.
-pub fn playback_play(host: &dyn Host, track: &Track) -> Result<(), MusicError> {
-    if !matches!(track.provider.as_str(), "youtube" | "spotify") {
+/// Hands a Spotify track to the streamer's Connect device
+/// (`music.spotify.player.play`, moderator scope enforced host-side). Other
+/// providers have no player tool and play through the Music Station, so this
+/// is a no-op for them. `item_id` keys idempotency.
+pub fn handoff_play(host: &dyn Host, track: &Track, item_id: u64) -> Result<(), MusicError> {
+    if track.provider != "spotify" {
         return Ok(());
     }
+    let uri = format!("spotify:track:{}", track.id);
+    let key = format!("dj.play.{item_id}");
     call(
         host,
-        &track.provider,
-        "playback",
-        json!({"action": "play", "ref": track.id}),
+        "spotify",
+        "player.play",
+        json!({"uris": [uri]}),
+        Some(&key),
     )
     .map(|_| ())
 }

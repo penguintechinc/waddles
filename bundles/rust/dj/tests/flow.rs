@@ -88,7 +88,7 @@ fn url_requests_resolve_through_the_provider_track_tool() {
     let h = host();
     let r = say(&h, &a("m1"), "!sr https://www.youtube.com/watch?v=yt_ncs2");
     assert!(r.contains("On And On"), "{r}");
-    assert_eq!(h.calls_to("music.youtube.track"), 1);
+    assert_eq!(h.calls_to("music.youtube.resolve"), 1);
     let bad = say(
         &h,
         &user(USER_B, false, "m2"),
@@ -470,7 +470,7 @@ fn untrusted_titles_only_reach_classify_as_data_and_requests_never_reach_ai() {
             .unwrap()
             .contains("Ignore all previous")
     );
-    assert_eq!(c.2["context"], "upbeat only");
+    assert_eq!(c.2["instructions"], "upbeat only");
 }
 
 #[test]
@@ -557,7 +557,7 @@ fn playlist_crud_reorder_import_and_playback_loop() {
     assert!(r.contains("imported 3 songs"), "{r}"); // heroes, random, boom (hour long skipped, on-and-on dup)
     assert!(
         m("!dj playlist import chill spotify https://www.youtube.com/playlist?list=1")
-            .contains("does not match")
+            .contains("use the provider")
     );
     m("!dj list deny-artist add famous artist");
     assert!(m("!dj playlist use chill").contains("active playlist is chill"));

@@ -701,8 +701,8 @@ impl<'a> Engine<'a> {
         }
         let reply = match next {
             Some(item) => {
-                if let Err(e) = music::playback_play(self.host, &item.track) {
-                    note.push_str(&format!(" (playback handoff unavailable: {e})"));
+                if let Err(e) = music::handoff_play(self.host, &item.track, item.id) {
+                    note.push_str(&format!(" (player handoff unavailable: {e})"));
                 }
                 let line = fmt_track(&item.track);
                 st.now = Some(item);

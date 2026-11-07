@@ -60,7 +60,7 @@ permissions:
   justification: Resolve viewer song requests and AI DJ hints against youtube (metadata only)
   params:
     write: false
-- id: tool.call:waddles.core.service.music-youtube:music.youtube.track
+- id: tool.call:waddles.core.service.music-youtube:music.youtube.resolve
   justification: Resolve a pasted youtube link to track metadata (metadata only)
   params:
     write: false
@@ -68,15 +68,11 @@ permissions:
   justification: Import a youtube playlist into a static DJ playlist
   params:
     write: false
-- id: tool.call:waddles.core.service.music-youtube:music.youtube.playback
-  justification: Hand the now-playing track to the youtube player (overlay embed or Connect)
-  params:
-    write: true
 - id: tool.call:waddles.core.service.music-spotify:music.spotify.search
   justification: Resolve viewer song requests and AI DJ hints against spotify (metadata only)
   params:
     write: false
-- id: tool.call:waddles.core.service.music-spotify:music.spotify.track
+- id: tool.call:waddles.core.service.music-spotify:music.spotify.resolve
   justification: Resolve a pasted spotify link to track metadata (metadata only)
   params:
     write: false
@@ -84,16 +80,20 @@ permissions:
   justification: Import a spotify playlist into a static DJ playlist
   params:
     write: false
-- id: tool.call:waddles.core.service.music-spotify:music.spotify.playback
-  justification: Hand the now-playing track to the spotify player (overlay embed or Connect)
+- id: tool.call:waddles.core.service.music-spotify:music.spotify.player.play
+  justification: Hand the now-playing track to the streamer Spotify Connect device (moderator scope enforced host-side)
   params:
     write: true
 - id: tool.call:waddles.core.service.music-soundcloud:music.soundcloud.search
   justification: Resolve viewer song requests and AI DJ hints against soundcloud (metadata only)
   params:
     write: false
-- id: tool.call:waddles.core.service.music-soundcloud:music.soundcloud.track
+- id: tool.call:waddles.core.service.music-soundcloud:music.soundcloud.resolve
   justification: Resolve a pasted soundcloud link to track metadata (metadata only)
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-soundcloud:music.soundcloud.playlist.get
+  justification: Import a soundcloud playlist into a static DJ playlist
   params:
     write: false
 - id: tool.call:waddles.core.service.ai:ai.complete
