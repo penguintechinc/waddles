@@ -94,6 +94,11 @@ COPY bundles/rust/economy /repo/bundles/rust/economy
 WORKDIR /repo/bundles/rust/economy
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# DJ app bundle (`stage-next-tools` world): same pinned builder.
+COPY bundles/rust/dj /repo/bundles/rust/dj
+WORKDIR /repo/bundles/rust/dj
+RUN cargo component build --release --target wasm32-wasip2 --locked
+
 # Twitch platform connector (P6b, `kind: service`, world connector-tools): same pinned builder.
 COPY bundles/rust/twitch /repo/bundles/rust/twitch
 WORKDIR /repo/bundles/rust/twitch
@@ -309,6 +314,7 @@ COPY bundles/core-bundles.yaml /core-bundles/core-bundles.yaml
 COPY bundles/rust/ping/hub-manifest.yaml /core-bundles/ping.manifest.yaml
 COPY bundles/rust/reputation/hub-manifest.yaml /core-bundles/reputation.manifest.yaml
 COPY bundles/rust/economy/hub-manifest.yaml /core-bundles/economy.manifest.yaml
+COPY bundles/rust/dj/hub-manifest.yaml /core-bundles/dj.manifest.yaml
 COPY bundles/rust/twitch/hub-manifest.yaml /core-bundles/twitch.manifest.yaml
 COPY bundles/rust/discord/hub-manifest.yaml /core-bundles/discord-connector.manifest.yaml
 COPY bundles/rust/youtube/hub-manifest.yaml /core-bundles/youtube.manifest.yaml
@@ -319,6 +325,7 @@ COPY --from=rust-bundle-builder /repo/bundles/rust/ping/target/wasm32-wasip2/rel
 COPY --from=rust-bundle-builder /repo/bundles/rust/reputation/target/wasm32-wasip2/release/waddle_bundle_reputation_service.wasm /core-bundles/reputation.wasm
 COPY --from=csharp-bundle-builder /repo/bundles/csharp/csping/bin/Release/net10.0/wasi-wasm/publish/csping.wasm /core-bundles/csping.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/economy/target/wasm32-wasip2/release/waddle_bundle_economy_service.wasm /core-bundles/economy.wasm
+COPY --from=rust-bundle-builder /repo/bundles/rust/dj/target/wasm32-wasip2/release/waddle_bundle_dj_app.wasm /core-bundles/dj.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/twitch/target/wasm32-wasip2/release/waddle_bundle_twitch_overlay.wasm /core-bundles/twitch.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/discord/target/wasm32-wasip2/release/waddle_bundle_discord_overlay.wasm /core-bundles/discord-connector.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/youtube/target/wasm32-wasip2/release/waddle_bundle_youtube_service.wasm /core-bundles/youtube.wasm

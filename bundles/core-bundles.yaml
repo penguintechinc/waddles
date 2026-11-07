@@ -1565,3 +1565,16 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+
+  # DJ app bundle (Rust, `stage-next-tools`): playlists, !sr song requests, mod queue controls,
+  # deterministic song policy + optional AI DJ. Flag waddles.command-dj defaults OFF.
+  - app_id: waddles.core.example.dj
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/dj
+    manifest_path: dj.manifest.yaml
+    artifact_path: dj.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
