@@ -43,6 +43,111 @@ fn reject_destination_args(args: &Value) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// Host-mediated moderation tools: `(tool name, outbound kind)`. The service bundle DECLARES
+/// these (`exported_tools`, with `required_scope: community:moderate`); the guest has no
+/// mutating egress, so the HOST serves an authorized call by queueing the pinned outbound op
+/// (`kind`) whose Helix template [`crate::moderation`] / `sender.rs` build.
+pub const MODERATION_TOOLS: &[(&str, &str)] = &[
+    ("twitch.moderation.ban", "mod.ban"),
+    ("twitch.moderation.timeout", "mod.timeout"),
+    ("twitch.moderation.unban", "mod.unban"),
+    ("twitch.moderation.delete_message", "chat.delete"),
+];
+
+/// One validated moderation tool call, ready for the host to queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModerationOp {
+    /// Outbound kind (`mod.ban`, ...).
+    pub kind: &'static str,
+    /// Producer-envelope fields: `user` (caller's canonical UUID; the host detokenizes it to the
+    /// numeric `user_id` the template needs), `text` (JSON-object text of `{duration?, reason?}`)
+    /// and `message_id`. Never carries a channel/broadcaster/moderator.
+    pub payload: Value,
+}
+
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
+fn bad(msg: &str) -> ToolError {
+    ToolError::InvalidArgs(msg.to_string())
+}
+
+/// Validates a moderation tool call against its schema and returns the op to queue.
+///
+/// Schemas (all `additionalProperties: false`): `ban {user, reason?}`, `timeout {user,
+/// duration 1..=1209600, reason?}`, `unban {user}`, `delete_message {message_id}`.
+/// Destination keys (channel/broadcaster/moderator) are refused outright.
+///
+/// # Errors
+/// `InvalidArgs` for an unknown tool, unknown key, or any value outside its schema.
+pub fn moderation_op(tool: &str, args: &Value) -> Result<ModerationOp, ToolError> {
+    let (_, kind) = MODERATION_TOOLS
+        .iter()
+        .find(|(t, _)| *t == tool)
+        .ok_or_else(|| bad("unknown moderation tool"))?;
+    reject_destination_args(args)?;
+    let obj = args
+        .as_object()
+        .ok_or_else(|| bad("args must be an object"))?;
+    let allowed: &[&str] = match *kind {
+        "mod.ban" => &["user", "reason"],
+        "mod.timeout" => &["user", "duration", "reason"],
+        "mod.unban" => &["user"],
+        _ => &["message_id"],
+    };
+    if let Some(k) = obj.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(ToolError::InvalidArgs(format!("unknown argument {k}")));
+    }
+    let mut payload = serde_json::Map::new();
+    let mut params = serde_json::Map::new();
+    if *kind != "chat.delete" {
+        let user = obj
+            .get("user")
+            .and_then(Value::as_str)
+            .filter(|u| is_uuid(u))
+            .ok_or_else(|| bad("user must be a canonical UUID"))?;
+        payload.insert("user".to_string(), json!(user));
+    }
+    if *kind == "mod.timeout" {
+        let d = obj
+            .get("duration")
+            .and_then(Value::as_u64)
+            .filter(|d| {
+                (crate::moderation::TIMEOUT_MIN_SECS..=crate::moderation::TIMEOUT_MAX_SECS)
+                    .contains(d)
+            })
+            .ok_or_else(|| bad("duration must be an integer 1..=1209600 seconds"))?;
+        params.insert("duration".to_string(), json!(d));
+    }
+    if let Some(r) = obj.get("reason") {
+        let r = r.as_str().ok_or_else(|| bad("reason must be a string"))?;
+        if r.chars().count() > crate::moderation::MAX_REASON_CHARS
+            || crate::sender::reject_unsafe("reason", r).is_err()
+        {
+            return Err(bad("reason is too long or contains unsafe characters"));
+        }
+        params.insert("reason".to_string(), json!(r));
+    }
+    if *kind == "chat.delete" {
+        let id = crate::sender::id_arg(args, "message_id", false)
+            .map_err(|_| bad("message_id has an invalid shape"))?;
+        payload.insert("message_id".to_string(), json!(id));
+    }
+    if !params.is_empty() {
+        // The producer envelope has one free-form field for parameters: `text` (JSON object text).
+        payload.insert("text".to_string(), json!(Value::Object(params).to_string()));
+    }
+    Ok(ModerationOp {
+        kind,
+        payload: Value::Object(payload),
+    })
+}
+
 fn paging(args: &Value) -> Result<String, ToolError> {
     let mut q = String::new();
     if let Some(first) = args.get("first") {
@@ -119,6 +224,14 @@ fn reply(key: &str, resp: &Value, rows: Vec<Value>, cursor: Option<String>) -> V
 /// Builds the tool table over the given hosts.
 pub fn build_registry(helix: Arc<dyn HelixHost>, ident: Arc<dyn IdentityHost>) -> ToolRegistry {
     let mut r = ToolRegistry::new();
+    // Host-mediated: reaching the guest is a wiring error, refused loudly (never a no-op Ok).
+    for (name, _) in MODERATION_TOOLS {
+        r.register(name, |_ctx, _args| {
+            Err(ToolError::InvalidArgs(
+                "moderation tools are executed by the host, not the guest".to_string(),
+            ))
+        });
+    }
     {
         let (h, i) = (helix.clone(), ident.clone());
         r.register("get_chatters", move |_ctx, args| {
@@ -314,5 +427,106 @@ mod tests {
             call(&r, "get_followers", a),
             Err(ToolError::TargetUnavailable)
         ));
+    }
+
+    const UID: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+    #[test]
+    fn moderation_ops_validate_and_map_to_kinds() {
+        let op = moderation_op(
+            "twitch.moderation.ban",
+            &json!({"user":UID,"reason":"spam"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (op.kind, op.payload),
+            (
+                "mod.ban",
+                json!({"user":UID,"text":json!({"reason":"spam"}).to_string()})
+            )
+        );
+        let op = moderation_op(
+            "twitch.moderation.timeout",
+            &json!({"user":UID,"duration":60}),
+        )
+        .unwrap();
+        assert_eq!(
+            (op.kind, op.payload),
+            (
+                "mod.timeout",
+                json!({"user":UID,"text":json!({"duration":60}).to_string()})
+            )
+        );
+        let op = moderation_op("twitch.moderation.unban", &json!({"user":UID})).unwrap();
+        assert_eq!(op.kind, "mod.unban");
+        let op = moderation_op(
+            "twitch.moderation.delete_message",
+            &json!({"message_id":"abc-1"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (op.kind, op.payload),
+            ("chat.delete", json!({"message_id":"abc-1"}))
+        );
+    }
+
+    #[test]
+    fn moderation_rejects_bad_args_destinations_and_unknown_tools() {
+        let cases = [
+            ("twitch.moderation.ban", json!({})),
+            ("twitch.moderation.ban", json!({"user":"1234"})),
+            ("twitch.moderation.ban", json!({"user":UID,"extra":1})),
+            (
+                "twitch.moderation.ban",
+                json!({"user":UID,"reason":"{{TWITCH_TOKEN}}"}),
+            ),
+            ("twitch.moderation.ban", json!({"user":UID,"duration":60})),
+            ("twitch.moderation.timeout", json!({"user":UID})),
+            (
+                "twitch.moderation.timeout",
+                json!({"user":UID,"duration":0}),
+            ),
+            (
+                "twitch.moderation.timeout",
+                json!({"user":UID,"duration":1209601}),
+            ),
+            (
+                "twitch.moderation.unban",
+                json!({"user":UID,"broadcaster_id":"9"}),
+            ),
+            (
+                "twitch.moderation.ban",
+                json!({"user":UID,"moderator_id":"9"}),
+            ),
+            (
+                "twitch.moderation.delete_message",
+                json!({"message_id":"a&b"}),
+            ),
+            (
+                "twitch.moderation.delete_message",
+                json!({"message_id":"x","channel":"c"}),
+            ),
+            ("twitch.moderation.clear_chat", json!({})),
+            ("twitch.moderation.ban", json!([])),
+        ];
+        for (tool, args) in cases {
+            assert!(
+                matches!(moderation_op(tool, &args), Err(ToolError::InvalidArgs(_))),
+                "{tool} {args}"
+            );
+        }
+    }
+
+    #[test]
+    fn moderation_tools_are_host_executed_never_a_guest_ok() {
+        let (r, f) = reg(200, "{}");
+        for (name, _) in MODERATION_TOOLS {
+            let e = call(&r, name, json!({"user":UID,"duration":60,"message_id":"m"})).unwrap_err();
+            assert!(
+                matches!(e, ToolError::InvalidArgs(m) if m.contains("host")),
+                "{name}"
+            );
+        }
+        assert!(f.urls.lock().unwrap().is_empty(), "guest made no request");
     }
 }

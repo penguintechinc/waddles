@@ -457,7 +457,7 @@ async fn wait_for(server: &MockServer, method_name: &str, want: usize) -> Vec<wi
             "{o}={}",
             ["twitch", "discord", "youtube"]
                 .iter()
-                .map(|p| exec_count(p, "chat.send", o) + exec_count(p, "event.create", o))
+                .map(|p| exec_count(p, "chat.send", o) + exec_count(p, "event.create", o) + exec_count(p, "mod.ban", o) + exec_count(p, "mod.timeout", o))
                 .sum::<u64>()
         )
     })
@@ -1020,4 +1020,102 @@ async fn registered_ops_reach_build_request_and_unregistered_ops_are_rejected_at
     assert_eq!((reached, rejected), (4, 3), "denominator: rows exercised");
     stop(tw_tx, tw_h).await;
     stop(yt_tx, yt_h).await;
+}
+
+/// S1a real path: the REAL twitch connector wasm turns registered moderation ops into Helix
+/// requests. The executor fills `broadcaster_id` / `moderator_id` from the community binding
+/// (111 / 222), the bundle's own params travel in `text`, and a `text` that tries to name a
+/// destination id is refused by the connector so nothing reaches the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn twitch_moderation_ops_reach_helix_with_host_filled_ids_and_refuse_bundle_ids() {
+    let rig = rig(true).await;
+    mock_twitch(&rig.tw).await;
+    Mock::given(method("POST"))
+        .and(path("/helix/moderation/bans"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{}]})))
+        .mount(&rig.tw)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/helix/moderation/bans"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&rig.tw)
+        .await;
+    let (tx, h) = drain(&rig, "twitch");
+
+    let ban = entry(
+        "twitch",
+        "mod.ban",
+        "#chan",
+        "#chan",
+        &json!({"reason": "spam"}).to_string(),
+        "999",
+        TENANT,
+    );
+    push(TWITCH_OUTBOUND_QUEUE_KEY, &ban).await;
+    let timeout = entry(
+        "twitch",
+        "mod.timeout",
+        "#chan",
+        "#chan",
+        &json!({"duration": 600, "reason": "slow down"}).to_string(),
+        "999",
+        TENANT,
+    );
+    push(TWITCH_OUTBOUND_QUEUE_KEY, &timeout).await;
+    let posts = wait_for(&rig.tw, "POST", 2).await;
+    let mut bodies: Vec<serde_json::Value> = Vec::new();
+    for req in &posts {
+        assert_eq!(req.url.path(), "/helix/moderation/bans");
+        let q: HashMap<_, _> = req.url.query_pairs().into_owned().collect();
+        assert_eq!(q["broadcaster_id"], "111", "host-filled broadcaster");
+        assert_eq!(q["moderator_id"], "222", "host-filled moderator");
+        assert_eq!(q.len(), 2);
+        assert_eq!(header(req, "authorization"), format!("Bearer {TW_TOKEN}"));
+        assert_eq!(header(req, "client-id"), "cid123");
+        bodies.push(serde_json::from_slice(&req.body).unwrap());
+    }
+    bodies.sort_by_key(|b| b["data"].get("duration").is_some());
+    assert_eq!(
+        bodies[0],
+        json!({"data": {"user_id": "999", "reason": "spam"}})
+    );
+    assert_eq!(
+        bodies[1],
+        json!({"data": {"user_id": "999", "reason": "slow down", "duration": 600}})
+    );
+
+    let unban = entry("twitch", "mod.unban", "#chan", "#chan", "", "999", TENANT);
+    push(TWITCH_OUTBOUND_QUEUE_KEY, &unban).await;
+    let dels = wait_for(&rig.tw, "DELETE", 1).await;
+    let q: HashMap<_, _> = dels[0].url.query_pairs().into_owned().collect();
+    assert_eq!(dels[0].url.path(), "/helix/moderation/bans");
+    assert_eq!(
+        (
+            q["broadcaster_id"].as_str(),
+            q["moderator_id"].as_str(),
+            q["user_id"].as_str()
+        ),
+        ("111", "222", "999")
+    );
+
+    // Bundle-supplied destination: the connector refuses it, so no further request is sent.
+    let before = rig.tw.received_requests().await.unwrap().len();
+    let evil = entry(
+        "twitch",
+        "mod.ban",
+        "#chan",
+        "#chan",
+        &json!({"broadcaster_id": "666", "reason": "x"}).to_string(),
+        "999",
+        TENANT,
+    );
+    push(TWITCH_OUTBOUND_QUEUE_KEY, &evil).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let all = rig.tw.received_requests().await.unwrap();
+    assert_eq!(all.len(), before, "refused op must not reach the wire");
+    assert!(
+        all.iter().all(|r| !r.url.as_str().contains("666")),
+        "no request ever names a bundle-supplied id"
+    );
+    stop(tx, h).await;
 }
