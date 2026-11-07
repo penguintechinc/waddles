@@ -287,6 +287,49 @@ public class DbStateStoreTests : StateStoreContract
     }
 }
 
+public class IdempotentOutcomeTests
+{
+    private static WaddleSdk.Chat.ChatReplyPayload Payload(string text) => new(text, "c");
+
+    private static IdempotentOutcome Make() => new(new KvStateStore(new FakeKvClient()), "game");
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("  ")]
+    public void a_blank_message_id_is_refused(string id)
+    {
+        Assert.Throws<ArgumentException>(() => Make().KeyFor(id, "twitch", "a", "roll"));
+    }
+
+    [Fact]
+    public void keys_are_bound_to_every_part_and_length_prefixed_against_concatenation_aliasing()
+    {
+        var o = Make();
+        var baseKey = o.KeyFor("m", "twitch", "a", "roll");
+        Assert.NotEqual(baseKey, o.KeyFor("m2", "twitch", "a", "roll"));
+        Assert.NotEqual(baseKey, o.KeyFor("m", "discord", "a", "roll"));
+        Assert.NotEqual(baseKey, o.KeyFor("m", "twitch", "b", "roll"));
+        Assert.NotEqual(baseKey, o.KeyFor("m", "twitch", "a", "dice"));
+        Assert.NotEqual(o.KeyFor("ab", "c", "d", "e"), o.KeyFor("a", "bc", "d", "e"));
+        Assert.DoesNotContain(':', baseKey);
+    }
+
+    [Fact]
+    public void record_replay_and_discard_round_trip_only_for_the_exact_delivery()
+    {
+        var o = Make();
+        var info = WaddleSdk.Json.WaddleSdkJsonContext.Default.ChatReplyPayload;
+        o.Record("m", "twitch", "a", "roll", Payload("x"), info);
+
+        Assert.Equal("x", o.TryReplay("m", "twitch", "a", "roll", info, _ => true)!.Text);
+        Assert.Null(o.TryReplay("m", "twitch", "b", "roll", info, _ => true));
+        Assert.Null(o.TryReplay("m", "twitch", "a", "roll", info, _ => false));
+
+        o.Discard("m", "twitch", "a", "roll");
+        Assert.Null(o.TryReplay("m", "twitch", "a", "roll", info, _ => true));
+    }
+}
+
 public class StateCooldownTests
 {
     [Fact]

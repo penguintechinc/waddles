@@ -89,10 +89,14 @@ public sealed class RollLogic(Func<int, int, int>? nextInt = null) : WaddleProce
         }
 
         var store = new KvStateStore(host.Kv);
-        var outcomeKey = StateKey.Of("roll.out", StateKey.Hash(host.Context.MessageId));
         var name = UserPlaceholder.For(actor);
 
-        var replay = store.GetJson(outcomeKey, RollJsonContext.Default.RollOutcome);
+        // Refuses (throws) on a blank message id; the key binds message id + platform + actor + command, and the stored
+        // record must carry the same actor + command, else it is not a replay (full validation + cooldown apply).
+        var outcomes = new IdempotentOutcome(store, "roll", OutcomeTtlSeconds);
+        var messageId = host.Context.MessageId;
+        var replay = outcomes.TryReplay(messageId, @event.Platform, actor, command.Name, RollJsonContext.Default.RollOutcome,
+            r => r.Actor == actor && r.Command == command.Name);
         RollOutcome outcome;
         if (replay is not null)
         {
@@ -107,7 +111,7 @@ public sealed class RollLogic(Func<int, int, int>? nextInt = null) : WaddleProce
             }
 
             outcome = fresh;
-            store.SetJson(outcomeKey, outcome, RollJsonContext.Default.RollOutcome, OutcomeTtlSeconds);
+            outcomes.Record(messageId, @event.Platform, actor, command.Name, outcome, RollJsonContext.Default.RollOutcome);
         }
 
         var payout = Payout(outcome);
@@ -118,7 +122,7 @@ public sealed class RollLogic(Func<int, int, int>? nextInt = null) : WaddleProce
         }
         catch (WaddleEconomyException ex) when (ex.Kind is EconomyErrorKind.InsufficientFunds or EconomyErrorKind.OverCap)
         {
-            store.Delete(outcomeKey);
+            outcomes.Discard(messageId, @event.Platform, actor, command.Name);
             StateCooldown.Release(store, command.Name, actor);
             host.Log.Info("roll.refused", new LogFields().With("reason", ex.Kind == EconomyErrorKind.OverCap ? "over_cap" : "insufficient_funds").Build());
             var alias = Alias(host, actor);
@@ -163,7 +167,7 @@ public sealed class RollLogic(Func<int, int, int>? nextInt = null) : WaddleProce
             return null;
         }
 
-        return new RollOutcome(_nextInt(1, 6), _nextInt(1, 6), stake, _nextInt(0, WinMessages.Length - 1), _nextInt(0, LostMessages.Length - 1));
+        return new RollOutcome(_nextInt(1, 6), _nextInt(1, 6), stake, _nextInt(0, WinMessages.Length - 1), _nextInt(0, LostMessages.Length - 1), actor, command.Name);
     }
 
     /// <summary>Parses `[stake|all]`; no argument = <see cref="DefaultStake"/> (clamped to the max bet only for `all`).</summary>

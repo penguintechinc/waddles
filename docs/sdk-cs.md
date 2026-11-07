@@ -52,7 +52,7 @@ pin its JSON schema in a contract-fixture test. Today use WIT `Ai.Generate`.
 
 ### Money rules every port must follow
 - Exactly ONE host economy call per logical settlement; the host de-duplicates per (event, call ordinal), so a redelivery that replays the same calls moves nothing.
-- Anything random is rolled ONCE and recorded (kv, keyed by `StateKey.Hash(context.MessageId)`) BEFORE the money call and reused on redelivery (see `RollLogic`), or the reply will not match the ledger.
+- Anything random is rolled ONCE and recorded BEFORE the money call and reused on redelivery, or the reply will not match the ledger. ALWAYS use `State.IdempotentOutcome` (see `RollLogic`): it refuses a blank `MessageId`, keys on message id + platform + actor uuid + command (length-prefixed), and `TryReplay` takes a `matches` predicate so the stored record must carry the same actor/command (store them in your record). Anything that does not match is a FRESH request: full validation (max bet), cooldown, new roll. Never key replay on the message id alone.
 - `actor`-only debit: `Wager`/`Debit`/`Transfer(from)` must name the invocation's actor (`identity.ResolveActor()`); victim-debit games (steal) need a redesign (pot/fine).
 - Handle `InsufficientFunds`/`OverCap` with a chat reply; let `Denied`/`Unavailable`/`Backend`/`NotAMember` propagate (fail loud, never an "unpaid" reply).
 - Currency name = economy service alias (`EconomyServiceTools.PointsView`); fall back to `DefaultAlias` only with a logged warning. Names of people = `UserPlaceholder.For(uuid)` (host renders the display name at egress; no name lookup exists or is needed).

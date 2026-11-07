@@ -215,6 +215,54 @@ public class RollLogicTests
         Assert.All(host.EconomyFake.Wagers, w => Assert.Equal((Actor, 20UL, 120UL), w));
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void a_blank_message_id_is_refused_loudly_before_any_money_moves(string id)
+    {
+        var host = Host(messageId: id);
+        Assert.Throws<ArgumentException>(() => Rolls(1, 2, 0, 0).Run(Msg("!roll"), host));
+        Assert.Empty(host.EconomyFake.Wagers);
+    }
+
+    [Fact]
+    public void the_same_message_id_for_a_different_actor_is_not_a_replay()
+    {
+        var host = Host(messageId: "shared");
+        Rolls(1, 2, 0, 0).Run(Msg("!roll"), host);
+        host.IdentityFake.Actor = Other;
+        host.EconomyFake.Seed(Other, 100);
+        host.EconomyFake.BeginEvent("shared");
+        var text = Text(Rolls(6, 6, 0, 0).Run(Msg("!roll 20", "other"), host));
+
+        Assert.Contains("[6] and [6]", text);
+        Assert.Equal((Other, 20UL, 200UL), host.EconomyFake.Wagers.Last());
+    }
+
+    [Fact]
+    public void the_same_message_id_for_a_different_command_is_not_a_replay_and_validates_in_full()
+    {
+        var host = Host(messageId: "shared");
+        Rolls(1, 2, 0, 0).Run(Msg("!roll"), host);
+        host.EconomyFake.BeginEvent("shared");
+        host.EconomyFake.MaxBetCap = 5;
+        var text = Text(Rolls(6, 6, 0, 0).Run(Msg("!dice 10"), host));
+        Assert.Contains("max roll right now is 5", text);
+    }
+
+    [Fact]
+    public void a_stored_record_whose_binding_does_not_match_is_not_a_replay()
+    {
+        var host = Host(messageId: "evt-x");
+        Rolls(1, 2, 0, 0).Run(Msg("!roll"), host);
+        // Corrupt the stored binding (simulated key collision): same key, wrong actor inside.
+        var key = host.Base.KvFake.SetCalls.Last(c => c.Key.StartsWith("out.roll.")).Key;
+        host.Base.KvFake.Set(key, Encoding.UTF8.GetBytes("{\"d1\":6,\"d2\":6,\"stake\":10,\"win_msg\":0,\"lose_msg\":0,\"actor\":\"someone-else\",\"cmd\":\"roll\"}"), 60);
+        host.EconomyFake.BeginEvent("evt-x");
+        host.EconomyFake.MaxBetCap = 5;
+        Assert.Contains("max roll right now is 5", Text(Rolls(1, 2, 0, 0).Run(Msg("!roll 10"), host)));
+    }
+
     [Fact]
     public void a_replay_is_not_dropped_by_the_cooldown_the_first_delivery_took()
     {
@@ -392,7 +440,7 @@ public class RollLogicTests
     [Fact]
     public void result_text_for_boxcars_keeps_the_original_phrasing()
     {
-        var text = RollLogic.BuildResultText(new RollOutcome(6, 6, 10, 0, 0), "{user:x}", "stars", 5);
+        var text = RollLogic.BuildResultText(new RollOutcome(6, 6, 10, 0, 0, "a", "roll"), "{user:x}", "stars", 5);
         Assert.Contains("Boxcars to the max!!! 100 stars!", text);
     }
 
