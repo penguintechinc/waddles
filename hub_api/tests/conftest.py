@@ -1590,6 +1590,21 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("status_changed_at", DateTime),
     )
     Table(
+        "bundle_community_config",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("version", Integer, nullable=False),
+        Column("config", JSON, nullable=False),
+        Column("schema_sha256", String(64), nullable=False),
+        Column("updated_by", Integer),
+        Column("created_at", DateTime),
+        # Mirrors migration 0082's UNIQUE -- the save race guard.
+        UniqueConstraint("tenant_id", "community_id", "app_id", "version"),
+    )
+    Table(
         "app_install_approvals",
         metadata,
         Column("id", Integer, primary_key=True, autoincrement=True),

@@ -161,3 +161,13 @@ exported_tools:
         - 'null'
       text:
         type: string
+# Admin UI surface via hub-api's generic bundle-admin gateway (docs/BUNDLE_ADMIN_GATEWAY.md); identical in both manifests.
+admin_tools:
+- name: leaderboard
+  tool: leaderboard
+  kind: read
+  scope: community:moderate
+- name: override
+  tool: override
+  kind: action
+  scope: community:admin

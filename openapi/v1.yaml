@@ -1235,6 +1235,28 @@ components:
       - role
       title: CommunityMembershipDTO
       type: object
+    ConfigHistoryEntryDTO:
+      description: One saved config version (metadata only).
+      properties:
+        createdAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Createdat
+        updatedBy:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Updatedby
+        version:
+          title: Version
+          type: integer
+      required:
+      - version
+      - updatedBy
+      - createdAt
+      title: ConfigHistoryEntryDTO
+      type: object
     ConflictDTO:
       description: 'Response DTO: one detected coexistence conflict in a resolved
         set.'
@@ -5267,6 +5289,27 @@ components:
       - active30d
       title: StatsUsersDTO
       type: object
+    StorageAccessDTO:
+      description: One requested cross-prefix object-storage access block -- explicit
+        shape.
+      properties:
+        ops:
+          items:
+            type: string
+          title: Ops
+          type: array
+        prefixOwner:
+          title: Prefixowner
+          type: string
+        reason:
+          title: Reason
+          type: string
+      required:
+      - prefixOwner
+      - ops
+      - reason
+      title: StorageAccessDTO
+      type: object
     StreamConfigDTO:
       description: Wire DTO for a community's stream config -- never includes the
         key or its hash.
@@ -5533,6 +5576,33 @@ components:
       - transcode_applied
       - destinations_enabled
       title: StreamStatusDTO
+      type: object
+    TableAccessDTO:
+      description: One requested platform-table access block (table/columns/ops/reason)
+        -- explicit shape.
+      properties:
+        columns:
+          items:
+            type: string
+          title: Columns
+          type: array
+        ops:
+          items:
+            type: string
+          title: Ops
+          type: array
+        reason:
+          title: Reason
+          type: string
+        table:
+          title: Table
+          type: string
+      required:
+      - table
+      - columns
+      - ops
+      - reason
+      title: TableAccessDTO
       type: object
     TenantAdminDTO:
       description: Tenant admin DTO.
@@ -5865,6 +5935,33 @@ components:
       - balance_after
       - created_at
       title: TokenTransactionDTO
+      type: object
+    ToolDTO:
+      description: One admin tool the manifest declares, and whether this caller may
+        use it.
+      properties:
+        kind:
+          title: Kind
+          type: string
+        name:
+          title: Name
+          type: string
+        permitted:
+          title: Permitted
+          type: boolean
+        scope:
+          title: Scope
+          type: string
+        targetAppId:
+          title: Targetappid
+          type: string
+      required:
+      - name
+      - kind
+      - scope
+      - permitted
+      - targetAppId
+      title: ToolDTO
       type: object
     TrackDTO:
       description: Wire shape of a resolved `Track` -- mirrors `services.music_providers.track.Track`.
@@ -12749,6 +12846,11 @@ paths:
             schema:
               description: Request DTO for `POST /community/<community_id>/activation`.
               properties:
+                acknowledgedAccessGrants:
+                  items:
+                    type: string
+                  title: Acknowledgedaccessgrants
+                  type: array
                 appId:
                   title: Appid
                   type: string
@@ -12819,6 +12921,529 @@ paths:
           description: Generic message response DTO.
       summary: Deactivate an app for this community (hot-unload). Requires community-admin
         membership.
+  /api/v1/apps/community/{community_id}/activation/{app_id}/access-grants:
+    get:
+      description: '
+
+        Resolves the exact version an activation would run; community-admin only.
+        The
+
+        activation POST must then acknowledge every approved id (`acknowledgedAccessGrants`).'
+      operationId: get_activation_access_grants
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: the dangerous access grants a version
+                  requests and their approval state.
+
+
+                  `requestedIds` is every `platform.table.*` (etc.) permission id
+                  the manifest
+
+                  declares; `approvedIds` the globally-approved subset (anything requested
+                  but not
+
+                  approved is unusable until a global admin re-approves it). A new
+                  grant kind adds
+
+                  its own list field here (e.g. `storageAccess`).'
+                properties:
+                  approvedIds:
+                    items:
+                      type: string
+                    title: Approvedids
+                    type: array
+                  dangerousIds:
+                    items:
+                      type: string
+                    title: Dangerousids
+                    type: array
+                  requestedIds:
+                    items:
+                      type: string
+                    title: Requestedids
+                    type: array
+                  storageAccess:
+                    items:
+                      $ref: '#/components/schemas/StorageAccessDTO'
+                    title: Storageaccess
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  tableAccess:
+                    items:
+                      $ref: '#/components/schemas/TableAccessDTO'
+                    title: Tableaccess
+                    type: array
+                required:
+                - success
+                - requestedIds
+                - approvedIds
+                - dangerousIds
+                title: AccessGrantsResponse
+                type: object
+          description: 'Response DTO: the dangerous access grants a version requests
+            and their approval state.
+
+
+            `requestedIds` is every `platform.table.*` (etc.) permission id the manifest
+
+            declares; `approvedIds` the globally-approved subset (anything requested
+            but not
+
+            approved is unusable until a global admin re-approves it). A new grant
+            kind adds
+
+            its own list field here (e.g. `storageAccess`).'
+      summary: The dangerous access grants activating `app_id` here would carry (red
+        warning source).
+  /api/v1/apps/community/{community_id}/bundles/{app_id}/admin:
+    get:
+      description: ''
+      operationId: get_get_descriptor
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET .../admin`.
+                properties:
+                  appId:
+                    title: Appid
+                    type: string
+                  configSchema:
+                    anyOf:
+                    - additionalProperties: true
+                      type: object
+                    - type: 'null'
+                    title: Configschema
+                  success:
+                    title: Success
+                    type: boolean
+                  tools:
+                    items:
+                      $ref: '#/components/schemas/ToolDTO'
+                    title: Tools
+                    type: array
+                  version:
+                    title: Version
+                    type: string
+                required:
+                - success
+                - appId
+                - version
+                - configSchema
+                - tools
+                title: DescriptorResponse
+                type: object
+          description: Response DTO for `GET .../admin`.
+      summary: Config schema + admin tools for the bundle's admin UI (community moderator+).
+  /api/v1/apps/community/{community_id}/bundles/{app_id}/admin-actions/{tool_name}:
+    post:
+      description: ''
+      operationId: post_invoke_action
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: tool_name
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `POST .../admin-actions/<tool>`; `args`
+                is checked against its schema.
+              properties:
+                args:
+                  additionalProperties: true
+                  title: Args
+                  type: object
+              title: ActionRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for admin actions and data views; `result`
+                  matches the tool `output_schema`.
+                properties:
+                  limit:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    default: null
+                    title: Limit
+                  nextCursor:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Nextcursor
+                  result:
+                    additionalProperties: true
+                    title: Result
+                    type: object
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - result
+                title: ToolResponse
+                type: object
+          description: Response DTO for admin actions and data views; `result` matches
+            the tool `output_schema`.
+      summary: Invoke a manifest-declared admin action tool (scope per the manifest).
+  /api/v1/apps/community/{community_id}/bundles/{app_id}/config:
+    get:
+      description: ''
+      operationId: get_get_config__get_api_v1_apps_community_community_id_bundles_app_id_config
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET/PUT .../config` (`version` 0 =
+                  never saved).
+                properties:
+                  appId:
+                    title: Appid
+                    type: string
+                  config:
+                    additionalProperties: true
+                    title: Config
+                    type: object
+                  createdAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Createdat
+                  success:
+                    title: Success
+                    type: boolean
+                  updatedBy:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Updatedby
+                  version:
+                    title: Version
+                    type: integer
+                required:
+                - success
+                - appId
+                - version
+                - config
+                - updatedBy
+                - createdAt
+                title: ConfigResponse
+                type: object
+          description: Response DTO for `GET/PUT .../config` (`version` 0 = never
+            saved).
+      summary: Latest saved per-community config (community moderator+).
+    put:
+      description: ''
+      operationId: put_put_config
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `PUT .../config`; `expectedVersion` is
+                the optimistic-concurrency token.
+              properties:
+                config:
+                  additionalProperties: true
+                  title: Config
+                  type: object
+                expectedVersion:
+                  title: Expectedversion
+                  type: integer
+              required:
+              - config
+              - expectedVersion
+              title: SaveConfigRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET/PUT .../config` (`version` 0 =
+                  never saved).
+                properties:
+                  appId:
+                    title: Appid
+                    type: string
+                  config:
+                    additionalProperties: true
+                    title: Config
+                    type: object
+                  createdAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Createdat
+                  success:
+                    title: Success
+                    type: boolean
+                  updatedBy:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Updatedby
+                  version:
+                    title: Version
+                    type: integer
+                required:
+                - success
+                - appId
+                - version
+                - config
+                - updatedBy
+                - createdAt
+                title: ConfigResponse
+                type: object
+          description: Response DTO for `GET/PUT .../config` (`version` 0 = never
+            saved).
+      summary: Validate against the manifest `community_config_schema`; append a new
+        version (admin).
+  /api/v1/apps/community/{community_id}/bundles/{app_id}/config/history:
+    get:
+      description: ''
+      operationId: get_get_config_history
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET .../config/history`.
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                  versions:
+                    items:
+                      $ref: '#/components/schemas/ConfigHistoryEntryDTO'
+                    title: Versions
+                    type: array
+                required:
+                - success
+                - versions
+                title: ConfigHistoryResponse
+                type: object
+          description: Response DTO for `GET .../config/history`.
+      summary: Saved config versions, newest first (metadata only; `?limit=` 1..100).
+  /api/v1/apps/community/{community_id}/bundles/{app_id}/data/{view_name}:
+    get:
+      description: ''
+      operationId: get_read_view
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: view_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for admin actions and data views; `result`
+                  matches the tool `output_schema`.
+                properties:
+                  limit:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    default: null
+                    title: Limit
+                  nextCursor:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    default: null
+                    title: Nextcursor
+                  result:
+                    additionalProperties: true
+                    title: Result
+                    type: object
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - result
+                title: ToolResponse
+                type: object
+          description: Response DTO for admin actions and data views; `result` matches
+            the tool `output_schema`.
+      summary: 'Paginated bundle data view: `?limit=&cursor=&args=<url-encoded JSON
+        object>`.'
+  /api/v1/apps/community/{community_id}/{app_id}/access-grants:
+    get:
+      description: ''
+      operationId: get_get_community_access_grants
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: the dangerous access grants a version
+                  requests and their approval state.
+
+
+                  `requestedIds` is every `platform.table.*` (etc.) permission id
+                  the manifest
+
+                  declares; `approvedIds` the globally-approved subset (anything requested
+                  but not
+
+                  approved is unusable until a global admin re-approves it). A new
+                  grant kind adds
+
+                  its own list field here (e.g. `storageAccess`).'
+                properties:
+                  approvedIds:
+                    items:
+                      type: string
+                    title: Approvedids
+                    type: array
+                  dangerousIds:
+                    items:
+                      type: string
+                    title: Dangerousids
+                    type: array
+                  requestedIds:
+                    items:
+                      type: string
+                    title: Requestedids
+                    type: array
+                  storageAccess:
+                    items:
+                      $ref: '#/components/schemas/StorageAccessDTO'
+                    title: Storageaccess
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  tableAccess:
+                    items:
+                      $ref: '#/components/schemas/TableAccessDTO'
+                    title: Tableaccess
+                    type: array
+                required:
+                - success
+                - requestedIds
+                - approvedIds
+                - dangerousIds
+                title: AccessGrantsResponse
+                type: object
+          description: 'Response DTO: the dangerous access grants a version requests
+            and their approval state.
+
+
+            `requestedIds` is every `platform.table.*` (etc.) permission id the manifest
+
+            declares; `approvedIds` the globally-approved subset (anything requested
+            but not
+
+            approved is unusable until a global admin re-approves it). A new grant
+            kind adds
+
+            its own list field here (e.g. `storageAccess`).'
+      summary: 'COMMUNITY tier: the access grants shown (again) before activation.
+        Community admin only.'
   /api/v1/apps/community/{community_id}/{app_id}/permissions/grant:
     post:
       description: ''
@@ -13433,6 +14058,91 @@ paths:
           description: Response DTO for `GET /apps/{app_id}/versions/{version}`.
       summary: The state-machine state, reject reason (if any), scan status and digest
         for one version.
+  /api/v1/apps/{app_id}/versions/{version}/access-grants:
+    get:
+      description: ''
+      operationId: get_get_version_access_grants
+      parameters:
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: version
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: the dangerous access grants a version
+                  requests and their approval state.
+
+
+                  `requestedIds` is every `platform.table.*` (etc.) permission id
+                  the manifest
+
+                  declares; `approvedIds` the globally-approved subset (anything requested
+                  but not
+
+                  approved is unusable until a global admin re-approves it). A new
+                  grant kind adds
+
+                  its own list field here (e.g. `storageAccess`).'
+                properties:
+                  approvedIds:
+                    items:
+                      type: string
+                    title: Approvedids
+                    type: array
+                  dangerousIds:
+                    items:
+                      type: string
+                    title: Dangerousids
+                    type: array
+                  requestedIds:
+                    items:
+                      type: string
+                    title: Requestedids
+                    type: array
+                  storageAccess:
+                    items:
+                      $ref: '#/components/schemas/StorageAccessDTO'
+                    title: Storageaccess
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  tableAccess:
+                    items:
+                      $ref: '#/components/schemas/TableAccessDTO'
+                    title: Tableaccess
+                    type: array
+                required:
+                - success
+                - requestedIds
+                - approvedIds
+                - dangerousIds
+                title: AccessGrantsResponse
+                type: object
+          description: 'Response DTO: the dangerous access grants a version requests
+            and their approval state.
+
+
+            `requestedIds` is every `platform.table.*` (etc.) permission id the manifest
+
+            declares; `approvedIds` the globally-approved subset (anything requested
+            but not
+
+            approved is unusable until a global admin re-approves it). A new grant
+            kind adds
+
+            its own list field here (e.g. `storageAccess`).'
+      summary: 'GLOBAL tier: dangerous access grants a version requests (feeds the
+        red warning).'
   /api/v1/apps/{app_id}/versions/{version}/approve:
     post:
       description: ''
