@@ -43,6 +43,7 @@ _MANIFEST: dict[str, Any] = {
     "feature": "waddles.core.example",
     "module": "core",
     "provider": "builtin",
+    "author": "github:penguintechinc",
     "language": "rust",
     "artifact": "prebuilt",
     "execution_model": "native",
@@ -799,7 +800,8 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     # digest_conflict. 1.0.1 is the first version built from the corrected Dockerfile.
     versions_by_app_id = {e.app_id: e.version for e in entries}
     # 1.0.1 -> 1.0.2: manifest-only bump declaring `chat.send:<platform>` (least privilege).
-    assert versions_by_app_id["waddles.core.example.csping"] == "1.0.2"
+    # 1.0.2 -> 1.0.3: manifest-only bump backfilling the validated `author` (github:penguintechinc).
+    assert versions_by_app_id["waddles.core.example.csping"] == "1.0.3"
 
 
 def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: Path) -> None:
@@ -1438,6 +1440,7 @@ _PYPING_MANIFEST: dict[str, Any] = {
     "feature": "waddles.core.example",
     "module": "core",
     "provider": "builtin",
+    "author": "github:penguintechinc",
     "language": "python",
     "artifact": "prebuilt",
     "execution_model": "native",

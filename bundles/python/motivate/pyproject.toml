@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-motivate"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!motivate [@user]` -> a random motivational line, optionally aimed at a mentioned user. Static, SFW, stateless."
 requires-python = ">=3.13"
 dependencies = []

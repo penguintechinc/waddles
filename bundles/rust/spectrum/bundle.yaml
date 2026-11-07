@@ -6,10 +6,11 @@
 schema_version: 2
 app_id: waddles.core.service.spectrum
 name: RSI Spectrum Platform Connector (Rust, inbound-only)
-version: 0.1.0
+version: 0.1.1
 feature: waddles.core.service
 module: core
 provider: builtin
+author: github:penguintechinc
 language: rust
 artifact: component
 execution_model: wasi-component
