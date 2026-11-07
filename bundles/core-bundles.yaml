@@ -1541,13 +1541,13 @@ bundles:
   # Wix webhook connector (Rust `kind: service`, inbound-only, `connector-tools` world, egress []).
   # Verified by svc-ingest Scheme::WixJwt; the cutover flag waddles.connector-wix defaults OFF.
   - app_id: waddles.core.service.wix
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: connector-tools
     kind: service
     source_dir: rust/wix
-    manifest_path: wix.manifest.yaml
-    artifact_path: wix.wasm
+    manifest_path: wix-connector.manifest.yaml
+    artifact_path: wix-connector.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null
@@ -1555,7 +1555,7 @@ bundles:
   # RSI Spectrum platform CONNECTOR (gh #486, Rust `kind: service`, `connector` world, inbound-only).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-spectrum defaults OFF.
   - app_id: waddles.core.service.spectrum
-    version: "0.1.0"
+    version: "0.1.1"
     language: rust
     wit_world: connector
     kind: service

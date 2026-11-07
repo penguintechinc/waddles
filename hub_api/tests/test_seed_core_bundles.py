@@ -2093,8 +2093,9 @@ def test_real_catalog_has_the_connector_tools_rows() -> None:
             "service",
         )
         assert row["source_dir"] == f"rust/{platform}"
-        # discord's flat filename is `discord-connector.*`: plain `discord.*` is the python app's.
-        stem = "discord-connector" if platform == "discord" else platform
+        # discord/wix flat filenames are `<platform>-connector.*`: plain `<platform>.*` is the
+        # python app's (the flat /core-bundles/ namespace must stay collision-free).
+        stem = f"{platform}-connector" if platform in ("discord", "wix") else platform
         assert row["artifact_path"] == f"{stem}.wasm"
         assert row["manifest_path"] == f"{stem}.manifest.yaml"
 
