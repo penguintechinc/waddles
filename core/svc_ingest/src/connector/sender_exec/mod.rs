@@ -49,13 +49,13 @@ use std::time::{Duration, Instant};
 use bundle_host_http::guarded::{GuardedClient, GuardedLimits};
 use tracing::Instrument;
 
-pub use policy::{KindPolicy, PlatformPolicy, SlotOrigin};
+pub use policy::{KindPolicy, PlatformPolicy, ResultMode, SlotOrigin};
 pub use router::PlatformSlotRouter;
 pub use subst::{PreparedRequest, SlotValue, SubstError};
 pub use verify::TemplateError;
 pub use wire_builder::WireTemplateBuilder;
 
-use crate::outbound_ops::OutboundAction;
+use crate::outbound_ops::{OutboundAction, PolicyOp};
 use crate::outbound_pin::PinError;
 
 /// PostHog flag the executor enforces (default OFF, fail closed).
@@ -198,6 +198,15 @@ pub trait SlotSource: Send + Sync {
     /// answer or the call is an error.
     async fn resolve(&self, req: &SlotRequest<'_>)
         -> Result<HashMap<String, SlotValue>, SlotError>;
+
+    /// Whether this source can resolve APP-scoped credential handles (those starting with
+    /// [`policy::APP_HANDLE_PREFIX`]: an app/client-credentials token instead of the
+    /// community's user token). The default is `false`, so an app-scoped kind is refused
+    /// (fail-closed) until a platform source explicitly opts in -- a user token is NEVER
+    /// substituted for an app one.
+    fn supports_app_credentials(&self, _platform: &str) -> bool {
+        false
+    }
 }
 
 /// What a [`DutyHook::role_bulk`] decided.
@@ -504,7 +513,7 @@ impl ExecutorConfig {
     /// [`ConfigError::BadDigest`] for a malformed digest.
     pub fn from_env_with(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let mut digests = HashMap::new();
-        for p in ["twitch", "discord", "youtube"] {
+        for p in ["twitch", "discord", "youtube", "kick"] {
             if let Some(v) = lookup(&format!("SENDER_EXEC_DIGEST_{}", p.to_ascii_uppercase())) {
                 digests.insert(p.to_string(), v);
             }
@@ -569,25 +578,25 @@ fn platform_label(p: &str) -> &'static str {
         "twitch" => "twitch",
         "discord" => "discord",
         "youtube" => "youtube",
+        "kick" => "kick",
         _ => "other",
     }
 }
 
+/// Bounded metric-label universe: every op spelling in the production policy table, plus the
+/// host-composite `role.set` / `role.list` ops that never appear in it.
+static KIND_LABELS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut v = policy::all_registered_ops();
+    v.extend(["role.set", "role.list"]);
+    v
+});
+
 fn kind_label(k: &str) -> &'static str {
-    match k {
-        "chat.send" => "chat.send",
-        "chat.delete" => "chat.delete",
-        "dm.send" => "dm.send",
-        "role.add" => "role.add",
-        "role.remove" => "role.remove",
-        "role.set" => "role.set",
-        "role.list" => "role.list",
-        "event.create" => "event.create",
-        "event.update" => "event.update",
-        "event.cancel" => "event.cancel",
-        "event.delete" => "event.delete",
-        _ => "other",
-    }
+    KIND_LABELS
+        .iter()
+        .copied()
+        .find(|l| *l == k)
+        .unwrap_or("other")
 }
 
 /// The outbound executor. See the module doc.
@@ -695,7 +704,7 @@ where
             .iter()
             .find(|p| p.platform == platform)
             .ok_or(ExecError::UnsupportedPlatform)?;
-        let pinned = pin_channel(platform, action, false)?;
+        let pinned = pin_channel(platform, action, false, false)?;
         if !self.duties.claims(platform, action.op()) {
             return Err(ExecError::HostDutyMissing);
         }
@@ -751,7 +760,7 @@ where
             .slots
             .iter()
             .any(|s| s.origin == SlotOrigin::Stamp && kind.slots.contains(&s.name));
-        let pinned = pin_channel(req.platform, req.action, uses_stamp)?;
+        let pinned = pin_channel(req.platform, req.action, uses_stamp, kind.requires_pin)?;
         let cx = DutyCx {
             platform: req.platform,
             action: req.action,
@@ -801,6 +810,33 @@ where
         for c in &verified.header_creds {
             handles.push(c.handle);
         }
+        // Credential scope: an app-scoped kind may not also resolve a user-scoped slot, and
+        // runs only on a source that declares app-credential support.
+        let app_slots = verified
+            .used
+            .iter()
+            .filter(|i| policy.slots[**i].is_app_scoped())
+            .count();
+        if app_slots > 0 {
+            let user_slots = verified
+                .used
+                .iter()
+                .filter(|i| {
+                    policy.slots[**i].origin == SlotOrigin::Resolver
+                        && !policy.slots[**i].is_app_scoped()
+                })
+                .count();
+            if user_slots > 0 {
+                return Err(ExecError::Slot(SlotError::Refused(
+                    "slot_credential_scope_mixed",
+                )));
+            }
+            if !self.slots.supports_app_credentials(req.platform) {
+                return Err(ExecError::Slot(SlotError::Refused(
+                    "slot_app_credential_unsupported",
+                )));
+            }
+        }
         let resolved = if handles.is_empty() {
             HashMap::new()
         } else {
@@ -846,7 +882,7 @@ where
         let prepared =
             subst::render(policy, &verified, &values, &creds).map_err(ExecError::Subst)?;
         drop((values, creds));
-        self.send(prepared, kind_name == "event.create").await
+        self.send(prepared, kind.result).await
     }
 
     /// The ONLY egress call in the executor: the SSRF-guarded client.
@@ -854,7 +890,7 @@ where
     /// resource's snowflake `id`; a reply without one is a failed op (the
     /// producer could never address the resource again) and is surfaced, not
     /// defaulted.
-    async fn send(&self, p: PreparedRequest, wants_id: bool) -> Result<ExecOutcome, ExecError> {
+    async fn send(&self, p: PreparedRequest, result: ResultMode) -> Result<ExecOutcome, ExecError> {
         let method = reqwest::Method::from_bytes(p.method.as_bytes())
             .map_err(|_| ExecError::Egress("method"))?;
         let headers: Vec<(String, String)> = p
@@ -869,10 +905,13 @@ where
             .map_err(|e| ExecError::Egress(e.class()))?;
         match resp.status {
             200..=299 => {
-                let result_id = if wants_id {
-                    Some(created_id(&resp.body)?)
-                } else {
-                    None
+                let result_id = match result {
+                    ResultMode::None => None,
+                    ResultMode::CreatedSnowflake => Some(created_id(&resp.body)?),
+                    ResultMode::Body => Some(
+                        String::from_utf8(resp.body.to_vec())
+                            .map_err(|_| ExecError::Egress("bad_response"))?,
+                    ),
                 };
                 Ok(ExecOutcome {
                     status: resp.status,
@@ -916,6 +955,7 @@ fn pin_channel(
     platform: &str,
     action: &OutboundAction,
     uses_stamp: bool,
+    requires_pin: bool,
 ) -> Result<Option<String>, ExecError> {
     let (channel, origin) = match action {
         OutboundAction::ChatSend {
@@ -945,6 +985,27 @@ fn pin_channel(
         | OutboundAction::RoleOp { origin_channel, .. }
         | OutboundAction::RoleBulk { origin_channel, .. } => {
             (origin_channel.as_str(), Some(origin_channel.as_str()))
+        }
+        // A generic policy op: a `guild:` scope names no channel (the duty hook pins the guild
+        // from the binding); otherwise the channel (or, absent that, the origin itself) is
+        // re-proven against the stamp. With neither, only a kind that needs no pin may run.
+        OutboundAction::PolicyOp(PolicyOp {
+            channel,
+            origin_channel,
+            ..
+        }) => {
+            let origin = origin_channel.as_deref();
+            if channel.is_none() && origin.is_some_and(|o| role_guild_scope(o).is_some()) {
+                return Ok(None);
+            }
+            match (channel.as_deref(), origin) {
+                (Some(c), o) => (c, o),
+                (None, Some(o)) => (o, Some(o)),
+                (None, None) if uses_stamp || requires_pin => {
+                    return Err(ExecError::Pin(PinError::MissingOrigin));
+                }
+                (None, None) => return Ok(None),
+            }
         }
         // Event ops name no channel: the guild is pinned from the binding by
         // the duty hook, and no kind of theirs uses a stamp slot.
@@ -985,6 +1046,27 @@ fn default_payload(kind: &KindPolicy, action: &OutboundAction) -> Result<String,
         }
         OutboundAction::ChatDelete { message_id, .. } => {
             serde_json::json!({ "message_id": message_id })
+        }
+        // A generic op hands the connector ONLY the producer's text / target ids under fixed
+        // keys; the connector shapes them into the (verified) template.
+        OutboundAction::PolicyOp(p) => {
+            let mut m = serde_json::Map::new();
+            if let Some(t) = &p.text {
+                m.insert(
+                    kind.text_key.to_string(),
+                    serde_json::Value::from(t.as_str()),
+                );
+            }
+            if let Some(id) = &p.message_id {
+                m.insert(
+                    "message_id".to_string(),
+                    serde_json::Value::from(id.as_str()),
+                );
+            }
+            if let Some(u) = &p.user_id {
+                m.insert("user_id".to_string(), serde_json::Value::from(u.as_str()));
+            }
+            serde_json::Value::Object(m)
         }
         OutboundAction::DmSend { .. }
         | OutboundAction::RoleOp { .. }

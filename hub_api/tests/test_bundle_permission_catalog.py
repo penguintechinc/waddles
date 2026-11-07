@@ -288,3 +288,26 @@ def test_tool_call_is_dangerous_with_family(tool: str) -> None:
 )
 def test_malformed_tool_call_is_unknown(pid: str) -> None:
     assert resolve_risk(pid) is None
+
+
+@pytest.mark.parametrize(
+    ("family", "risk"),
+    [
+        ("message.edit", "dangerous"),
+        ("message.reaction", "normal"),
+        ("commands.register", "dangerous"),
+        ("eventsub.manage", "dangerous"),
+        ("interaction.respond", "normal"),
+    ],
+)
+def test_platform_op_families_mirror_the_rust_catalog(family: str, risk: str) -> None:
+    """The v3.0 platform-op families resolve to the Rust risk class; bare/unknown fail closed."""
+    from pathlib import Path
+
+    assert resolve_risk(f"{family}:discord") == risk
+    assert permission_family(f"{family}:twitch") == family
+    assert resolve_risk(family) is None
+    assert resolve_risk(f"{family}:myspace") is None
+    rust = Path(__file__).resolve().parents[2] / "core/bundle_capability_gate/src/permission.rs"
+    if rust.exists():
+        assert f'=> "{family}"' in rust.read_text()

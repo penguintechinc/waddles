@@ -1,0 +1,37 @@
+{
+  "twitch": [
+    "chat.send",
+    "chat.delete",
+    "dm.send",
+    "mod.ban",
+    "mod.timeout",
+    "mod.unban",
+    "eventsub.create",
+    "eventsub.delete",
+    "eventsub.list"
+  ],
+  "discord": [
+    "chat.send",
+    "chat.delete",
+    "dm.send",
+    "mod.kick",
+    "mod.ban",
+    "mod.unban",
+    "mod.timeout",
+    "message.edit",
+    "reaction.add",
+    "commands.register",
+    "commands.register.guild",
+    "interaction.callback",
+    "interaction.followup"
+  ],
+  "youtube": [
+    "chat.send",
+    "chat.delete",
+    "mod.ban",
+    "mod.unban",
+    "mod.add",
+    "mod.remove"
+  ],
+  "kick": []
+}
