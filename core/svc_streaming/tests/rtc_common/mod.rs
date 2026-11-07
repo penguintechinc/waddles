@@ -181,6 +181,7 @@ pub fn opus_publisher_track() -> (Arc<TrackLocalStaticRTP>, u32) {
 pub fn synthetic_packet(seq: u16, ssrc: u32) -> rtc::rtp::Packet {
     rtc::rtp::Packet {
         header: rtc::rtp::Header {
+            version: 2,
             sequence_number: seq,
             timestamp: u32::from(seq) * 960,
             ssrc,

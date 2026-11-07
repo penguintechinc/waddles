@@ -465,6 +465,8 @@ pub struct Orchestrator {
     record: Option<Arc<RecordSink>>,
     registry: Arc<PipelineRegistry>,
     whip_state: Arc<WhipState>,
+    /// WHEP viewer registry; `None` in tests/builds that serve no WHEP egress.
+    whep_state: Option<Arc<crate::egress::whep::WhepState>>,
     stream_metrics: StreamMetrics,
 }
 
@@ -487,7 +489,64 @@ impl Orchestrator {
             record,
             registry,
             whip_state,
+            whep_state: None,
             stream_metrics: StreamMetrics::shared(),
+        }
+    }
+
+    /// Attaches the WHEP viewer registry so a pipeline's WHEP output is wired
+    /// to its real source (see [`Self::wire_whep`]).
+    pub fn with_whep_state(mut self, whep_state: Arc<crate::egress::whep::WhepState>) -> Self {
+        self.whep_state = Some(whep_state);
+        self
+    }
+
+    /// Wires `OutputSpec::Whep` to a real media source, or fails loud.
+    ///
+    /// Supported: a WHIP source feeding only full-copy WHEP outputs -- viewers
+    /// subscribe to the publisher's [`crate::rtc::fanout::MediaFanouts`]
+    /// directly (SFU, no ffmpeg). Anything else (a transcoded WHEP profile, or
+    /// an RTMP/SRT/pull source) would need the ffmpeg `-f rtp` leg ->
+    /// `RtpIngress` bridge, which this orchestrator does not start: it logs an
+    /// ERROR and counts a `whep_not_wired` session failure rather than
+    /// serving a wrong (untranscoded) stream or silently serving nothing.
+    pub async fn wire_whep(
+        &self,
+        pipeline_id: PipelineId,
+        kind: IngestKind,
+        key: &str,
+        spec: &PipelineSpec,
+    ) {
+        if !spec
+            .outputs
+            .iter()
+            .any(|o| matches!(o, OutputSpec::Whep { .. }))
+        {
+            return;
+        }
+        let copy_whip = kind == IngestKind::Whip
+            && spec.inputs.first().is_some_and(|i| {
+                crate::pipeline::ffmpeg::is_pure_whip_to_whep_copy(spec, i).unwrap_or(false)
+            });
+        let fail = |why: &str| {
+            tracing::error!(%pipeline_id, reason = why, "orchestrator: WHEP output requested but cannot be served");
+            self.stream_metrics
+                .record_session_failure(kind, SessionFailure::WhepNotWired);
+        };
+        if !copy_whip {
+            fail("WHEP is only wired for a WHIP source with full-copy WHEP profiles; transcoded/non-WHIP sources need the ffmpeg RTP-leg bridge");
+            return;
+        }
+        let Some(whep) = &self.whep_state else {
+            fail("no WhepState attached to the orchestrator");
+            return;
+        };
+        match self.whip_state.fanout_for(key).await {
+            Some(fanouts) => {
+                whep.register_fanout(pipeline_id, fanouts).await;
+                tracing::info!(%pipeline_id, "orchestrator: WHEP output wired to the WHIP publisher's fanout");
+            }
+            None => fail("WHIP publisher fanout is gone (publisher disconnected before the pipeline started)"),
         }
     }
 
@@ -605,6 +664,7 @@ impl Orchestrator {
         };
         let pipeline_id = spec.id;
         let community_id = config.community_id;
+        let spec_for_whep = spec.clone();
 
         let span = tracing::Span::current();
         span.record("pipeline_id", tracing::field::display(pipeline_id));
@@ -661,6 +721,8 @@ impl Orchestrator {
             }
         }
 
+        self.wire_whep(pipeline_id, kind, &session.key, &spec_for_whep)
+            .await;
         self.registry
             .register(pipeline_id, community_id.to_string(), DEFAULT_PROFILE);
         tracing::info!(%pipeline_id, community_id, ?kind, "orchestrator: pipeline started");
@@ -770,6 +832,9 @@ impl Orchestrator {
             if let Err(err) = record.stop(pipeline_id).await {
                 tracing::warn!(%pipeline_id, error = %err, "orchestrator: record sink stop failed");
             }
+        }
+        if let Some(whep) = &self.whep_state {
+            whep.unregister_fanout(pipeline_id).await;
         }
         self.registry.unregister(pipeline_id);
         tracing::info!(%pipeline_id, "orchestrator: pipeline stopped and torn down");

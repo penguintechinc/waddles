@@ -14,11 +14,10 @@
 //! 6, "no ffmpeg process") or a transcoded profile (subscribes to a fanout
 //! fed by [`crate::rtc::rtp_leg::RtpIngress`] reading ffmpeg's `-f rtp`
 //! output -- §4). [`WhepState::register_fanout`] is how either source
-//! publishes a `PipelineId`'s fanout for viewers to find; **nothing in this
-//! service yet calls it for a real pipeline** -- `pipeline::supervisor`
-//! (S3) is still a stub (see `src/rtc/mod.rs`'s "Not done in this chunk"
-//! section), so this chunk exposes the mechanism and its test coverage,
-//! not an end-to-end wire-up.
+//! publishes a `PipelineId`'s fanout for viewers to find.
+//! `orchestrator::Orchestrator::wire_whep` calls it for a WHIP source feeding
+//! full-copy WHEP outputs (the real pipeline wire-up); a transcoded WHEP
+//! profile or non-WHIP source fails loud there instead of serving nothing.
 //!
 //! `OutputSpec::Whep{profile}` (the pipeline-model contract) carries a
 //! profile name, not a fanout -- resolving "this `PipelineId` + profile ->
@@ -116,6 +115,12 @@ impl WhepState {
         self.fanouts.write().await.remove(&pipeline_id);
     }
 
+    /// Whether a source has registered a fanout for `pipeline_id` (what a
+    /// WHEP viewer needs to exist before it can subscribe).
+    pub async fn has_fanout(&self, pipeline_id: PipelineId) -> bool {
+        self.fanouts.read().await.contains_key(&pipeline_id)
+    }
+
     /// Current viewer count for a pipeline -- used to enforce
     /// `WHEP_MAX_VIEWERS` before a new subscription is created. Not the
     /// same as `TrackFanout::subscriber_count`: a pipeline typically has
@@ -196,7 +201,10 @@ fn spawn_viewer_forward(
 /// are exactly as suitable a random SSRC source as `rand::random::<u32>()`
 /// would be, since RTP only requires the value to be unpredictable enough
 /// to avoid collisions, not cryptographically secure).
-fn viewer_track(kind: RtpCodecKind, codec: RTCRtpCodec) -> (Arc<TrackLocalStaticRTP>, u32) {
+pub(crate) fn viewer_track(
+    kind: RtpCodecKind,
+    codec: RTCRtpCodec,
+) -> (Arc<TrackLocalStaticRTP>, u32) {
     let ssrc = Uuid::new_v4().as_u128() as u32;
     let stream_id = format!("svc-streaming-whep-{ssrc}");
     let track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
@@ -222,7 +230,7 @@ fn viewer_track(kind: RtpCodecKind, codec: RTCRtpCodec) -> (Arc<TrackLocalStatic
 /// channels, **and** `sdp_fmtp_line` all have to match for codec matching
 /// to pick this entry during offer/answer generation; see
 /// [`opus_codec`]'s doc comment for what goes wrong when they don't.
-fn h264_codec() -> RTCRtpCodec {
+pub(crate) fn h264_codec() -> RTCRtpCodec {
     RTCRtpCodec {
         mime_type: "video/H264".to_string(),
         clock_rate: 90000,
@@ -240,7 +248,7 @@ fn h264_codec() -> RTCRtpCodec {
 /// negotiation complete against a *different* codec entry while the
 /// packets this service actually sends carry a payload type the far end
 /// never negotiated for this track -- silently dropped, not an error.
-fn opus_codec() -> RTCRtpCodec {
+pub(crate) fn opus_codec() -> RTCRtpCodec {
     RTCRtpCodec {
         mime_type: "audio/opus".to_string(),
         clock_rate: 48000,
