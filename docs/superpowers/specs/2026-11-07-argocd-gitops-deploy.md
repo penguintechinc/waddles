@@ -7,7 +7,8 @@ Status: DRAFT 2026-11-07 — design only, no implementation. Chart versions mark
 | # | Decision |
 |---|---|
 | 1 | One ArgoCD per environment cluster, installed IN that cluster. dal2alpha first; dal2beta/gamma/prod later. No central mgmt cluster. |
-| 2 | Product repos own deployment specifics (Application, values, hooks, verification). `penguintechinc/admin` holds only GENERIC config: ArgoCD install, Image Updater install, registry-cred wiring, root app-of-apps. |
+| 2 | Product repos own deployment specifics (Application, values, hooks, verification). `penguintechinc/admin` holds only GENERIC config: ArgoCD install, Image Updater install, registry-cred wiring, and ONE tiny bootstrap file per product per cluster. |
+| 5 | **Isolation per product per environment** (~10 products: waddles, waddleai, elder, nest, killkrill, ...). A break in one product's deploy must never affect another's. Shared control plane, isolated everything else (see Isolation model). |
 | 3 | Image tags flow via ArgoCD Image Updater, NOT CI committing tags. Alpha write-back = `argocd` (no git creds). `git` write-back = option for beta/prod. |
 | 4 | CI = build + push only. Helm deploy job removed only AFTER ArgoCD has synced alpha successfully once. |
 
@@ -15,7 +16,7 @@ Status: DRAFT 2026-11-07 — design only, no implementation. Chart versions mark
 
 | Goals | Non-goals |
 |---|---|
-| Pull-based deploy: cluster reconciles from git, runner needs no kube creds | Central multi-cluster ArgoCD |
+| Pull-based deploy: cluster reconciles from git, runner needs no kube creds | Central multi-cluster ArgoCD; cross-product sync dependencies |
 | Drift detection + self-heal on alpha | Replacing image builds (stay on dal2 ARC runner + buildkitd) |
 | Preserve ordering: migrations -> svc_action -> svc_ingest -> rest | Beta/gamma/prod rollout (follow-on specs; alpha only here) |
 | Preserve count-verified post-deploy checks | SSO for ArgoCD (later, noted) |
@@ -32,14 +33,17 @@ Status: DRAFT 2026-11-07 — design only, no implementation. Chart versions mark
    alpha-<epoch64>  ──────────────────────────▶│ repo-srv │◀──│ polls ghcr (creds)  │      │
                                              │  │ app-ctrl │   │ write-back: argocd  │      │
  git (waddles @ release/v3.0.X) ◀─── pull ───│  └────┬─────┘   └─────────────────────┘      │
- git (admin: root app-of-apps) ◀──── pull ───│       │ sync (waves)                         │
+ git (admin: per-product bootstrap) ◀──── pull ───│       │ sync (waves)                         │
                                              │       ▼                                      │
                                              │ ns waddlebot: PreSync migrations Job ->      │
                                              │   wave0 infra -> wave1 svc_action ->         │
                                              │   wave2 svc_ingest -> wave3 rest ->          │
                                              │   PostSync seed jobs + verify Job            │
                                              └──────────────────────────────────────────────┘
- root app (admin) ──discovers──▶ product Applications (waddles repo: k8s/argocd/alpha/*.yaml)
+ admin: k8s/argocd/dal2alpha/products/<product>.yaml (AppProject + 1 root App) - one file per product
+   ├─ waddles  root ──▶ waddles repo deploy/argocd/dal2alpha/*  ──▶ ns waddlebot
+   ├─ waddleai root ──▶ waddleai repo deploy/argocd/dal2alpha/* ──▶ ns waddleai
+   └─ ...      (each root syncs independently; no shared app-of-apps)
 ```
 
 ## Repo layout
@@ -55,21 +59,21 @@ Follows existing `k8s/arc-runners/` pattern (wrapper chart, vendored `charts/*.t
 | `k8s/argocd/alpha.yml` | dal2alpha overrides (resources, repo URLs, NodePort-free, RBAC cm) |
 | `k8s/argocd/templates/networkpolicy.yaml` | CNP egress: github.com, ghcr.io, kube-apiserver, DNS |
 | `k8s/argocd/templates/tetragon.yaml` | TracingPolicy allowlist additions for argocd binaries (only if enforcement blocks) |
-| `k8s/argocd/templates/appproject-waddlebot.yaml` | AppProject `waddlebot` (scoped, see Security) |
+| `k8s/argocd/dal2alpha/products/waddles.yaml` | Per-product bootstrap: namespace + ResourceQuota + LimitRange + AppProject `waddles` + ONE root Application -> waddles repo `deploy/argocd/dal2alpha/`. Template for every other product (`<product>.yaml`) |
+| `k8s/argocd/dal2alpha/products/README.md` | Onboarding: copy file, change name, repoURL, namespace, quota |
 | `k8s/argocd/SETUP.md` | Install runbook: pinned versions, helm v3.17.3, secrets, verify |
 | `k8s/argocd-image-updater/Chart.yaml` + `Chart.lock` | Wrapper, dep `argocd-image-updater` pinned |
 | `k8s/argocd-image-updater/values.yaml`, `alpha.yml` | Registry `ghcr`, creds ref, log level |
 | `k8s/argocd-image-updater/SETUP.md` | Creds wiring (Secret created by operator, never in git) |
-| `k8s/argocd-root/alpha/root-app.yaml` | Root app-of-apps; source = directory of product Application manifests |
-| `k8s/argocd-root/README.md` | Discovery contract (below) |
+| (removed) `k8s/argocd-root/` | No shared app-of-apps; replaced by per-product files above |
 
-Discovery contract: root app sources `penguintechinc/waddles` path `k8s/argocd/alpha` (directory of `Application` YAML, `directory.recurse: false`). New products add a source entry to the root app (one line in admin), not a new Chart.
+Discovery contract: each product's root Application sources its own repo path `deploy/argocd/<cluster>/` (`directory.recurse: false`). Onboarding a product = one new file in admin; nothing shared is edited, so one bad product manifest cannot break discovery for others.
 
 ### waddles (`penguintechinc/waddles`) — product specifics
 
 | Path | Purpose |
 |---|---|
-| `k8s/argocd/alpha/waddlebot-app.yaml` | The `Application` (source, valueFiles, waves, Image Updater annotations) |
+| `deploy/argocd/dal2alpha/waddlebot-app.yaml` | The `Application` (source, valueFiles, waves, Image Updater annotations) |
 | `k8s/helm/waddlebot/values-argocd-alpha.yaml` | Thin overlay (only if needed; else reuse `values-alpha.yaml` + `values-dal2alpha.yaml`) |
 | `k8s/helm/waddlebot/templates/verify-postsync-job.yaml` | PostSync count-verified smoke Job (flag-gated `argocd.verifyHook.enabled`) |
 | `k8s/helm/waddlebot/templates/verify-postsync-rbac.yaml` | Namespaced SA/Role/RoleBinding for verify Job |
@@ -89,7 +93,7 @@ Discovery contract: root app sources `penguintechinc/waddles` path `k8s/argocd/a
 
 | Field | Value |
 |---|---|
-| name / project | `waddlebot-alpha` / `waddlebot` |
+| name / project | `waddlebot-alpha` / `waddles` (AppProject per product) |
 | source | `repoURL: https://github.com/penguintechinc/waddles` `targetRevision: release/v3.0.X` `path: k8s/helm/waddlebot` |
 | helm.valueFiles | `values-alpha.yaml`, `values-dal2alpha.yaml` (same order as current workflow) |
 | helm.releaseName | `waddlebot` (must equal current release name for adoption; see cut-over) |
@@ -140,6 +144,53 @@ Wave plan (Sync phase; lower first; ArgoCD waits for Healthy per wave):
 
 Wave annotations are added in chart templates (`argocd.argoproj.io/sync-wave`), inert under plain `helm upgrade`, so the current deploy keeps working during cut-over.
 
+## Isolation model (per product, per environment)
+
+AppProject per product (admin-owned, in `products/<product>.yaml`):
+
+| Field | Value |
+|---|---|
+| `sourceRepos` | ONLY that product's repo |
+| `destinations` | ONLY that product's namespace(s) on this cluster (`https://kubernetes.default.svc`) |
+| `clusterResourceWhitelist` | `[]` (or minimal explicit list, each entry justified) |
+| `namespaceResourceBlacklist` | `ResourceQuota`, `LimitRange`, `CiliumClusterwideNetworkPolicy`; product cannot loosen its own quota/baseline |
+| `roles` | Project-scoped RBAC (`<product>-deployer`, `<product>-readonly`), SSO groups later; e.g. `p, proj:<product>:deployer, applications, sync, <product>/*, allow` |
+| `orphanedResources.warn` | true |
+| `syncWindows` | optional per product |
+
+Rules:
+- Separate Applications per product; **no cross-product sync waves or dependencies** (waves are intra-Application only). Cross-product needs are runtime contracts, not deploy ordering.
+- Per-product namespace gets `ResourceQuota` + `LimitRange` (admin-owned, in the bootstrap file) so one product cannot starve another.
+- Root Application per product: a bad manifest in product A's `deploy/argocd/<cluster>/` degrades only A's root.
+- Repo credentials per product (one scoped cred Secret per repo); registry pull creds per product namespace.
+
+### ApplicationSet vs per-product bootstrap files
+
+| Option | Blast radius | Verdict |
+|---|---|---|
+| **Per-product bootstrap file** | One file = one product | Chosen: failure domain = 1 product |
+| Single ApplicationSet over all products | One malformed element/template error stalls generation for ALL products | Rejected |
+| ApplicationSet per product | Isolated, but extra CRD/generator indirection for 1 root per product per cluster | Rejected now; revisit if a product wants templating (generator lives in the PRODUCT repo, bound by its AppProject) |
+
+Admin applies bootstrap files per product (operator `kubectl apply -f`), NOT via one admin Application syncing the whole `products/` dir (reintroduces a shared failure point). If automated later: one admin Application per product file.
+
+### Shared per cluster vs isolated per product
+
+| Component | Scope | Blast radius / mitigation |
+|---|---|---|
+| ArgoCD control plane (server, repo-server, controller, redis) | Shared per cluster | Outage pauses ALL products' deploys (running workloads unaffected). HA where env warrants, resource limits, pinned versions, upgrade alpha first |
+| Repo-server (manifest generation) | Shared | A huge/slow chart can starve others: repo-server replicas/limits, parallelism limit, exec timeout |
+| Image Updater | Shared per cluster | Registry rate limits / ghcr outage / bad cred stall tag updates for all, never break running pods. Mitigate: per-product registry creds (`pull-secret` per Application), staggered per-app intervals, strict `allow-tags` regex, per-Application failure (bad image skips only that app), alert on updater errors |
+| ArgoCD chart/CRD versions | Shared | Pin; alpha first; CRD upgrades affect all |
+| Cluster prerequisites (cert-manager, Cilium, CRDs) | Shared, admin-owned | Product projects cannot modify (empty `clusterResourceWhitelist`) |
+| AppProject | Isolated | Cannot deploy outside own ns/repo |
+| Root App + bootstrap file | Isolated | Own failure domain |
+| Applications + sync state | Isolated | No cross-product waves |
+| Namespace, ResourceQuota, LimitRange, CNP | Isolated | Starvation/egress contained |
+| Repo creds, registry creds | Isolated | Leak/rotation affects one product |
+| Image Updater annotations/settings | Isolated (on that product's Applications only) | Misconfig affects one app |
+| RBAC roles / SSO groups | Isolated (project-scoped) | Deployer of A has no rights on B |
+
 ## Image Updater
 
 Services (12) and chart keys. Registry `ghcr.io/penguintechinc/waddles/<svc>`. Common: `allow-tags: regexp:^alpha-\d+$`, `update-strategy: newest-build`, `pull-secret: pullsecret:argocd/ghcr-readonly`, write-back `argocd`.
@@ -168,6 +219,8 @@ argocd-image-updater.argoproj.io/<a>.helm.image-tag: <chart key>
 argocd-image-updater.argoproj.io/<a>.pull-secret: pullsecret:argocd/ghcr-readonly
 argocd-image-updater.argoproj.io/write-back-method: argocd
 ```
+
+Image Updater is shared per cluster but configured per product: annotations, `pull-secret`, and interval live only on that product's Applications; see blast-radius row in Isolation model.
 
 **Skew risk (key design issue)**: chart today uses ONE `global.imageTag` for all images. 12 independent trackers can roll partial sets (e.g. svc_ingest new before svc_action new -> breaks pin_sig v2 ordering; builds finish at different times). Options:
 
@@ -200,7 +253,7 @@ Current checks (deploy-dal2alpha.yml smoke step) -> new home:
 
 | Area | Design |
 |---|---|
-| RBAC | AppProject `waddlebot`: destinations = ns `waddlebot` only; sourceRepos = waddles repo only; `clusterResourceWhitelist` = empty (chart is namespaced; CRDs/ClusterIssuer are admin-owned) -> if waddles chart renders cluster-scoped objects, list them explicitly. argocd application-controller default is cluster-admin; scope down: controller ClusterRole limited + namespaced Role in `waddlebot` (`argocd-manager`-style) — verify controller still starts (needs list/watch for cache); fall back to namespaced-mode (`application.namespaces` + `controller.clusterRoleRules`) if chart supports |
+| RBAC | AppProject `waddles` (one per product): destinations = ns `waddlebot` only; sourceRepos = waddles repo only; `clusterResourceWhitelist` = empty (chart is namespaced; CRDs/ClusterIssuer are admin-owned) -> if waddles chart renders cluster-scoped objects, list them explicitly. argocd application-controller default is cluster-admin; scope down: controller ClusterRole limited + namespaced Role in `waddlebot` (`argocd-manager`-style) — verify controller still starts (needs list/watch for cache); fall back to namespaced-mode (`application.namespaces` + `controller.clusterRoleRules`) if chart supports |
 | CNP | `argocd` ns default-deny; egress allow: DNS, kube-apiserver, `github.com`, `ghcr.io` (+ `pkg-containers.githubusercontent.com` for blobs, verify); intra-ns free. Image Updater egress: ghcr.io + argocd-server. Cross-ns: argocd -> waddlebot only via API server (no pod traffic) |
 | Tetragon | Allowlist argocd-repo-server binaries (`helm`, `git`, `kustomize`, `ssh`, `gpg`); validate with enforced policy before cut-over; fallback = scoped additive TracingPolicy in admin `templates/tetragon.yaml` |
 | PSA | `argocd` ns `restricted`; rootless images, `runAsNonRoot`, read-only rootfs |
@@ -239,8 +292,8 @@ Rollback:
 | 1 | waddles | chart: sync-wave annotations, migrations hook -> Sync wave -5, `Prune=false` on stateful/Secret, verify PostSync Job (flag OFF default) | — | Annotations inert under helm; flag off |
 | 2 | admin | `k8s/argocd/` wrapper chart + SETUP.md + CNP + AppProject | — | Nothing applied until operator runs install |
 | 3 | admin | `k8s/argocd-image-updater/` wrapper + SETUP.md | 2 | Same |
-| 4 | admin | `k8s/argocd-root/alpha/` root app-of-apps + README | 2 | Applied manually by operator |
-| 5 | waddles | `k8s/argocd/alpha/waddlebot-app.yaml` (manual sync, IU annotations present but IU disabled) + `docs/deploy/argocd-alpha.md` | 1,4 | Not applied by CI |
+| 4 | admin | `k8s/argocd/dal2alpha/products/waddles.yaml` (AppProject + root App + ns/quota) + products README | 2 | Applied manually by operator; per-product, one file |
+| 5 | waddles | `deploy/argocd/dal2alpha/waddlebot-app.yaml` (manual sync, IU annotations present but IU disabled) + `docs/deploy/argocd-alpha.md` | 1,4 | Not applied by CI |
 | 6 | waddles | CI: sentinel `alpha-release` push step (if option 1) | — | Additive |
 | 7 | waddles | Enable automated sync + Image Updater (flip Application) | operator Phase 3 done | One-file change, revertible |
 | 8 | waddles | Remove `deploy` job from `deploy-dal2alpha.yml` | Phase 4 green | Revertible commit |
@@ -259,4 +312,5 @@ Operator (non-PR) steps between: install ArgoCD (after #2/#3), create secrets, P
 | 6 | Where does the ArgoCD-managed `argocd-server` get exposure/SSO (CF Access vs port-forward only)? | Port-forward v1 |
 | 7 | Is Tetragon enforcing on `argocd` ns today? Needs allowlist before install | Verify |
 | 8 | argocd-write-back tag not in git: acceptable for alpha audit, or want `git` write-back to a separate branch now? | `argocd` per decision |
+| 10 | Per-product namespace/quota values; apply bootstrap files via operator kubectl vs one admin Application per product | Operator kubectl first |
 | 9 | Beta/prod: separate deploy-values repo vs in-repo `k8s/argocd/<env>/` for git write-back branch protection | Defer to beta spec |
