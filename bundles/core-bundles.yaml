@@ -1445,9 +1445,9 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.chatguard
-    version: "1.0.0"
+    version: "1.1.0"
     language: python
-    wit_world: stage-next
+    wit_world: stage-next-tools
     source_dir: python/chatguard
     manifest_path: chatguard.manifest.yaml
     artifact_path: chatguard.wasm
