@@ -38,11 +38,18 @@ hub-api gateway connection). The host resolves and injects them and scrubs them 
 | Control | Default | Config key (kv `config`) |
 |---|---|---|
 | Upstream calls per minute | 20 | `rate_per_min` 1..600 |
-| Quota units per UTC day (search=100, list=1) | 3000 | `daily_quota_units` 100..1e6 |
+| Quota units per UTC day (search=100, list=1) | 1000 | `daily_quota_units` 100..1e6; in `api_key` mode CLAMPED to 10% of the shared key (1000), `oauth` mode unclamped |
 | Track metadata TTL | 6h | `cache_ttl_s` 60..604800 |
 | Search/playlist id-list TTL | 1h | `search_ttl_s` 60..604800 |
 | Region / safe search | none / moderate | `region_code` (`US`), `safe_search` |
 | Auth mode | `api_key` | `auth_mode` `api_key`\|`oauth` |
+
+`safe_search` (`none`/`moderate`/`strict`) is enforced on EVERY tool (search, playlist.get, track,
+resolve): `moderate` drops age-restricted videos; `strict` also drops videos whose rating cannot be
+confirmed. Multi-item tools report them in `restricted`/`skipped`; track/resolve return `restricted`.
+A 403 `quotaExceeded` from YouTube is `quota_exhausted` (the credential, not the community budget)
+and trips a per-day kv breaker so later calls fail fast. The global counter for the shared key must
+be a host-side guard keyed by secret ref (bundle kv is community-scoped).
 
 Cache hits cost no quota and no rate budget. Invalid config fails loud. Logs carry tool name and
 outcome code only (never queries, urls or ids).

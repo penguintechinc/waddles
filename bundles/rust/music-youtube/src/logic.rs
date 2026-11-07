@@ -37,6 +37,14 @@ const MAX_URL: usize = 512;
 /// Largest `videos.list` batch the API accepts.
 const MAX_BATCH: usize = 50;
 const DAY_MS: u64 = 86_400_000;
+/// Daily quota units of the ONE shared platform API key (YouTube's default project quota).
+pub const GLOBAL_KEY_DAILY_UNITS: u32 = 10_000;
+/// Largest share (percent) of the shared key's daily quota one community may spend in
+/// `api_key` mode. Bundle kv is community-scoped (no global counter reachable from the
+/// guest), so this hard clamp is what stops one community draining the shared key; the
+/// host-side guard keyed by secret ref is the authoritative global counter. `oauth` mode
+/// spends the community's OWN credential and is not clamped.
+pub const COMMUNITY_SHARE_PCT: u32 = 10;
 const MINUTE_MS: u64 = 60_000;
 
 /// An HTTP response as the logic sees it.
@@ -93,7 +101,7 @@ pub struct Config {
     pub auth_mode: AuthMode,
     /// Max upstream calls per community per minute.
     pub rate_per_min: u32,
-    /// Max quota units per community per UTC day.
+    /// Max quota units per community per UTC day (clamped, see [`Config::effective_daily_units`]).
     pub daily_quota_units: u32,
     /// Track metadata cache TTL.
     pub cache_ttl_s: u32,
@@ -110,7 +118,7 @@ impl Default for Config {
         Self {
             auth_mode: AuthMode::ApiKey,
             rate_per_min: 20,
-            daily_quota_units: 3000,
+            daily_quota_units: GLOBAL_KEY_DAILY_UNITS / 100 * COMMUNITY_SHARE_PCT,
             cache_ttl_s: 6 * 3600,
             search_ttl_s: 3600,
             region_code: None,
@@ -120,6 +128,17 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The community's real daily budget: in `api_key` mode (shared credential) clamped to
+    /// its fraction of the global key budget; in `oauth` mode (own credential) as configured.
+    pub fn effective_daily_units(&self) -> u32 {
+        match self.auth_mode {
+            AuthMode::ApiKey => self
+                .daily_quota_units
+                .min(GLOBAL_KEY_DAILY_UNITS / 100 * COMMUNITY_SHARE_PCT),
+            AuthMode::Oauth => self.daily_quota_units,
+        }
+    }
+
     /// Bounds-checks a parsed config (cache <= 7 days: provider terms bound retention).
     fn validate(&self) -> Result<(), ToolError> {
         let ok = (1..=600).contains(&self.rate_per_min)
@@ -220,15 +239,20 @@ impl Service {
         units: i64,
     ) -> Result<Value, ToolError> {
         let now = self.clock.now_millis();
+        let day = now / DAY_MS;
+        let xkey = format!("quota.x.{day}");
+        if Self::kv_err(self.kv.get(&xkey))?.is_some() {
+            // The credential itself was reported exhausted today: fail fast, no upstream call.
+            return Err(invalid("quota_exhausted"));
+        }
         let minute = now / MINUTE_MS;
         let n = Self::kv_err(self.kv.increment(&format!("rl.m.{minute}"), 1, 120))?;
         if n > i64::from(cfg.rate_per_min) {
             return Err(invalid("rate_limited"));
         }
-        let day = now / DAY_MS;
         let qkey = format!("quota.d.{day}");
         let used = Self::kv_err(self.kv.increment(&qkey, units, 2 * 86_400))?;
-        if used > i64::from(cfg.daily_quota_units) {
+        if used > i64::from(cfg.effective_daily_units()) {
             // Refund: the call is not made, so it must not eat budget.
             Self::kv_err(self.kv.increment(&qkey, -units, 2 * 86_400))?;
             return Err(invalid("quota_exceeded"));
@@ -247,16 +271,20 @@ impl Service {
             )],
         };
         let resp = self.http.get(&url, &refs).map_err(map_http_fail)?;
-        map_status(&resp)
+        let result = map_status(&resp);
+        if result == Err(invalid("quota_exhausted")) {
+            // Remember until the next UTC day so every later call fails fast, loudly.
+            let ttl = ((day + 1) * DAY_MS - now).div_ceil(1000).clamp(60, 86_400) as u32;
+            Self::kv_err(self.kv.set(&xkey, b"1", ttl))?;
+        }
+        result
     }
 
     /// Hydrates `ids` into tracks (cache first, one batched `videos.list` for the
-    /// misses). Returns `(tracks_in_order, any_cache_hit, skipped_unavailable)`.
-    fn tracks_for(
-        &self,
-        cfg: &Config,
-        ids: &[String],
-    ) -> Result<(Vec<Value>, bool, usize), ToolError> {
+    /// misses), then applies the community's `safe_search` policy to EVERY path (search,
+    /// playlist, track, resolve). Cached rows are stored unfiltered, so a config change
+    /// takes effect immediately.
+    fn tracks_for(&self, cfg: &Config, ids: &[String]) -> Result<Hydrated, ToolError> {
         let mut found: Vec<Option<Value>> = Vec::with_capacity(ids.len());
         let mut missing: Vec<String> = Vec::new();
         let mut hit = false;
@@ -298,8 +326,17 @@ impl Service {
                 }
             }
         }
-        let skipped = found.iter().filter(|f| f.is_none()).count();
-        Ok((found.into_iter().flatten().collect(), hit, skipped))
+        let unavailable = found.iter().filter(|f| f.is_none()).count();
+        let (tracks, blocked): (Vec<Value>, Vec<Value>) = found
+            .into_iter()
+            .flatten()
+            .partition(|t| passes_safe_search(&cfg.safe_search, t));
+        Ok(Hydrated {
+            tracks,
+            hit,
+            unavailable,
+            restricted: blocked.len(),
+        })
     }
 
     /// `music.youtube.track`: id -> metadata.
@@ -314,9 +351,12 @@ impl Service {
 
     fn track_by_id(&self, id: &str) -> Result<Value, ToolError> {
         let cfg = self.config()?;
-        let (mut tracks, cached, _) = self.tracks_for(&cfg, &[id.to_string()])?;
-        let track = tracks.pop().ok_or_else(|| invalid("not_found"))?;
-        Ok(json!({"track": track, "cached": cached, "capability": capability()}))
+        let mut h = self.tracks_for(&cfg, &[id.to_string()])?;
+        if h.restricted > 0 {
+            return Err(invalid("restricted"));
+        }
+        let track = h.tracks.pop().ok_or_else(|| invalid("not_found"))?;
+        Ok(json!({"track": track, "cached": h.hit, "capability": capability()}))
     }
 
     /// `music.youtube.resolve`: url -> track.
@@ -381,11 +421,12 @@ impl Service {
                 (ids, false)
             }
         };
-        let (tracks, tracks_hit, skipped) = self.tracks_for(&cfg, &ids)?;
+        let h = self.tracks_for(&cfg, &ids)?;
         Ok(json!({
-            "tracks": tracks,
-            "cached": search_hit && tracks_hit,
-            "skipped": skipped,
+            "tracks": h.tracks,
+            "cached": search_hit && h.hit,
+            "skipped": h.unavailable + h.restricted,
+            "restricted": h.restricted,
             "capability": capability(),
         }))
     }
@@ -446,14 +487,34 @@ impl Service {
                 ((ids, next), false)
             }
         };
-        let (tracks, tracks_hit, skipped) = self.tracks_for(&cfg, &ids)?;
+        let h = self.tracks_for(&cfg, &ids)?;
         Ok(json!({
-            "tracks": tracks,
+            "tracks": h.tracks,
             "next_page_token": next,
-            "cached": list_hit && tracks_hit,
-            "skipped": skipped,
+            "cached": list_hit && h.hit,
+            "skipped": h.unavailable + h.restricted,
+            "restricted": h.restricted,
             "capability": capability(),
         }))
+    }
+}
+
+/// Result of hydrating ids: visible tracks plus how many were unavailable / policy-blocked.
+struct Hydrated {
+    tracks: Vec<Value>,
+    hit: bool,
+    unavailable: usize,
+    restricted: usize,
+}
+
+/// `safe_search` policy on one track: `none` allows all; `moderate` drops age-restricted;
+/// `strict` also drops anything whose rating could not be confirmed (fail closed -- a row
+/// without `rating_known` is treated as unconfirmed).
+fn passes_safe_search(mode: &str, track: &Value) -> bool {
+    match mode {
+        "none" => true,
+        "moderate" => track["explicit"] != json!(true),
+        _ => track["explicit"] != json!(true) && track["rating_known"] == json!(true),
     }
 }
 
@@ -509,7 +570,7 @@ fn map_status(resp: &HttpResp) -> Result<Value, ToolError> {
         403 => {
             let body = String::from_utf8_lossy(&resp.body);
             if body.contains("quotaExceeded") || body.contains("rateLimitExceeded") {
-                Err(invalid("quota_exceeded"))
+                Err(invalid("quota_exhausted"))
             } else {
                 Err(invalid("upstream_forbidden"))
             }
@@ -539,9 +600,11 @@ pub fn tool_log_label(name: &str) -> &'static str {
 }
 
 /// Stable error codes safe to log; anything else collapses to `invalid_args`.
-const OUTCOME_CODES: [&str; 14] = [
+const OUTCOME_CODES: [&str; 16] = [
     "rate_limited",
     "quota_exceeded",
+    "quota_exhausted",
+    "restricted",
     "not_found",
     "auth_unavailable",
     "config_invalid",
@@ -921,7 +984,7 @@ mod tests {
             (status(401, "{}"), "auth_unavailable"),
             (
                 status(403, r#"{"error":{"errors":[{"reason":"quotaExceeded"}]}}"#),
-                "quota_exceeded",
+                "quota_exhausted",
             ),
             (status(403, "{}"), "upstream_forbidden"),
             (status(404, "{}"), "not_found"),
@@ -1075,6 +1138,179 @@ mod tests {
             s.track(json!({"id": A})).unwrap_err(),
             ToolError::TargetUnavailable
         );
+    }
+
+    fn restricted_video(id: &str) -> Value {
+        let mut v = video(id, "R");
+        v["contentDetails"]["contentRating"] = json!({"ytRating": "ytAgeRestricted"});
+        v
+    }
+
+    fn rated_video(id: &str, title: &str) -> Value {
+        let mut v = video(id, title);
+        v["contentDetails"]["contentRating"] = json!({});
+        v
+    }
+
+    fn with_config(cfg: &str) -> Arc<FakeKv> {
+        let kv = Arc::new(FakeKv::default());
+        kv.set("config", cfg.as_bytes(), 0).unwrap();
+        kv
+    }
+
+    fn empty_searches(n: usize) -> Arc<FakeHttp> {
+        FakeHttp::new((0..n).map(|_| ok(json!({"items": []}))).collect())
+    }
+
+    #[test]
+    fn api_key_mode_clamps_community_to_global_fraction() {
+        // Asks for 100k/day, but the shared key only allows its fraction (10% of 10k = 1000).
+        let http = empty_searches(11);
+        let s = svc(
+            http.clone(),
+            with_config(r#"{"daily_quota_units":100000,"rate_per_min":600}"#),
+        );
+        for i in 0..10 {
+            s.search(json!({"query": format!("q{i}")})).unwrap();
+        }
+        let e = s.search(json!({"query": "q10"})).unwrap_err();
+        assert_eq!(err_msg(e), "quota_exceeded");
+        assert_eq!(http.count(), 10, "11th call must not reach upstream");
+        assert_eq!(Config::default().effective_daily_units(), 1000);
+    }
+
+    #[test]
+    fn oauth_mode_spends_own_credential_and_is_not_clamped() {
+        let http = empty_searches(11);
+        let s = svc(
+            http.clone(),
+            with_config(r#"{"auth_mode":"oauth","daily_quota_units":1100,"rate_per_min":600}"#),
+        );
+        for i in 0..11 {
+            s.search(json!({"query": format!("q{i}")})).unwrap();
+        }
+        assert_eq!(http.count(), 11);
+        assert_eq!(
+            err_msg(s.search(json!({"query": "more"})).unwrap_err()),
+            "quota_exceeded"
+        );
+    }
+
+    #[test]
+    fn global_credential_exhaustion_is_explicit_and_fails_fast() {
+        let http = FakeHttp::new(vec![status(
+            403,
+            r#"{"error":{"errors":[{"reason":"quotaExceeded"}]}}"#,
+        )]);
+        let s = svc(http.clone(), Arc::new(FakeKv::default()));
+        assert_eq!(
+            err_msg(s.search(json!({"query": "a"})).unwrap_err()),
+            "quota_exhausted"
+        );
+        // Every later tool call that day fails fast without touching upstream.
+        for r in [
+            s.track(json!({"id": A})),
+            s.search(json!({"query": "b"})),
+            s.playlist_get(json!({"playlist_id": "PLabcdefghij"})),
+        ] {
+            assert_eq!(err_msg(r.unwrap_err()), "quota_exhausted");
+        }
+        assert_eq!(http.count(), 1);
+        // Cached data is still served (no upstream needed): not under test here, but the
+        // breaker must expire the next UTC day.
+        let next_day = Service::new(
+            http,
+            s.kv.clone(),
+            Arc::new(FixedClock(1_700_000_000_000 + DAY_MS)),
+        );
+        assert!(next_day.config().is_ok());
+        assert!(
+            next_day
+                .kv
+                .get(&format!(
+                    "quota.x.{}",
+                    (1_700_000_000_000 + DAY_MS) / DAY_MS
+                ))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn safe_search_moderate_filters_every_tool() {
+        let rid = "rrrrrrrrrrr";
+        let http = FakeHttp::new(vec![
+            // search: ids + hydrate
+            ok(json!({"items": [{"id": {"videoId": rid}}, {"id": {"videoId": B}}]})),
+            ok(json!({"items": [restricted_video(rid), rated_video(B, "Ok")]})),
+            // playlist ids (hydrate cached)
+            ok(
+                json!({"items": [{"contentDetails": {"videoId": rid}}, {"contentDetails": {"videoId": B}}]}),
+            ),
+        ]);
+        let s = svc(http, Arc::new(FakeKv::default()));
+        let r = s.search(json!({"query": "q"})).unwrap();
+        assert_eq!(r["tracks"].as_array().unwrap().len(), 1);
+        assert_eq!(r["tracks"][0]["id"], B);
+        assert_eq!(
+            (r["restricted"].clone(), r["skipped"].clone()),
+            (json!(1), json!(1))
+        );
+        let p = s
+            .playlist_get(json!({"playlist_id": "PLabcdefghij"}))
+            .unwrap();
+        assert_eq!(p["tracks"].as_array().unwrap().len(), 1);
+        assert_eq!(p["restricted"], 1);
+        assert_eq!(
+            err_msg(s.track(json!({"id": rid})).unwrap_err()),
+            "restricted"
+        );
+        assert_eq!(
+            err_msg(
+                s.resolve(json!({"url": format!("https://youtu.be/{rid}")}))
+                    .unwrap_err()
+            ),
+            "restricted"
+        );
+        assert!(s.track(json!({"id": B})).is_ok());
+    }
+
+    #[test]
+    fn safe_search_none_allows_age_restricted() {
+        let rid = "rrrrrrrrrrr";
+        let http = FakeHttp::new(vec![ok(json!({"items": [restricted_video(rid)]}))]);
+        let s = svc(http, with_config(r#"{"safe_search":"none"}"#));
+        assert_eq!(
+            s.track(json!({"id": rid})).unwrap()["track"]["explicit"],
+            true
+        );
+    }
+
+    #[test]
+    fn safe_search_strict_drops_unconfirmed_and_applies_to_cached_rows() {
+        // Unrated-in-payload (no contentRating key) cannot be confirmed -> dropped in strict.
+        let http = FakeHttp::new(vec![ok(json!({"items": [video(A, "Unconfirmed")]}))]);
+        let kv = with_config(r#"{"safe_search":"strict"}"#);
+        let s = svc(http.clone(), kv.clone());
+        assert_eq!(
+            err_msg(s.track(json!({"id": A})).unwrap_err()),
+            "restricted"
+        );
+        // Row was cached unfiltered: relaxing the policy serves it without a new upstream call.
+        kv.set("config", br#"{"safe_search":"moderate"}"#, 0)
+            .unwrap();
+        assert_eq!(s.track(json!({"id": A})).unwrap()["cached"], true);
+        assert_eq!(http.count(), 1);
+        // And tightening again re-applies strict to the cached row.
+        kv.set("config", br#"{"safe_search":"strict"}"#, 0).unwrap();
+        assert_eq!(
+            err_msg(s.track(json!({"id": A})).unwrap_err()),
+            "restricted"
+        );
+        // A confirmed-rated, non-restricted video passes strict.
+        let http2 = FakeHttp::new(vec![ok(json!({"items": [rated_video(B, "Fine")]}))]);
+        let s2 = svc(http2, with_config(r#"{"safe_search":"strict"}"#));
+        assert!(s2.track(json!({"id": B})).is_ok());
     }
 
     const CONTRACT: &str = include_str!("../../../contracts/music-tool-contract.v1.json");

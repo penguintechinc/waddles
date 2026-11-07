@@ -291,6 +291,7 @@ pub fn track_from_item(item: &Value) -> Result<Value, &'static str> {
         "duration_ms": duration_ms,
         "thumbnail": best_thumbnail(&snippet["thumbnails"]),
         "explicit": explicit,
+        "rating_known": item["contentDetails"]["contentRating"].is_object(),
         "source_url": format!("https://www.youtube.com/watch?v={id}"),
         "channel_id": snippet["channelId"].as_str(),
         "embeddable": item["status"]["embeddable"].as_bool(),
