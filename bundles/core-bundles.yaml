@@ -447,8 +447,9 @@ bundles:
   # gates its own reply behind a `waddles.command-<name>` PostHog flag (default OFF) inside
   # `transform()` -- this catalog entry only installs the bundle, it does not make it respond.
   - app_id: waddles.core.example.rank
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
+    wit_world: stage-next-tools
     source_dir: python/rank
     manifest_path: rank.manifest.yaml
     artifact_path: rank.wasm
