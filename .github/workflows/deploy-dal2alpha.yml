@@ -83,7 +83,9 @@ jobs:
       contents: read
       packages: write
     strategy:
-      fail-fast: true
+      # false: one failed image must not cancel the others, so a single run
+      # surfaces every broken build. Deploy still requires all builds green.
+      fail-fast: false
       matrix:
         include:
           # service = image repo name (mirrors scripts/alpha-deploy.sh SERVICES).
