@@ -1501,7 +1501,7 @@ bundles:
   # bundle-MCP-tools P6b: discord platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-discord defaults OFF.
   - app_id: waddles.core.service.discord
-    version: "1.0.6"
+    version: "1.0.7"
     language: rust
     wit_world: connector-tools
     kind: service

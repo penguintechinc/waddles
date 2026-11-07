@@ -22,6 +22,7 @@
 use serde_json::{Map, Value, json};
 
 use crate::error::{ConnectorError, Result};
+use crate::{message_ops, moderation};
 use crate::sanitize::guard_text;
 use crate::session::is_snowflake;
 
@@ -47,7 +48,8 @@ pub const MAX_CONTENT_CHARS: usize = 2000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Action {
     /// `chat.send`, `chat.delete`, `dm.send`, `role.add`, `role.remove`,
-    /// `event.create`, `event.update`, `event.cancel`, `event.delete`.
+    /// `event.create`, `event.update`, `event.cancel`, `event.delete`,
+    /// `mod.kick|ban|unban|timeout`, `message.edit`, `reaction.add`.
     pub kind: String,
     /// Opaque binding id the host resolves.
     pub target_source_id: String,
@@ -71,7 +73,7 @@ pub struct HttpTpl {
 }
 
 /// Parses the payload as an object whose keys are exactly within `allowed`.
-fn object(payload: &str, allowed: &[&str]) -> Result<Map<String, Value>> {
+pub(crate) fn object(payload: &str, allowed: &[&str]) -> Result<Map<String, Value>> {
     let v: Value = serde_json::from_str(payload)
         .map_err(|_| ConnectorError::Malformed("payload is not JSON".into()))?;
     let Value::Object(map) = v else {
@@ -86,13 +88,13 @@ fn object(payload: &str, allowed: &[&str]) -> Result<Map<String, Value>> {
     Ok(map)
 }
 
-fn str_field<'a>(map: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
+pub(crate) fn str_field<'a>(map: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
     map.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| ConnectorError::Malformed(format!("missing string `{key}`")))
 }
 
-fn snowflake(map: &Map<String, Value>, key: &str) -> Result<String> {
+pub(crate) fn snowflake(map: &Map<String, Value>, key: &str) -> Result<String> {
     let s = str_field(map, key)?;
     if is_snowflake(s) {
         Ok(s.to_string())
@@ -106,7 +108,7 @@ fn snowflake(map: &Map<String, Value>, key: &str) -> Result<String> {
 /// A user reference: ONLY the `{user:<uuid>}` placeholder. The host resolves it
 /// through its community-scoped tokenization; a raw platform id never crosses
 /// this boundary (repo PII rule), so snowflakes are refused.
-fn user_ref(map: &Map<String, Value>, key: &str) -> Result<String> {
+pub(crate) fn user_ref(map: &Map<String, Value>, key: &str) -> Result<String> {
     let s = str_field(map, key)?;
     guard_text(key, s, false)?;
     let placeholder = s
@@ -140,7 +142,7 @@ fn role_key(map: &Map<String, Value>) -> Result<String> {
     }
 }
 
-fn content(map: &Map<String, Value>) -> Result<&str> {
+pub(crate) fn content(map: &Map<String, Value>) -> Result<&str> {
     let c = str_field(map, "content")?;
     guard_text("content", c, true)?;
     if c.is_empty() {
@@ -178,7 +180,7 @@ const STATUS_CANCELED: u8 = 4;
 /// `true` for an RFC 3339 timestamp `YYYY-MM-DDTHH:MM:SS[.f+](Z|+HH:MM|-HH:MM)`
 /// with in-range fields. Strict on purpose: it lands in a JSON body Discord
 /// parses, and nothing but digits/`-`/`:`/`.`/`T`/`Z`/`+` may pass.
-fn is_rfc3339(s: &str) -> bool {
+pub(crate) fn is_rfc3339(s: &str) -> bool {
     let b = s.as_bytes();
     let digits =
         |r: std::ops::Range<usize>| b.get(r).is_some_and(|x| x.iter().all(u8::is_ascii_digit));
@@ -324,7 +326,7 @@ fn build_event_request(kind: &str, p: &str) -> Result<HttpTpl> {
     }
 }
 
-fn tpl(method: &str, path: String, body: Option<Vec<u8>>) -> HttpTpl {
+pub(crate) fn tpl(method: &str, path: String, body: Option<Vec<u8>>) -> HttpTpl {
     let headers = if body.is_some() {
         vec![("Content-Type".to_string(), "application/json".to_string())]
     } else {
@@ -406,6 +408,8 @@ pub fn build_request(action: &Action) -> Result<HttpTpl> {
         "event.create" | "event.update" | "event.cancel" | "event.delete" => {
             build_event_request(action.kind.as_str(), p)
         }
+        "mod.kick" | "mod.ban" | "mod.unban" | "mod.timeout" => moderation::build(&action.kind, p),
+        "message.edit" | "reaction.add" => message_ops::build(&action.kind, p),
         other => Err(ConnectorError::Unsupported(format!(
             "action kind `{other}`"
         ))),
@@ -602,6 +606,11 @@ mod tests {
         assert!(matches!(
             build_request(&act("moderation.ban", "{}")),
             Err(ConnectorError::Unsupported(_))
+        ));
+        // flipped (S2a): the registered `mod.ban` kind is now implemented and validates input
+        assert!(matches!(
+            build_request(&act("mod.ban", "{}")),
+            Err(ConnectorError::Malformed(_))
         ));
         let mut a = act("chat.send", r#"{"content":"x"}"#);
         a.target_source_id.clear();

@@ -48,6 +48,97 @@ fn lifecycle_json(l: &Lifecycle) -> Value {
     }
 }
 
+/// A syntactically valid timestamp used ONLY to validate a timeout tool's other arguments through
+/// the connector builder; the real `until` is computed by the host from `duration_seconds`.
+const PROBE_UNTIL: &str = "2000-01-01T00:00:00Z";
+
+/// Rejects any key of `a` outside `allowed` (arguments are never silently dropped).
+fn only_keys(a: &Value, allowed: &[&str]) -> Result<(), ToolFail> {
+    let m = a
+        .as_object()
+        .ok_or_else(|| ToolFail::InvalidArgs("args must be an object".into()))?;
+    match m.keys().find(|k| !allowed.contains(&k.as_str())) {
+        Some(k) => Err(ToolFail::InvalidArgs(format!(
+            "argument `{k}` is not accepted"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// A required string argument.
+fn arg_str<'a>(a: &'a Value, key: &str) -> Result<&'a str, ToolFail> {
+    a.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolFail::InvalidArgs(format!("missing string `{key}`")))
+}
+
+/// Maps a `discord.moderation.*` / `discord.message.*` tool call to `(registered op, connector
+/// payload)`. `user` is the uuid of the tokenized `{user:<uuid>}` reference.
+fn write_tool_payload(name: &str, a: &Value) -> Result<(&'static str, Value), ToolFail> {
+    let user =
+        |a: &Value| -> Result<String, ToolFail> { Ok(format!("{{user:{}}}", arg_str(a, "user")?)) };
+    Ok(match name {
+        "discord.moderation.kick" => {
+            only_keys(a, &["user"])?;
+            ("mod.kick", json!({"user_id": user(a)?}))
+        }
+        "discord.moderation.unban" => {
+            only_keys(a, &["user"])?;
+            ("mod.unban", json!({"user_id": user(a)?}))
+        }
+        "discord.moderation.ban" => {
+            only_keys(a, &["user", "delete_message_seconds"])?;
+            let mut p = json!({"user_id": user(a)?});
+            if let Some(v) = a.get("delete_message_seconds") {
+                p["delete_message_seconds"] = v.clone();
+            }
+            ("mod.ban", p)
+        }
+        "discord.moderation.timeout" => {
+            only_keys(a, &["user", "duration_seconds"])?;
+            a.get("duration_seconds")
+                .and_then(Value::as_u64)
+                .filter(|s| (1..=crate::moderation::MAX_TIMEOUT_SECONDS).contains(s))
+                .ok_or_else(|| {
+                    ToolFail::InvalidArgs(format!(
+                        "`duration_seconds` must be an integer 1..={}",
+                        crate::moderation::MAX_TIMEOUT_SECONDS
+                    ))
+                })?;
+            (
+                "mod.timeout",
+                json!({"user_id": user(a)?, "until": PROBE_UNTIL}),
+            )
+        }
+        "discord.moderation.untimeout" => {
+            only_keys(a, &["user"])?;
+            ("mod.timeout", json!({"user_id": user(a)?, "clear": true}))
+        }
+        "discord.message.edit" => {
+            only_keys(a, &["message_id", "content"])?;
+            (
+                "message.edit",
+                json!({"message_id": arg_str(a, "message_id")?, "content": arg_str(a, "content")?}),
+            )
+        }
+        "discord.message.react" => {
+            only_keys(a, &["message_id", "emoji"])?;
+            (
+                "reaction.add",
+                json!({"message_id": arg_str(a, "message_id")?, "content": arg_str(a, "emoji")?}),
+            )
+        }
+        "discord.message.delete" => {
+            only_keys(a, &["message_id"])?;
+            (
+                "chat.delete",
+                json!({"message_id": arg_str(a, "message_id")?}),
+            )
+        }
+        _ => return Err(ToolFail::Unknown),
+    })
+}
+
 /// Dispatches one tool call.
 ///
 /// * `classify_frame` `{frame: <gateway envelope object>}` -> `{action, ...}`
@@ -100,6 +191,22 @@ pub fn call(name: &str, args: &[u8]) -> Result<Vec<u8>, ToolFail> {
                 kind: kind.to_string(),
                 target_source_id: "tool".to_string(),
                 payload_json: payload,
+            })
+            .map_err(|e| ToolFail::InvalidArgs(e.to_string()))?;
+            json!({"validated": true, "op": kind})
+        }
+        // Moderation + message-op tools: same pattern. The args are mapped to the connector
+        // payload of the registered op and validated through the SAME builder the sender uses;
+        // the HOST executes (guild/credential from the binding, role hierarchy, audit).
+        other
+            if other.starts_with("discord.moderation.")
+                || other.starts_with("discord.message.") =>
+        {
+            let (kind, payload) = write_tool_payload(other, &a)?;
+            crate::sender::build_request(&crate::sender::Action {
+                kind: kind.to_string(),
+                target_source_id: "tool".to_string(),
+                payload_json: payload.to_string(),
             })
             .map_err(|e| ToolFail::InvalidArgs(e.to_string()))?;
             json!({"validated": true, "op": kind})
@@ -231,5 +338,103 @@ mod tests {
             run("discord.scheduled_event.explode", json!({})),
             Err(ToolFail::Unknown)
         ));
+    }
+
+    const U: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+    #[test]
+    fn moderation_and_message_tools_validate_through_the_sender_templates() {
+        for (tool, args, op) in [
+            ("discord.moderation.kick", json!({"user":U}), "mod.kick"),
+            ("discord.moderation.unban", json!({"user":U}), "mod.unban"),
+            ("discord.moderation.ban", json!({"user":U}), "mod.ban"),
+            (
+                "discord.moderation.ban",
+                json!({"user":U,"delete_message_seconds":604800}),
+                "mod.ban",
+            ),
+            (
+                "discord.moderation.timeout",
+                json!({"user":U,"duration_seconds":2419200}),
+                "mod.timeout",
+            ),
+            (
+                "discord.moderation.untimeout",
+                json!({"user":U}),
+                "mod.timeout",
+            ),
+            (
+                "discord.message.edit",
+                json!({"message_id":"5","content":"x"}),
+                "message.edit",
+            ),
+            (
+                "discord.message.react",
+                json!({"message_id":"5","emoji":"\u{1F44D}"}),
+                "reaction.add",
+            ),
+            (
+                "discord.message.delete",
+                json!({"message_id":"5"}),
+                "chat.delete",
+            ),
+        ] {
+            assert_eq!(
+                run(tool, args).unwrap(),
+                json!({"validated":true,"op":op}),
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn moderation_and_message_tools_refuse_bad_arguments() {
+        for (tool, args) in [
+            ("discord.moderation.kick", json!({"user":U,"guild_id":"1"})),
+            (
+                "discord.moderation.kick",
+                json!({"user":"700000000000000001"}),
+            ),
+            ("discord.moderation.kick", json!({})),
+            (
+                "discord.moderation.ban",
+                json!({"user":U,"delete_message_seconds":604801}),
+            ),
+            ("discord.moderation.timeout", json!({"user":U})),
+            (
+                "discord.moderation.timeout",
+                json!({"user":U,"duration_seconds":0}),
+            ),
+            (
+                "discord.moderation.timeout",
+                json!({"user":U,"duration_seconds":2419201}),
+            ),
+            (
+                "discord.moderation.untimeout",
+                json!({"user":U,"duration_seconds":5}),
+            ),
+            (
+                "discord.message.edit",
+                json!({"message_id":"5","content":"x","channel_id":"1"}),
+            ),
+            (
+                "discord.message.react",
+                json!({"message_id":"5","emoji":"abc"}),
+            ),
+            ("discord.message.delete", json!({"message_id":"../x"})),
+        ] {
+            assert!(
+                matches!(run(tool, args.clone()), Err(ToolFail::InvalidArgs(_))),
+                "{tool} {args}"
+            );
+        }
+        assert_eq!(
+            run("discord.moderation.nuke", json!({})),
+            Err(ToolFail::Unknown)
+        );
+        assert_eq!(
+            run("discord.message.send_embed", json!({})),
+            Err(ToolFail::Unknown)
+        );
     }
 }

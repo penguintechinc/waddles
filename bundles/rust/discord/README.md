@@ -144,6 +144,19 @@ and the approved grant `tool.call:waddles.core.service.discord:discord.scheduled
 * Status: executed by the host once T6d lands; the executor's `ConnectorHost` does not yet expose the
   sender export, so `build-request` is covered by native unit tests (and its presence is checked at load).
 
+## Moderation + message ops (1.0.7)
+
+Kinds `mod.kick|ban|unban|timeout` (`moderation.rs`) and `message.edit|reaction.add` (`message_ops.rs`);
+tools `discord.moderation.{kick,ban,unban,timeout,untimeout}` (manifest `required_scope: community:moderate`,
+host-verified actor) and `discord.message.{edit,react,delete}`. The target is ALWAYS a `{user:<uuid>}` token (a raw
+snowflake is refused: PII rule); the guild is the host binding. The host duty hook
+(`discord_duties.rs::mod_gate`) additionally enforces, from live guild state: bot outranks target (strictly), target
+is not the owner/bot, timeouts never hit administrators, the bot holds KICK/BAN/MODERATE_MEMBERS; every refusal is a
+fixed reason code and one PII-free audit event (`target: "audit"`) + `svc_ingest_discord_moderation_total` is
+emitted per authorized action. Timeouts: the host converts `duration_seconds` (1..=28d) to the absolute
+`communication_disabled_until` from its own clock; `clear` lifts it. Bans: `delete_message_seconds` 0..=604800.
+Not yet available (needs host-table rows, see the PR): `message.send_embed`, `webhook.create`.
+
 ## Credential-slot smuggling guard (`sanitize.rs`)
 
 Every string that reaches a template (message `content`, `target-source-id`, user refs) is REJECTED — never

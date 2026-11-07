@@ -8,7 +8,7 @@
 schema_version: 2
 app_id: waddles.core.service.discord
 name: Discord Platform Connector (Rust)
-version: 1.0.6
+version: 1.0.7
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -257,6 +257,143 @@ exported_tools:
                 type: string
               assignable:
                 type: boolean
+  - name: discord.moderation.kick
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+      required:
+        - user
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+  - name: discord.moderation.unban
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+      required:
+        - user
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+  - name: discord.moderation.ban
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+        delete_message_seconds:
+          type: integer
+          minimum: 0
+          maximum: 604800
+      required:
+        - user
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+  - name: discord.moderation.timeout
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+        duration_seconds:
+          type: integer
+          minimum: 1
+          maximum: 2419200
+      required:
+        - user
+        - duration_seconds
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+  - name: discord.moderation.untimeout
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+      required:
+        - user
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+  - name: discord.message.edit
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        message_id:
+          type: string
+          pattern: "^[0-9]{1,20}$"
+        content:
+          type: string
+          minLength: 1
+          maxLength: 2000
+      required:
+        - message_id
+        - content
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: discord.message.react
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        message_id:
+          type: string
+          pattern: "^[0-9]{1,20}$"
+        emoji:
+          type: string
+          minLength: 1
+          maxLength: 64
+      required:
+        - message_id
+        - emoji
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: discord.message.delete
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        message_id:
+          type: string
+          pattern: "^[0-9]{1,20}$"
+      required:
+        - message_id
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
 author: PenguinTech/waddles
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/discord
