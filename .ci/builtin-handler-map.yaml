@@ -224,9 +224,10 @@ handlers:
     gap: "welcome message send has no bundle"
     tracking: "#840"
   - handler: core/svc_action/builtin_handlers/streaming_stream_action.py
-    status: pending
-    gap: "live-stream listing query has no bundle"
-    tracking: "#840"
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/rust/live-now/hub-manifest.yaml, contains: 'command_prefix: \["!live"\]'}
   - handler: core/svc_action/builtin_handlers/twitch_shoutout_action.py
     status: pending
     gap: "Twitch shoutout API call + `!vso` video shoutout not evidenced in bundles/python/shoutout (`!so` only)"

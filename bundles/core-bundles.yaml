@@ -1565,3 +1565,17 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+
+  # live-now APP bundle (Rust, stage-next-tools): community who's-live + !live + go-live announcements,
+  # consuming <platform>.live.channels from the platform service bundles (live-channels contract v1).
+  # Chat commands/announcements gated by PostHog flags live-now.command / live-now.announce (default OFF).
+  - app_id: waddles.core.app.live-now
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/live-now
+    manifest_path: live-now.manifest.yaml
+    artifact_path: live-now.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
