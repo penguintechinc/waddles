@@ -56,11 +56,6 @@ exported_tools:
         type: integer
         minimum: 1
         maximum: 50
-      auth:
-        type: string
-        enum:
-        - app
-        - connection
     required:
     - query
     additionalProperties: false
@@ -108,11 +103,6 @@ exported_tools:
       track:
         type: string
         maxLength: 200
-      auth:
-        type: string
-        enum:
-        - app
-        - connection
     required:
     - track
     additionalProperties: false
@@ -163,11 +153,6 @@ exported_tools:
         type: integer
         minimum: 0
         maximum: 100000
-      auth:
-        type: string
-        enum:
-        - app
-        - connection
     required:
     - playlist
     additionalProperties: false
@@ -215,11 +200,6 @@ exported_tools:
       url:
         type: string
         maxLength: 200
-      auth:
-        type: string
-        enum:
-        - app
-        - connection
     required:
     - url
     additionalProperties: false
@@ -290,6 +270,7 @@ exported_tools:
 - name: music.spotify.player.state
   access: read
   risk: normal
+  required_scope: community:moderate
   input_schema:
     type: object
     properties: {}
@@ -317,6 +298,7 @@ exported_tools:
 - name: music.spotify.player.play
   access: write
   risk: dangerous
+  required_scope: community:moderate
   input_schema:
     type: object
     properties:
@@ -359,6 +341,7 @@ exported_tools:
 - name: music.spotify.player.pause
   access: write
   risk: dangerous
+  required_scope: community:moderate
   input_schema:
     type: object
     properties:
@@ -384,6 +367,7 @@ exported_tools:
 - name: music.spotify.player.next
   access: write
   risk: dangerous
+  required_scope: community:moderate
   input_schema:
     type: object
     properties:
@@ -409,6 +393,7 @@ exported_tools:
 - name: music.spotify.player.queue_add
   access: write
   risk: dangerous
+  required_scope: community:member
   input_schema:
     type: object
     properties:

@@ -228,3 +228,34 @@ fn caller_cannot_redirect_requests_via_args() {
     }
     assert!(r.http.requests().is_empty());
 }
+
+#[test]
+fn manifests_gate_player_tools_by_scope_and_metadata_has_no_auth_selector() {
+    for f in ["bundle.yaml", "hub-manifest.yaml"] {
+        let text = std::fs::read_to_string(format!("{}/{f}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        for (tool, scope) in [
+            ("state", "community:moderate"),
+            ("play", "community:moderate"),
+            ("pause", "community:moderate"),
+            ("next", "community:moderate"),
+            ("queue_add", "community:member"),
+        ] {
+            let at = text
+                .find(&format!("- name: music.spotify.player.{tool}\n"))
+                .unwrap();
+            let head = &text[at..at + 160];
+            assert!(
+                head.contains(&format!("required_scope: {scope}")),
+                "{f} {tool}: {head}"
+            );
+        }
+        for t in ["search", "track", "playlist.get", "resolve"] {
+            let at = text.find(&format!("- name: music.spotify.{t}\n")).unwrap();
+            let end = text[at..].find("output_schema").unwrap();
+            assert!(
+                !text[at..at + end].contains("auth"),
+                "{f} {t} exposes an auth selector"
+            );
+        }
+    }
+}

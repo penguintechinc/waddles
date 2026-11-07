@@ -51,6 +51,14 @@ pub const DEFAULT_RETRY_AFTER_S: u32 = 5;
 /// Seconds an idempotency record lives.
 pub const IDEM_TTL_S: u32 = 600;
 
+/// Scope the host-verified actor must hold for player state/play/pause/next
+/// (the connected account is the community's; control is moderator-level).
+pub const SCOPE_PLAYER: &str = "community:moderate";
+/// Scope for `player.queue_add`: a verified community member. Viewer requests
+/// are mediated and policy-checked by the DJ app (which alone holds the tool
+/// grant); this only guarantees a real, verified member actor.
+pub const SCOPE_QUEUE: &str = "community:member";
+
 /// kv key holding the community's optional config JSON.
 pub const KEY_CONFIG: &str = "config";
 /// kv key holding the 429 backoff deadline (epoch ms).
@@ -284,6 +292,16 @@ fn parse_args<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, ToolError>
     serde_json::from_value(args).map_err(|e| invalid(format!("invalid_args: {e}")))
 }
 
+/// Second authz layer (the host also enforces the manifest `required_scope`):
+/// the verified actor must hold `scope`, else `forbidden` BEFORE any host call.
+fn require_scope(ctx: &ToolContext, scope: &str) -> Result<(), ToolError> {
+    if ctx.has_scope(scope) {
+        Ok(())
+    } else {
+        Err(ToolError::Forbidden)
+    }
+}
+
 fn require_key(ctx: &ToolContext) -> Result<&str, ToolError> {
     match ctx.idempotency_key.as_deref() {
         Some(k) if !k.is_empty() => Ok(k),
@@ -400,38 +418,17 @@ pub fn track_json(item: &Value) -> Option<Value> {
     }))
 }
 
-#[derive(Deserialize, Clone, Copy, Default)]
-#[serde(rename_all = "lowercase")]
-enum AuthSel {
-    #[default]
-    App,
-    Connection,
-}
-
-impl AuthSel {
-    fn cred(self) -> Cred {
-        match self {
-            AuthSel::App => Cred::App,
-            AuthSel::Connection => Cred::User,
-        }
-    }
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SearchArgs {
     query: String,
     limit: Option<u32>,
-    #[serde(default)]
-    auth: AuthSel,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TrackArgs {
     track: String,
-    #[serde(default)]
-    auth: AuthSel,
 }
 
 #[derive(Deserialize)]
@@ -440,16 +437,12 @@ struct PlaylistArgs {
     playlist: String,
     limit: Option<u32>,
     offset: Option<u32>,
-    #[serde(default)]
-    auth: AuthSel,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResolveArgs {
     url: String,
-    #[serde(default)]
-    auth: AuthSel,
 }
 
 #[derive(Deserialize)]
@@ -710,7 +703,7 @@ impl Spotify {
             return Err(invalid("invalid_limit"));
         }
         let cfg = self.config()?;
-        let cred = a.auth.cred();
+        let cred = Cred::App;
         let material = format!("{}|{limit}|{query}", cred.tag());
         let key = format!("srch.{}", fnv_hex(&material));
         let v = self.cached(&cfg, &key, &material, || {
@@ -740,7 +733,7 @@ impl Spotify {
         let a: TrackArgs = parse_args(args)?;
         let id = track_ref(&a.track)?;
         let cfg = self.config()?;
-        let t = self.fetch_track(&cfg, a.auth.cred(), &id)?;
+        let t = self.fetch_track(&cfg, Cred::App, &id)?;
         Ok(Self::with_cap(json!({ "track": t })))
     }
 
@@ -754,7 +747,7 @@ impl Spotify {
             return Err(invalid("invalid_paging"));
         }
         let cfg = self.config()?;
-        let v = self.fetch_playlist(&cfg, a.auth.cred(), &id, limit, offset)?;
+        let v = self.fetch_playlist(&cfg, Cred::App, &id, limit, offset)?;
         Ok(Self::with_cap(v))
     }
 
@@ -763,7 +756,7 @@ impl Spotify {
         let a: ResolveArgs = parse_args(args)?;
         let (kind, id) = parse_ref(&a.url)?;
         let cfg = self.config()?;
-        let cred = a.auth.cred();
+        let cred = Cred::App;
         let mut out = match kind {
             Kind::Track => json!({ "track": self.fetch_track(&cfg, cred, &id)? }),
             Kind::Playlist => self.fetch_playlist(&cfg, cred, &id, DEFAULT_PLAYLIST_LIMIT, 0)?,
@@ -821,7 +814,8 @@ impl Spotify {
     }
 
     /// `music.spotify.player.state {}` -> playback state (`active:false` if no device).
-    pub fn player_state(&self, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    pub fn player_state(&self, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+        require_scope(ctx, SCOPE_PLAYER)?;
         let _: StateArgs = parse_args(args)?;
         let resp = self.player(
             "GET",
@@ -861,6 +855,7 @@ impl Spotify {
     /// `music.spotify.player.play {uris? | context_uri?, offset?, position_ms?, device_id?}`;
     /// no content args = resume.
     pub fn player_play(&self, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+        require_scope(ctx, SCOPE_PLAYER)?;
         let a: PlayArgs = parse_args(args)?;
         require_key(ctx)?;
         if a.uris.is_some() && a.context_uri.is_some() {
@@ -908,6 +903,7 @@ impl Spotify {
 
     /// `music.spotify.player.pause {device_id?}`.
     pub fn player_pause(&self, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+        require_scope(ctx, SCOPE_PLAYER)?;
         let a: DeviceArgs = parse_args(args)?;
         require_key(ctx)?;
         let q = Self::device_query(&a.device_id)?;
@@ -941,6 +937,7 @@ impl Spotify {
 
     /// `music.spotify.player.next {device_id?}` (deduped per idempotency key).
     pub fn player_next(&self, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+        require_scope(ctx, SCOPE_PLAYER)?;
         let a: DeviceArgs = parse_args(args)?;
         let q = Self::device_query(&a.device_id)?;
         self.once(ctx, "next", || {
@@ -951,6 +948,7 @@ impl Spotify {
 
     /// `music.spotify.player.queue_add {track, device_id?}` (deduped per idempotency key).
     pub fn player_queue_add(&self, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+        require_scope(ctx, SCOPE_QUEUE)?;
         let a: QueueArgs = parse_args(args)?;
         let id = track_ref(&a.track)?;
         let mut q = vec![("uri", format!("spotify:track:{id}"))];
@@ -1156,11 +1154,27 @@ pub mod testing {
         pub fn registry(&self) -> ToolRegistry {
             build_registry(self.svc.clone())
         }
-        /// Calls a tool through the real registry with an optional idempotency key.
+        /// Calls a tool through the real registry as a fully-scoped actor.
         pub fn call(&self, name: &str, args: Value, key: Option<&str>) -> Result<Value, ToolError> {
+            self.call_as(name, args, key, Some(&[SCOPE_PLAYER, SCOPE_QUEUE]))
+        }
+
+        /// Calls a tool with an explicit host context: `None` = no verified actor,
+        /// `Some(scopes)` = a verified actor holding exactly those scopes.
+        pub fn call_as(
+            &self,
+            name: &str,
+            args: Value,
+            key: Option<&str>,
+            scopes: Option<&[&str]>,
+        ) -> Result<Value, ToolError> {
             let mut a = args;
             if let Some(k) = key {
                 a[waddle_sdk::tool::IDEMPOTENCY_ARG] = json!(k);
+            }
+            if let Some(sc) = scopes {
+                a[waddle_sdk::tool::CTX_ARG] =
+                    json!({"actor": "11111111-1111-4111-8111-111111111111", "scopes": sc});
             }
             let out = self
                 .registry()
@@ -1308,26 +1322,135 @@ mod tests {
     }
 
     #[test]
-    fn search_cache_is_keyed_by_query_and_credential() {
+    fn search_cache_is_keyed_by_query() {
         let r = Rig::new();
         r.http
             .push(200, &json!({"tracks": {"items": [spotify_track(T1, "A")]}}));
-        r.http
-            .push(200, &json!({"tracks": {"items": [spotify_track(T2, "B")]}}));
         r.http
             .push(200, &json!({"tracks": {"items": [spotify_track(T2, "B")]}}));
         r.call("music.spotify.search", json!({"query": "x"}), None)
             .unwrap();
         r.call("music.spotify.search", json!({"query": "y"}), None)
             .unwrap();
-        r.call(
+        assert_eq!(r.http.requests().len(), 2);
+    }
+
+    #[test]
+    fn read_tools_cannot_select_the_user_credential() {
+        let r = Rig::new();
+        let p = format!("spotify:playlist:{P1}");
+        for (tool, args) in [
+            (
+                "music.spotify.search",
+                json!({"query": "x", "auth": "connection"}),
+            ),
+            (
+                "music.spotify.track",
+                json!({"track": T2_URI(), "auth": "connection"}),
+            ),
+            (
+                "music.spotify.playlist.get",
+                json!({"playlist": p, "auth": "connection"}),
+            ),
+            (
+                "music.spotify.resolve",
+                json!({"url": T2_URI(), "auth": "connection"}),
+            ),
+            ("music.spotify.search", json!({"query": "x", "auth": "app"})),
+        ] {
+            assert!(r.call(tool, args.clone(), None).is_err(), "{tool} {args}");
+        }
+        assert!(r.http.requests().is_empty());
+        // and every accepted metadata call rides the app credential only
+        r.http.push(200, &spotify_track(T2, "B"));
+        r.call("music.spotify.track", json!({"track": T2_URI()}), None)
+            .unwrap();
+        r.http.push(200, &json!({"tracks": {"items": []}}));
+        r.call_as(
             "music.spotify.search",
-            json!({"query": "x", "auth": "connection"}),
+            json!({"query": "z"}),
             None,
+            Some(&[SCOPE_PLAYER, SCOPE_QUEUE]),
         )
         .unwrap();
-        assert_eq!(r.http.requests().len(), 3);
-        assert_eq!(r.http.requests()[2].cred, Cred::User);
+        assert!(r.http.requests().iter().all(|q| q.cred == Cred::App));
+    }
+
+    #[test]
+    fn player_tools_require_scope_before_any_host_call() {
+        let tools = [
+            ("music.spotify.player.state", json!({}), SCOPE_PLAYER),
+            ("music.spotify.player.play", json!({}), SCOPE_PLAYER),
+            ("music.spotify.player.pause", json!({}), SCOPE_PLAYER),
+            ("music.spotify.player.next", json!({}), SCOPE_PLAYER),
+            (
+                "music.spotify.player.queue_add",
+                json!({"track": T2_URI()}),
+                SCOPE_QUEUE,
+            ),
+        ];
+        for (tool, args, scope) in tools {
+            let r = Rig::new();
+            // no verified actor
+            assert!(
+                matches!(
+                    r.call_as(tool, args.clone(), Some("k"), None),
+                    Err(ToolError::Forbidden)
+                ),
+                "{tool} no actor"
+            );
+            // actor without the scope (holds only an unrelated one)
+            assert!(
+                matches!(
+                    r.call_as(tool, args.clone(), Some("k"), Some(&["community:vip"])),
+                    Err(ToolError::Forbidden)
+                ),
+                "{tool} wrong scope"
+            );
+            assert!(
+                matches!(
+                    r.call_as(tool, args.clone(), Some("k"), Some(&[])),
+                    Err(ToolError::Forbidden)
+                ),
+                "{tool} empty scopes"
+            );
+            assert!(
+                r.http.requests().is_empty(),
+                "{tool}: no upstream before authz"
+            );
+            // correct scope allowed
+            r.http.push(204, &Value::Null);
+            assert!(
+                r.call_as(tool, args.clone(), Some("k"), Some(&[scope]))
+                    .is_ok(),
+                "{tool} with {scope}"
+            );
+            assert_eq!(r.http.requests().len(), 1, "{tool}");
+        }
+    }
+
+    #[test]
+    fn queue_scope_does_not_grant_player_control_and_vice_versa() {
+        let r = Rig::new();
+        assert!(matches!(
+            r.call_as(
+                "music.spotify.player.pause",
+                json!({}),
+                Some("k"),
+                Some(&[SCOPE_QUEUE])
+            ),
+            Err(ToolError::Forbidden)
+        ));
+        assert!(matches!(
+            r.call_as(
+                "music.spotify.player.queue_add",
+                json!({"track": T2_URI()}),
+                Some("k"),
+                Some(&[SCOPE_PLAYER])
+            ),
+            Err(ToolError::Forbidden)
+        ));
+        assert!(r.http.requests().is_empty());
     }
 
     #[test]
@@ -1340,7 +1463,6 @@ mod tests {
             json!({"query": "x".repeat(201)}),
             json!({"query": "x", "limit": 0}),
             json!({"query": "x", "limit": 51}),
-            json!({"query": "x", "auth": "root"}),
             json!({"query": "x", "bogus": 1}),
             json!({}),
         ] {
