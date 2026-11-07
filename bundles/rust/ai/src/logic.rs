@@ -127,13 +127,40 @@ pub trait Moderation: Send + Sync {
     fn check(&self, dir: Direction, text: &str) -> Result<(), ()>;
 }
 
-/// Case-insensitive substring blocklist (per-community kv config).
+/// `true` for default-ignorable / format code points (soft hyphen, combining
+/// grapheme joiner, Hangul fillers, Mongolian/variation selectors, bidi and
+/// invisible operators, tag characters, ...) that render as nothing and so can
+/// split a blocked term without changing how it reads.
+fn is_ignorable(c: char) -> bool {
+    is_stripped(c)
+        || matches!(c,
+            '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}'
+            | '\u{17B4}' | '\u{17B5}' | '\u{180B}'..='\u{180F}'
+            | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FFA0}' | '\u{FFF0}'..='\u{FFF8}' | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E0FFF}')
+}
+
+/// Canonical form used for every moderation match: strip ignorables, NFKC
+/// (folds fullwidth/compatibility forms), strip again (NFKC can expose more),
+/// then lowercase. Blocklist terms go through the same function.
+pub fn canonical(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let pre: String = text.chars().filter(|c| !is_ignorable(*c)).collect();
+    pre.nfkc()
+        .filter(|c| !is_ignorable(*c))
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Case/width/invisible-insensitive substring blocklist (per-community kv
+/// config). Terms must already be [`canonical`] (see [`Config::parse`]).
 pub struct Blocklist(pub Vec<String>);
 
 impl Moderation for Blocklist {
-    /// Refuses when any configured term occurs in `text`.
+    /// Refuses when any configured term occurs in the canonical form of `text`.
     fn check(&self, _dir: Direction, text: &str) -> Result<(), ()> {
-        let hay = text.to_lowercase();
+        let hay = canonical(text);
         if self.0.iter().any(|t| hay.contains(t.as_str())) {
             Err(())
         } else {
@@ -215,7 +242,7 @@ impl Config {
             .blocklist
             .unwrap_or_default()
             .into_iter()
-            .map(|t| t.trim().to_lowercase())
+            .map(|t| canonical(t.trim()))
             .collect();
         if blocklist.len() > 100 || blocklist.iter().any(|t| t.is_empty() || t.len() > 64) {
             return Err(bad());
@@ -449,7 +476,8 @@ impl AiService {
         }
         let moderation = Blocklist(cfg.blocklist.clone());
         for t in input_texts {
-            if moderation.check(Direction::Input, t).is_err() {
+            // Check the exact neutralized form that goes into the prompt.
+            if moderation.check(Direction::Input, &neutralize(t)).is_err() {
                 return Err(invalid("input_rejected"));
             }
         }
@@ -459,6 +487,13 @@ impl AiService {
             return Err(invalid("content_filtered"));
         }
         Ok(raw)
+    }
+
+    /// Moderates the exact value about to be returned to the caller.
+    fn final_check(cfg: &Config, text: &str) -> Result<(), ToolError> {
+        Blocklist(cfg.blocklist.clone())
+            .check(Direction::Output, text)
+            .map_err(|()| invalid("content_filtered"))
     }
 
     /// `ai.complete`: guarded free-text completion.
@@ -491,6 +526,7 @@ impl AiService {
         }
         let raw = self.run(&cfg, &inputs, &prompt, &opts)?;
         let text = sanitize_output(&raw, cfg.allow_links)?;
+        Self::final_check(&cfg, &text)?;
         Ok(json!({ "text": text }))
     }
 
@@ -541,6 +577,7 @@ impl AiService {
         let reason = sanitize_output(&reason, false)
             .map(|r| r.chars().take(MAX_REASON_CHARS).collect::<String>())
             .unwrap_or_default();
+        Self::final_check(&cfg, &reason)?;
         Ok(json!({ "label": label, "confidence": confidence, "reason": reason }))
     }
 
@@ -661,5 +698,7 @@ pub fn build_registry(svc: Arc<AiService>) -> ToolRegistry {
     r
 }
 
+#[cfg(test)]
+mod moderation_tests;
 #[cfg(test)]
 mod tests;
