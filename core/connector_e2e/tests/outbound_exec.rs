@@ -33,6 +33,7 @@ use svc_ingest::connector::sender_exec::discord_duties::{
 };
 use svc_ingest::connector::sender_exec::discord_slots::DiscordSlots;
 use svc_ingest::connector::sender_exec::twitch_slots::TwitchSlots;
+use svc_ingest::connector::sender_exec::youtube_duties::{QuotaLedger, WithYoutube, YoutubeDuties};
 use svc_ingest::connector::sender_exec::youtube_slots::YoutubeSlots;
 use svc_ingest::connector::sender_exec::{
     exec_count, BuildError, BuiltTemplate, ExecutorConfig, PlatformPolicy, PlatformSlotRouter,
@@ -110,6 +111,7 @@ impl DiscordCredentialSource for DcCreds {
     }
 }
 
+#[derive(Clone)]
 struct YtCreds;
 impl YoutubeCredentialSource for YtCreds {
     async fn binding(
@@ -130,6 +132,7 @@ impl YoutubeCredentialSource for YtCreds {
     }
 }
 
+#[derive(Clone)]
 struct Users;
 impl PlatformUserResolver for Users {
     async fn resolve(
@@ -180,7 +183,7 @@ type Exec = SenderExecutor<
     Rewrite,
     PlatformSlotRouter<TwitchSlots<TwCreds>, DiscordSlots<DcCreds>, YoutubeSlots<YtCreds>>,
     CachedFlagGate,
-    DiscordDuties<DcCreds, Users>,
+    WithYoutube<DiscordDuties<DcCreds, Users>, YoutubeDuties<YtCreds, Users>>,
 >;
 
 fn guard() -> GuardedClient {
@@ -298,11 +301,14 @@ async fn rig(flag: bool) -> Rig {
         DiscordSlots::with_endpoint(DcCreds, guard(), format!("{}/api/v10", dc.uri())),
         YoutubeSlots::new(YtCreds),
     );
-    let duties = DiscordDuties::with_endpoint(
-        DcCreds,
-        Users,
-        format!("{}/api/v10", dc.uri()),
-        Duration::from_secs(30),
+    let duties = WithYoutube::new(
+        DiscordDuties::with_endpoint(
+            DcCreds,
+            Users,
+            format!("{}/api/v10", dc.uri()),
+            Duration::from_secs(30),
+        ),
+        YoutubeDuties::with_endpoint(YtCreds, Users, yt.uri(), QuotaLedger::new(100_000)),
     );
     let exec = Arc::new(SenderExecutor::with_duties(
         builder,
@@ -1117,5 +1123,223 @@ async fn twitch_moderation_ops_reach_helix_with_host_filled_ids_and_refuse_bundl
         all.iter().all(|r| !r.url.as_str().contains("666")),
         "no request ever names a bundle-supplied id"
     );
+    stop(tx, h).await;
+}
+
+/// A producer-stamped queue entry for an op naming a resource id (`message_id`, signed).
+fn entry_with_message(
+    platform: &str,
+    op: &str,
+    channel: &str,
+    text: &str,
+    user_id: &str,
+    message_id: &str,
+) -> String {
+    let op_id = format!(
+        "e2e-{}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst),
+        now_ms()
+    );
+    let exp_ms = now_ms() + 60_000;
+    let sig = pin()
+        .sign(&PinFields {
+            platform,
+            op,
+            channel,
+            origin_channel: channel,
+            message_id,
+            text,
+            user_id,
+            op_id: &op_id,
+            exp_ms,
+            community_id: COMMUNITY,
+            tenant_id: TENANT,
+        })
+        .unwrap();
+    let mut v = json!({
+        "v": 1, "op": op, "platform": platform, "origin_channel": channel, "channel": channel,
+        "op_id": op_id, "exp_ms": exp_ms, "community_id": COMMUNITY, "tenant_id": TENANT,
+        "pin_sig": sig,
+    });
+    for (k, val) in [
+        ("text", text),
+        ("user_id", user_id),
+        ("message_id", message_id),
+    ] {
+        if !val.is_empty() {
+            v[k] = json!(val);
+        }
+    }
+    v.to_string()
+}
+
+/// Pushes `raw` on the YouTube queue and returns the drain's ack.
+async fn push_ack(raw: &str) -> serde_json::Value {
+    let op_id = op_id_of(raw);
+    push(YOUTUBE_OUTBOUND_QUEUE_KEY, raw).await;
+    ack_for(&op_id).await
+}
+
+/// YouTube live-chat moderation end to end through the REAL compiled connector: queue -> drain ->
+/// executor (REAL wasm `build-request`) -> verifier -> host duties (ownership proof, target
+/// detokenization, quota) -> `GuardedClient` -> wire. Asserts the exact requests at the fake
+/// YouTube, that a foreign id never reaches the wire, and that the target is the host's value.
+#[tokio::test(flavor = "multi_thread")]
+async fn youtube_moderation_flows_through_the_real_connector_with_host_enforced_ownership() {
+    let rig = rig(true).await;
+    Mock::given(method("GET"))
+        .and(path("/youtube/v3/liveChat/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"items": [{"id": "LCC.own1"}, {"id": "LCC.own2"}]})),
+        )
+        .mount(&rig.yt)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/youtube/v3/liveChat/moderators"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"items": [{"id": "modPre"}]})),
+        )
+        .mount(&rig.yt)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/youtube/v3/liveChat/bans"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "banNew1"})))
+        .mount(&rig.yt)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/youtube/v3/liveChat/moderators"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "modNew1"})))
+        .mount(&rig.yt)
+        .await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&rig.yt)
+        .await;
+    let (tx, h) = drain(&rig, "youtube");
+    let user = format!("{{user:{USER_UUID}}}");
+    let mut examined = 0;
+
+    // delete: an id the pinned chat owns is proven by host lookup, then deleted.
+    let ack = push_ack(&entry_with_message(
+        "youtube",
+        "chat.delete",
+        "lc1",
+        "",
+        "",
+        "LCC.own1",
+    ))
+    .await;
+    assert_eq!(ack["ok"], true, "{ack}");
+    let dels = wait_for(&rig.yt, "DELETE", 1).await;
+    assert_eq!(dels[0].url.path(), "/youtube/v3/liveChat/messages");
+    assert_eq!(dels[0].url.query(), Some("id=LCC.own1"));
+    assert_eq!(
+        header(&dels[0], "authorization"),
+        format!("Bearer {YT_TOKEN}")
+    );
+    examined += 1;
+
+    // delete: a foreign id is refused host-side; nothing more is deleted.
+    let ack = push_ack(&entry_with_message(
+        "youtube",
+        "chat.delete",
+        "lc1",
+        "",
+        "",
+        "LCC.foreign",
+    ))
+    .await;
+    assert_eq!(ack["ok"], false, "{ack}");
+    examined += 1;
+
+    // ban (temporary): the target is the host's detokenized value, the chat the pinned one.
+    let ack = push_ack(&entry_with_message(
+        "youtube", "mod.ban", "lc1", "600", &user, "",
+    ))
+    .await;
+    assert_eq!(ack["ok"], true, "{ack}");
+    let posts = wait_for(&rig.yt, "POST", 1).await;
+    let ban = posts
+        .iter()
+        .find(|r| r.url.path() == "/youtube/v3/liveChat/bans")
+        .expect("ban request");
+    let body: serde_json::Value = serde_json::from_slice(&ban.body).unwrap();
+    assert_eq!(body["snippet"]["liveChatId"], "lc1");
+    assert_eq!(body["snippet"]["type"], "temporary");
+    assert_eq!(body["snippet"]["banDurationSeconds"], 600);
+    assert_eq!(body["snippet"]["bannedUserDetails"]["channelId"], USER_RAW);
+    assert!(!String::from_utf8_lossy(&ban.body).contains(USER_UUID));
+    examined += 1;
+
+    // unban: the ban id the host created is provable; a foreign ban id is not.
+    let ack = push_ack(&entry_with_message(
+        "youtube",
+        "mod.unban",
+        "lc1",
+        "",
+        "",
+        "banNew1",
+    ))
+    .await;
+    assert_eq!(ack["ok"], true, "{ack}");
+    let ack = push_ack(&entry_with_message(
+        "youtube",
+        "mod.unban",
+        "lc1",
+        "",
+        "",
+        "banForeign",
+    ))
+    .await;
+    assert_eq!(ack["ok"], false, "{ack}");
+    examined += 2;
+
+    // moderators: add (host-created id), remove it, remove a listed one, refuse a foreign one.
+    let ack = push_ack(&entry_with_message(
+        "youtube", "mod.add", "lc1", "", &user, "",
+    ))
+    .await;
+    assert_eq!(ack["ok"], true, "{ack}");
+    for (id, ok) in [("modNew1", true), ("modPre", true), ("modForeign", false)] {
+        let ack = push_ack(&entry_with_message(
+            "youtube",
+            "mod.remove",
+            "lc1",
+            "",
+            "",
+            id,
+        ))
+        .await;
+        assert_eq!(ack["ok"], ok, "{id}: {ack}");
+    }
+    examined += 4;
+
+    // a raw channel id is never a target.
+    let ack = push_ack(&entry_with_message(
+        "youtube",
+        "mod.add",
+        "lc1",
+        "",
+        "UCrawChannelId",
+        "",
+    ))
+    .await;
+    assert_eq!(ack["ok"], false, "{ack}");
+    examined += 1;
+
+    let all = rig.yt.received_requests().await.unwrap();
+    let deleted: Vec<String> = all
+        .iter()
+        .filter(|r| r.method.as_str() == "DELETE")
+        .map(|r| r.url.query().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        deleted,
+        ["id=LCC.own1", "id=banNew1", "id=modNew1", "id=modPre"],
+        "only owned ids may reach YouTube"
+    );
+    assert_eq!(examined, 10, "denominator: ops exercised");
     stop(tx, h).await;
 }

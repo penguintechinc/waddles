@@ -99,7 +99,12 @@ impl TemplateBuilder for Tpl {
 
 struct Rig {
     server: MockServer,
-    exec: SenderExecutor<Tpl, YoutubeSlots<Creds>, Flag, NoDuties>,
+    exec: SenderExecutor<
+        Tpl,
+        YoutubeSlots<Creds>,
+        Flag,
+        super::youtube_duties::YoutubeDuties<Creds, super::discord_duties::NoUserResolver>,
+    >,
     creds: Creds,
 }
 
@@ -127,12 +132,19 @@ async fn rig_with(creds: Creds, edit: impl FnOnce(&mut RequestTpl)) -> Rig {
             },
             vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
         );
-    let exec = SenderExecutor::new(
+    let duties = super::youtube_duties::YoutubeDuties::with_endpoint(
+        creds.clone(),
+        super::discord_duties::NoUserResolver,
+        server.uri(),
+        super::youtube_duties::QuotaLedger::new(1_000_000),
+    );
+    let exec = SenderExecutor::with_duties(
         Tpl {
             tpl: Arc::new(Mutex::new(t)),
         },
         YoutubeSlots::new(creds.clone()),
         Flag(true),
+        duties,
         cfg,
     );
     Rig {

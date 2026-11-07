@@ -32,17 +32,44 @@ app bundles --> tool-provider.call (poll_plan, classify_error, discovery_*, buil
    `snippet.liveChatId`. `video_id` is **null** here (it is host discovery state, not in the response).
 2. A receiver-raw event dict (`{text, live_chat_id, author_id, ...}`) -- the Python/corpus contract.
 
-## Tools (all read-only template/classification helpers; none performs I/O)
+## Guest tools (read-only template/classification helpers; none performs I/O)
 
 `discovery_request{step}`, `discovery_parse`, `poll_request{max_results?}`, `poll_plan`, `classify_error`,
 `build_send_chat_request{target_source_id, payload{text}}`. Request tools take no ids (slots, above).
 
 ## Sender (Part B)
 
-`build-request` supports `chat.send` -> `POST liveChat/messages?part=snippet`. `target-source-id` is validated but not
-embedded: the destination is the host-pinned `{{YT_LIVE_CHAT_ID}}` slot and the payload can supply ONLY `text`
-(<=200 chars), so an app cannot retarget a message; credential slot as above. Real execution needs T6d (generic host outbound); the
-executor `ConnectorHost` does not export `sender` yet, so the template is proven at the component level only.
+`build-request` supports `chat.send` -> `POST liveChat/messages?part=snippet` and the moderation kinds below.
+`target-source-id` is validated but not embedded: the destination is the host-pinned `{{YT_LIVE_CHAT_ID}}` slot and the
+payload can supply ONLY `text` (<=200 chars), so an app cannot retarget a message; credential slot as above.
+
+| kind | request | payload keys (host-supplied) |
+|---|---|---|
+| `chat.delete` | `DELETE liveChat/messages?id=` | `message_id` |
+| `mod.ban` | `POST liveChat/bans?part=snippet` (`permanent`, or `temporary` + `banDurationSeconds`) | `user_id` (UUID), `text` = seconds (1..=1209600) |
+| `mod.unban` | `DELETE liveChat/bans?id=` | `message_id` = the ban id |
+| `mod.add` | `POST liveChat/moderators?part=snippet` | `user_id` (UUID) |
+| `mod.remove` | `DELETE liveChat/moderators?id=` | `message_id` = the moderator id |
+
+The live chat is always `{{YT_LIVE_CHAT_ID}}`; the target channel is `{{YT_TARGET_USER}}` (the UUID, detokenized
+host-side for the entry's community -- the connector never embeds it and refuses a raw channel id). Before egress
+the HOST (`core/svc_ingest/.../sender_exec/youtube_duties.rs`) proves a delete id belongs to the pinned chat
+(host-created ids, else a `liveChatMessages.list` / `liveChatModerators.list` lookup of that chat; ban ids must be
+host-created because the API has no list) and charges the per-community daily Data API quota
+(`YOUTUBE_COMMUNITY_DAILY_QUOTA_UNITS`, default 5000; chat.send/delete 20, ban/unban/moderator 50, list 5);
+an exhausted budget is the explicit `quota_exhausted` refusal.
+
+## Host-executed tools (`youtube.chat.*`)
+
+Declared in `exported_tools` (`access: write`, `risk: dangerous`) and served by `svc_action`
+(`capabilities/youtube_tools.rs`), not by the guest: `youtube.chat.delete_message{message_id}`,
+`youtube.chat.ban{user, duration_seconds?}`, `youtube.chat.unban{ban_id}`, `youtube.chat.add_moderator{user}`,
+`youtube.chat.remove_moderator{moderator_id}`. Chat and credential are never arguments (extra keys are refused);
+the call acts in the origin chat of the triggering YouTube event. `ban`/`add_moderator` return the created
+resource `id` for later `unban`/`remove_moderator`. Authorization: the planner's approved `tool.call` grant +
+write key (dangerous tools need admin approval -- that grant is the caller's moderation permission), the origin
+pin, the drain's ownership/quota duties, and a per-community daily op cap (`quota_exhausted`). No
+`required_scope`: the action stage has no verified-actor resolution and refuses every scope-restricted tool.
 
 ## Host config (slots the host must pin and substitute)
 

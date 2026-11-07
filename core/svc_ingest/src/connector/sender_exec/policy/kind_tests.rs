@@ -478,13 +478,13 @@ fn youtube_moderation_inserts_take_only_a_snippet_with_the_host_chat_id() {
             "mod.ban",
             "bans",
             serde_json::json!({"liveChatId": "{{YT_LIVE_CHAT_ID}}", "type": "permanent",
-                "bannedUserDetails": {"channelId": "UCabc"}}),
+                "bannedUserDetails": {"channelId": "{{YT_TARGET_USER}}"}}),
         ),
         (
             "mod.add",
             "moderators",
             serde_json::json!({"liveChatId": "{{YT_LIVE_CHAT_ID}}",
-                "moderatorDetails": {"channelId": "UCabc"}}),
+                "moderatorDetails": {"channelId": "{{YT_TARGET_USER}}"}}),
         ),
     ] {
         let url = format!("https://www.googleapis.com/youtube/v3/liveChat/{resource}?part=snippet");
@@ -511,6 +511,33 @@ fn youtube_moderation_inserts_take_only_a_snippet_with_the_host_chat_id() {
         // A literal live chat id is a body string that is not a declared slot position
         // match for the host id; the slot must be used for the chat id.
         assert!(p.kind(kind).unwrap().requires_pin, "{kind}");
+        // A literal target channel id is refused: the target is the host's detokenized slot.
+        let mut lit = snippet.clone();
+        let key = if kind == "mod.ban" {
+            "bannedUserDetails"
+        } else {
+            "moderatorDetails"
+        };
+        lit[key]["channelId"] = serde_json::json!("UCabc");
+        let lit = tpl(
+            "POST",
+            &url,
+            &YT_HDRS,
+            Some(serde_json::json!({ "snippet": lit })),
+            &YT_REFS,
+        );
+        assert!(check(&p, kind, &lit).is_err(), "{kind} literal target");
+        // A literal live chat id (another chat) is refused too.
+        let mut other = snippet.clone();
+        other["liveChatId"] = serde_json::json!("OtherChat123");
+        let other = tpl(
+            "POST",
+            &url,
+            &YT_HDRS,
+            Some(serde_json::json!({ "snippet": other })),
+            &YT_REFS,
+        );
+        assert!(check(&p, kind, &other).is_err(), "{kind} literal chat id");
     }
 }
 

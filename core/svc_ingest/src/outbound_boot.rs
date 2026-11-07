@@ -26,6 +26,7 @@ use crate::connector::host_api_listener::{self, HostApiTls};
 use crate::connector::sender_exec::discord_duties::DiscordDuties;
 use crate::connector::sender_exec::discord_slots::DiscordSlots;
 use crate::connector::sender_exec::twitch_slots::TwitchSlots;
+use crate::connector::sender_exec::youtube_duties::{self, WithYoutube, YoutubeDuties};
 use crate::connector::sender_exec::youtube_slots::YoutubeSlots;
 use crate::connector::sender_exec::{
     ExecutorConfig, FlagGate, PlatformSlotRouter, SenderExecutor, WireTemplateBuilder,
@@ -290,9 +291,24 @@ pub type ProdSlots = PlatformSlotRouter<
     YoutubeSlots<ResolverYoutubeCredentials<Resolver>>,
 >;
 /// The production Discord host duties.
-pub type ProdDuties = DiscordDuties<ResolverDiscordCredentials<Resolver>, HubPlatformUserResolver>;
+pub type ProdDuties = WithYoutube<
+    DiscordDuties<ResolverDiscordCredentials<Resolver>, Arc<HubPlatformUserResolver>>,
+    YoutubeDuties<ResolverYoutubeCredentials<Resolver>, Arc<HubPlatformUserResolver>>,
+>;
 /// The production executor.
 pub type ProdExecutor = SenderExecutor<WireTemplateBuilder, ProdSlots, CachedFlagGate, ProdDuties>;
+
+/// Per-community daily YouTube quota budget (units) from `YOUTUBE_COMMUNITY_DAILY_QUOTA_UNITS`;
+/// an unset variable uses the default, a malformed one is logged and the default is used.
+fn youtube_daily_budget() -> u32 {
+    match std::env::var("YOUTUBE_COMMUNITY_DAILY_QUOTA_UNITS") {
+        Ok(v) => v.trim().parse().unwrap_or_else(|_| {
+            tracing::warn!("YOUTUBE_COMMUNITY_DAILY_QUOTA_UNITS is not an integer; using default");
+            youtube_duties::DEFAULT_DAILY_BUDGET_UNITS
+        }),
+        Err(_) => youtube_duties::DEFAULT_DAILY_BUDGET_UNITS,
+    }
+}
 
 fn resolver(cli: &CliConfig) -> anyhow::Result<Resolver> {
     connection_resolver::ConnectionResolver::new(
@@ -399,7 +415,18 @@ pub fn build_with_link(
         DiscordSlots::new(ResolverDiscordCredentials::new(resolver(cli)?)),
         YoutubeSlots::new(ResolverYoutubeCredentials::new(resolver(cli)?)),
     );
-    let duties = DiscordDuties::new(ResolverDiscordCredentials::new(resolver(cli)?), users);
+    let users = Arc::new(users);
+    let duties = WithYoutube::new(
+        DiscordDuties::new(
+            ResolverDiscordCredentials::new(resolver(cli)?),
+            Arc::clone(&users),
+        ),
+        YoutubeDuties::new(
+            ResolverYoutubeCredentials::new(resolver(cli)?),
+            users,
+            youtube_daily_budget(),
+        ),
+    );
     let exec_cfg = ExecutorConfig::production(cfg.digests.clone())
         .map_err(|e| anyhow::anyhow!("executor config: {e}"))?;
     let executor =

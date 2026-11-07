@@ -236,6 +236,8 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .expect("register svc_ingest_outbound_credential_resolve_total");
     crate::connector::sender_exec::register_metrics(registry)
         .expect("register svc_ingest_sender_exec_total / _seconds");
+    crate::connector::sender_exec::youtube_duties::register_metrics(registry)
+        .expect("register svc_ingest_youtube_duty_refused_total / _quota_units_total");
     crate::outbound_boot::register_metrics(registry).expect("register svc_ingest_outbound_path");
 
     let eventsub_verifications_total = prometheus::IntCounterVec::new(

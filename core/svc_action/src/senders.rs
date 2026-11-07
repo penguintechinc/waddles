@@ -16,7 +16,8 @@
 //! are queued to svc-ingest's bot-token REST sender
 //! (`svc_ingest::outbound::run_discord`) -- accepted only while that drain
 //! advertises readiness, and reported successful only once it confirms the
-//! op (`StageCapabilities::handle_discord_queued_op`). Slack/YouTube/Kick
+//! op (`StageCapabilities::handle_discord_queued_op`). YouTube (live-chat send and
+//! moderation) is Implemented via the generic confirmed queue. Slack/Kick
 //! remain a documented `TODO(M3+)` seam -- rather than reimplement connector logic
 //! here, this module leaves an explicit seam per remaining platform naming
 //! the `penguin-connectors` crate that owns it, per the M3 task's own
@@ -92,10 +93,11 @@ pub fn sender_status(platform: Platform) -> SenderStatus {
             reason: "TODO(M3+): slack sender -- pending the http host capability \
                      (crate::capabilities) and penguin-connectors' Slack scaffold",
         },
-        Platform::Youtube => SenderStatus::PendingSeam {
-            reason: "TODO(M3+): youtube sender -- pending the http host capability \
-                     (crate::capabilities) and penguin-connectors' YouTube scaffold",
-        },
+        // Live-chat send + moderation (delete/ban/unban/moderators) run through the generic
+        // confirmed queue (`StageCapabilities::handle_platform_queued_op`) to svc-ingest's
+        // executor, where the YouTube bundle shapes the request and the host owns the
+        // credential, pinned chat, ownership proof, target detokenization and quota.
+        Platform::Youtube => SenderStatus::Implemented,
         Platform::Kick => SenderStatus::PendingSeam {
             reason: "TODO(M3+): kick sender -- pending the http host capability \
                      (crate::capabilities) and penguin-connectors' Kick scaffold",
@@ -214,10 +216,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn twitch_and_discord_are_implemented_every_other_platform_is_a_seam() {
+    fn twitch_discord_and_youtube_are_implemented_every_other_platform_is_a_seam() {
         assert_eq!(sender_status(Platform::Twitch), SenderStatus::Implemented);
         assert_eq!(sender_status(Platform::Discord), SenderStatus::Implemented);
-        for platform in [Platform::Slack, Platform::Youtube, Platform::Kick] {
+        assert_eq!(sender_status(Platform::Youtube), SenderStatus::Implemented);
+        for platform in [Platform::Slack, Platform::Kick] {
             assert!(matches!(
                 sender_status(platform),
                 SenderStatus::PendingSeam { .. }

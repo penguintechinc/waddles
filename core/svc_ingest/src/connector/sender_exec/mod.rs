@@ -39,6 +39,7 @@ pub mod subst;
 pub mod twitch_slots;
 pub mod verify;
 pub mod wire_builder;
+pub mod youtube_duties;
 pub mod youtube_slots;
 
 use std::collections::{BTreeMap, HashMap};
@@ -272,6 +273,10 @@ pub trait DutyHook: Send + Sync {
     async fn role_bulk(&self, _cx: &DutyCx<'_>) -> Result<RoleBulkPlan, ExecError> {
         Err(ExecError::HostDutyMissing)
     }
+
+    /// Runs after a duty kind's request succeeded (2xx), with the outcome -- lets a hook
+    /// remember host-created resource ids. Never fails the op; the default does nothing.
+    async fn after_send(&self, _cx: &DutyCx<'_>, _outcome: &ExecOutcome) {}
 
     /// Value for a [`SlotOrigin::Duty`] slot (e.g. the DM channel id from
     /// the reply to the host's own `POST /users/@me/channels`).
@@ -882,7 +887,11 @@ where
         let prepared =
             subst::render(policy, &verified, &values, &creds).map_err(ExecError::Subst)?;
         drop((values, creds));
-        self.send(prepared, kind.result).await
+        let outcome = self.send(prepared, kind.result).await?;
+        if kind.needs_duty {
+            self.duties.after_send(&cx, &outcome).await;
+        }
+        Ok(outcome)
     }
 
     /// The ONLY egress call in the executor: the SSRF-guarded client.
@@ -1039,7 +1048,10 @@ pub(crate) fn role_guild_scope(origin: &str) -> Option<Option<&str>> {
 /// The connector payload for a plain (non-duty) kind: ONLY the text / message
 /// id from the verified queue entry -- never a channel, guild, user or
 /// credential field (connectors reject those outright).
-fn default_payload(kind: &KindPolicy, action: &OutboundAction) -> Result<String, ExecError> {
+pub(crate) fn default_payload(
+    kind: &KindPolicy,
+    action: &OutboundAction,
+) -> Result<String, ExecError> {
     let v = match action {
         OutboundAction::ChatSend { text, .. } => {
             serde_json::json!({ kind.text_key: text })

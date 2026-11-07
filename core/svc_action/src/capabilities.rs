@@ -69,6 +69,7 @@ mod host_tools;
 pub use event_sync::{run_event_sync_consumer, EVENT_SYNC_REQUEST_QUEUE, EVENT_SYNC_RESULT_PREFIX};
 mod tool;
 pub use tool::ToolWiring;
+mod youtube_tools;
 
 /// A raw platform account id held host-side. A newtype so the id can never reach a log line or
 /// metric label through a derived `Debug` of the scope that carries it.
