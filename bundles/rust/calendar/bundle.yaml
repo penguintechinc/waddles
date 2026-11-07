@@ -35,10 +35,9 @@ stages:
     spec:
       required_config: []
 egress: []
-# Storage decision: community kv, NOT `data.tables`. The host db capability is ONE table per
-# bundle with insert/get/query(limit, offset, order)/update/delete and no filter, so the spec's
-# events/rsvps/event_sync relational design (upcoming, approval queue, per-event RSVPs) cannot
-# be expressed without full scans. See README "Storage".
+# Storage decision: community kv, NOT `data.tables`. `data.tables` is supported, but the guest db
+# import is one table per bundle with an unfiltered query (no WHERE, so declared indexes are
+# unusable) and no transaction: the spec's relational design cannot be expressed. See README "Storage".
 data:
   tables: []
 limits:

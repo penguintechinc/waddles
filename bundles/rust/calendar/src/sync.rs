@@ -291,11 +291,7 @@ pub fn enqueue(ctx: &Ctx, cfg: &Config, ev: &Event, op: SyncOp) -> Result<(), Ca
         any = true;
     }
     if any {
-        let mut q = store::pending(ctx.kv)?;
-        if !q.contains(&ev.id) {
-            q.push(ev.id);
-            store::set_pending(ctx.kv, &q)?;
-        }
+        store::pending_add(ctx.kv, ev.id)?;
     }
     Ok(())
 }
@@ -599,16 +595,11 @@ fn refresh_queue(ctx: &Ctx, id: u64) -> Result<(), CalError> {
             owed = true;
         }
     }
-    let mut q = store::pending(ctx.kv)?;
-    let present = q.contains(&id);
-    if owed && !present {
-        q.push(id);
-        store::set_pending(ctx.kv, &q)?;
-    } else if !owed && present {
-        q.retain(|x| *x != id);
-        store::set_pending(ctx.kv, &q)?;
+    if owed {
+        store::pending_add(ctx.kv, id)
+    } else {
+        store::pending_remove(ctx.kv, id)
     }
-    Ok(())
 }
 
 /// Reconcile pass: a bounded batch of events that still owe sync work. Called after every event
@@ -618,11 +609,7 @@ pub fn reconcile(ctx: &Ctx, cfg: &Config, limit: usize) -> Result<Vec<RunOutcome
     for id in store::pending(ctx.kv)?.into_iter().take(limit) {
         match store::event(ctx.kv, id)? {
             Some(ev) => out.extend(flush_event(ctx, cfg, &ev)?),
-            None => {
-                let mut q = store::pending(ctx.kv)?;
-                q.retain(|x| *x != id);
-                store::set_pending(ctx.kv, &q)?;
-            }
+            None => store::pending_remove(ctx.kv, id)?,
         }
     }
     Ok(out)

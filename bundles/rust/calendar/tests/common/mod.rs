@@ -25,7 +25,7 @@ impl Kv for MemKv {
         assert!(!key.contains(':'), "kv key must not contain ':' -> {key}");
         Ok(self.0.borrow().get(key).cloned())
     }
-    fn set(&self, key: &str, value: &[u8]) -> Result<(), CalError> {
+    fn set(&self, key: &str, value: &[u8], _ttl_seconds: u32) -> Result<(), CalError> {
         assert!(!key.contains(':'), "kv key must not contain ':' -> {key}");
         self.0.borrow_mut().insert(key.to_string(), value.to_vec());
         Ok(())

@@ -1,23 +1,36 @@
 //! Typed persistence over the community kv. Keys use `.` only (no `:`, bundle kv rule).
 //!
 //! Layout (all community-scoped by the host):
-//! `cal.seq` id counter | `cal.index` live ids | `cal.ev.<id>` event | `cal.rsvp.<id>` RSVP map |
+//! `cal.seq` id counter | `cal.index` live ids | `cal.ev.<id>` event |
+//! `cal.rsvp.<id>.<uuid>` one RSVP per (event, user) | `cal.rsvpc.<id>.<answer>` atomic answer
+//! counters | `cal.rsvpn.<id>` atomic voter count | `cal.rsvpt` atomic total voter keys |
 //! `cal.sync.<id>.<target>` mapping | `cal.pendq` ids owing a sync op | `cal.idem.<hash>` applied
-//! idempotency keys.
+//! idempotency keys (30-day TTL).
 //!
-//! kv has no list/CAS, so index and RSVP updates are read-modify-write; a concurrent writer in
-//! one community can lose an update (documented in the README, not hidden). Corrupt stored state
-//! is a loud `Storage` error, never a silent default.
-
-use std::collections::BTreeMap;
+//! Concurrency, precisely: the host kv offers get/set/delete/increment only -- no compare-and-
+//! swap, no multi-key transaction, no key listing, and the db import has no filtered query. So:
+//! RSVPs use one key per (event, user) plus atomic `increment` counters (no shared read-modify-
+//! write, safe under concurrent RSVPs); event records commit through a version check
+//! (`put_event_cas`, loses nothing silently: a concurrent change is a loud `Conflict`, with a
+//! microsecond window between the check and the write that only host CAS can close); the shared
+//! index/queue lists use read-back verified updates with bounded retry. Corrupt stored state is
+//! a loud `Storage` error, never a silent default.
 
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::host::{CalError, Kv};
 use crate::model::{Config, Event, Rsvp, SyncRecord, Target};
 
-pub const MAX_EVENTS: usize = 400;
+/// Events kept per community. Bounded by the host's 64 kv ops per invocation: a list reads the
+/// index plus every event once.
+pub const MAX_EVENTS: usize = 40;
 pub const MAX_RSVPS: usize = 500;
+/// Budget of per-user RSVP keys per community (host cap is 10k keys per app, shared with
+/// events, mappings and idempotency keys). Orphaned voter keys of purged events are not
+/// enumerable and are not reclaimed; new voters are refused loudly at this budget.
+pub const MAX_TOTAL_RSVP_KEYS: i64 = 6000;
+const IDEM_TTL_SECONDS: u32 = 30 * 86_400;
+const LIST_RETRIES: usize = 4;
 const SEQ: &str = "cal.seq";
 const INDEX: &str = "cal.index";
 const PENDQ: &str = "cal.pendq";
@@ -33,7 +46,7 @@ fn load<T: DeserializeOwned>(kv: &dyn Kv, key: &str) -> Result<Option<T>, CalErr
 
 fn save<T: Serialize>(kv: &dyn Kv, key: &str, v: &T) -> Result<(), CalError> {
     let raw = serde_json::to_vec(v).map_err(|e| CalError::Storage(e.to_string()))?;
-    kv.set(key, &raw)
+    kv.set(key, &raw, 0)
 }
 
 /// Allocates the next community-local event id.
@@ -47,9 +60,37 @@ pub fn index(kv: &dyn Kv) -> Result<Vec<u64>, CalError> {
     Ok(load::<Vec<u64>>(kv, INDEX)?.unwrap_or_default())
 }
 
-/// Persists the id index.
-pub fn set_index(kv: &dyn Kv, ids: &[u64]) -> Result<(), CalError> {
-    save(kv, INDEX, &ids)
+/// Adds/removes one id in a shared list with a read-back check: after writing, the list is
+/// re-read and the change re-applied if a concurrent writer overwrote it (bounded retries; a
+/// persistent loss is a loud `Conflict`).
+fn update_list(kv: &dyn Kv, key: &str, id: u64, add: bool) -> Result<(), CalError> {
+    for _ in 0..LIST_RETRIES {
+        let mut v = load::<Vec<u64>>(kv, key)?.unwrap_or_default();
+        let has = v.contains(&id);
+        if has != add {
+            if add {
+                v.push(id);
+            } else {
+                v.retain(|x| *x != id);
+            }
+            save(kv, key, &v)?;
+        }
+        let check = load::<Vec<u64>>(kv, key)?.unwrap_or_default();
+        if check.contains(&id) == add {
+            return Ok(());
+        }
+    }
+    Err(CalError::Conflict("calendar is busy, try again".into()))
+}
+
+/// Adds an event id to the index (verified).
+pub fn index_add(kv: &dyn Kv, id: u64) -> Result<(), CalError> {
+    update_list(kv, INDEX, id, true)
+}
+
+/// Removes an event id from the index (verified).
+pub fn index_remove(kv: &dyn Kv, id: u64) -> Result<(), CalError> {
+    update_list(kv, INDEX, id, false)
 }
 
 /// Loads one event.
@@ -57,29 +98,86 @@ pub fn event(kv: &dyn Kv, id: u64) -> Result<Option<Event>, CalError> {
     load(kv, &format!("cal.ev.{id}"))
 }
 
-/// Writes one event record (does not touch the index).
+/// Writes a NEW event record (does not touch the index).
 pub fn put_event(kv: &dyn Kv, e: &Event) -> Result<(), CalError> {
     save(kv, &format!("cal.ev.{}", e.id), e)
+}
+
+/// Commits a mutated event: `e.version` must be exactly one above the stored version. A
+/// concurrent mutation (stored version moved) is a loud `Conflict`, never a silent overwrite.
+pub fn put_event_cas(kv: &dyn Kv, e: &Event) -> Result<(), CalError> {
+    let stored = event(kv, e.id)?.ok_or(CalError::NotFound)?;
+    if stored.version + 1 != e.version {
+        return Err(CalError::Conflict(
+            "the event was changed by someone else; please retry".into(),
+        ));
+    }
+    put_event(kv, e)
 }
 
 /// Removes an event, its RSVPs and sync mappings (index handled by the caller).
 pub fn purge_event(kv: &dyn Kv, id: u64) -> Result<(), CalError> {
     kv.delete(&format!("cal.ev.{id}"))?;
-    kv.delete(&format!("cal.rsvp.{id}"))?;
+    kv.delete(&format!("cal.rsvpn.{id}"))?;
+    for r in [Rsvp::Yes, Rsvp::No, Rsvp::Maybe] {
+        kv.delete(&format!("cal.rsvpc.{id}.{}", r.label()))?;
+    }
     for t in Target::ALL {
         kv.delete(&sync_key(id, t))?;
     }
     Ok(())
 }
 
-/// RSVP map keyed by user UUID (never a username).
-pub fn rsvps(kv: &dyn Kv, id: u64) -> Result<BTreeMap<String, Rsvp>, CalError> {
-    Ok(load(kv, &format!("cal.rsvp.{id}"))?.unwrap_or_default())
+fn rsvp_key(id: u64, uid: &str) -> String {
+    format!("cal.rsvp.{id}.{uid}")
 }
 
-/// Persists the RSVP map.
-pub fn put_rsvps(kv: &dyn Kv, id: u64, m: &BTreeMap<String, Rsvp>) -> Result<(), CalError> {
-    save(kv, &format!("cal.rsvp.{id}"), m)
+fn read_counter(kv: &dyn Kv, key: &str) -> Result<u64, CalError> {
+    match kv.get(key)? {
+        None => Ok(0),
+        Some(raw) => std::str::from_utf8(&raw)
+            .ok()
+            .and_then(|t| t.parse::<i64>().ok())
+            .map(|n| u64::try_from(n).unwrap_or(0))
+            .ok_or_else(|| CalError::Storage(format!("corrupt counter at {key}"))),
+    }
+}
+
+/// The caller's own RSVP for an event, if any.
+pub fn rsvp_get(kv: &dyn Kv, id: u64, uid: &str) -> Result<Option<Rsvp>, CalError> {
+    load(kv, &rsvp_key(id, uid))
+}
+
+/// Records one user's RSVP without any shared read-modify-write: a per-(event, user) key plus
+/// atomic counters, so concurrent RSVPs from different users can never lose each other.
+pub fn rsvp_set(kv: &dyn Kv, id: u64, uid: &str, answer: Rsvp) -> Result<(), CalError> {
+    let prev = rsvp_get(kv, id, uid)?;
+    if prev == Some(answer) {
+        return Ok(());
+    }
+    if prev.is_none() {
+        let n = kv.increment(&format!("cal.rsvpn.{id}"), 1)?;
+        let total = kv.increment("cal.rsvpt", 1)?;
+        if n > i64::try_from(MAX_RSVPS).unwrap_or(i64::MAX) || total > MAX_TOTAL_RSVP_KEYS {
+            kv.increment(&format!("cal.rsvpn.{id}"), -1)?;
+            kv.increment("cal.rsvpt", -1)?;
+            return Err(CalError::Conflict(format!(
+                "RSVPs are full (max {MAX_RSVPS} per event)"
+            )));
+        }
+    }
+    save(kv, &rsvp_key(id, uid), &answer)?;
+    if let Some(p) = prev {
+        kv.increment(&format!("cal.rsvpc.{id}.{}", p.label()), -1)?;
+    }
+    kv.increment(&format!("cal.rsvpc.{id}.{}", answer.label()), 1)?;
+    Ok(())
+}
+
+/// RSVP counts (yes, no, maybe) for an event, read from the atomic counters.
+pub fn rsvp_counts(kv: &dyn Kv, id: u64) -> Result<(u64, u64, u64), CalError> {
+    let c = |r: Rsvp| read_counter(kv, &format!("cal.rsvpc.{id}.{}", r.label()));
+    Ok((c(Rsvp::Yes)?, c(Rsvp::No)?, c(Rsvp::Maybe)?))
 }
 
 fn sync_key(id: u64, t: Target) -> String {
@@ -101,9 +199,14 @@ pub fn pending(kv: &dyn Kv) -> Result<Vec<u64>, CalError> {
     Ok(load::<Vec<u64>>(kv, PENDQ)?.unwrap_or_default())
 }
 
-/// Persists the pending-sync queue.
-pub fn set_pending(kv: &dyn Kv, ids: &[u64]) -> Result<(), CalError> {
-    save(kv, PENDQ, &ids)
+/// Adds an event id to the pending-sync queue (verified).
+pub fn pending_add(kv: &dyn Kv, id: u64) -> Result<(), CalError> {
+    update_list(kv, PENDQ, id, true)
+}
+
+/// Removes an event id from the pending-sync queue (verified).
+pub fn pending_remove(kv: &dyn Kv, id: u64) -> Result<(), CalError> {
+    update_list(kv, PENDQ, id, false)
 }
 
 fn idem_key(key_hash: &str) -> String {
@@ -117,7 +220,7 @@ pub fn idem_applied(kv: &dyn Kv, key_hash: &str) -> Result<bool, CalError> {
 
 /// Records an applied idempotency key.
 pub fn mark_idem(kv: &dyn Kv, key_hash: &str) -> Result<(), CalError> {
-    kv.set(&idem_key(key_hash), b"1")
+    kv.set(&idem_key(key_hash), b"1", IDEM_TTL_SECONDS)
 }
 
 /// Effective config: the hub-resolved `config_json` (strictly parsed) and nothing else.

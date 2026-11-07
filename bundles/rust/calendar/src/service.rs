@@ -1,11 +1,9 @@
 //! Calendar operations: create/update/cancel/approve/reject/rsvp/list. Pure logic over the host
 //! seams; every mutation bumps the event version and queues sync, then flushes it inline.
 
-use std::collections::BTreeMap;
-
 use crate::host::{CalError, Caller, Ctx};
 use crate::model::{Config, Event, Rsvp, Status, SyncOp, SyncRecord, Target, derive_public_id};
-use crate::store::{self, MAX_EVENTS, MAX_RSVPS};
+use crate::store::{self, MAX_EVENTS};
 use crate::sync;
 use crate::timeutil::{
     MAX_CHANNEL, MAX_LOCATION, MAX_TITLE, check_description, check_text, check_window, parse_tz,
@@ -53,22 +51,21 @@ fn owns_or_approves(caller: &Caller, ev: &Event) -> bool {
 }
 
 /// Makes room by dropping the oldest terminal event with no sync work outstanding.
-fn make_room(ctx: &Ctx, index: &mut Vec<u64>) -> Result<(), CalError> {
+fn make_room(ctx: &Ctx) -> Result<(), CalError> {
+    let index = store::index(ctx.kv)?;
     if index.len() < MAX_EVENTS {
         return Ok(());
     }
-    for (pos, id) in index.clone().into_iter().enumerate() {
+    for id in index {
         let Some(ev) = store::event(ctx.kv, id)? else {
-            index.remove(pos);
-            return Ok(());
+            return store::index_remove(ctx.kv, id);
         };
         let owes = Target::ALL.iter().any(
             |t| matches!(store::sync_record(ctx.kv, id, *t), Ok(Some(r)) if r.pending_op.is_some()),
         );
         if ev.status.is_terminal() && !owes {
             store::purge_event(ctx.kv, id)?;
-            index.remove(pos);
-            return Ok(());
+            return store::index_remove(ctx.kv, id);
         }
     }
     Err(CalError::Conflict(format!(
@@ -94,8 +91,7 @@ pub fn create(ctx: &Ctx, cfg: &Config, caller: &Caller, n: NewEvent) -> Result<E
     let location = opt_text("location", &n.location, MAX_LOCATION)?;
     let channel = opt_text("channel", &n.channel, MAX_CHANNEL)?;
 
-    let mut index = store::index(ctx.kv)?;
-    make_room(ctx, &mut index)?;
+    make_room(ctx)?;
     let id = store::next_id(ctx.kv)?;
     let status = if caller.approver || !cfg.approval_required {
         Status::Scheduled
@@ -119,8 +115,7 @@ pub fn create(ctx: &Ctx, cfg: &Config, caller: &Caller, n: NewEvent) -> Result<E
         version: 1,
     };
     store::put_event(ctx.kv, &ev)?;
-    index.push(id);
-    store::set_index(ctx.kv, &index)?;
+    store::index_add(ctx.kv, id)?;
     if ev.status == Status::Scheduled {
         sync::enqueue(ctx, cfg, &ev, SyncOp::Create)?;
         sync::flush_event(ctx, cfg, &ev)?;
@@ -183,7 +178,7 @@ pub fn update(
         ev.approved_by = None;
     }
     ev.version += 1;
-    store::put_event(ctx.kv, &ev)?;
+    store::put_event_cas(ctx.kv, &ev)?;
     if ev.status == Status::Pending {
         // Any earlier queued upsert (e.g. a transient failure) must not push edited content.
         sync::drop_upserts(ctx, ev.id)?;
@@ -209,7 +204,7 @@ pub fn cancel(ctx: &Ctx, cfg: &Config, caller: &Caller, id: u64) -> Result<Event
     }
     ev.status = Status::Cancelled;
     ev.version += 1;
-    store::put_event(ctx.kv, &ev)?;
+    store::put_event_cas(ctx.kv, &ev)?;
     sync::enqueue(ctx, cfg, &ev, SyncOp::Cancel)?;
     sync::flush_event(ctx, cfg, &ev)?;
     Ok(ev)
@@ -223,7 +218,7 @@ pub fn delete(ctx: &Ctx, cfg: &Config, caller: &Caller, id: u64) -> Result<(), C
     let mut ev = load(ctx, id)?;
     ev.version += 1;
     ev.status = Status::Cancelled;
-    store::put_event(ctx.kv, &ev)?;
+    store::put_event_cas(ctx.kv, &ev)?;
     sync::enqueue(ctx, cfg, &ev, SyncOp::Delete)?;
     sync::flush_event(ctx, cfg, &ev)?;
     // Keep the record while any enabled target still owes the removal (retry on next touch).
@@ -240,12 +235,8 @@ pub fn delete(ctx: &Ctx, cfg: &Config, caller: &Caller, id: u64) -> Result<(), C
         }
     }
     store::purge_event(ctx.kv, id)?;
-    let mut index = store::index(ctx.kv)?;
-    index.retain(|x| *x != id);
-    store::set_index(ctx.kv, &index)?;
-    let mut q = store::pending(ctx.kv)?;
-    q.retain(|x| *x != id);
-    store::set_pending(ctx.kv, &q)
+    store::index_remove(ctx.kv, id)?;
+    store::pending_remove(ctx.kv, id)
 }
 
 /// Approves a pending event (approver only) and starts sync.
@@ -264,7 +255,7 @@ pub fn approve(ctx: &Ctx, cfg: &Config, caller: &Caller, id: u64) -> Result<Even
     ev.status = Status::Scheduled;
     ev.approved_by = Some(approver);
     ev.version += 1;
-    store::put_event(ctx.kv, &ev)?;
+    store::put_event_cas(ctx.kv, &ev)?;
     sync::enqueue(ctx, cfg, &ev, SyncOp::Create)?;
     sync::flush_event(ctx, cfg, &ev)?;
     Ok(ev)
@@ -290,7 +281,7 @@ pub fn reject(
     ev.reject_reason = opt_text("reason", &reason, 200)?;
     ev.status = Status::Rejected;
     ev.version += 1;
-    store::put_event(ctx.kv, &ev)?;
+    store::put_event_cas(ctx.kv, &ev)?;
     Ok(ev)
 }
 
@@ -301,21 +292,13 @@ pub fn rsvp(ctx: &Ctx, caller: &Caller, id: u64, answer: Rsvp) -> Result<Event, 
     if ev.status != Status::Scheduled {
         return Err(CalError::NotFound);
     }
-    let mut m = store::rsvps(ctx.kv, id)?;
-    if !m.contains_key(&uid) && m.len() >= MAX_RSVPS {
-        return Err(CalError::Conflict(format!(
-            "event is full ({MAX_RSVPS} RSVPs)"
-        )));
-    }
-    m.insert(uid, answer);
-    store::put_rsvps(ctx.kv, id, &m)?;
+    store::rsvp_set(ctx.kv, id, &uid, answer)?;
     Ok(ev)
 }
 
 /// RSVP counts (yes, no, maybe) for an event.
-pub fn rsvp_counts(m: &BTreeMap<String, Rsvp>) -> (usize, usize, usize) {
-    let c = |r: Rsvp| m.values().filter(|v| **v == r).count();
-    (c(Rsvp::Yes), c(Rsvp::No), c(Rsvp::Maybe))
+pub fn rsvp_counts(ctx: &Ctx, id: u64) -> Result<(u64, u64, u64), CalError> {
+    store::rsvp_counts(ctx.kv, id)
 }
 
 /// One event the caller may see: scheduled ones for everyone, anything for approvers/owners.

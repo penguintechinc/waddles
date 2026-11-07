@@ -28,10 +28,8 @@ stages:
   action:
     entry: "waddle:bundle/action-stage#dispatch"
 egress: []
-# Storage decision: community kv, NOT `data.tables`. The host db capability is ONE table per
-# bundle with insert/get/query(limit, offset, order)/update/delete and no filter, so the spec's
-# events/rsvps/event_sync relational design (upcoming, approval queue, per-event RSVPs) cannot
-# be expressed without full scans. See README "Storage".
+# Storage decision: community kv, NOT `data.tables` (guest db import = one table, unfiltered query, no
+# transaction). See README "Storage".
 data:
   tables: []
 limits:

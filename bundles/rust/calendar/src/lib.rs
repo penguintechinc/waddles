@@ -46,8 +46,8 @@ mod component {
         fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CalError> {
             kv::get(key).map_err(|_| CalError::Storage("kv get failed".into()))
         }
-        fn set(&self, key: &str, value: &[u8]) -> Result<(), CalError> {
-            kv::set(key, value, 0).map_err(|_| CalError::Storage("kv set failed".into()))
+        fn set(&self, key: &str, value: &[u8], ttl_seconds: u32) -> Result<(), CalError> {
+            kv::set(key, value, ttl_seconds).map_err(|_| CalError::Storage("kv set failed".into()))
         }
         fn delete(&self, key: &str) -> Result<(), CalError> {
             kv::delete(key).map_err(|_| CalError::Storage("kv delete failed".into()))

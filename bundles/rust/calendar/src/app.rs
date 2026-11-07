@@ -148,7 +148,7 @@ fn run_command(
         }
         Command::View { id } => {
             let ev = service::get(ctx, caller, id)?;
-            let (y, n, m) = service::rsvp_counts(&store::rsvps(ctx.kv, id)?);
+            let (y, n, m) = service::rsvp_counts(ctx, id)?;
             let loc = ev
                 .location
                 .as_deref()
@@ -216,7 +216,7 @@ fn run_command(
         }
         Command::Rsvp { id, answer: None } => {
             let ev = service::get(ctx, caller, id)?;
-            let (y, n, m) = service::rsvp_counts(&store::rsvps(ctx.kv, id)?);
+            let (y, n, m) = service::rsvp_counts(ctx, id)?;
             Ok(r(
                 format!("{} -- yes: {y}, no: {n}, maybe: {m}", fmt_event(&ev)),
                 "rsvp_view",
@@ -309,7 +309,7 @@ fn event_json(ctx: &Ctx, e: &Event) -> Result<Value, CalError> {
             }));
         }
     }
-    let (y, n, m) = service::rsvp_counts(&store::rsvps(ctx.kv, e.id)?);
+    let (y, n, m) = service::rsvp_counts(ctx, e.id)?;
     Ok(json!({
         "id": e.id,
         "public_id": e.public_id,

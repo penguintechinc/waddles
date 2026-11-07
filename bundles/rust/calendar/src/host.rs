@@ -30,8 +30,8 @@ pub enum CalError {
 pub trait Kv {
     /// Reads a key.
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CalError>;
-    /// Writes a key with no expiry.
-    fn set(&self, key: &str, value: &[u8]) -> Result<(), CalError>;
+    /// Writes a key; `ttl_seconds == 0` means no expiry (the host clamps to its max TTL).
+    fn set(&self, key: &str, value: &[u8], ttl_seconds: u32) -> Result<(), CalError>;
     /// Deletes a key.
     fn delete(&self, key: &str) -> Result<(), CalError>;
     /// Atomic increment; returns the new value.

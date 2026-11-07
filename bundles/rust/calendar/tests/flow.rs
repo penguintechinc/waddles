@@ -45,8 +45,12 @@ fn create_list_view_rsvp_cancel_roundtrip() {
     service::rsvp(&ctx, &member(USER), ev.id, Rsvp::Yes).unwrap();
     service::rsvp(&ctx, &member(USER2), ev.id, Rsvp::Maybe).unwrap();
     service::rsvp(&ctx, &member(USER), ev.id, Rsvp::No).unwrap(); // re-RSVP changes answer
-    let counts = service::rsvp_counts(&store::rsvps(ctx.kv, ev.id).unwrap());
+    let counts = service::rsvp_counts(&ctx, ev.id).unwrap();
     assert_eq!(counts, (0, 1, 1));
+    assert_eq!(
+        store::rsvp_get(ctx.kv, ev.id, USER).unwrap(),
+        Some(Rsvp::No)
+    );
 
     let c = service::cancel(&ctx, &cfg, &member(USER), ev.id);
     assert_eq!(

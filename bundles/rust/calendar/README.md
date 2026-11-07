@@ -21,16 +21,28 @@ Values with spaces must be double-quoted. The parser also accepts the legacy `!e
 `bundles/python/event` still owns `!event`/`!rsvp` and two bundles must not answer one command
 (`test_bundle_command_collisions`). Widen `command_prefix` in the PR that deletes that bundle.
 
-## Storage: community kv (not `data.tables`)
+## Storage: community kv (re-checked against the host; `data.tables` cannot express this)
 
-The host `db` capability is ONE table per bundle with insert/get/`query(limit, offset, order)`/
-update/delete and no filter, so upcoming/approval-queue/per-event-RSVP queries (the spec's
-events/rsvps/event_sync tables) would need full scans. kv keys (all `.`-separated, community
-scoped by the host): `cal.seq`, `cal.index`, `cal.ev.<id>`, `cal.rsvp.<id>`,
-`cal.sync.<id>.<target>`, `cal.pendq`, `cal.idem.<hash>`. kv has no list/CAS: index and
-RSVP updates are read-modify-write and a concurrent writer in one community can lose an update
-(accepted at chat scale, not hidden). Cap 400 events (oldest terminal event is purged to make
-room) and 500 RSVPs/event. Revisit when `db.query` gains filters.
+`data.tables` IS supported by the host (manifest parse, DDL with declared indexes, alembic 0030),
+but the guest `db` import is the limit: ONE table per bundle (no table name in any call), and
+`query(limit<=200, offset, order-by)` has NO filter/WHERE, so declared indexes on
+(community_id, starts_at, status) can never be used to narrow a read; upcoming/approval-queue
+lookups would be full scans, and there is no multi-statement transaction. Missing host
+capabilities: (1) filtered/indexed `db.query`, (2) multiple tables per bundle, (3) kv
+compare-and-swap or a multi-key transaction, (4) kv key listing. Until then state stays in kv:
+
+| Key | Purpose | Concurrency |
+|---|---|---|
+| `cal.ev.<id>` | event record | version-checked commit (`put_event_cas`): a concurrent change is a loud `Conflict` (retry), never a silent overwrite; a microsecond check-to-write window remains until the host has CAS |
+| `cal.rsvp.<id>.<uuid>`, `cal.rsvpc.<id>.<answer>`, `cal.rsvpn.<id>`, `cal.rsvpt` | one RSVP key per (event, user) + atomic `increment` counters | no shared read-modify-write: concurrent RSVPs cannot lose each other (threaded test) |
+| `cal.index`, `cal.pendq` | id lists | read-back verified add/remove with bounded retry; persistent loss is a loud `Conflict` |
+| `cal.seq`, `cal.sync.<id>.<target>`, `cal.idem.<hash>` (30-day TTL) | id counter, mappings, idempotency keys | atomic increment / single-writer per event |
+
+Host limits that shape this: 64 kv ops per invocation (so max 40 events per community: a list
+reads the index plus each event once), 10k keys per app (RSVP voter keys are budgeted at 6000
+per community; voter keys of purged events are not enumerable and are not reclaimed; new
+voters are refused loudly at the budget), 64 KiB per value. Cap 500 RSVPs per event, enforced
+atomically. Revisit when `db.query` gains filters.
 
 ## Sync
 
@@ -83,7 +95,7 @@ Discord guild/credential is resolved host-side from the community's own connecti
 ## Build / test
 
 ```bash
-cargo test                                         # 32 tests (flow + contract)
+cargo test                                         # 39 tests (flow + concurrency + contract)
 cargo component build --release --target wasm32-wasip2 --locked
 wasm-tools component wit target/wasm32-wasip2/release/waddle_bundle_calendar_rust.wasm
 ```
