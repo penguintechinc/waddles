@@ -23,19 +23,54 @@ pub fn contract(tool: &str) -> Value {
 /// Minimal JSON-Schema subset validator: type, required, properties, additionalProperties,
 /// enum, minimum, maximum, maxLength, minItems, maxItems, items.
 pub fn validate(schema: &Value, v: &Value, path: &str) -> Result<(), String> {
-    let ty = schema.get("type").and_then(Value::as_str);
-    let type_ok = match ty {
-        Some("object") => v.is_object(),
-        Some("string") => v.is_string(),
-        Some("integer") => v.is_i64() || v.is_u64(),
-        Some("number") => v.is_number(),
-        Some("boolean") => v.is_boolean(),
-        Some("array") => v.is_array(),
-        None => true,
-        Some(other) => return Err(format!("{path}: unsupported schema type {other}")),
+    let types: Vec<&str> = match schema.get("type") {
+        Some(Value::String(t)) => vec![t.as_str()],
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+        _ => vec![],
     };
+    let one = |t: &str| -> Result<bool, String> {
+        Ok(match t {
+            "object" => v.is_object(),
+            "string" => v.is_string(),
+            "integer" => v.is_i64() || v.is_u64(),
+            "number" => v.is_number(),
+            "boolean" => v.is_boolean(),
+            "array" => v.is_array(),
+            "null" => v.is_null(),
+            other => return Err(format!("{path}: unsupported schema type {other}")),
+        })
+    };
+    let mut type_ok = types.is_empty();
+    for t in &types {
+        type_ok |= one(t)?;
+    }
+    let ty = &types;
     if !type_ok {
         return Err(format!("{path}: expected {ty:?}, got {v}"));
+    }
+    if let (Some(pat), Some(s)) = (schema.get("pattern").and_then(Value::as_str), v.as_str()) {
+        assert_eq!(
+            pat, "^[a-z0-9][a-z0-9_.-]{0,39}$",
+            "unsupported pattern in test validator"
+        );
+        if !waddle_bundle_ai_teammates::ai::collection_ok(s) {
+            return Err(format!("{path}: {s:?} does not match {pat}"));
+        }
+    }
+    if let (Some(s), Some(min)) = (v.as_str(), schema.get("minLength").and_then(Value::as_u64)) {
+        if (s.chars().count() as u64) < min {
+            return Err(format!("{path}: string shorter than {min}"));
+        }
+    }
+    if let (Some(a), Some(true)) = (
+        v.as_array(),
+        schema.get("uniqueItems").and_then(Value::as_bool),
+    ) {
+        for (i, x) in a.iter().enumerate() {
+            if a[..i].contains(x) {
+                return Err(format!("{path}: duplicate items"));
+            }
+        }
     }
     if let Some(e) = schema.get("enum").and_then(Value::as_array) {
         if !e.contains(v) {
@@ -278,10 +313,23 @@ pub fn happy(h: &FakeHost) {
         Ok(json!({"text": "The hangar opens at noon."}))
     });
     h.on("ai.classify", |_| {
-        Ok(json!({"label": "safe", "score": 0.97}))
+        Ok(json!({"label": "safe", "confidence": 0.97, "reason": "friendly question"}))
     });
-    h.on("ai.rag.query", |_| Ok(json!({"matches": [{"text": "The hangar opens at noon on event days.", "source": "faq", "score": 0.9}]})));
+    h.on("ai.rag.query", |_| {
+        Ok(json!({
+            "answer": "The hangar opens at noon.",
+            "citations": [{"doc_id": "faq", "chunk": 0, "score": 0.9}]
+        }))
+    });
     for p in ["twitch", "discord", "youtube"] {
-        h.on(&format!("{p}.live.channels"), |_| Ok(json!({"channels": [{"channel_id": "chan1", "live": true, "title": "Friday night run", "game": "Star Game"}]})));
+        h.on(&format!("{p}.live.channels"), |_| {
+            Ok(json!({
+                "channels": [{
+                    "channel_ref": "chan1", "display_name": "Chan One", "is_live": true,
+                    "title": "Friday night run", "category": "Star Game"
+                }],
+                "as_of": "2026-11-07T00:00:00Z"
+            }))
+        });
     }
 }

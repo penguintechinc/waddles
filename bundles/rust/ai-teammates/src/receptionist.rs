@@ -40,14 +40,7 @@ pub fn build_greeting<H: Host>(h: &H, cfg: &ReceptionistCfg, uuid: &str) -> Stri
     let system = format!(
         "Write one short, warm, single-sentence welcome line for a new member of an online community. Do not include any name, mention, link or command. Plain text only. {UNTRUSTED_DATA_NOTICE}"
     );
-    match ai::complete(
-        h,
-        &system,
-        "Write the welcome line.",
-        60,
-        0.7,
-        "receptionist",
-    ) {
+    match ai::complete(h, &system, "Write the welcome line.", 60, 0.7) {
         Ok(text) => match guard::sanitize_model_output(
             &text,
             cfg.max_greeting_chars

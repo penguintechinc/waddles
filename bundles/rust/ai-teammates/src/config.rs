@@ -136,13 +136,6 @@ impl Default for ProducerCfg {
 pub const PRODUCER_MIN_INTERVAL_FLOOR: u32 = 5;
 pub const PRODUCER_MAX_PER_HOUR_CEIL: u32 = 6;
 
-fn id_ok(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 100
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-}
-
 impl ResearcherCfg {
     /// Validates ranges.
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -155,8 +148,12 @@ impl ResearcherCfg {
         if !(40..=400).contains(&self.max_answer_chars) {
             return bad("researcher.max_answer_chars must be 40-400");
         }
-        if self.collection.as_deref().is_some_and(|c| !id_ok(c)) {
-            return bad("researcher.collection must be an identifier");
+        if self
+            .collection
+            .as_deref()
+            .is_some_and(|c| !crate::ai::collection_ok(c))
+        {
+            return bad("researcher.collection must match ^[a-z0-9][a-z0-9_.-]{0,39}$");
         }
         Ok(())
     }
@@ -183,8 +180,10 @@ impl ReceptionistCfg {
         {
             return bad("receptionist.welcome_channel_id must be 1-100 chars");
         }
-        if !id_ok(&self.onboarding_collection) {
-            return bad("receptionist.onboarding_collection must be an identifier");
+        if !crate::ai::collection_ok(&self.onboarding_collection) {
+            return bad(
+                "receptionist.onboarding_collection must match ^[a-z0-9][a-z0-9_.-]{0,39}$",
+            );
         }
         if !(40..=400).contains(&self.max_greeting_chars) {
             return bad("receptionist.max_greeting_chars must be 40-400");

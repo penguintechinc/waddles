@@ -2,50 +2,57 @@
   "tool": "ai.classify",
   "target": "waddles.core.service.ai",
   "access": "read",
+  "source": "bundles/contracts/ai-tools.v1.json (PR #1120)",
   "request": {
     "type": "object",
-    "required": [
-      "text",
-      "labels",
-      "purpose"
-    ],
-    "additionalProperties": false,
     "properties": {
       "text": {
         "type": "string",
+        "minLength": 1,
         "maxLength": 2000
       },
       "labels": {
         "type": "array",
         "items": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
         },
         "minItems": 2,
-        "maxItems": 16
+        "maxItems": 20,
+        "uniqueItems": true
       },
-      "purpose": {
+      "instructions": {
         "type": "string",
-        "enum": [
-          "producer_moderation"
-        ]
+        "maxLength": 800
       }
-    }
+    },
+    "required": [
+      "text",
+      "labels"
+    ],
+    "additionalProperties": false
   },
   "response": {
     "type": "object",
-    "required": [
-      "label",
-      "score"
-    ],
     "properties": {
       "label": {
         "type": "string"
       },
-      "score": {
+      "confidence": {
         "type": "number",
         "minimum": 0,
         "maximum": 1
+      },
+      "reason": {
+        "type": "string",
+        "maxLength": 200
       }
-    }
+    },
+    "required": [
+      "label",
+      "confidence",
+      "reason"
+    ]
   }
 }

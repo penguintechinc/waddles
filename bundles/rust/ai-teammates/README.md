@@ -51,9 +51,13 @@ limits are enforced in code AND schema: interval floor 5 min, max 6 posts/hour.
 
 ## Consumed tool contracts (`contracts/*.json`, validated in every flow test)
 
-`ai.complete`, `ai.classify`, `ai.rag.query` on `waddles.core.service.ai`;
-`twitch|discord|youtube.live.channels` on the platform services. These are the agreed wire shapes
-for services built in parallel; a mismatch fails `tests/contract.rs`/`tests/flows.rs`.
+Generated from the authoritative contracts: `ai.complete`, `ai.classify`, `ai.rag.query` from
+`bundles/contracts/ai-tools.v1.json` (AI service #1109, consolidated in #1120), and
+`<platform>.live.channels` from `live-channels-contract.v1.json` (#1119). Inputs are validated
+against the producer bounds before every call and fail loud (never truncated). KB mode uses the
+service's grounded `answer` + `citations` directly (an uncited or injection-shaped answer is
+discarded); `ai.complete` is used only for the general fallback, greeting line and Producer.
+Producer `channels[].channel_id` is the platform's `channel_ref`.
 
 ## Parity with the legacy features
 

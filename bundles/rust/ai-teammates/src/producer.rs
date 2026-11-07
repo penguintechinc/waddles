@@ -12,6 +12,7 @@ use crate::guard::{self, UNTRUSTED_DATA_NOTICE};
 use crate::host::{Host, Level, key_part};
 
 const THROTTLE_S: u32 = 30;
+const MODERATION_INSTRUCTIONS: &str = "Decide whether this single chat message is safe to post in a live community stream chat. It is unsafe if it contains harassment, hate, sexual content, scams, spam, politics, personal data, links, mentions or commands.";
 const PAUSED_KEY: &str = "producer.paused";
 
 /// Result of one tick (the reason is a closed vocabulary, safe to log).
@@ -128,7 +129,10 @@ pub fn tick<H: Host>(h: &H, cfg: &ProducerCfg) -> Tick {
         let live = live_cache
             .iter()
             .find(|(p, _)| *p == ch.platform)
-            .and_then(|(_, v)| v.iter().find(|c| c.channel_id == ch.channel_id && c.live));
+            .and_then(|(_, v)| {
+                v.iter()
+                    .find(|c| c.channel_ref == ch.channel_id && c.is_live)
+            });
         let Some(live) = live else { continue };
         let last = h
             .kv_get(&last_key(&ch.platform, &ch.channel_id))
@@ -144,7 +148,7 @@ pub fn tick<H: Host>(h: &H, cfg: &ProducerCfg) -> Tick {
                     ch.platform.clone(),
                     ch.channel_id.clone(),
                     live.title.clone(),
-                    live.game.clone(),
+                    live.category.clone(),
                 ));
                 break;
             }
@@ -174,7 +178,7 @@ pub fn tick<H: Host>(h: &H, cfg: &ProducerCfg) -> Tick {
     let system = format!(
         "You write ONE short, friendly conversation-starter question (at most 25 words) for a live stream chat that has gone quiet. Address the whole chat, never a specific person. No links, mentions, commands or hashtags. {UNTRUSTED_DATA_NOTICE}"
     );
-    let text = match ai::complete(h, &system, &prompt, 80, 0.8, "producer") {
+    let text = match ai::complete(h, &system, &prompt, 80, 0.8) {
         Ok(t) => t,
         Err(e) => {
             log(
@@ -193,8 +197,8 @@ pub fn tick<H: Host>(h: &H, cfg: &ProducerCfg) -> Tick {
     {
         return Tick::Skipped("blocklist");
     }
-    match ai::classify(h, &text, &["safe", "unsafe"], "producer_moderation") {
-        Ok(c) if c.label == "safe" && c.score >= 0.5 => {}
+    match ai::classify(h, &text, &["safe", "unsafe"], MODERATION_INSTRUCTIONS) {
+        Ok(c) if c.label == "safe" && c.confidence >= 0.5 => {}
         Ok(_) => return Tick::Skipped("moderation_rejected"),
         Err(e) => {
             log(

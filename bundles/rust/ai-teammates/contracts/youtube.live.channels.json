@@ -2,41 +2,112 @@
   "tool": "youtube.live.channels",
   "target": "waddles.core.service.youtube",
   "access": "read",
+  "source": "bundles/contracts/live-channels-contract.v1.json (PR #1119)",
   "request": {
     "type": "object",
-    "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "scope": {
+        "type": "string",
+        "enum": [
+          "community",
+          "linked"
+        ]
+      },
+      "cursor": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100
+      }
+    },
+    "required": [
+      "scope"
+    ],
+    "additionalProperties": false
   },
   "response": {
     "type": "object",
-    "required": [
-      "channels"
-    ],
     "properties": {
       "channels": {
         "type": "array",
         "items": {
           "type": "object",
-          "required": [
-            "channel_id",
-            "live"
-          ],
           "properties": {
-            "channel_id": {
-              "type": "string"
+            "channel_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
             },
-            "live": {
+            "display_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "is_live": {
               "type": "boolean"
             },
             "title": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 300
             },
-            "game": {
-              "type": "string"
+            "category": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 100
+            },
+            "viewers": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "started_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 40
+            },
+            "thumbnail_ref": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 512
             }
-          }
+          },
+          "required": [
+            "channel_ref",
+            "display_name",
+            "is_live"
+          ]
         }
+      },
+      "cursor": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "maxLength": 512
+      },
+      "as_of": {
+        "type": "string",
+        "maxLength": 40
       }
-    }
+    },
+    "required": [
+      "channels",
+      "as_of"
+    ]
   }
 }
