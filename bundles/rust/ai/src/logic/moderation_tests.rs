@@ -138,6 +138,46 @@ fn invisible_only_term_is_invalid_config() {
 }
 
 #[test]
+fn terms_with_neutralized_chars_block_input_and_output() {
+    for (term, hit) in [
+        ("<script>", "x <script> y"),
+        ("a<b", "a<b"),
+        (">", "1 > 0"),
+        ("<", "if a < b"),
+        ("<script>", "x \u{ff1c}script\u{ff1e} y"),
+        ("<script>", "x <\u{200b}script> y"),
+    ] {
+        let cfg = json!({ "blocklist": [term] }).to_string();
+        let (s, ai) = svc("fine", Some(&cfg));
+        let e = s.complete(&admin(), json!({"prompt": hit})).unwrap_err();
+        assert_eq!(msg(e), "input_rejected", "{term:?} in {hit:?}");
+        assert_eq!(*ai.1.lock().unwrap(), 0);
+        let (s, _) = svc(&format!("reply {hit} end"), Some(&cfg));
+        let e = s
+            .complete(&admin(), json!({"prompt": "clean"}))
+            .unwrap_err();
+        assert_eq!(msg(e), "content_filtered", "{term:?} in {hit:?}");
+    }
+}
+
+#[test]
+fn canonical_is_invariant_under_every_neutralize_rewrite() {
+    let mut rewritten = 0;
+    for cp in 0..=0x10FFFFu32 {
+        let Some(c) = char::from_u32(cp) else {
+            continue;
+        };
+        let s = c.to_string();
+        let n = neutralize(&s);
+        if n != s && !n.is_empty() {
+            rewritten += 1;
+            assert_eq!(canonical(&s), canonical(&n), "U+{cp:04X}");
+        }
+    }
+    assert!(rewritten >= 2, "neutralize rewrote {rewritten} chars");
+}
+
+#[test]
 fn clean_text_still_passes() {
     let (s, _) = svc("all good here", Some(CFG));
     assert!(s.complete(&admin(), json!({"prompt": "hello"})).is_ok());

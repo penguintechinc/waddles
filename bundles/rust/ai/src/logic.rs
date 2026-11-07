@@ -149,6 +149,13 @@ pub fn canonical(text: &str) -> String {
     let pre: String = text.chars().filter(|c| !is_ignorable(*c)).collect();
     pre.nfkc()
         .filter(|c| !is_ignorable(*c))
+        // The substitution `neutralize` applies, so a term containing `<`/`>`
+        // matches neutralized input and raw output alike.
+        .map(|c| match c {
+            '<' => '\u{2039}',
+            '>' => '\u{203A}',
+            other => other,
+        })
         .collect::<String>()
         .to_lowercase()
 }
