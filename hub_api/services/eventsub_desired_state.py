@@ -24,7 +24,7 @@ import secrets
 import time
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import IntEnum
 from typing import Any, Final
@@ -185,7 +185,7 @@ class SyncSummary:
 
 @dataclass(slots=True, frozen=True)
 class WorkItem:
-    """One create/delete the reconcile hook must perform. ``secret`` only on CREATE."""
+    """One create/delete the reconcile hook must perform. Never carries the webhook secret."""
 
     public_id: str
     action: Action
@@ -197,7 +197,7 @@ class WorkItem:
     version: int
     callback_url: str
     twitch_subscription_id: str | None
-    secret: str | None = field(default=None, repr=False)
+    callback_key: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -523,7 +523,7 @@ async def _collect_work(conn: Any, now: datetime, limit: int) -> tuple[list[Work
             text(
                 f"""
                 SELECT public_id, tenant_id, community_id, connection_id, sub_type, sub_version,
-                       status, twitch_subscription_id, callback_url, secret_enc
+                       status, twitch_subscription_id, callback_url, callback_key
                   FROM {_TABLE}
                  WHERE status IN (1, 5, 6)
                     OR (status = 3 AND next_attempt_at IS NOT NULL AND next_attempt_at <= :now)
@@ -551,7 +551,7 @@ async def _collect_work(conn: Any, now: datetime, limit: int) -> tuple[list[Work
                 version=int(r.sub_version),
                 callback_url=r.callback_url,
                 twitch_subscription_id=r.twitch_subscription_id,
-                secret=None if is_delete else decrypt_value(r.secret_enc, aad=_aad(r.public_id)),
+                callback_key=r.callback_key,
             )
         )
     enabled_rows = (

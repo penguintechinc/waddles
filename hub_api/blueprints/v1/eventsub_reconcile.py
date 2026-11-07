@@ -10,8 +10,8 @@ Machine JWT / verified SVID only, ``system`` tenant, scope ``eventsub:reconcile`
 route: ``eventsub:secret-read``). Ids are numeric tenant/community/connection (data-plane
 convention) plus the subscription ``public_id`` UUID; no raw broadcaster id or PII exists here --
 the bundle resolves the broadcaster/app token through the connection resolver. Enums are int codes.
-The CREATE work item (and the secret route) carry the plaintext webhook secret: responses are
-``no-store`` and the value is never logged.
+The webhook secret is NEVER in the reconcile response (it must not enter guest memory); only the
+host (svc-ingest) reads it, via the secret route, and injects it host-side. ``no-store``.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ class ReconcileRequest:
 
 @dataclass(slots=True, frozen=True)
 class WorkItemDTO:
-    """One create (``action`` 1, carries ``secret``) or delete (``action`` 2) to perform."""
+    """One create (``action`` 1) or delete (``action`` 2). Never carries the webhook secret."""
 
     subscriptionId: str
     action: int
@@ -59,8 +59,8 @@ class WorkItemDTO:
     twitchType: str
     version: int
     callbackUrl: str
+    callbackKey: str
     twitchSubscriptionId: str | None = None
-    secret: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -199,8 +199,8 @@ async def reconcile_route(data: ReconcileRequest) -> Any:
                 twitchType=w.twitch_type,
                 version=w.version,
                 callbackUrl=w.callback_url,
+                callbackKey=w.callback_key,
                 twitchSubscriptionId=w.twitch_subscription_id,
-                secret=w.secret,
             )
             for w in work
         ],

@@ -210,17 +210,17 @@ class TestDerivation:
             assert item.action is es.Action.CREATE
             assert item.connection_id == world.conn_id
             assert item.callback_url.startswith(f"{BASE}/eventsub/twitch/webhook/")
-            assert item.secret and len(item.secret) >= 40
+            assert item.callback_key and item.callback_url.endswith(item.callback_key)
+            assert not hasattr(item, "secret")
         raw = {str(r.public_id): r for r in rows}
         for item in mine:
             row = raw[item.public_id]
-            assert item.secret not in row.secret_enc  # sealed, not plaintext
-            assert (
-                decrypt_value(row.secret_enc, aad=f"eventsub:{row.public_id}".encode())
-                == item.secret
-            )
+            plain = decrypt_value(row.secret_enc, aad=f"eventsub:{row.public_id}".encode())
+            assert len(plain) >= 40
+            assert plain not in row.secret_enc  # sealed, not plaintext
+            assert await es.secret_for_callback_key(world.dal, item.callback_key) == plain
         # secrets are per-subscription
-        assert len({i.secret for i in mine}) == 3
+        assert len({r.secret_enc for r in rows}) == 3
 
     async def test_tenant_wide_bundle_applies(self, world: World) -> None:
         await world.activate(["channel.follow"], community=0)
@@ -355,7 +355,7 @@ class TestLifecycle:
         summary, work, _ = await _reconcile(world)
         assert summary.marked_delete >= 1
         mine = _mine(work, world)
-        assert [(x.action, x.secret) for x in mine] == [(es.Action.DELETE, None)]
+        assert [x.action for x in mine] == [es.Action.DELETE]
         assert mine[0].twitch_subscription_id
         await es.report_results(world.dal, [es.Report(mine[0].public_id, es.Outcome.DELETED)])
         assert await world.rows() == []
@@ -611,6 +611,26 @@ def _h(
 
 
 class TestContractHttp:
+    async def test_reconcile_response_never_contains_secret_material(
+        self, world: World, issuer: ServiceJwtIssuer
+    ) -> None:
+        import re
+
+        await world.activate(["channel.raid", "stream.*"])
+        client = _app(world.dal, issuer).test_client()
+        resp = await client.post("/api/v1/internal/eventsub/reconcile", json={}, headers=_h(issuer))
+        raw = await resp.get_data(as_text=True)
+        body = json.loads(raw)
+        mine = [w for w in body["work"] if w["communityId"] == world.community]
+        assert len(mine) == 3
+        assert all("secret" not in w for w in mine)
+        assert "secret" not in raw.lower()
+        for row in await world.rows():
+            plain = decrypt_value(row.secret_enc, aad=f"eventsub:{row.public_id}".encode())
+            assert plain not in raw and row.secret_enc not in raw
+        # no 64-char hex blob anywhere in the response (the callback key is 43 urlsafe chars)
+        assert not re.search(r"\b[0-9a-fA-F]{64}\b", raw)
+
     async def test_full_round_trip(self, world: World, issuer: ServiceJwtIssuer) -> None:
         await world.activate(["channel.raid", "stream.online"])
         client = _app(world.dal, issuer).test_client()
@@ -620,7 +640,7 @@ class TestContractHttp:
         body = await resp.get_json()
         mine = [w for w in body["work"] if w["communityId"] == world.community]
         assert {w["twitchType"] for w in mine} == {"channel.raid", "stream.online"}
-        assert all(w["action"] == 1 and w["secret"] and w["tenantId"] == world.tenant for w in mine)
+        assert all(w["action"] == 1 and w["tenantId"] == world.tenant for w in mine)
         assert body["sweep"]["communities"] >= 1
         # no PII / raw broadcaster id leaks into the contract
         assert "bc-" not in json.dumps(mine)
@@ -652,7 +672,10 @@ class TestContractHttp:
         hdr = _h(issuer, scope=SCOPE_SECRET_READ)
         resp = await client.get(f"/api/v1/internal/eventsub/secret/{key}", headers=hdr)
         assert resp.status_code == 200
-        assert (await resp.get_json())["secret"] == item["secret"]
+        row = (await world.rows())[0]
+        plain = decrypt_value(row.secret_enc, aad=f"eventsub:{row.public_id}".encode())
+        assert (await resp.get_json())["secret"] == plain
+        assert item["callbackKey"] == key
         assert (
             await client.get("/api/v1/internal/eventsub/secret/unknown-key-0123456789", headers=hdr)
         ).status_code == 404
@@ -712,5 +735,11 @@ class TestContractHttp:
         item = next(
             w for w in (await resp.get_json())["work"] if w["communityId"] == world.community
         )
-        assert item["secret"] not in caplog.text
+        row = (await world.rows())[0]
+        plain = decrypt_value(row.secret_enc, aad=f"eventsub:{row.public_id}".encode())
+        key = item["callbackKey"]
+        await client.get(
+            f"/api/v1/internal/eventsub/secret/{key}", headers=_h(issuer, scope=SCOPE_SECRET_READ)
+        )
+        assert plain not in caplog.text
         assert os.environ["CREDENTIAL_ENCRYPTION_KEY"] not in caplog.text
