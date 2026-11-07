@@ -10,6 +10,7 @@ All Wix features in one app bundle. Wix is a provider name; nothing here is cust
   - `!wix plan map <plan-uuid> <role_key>` / `!wix plan unmap <plan-uuid>` (mod) + `!wix enable roles`: `subscription.started|changed|ended` -> `discord.member.roles.add|remove`.
   - `!wix enable events`: `event.created|updated|canceled` -> `discord.scheduled_event.create|update|cancel`; the Wix->Discord id link is kv `wix.evmap.<wix_event_id>` (redelivery is a no-op).
   - Fail loud: `!wix enable <module>` is refused if the runtime lacks the `tool` import; any tool failure (not granted, forbidden, unavailable...) is logged AND recorded under kv `wix.fault.<module>`; `!wix modules` (mod) shows each module's on/off, `TOOLS MISSING`, and last failure code.
+  - Ordering guard (delivery is at-least-once/unordered): kv `wix.sub.<order_id>` / `wix.evst.<wix_event_id>` hold the last applied `occurred_at|status`; an event not strictly newer is ignored, and ENDED/CANCELED (subscription) or CANCELED (event) is terminal -- only a NEW order id re-grants a role. State advances only after the tool call succeeds. Limitation: current state is not re-confirmed against Wix (no `wix.order.get` tool exists yet; Wix order reads can be added to the Rust service bundle later).
   - Outbound Wix writes (`wix.event.*`) are the Rust service bundle's tools, consumed by the calendar app, not by this bundle.
 - Announcements: use the generic `waddles.core.example.announce` bundle.
 - Test: `python3 -m pytest bundles/python/wix/tests`

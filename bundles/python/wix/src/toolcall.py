@@ -8,6 +8,7 @@ to a moderator -- a missing tool or a refused grant is never a silent no-op.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from waddle_sdk import community_kv, log, tool
@@ -83,3 +84,34 @@ async def call(
         return None
     await clear_fault(community, module)
     return result
+
+
+def parse_ts(raw: str) -> datetime | None:
+    """Timezone-aware datetime for an RFC 3339 string, or `None` when unparseable/naive."""
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+async def read_order(community: str | None, key: str) -> tuple[datetime, str] | None:
+    """Last applied `(occurred_at, status)` stored under `key`; a corrupt value is a loud fault."""
+    raw = await community_kv.get(community, key)
+    if raw is None:
+        return None
+    ts_text, _, status = raw.decode("utf-8", "replace").partition("|")
+    ts = parse_ts(ts_text)
+    if ts is None or not status:
+        log.error("wix.order_state_corrupt")
+        raise ValueError("corrupt ordering state")
+    return ts, status
+
+
+async def write_order(
+    community: str | None, key: str, ts: datetime, status: str
+) -> None:
+    """Record the last applied `(occurred_at, status)` for ordering/terminal checks."""
+    await community_kv.set(
+        community, key, f"{ts.isoformat()}|{status}".encode(), ttl_seconds=0
+    )

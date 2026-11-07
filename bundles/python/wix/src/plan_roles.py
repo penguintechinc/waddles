@@ -26,11 +26,19 @@ MISSING_CAPABILITY_MSG = toolcall.MISSING_CAPABILITY_MSG.format(module=MODULE)
 _ROLE_KEY = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 _ACTIVE = frozenset({"ACTIVE"})
 _INACTIVE = frozenset({"ENDED", "CANCELED", "PAUSED"})
+#: Terminal for an order id: a late/replayed event can never re-grant; only a NEW order does.
+_TERMINAL = frozenset({"ENDED", "CANCELED"})
+_ORDER_ID = re.compile(r"[A-Za-z0-9-]{8,64}")
 
 
 def capability_available() -> bool:
     """True iff the runtime provides the tool-invocation import."""
     return toolcall.capability_available()
+
+
+def order_key(order_id: str) -> str:
+    """kv key (`.`-only) holding the last applied `occurred_at|status` for a Wix order."""
+    return f"wix.sub.{order_id}"
 
 
 def plan_key(plan_id: str) -> str:
@@ -86,6 +94,19 @@ async def handle(
     else:
         log.debug("wix.roles_status_ignored", event_type=event_type)
         return
+    order_id = payload.get("order_id")
+    ts = toolcall.parse_ts(occurred_at)
+    if (
+        not isinstance(order_id, str)
+        or _ORDER_ID.fullmatch(order_id) is None
+        or ts is None
+    ):
+        await toolcall.record_fault(community, MODULE, "bad_order_event")
+        return
+    prior = await toolcall.read_order(community, order_key(order_id))
+    if prior is not None and (prior[1] in _TERMINAL or ts <= prior[0]):
+        log.info("wix.roles_stale_event_ignored", event_type=event_type)
+        return
     key = hashlib.sha256(
         f"wix.roles:{payload.get('event_id')}:{tool_name}:{occurred_at}".encode()
     ).hexdigest()
@@ -97,4 +118,8 @@ async def handle(
         idempotency_key=key,
     )
     if result is not None:
+        applied = status if status in _TERMINAL | {"PAUSED"} else "ACTIVE"
+        if event_type == "subscription.ended" and applied not in _TERMINAL:
+            applied = "ENDED"
+        await toolcall.write_order(community, order_key(order_id), ts, applied)
         log.info("wix.roles_applied", op=tool_name, community_id=community)

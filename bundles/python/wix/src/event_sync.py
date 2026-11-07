@@ -38,6 +38,11 @@ def capability_available() -> bool:
     return toolcall.capability_available()
 
 
+def state_key(wix_event_id: str) -> str:
+    """kv key (`.`-only) holding the last applied `occurred_at|state` for a Wix event."""
+    return f"wix.evst.{wix_event_id}"
+
+
 def map_key(wix_event_id: str) -> str:
     """kv key (`.`-only) holding the Discord event id mirrored from a Wix event."""
     return f"wix.evmap.{wix_event_id}"
@@ -83,6 +88,14 @@ async def handle(
     if not isinstance(wix_id, str) or _WIX_ID.fullmatch(wix_id) is None:
         log.error("wix.events_bad_payload", event_type=event_type)
         return
+    ts = toolcall.parse_ts(occurred_at)
+    if ts is None:
+        await toolcall.record_fault(community, MODULE, "bad_event_timestamp")
+        return
+    prior = await toolcall.read_order(community, state_key(wix_id))
+    if prior is not None and (prior[1] == "CANCELED" or ts <= prior[0]):
+        log.info("wix.events_stale_event_ignored", event_type=event_type)
+        return
     raw = await community_kv.get(community, map_key(wix_id))
     discord_id = raw.decode("utf-8", "replace") if raw is not None else None
     if discord_id is not None and _SNOWFLAKE.fullmatch(discord_id) is None:
@@ -91,6 +104,7 @@ async def handle(
     if event_type == "event.canceled":
         if discord_id is None:
             log.debug("wix.events_cancel_unmapped")
+            await toolcall.write_order(community, state_key(wix_id), ts, "CANCELED")
             return
         result = await toolcall.call(
             community,
@@ -101,6 +115,7 @@ async def handle(
         )
         if result is not None:
             await community_kv.delete(community, map_key(wix_id))
+            await toolcall.write_order(community, state_key(wix_id), ts, "CANCELED")
             log.info("wix.events_canceled", community_id=community)
         return
     args = _discord_args(payload)
@@ -124,6 +139,7 @@ async def handle(
         await community_kv.set(
             community, map_key(wix_id), new_id.encode(), ttl_seconds=0
         )
+        await toolcall.write_order(community, state_key(wix_id), ts, "LIVE")
         log.info("wix.events_created", community_id=community)
         return
     if event_type == "event.created":
@@ -137,4 +153,5 @@ async def handle(
         idempotency_key=_key(wix_id, "update", occurred_at),
     )
     if result is not None:
+        await toolcall.write_order(community, state_key(wix_id), ts, "LIVE")
         log.info("wix.events_updated", community_id=community)

@@ -8,6 +8,7 @@ is the real code.
 
 from __future__ import annotations
 
+import itertools
 import json
 import sys
 import types
@@ -69,10 +70,19 @@ def tools(host: _Host) -> _Tool:
     return t
 
 
+_CLOCK = itertools.count(1)
+
+
 def _wix(
-    host: _Host, kind: str, payload: dict[str, Any], actor: str | None = ALICE
+    host: _Host,
+    kind: str,
+    payload: dict[str, Any],
+    actor: str | None = ALICE,
+    at: str | None = None,
 ) -> None:
-    ev = PlatformEvent("wix", kind, actor, payload, "2026-11-07T00:00:00Z")  # type: ignore[arg-type]
+    """Deliver one connector record; each call is strictly later than the previous unless `at`."""
+    when = at or f"2026-11-07T00:{next(_CLOCK):02d}:00Z"
+    ev = PlatformEvent("wix", kind, actor, payload, when)  # type: ignore[arg-type]
     with bundle_context(
         tenant="t", community="c1", app_id="waddles.core.integration.wix"
     ):
@@ -83,8 +93,8 @@ def _enable(host: _Host, module: str) -> None:
     assert _say(host, f"!wix enable {module}", **MOD) == f"Wix {module} module enabled."
 
 
-def _sub(status: str = "ACTIVE") -> dict[str, Any]:
-    return {"event_id": "e1", "order_id": "o1", "plan_id": PLAN, "status": status}
+def _sub(status: str = "ACTIVE", order: str = "order-0001") -> dict[str, Any]:
+    return {"event_id": "e1", "order_id": order, "plan_id": PLAN, "status": status}
 
 
 def test_roles_map_then_active_adds_and_ended_removes(
@@ -232,3 +242,107 @@ def test_plan_command_validation_and_permissions(host: _Host, tools: _Tool) -> N
     assert "removed" in _say(host, f"!wix plan unmap {PLAN}", **MOD)
     assert _USAGE in _say(host, "!wix plan", **MOD)
     assert WIX_A  # fixture constants referenced
+
+
+def test_roles_late_or_replayed_active_after_ended_never_regrants(
+    host: _Host, tools: _Tool
+) -> None:
+    _say(host, f"!wix plan map {PLAN} vip", **MOD)
+    _enable(host, "roles")
+    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
+    _wix(host, "subscription.ended", _sub("ENDED"), at="2026-11-07T11:00:00Z")
+    _wix(
+        host, "subscription.started", _sub(), at="2026-11-07T10:30:00Z"
+    )  # delayed, older
+    _wix(
+        host, "subscription.started", _sub(), at="2026-11-07T12:00:00Z"
+    )  # newer but terminal
+    _wix(host, "subscription.ended", _sub("ENDED"), at="2026-11-07T11:00:00Z")  # replay
+    assert [c[1] for c in tools.calls] == [
+        "discord.member.roles.add",
+        "discord.member.roles.remove",
+    ]
+    assert "wix.roles_stale_event_ignored" in host.logs_text()
+
+
+def test_roles_replay_ignored_and_new_order_grants(host: _Host, tools: _Tool) -> None:
+    _say(host, f"!wix plan map {PLAN} vip", **MOD)
+    _enable(host, "roles")
+    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
+    _wix(
+        host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z"
+    )  # same ts: replay
+    _wix(host, "subscription.ended", _sub("CANCELED"), at="2026-11-07T11:00:00Z")
+    _wix(
+        host,
+        "subscription.started",
+        _sub(order="order-0002"),
+        at="2026-11-07T12:00:00Z",
+    )
+    assert [c[1] for c in tools.calls] == [
+        "discord.member.roles.add",
+        "discord.member.roles.remove",
+        "discord.member.roles.add",
+    ]
+
+
+def test_roles_failed_call_does_not_advance_order_state(
+    host: _Host, tools: _Tool
+) -> None:
+    _say(host, f"!wix plan map {PLAN} vip", **MOD)
+    _enable(host, "roles")
+    tools.fail = "discord.member.roles.add"
+    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
+    tools.fail = None
+    _wix(
+        host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z"
+    )  # retry still applies
+    assert [c[1] for c in tools.calls].count("discord.member.roles.add") == 2
+
+
+def test_roles_bad_order_or_timestamp_fail_loud(host: _Host, tools: _Tool) -> None:
+    _say(host, f"!wix plan map {PLAN} vip", **MOD)
+    _enable(host, "roles")
+    _wix(host, "subscription.started", _sub(order="x:y"))
+    _wix(host, "subscription.started", _sub(), at="yesterday")
+    assert tools.calls == []
+    assert "bad_order_event" in _say(host, "!wix modules", **MOD)
+
+
+def test_events_late_events_after_cancel_or_replay_are_ignored(
+    host: _Host, tools: _Tool
+) -> None:
+    _enable(host, "events")
+    p = {
+        "wix_event_id": WIX_EVENT,
+        "title": "t",
+        "starts_at": "2026-12-01T19:00:00Z",
+        "ends_at": "2026-12-01T20:00:00Z",
+    }
+    tools.results["discord.scheduled_event.create"] = {"id": "77"}
+    _wix(host, "event.created", p, at="2026-11-07T10:00:00Z")
+    _wix(
+        host, "event.updated", {**p, "title": "old"}, at="2026-11-07T09:00:00Z"
+    )  # older
+    _wix(host, "event.canceled", p, at="2026-11-07T11:00:00Z")
+    _wix(
+        host, "event.created", p, at="2026-11-07T12:00:00Z"
+    )  # late, after terminal cancel
+    _wix(host, "event.updated", p, at="2026-11-07T13:00:00Z")
+    assert [c[1] for c in tools.calls] == [
+        "discord.scheduled_event.create",
+        "discord.scheduled_event.cancel",
+    ]
+
+
+def test_events_cancel_before_create_is_terminal(host: _Host, tools: _Tool) -> None:
+    _enable(host, "events")
+    p = {
+        "wix_event_id": WIX_EVENT,
+        "title": "t",
+        "starts_at": "2026-12-01T19:00:00Z",
+        "ends_at": "2026-12-01T20:00:00Z",
+    }
+    _wix(host, "event.canceled", p, at="2026-11-07T11:00:00Z")
+    _wix(host, "event.created", p, at="2026-11-07T10:00:00Z")
+    assert tools.calls == []
