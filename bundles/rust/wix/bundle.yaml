@@ -1,12 +1,13 @@
 # hub-api install-pipeline manifest (schema_version 2) for the Wix webhook CONNECTOR.
-# Inbound-only `kind: service` connector on the `connector-tools` world (no tools exported).
-# No egress: the host owns the verified webhook ingress (svc-ingest `Scheme::WixJwt`, RS256 JWT
+# `kind: service` connector on the `connector-tools` world: inbound webhooks + outbound Wix Events tools
+# (`wix.event.*`, host-executed request templates; the Wix API key + site id are host-side connection handles).
+# The host owns the verified webhook ingress (svc-ingest `Scheme::WixJwt`, RS256 JWT
 # against the connection's Wix app public key). Credentials are never in this file or the
 # component. Cutover flag: PostHog `waddles.connector-wix` (default OFF).
 schema_version: 2
 app_id: waddles.core.service.wix
-name: Wix Webhook Connector (Rust)
-version: 1.0.0
+name: Wix Connector (Rust)
+version: 1.1.0
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -18,18 +19,134 @@ kind: service
 stages:
   action:
     entry: waddle:bundle/tool-provider#call
-egress: []
+egress:
+  - host: www.wixapis.com
+    methods: ["GET", "POST", "PATCH"]
 data:
   tables: []
 limits:
   timeout_ms: 2000
   memory_mb: 64
-  egress_rps: 1
+  egress_rps: 5
 permissions:
+  - id: net.http.fqdn:www.wixapis.com
+    justification: "declares the single Wix REST host the HOST executes the wix.event.* request templates against (Events V3 query/get/create/update/cancel); the guest never calls it, and the API key + site id are host-resolved secret-refs, never in the component"
+    params:
+      methods: ["GET", "POST", "PATCH"]
   - id: connector.pii.read
     justification: "gates identity.lookup, used to tokenize each Wix member id to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw Wix member id leaves the connector)"
 routes_to: []
-exported_tools: []
+exported_tools:
+  - name: wix.event.list
+    access: read
+    risk: normal
+    input_schema:
+      type: object
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+          maximum: 10000
+        starts_after: &id001
+          type: string
+          description: RFC 3339 timestamp
+        starts_before: *id001
+        exclude_canceled:
+          type: boolean
+      required: []
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: wix.event.get
+    access: read
+    risk: normal
+    input_schema:
+      type: object
+      properties:
+        event_id: &id002
+          type: string
+          pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+      required:
+      - event_id
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: wix.event.create
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        title: &id003
+          type: string
+          minLength: 1
+          maxLength: 200
+        description: &id004
+          type: string
+          maxLength: 500
+        starts_at: *id001
+        ends_at: *id001
+        timezone: &id005
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: IANA time-zone id
+        location_name: &id006
+          type: string
+          minLength: 1
+          maxLength: 50
+        location_type: &id007
+          type: string
+          enum:
+          - VENUE
+          - ONLINE
+      required:
+      - title
+      - starts_at
+      - ends_at
+      - timezone
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: wix.event.update
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        event_id: *id002
+        revision:
+          type: integer
+          minimum: 1
+        title: *id003
+        description: *id004
+        starts_at: *id001
+        ends_at: *id001
+        timezone: *id005
+        location_name: *id006
+        location_type: *id007
+      required:
+      - event_id
+      - revision
+      additionalProperties: false
+    output_schema:
+      type: object
+  - name: wix.event.cancel
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        event_id: *id002
+      required:
+      - event_id
+      additionalProperties: false
+    output_schema:
+      type: object
 author: PenguinTech/waddles
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/wix
@@ -38,5 +155,5 @@ compatible_with: []
 incompatible_with: []
 platform_compatibility:
   tested_with: 1.0.0
-  min_version: 1.0.0
+  min_version: 1.1.0
   max_version: null

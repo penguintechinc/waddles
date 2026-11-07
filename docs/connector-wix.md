@@ -1,6 +1,6 @@
 # Wix webhook connector (`waddles.core.service.wix`)
 
-Inbound-only connector service bundle for Wix app webhooks. Generic: any community that installs a Wix app and
+Connector service bundle for Wix app webhooks (inbound) plus the outbound `wix.event.*` tools (1.1.0, see below). Generic: any community that installs a Wix app and
 stores its credentials can use it. Flag: PostHog `waddles.connector-wix` (default OFF); env baseline
 `CONNECTOR_WIX_ENABLED` (default OFF); route listing via `CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS=wix`.
 Route/ingress mechanics: `docs/connector-webhook-routes.md`.
@@ -69,3 +69,20 @@ Not emitted (out of scope): RSVP/ticket/order-of-tickets events.
 2. Copy the app **public key** (app home -> "View ID and Keys") and the site **instance id** into the community's
    Wix provider connection (hub-api `provider_connections`, provider `wix`: secret = public key, metadata
    `instance_id`). Release a new app version so webhook changes take effect.
+
+## Outbound tools (`wix.event.*`, 1.1.0)
+
+| Tool | Wix call | Access / risk |
+|---|---|---|
+| `wix.event.list` | `POST /events/v3/events/query` | read / normal |
+| `wix.event.get` | `GET /events/v3/events/{eventId}` | read / normal |
+| `wix.event.create` | `POST /events/v3/events` | write / dangerous |
+| `wix.event.update` | `PATCH /events/v3/events/{id}` (current `revision` required) | write / dangerous |
+| `wix.event.cancel` | `POST /events/v3/events/{eventId}/cancel` | write / dangerous |
+
+Docs: https://dev.wix.com/docs/rest/business-solutions/events/event-management/events-v3/{query-events,get-event,create-event,update-event,cancel-event}.
+Create needs title + `startDate`/`endDate` + `timeZoneId`; `description` maps to `shortDescription` (<=500), `location_name` (<=50) and
+`location_type` `VENUE|ONLINE`. Host duties (S0 seam, not in this bundle): execute the template against `www.wixapis.com`, filling
+handles `wix.api_key` (Wix API key / app token) and `wix.site_id` from the community's Wix connection. The current `wix` provider
+adapter stores only the app PUBLIC key + `instance_id` (inbound verification), so an API credential field must be added to the
+connection before the tools can run. `booking.list` is intentionally not offered (participant PII in responses).

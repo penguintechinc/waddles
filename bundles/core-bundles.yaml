@@ -702,11 +702,12 @@ bundles:
       - tenant_slug: global
         community_id: null
   # Wix integration (#485): `!wix` membership status/link over the Wix REST API (GET), with
-  # default-off plan-role / event-sync modules (need webhook connector + table-access grant).
+  # default-off plan-role / event-sync modules driven by the Wix webhook connector, calling the Discord
+  # service tools (tool.call grants => stage-next-tools world).
   - app_id: waddles.core.integration.wix
-    version: "1.0.1"
+    version: "1.1.0"
     language: python
-    wit_world: stage-next
+    wit_world: stage-next-tools
     source_dir: python/wix
     manifest_path: wix.manifest.yaml
     artifact_path: wix.wasm
@@ -1538,10 +1539,11 @@ bundles:
       - tenant_slug: global
         community_id: null
 
-  # Wix webhook connector (Rust `kind: service`, inbound-only, `connector-tools` world, egress []).
-  # Verified by svc-ingest Scheme::WixJwt; the cutover flag waddles.connector-wix defaults OFF.
+  # Wix connector (Rust `kind: service`, `connector-tools` world): inbound webhooks (verified by svc-ingest
+  # Scheme::WixJwt) + outbound `wix.event.*` Events V3 tools (host-executed templates; creds host-side).
+  # The cutover flag waddles.connector-wix defaults OFF.
   - app_id: waddles.core.service.wix
-    version: "1.0.0"
+    version: "1.1.0"
     language: rust
     wit_world: connector-tools
     kind: service
