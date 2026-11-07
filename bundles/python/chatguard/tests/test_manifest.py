@@ -151,16 +151,15 @@ def _read(relative: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_host_relay_ops_are_exactly_send_delete_dm() -> None:
-    """No `chat.timeout` relay op exists -- if one appears, wire it and delete this tripwire."""
+def test_host_relay_ops_are_exactly_the_known_set() -> None:
+    """Pin the exact relay-op set; a new op (e.g. a ban/timeout) must be reviewed against chatguard."""
     source = _read("core/svc_action/src/capabilities.rs")
     enum = re.search(r"enum RelayOp \{(?P<body>.*?)\n\}", source, re.DOTALL)
     assert enum is not None, "RelayOp enum moved -- re-verify chatguard's moderation capabilities"
     variants = set(re.findall(r"^\s+(\w+),", enum.group("body"), re.MULTILINE))
-    assert {"ChatSend", "ChatDelete", "DmSend"} <= variants
-    assert not [v for v in variants if re.search(r"Ban|Timeout|Kick", v)], (
-        f"the host relay ops changed to {sorted(variants)}: a relay moderation op now exists "
-        "-- moderation.py goes through tool.call grants; re-evaluate"
+    assert variants == {"ChatSend", "ChatDelete", "DmSend", "RoleAdd", "RoleRemove"}, (
+        f"the host relay ops changed to {sorted(variants)}: if a ban/timeout/kick relay op "
+        "appeared, chatguard's moderation goes through tool.call grants -- re-evaluate"
     )
 
 

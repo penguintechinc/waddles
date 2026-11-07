@@ -136,8 +136,8 @@ def test_grammar_golden(text: str, expected: tuple[Any, ...], host: _Host) -> No
 
 BAD = [
     "!ban",
-    "!ban someone",
-    "!ban @someone twitch",
+    "!ban bad/name",
+    "!ban @",
     f"!ban {TTOK} {TTOK}x",
     f"!timeout {TTOK}",
     f"!timeout {TTOK} soon",
@@ -298,9 +298,9 @@ def test_self_target_refused_before_any_tool_call(host: _Host, tools: ToolHost) 
 @pytest.mark.parametrize(
     ("setup", "expected"),
     [
-        ("unknown", "couldn't find that user"),
+        ("unknown", "user not found"),
         ("unlinked", "isn't linked"),
-        ("ambiguous", "more than one person"),
+        ("ambiguous", "more than one user"),
     ],
 )
 def test_target_resolution_failures(
@@ -377,3 +377,48 @@ def test_unknown_tool_error_codes_are_all_mapped() -> None:
         text = moderation._failure_text(moderation.tool.ToolError(code, ""))
         assert text
     assert _run is not None
+
+
+# --- plain usernames (resolved host-side) -------------------------------------------------------
+
+
+@pytest.mark.parametrize("word", ["bob", "@bob", "Bob_1.x-y"])
+def test_plain_handle_resolves_host_side_and_never_reaches_tools_or_logs(
+    word: str, host: _Host, tools: ToolHost
+) -> None:
+    handle = word.removeprefix("@")
+    host.ident.add_mention(handle, TARGET)
+    out = mod_reply(host, f"!ban {word} twitch spam")
+    assert out == "banned on twitch"
+    assert tools.calls[0][2] == {"user": TARGET, "reason": "spam"}
+    assert f"mention:{handle.lower()}" in host.ident.calls  # resolved by the host identity import
+    assert handle.lower() not in host.logged().lower()
+    for _, _, args, _ in tools.calls:
+        assert handle.lower() not in json.dumps(args).lower()
+
+
+def test_plain_handle_all_fanout_uses_one_uuid(host: _Host, tools: ToolHost) -> None:
+    host.ident.add_mention("bob", TARGET)
+    assert mod_reply(host, "!ban bob") == "banned on twitch, discord, youtube"
+    assert {c[2]["user"] for c in tools.calls} == {TARGET}
+
+
+def test_plain_handle_ambiguous_asks_for_a_mention(host: _Host, tools: ToolHost) -> None:
+    host.ident.add_ambiguous_mention("bob")
+    out = mod_reply(host, "!ban bob")
+    assert out == "that name matches more than one user -- @mention them to pick one"
+    assert tools.calls == []
+
+
+def test_plain_handle_not_found(host: _Host, tools: ToolHost) -> None:
+    out = mod_reply(host, "!ban nobody")
+    assert out == "user not found" and "nobody" not in out
+    assert tools.calls == []
+    assert "nobody" not in host.logged()
+
+
+def test_mention_placeholder_still_works_and_bad_input_is_not_echoed(
+    host: _Host, tools: ToolHost
+) -> None:
+    assert mod_reply(host, f"!unban {TTOK} twitch") == "unbanned on twitch"
+    assert "bad/handle" not in mod_reply(host, "!ban bad/handle")

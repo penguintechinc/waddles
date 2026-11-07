@@ -152,8 +152,10 @@ mints placeholders, so a typed `{user:token-shaped-word}` is blanked like a ment
 
 ## Cross-platform moderation commands (v1.1.0)
 
-Moderators ban/timeout/kick across platforms with one grammar. The target is always an
-`@mention`; the platform word is optional and defaults to `all`.
+Moderators ban/timeout/kick across platforms with one grammar. The target is a plain username
+(`bob`, `@bob`) or an `@mention`; the platform word is optional and defaults to `all`. A plain
+username is resolved host-side (invoking platform first, then linked identities): ambiguous ->
+"@mention them to pick one", unknown -> "user not found". It is never sent to a tool or logged.
 
 | Command | Platforms |
 |---|---|

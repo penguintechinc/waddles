@@ -10,8 +10,8 @@ Commands (all `!<verb> <@user> ...`; the platform word is optional and defaults 
 - `!purge <user> [platform]` (Twitch only: the platform's own purge idiom, a 1 second timeout)
 - `!modlog [n]` (recent actions of this community, ids abbreviated)
 
-**Identity.** A username is mutable PII, so it never reaches a platform tool. The target must be
-the host-minted `{user:<token>}` mention of the invoking message; the host's `identity` import
+**Identity.** A username is mutable PII, so it never reaches a platform tool. The target is a plain
+username (`bob`/`@bob`) or the host-minted `{user:<token>}` mention of the invoking message; the host's `identity` import
 turns it into the community user UUID and every tool call carries only `{"user": "<uuid>"}`. The
 host-side tool resolves that UUID to the platform account linked on ITS platform, so "all" is a
 fan-out of one UUID to every enabled platform and a platform where the user has no linked account
@@ -159,6 +159,27 @@ def _clean_reason(words: list[str]) -> str | None:
     return text or None
 
 
+_HANDLE_RE: Final = re.compile(r"@?[A-Za-z0-9_.\-]{1,64}")
+
+
+def _target_token(word: str) -> str:
+    """Return the first argument as a host-resolvable reference: a mention token or a handle.
+
+    A `{user:<token>}` placeholder is the unambiguous form. A PLAIN handle (`bob` / `@bob`) goes
+    to the host's `identity.resolve_mention`, which resolves it on the invoking platform first and
+    then through linked identities, answering ambiguous / not-found instead of guessing. The handle
+    is resolved host-side only: never sent to a platform tool, logged or echoed.
+    """
+    if "{" in word or "}" in word or "\\" in word:
+        tokens = identity.mention_tokens(word)
+        if len(tokens) != 1 or word != "{user:" + tokens[0] + "}":
+            raise ModUsageError("the first argument must be a username or an @mention")
+        return tokens[0]
+    if not _HANDLE_RE.fullmatch(word):
+        raise ModUsageError("the first argument must be a username or an @mention")
+    return word.removeprefix("@")
+
+
 def parse(text: str) -> ModCommand:
     """Parse one moderation line (not `!modlog`) into a [`ModCommand`].
 
@@ -175,9 +196,7 @@ def parse(text: str) -> ModCommand:
     rest = words[1:]
     if not rest:
         raise ModUsageError(USAGE)
-    tokens = identity.mention_tokens(rest[0])
-    if len(tokens) != 1 or rest[0] != "{user:" + tokens[0] + "}":
-        raise ModUsageError("the first argument must be an @mention of the user")
+    token = _target_token(rest[0])
     rest = rest[1:]
     duration: int | None = None
     if action == "timeout":
@@ -194,7 +213,7 @@ def parse(text: str) -> ModCommand:
         reason = _clean_reason(rest)
     elif rest:
         raise ModUsageError(f"unexpected extra text after !{action}")
-    return ModCommand(action, tokens[0], platform, duration, reason)
+    return ModCommand(action, token, platform, duration, reason)
 
 
 def plan(cmd: ModCommand, platform: str, reason: str | None) -> Op | str:
@@ -344,9 +363,9 @@ async def _resolve(cmd: ModCommand) -> tuple[str, str] | str:
     except identity.NotLinkedError:
         return "I can't act on that: an account involved isn't linked to the community"
     except identity.NotFoundError:
-        return "I couldn't find that user in your message -- @mention them"
+        return "user not found"
     except identity.AmbiguousError:
-        return "that name matches more than one person -- mention them directly"
+        return "that name matches more than one user -- @mention them to pick one"
     except identity.NotAMemberError:
         return "that user isn't a member of this community"
     except identity.DeniedError:
