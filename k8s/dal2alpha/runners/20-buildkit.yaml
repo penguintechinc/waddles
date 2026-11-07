@@ -137,4 +137,14 @@ spec:
         - matchName: registry.npmjs.org
         - matchName: index.crates.io
         - matchName: static.crates.io
-      toPorts: [{ports: [{port: "443", protocol: TCP}]}]
+        # Docker Hub image layers are served from Cloudfront
+        - matchPattern: "*.cloudfront.docker.com"
+        # Microsoft Container Registry (manifests + blob data host)
+        - matchName: mcr.microsoft.com
+        - matchPattern: "*.data.mcr.microsoft.com"
+        # Debian apt mirrors for Debian-based base images
+        - matchName: deb.debian.org
+        - matchName: security.debian.org
+        - matchPattern: "*.debian.org"
+      # 80: apt in Debian base images uses plain HTTP; 443 for registries/pkg indexes
+      toPorts: [{ports: [{port: "443", protocol: TCP}, {port: "80", protocol: TCP}]}]
