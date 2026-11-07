@@ -152,7 +152,7 @@ def _read(relative: str) -> str:
 
 
 def test_host_relay_ops_are_exactly_the_known_set() -> None:
-    """Pin the exact relay-op set; a new op (e.g. a ban/timeout) must be reviewed against chatguard."""
+    """Pin the exact relay-op set; a new op (e.g. ban/timeout) must be reviewed here."""
     source = _read("core/svc_action/src/capabilities.rs")
     enum = re.search(r"enum RelayOp \{(?P<body>.*?)\n\}", source, re.DOTALL)
     assert enum is not None, "RelayOp enum moved -- re-verify chatguard's moderation capabilities"

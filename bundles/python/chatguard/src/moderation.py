@@ -11,8 +11,8 @@ Commands (all `!<verb> <@user> ...`; the platform word is optional and defaults 
 - `!modlog [n]` (recent actions of this community, ids abbreviated)
 
 **Identity.** A username is mutable PII, so it never reaches a platform tool. The target is a plain
-username (`bob`/`@bob`) or the host-minted `{user:<token>}` mention of the invoking message; the host's `identity` import
-turns it into the community user UUID and every tool call carries only `{"user": "<uuid>"}`. The
+username (`bob`/`@bob`) or the host-minted `{user:<token>}` mention of the invoking message;
+the host's `identity` import turns it into the community user UUID and every tool call carries only `{"user": "<uuid>"}`. The
 host-side tool resolves that UUID to the platform account linked on ITS platform, so "all" is a
 fan-out of one UUID to every enabled platform and a platform where the user has no linked account
 (or the community has no bound channel) answers with a per-platform refusal in the single reply.
