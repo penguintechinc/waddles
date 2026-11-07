@@ -35,7 +35,7 @@ Kind: S = service bundle (owns tools), A = app bundle (invokes), P = platform se
 |---|---|---|---|---|---|---|
 | `calendar` | A | Rust | (admin actions only) | `discord.scheduled_event.*`, `twitch.schedule.*`, `wix.event.*`, `chat.send` | `event.py`, `event_discord_sync.py`, `calendar_interaction_module`, `bundles/python/event` (per #1099) | v3.0 (discord) / v3.1 (twitch, wix) |
 | `discord` (extend) | P | Rust | existing + `discord.live.channels` + `discord.voice.*` (v3.1) | -- | -- | live tool v3.0 |
-| `twitch` (extend) | P | Rust | + `twitch.schedule.{list,create,update,delete}`, `twitch.clip.create`, `twitch.live.channels` | -- | `clip_interaction_module/twitch_clip_service` | v3.0 live+clip; schedule v3.1 |
+| `twitch` (extend) | P | Rust | + `twitch.schedule.{list,create,update,delete}`, `twitch.clip.{create,get,list}`, `twitch.live.channels` | -- | `clip_interaction_module/twitch_clip_service` | v3.0 live + clip.{create,get,list}; schedule v3.1 |
 | `youtube` (extend) | P | Rust | + `youtube.live.channels` | -- | `live_status_service` (yt part) | v3.0 |
 | `kick` (new, if API allows) | P | Rust | `kick.live.channels` | -- | -- | v3.1 (Q6) |
 | `wix` (extend) | P | Rust | + `wix.event.{list,create,update,cancel}` (outbound Wix Events API) | -- | -- | v3.1 |
@@ -46,8 +46,9 @@ Kind: S = service bundle (owns tools), A = app bundle (invokes), P = platform se
 | `dj` | A | Rust | (admin actions; queue read for Music Station) | `music.*.*`, `ai.complete`, `ai.classify`, `chat.send` | `music.py`, `community_music_queue.py`, `public_music_queue.py`, `music_service.py`, `core/unified_music_module`, `bundles/python/music` | v3.0 (static+requests) / v3.1 (AI DJ, auto-remove) |
 | `ai` | S | Rust | `ai.complete`, `ai.classify`, `ai.embed`, `ai.rag.{ingest,search,delete}`, `ai.memory.{put,search,forget}` | host WaddleAI/BYOK | `ai_interaction_module` providers, `bot_ai_knowledge.py`, `bot_ai_chatter.py`, `memories_interaction_module`, `bundles/python/memories`, `ai_researcher_module` model plumbing | v3.0 (complete/classify/rag) / v3.1 (memory) |
 | `ai-teammates` | A | Rust | (admin actions) | `ai.*`, `chat.send`, `*.live.channels` (opt) | `ai_researcher_module`, `welcome_interaction_module`, `ai_interaction_module/proactive_chat_service`, `bot.py` ai-* routes | v3.0 Researcher+Receptionist / v3.1 Producer+DJ teammate |
-| `clip-capture` | S | Rust | `clip.capture` (last N s of a stream), `clip.get`, `clip.list`, `clip.delete` | host `svc_streaming` ring-buffer seam, bundle object storage | `clip_interaction_module/clip_service` (reels part -> Q7) | v3.1 |
-| `clips` | A | Rust | (admin actions) | `twitch.clip.create`, `clip.*`, `chat.send` | `clip_interaction_module` commands | v3.0 (twitch native) / v3.1 (capture) |
+| `clip` | S (on svc-streaming) | Rust | `clip.capture` (last N<=30s from stream ring buffer), `clip.get`, `clip.list`, `clip.delete`, `clip.share_url` (signed, host-minted) | host `svc_streaming` ring-buffer seam, bundle object storage | `clip_interaction_module/clip_service` (capture/reels backend) | v3.1 |
+| `clip-manager` | A | Rust | (admin actions; chat `!clip`) | `clip.*`, `chat.send` | `clip_interaction_module` (bookmark/list/manage/share/delete, permissions via scopes `clips:request|manage|delete`) | v3.1 |
+| `twitch-clips` | A | Rust | (admin actions; chat `!clip`) | `twitch.clip.{create,get,list}`, `chat.send` | `clip_interaction_module` Twitch clip create/list + `twitch_clip_service` | v3.0 |
 | `webrtc` | S | Rust | Signaling/policy: `whip.{endpoint_create,endpoint_revoke,list}` (ingest tokens), `whep.{endpoint_create,endpoint_revoke,list}` (playback), `room.{create,close,list,get,lock,unlock}`, `participant.{token_issue,token_revoke,kick,mute}`, `track.{publish_route,subscribe_route}`, `relay.{create,close}` (pass-through proxy), `recording.{start,stop}`, `stats.get` | host `svc_streaming` seam (existing `ingest/whip.rs`, `egress/whep.rs`, `rtc/*`); TURN/ICE host config | `calls_proxy.py`, `core/module_rtc` (Go); WHIP/WHEP control surface of svc-streaming | v3.0 minimal (whip/whep endpoint + room token) / v3.1 full |
 | `rooms` | A | Rust | (admin actions) | `webrtc.*`, `discord.voice.*` (opt), `chat.send`; event link is data (UUID), no app->app call | `calls.py`, `/interact/voice` | v3.1 |
 | `game-servers` | A | Rust | (admin actions) | `gameserver.*`, `chat.send` | `bot.py` rcon routes, `bot_rcon.py`, `server_manager`/`server_status` modules | v3.1 |
@@ -138,7 +139,7 @@ Calendar internals: #1099. Contract this spec adds: each platform bundle exposes
   access, schedule)        room/track routing, relay,           egress/whep.rs  POST /whep/..       <- TrackFanout (SFU: 1 encode, N PCs)
                            recording hooks, stats)              egress/relay.rs  pass-through proxy; rtc/{pc_factory,rtp_leg,...}
    event link = UUID data                                       TURN/ICE + UDP range = host config; recording -> bundle object storage
- other apps (DJ, clips, live-now) never call webrtc; they use streaming-adjacent tools only
+ other apps (DJ, clip-manager, live-now) never call webrtc; they use streaming-adjacent tools only
 ```
 
 How existing code is exposed (no rewrite, no media in guests):
@@ -177,7 +178,7 @@ err: platform_unavailable | rate_limited | not_connected   // loud, no empty-suc
 
 **Clip**
 - `twitch.clip.create` (service tool): Helix `POST /clips`, returns clip id/url; broadcaster pinned host-side (same destination-arg rejection as `tools.rs:35`). Replaces `twitch_clip_service`.
-- `clip-capture` (service bundle on svc-streaming): svc-streaming keeps a per-stream rolling in-memory/spool **ring buffer** (default 60s, configurable cap) for streams passing through; `clip.capture{stream_ref, seconds<=30}` asks the host seam to cut the last N s (keyframe-aligned remux, no re-encode) -> writes MP4 to bundle object storage under the bundle prefix (`2026-11-06-bundle-object-storage.md`: 1 bucket, prefix per bundle, tag for media) -> returns `{clip_id, object_ref, duration_s}`. Retention TTL + per-community quota; capture only for streams the community owns; download via signed URL minted host-side.
+- `clip` SERVICE bundle (stream-video clips, on svc-streaming; managed by the `clip-manager` APP, distinct from Twitch-native clips which `twitch-clips` APP drives): svc-streaming keeps a per-stream rolling in-memory/spool **ring buffer** (default 60s, configurable cap) for streams passing through; `clip.capture{stream_ref, seconds<=30}` asks the host seam to cut the last N s (keyframe-aligned remux, no re-encode) -> writes MP4 to bundle object storage under the bundle prefix (`2026-11-06-bundle-object-storage.md`: 1 bucket, prefix per bundle, tag for media) -> returns `{clip_id, object_ref, duration_s}`. Retention TTL + per-community quota; capture only for streams the community owns; download via signed URL minted host-side.
 - Pre-req: ring buffer in `core/svc_streaming` (new; `egress/record` spool is the closest base) -- scope risk, v3.1.
 
 ## 9. Parity matrix (old feature -> new home)
@@ -220,8 +221,10 @@ Status legend: C = covered by target bundle (design), M = missing/needs explicit
 | Prompt safety | `prompt_safety.py` | `ai-teammates`/`ai` guard (ported tests) | C |
 | Welcome | `welcome_interaction_module` | Receptionist | C |
 | Memories | `memories_interaction_module`, `bundles/python/memories` | `ai.memory.*` | C (v3.1) |
-| Clip create/bookmark/list | `clip_interaction_module` | `clips`+`twitch.clip.create` | C |
-| Reels/clip overlay | clip module | `clips`+`clip-capture` | M (Q7) |
+| Twitch clip create/list/get | `clip_interaction_module`, `twitch_clip_service` | `twitch-clips` + `twitch.clip.*` | C (v3.0) |
+| Stream clip capture (ring buffer) | `clip_service` | `clip` service | C (v3.1) |
+| Clip bookmark/list/manage/share/delete/permissions | `clip_interaction_module` | `clip-manager` | C (v3.1) |
+| Reels/clip overlay | clip module | `clip-manager` + `clip` | M (Q7) |
 | Overlay config/browser-sources | `overlay.py` | stays hub-api (host admin) | N/A (Q4) |
 | Shoutout, inventory, translate etc. | various | not in this spec | N/A (Q5) |
 
@@ -237,7 +240,8 @@ Status legend: C = covered by target bundle (design), M = missing/needs explicit
 | D4 (calls) | `calls.py`, `calls_proxy.py`, `core/module_rtc/` (whole Go module) + its helm/CI/httproute entries | webrtc (full) + rooms (v3.1); no Go left behind |
 | D5 (gameserver) | rcon block in `bot.py`, `bot_rcon.py`, `server_manager`, `server_status` modules | game-servers (v3.1) |
 | D6 (ai) | `bot_ai_*.py`, ai routes in `bot.py`, `ai_interaction_module`, `welcome_interaction_module`, `memories_*`, `bundles/python/memories`, `core/ai_researcher_module` + helm `ai-researcher` (values.yaml:2466, templates/core/ai-researcher.yaml, kustomize, `build-ai-researcher.yml`, httproute, `service-roles.yaml` entry) | s9 all C incl. researcher audit |
-| D7 (clip) | `clip_interaction_module` | clips + capture |
+| D7a (twitch clips) | Twitch parts of `clip_interaction_module` | twitch-clips live |
+| D7b (clip module remainder) | `action/interactive/clip_interaction_module/` | `clip` + `clip-manager` parity C (v3.1) |
 
 Each D-PR: delete code + tests + helm/CI/DB-role refs; drop tables only a release after soak (dual SQL + Alembic chain caveat per #1099 s11).
 
@@ -259,7 +263,7 @@ Each D-PR: delete code + tests + helm/CI/DB-role refs; drop tables only a releas
 - Per-community scoping: every table/kv row carries numeric `community_id`; tool calls resolve community from the envelope, never from args; platform channel ids never accepted from caller (reject-destination-args pattern, `tools.rs:35`).
 - PII-free logs: log community_id, op, bundle app_id, counts only; never chat text, track-requester names, handles, or prompts.
 - Prompt injection: s6 guard; teammates have no model-selected tools; AI outputs never executed.
-- Dangerous tools (`*.create/update/delete`, `gameserver.command/kick/ban`, `clip.capture`) -> `risk: dangerous`, admin approval + consent; gameserver commands additionally allowlisted per server policy (carry over `enforcement_service` rules).
+- Dangerous tools (`*.create/update/delete`, `gameserver.command/kick/ban`, `clip.capture`, `clip.delete`) -> `risk: dangerous`, admin approval + consent; gameserver commands additionally allowlisted per server policy (carry over `enforcement_service` rules).
 - DMCA/ToS: s4; no audio download/re-stream; takedown contact + audit trail for removals.
 - Fail loud: unimplemented provider capability returns `unsupported`, never silent no-op.
 
@@ -279,10 +283,10 @@ Each D-PR: delete code + tests + helm/CI/DB-role refs; drop tables only a releas
 | 2 (parallel) | P6 `dj` (static + requests, policy s5 deterministic part) | `bundles/rust/dj/` | P4, P0b | v3.0 |
 | 2 | P7 `live-now` | `bundles/rust/live-now/` | P1-P3 | v3.0 |
 | 2 | P8 `ai-teammates` Researcher+Receptionist | `bundles/rust/ai-teammates/` | P0b | v3.0 |
-| 2 | P9 `clips` (twitch native) | `bundles/rust/clips/` | P1 | v3.0 |
+| 2 | P9 `twitch-clips` app | `bundles/rust/twitch-clips/` | P1 | v3.0 |
 | 3 | M1 data migrations (music, ai knowledge, welcome) | `scripts/migrate/*`, one-off admin job | P6, P8 | v3.0 |
 | 3 | D1, D3, D7-partial then D2, D6 (after parity C + soak) | deletions per s10 | wave 2 + M1 | v3.0 end / v3.1 |
-| 4 (v3.1) | `music-soundcloud`; `dj` AI + auto-remove; Producer; `twitch.schedule` + `wix.event` + calendar import; `clip-capture` + svc-streaming ring buffer; `webrtc` full (lock/kick/mute/recording/track routing) + `rooms` app; `gameserver`+`game-servers`; `ai.memory`; D2-remainder, D4, D5 | disjoint per bundle dir; svc-streaming PR owns `core/svc_streaming/` alone | wave 3 | v3.1 |
+| 4 (v3.1) | `music-soundcloud`; `dj` AI + auto-remove; Producer; `twitch.schedule` + `wix.event` + calendar import; `clip` service + svc-streaming ring buffer (host PR owns `core/svc_streaming/` ring-buffer files alone) then `clip-manager` app; `webrtc` full (lock/kick/mute/recording/track routing) + `rooms` app; `gameserver`+`game-servers`; `ai.memory`; D2-remainder, D4, D5 | disjoint per bundle dir; svc-streaming PR owns `core/svc_streaming/` alone | wave 3 | v3.1 |
 
 ## 14. v3.0 (beta Wed 2026-11-11) vs v3.1 -- honest cut
 
@@ -299,7 +303,7 @@ Each D-PR: delete code + tests + helm/CI/DB-role refs; drop tables only a releas
 4. `overlay.py` browser-source/overlay admin: keep in hub-api as host-service admin (this spec's assumption)?
 5. Shoutout, inventory, translate, quote, lfg, loyalty modules: out of scope here -- do they need a follow-up catalog pass?
 6. Kick platform bundle: API availability/ToS -- include in v3.1 or drop `kick.live.channels`?
-7. Clip reels/overlay (`clip_interaction_module` `/reels`, `/overlay`): keep in `clips`, or drop?
+7. Clip reels/overlay (`clip_interaction_module` `/reels`, `/overlay`): keep in `clip-manager`, or drop?
 8. Radio stations (`radio_player.py` 929 LOC): needed? Re-streaming internet radio has DMCA/ToS exposure.
 9. Music OAuth tokens: acceptable to force re-link at cutover instead of migrating tokens?
 10. Wix event write scope: are Wix sites calendar targets at all, or import-only (webhook-fed)?
