@@ -78,6 +78,12 @@ keyed only by `to_broadcaster_user_id` yields that id (the hardcoded path publis
 5. **Outbound slot semantics (Part B)** follow the handshake-slot convention; reconcile with T6d once specified. Read tools use the host-pinned slots above.
 6. The connector needs the connector `identity.lookup` import for read tools.
 
+## Moderation (v1.1.0)
+
+Tools `twitch.moderation.{ban,timeout,unban,delete_message}` (manifest `required_scope: community:moderate`, `risk: dangerous`; the host verifies the invoking actor). The guest has no mutating egress: the host serves an authorized call by queueing the pinned outbound op `mod.ban` / `mod.timeout` / `mod.unban` / `chat.delete`, whose Helix template `moderation.rs` / `sender.rs` build. `broadcaster_id` / `moderator_id` are host slots; payload keys naming a destination are ignored. `tools::moderation_op` validates tool args (UUID `user`, `duration` 1..=1209600 s, `reason` <= 500 chars) and yields the producer-envelope fields; for ban/timeout the params ride in `text` as a JSON object `{duration?, reason?}`. Permissions: `moderation.twitch`, `chat.delete:twitch`.
+
+Not implemented (fail loud): `clear_chat` (policy has no kind for `DELETE /moderation/chat` without `message_id`) and whispers (`dm.send` needs a host duty). Parity vs legacy `twitch_service.py`: `tests/moderation_parity.rs` (moderator is the bot connection, not the broadcaster).
+
 ## Build / test
 
 ```
