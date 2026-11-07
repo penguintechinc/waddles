@@ -184,6 +184,10 @@ pub fn update(
     }
     ev.version += 1;
     store::put_event(ctx.kv, &ev)?;
+    if ev.status == Status::Pending {
+        // Any earlier queued upsert (e.g. a transient failure) must not push edited content.
+        sync::drop_upserts(ctx, ev.id)?;
+    }
     if ev.status == Status::Scheduled {
         sync::enqueue(ctx, cfg, &ev, SyncOp::Update)?;
         sync::flush_event(ctx, cfg, &ev)?;

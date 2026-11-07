@@ -323,6 +323,18 @@ fn run_target(
             outcome: "idle",
         });
     };
+    if matches!(intent, SyncOp::Create | SyncOp::Update)
+        && ev.status != crate::model::Status::Scheduled
+    {
+        // Approval gate inside the engine: unapproved content never reaches a remote target.
+        // The intent is dropped; approval re-queues it.
+        rec.pending_op = None;
+        return Ok(RunOutcome {
+            target,
+            op: Some(intent),
+            outcome: "dropped_unapproved",
+        });
+    }
     let mut recreated = false;
     loop {
         let op = match (intent, rec.remote_id.is_some()) {
@@ -541,7 +553,7 @@ pub fn flush_event(ctx: &Ctx, cfg: &Config, ev: &Event) -> Result<Vec<RunOutcome
         store::put_sync_record(ctx.kv, ev.id, &rec)?;
         let healthy = matches!(
             o.outcome,
-            "ok" | "noop" | "unchanged" | "replayed" | "remote_gone"
+            "ok" | "noop" | "unchanged" | "replayed" | "remote_gone" | "dropped_unapproved"
         );
         ctx.log.log(
             if healthy { "info" } else { "warn" },
@@ -557,6 +569,23 @@ pub fn flush_event(ctx: &Ctx, cfg: &Config, ev: &Event) -> Result<Vec<RunOutcome
     }
     refresh_queue(ctx, ev.id)?;
     Ok(out)
+}
+
+/// Clears waiting Create/Update (upsert) intents for an event that left `Scheduled` (kept
+/// Cancel/Delete intents still run) and refreshes the queue.
+pub fn drop_upserts(ctx: &Ctx, id: u64) -> Result<(), CalError> {
+    for t in Target::ALL {
+        if let Some(mut r) = store::sync_record(ctx.kv, id, t)?
+            && matches!(r.pending_op, Some(SyncOp::Create | SyncOp::Update))
+        {
+            r.pending_op = None;
+            if r.remote_id.is_some() {
+                r.status = SyncStatus::Synced;
+            }
+            store::put_sync_record(ctx.kv, id, &r)?;
+        }
+    }
+    refresh_queue(ctx, id)
 }
 
 /// Keeps the pending queue in step with the event's mappings.

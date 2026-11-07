@@ -989,3 +989,86 @@ fn calendar_full_purges_oldest_terminal_event_then_refuses() {
     assert_eq!(store::index(ctx.kv).unwrap().len(), store::MAX_EVENTS);
     assert!(n.id > first.id);
 }
+
+#[test]
+fn queued_upsert_cannot_push_unapproved_edit_after_pending_reset() {
+    let w = World::new();
+    let ctx = w.ctx();
+    let cfg = Config {
+        approval_required: true,
+        sync_discord: true,
+        ..Config::default()
+    };
+    // Approved + synced once (remote exists).
+    let ev = service::create(&ctx, &cfg, &member(USER), new_ev("Orig", SOON)).unwrap();
+    service::approve(&ctx, &cfg, &approver(), ev.id).unwrap();
+    assert_eq!(w.calls().len(), 1);
+    // An approver edit whose update fails transiently stays queued.
+    w.tools
+        .script
+        .borrow_mut()
+        .push_back(Err(ToolError::Timeout));
+    w.tools
+        .script
+        .borrow_mut()
+        .push_back(Err(ToolError::Timeout));
+    service::update(
+        &ctx,
+        &cfg,
+        &approver(),
+        ev.id,
+        Patch {
+            title: Some("Approved edit".into()),
+            ..Patch::default()
+        },
+    )
+    .unwrap();
+    let before = w.calls().len();
+    assert_eq!(store::pending(ctx.kv).unwrap(), vec![ev.id]);
+    // Non-approver edit: back to Pending, queue cleared, reconcile pushes NOTHING.
+    service::update(
+        &ctx,
+        &cfg,
+        &member(USER),
+        ev.id,
+        Patch {
+            title: Some("Sneaky".into()),
+            ..Patch::default()
+        },
+    )
+    .unwrap();
+    assert!(store::pending(ctx.kv).unwrap().is_empty());
+    assert!(sync::reconcile(&ctx, &cfg, 5).unwrap().is_empty());
+    assert_eq!(w.calls().len(), before, "zero tool calls while pending");
+    // Re-approval pushes exactly one update carrying the edited content.
+    service::approve(&ctx, &cfg, &approver(), ev.id).unwrap();
+    let calls = w.calls();
+    assert_eq!(calls.len(), before + 1);
+    assert_eq!(calls.last().unwrap().tool, "discord.scheduled_event.update");
+    assert_eq!(calls.last().unwrap().args["name"], "Sneaky");
+}
+
+#[test]
+fn engine_refuses_upserts_for_non_scheduled_events_even_if_queued() {
+    let w = World::new();
+    let ctx = w.ctx();
+    let cfg = cfg_sync(true);
+    let mut ev = service::create(&ctx, &cfg, &approver(), new_ev("E", SOON)).unwrap();
+    assert_eq!(w.calls().len(), 1);
+    // Force a stale queued upsert, then flip the event to Pending behind the engine's back.
+    sync::enqueue(&ctx, &cfg, &ev, SyncOp::Update).unwrap();
+    ev.status = Status::Pending;
+    ev.title = "Unapproved".into();
+    let out = sync::flush_event(&ctx, &cfg, &ev).unwrap();
+    assert_eq!(out[0].outcome, "dropped_unapproved");
+    assert_eq!(w.calls().len(), 1);
+    assert!(store::pending(ctx.kv).unwrap().is_empty());
+    // A queued Cancel still runs for a non-scheduled (cancelled) event.
+    ev.status = Status::Cancelled;
+    sync::enqueue(&ctx, &cfg, &ev, SyncOp::Cancel).unwrap();
+    sync::flush_event(&ctx, &cfg, &ev).unwrap();
+    assert_eq!(
+        w.calls().last().unwrap().tool,
+        "discord.scheduled_event.cancel"
+    );
+}
