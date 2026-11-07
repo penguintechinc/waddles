@@ -55,10 +55,10 @@ pub const RATE_LIMIT_PER_MIN: i64 = 30;
 pub const BACKOFF_DEFAULT_S: u32 = 30;
 pub const BACKOFF_MAX_S: u32 = 300;
 /// Search/playlist page bounds.
-pub const MAX_LIMIT: u64 = 50;
+pub const MAX_SEARCH_LIMIT: u64 = 25;
+pub const MAX_PLAYLIST_LIMIT: u64 = 50;
 pub const DEFAULT_SEARCH_LIMIT: u64 = 10;
 pub const DEFAULT_PLAYLIST_LIMIT: u64 = 25;
-const MAX_OFFSET: u64 = 1000;
 const MAX_QUERY_LEN: usize = 200;
 const MAX_URL_LEN: usize = 200;
 const MAX_TEXT: usize = 300;
@@ -225,9 +225,9 @@ fn opt_str(v: &Value, key: &str) -> Value {
     }
 }
 
-/// License + permission block shared by tracks and playlists. These are the
-/// flags the DJ app enforces DMCA-safe rules from; absence is reported as
-/// `null`, never defaulted to "allowed".
+/// License + permission block (a documented extension of the shared music
+/// track contract). These are the flags the DJ app enforces DMCA-safe rules
+/// from; absence is reported as `null`, never defaulted to "allowed".
 fn license_json(v: &Value) -> Value {
     let lic = v
         .get("license")
@@ -248,7 +248,11 @@ fn malformed() -> ToolError {
     ToolError::TargetUnavailable
 }
 
-/// Maps one upstream track object to the common music-track shape.
+/// Maps one upstream track object to the shared music-track contract
+/// (`bundles/contracts/music-tool-contract.v1.json`) plus provider extras:
+/// `artist_id`, `genre`, `license{..}`, `embeddable`, `full_playback`.
+/// A track missing a contract-required field is malformed (callers in list
+/// tools skip + count it; single-track tools fail loud).
 pub fn track_json(v: &Value) -> Result<Value, ToolError> {
     let obj = v.as_object().ok_or_else(malformed)?;
     let urn = match obj.get("urn").and_then(Value::as_str) {
@@ -270,7 +274,17 @@ pub fn track_json(v: &Value) -> Result<Value, ToolError> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .or_else(|| user.and_then(|u| u.get("username")).and_then(Value::as_str))
-        .map(trunc);
+        .map(trunc)
+        .ok_or_else(malformed)?;
+    let duration_ms = obj
+        .get("duration")
+        .and_then(Value::as_u64)
+        .ok_or_else(malformed)?;
+    let source_url = obj
+        .get("permalink_url")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(malformed)?;
     let access = obj.get("access").and_then(Value::as_str);
     let streamable = obj.get("streamable").and_then(Value::as_bool);
     let sharing = obj.get("sharing").and_then(Value::as_str);
@@ -285,23 +299,35 @@ pub fn track_json(v: &Value) -> Result<Value, ToolError> {
         "id": urn,
         "title": trunc(title),
         "artist": artist,
-        "artist_id": user.and_then(|u| u.get("urn")).and_then(Value::as_str),
-        "url": opt_str(v, "permalink_url"),
-        "artwork_url": opt_str(v, "artwork_url"),
-        "genre": opt_str(v, "genre"),
-        "duration_s": obj.get("duration").and_then(Value::as_u64).map(|ms| ms.div_ceil(1000)),
+        "duration_ms": duration_ms,
+        "thumbnail": opt_str(v, "artwork_url"),
         // SoundCloud exposes no explicit-content flag: unknown, not "clean".
         "explicit": Value::Null,
+        "source_url": trunc(source_url),
+        "artist_id": user.and_then(|u| u.get("urn")).and_then(Value::as_str),
+        "genre": opt_str(v, "genre"),
         "license": license_json(v),
-        // Waddles never re-streams or downloads: playback is the provider widget embed.
-        "capability": {
-            "metadata": true,
-            "embed": embeddable,
-            "full_playback": full_playback,
-            "stream_url": false,
-            "download": false,
-        },
+        // Provider widget embed is the only playback; per-track permission.
+        "embeddable": embeddable,
+        "full_playback": full_playback,
     }))
+}
+
+/// Contract `capability` for one track: widget embed when permitted, else
+/// none. Waddles never serves or downloads audio (`server_audio:false`) and
+/// SoundCloud has no queue API (`queue_add:false`).
+fn track_capability(track: &Value) -> Value {
+    let playback = if track["embeddable"].as_bool() == Some(true) {
+        "embed"
+    } else {
+        "none"
+    };
+    json!({ "playback": playback, "server_audio": false, "queue_add": false })
+}
+
+/// Provider-level capability for list tools (per-track `embeddable` refines it).
+fn provider_capability() -> Value {
+    json!({ "playback": "embed", "server_audio": false, "queue_add": false })
 }
 
 fn tracks_of(v: &Value) -> Result<&Vec<Value>, ToolError> {
@@ -315,34 +341,22 @@ fn tracks_of(v: &Value) -> Result<&Vec<Value>, ToolError> {
     }
 }
 
-/// Maps an upstream playlist object (metadata only) to the common shape.
-fn playlist_meta(v: &Value) -> Result<Value, ToolError> {
-    let obj = v.as_object().ok_or_else(malformed)?;
-    let urn = obj
-        .get("urn")
-        .and_then(Value::as_str)
-        .filter(|u| !u.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            obj.get("id")
-                .and_then(Value::as_u64)
-                .map(|n| format!("soundcloud:playlists:{n}"))
-        })
-        .ok_or_else(malformed)?;
-    let title = obj
-        .get("title")
-        .and_then(Value::as_str)
-        .ok_or_else(malformed)?;
-    Ok(json!({
-        "provider": PROVIDER,
-        "id": urn,
-        "title": trunc(title),
-        "url": opt_str(v, "permalink_url"),
-        "owner": v.get("user").and_then(|u| u.get("username")).and_then(Value::as_str).map(trunc),
-        "track_count": obj.get("track_count").and_then(Value::as_u64),
-        "duration_s": obj.get("duration").and_then(Value::as_u64).map(|ms| ms.div_ceil(1000)),
-        "license": license_json(v),
-    }))
+/// Maps rows, dropping (and counting) tracks missing contract-required fields.
+fn collect_tracks<'a>(rows: impl Iterator<Item = &'a Value>) -> (Vec<Value>, u64) {
+    let (mut out, mut skipped) = (Vec::new(), 0u64);
+    for r in rows {
+        match track_json(r) {
+            Ok(t) => out.push(t),
+            Err(_) => skipped += 1,
+        }
+    }
+    (out, skipped)
+}
+
+/// `{track, cached, capability}` for single-track outputs.
+fn track_out(track: Value, cached: bool) -> Value {
+    let capability = track_capability(&track);
+    json!({ "track": track, "cached": cached, "capability": capability })
 }
 
 /// Outcome of a successful upstream GET.
@@ -443,34 +457,38 @@ impl Soundcloud {
         }
     }
 
-    /// `music.soundcloud.search {q, limit?, offset?, access?[]}`.
+    /// Cache read: marks the stored output `cached: true`.
+    fn cached_out(&self, key: &str) -> Option<Value> {
+        let mut v = self.cache_get(key)?;
+        v["cached"] = Value::Bool(true);
+        Some(v)
+    }
+
+    /// `music.soundcloud.search {query, limit?}`.
     pub fn search(&self, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
-        only_fields(&args, &["q", "limit", "offset", "access"])?;
-        let q = str_field(&args, "q")?.trim();
+        only_fields(&args, &["query", "limit"])?;
+        let q = str_field(&args, "query")?.trim();
         if q.is_empty() || q.chars().count() > MAX_QUERY_LEN || q.chars().any(char::is_control) {
             return Err(invalid(format!(
-                "q must be 1..={MAX_QUERY_LEN} printable characters"
+                "query must be 1..={MAX_QUERY_LEN} printable characters"
             )));
         }
-        let limit = bounded_u64(&args, "limit", 1, MAX_LIMIT, DEFAULT_SEARCH_LIMIT)?;
-        let offset = bounded_u64(&args, "offset", 0, MAX_OFFSET, 0)?;
-        let access = access_filter(&args)?;
+        let limit = bounded_u64(&args, "limit", 1, MAX_SEARCH_LIMIT, DEFAULT_SEARCH_LIMIT)?;
         let key = format!(
             "cache.search.{}",
-            fnv_hex(&format!("{}|{limit}|{offset}|{access}", q.to_lowercase()))
+            fnv_hex(&format!("{}|{limit}", q.to_lowercase()))
         );
-        if let Some(hit) = self.cache_get(&key) {
+        if let Some(hit) = self.cached_out(&key) {
             return Ok(hit);
         }
-        let mut pq = format!("/tracks?q={}&limit={limit}&offset={offset}", pct_encode(q));
-        if !access.is_empty() {
-            pq.push_str(&format!("&access={}", pct_encode(&access)));
-        }
-        let body = self.fetch_json(&pq)?;
-        let rows = tracks_of(&body)?;
-        let tracks = rows.iter().map(track_json).collect::<Result<Vec<_>, _>>()?;
-        let next_offset = (rows.len() as u64 == limit).then(|| offset + limit);
-        let out = json!({ "provider": PROVIDER, "tracks": tracks, "next_offset": next_offset });
+        let body = self.fetch_json(&format!("/tracks?q={}&limit={limit}", pct_encode(q)))?;
+        let (tracks, skipped) = collect_tracks(tracks_of(&body)?.iter());
+        let out = json!({
+            "tracks": tracks,
+            "cached": false,
+            "skipped": skipped,
+            "capability": provider_capability(),
+        });
         self.cache_put(&key, &out, TTL_SEARCH);
         Ok(out)
     }
@@ -484,94 +502,93 @@ impl Soundcloud {
 
     fn track_by_urn(&self, urn: &str) -> Result<Value, ToolError> {
         let key = format!("cache.track.{}", fnv_hex(urn));
-        if let Some(hit) = self.cache_get(&key) {
+        if let Some(hit) = self.cached_out(&key) {
             return Ok(hit);
         }
         let body = self.fetch_json(&format!("/tracks/{urn}"))?;
-        let out = track_json(&body)?;
+        let out = track_out(track_json(&body)?, false);
         self.cache_put(&key, &out, TTL_TRACK);
         Ok(out)
     }
 
-    /// `music.soundcloud.playlist.get {id, limit?}`: metadata + first `limit` tracks.
+    /// `music.soundcloud.playlist.get {playlist_id, limit?, page_token?}`.
+    /// `page_token` is an opaque `o<offset>` cursor into the upstream list.
     pub fn playlist_get(&self, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
-        only_fields(&args, &["id", "limit"])?;
-        let urn = parse_playlist_id(str_field(&args, "id")?)?;
-        let limit = bounded_u64(&args, "limit", 1, MAX_LIMIT, DEFAULT_PLAYLIST_LIMIT)?;
-        self.playlist_by_urn(&urn, limit)
-    }
-
-    fn playlist_by_urn(&self, urn: &str, limit: u64) -> Result<Value, ToolError> {
-        let key = format!("cache.playlist.{}", fnv_hex(&format!("{urn}|{limit}")));
-        if let Some(hit) = self.cache_get(&key) {
+        only_fields(&args, &["playlist_id", "limit", "page_token"])?;
+        let urn = parse_playlist_id(str_field(&args, "playlist_id")?)?;
+        let limit = bounded_u64(
+            &args,
+            "limit",
+            1,
+            MAX_PLAYLIST_LIMIT,
+            DEFAULT_PLAYLIST_LIMIT,
+        )?;
+        let offset = match args.get("page_token") {
+            None | Some(Value::Null) => 0usize,
+            Some(Value::String(t)) => t
+                .strip_prefix('o')
+                .filter(|d| (1..=6).contains(&d.len()) && d.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|d| d.parse().ok())
+                .ok_or_else(|| invalid("page_token is not a valid cursor"))?,
+            Some(_) => return Err(invalid("page_token must be a string")),
+        };
+        let key = format!(
+            "cache.playlist.{}",
+            fnv_hex(&format!("{urn}|{limit}|{offset}"))
+        );
+        if let Some(hit) = self.cached_out(&key) {
             return Ok(hit);
         }
-        let meta =
-            playlist_meta(&self.fetch_json(&format!("/playlists/{urn}?show_tracks=false"))?)?;
         let body = self.fetch_json(&format!("/playlists/{urn}/tracks"))?;
         let rows = tracks_of(&body)?;
-        let tracks = rows
-            .iter()
-            .take(limit as usize)
-            .map(track_json)
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut out = meta;
-        out["tracks"] = Value::Array(tracks);
-        out["truncated"] = Value::Bool(rows.len() as u64 > limit);
+        let page: Vec<&Value> = rows.iter().skip(offset).take(limit as usize).collect();
+        let (tracks, skipped) = collect_tracks(page.into_iter());
+        let next = offset + limit as usize;
+        let next_page_token = (rows.len() > next).then(|| format!("o{next}"));
+        let out = json!({
+            "tracks": tracks,
+            "next_page_token": next_page_token,
+            "cached": false,
+            "skipped": skipped,
+            "capability": provider_capability(),
+        });
         self.cache_put(&key, &out, TTL_PLAYLIST);
         Ok(out)
     }
 
-    /// `music.soundcloud.resolve {url}` -> `{kind: track|playlist, track|playlist}`.
+    /// `music.soundcloud.resolve {url}` -> `{track, cached, capability}`.
+    /// Playlist/user permalinks fail loud (`unsupported_resource_kind`): use
+    /// `playlist.get` with the playlist id.
     pub fn resolve(&self, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
         only_fields(&args, &["url"])?;
         let permalink = normalize_permalink(str_field(&args, "url")?)?;
         let key = format!("cache.resolve.{}", fnv_hex(&permalink));
-        if let Some(hit) = self.cache_get(&key) {
+        if let Some(hit) = self.cached_out(&key) {
             return Ok(hit);
         }
         let out = match self.fetch(&format!("/resolve?url={}", pct_encode(&permalink)))? {
             // 302 -> the resource URL on the API host; re-fetch it ourselves so
             // the credential only ever rides to api.soundcloud.com.
             Fetched::Redirect(loc) => match resource_from_location(&loc)? {
-                Resource::Track(urn) => {
-                    json!({ "kind": "track", "track": self.track_by_urn(&urn)? })
-                }
-                Resource::Playlist(urn) => json!({
-                    "kind": "playlist",
-                    "playlist": self.playlist_by_urn(&urn, DEFAULT_PLAYLIST_LIMIT)?
-                }),
+                Resource::Track(urn) => self.track_by_urn(&urn)?,
+                Resource::Playlist => return Err(invalid("unsupported_resource_kind")),
             },
             // The host followed the redirect: classify the final object.
             Fetched::Json(v) => match v.get("kind").and_then(Value::as_str) {
-                Some("track") => json!({ "kind": "track", "track": track_json(&v)? }),
-                Some("playlist") => {
-                    let mut p = playlist_meta(&v)?;
-                    let rows = v
-                        .get("tracks")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    p["tracks"] = Value::Array(
-                        rows.iter()
-                            .take(DEFAULT_PLAYLIST_LIMIT as usize)
-                            .map(track_json)
-                            .collect::<Result<Vec<_>, _>>()?,
-                    );
-                    p["truncated"] = Value::Bool(rows.len() as u64 > DEFAULT_PLAYLIST_LIMIT);
-                    json!({ "kind": "playlist", "playlist": p })
-                }
+                Some("track") => track_out(track_json(&v)?, false),
                 _ => return Err(invalid("unsupported_resource_kind")),
             },
         };
-        self.cache_put(&key, &out, TTL_RESOLVE);
+        let mut stored = out.clone();
+        stored["cached"] = Value::Bool(false);
+        self.cache_put(&key, &stored, TTL_RESOLVE);
         Ok(out)
     }
 }
 
 enum Resource {
     Track(String),
-    Playlist(String),
+    Playlist,
 }
 
 /// Parses a `/resolve` redirect target. Only the API host and the
@@ -588,29 +605,9 @@ fn resource_from_location(loc: &str) -> Result<Resource, ToolError> {
             .map(Resource::Track)
             .map_err(|_| malformed()),
         "playlists" => parse_playlist_id(id)
-            .map(Resource::Playlist)
+            .map(|_| Resource::Playlist)
             .map_err(|_| malformed()),
         _ => Err(invalid("unsupported_resource_kind")),
-    }
-}
-
-fn access_filter(args: &Value) -> Result<String, ToolError> {
-    match args.get("access") {
-        None | Some(Value::Null) => Ok(String::new()),
-        Some(Value::Array(a)) if (1..=3).contains(&a.len()) => {
-            let mut out: Vec<&str> = Vec::new();
-            for v in a {
-                let s = v
-                    .as_str()
-                    .filter(|s| matches!(*s, "playable" | "preview" | "blocked"))
-                    .ok_or_else(|| invalid("access[] must be playable|preview|blocked"))?;
-                if !out.contains(&s) {
-                    out.push(s);
-                }
-            }
-            Ok(out.join(","))
-        }
-        Some(_) => Err(invalid("access must be an array of 1..=3 access levels")),
     }
 }
 
@@ -761,6 +758,7 @@ mod tests {
         let mut t = json!({
             "urn": format!("soundcloud:tracks:{id}"), "title": "Song", "duration": 200_001,
             "permalink_url": "https://soundcloud.com/a/song", "access": "playable",
+            "artwork_url": "https://i1.sndcdn.com/a.jpg",
             "streamable": true, "downloadable": false, "license": "cc-by", "sharing": "public",
             "user": {"username": "Artist", "urn": "soundcloud:users:9"}
         });
@@ -777,37 +775,52 @@ mod tests {
     }
 
     #[test]
-    fn track_normalizes_license_and_capability() {
+    fn track_matches_contract_shape_and_keeps_license() {
         let v = track_json(&track(1, json!({}))).unwrap();
+        assert_eq!(v["provider"], "soundcloud");
         assert_eq!(v["id"], "soundcloud:tracks:1");
-        assert_eq!(v["duration_s"], 201);
+        assert_eq!(v["duration_ms"], 200_001);
+        assert_eq!(v["source_url"], "https://soundcloud.com/a/song");
+        assert_eq!(v["thumbnail"], "https://i1.sndcdn.com/a.jpg");
+        assert_eq!(v["explicit"], Value::Null);
         assert_eq!(v["license"]["creative_commons"], true);
         assert_eq!(v["license"]["type"], "cc-by");
-        assert_eq!(v["capability"]["embed"], true);
-        assert_eq!(v["capability"]["stream_url"], false);
-        assert_eq!(v["explicit"], Value::Null);
-        assert!(v.get("stream_url").is_none());
+        assert_eq!(v["embeddable"], true);
+        for old in ["url", "duration_s", "capability", "stream_url"] {
+            assert!(v.get(old).is_none(), "{old} must not be on a track");
+        }
     }
 
     #[test]
-    fn blocked_private_or_unembeddable_tracks_cannot_embed() {
+    fn blocked_private_or_unembeddable_tracks_get_playback_none() {
         for extra in [
             json!({"access": "blocked"}),
             json!({"sharing": "private"}),
             json!({"streamable": false}),
             json!({"embeddable_by": "none"}),
         ] {
-            let v = track_json(&track(1, extra)).unwrap();
-            assert_eq!(v["capability"]["embed"], false);
-            assert_eq!(v["capability"]["full_playback"], false);
+            let t = track_json(&track(1, extra)).unwrap();
+            assert_eq!(t["embeddable"], false);
+            assert_eq!(t["full_playback"], false);
+            assert_eq!(track_capability(&t)["playback"], "none");
         }
         let p = track_json(&track(1, json!({"access": "preview"}))).unwrap();
-        assert_eq!(p["capability"]["embed"], true);
-        assert_eq!(p["capability"]["full_playback"], false);
+        assert_eq!(p["embeddable"], true);
+        assert_eq!(p["full_playback"], false);
+        assert_eq!(track_capability(&p)["playback"], "embed");
         // Missing access is unknown -> not embeddable (never default-allow).
         let mut t = track(1, json!({}));
         t.as_object_mut().unwrap().remove("access");
-        assert_eq!(track_json(&t).unwrap()["capability"]["embed"], false);
+        assert_eq!(track_json(&t).unwrap()["embeddable"], false);
+    }
+
+    #[test]
+    fn capability_never_claims_server_audio_or_queue() {
+        let t = track_json(&track(1, json!({}))).unwrap();
+        let c = track_capability(&t);
+        assert_eq!(c["server_audio"], false);
+        assert_eq!(c["queue_add"], false);
+        assert_eq!(provider_capability()["server_audio"], false);
     }
 
     #[test]
@@ -818,12 +831,20 @@ mod tests {
     }
 
     #[test]
-    fn malformed_upstream_track_fails_loud() {
+    fn upstream_track_missing_contract_field_is_malformed() {
         assert_eq!(
             track_json(&json!({"urn": "x"})),
             Err(ToolError::TargetUnavailable)
         );
         assert_eq!(track_json(&json!("x")), Err(ToolError::TargetUnavailable));
+        for k in ["title", "duration", "permalink_url"] {
+            let mut t = track(1, json!({}));
+            t.as_object_mut().unwrap().remove(k);
+            assert_eq!(track_json(&t), Err(ToolError::TargetUnavailable), "{k}");
+        }
+        let mut t = track(1, json!({}));
+        t["user"] = json!({});
+        assert_eq!(track_json(&t), Err(ToolError::TargetUnavailable));
     }
 
     #[test]
@@ -857,24 +878,29 @@ mod tests {
     }
 
     #[test]
-    fn search_builds_encoded_url_caches_and_pages() {
+    fn search_builds_encoded_url_caches_and_skips_malformed() {
+        let mut broken = track(3, json!({}));
+        broken.as_object_mut().unwrap().remove("permalink_url");
         let up = FakeUpstream::with(vec![ok(
-            json!({"collection": [track(1, json!({})), track(2, json!({}))]}),
+            json!({"collection": [track(1, json!({})), track(2, json!({})), broken]}),
         )]);
         let store = Arc::new(FakeStore::default());
         let sc = service(up.clone(), store.clone());
-        let a = json!({"q": "lo fi & beats", "limit": 2, "access": ["playable", "playable"]});
+        let a = json!({"query": "lo fi & beats", "limit": 3});
         let out = call(&sc, TOOL_SEARCH, a.clone()).unwrap();
         assert_eq!(out["tracks"].as_array().unwrap().len(), 2);
-        assert_eq!(out["next_offset"], 2);
+        assert_eq!(out["skipped"], 1);
+        assert_eq!(out["cached"], false);
+        assert_eq!(out["capability"]["playback"], "embed");
+        assert!(out.get("provider").is_none() && out.get("next_offset").is_none());
         assert_eq!(
             up.calls(),
-            vec![format!(
-                "{API_BASE}/tracks?q=lo%20fi%20%26%20beats&limit=2&offset=0&access=playable"
-            )]
+            vec![format!("{API_BASE}/tracks?q=lo%20fi%20%26%20beats&limit=3")]
         );
         // Second identical call is a cache hit: no upstream call, no rate budget.
-        assert_eq!(call(&sc, TOOL_SEARCH, a).unwrap(), out);
+        let hit = call(&sc, TOOL_SEARCH, a).unwrap();
+        assert_eq!(hit["cached"], true);
+        assert_eq!(hit["tracks"], out["tracks"]);
         assert_eq!(up.calls().len(), 1);
         let m = store.map.lock().unwrap();
         let cache = m
@@ -891,15 +917,15 @@ mod tests {
         let sc = service(FakeUpstream::with(vec![]), Arc::new(FakeStore::default()));
         for a in [
             json!({}),
-            json!({"q": ""}),
-            json!({"q": "  "}),
-            json!({"q": "a\nb"}),
-            json!({"q": "a", "limit": 0}),
-            json!({"q": "a", "limit": 51}),
-            json!({"q": "a", "offset": 1001}),
-            json!({"q": "a", "access": "playable"}),
-            json!({"q": "a", "access": ["nope"]}),
-            json!({"q": "a", "community_id": 3}),
+            json!({"q": "legacy name"}),
+            json!({"query": ""}),
+            json!({"query": "  "}),
+            json!({"query": "a\nb"}),
+            json!({"query": "a", "limit": 0}),
+            json!({"query": "a", "limit": 26}),
+            json!({"query": "a", "offset": 1}),
+            json!({"query": "a", "access": ["playable"]}),
+            json!({"query": "a", "community_id": 3}),
             json!("str"),
         ] {
             assert!(
@@ -917,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn track_hits_urn_path_and_maps_statuses() {
+    fn track_returns_track_and_capability_and_maps_statuses() {
         let up = FakeUpstream::with(vec![
             ok(track(7, json!({}))),
             status(404, None, None),
@@ -927,10 +953,10 @@ mod tests {
             Err(HttpFail::Denied),
         ]);
         let sc = service(up.clone(), Arc::new(FakeStore::default()));
-        assert_eq!(
-            call(&sc, TOOL_TRACK, json!({"id": "7"})).unwrap()["id"],
-            "soundcloud:tracks:7"
-        );
+        let out = call(&sc, TOOL_TRACK, json!({"id": "7"})).unwrap();
+        assert_eq!(out["track"]["id"], "soundcloud:tracks:7");
+        assert_eq!(out["capability"]["playback"], "embed");
+        assert_eq!(out["cached"], false);
         assert_eq!(
             up.calls()[0],
             format!("{API_BASE}/tracks/soundcloud:tracks:7")
@@ -1023,27 +1049,51 @@ mod tests {
     }
 
     #[test]
-    fn playlist_returns_meta_tracks_and_truncation() {
-        let meta = json!({"urn": "soundcloud:playlists:5", "title": "Mix", "track_count": 3,
-            "duration": 600_000, "license": "cc-by-sa", "user": {"username": "DJ"},
-            "permalink_url": "https://soundcloud.com/dj/sets/mix"});
-        let tracks =
-            json!({"collection": [track(1, json!({})), track(2, json!({})), track(3, json!({}))]});
-        let up = FakeUpstream::with(vec![ok(meta), ok(tracks)]);
+    fn playlist_pages_with_opaque_token() {
+        let tracks = json!({"collection": [
+            track(1, json!({})), track(2, json!({})), track(3, json!({}))]});
+        let up = FakeUpstream::with(vec![ok(tracks.clone()), ok(tracks)]);
         let sc = service(up.clone(), Arc::new(FakeStore::default()));
-        let out = call(&sc, TOOL_PLAYLIST, json!({"id": "5", "limit": 2})).unwrap();
-        assert_eq!(out["tracks"].as_array().unwrap().len(), 2);
-        assert_eq!(out["truncated"], true);
-        assert_eq!(out["license"]["creative_commons"], true);
-        assert_eq!(out["duration_s"], 600);
+        let p1 = call(&sc, TOOL_PLAYLIST, json!({"playlist_id": "5", "limit": 2})).unwrap();
+        assert_eq!(p1["tracks"].as_array().unwrap().len(), 2);
+        assert_eq!(p1["next_page_token"], "o2");
+        assert_eq!(p1["capability"]["playback"], "embed");
+        assert!(p1.get("truncated").is_none() && p1.get("license").is_none());
         assert_eq!(
             up.calls()[0],
-            format!("{API_BASE}/playlists/soundcloud:playlists:5?show_tracks=false")
-        );
-        assert_eq!(
-            up.calls()[1],
             format!("{API_BASE}/playlists/soundcloud:playlists:5/tracks")
         );
+        let p2 = call(
+            &sc,
+            TOOL_PLAYLIST,
+            json!({"playlist_id": "5", "limit": 2, "page_token": "o2"}),
+        )
+        .unwrap();
+        assert_eq!(p2["tracks"].as_array().unwrap().len(), 1);
+        assert_eq!(p2["tracks"][0]["id"], "soundcloud:tracks:3");
+        assert_eq!(p2["next_page_token"], Value::Null);
+    }
+
+    #[test]
+    fn playlist_rejects_bad_args() {
+        let sc = service(FakeUpstream::with(vec![]), Arc::new(FakeStore::default()));
+        for a in [
+            json!({"id": "5"}),
+            json!({"playlist_id": "x"}),
+            json!({"playlist_id": "5", "limit": 51}),
+            json!({"playlist_id": "5", "page_token": "2"}),
+            json!({"playlist_id": "5", "page_token": "o"}),
+            json!({"playlist_id": "5", "page_token": 2}),
+            json!({"playlist_id": "5", "page_token": "o1234567"}),
+        ] {
+            assert!(
+                matches!(
+                    call(&sc, TOOL_PLAYLIST, a.clone()),
+                    Err(ToolError::InvalidArgs(_))
+                ),
+                "{a}"
+            );
+        }
     }
 
     #[test]
@@ -1063,8 +1113,9 @@ mod tests {
             json!({"url": "https://soundcloud.com/a/song"}),
         )
         .unwrap();
-        assert_eq!(out["kind"], "track");
         assert_eq!(out["track"]["id"], "soundcloud:tracks:77");
+        assert!(out.get("kind").is_none());
+        assert_eq!(out["capability"]["playback"], "embed");
         assert_eq!(
             up.calls()[0],
             format!("{API_BASE}/resolve?url=https%3A%2F%2Fsoundcloud.com%2Fa%2Fsong")
@@ -1073,10 +1124,19 @@ mod tests {
             up.calls()[1],
             format!("{API_BASE}/tracks/soundcloud:tracks:77")
         );
+        // Cached resolve answers without upstream.
+        let again = call(
+            &sc,
+            TOOL_RESOLVE,
+            json!({"url": "https://soundcloud.com/a/song"}),
+        )
+        .unwrap();
+        assert_eq!(again["cached"], true);
+        assert_eq!(up.calls().len(), 2);
     }
 
     #[test]
-    fn resolve_rejects_foreign_or_unsupported_redirects_and_handles_followed_json() {
+    fn resolve_rejects_foreign_playlist_user_redirects_and_handles_followed_json() {
         let up = FakeUpstream::with(vec![
             status(302, Some("https://evil.example/tracks/1"), None),
             status(302, Some("https://api.soundcloud.com/users/1"), None),
@@ -1087,6 +1147,7 @@ mod tests {
                 t["kind"] = json!("track");
                 t
             }),
+            status(302, Some("https://api.soundcloud.com/playlists/9"), None),
         ]);
         let sc = service(up, Arc::new(FakeStore::default()));
         let u = |p: &str| json!({"url": format!("https://soundcloud.com/{p}")});
@@ -1109,6 +1170,10 @@ mod tests {
         assert_eq!(
             call(&sc, TOOL_RESOLVE, u("e")).unwrap()["track"]["id"],
             "soundcloud:tracks:3"
+        );
+        assert_eq!(
+            call(&sc, TOOL_RESOLVE, u("f/sets/x")),
+            Err(invalid("unsupported_resource_kind"))
         );
     }
 

@@ -42,67 +42,311 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      q: {type: string, minLength: 1, maxLength: 200}
-      limit: {type: integer, minimum: 1, maximum: 50}
-      offset: {type: integer, minimum: 0, maximum: 1000}
-      access:
-        type: array
-        minItems: 1
-        maxItems: 3
-        items: {type: string, enum: [playable, preview, blocked]}
-    required: [q]
+      query:
+        type: string
+        minLength: 1
+        maxLength: 200
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 25
+    required:
+    - query
     additionalProperties: false
   output_schema:
     type: object
     properties:
-      provider: {type: string, enum: [soundcloud]}
-      tracks: {type: array, items: {type: object}}
-      next_offset: {type: [integer, 'null']}
-    required: [provider, tracks, next_offset]
+      tracks:
+        type: array
+        items:
+          type: object
+          properties:
+            provider:
+              type: string
+            id:
+              type: string
+            title:
+              type: string
+            artist:
+              type: string
+            duration_ms:
+              type: integer
+              minimum: 0
+            thumbnail:
+              type:
+              - string
+              - 'null'
+            explicit:
+              type:
+              - boolean
+              - 'null'
+            source_url:
+              type: string
+          required:
+          - provider
+          - id
+          - title
+          - artist
+          - duration_ms
+          - thumbnail
+          - explicit
+          - source_url
+      cached:
+        type: boolean
+      skipped:
+        type: integer
+        minimum: 0
+      capability:
+        type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
+    required:
+    - tracks
+    - capability
 - name: music.soundcloud.track
   access: read
   risk: normal
   input_schema:
     type: object
     properties:
-      id: {type: string, description: "track id or soundcloud:tracks:<id> URN"}
-    required: [id]
+      id:
+        type: string
+        minLength: 1
+        maxLength: 64
+    required:
+    - id
     additionalProperties: false
   output_schema:
     type: object
-    required: [provider, id, title, artist, url, duration_s, explicit, license, capability]
+    properties:
+      track:
+        type: object
+        properties:
+          provider:
+            type: string
+          id:
+            type: string
+          title:
+            type: string
+          artist:
+            type: string
+          duration_ms:
+            type: integer
+            minimum: 0
+          thumbnail:
+            type:
+            - string
+            - 'null'
+          explicit:
+            type:
+            - boolean
+            - 'null'
+          source_url:
+            type: string
+        required:
+        - provider
+        - id
+        - title
+        - artist
+        - duration_ms
+        - thumbnail
+        - explicit
+        - source_url
+      cached:
+        type: boolean
+      capability:
+        type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
+    required:
+    - track
+    - capability
 - name: music.soundcloud.playlist.get
   access: read
   risk: normal
   input_schema:
     type: object
     properties:
-      id: {type: string, description: "playlist id or soundcloud:playlists:<id> URN"}
-      limit: {type: integer, minimum: 1, maximum: 50}
-    required: [id]
+      playlist_id:
+        type: string
+        minLength: 1
+        maxLength: 64
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 50
+      page_token:
+        type: string
+        minLength: 1
+        maxLength: 200
+    required:
+    - playlist_id
     additionalProperties: false
   output_schema:
     type: object
     properties:
-      tracks: {type: array, items: {type: object}}
-      truncated: {type: boolean}
-    required: [provider, id, title, license, tracks, truncated]
+      tracks:
+        type: array
+        items:
+          type: object
+          properties:
+            provider:
+              type: string
+            id:
+              type: string
+            title:
+              type: string
+            artist:
+              type: string
+            duration_ms:
+              type: integer
+              minimum: 0
+            thumbnail:
+              type:
+              - string
+              - 'null'
+            explicit:
+              type:
+              - boolean
+              - 'null'
+            source_url:
+              type: string
+          required:
+          - provider
+          - id
+          - title
+          - artist
+          - duration_ms
+          - thumbnail
+          - explicit
+          - source_url
+      next_page_token:
+        type:
+        - string
+        - 'null'
+      cached:
+        type: boolean
+      skipped:
+        type: integer
+        minimum: 0
+      capability:
+        type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
+    required:
+    - tracks
+    - next_page_token
+    - capability
 - name: music.soundcloud.resolve
   access: read
   risk: normal
   input_schema:
     type: object
     properties:
-      url: {type: string, maxLength: 200, description: "https://soundcloud.com permalink"}
-    required: [url]
+      url:
+        type: string
+        minLength: 1
+        maxLength: 512
+    required:
+    - url
     additionalProperties: false
   output_schema:
     type: object
     properties:
-      kind: {type: string, enum: [track, playlist]}
-      track: {type: object}
-      playlist: {type: object}
-    required: [kind]
+      track:
+        type: object
+        properties:
+          provider:
+            type: string
+          id:
+            type: string
+          title:
+            type: string
+          artist:
+            type: string
+          duration_ms:
+            type: integer
+            minimum: 0
+          thumbnail:
+            type:
+            - string
+            - 'null'
+          explicit:
+            type:
+            - boolean
+            - 'null'
+          source_url:
+            type: string
+        required:
+        - provider
+        - id
+        - title
+        - artist
+        - duration_ms
+        - thumbnail
+        - explicit
+        - source_url
+      cached:
+        type: boolean
+      capability:
+        type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
+    required:
+    - track
+    - capability
 config_schema: {}
 compatible_with: []
 incompatible_with: []
