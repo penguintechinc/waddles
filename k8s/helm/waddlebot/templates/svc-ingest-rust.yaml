@@ -387,7 +387,7 @@ spec:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-ingest-rust
 # PR-H: host-api (8301) is NOT in the shared same-namespace allow above --
-# templates/svc-ingest-host-api-networkpolicy.yaml admits ONLY the bundle-executor on it.
+# templates/svc-ingest-host-api-networkpolicy.yaml admits ONLY the svc-bundles-executor on it.
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
 {{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-ingest-rust" "ports" (list $.Values.pipeline.rustDataPlane.svcIngest.port $.Values.pipeline.rustDataPlane.svcIngest.metricsPort) "runtime" "rust" "binaries" (list "/app/svc-ingest")) }}
 {{- end }}

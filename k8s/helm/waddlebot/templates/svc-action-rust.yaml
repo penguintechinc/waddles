@@ -6,8 +6,8 @@
 #
 # Serves the executor<->stage host-API mTLS server (core/svc_action/src/host_api.rs). svc-process
 # has its own (core/svc_process/src/host_api.rs, see templates/svc-process-rust.yaml).
-# pipeline.rustDataPlane.bundleExecutor.stageTarget defaults to svc-action-rust; svc-process-rust
-# is the alternative target. The HOST_API_SERVER_CERT_FILE/KEY_FILE/CLIENT_CA_FILE env + volume
+# pipeline.rustDataPlane.bundleExecutor.stages lists svc-action-rust (and svc-process-rust: one
+# executor Deployment dials every stage). The HOST_API_SERVER_CERT_FILE/KEY_FILE/CLIENT_CA_FILE env + volume
 # below render only when waddlebot.hostApiTlsMaterialAvailable is true. global.hostApiTls
 # self-provisions on alpha/local and must be supplied on beta/gamma/production (see its
 # values.yaml comment). Without material host_api.rs's build_server_config fails closed with a
@@ -129,7 +129,7 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcAction.heartbeatIntervalMs | default 5000 | quote }}
         # regression: readiness gated on executor connection deadlocked
         # rollouts (alpha 2026-10-02) -- NO LONGER wired into `/readyz`/
-        # `/healthz`/`/health` (a bundle-executor dials this service
+        # `/healthz`/`/health` (a svc-bundles-executor dials this service
         # through its ClusterIP Service, which only routes to Ready pods,
         # so gating readiness/liveness on executor presence deadlocked
         # rollouts). Now only the threshold for the periodic zero-executor

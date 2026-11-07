@@ -36,6 +36,10 @@ spec:
         # host-api-tls-certificate.yaml (hostApiTlsDesiredDnsNames):
         - waddlebot-svc-process-rust
         - waddlebot-svc-action-rust
+        - waddlebot-svc-bundles-executor
+        # TRANSITION ONLY: the leaf cert issued before the executor rename still carries this SAN
+        # until cert-manager re-issues it on the next helm upgrade; a CA that no longer permits it
+        # would make every peer reject the live cert mid-rollout. Remove once re-issued.
         - waddlebot-bundle-executor
         # NOT permitted (deliberately): `<svc>.waddlebot` / `<svc>.waddlebot.svc` short forms -- only the
         # self-generated hub-api/valkey certs (own CA, not this one) use them.

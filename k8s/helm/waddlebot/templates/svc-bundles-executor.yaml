@@ -1,7 +1,14 @@
-# feature/e2e-helm-rust-dataplane -- bundle-executor (core/bundle_executor, M2): the
-# credential-less WASM bundle sandbox host that dials a stage's host-API mTLS listener
-# (pipeline.rustDataPlane.bundleExecutor.stageTarget, default svc-action-rust -- see
-# templates/svc-action-rust.yaml) and services `load`/`invoke`/`unload` calls over it.
+# svc-bundles-executor (crate core/bundle_executor, binary svc-bundles-executor): the
+# credential-less WASM bundle sandbox host. ONE Deployment serves EVERY stage: each pod
+# dials every listener in pipeline.rustDataPlane.bundleExecutor.stages (svc-process-rust
+# AND svc-action-rust) plus svc-ingest's connector link, with an independent dial loop,
+# reconnect/backoff, bundle registry and metrics `stage` label per link (so one stage
+# being down never blocks another), and services `load`/`invoke`/`unload` calls over them.
+# It scales HORIZONTALLY (HPA + PDB in templates/autoscaling.yaml, key bundleExecutor):
+# every replica dials every stage, and each stage/svc-ingest spreads work round-robin
+# across the replicas connected to it (each item reaches exactly one executor). Replicas
+# are stateless -- the only local state is the emptyDir wasm precompile cache below, which
+# warms independently per pod.
 # Gated on the top-level pipeline.rustDataPlane.enabled flag (default false) plus this
 # module's own .enabled sub-flag.
 #
@@ -73,10 +80,10 @@ guess.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "waddlebot.fullname" . }}-bundle-executor
+  name: {{ include "waddlebot.fullname" . }}-svc-bundles-executor
   labels:
     {{- include "waddlebot.labels" . | nindent 4 }}
-    app.kubernetes.io/component: bundle-executor
+    app.kubernetes.io/component: svc-bundles-executor
 spec:
   {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "bundleExecutor")) }}
   replicas: {{ .Values.pipeline.rustDataPlane.bundleExecutor.replicas }}
@@ -84,7 +91,7 @@ spec:
   selector:
     matchLabels:
       {{- include "waddlebot.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: bundle-executor
+      app.kubernetes.io/component: svc-bundles-executor
   template:
     metadata:
       annotations:
@@ -100,7 +107,7 @@ spec:
         {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: bundle-executor
+        app.kubernetes.io/component: svc-bundles-executor
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       automountServiceAccountToken: false
@@ -112,7 +119,7 @@ spec:
       initContainers:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
-      - name: bundle-executor
+      - name: svc-bundles-executor
         # Own image (self-contained full path per environment, no global.imageRegistry
         # concatenation) -- same pattern as .Values.streaming.image/.Values.reputation.image
         # (see those templates' own image lines); using the waddlebot.image helper here
@@ -135,8 +142,10 @@ spec:
             drop:
             - ALL
         env:
+        # Comma-separated list: one dial loop per stage (core/bundle_executor/src/config.rs
+        # stage_targets). Every stage shares the HOST_API_* mTLS material + identity below.
         - name: STAGE_HOST_API_ADDR
-          value: "{{ include "waddlebot.fullname" . }}-{{ .Values.pipeline.rustDataPlane.bundleExecutor.stageTarget }}:{{ .Values.pipeline.rustDataPlane.bundleExecutor.stagePort }}"
+          value: {{ include "waddlebot.bundleExecutorStageAddrs" . | quote }}
         - name: EXECUTOR_STAGE_CONNECTIONS
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.stageConnections | quote }}
         - name: EXECUTOR_CALL_TIMEOUT_MS
@@ -186,7 +195,7 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName | quote }}
         - name: BUNDLE_BUCKET_REGION
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketRegion | quote }}
-        # feature/seaweedfs-object-storage -- least-privilege "bundle-executor"
+        # feature/seaweedfs-object-storage -- least-privilege "svc-bundles-executor"
         # (data-plane) S3 identity: Read/List ONLY, scoped to this bucket -- see
         # templates/infrastructure/seaweedfs.yaml's s3-identities.json. Replaces the
         # former MINIO_ROOT_USER/MINIO_ROOT_PASSWORD admin credential, which could PUT.
@@ -297,5 +306,5 @@ spec:
           defaultMode: 0440
       {{- end }}
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
-{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "bundle-executor" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false) }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-bundles-executor" "ports" (list ) "runtime" "rust" "binaries" (list "/app/bundle-executor") "cnp" false) }}
 {{- end }}

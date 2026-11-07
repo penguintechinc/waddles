@@ -369,7 +369,7 @@ jobs:
           set -euo pipefail
           # autoProvisionedKeys.enabled:true -- the keys hook must have produced the
           # bundle-signing Secret (private key) and the public-key ConfigMap that
-          # bundle-executor reads BUNDLE_SIGNING_PUBLIC_KEYS from. Unchanged-across-upgrade
+          # svc-bundles-executor reads BUNDLE_SIGNING_PUBLIC_KEYS from. Unchanged-across-upgrade
           # for the Secret is asserted by the hash comparison step above.
           priv=$(kubectl get secret waddlebot-bundle-signing -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("data") or {}))')
           pub=$(kubectl get configmap waddlebot-bundle-signing-public -n "${NAMESPACE}" -o jsonpath='{.data.BUNDLE_SIGNING_PUBLIC_KEYS}')
