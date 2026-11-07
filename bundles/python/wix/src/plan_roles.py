@@ -26,8 +26,6 @@ MISSING_CAPABILITY_MSG = toolcall.MISSING_CAPABILITY_MSG.format(module=MODULE)
 _ROLE_KEY = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 _ACTIVE = frozenset({"ACTIVE"})
 _INACTIVE = frozenset({"ENDED", "CANCELED", "PAUSED"})
-#: Terminal for an order id: a late/replayed event can never re-grant; only a NEW order does.
-_TERMINAL = frozenset({"ENDED", "CANCELED"})
 _ORDER_ID = re.compile(r"[A-Za-z0-9-]{8,64}")
 
 
@@ -104,8 +102,17 @@ async def handle(
         await toolcall.record_fault(community, MODULE, "bad_order_event")
         return
     prior = await toolcall.read_order(community, order_key(order_id))
-    if prior is not None and (prior[1] in _TERMINAL or ts <= prior[0]):
-        log.info("wix.roles_stale_event_ignored", event_type=event_type)
+    wix_time = payload.get("time_source") == "wix"
+    revoke = tool_name == "discord.member.roles.remove"
+    if prior is not None and prior[1] in toolcall.TERMINAL:
+        log.info("wix.roles_terminal_order_ignored", event_type=event_type)
+        return
+    if not revoke and not toolcall.grant_is_newer(prior, ts, wix_time=wix_time):
+        # Revocations are never timestamp-gated; only grants need a newer Wix-sourced time.
+        if wix_time:
+            log.info("wix.roles_stale_event_ignored", event_type=event_type)
+        else:
+            await toolcall.record_fault(community, MODULE, "unorderable_grant")
         return
     key = hashlib.sha256(
         f"wix.roles:{payload.get('event_id')}:{tool_name}:{occurred_at}".encode()
@@ -118,8 +125,13 @@ async def handle(
         idempotency_key=key,
     )
     if result is not None:
-        applied = status if status in _TERMINAL | {"PAUSED"} else "ACTIVE"
-        if event_type == "subscription.ended" and applied not in _TERMINAL:
-            applied = "ENDED"
-        await toolcall.write_order(community, order_key(order_id), ts, applied)
+        if not revoke:
+            applied = "ACTIVE"
+        elif event_type == "subscription.ended" or status in toolcall.TERMINAL:
+            applied = "CANCELED" if status == "CANCELED" else "ENDED"
+        else:
+            applied = "PAUSED"
+        await toolcall.write_order(
+            community, order_key(order_id), ts, applied, wix_time=wix_time
+        )
         log.info("wix.roles_applied", op=tool_name, community_id=community)

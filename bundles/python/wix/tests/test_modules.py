@@ -79,9 +79,11 @@ def _wix(
     payload: dict[str, Any],
     actor: str | None = ALICE,
     at: str | None = None,
+    src: str = "wix",
 ) -> None:
     """Deliver one connector record; each call is strictly later than the previous unless `at`."""
     when = at or f"2026-11-07T00:{next(_CLOCK):02d}:00Z"
+    payload = {"time_source": src, **payload}
     ev = PlatformEvent("wix", kind, actor, payload, when)  # type: ignore[arg-type]
     with bundle_context(
         tenant="t", community="c1", app_id="waddles.core.integration.wix"
@@ -262,7 +264,7 @@ def test_roles_late_or_replayed_active_after_ended_never_regrants(
         "discord.member.roles.add",
         "discord.member.roles.remove",
     ]
-    assert "wix.roles_stale_event_ignored" in host.logs_text()
+    assert "wix.roles_terminal_order_ignored" in host.logs_text()
 
 
 def test_roles_replay_ignored_and_new_order_grants(host: _Host, tools: _Tool) -> None:
@@ -346,3 +348,87 @@ def test_events_cancel_before_create_is_terminal(host: _Host, tools: _Tool) -> N
     _wix(host, "event.canceled", p, at="2026-11-07T11:00:00Z")
     _wix(host, "event.created", p, at="2026-11-07T10:00:00Z")
     assert tools.calls == []
+
+
+def test_roles_older_or_skewed_remove_still_removes(host: _Host, tools: _Tool) -> None:
+    _say(host, f"!wix plan map {PLAN} vip", **MOD)
+    _enable(host, "roles")
+    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
+    _wix(
+        host, "subscription.ended", _sub("ENDED"), at="2026-11-07T09:00:00Z"
+    )  # older clock
+    assert [c[1] for c in tools.calls] == [
+        "discord.member.roles.add",
+        "discord.member.roles.remove",
+    ]
+    # ...and the order is now terminal: a newer grant for it is refused.
+    _wix(host, "subscription.started", _sub(), at="2026-11-07T12:00:00Z")
+    assert len(tools.calls) == 2
+
+
+def test_roles_received_time_remove_executes_but_received_time_grant_is_refused(
+    host: _Host, tools: _Tool
+) -> None:
+    _say(host, f"!wix plan map {PLAN} vip", **MOD)
+    _enable(host, "roles")
+    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
+    _wix(host, "subscription.changed", _sub("PAUSED"), src="received")  # remove runs
+    assert [c[1] for c in tools.calls][-1] == "discord.member.roles.remove"
+    _wix(host, "subscription.started", _sub(), src="received")  # unorderable grant
+    assert [c[1] for c in tools.calls].count("discord.member.roles.add") == 1
+    assert "unorderable_grant" in _say(host, "!wix modules", **MOD)
+    # A Wix-sourced newer resume still grants (received-time pause kept the Wix state).
+    _wix(host, "subscription.changed", _sub(), at="2026-11-07T11:00:00Z")
+    assert [c[1] for c in tools.calls].count("discord.member.roles.add") == 2
+
+
+def test_roles_received_time_end_is_terminal(host: _Host, tools: _Tool) -> None:
+    _say(host, f"!wix plan map {PLAN} vip", **MOD)
+    _enable(host, "roles")
+    _wix(host, "subscription.started", _sub(), at="2026-11-07T10:00:00Z")
+    _wix(host, "subscription.ended", _sub("ENDED"), src="received")
+    _wix(host, "subscription.started", _sub(), at="2030-01-01T00:00:00Z")
+    assert [c[1] for c in tools.calls] == [
+        "discord.member.roles.add",
+        "discord.member.roles.remove",
+    ]
+
+
+def test_events_cancel_with_skewed_clock_still_cancels(
+    host: _Host, tools: _Tool
+) -> None:
+    _enable(host, "events")
+    p = {
+        "wix_event_id": WIX_EVENT,
+        "title": "t",
+        "starts_at": "2026-12-01T19:00:00Z",
+        "ends_at": "2026-12-01T20:00:00Z",
+    }
+    tools.results["discord.scheduled_event.create"] = {"id": "77"}
+    _wix(host, "event.created", p, at="2026-11-07T10:00:00Z")
+    _wix(host, "event.canceled", p, at="2026-11-07T08:00:00Z")  # older clock
+    assert [c[1] for c in tools.calls][-1] == "discord.scheduled_event.cancel"
+    _wix(host, "event.updated", p, at="2026-11-07T12:00:00Z")
+    assert len(tools.calls) == 2
+
+
+def test_events_received_time_cancel_runs_and_received_time_create_is_refused(
+    host: _Host, tools: _Tool
+) -> None:
+    _enable(host, "events")
+    p = {
+        "wix_event_id": WIX_EVENT,
+        "title": "t",
+        "starts_at": "2026-12-01T19:00:00Z",
+        "ends_at": "2026-12-01T20:00:00Z",
+    }
+    _wix(host, "event.created", p, src="received")
+    assert tools.calls == []
+    assert "unorderable_event" in _say(host, "!wix modules", **MOD)
+    tools.results["discord.scheduled_event.create"] = {"id": "77"}
+    _wix(host, "event.created", p, at="2026-11-07T10:00:00Z")
+    _wix(host, "event.canceled", p, src="received")
+    assert [c[1] for c in tools.calls] == [
+        "discord.scheduled_event.create",
+        "discord.scheduled_event.cancel",
+    ]

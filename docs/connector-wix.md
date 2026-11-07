@@ -40,7 +40,7 @@ Replay: Valkey `SET NX PX` keyed on the Wix **event id**. 1 MiB body cap. All re
 
 Every event: `platform = "wix"`, `occurred_at` = RFC 3339 Wix `eventTime`. `actor` = member **UUID** from
 `identity.lookup(platform-identity("wix", <wix member id>))`; no email/name ever. Payload keys below are
-exhaustive; every payload also carries `event_id` (Wix event id) and `instance_id`. Unknown `eventType`s are skipped
+exhaustive; every payload also carries `event_id` (Wix event id), `instance_id` and `time_source` (`"wix"` when `occurred_at` is Wix's own `eventTime`, `"received"` for the receive-time fallback -- non-orderable, consumers must never compare it with Wix times). Unknown `eventType`s are skipped
 (counted, never an error).
 
 | event_type | Wix source | actor | payload (besides event_id, instance_id) |
