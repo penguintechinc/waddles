@@ -3,7 +3,7 @@
 Denominator (`grep -rl "kind: Deployment" k8s/helm/waddlebot/templates/ | wc -l`): **31**.
 
 This chart now contains **both** the 31 legacy per-module Deployments **and** the 7 new
-pipeline Deployments (`templates/svc-ingest.yaml`, `svc-process.yaml`, `svc-action.yaml`,
+pipeline Deployments (historical: `svc-ingest.yaml`, `svc-process.yaml`, `svc-action.yaml` -- since removed in favor of the Rust `svc-*-rust.yaml`;
 `svc-core.yaml`, `hub-api.yaml`, `hub-webui.yaml`, `svc-rtc.yaml`). They coexist — the 31 are
 **not deleted** by this task. Deleting them and wiring the new containers' app-level Python
 Module-bundle imports is the remaining build (see bottom of this file).

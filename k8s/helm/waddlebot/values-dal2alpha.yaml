@@ -169,33 +169,6 @@ pipeline:
   # Still double-gated by the waddles.calendar.event_discord_sync PostHog flag (default OFF).
   eventSync:
     enabled: true
-  # fix/alpha-clean-deploy -- the legacy Python svc-ingest/svc-process/svc-action
-  # Deployments crash-loop in this cluster (`No module named 'waddle'` loading
-  # ping's WASM entrypoint) and are no longer the live path here: the Rust data
-  # plane (pipeline.rustDataPlane below, enabled: true) is. Previously kept
-  # enabled alongside the Rust stack on purpose ("coexistence, not cutover") --
-  # that coexistence is now producing pure crash-loop noise with no working
-  # legacy consumer left in this cluster, so disabling here (alpha/local only;
-  # left enabled in base values.yaml + beta/gamma/production, which still run
-  # the Python pipeline for real).
-  svcIngest:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "100m", memory: "128Mi" }
-      limits: { cpu: "500m", memory: "512Mi" }
-  svcProcess:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "100m", memory: "128Mi" }
-      limits: { cpu: "500m", memory: "512Mi" }
-  svcAction:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "100m", memory: "128Mi" }
-      limits: { cpu: "500m", memory: "512Mi" }
   svcCore:
     enabled: false
     replicas: 1
@@ -313,11 +286,8 @@ pipeline:
   # committed to git (tribal knowledge, at risk of being lost between sessions). This alpha
   # cluster's real, proven purpose today IS the Rust data-plane e2e proof (ping/pong bundle,
   # spec `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md`), so `enabled: true`
-  # now reflects that honestly. fix/alpha-clean-deploy: the Python
-  # pipeline.svcIngest/svcProcess/svcAction Deployments above are now disabled
-  # (`enabled: false`) instead of coexisting -- they had no working legacy
-  # consumer left in this cluster and were pure crash-loop noise alongside the
-  # Rust stack below. Still requires, via --reuse-values or an ephemeral
+  # now reflects that honestly. The legacy Python svc-ingest/svc-process/svc-action
+  # Deployments have been removed from the chart entirely. Still requires, via --reuse-values or an ephemeral
   # secrets file (never committed, critical-rules.md Token & Secret Hygiene):
   #   1. global.envelopeBindingKeys (kid e2e1) -- HMAC key material, secret, never committed.
   # fix/chart-autogen-bundle-signing-key -- item 2 (feature/bundle-artifact-signing's
@@ -483,20 +453,8 @@ pipeline:
         limits: { cpu: "2000m", memory: "16Gi" }
 
 presentation:
-  image:
-    repository: "ghcr.io/penguintechinc/waddles/svc-presentation"
-    tag: ""
-  service:
-    type: ClusterIP
-  # Matches pipeline.svcStreaming.publicBaseUrl above -- same media NodePort host, derived
-  # from the node IP at runtime, so live_stream.py's browser-facing HLS URLs resolve
-  # off-laptop like svc-streaming's own.
-  publicStreamingUrl: ""
-  publicStreamingUrlFromNodeIP: false
-  # chore/deploy-svc-presentation-rust-alpha -- deploy the Rust svc-presentation (overlay +
-  # image surface) instead of the Python one. Overlay view/SSE port reachable on-host at
-  # localhost:31032 (same NodePort the Python service held). Image built by
-  # scripts/alpha-deploy.sh as svc-presentation-rust:<SHA8> (global.imageTag).
+  # Rust svc-presentation (overlay + image surface). Overlay view/SSE port reachable on-host at
+  # localhost:31032. Image built by scripts/alpha-deploy.sh (global.imageTag).
   rust:
     enabled: true
     nodePort:

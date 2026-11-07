@@ -1182,49 +1182,6 @@ pipeline:
         memory: "512Mi"
   goRuntimeImage: "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587"
 
-  svcIngest:
-    enabled: true
-    port: 8200
-    replicas: 2
-    # T10 (v3 demo) -- sane defaults for svc-ingest's held-socket lease (Discord
-    # gateway / Twitch IRC single-connection ownership via Valkey), see
-    # supervisor/socket_lease.py. Override per-env if lease churn is observed.
-    socketLease:
-      ttlSeconds: 30
-      renewSeconds: 10
-      keyPrefix: "waddlebot:socket-lease"
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-      limits:
-        cpu: "2000m"
-        memory: "2Gi"
-
-  svcProcess:
-    enabled: true
-    port: 8201
-    replicas: 2
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-      limits:
-        cpu: "2000m"
-        memory: "2Gi"
-
-  svcAction:
-    enabled: true
-    port: 8202
-    replicas: 2
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-      limits:
-        cpu: "2000m"
-        memory: "2Gi"
-
   svcCore:
     enabled: true
     port: 8203
@@ -1362,7 +1319,7 @@ pipeline:
 
   # v3.0.x — 8th container / 4th stage-runner. `presentation.enabled` toggle: renders core
   # overlays + Music Station + activated bundles' presentation components. See
-  # templates/svc-presentation.yaml header for the full design-doc trail and why this is
+  # templates/svc-presentation-rust.yaml header for the design trail and why this is
   # NOT gated on any modules.<name>.enabled (generic across all Modules, unlike svc-rtc).
   svcPresentation:
     enabled: true
@@ -1463,11 +1420,10 @@ pipeline:
         memory: "4Gi"
 
   # Rust data-plane Deployments (core/svc_ingest, core/svc_process, core/svc_action,
-  # core/bundle_executor). ADDITIVE, never replaces pipeline.svcIngest/svcProcess/svcAction
-  # above. Gated behind this top-level `enabled` flag (default false) so the Python deploy is
-  # undisturbed until deliberately flipped. Resource names carry a `-rust` suffix
-  # (templates/svc-ingest-rust.yaml et al) so both stacks render side by side with no K8s
-  # object-name collision. Image repositories are distinct `<module>-rust` repos
+  # core/bundle_executor). The legacy Python svc-ingest/svc-process/svc-action Deployments
+  # no longer exist in this chart. Gated behind this top-level `enabled` flag (default
+  # false). Resource names keep their `-rust` suffix (templates/svc-ingest-rust.yaml et al).
+  # Image repositories are distinct `<module>-rust` repos
   # (waddlebot.legacyModuleImage), built by CI / scripts/alpha-deploy.sh.
   #
   # ACTUAL STATE (verified against core/*/src, 2026-10-12):
@@ -1578,10 +1534,8 @@ pipeline:
 
     svcIngest:
       enabled: true
-      # fix/helm-alpha-self-provisioning -- distinct image repository from
-      # pipeline.svcIngest's Python Deployment (module "svc-ingest"), so the two
-      # coexisting Deployments never resolve to the same repository:tag and therefore
-      # never race on which binary a shared tag actually points at. Matches
+      # fix/helm-alpha-self-provisioning -- image repository (formerly kept distinct from the
+      # removed Python svc-ingest Deployment's so the two never raced on a shared tag). Matches
       # core/svc_ingest/Dockerfile.rust's build tag.
       imageRepository: "svc-ingest-rust"
       port: 8200
@@ -1964,37 +1918,16 @@ pipeline:
   piiTokenization:
     enabled: true
 
-# v3.0.x — svc-presentation (8th container, 4th stage-runner). Music overlay + per-community
-# OBS browser-source surfaces. Own image placeholder (core/svc_presentation/ builds with
-# CI once Dockerfile is wired). Image repository structure allows alpha local registry +
-# beta/gamma/prod ghcr.io registry -- see templates/svc-presentation.yaml rendering logic.
+# v3.0.x — svc-presentation (Rust; music overlay + per-community OBS browser-source
+# surfaces). Image is presentation.rust.imageRepository -- see templates/svc-presentation-rust.yaml.
 presentation:
-  image:
-    repository: "svc-presentation"
-    tag: ""
-  service:
-    type: ClusterIP
-    nodePort: ""
-  # core/svc_presentation/blueprints/live_stream.py PUBLIC_STREAMING_URL -- externally
-  # reachable svc-streaming base URL rewritten into HLS playback URLs for the browser's
-  # own fetches. Empty by default: that file degrades to "offline" rather than guessing a
-  # public hostname when unset (never a broken/empty player src). Alpha overrides to the
-  # svc-streaming media NodePort's LAN URL -- see values-alpha.yaml.
-  publicStreamingUrl: ""
-  # Same node-IP derivation as pipeline.svcStreaming.publicBaseUrlFromNodeIP: when
-  # publicStreamingUrl is empty, build http://<node hostIP>:<svcStreaming.nodePort.httpPort>
-  # from the downward API instead of a hardcoded LAN IP. Requires
-  # pipeline.svcStreaming.nodePort.enabled.
-  publicStreamingUrlFromNodeIP: false
-  # chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (core/svc_presentation,
-  # Dockerfile.rust) replaces the Python Deployment above WHEN enabled: same Deployment/
-  # Service names (in-place swap, Service/NodePort unchanged), templates/svc-presentation-
-  # rust.yaml renders instead of templates/svc-presentation.yaml. Default false (Python
-  # stays the base/beta/prod path until the overlay PRs land and the cutover is approved);
-  # values-alpha.yaml flips it on. Image repo is a bare name resolved via global.imageRegistry
-  # + global.imageTag (per-commit tag built by scripts/alpha-deploy.sh), like svc-action-rust.
+  # Rust svc-presentation (core/svc_presentation, Dockerfile.rust). The legacy Python
+  # Deployment was removed; this is the only presentation Deployment. Default true in every
+  # environment (setting false renders NO presentation Deployment/Service). Image repo is a
+  # bare name resolved via global.imageRegistry + global.imageTag (per-commit tag built by
+  # scripts/alpha-deploy.sh), like svc-action-rust.
   rust:
-    enabled: false
+    enabled: true
     imageRepository: "svc-presentation-rust"
     # Alpha-only on-host access to the overlay view/SSE port: when true the Service becomes
     # NodePort (presentation.rust.nodePort.port). Base/beta/prod stay ClusterIP
@@ -2018,7 +1951,7 @@ presentation:
 
 # v3.0.x — Rust svc-streaming image (Issue #287). Own Dockerfile
 # (core/svc_streaming/Dockerfile.rust), not the shared pipeline.pythonBaseImage
-# placeholder -- mirrors the presentation.image block's shape above.
+# placeholder.
 streaming:
   # svc-streaming image variant for this deploy: cpu | amd | nvidia. The variant is appended to
   # the image tag (<tag>-<variant>); CI publishes all three. Pick per node pool: cpu where no GPU,
@@ -3061,7 +2994,7 @@ shutdown:
   preStopSleepSeconds: 5
 
 # startupProbe budget (failureThreshold x periodSeconds = 150s by default) for the slow-start
-# workloads: hub-api, the Rust data-plane stages, the Python pipeline stages, svc-streaming and
+# workloads: hub-api, the Rust data-plane stages, svc-streaming and
 # svc-presentation. Liveness/readiness only begin once it passes.
 startupProbe:
   periodSeconds: 5
@@ -3517,7 +3450,7 @@ serviceJwt:
         # Rust svc-presentation's `POST /{overlay_code}/{surface}/push`, which needs a hub-api-minted
         # PUSH JWT. hub-api stamps the per-community form `presentation.overlay:push:<community_id>`
         # (never wider). Filtered out of the rendered allow-list unless presentation.rust.enabled
-        # (waddlebot.svcActionOverlayPush) -- base/beta/prod keep the Python svc-presentation.
+        # (waddlebot.svcActionOverlayPush); the Python svc-presentation was removed, Rust is the default.
         - "presentation.overlay:push"
     # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
     # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints

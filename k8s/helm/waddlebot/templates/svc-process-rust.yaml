@@ -1,5 +1,5 @@
 # feature/e2e-helm-rust-dataplane -- Rust svc-process (core/svc_process) Deployment,
-# ADDITIVE to templates/svc-process.yaml's Python Deployment -- never replaces it. Gated on
+# (the legacy Python svc-process template was removed). Gated on
 # the top-level pipeline.rustDataPlane.enabled flag (default false) plus this stage's own
 # .enabled sub-flag. See templates/svc-ingest-rust.yaml's header for the full `-rust`
 # resource-naming-vs-shared-image-tag rationale (identical here) -- not repeated per file.

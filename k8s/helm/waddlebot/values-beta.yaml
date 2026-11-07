@@ -93,21 +93,6 @@ infrastructure:
 # slightly more headroom than alpha). Pipeline app services share one
 # generic tier; hubApi/hubWebui are sized individually.
 pipeline:
-  svcIngest:
-    replicas: 1
-    resources:
-      requests: { cpu: "150m", memory: "192Mi" }
-      limits: { cpu: "750m", memory: "768Mi" }
-  svcProcess:
-    replicas: 1
-    resources:
-      requests: { cpu: "150m", memory: "192Mi" }
-      limits: { cpu: "750m", memory: "768Mi" }
-  svcAction:
-    replicas: 1
-    resources:
-      requests: { cpu: "150m", memory: "192Mi" }
-      limits: { cpu: "750m", memory: "768Mi" }
   svcCore:
     replicas: 1
     resources:
@@ -835,11 +820,6 @@ egressPolicy:
     podCidr: "10.244.0.0/16"      # dal2 — confirm against cluster CNI config before deploy
     serviceCidr: "10.96.0.0/12"
     nodeCidr: "10.0.0.0/8"
-
-presentation:
-  image:
-    repository: "svc-presentation"
-    tag: "latest"
 
 # R5: the SPIRE agent DaemonSet is an approved ROOT EXCEPTION (uid 0 + hostPath Workload-API socket
 # dir) that neither PSA baseline nor restricted admits, and it lives in this namespace, so beta cannot

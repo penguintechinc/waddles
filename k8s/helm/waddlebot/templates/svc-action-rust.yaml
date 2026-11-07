@@ -1,6 +1,5 @@
 # feature/e2e-helm-rust-dataplane -- Rust svc-action (core/svc_action, M3 executor
-# integration landed) Deployment, ADDITIVE to templates/svc-action.yaml's Python
-# Deployment -- never replaces it. Gated on the top-level pipeline.rustDataPlane.enabled
+# integration landed) Deployment (the legacy Python svc-action template was removed). Gated on the top-level pipeline.rustDataPlane.enabled
 # flag (default false) plus this stage's own .enabled sub-flag. See
 # templates/svc-ingest-rust.yaml's header for the full `-rust` resource-naming-vs-shared-
 # image-tag rationale (identical here) -- not repeated per file.
