@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 use waddle_sdk::tool::{ToolContext, ToolError, ToolRegistry};
 
 /// Every tool name this bundle exposes (also the only labels ever logged).
-pub const TOOL_NAMES: [&str; 10] = [
+pub const TOOL_NAMES: [&str; 12] = [
     "room.create",
     "room.get",
     "room.close",
@@ -28,6 +28,8 @@ pub const TOOL_NAMES: [&str; 10] = [
     "track.route",
     "recording.start",
     "recording.stop",
+    "token.revoke_all",
+    "admin.verify",
 ];
 
 /// Largest room label (display text, never a key).
@@ -250,6 +252,25 @@ fn token_issue(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, Too
     )
 }
 
+/// Bumps the room's token epoch host-side, invalidating every older token.
+fn token_revoke_all(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    let o = object(&args, &["room_id"])?;
+    let req = json!({"room_id": uuid_arg(o, "room_id", true)?});
+    pick(
+        &m.call("token.revoke_all", &req).map_err(tool_err)?,
+        &["room_id", "epoch"],
+    )
+}
+
+/// Authorization proof for apps: succeeds only when the HOST has verified the
+/// actor holds `community:admin` (the manifest's `required_scope` is enforced
+/// before dispatch, so reaching this handler IS the proof). Takes no arguments
+/// and never reads actor/scope data from the caller.
+fn admin_verify(_: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    object(&args, &[])?;
+    Ok(json!({"verified": true}))
+}
+
 fn token_revoke(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
     let o = object(&args, &["room_id", "token_id"])?;
     let req = json!({
@@ -356,6 +377,8 @@ pub fn build_registry(media: Arc<dyn Media>) -> ToolRegistry {
         "recording.stop",
         Box::new(recording("recording.stop")),
     );
+    reg(&mut r, "token.revoke_all", Box::new(token_revoke_all));
+    reg(&mut r, "admin.verify", Box::new(admin_verify));
     r
 }
 
@@ -586,5 +609,33 @@ mod tests {
     fn log_label_never_echoes_unknown_names() {
         assert_eq!(tool_log_label("room.create"), "room.create");
         assert_eq!(tool_log_label("someone@example.com"), "unknown_tool");
+    }
+
+    #[test]
+    fn admin_verify_makes_no_host_call_and_rejects_arguments() {
+        let f = Fake::ok(json!({}));
+        assert_eq!(
+            call(&f, "admin.verify", json!({})).unwrap(),
+            json!({"verified": true})
+        );
+        assert!(matches!(
+            call(&f, "admin.verify", json!({"actor": USER})),
+            Err(ToolError::InvalidArgs(_))
+        ));
+        assert!(
+            f.calls().is_empty(),
+            "scope is enforced host-side; nothing to ask the host"
+        );
+    }
+
+    #[test]
+    fn revoke_all_validates_and_whitelists() {
+        let f = Fake::ok(json!({"room_id": ROOM, "epoch": 3, "leak": 1}));
+        let out = call(&f, "token.revoke_all", json!({"room_id": ROOM})).unwrap();
+        assert_eq!(out, json!({"room_id": ROOM, "epoch": 3}));
+        assert!(matches!(
+            call(&f, "token.revoke_all", json!({"room_id": "x"})),
+            Err(ToolError::InvalidArgs(_))
+        ));
     }
 }

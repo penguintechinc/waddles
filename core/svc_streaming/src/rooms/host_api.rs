@@ -175,6 +175,13 @@ struct RevokeReq {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PipelineTokenReq {
+    community_id: String,
+    pipeline_id: Uuid,
+    ttl_secs: Option<i64>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EndpointReq {
     community_id: String,
     room_id: Uuid,
@@ -237,10 +244,27 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
         }
         "token.revoke" => {
             let r: RevokeReq = parse(body)?;
-            svc.get(&r.community_id, r.room_id).await?;
-            let until = chrono::Utc::now().timestamp() + super::token::MAX_TTL_SECS;
-            svc.revoke_token(r.token_id, until).await?;
+            svc.revoke_token(&r.community_id, r.room_id, r.token_id).await?;
             Ok(json!({"revoked": true, "token_id": r.token_id}))
+        }
+        "token.revoke_all" => {
+            let r: RoomReq = parse(body)?;
+            let epoch = svc.revoke_all(&r.community_id, r.room_id).await?;
+            Ok(json!({"room_id": r.room_id, "epoch": epoch}))
+        }
+        "pipeline.whep_token" => {
+            let r: PipelineTokenReq = parse(body)?;
+            let (t, participant) = svc
+                .issue_pipeline_token(&r.community_id, r.pipeline_id, r.ttl_secs)
+                .await?;
+            let url = format!(
+                "{}/whep/{}/{}",
+                svc.public_base_url().trim_end_matches('/'),
+                r.community_id,
+                r.pipeline_id
+            );
+            Ok(json!({"url": url, "token": t.token, "token_id": t.token_id,
+                      "participant_id": participant, "expires_at": t.expires_at}))
         }
         "whip.endpoint" | "whep.endpoint" => {
             let r: EndpointReq = parse(body)?;

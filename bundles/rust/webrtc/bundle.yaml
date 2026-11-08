@@ -331,6 +331,41 @@ exported_tools:
         type: string
       state:
         type: string
+- name: token.revoke_all
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+    required:
+    - room_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      epoch:
+        type: integer
+  required_scope: community:admin
+- name: admin.verify
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      verified:
+        type: boolean
+  required_scope: community:admin
 - name: recording.stop
   access: write
   risk: normal

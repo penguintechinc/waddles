@@ -543,7 +543,7 @@ impl Orchestrator {
         };
         match self.whip_state.fanout_for(key).await {
             Some(fanouts) => {
-                whep.register_fanout(pipeline_id, fanouts).await;
+                whep.register_fanout(pipeline_id, &spec.community_id, fanouts).await;
                 tracing::info!(%pipeline_id, "orchestrator: WHEP output wired to the WHIP publisher's fanout");
             }
             None => fail("WHIP publisher fanout is gone (publisher disconnected before the pipeline started)"),

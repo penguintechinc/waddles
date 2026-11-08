@@ -403,17 +403,57 @@ fn pick_endpoint(v: &Value) -> Result<Value, RoomsError> {
 
 // ------------------------------------------------------------ admin actions
 
-/// Gateway-facing admin/join operations. The gateway has already verified the
-/// caller (`community:admin` for every op except `join_token`, where `actor` is
-/// the authenticated user itself); this layer validates and applies.
-pub fn admin(
+/// Admin operations for a host-delivered `admin.action` event.
+///
+/// Nothing here trusts the event: `actor` must be the HOST-VERIFIED actor
+/// (`identity.resolve_actor`), `args.actor` is rejected outright, and every op
+/// except `join_token` first passes a host-enforced `community:admin` check (the
+/// `admin.verify` tool carries `required_scope: community:admin`). Credentials
+/// are never produced on this path -- the result is emitted as an event, and
+/// events are queued and logged -- so `join_token` is refused here.
+pub fn admin_for_event(
     op: &str,
     args: &Value,
     tools: &dyn Tools,
     store: &dyn Store,
     msg: &str,
     now: i64,
+    actor: &str,
 ) -> Result<Value, RoomsError> {
+    admin_inner(op, args, tools, store, msg, now, actor, false)
+}
+
+/// Shared implementation. `allow_credentials` is `true` only for a direct,
+/// non-event result channel (not yet provided by the host).
+#[allow(clippy::too_many_arguments)]
+fn admin_inner(
+    op: &str,
+    args: &Value,
+    tools: &dyn Tools,
+    store: &dyn Store,
+    msg: &str,
+    now: i64,
+    actor: &str,
+    allow_credentials: bool,
+) -> Result<Value, RoomsError> {
+    if args.get("actor").is_some() {
+        return Err(RoomsError::Denied(
+            "actor is derived by the host and is not accepted as an argument".into(),
+        ));
+    }
+    need_uuid("verified actor", actor)?;
+    if op == "join_token" {
+        if !allow_credentials {
+            return Err(RoomsError::Denied(
+                "join credentials are not returned over events".into(),
+            ));
+        }
+    } else {
+        // Host-enforced: refused unless the verified actor holds community:admin.
+        tools
+            .invoke("admin.verify", &json!({}), None)
+            .map_err(tool_err)?;
+    }
     let s = |k: &str| args.get(k).and_then(Value::as_str);
     let req = |k: &str| s(k).ok_or_else(|| RoomsError::Usage(format!("{k} is required")));
     match op {
@@ -435,16 +475,7 @@ pub fn admin(
             if kind == Kind::Event && event.is_none() {
                 return Err(RoomsError::Usage("event rooms need event_id".into()));
             }
-            let r = create_room(
-                tools,
-                store,
-                msg,
-                req("actor")?,
-                req("label")?,
-                kind,
-                None,
-                event,
-            )?;
+            let r = create_room(tools, store, msg, actor, req("label")?, kind, None, event)?;
             Ok(view(&r))
         }
         "room.virtual" => {
@@ -453,7 +484,7 @@ pub fn admin(
                 tools,
                 store,
                 msg,
-                req("actor")?,
+                actor,
                 req("label")?,
                 kind,
                 Some(req("parent")?),
@@ -551,15 +582,7 @@ pub fn admin(
         }
         "join_token" => {
             let guest = args.get("guest").and_then(Value::as_bool).unwrap_or(false);
-            join(
-                tools,
-                store,
-                msg,
-                req("room_id")?,
-                req("actor")?,
-                guest,
-                now,
-            )
+            join(tools, store, msg, req("room_id")?, actor, guest, now)
         }
         other => Err(RoomsError::Usage(format!(
             "unknown admin op {:?}",
@@ -857,12 +880,20 @@ mod tests {
         calls: RefCell<Vec<(String, Value, Option<String>)>>,
         n: RefCell<u32>,
         fail: RefCell<Option<ToolFail>>,
+        deny_admin: RefCell<bool>,
     }
     impl Tools for Svc {
         fn invoke(&self, tool: &str, args: &Value, idem: Option<&str>) -> Result<Value, ToolFail> {
             self.calls
                 .borrow_mut()
                 .push((tool.into(), args.clone(), idem.map(str::to_string)));
+            if tool == "admin.verify" {
+                return if *self.deny_admin.borrow() {
+                    Err(ToolFail::Forbidden)
+                } else {
+                    Ok(json!({"verified": true}))
+                };
+            }
             if let Some(f) = self.fail.borrow().clone() {
                 return Err(f);
             }
@@ -886,6 +917,27 @@ mod tests {
         fn actor(&self) -> Result<String, String> {
             Ok(self.0.to_string())
         }
+    }
+    fn admin(
+        op: &str,
+        args: &Value,
+        t: &dyn Tools,
+        k: &dyn Store,
+        msg: &str,
+        now: i64,
+    ) -> Result<Value, RoomsError> {
+        admin_inner(op, args, t, k, msg, now, ADMIN, true)
+    }
+    fn admin_as(
+        who: &str,
+        op: &str,
+        args: &Value,
+        t: &dyn Tools,
+        k: &dyn Store,
+        msg: &str,
+        now: i64,
+    ) -> Result<Value, RoomsError> {
+        admin_inner(op, args, t, k, msg, now, who, true)
     }
     fn chat(t: &str, svc: &Svc, kv: &Kv, who: &'static str) -> String {
         handle_chat(t, "m1", svc, kv, &Who(who), Some("https://app/rooms")).unwrap()
@@ -1084,7 +1136,7 @@ mod tests {
         let id = "00000000-0000-0000-0000-000000000001";
         admin(
             "room.virtual",
-            &json!({"actor": ADMIN, "label": "Main", "kind": "stage", "parent": id}),
+            &json!({"label": "Main", "kind": "stage", "parent": id}),
             &s,
             &k,
             "m2",
@@ -1093,9 +1145,10 @@ mod tests {
         .unwrap();
         let stage = "00000000-0000-0000-0000-000000000002";
         s.calls.borrow_mut().clear();
-        let j = admin(
+        let j = admin_as(
+            USER,
             "join_token",
-            &json!({"room_id": stage, "actor": USER}),
+            &json!({"room_id": stage}),
             &s,
             &k,
             "m3",
@@ -1120,9 +1173,10 @@ mod tests {
             0,
         )
         .unwrap();
-        let j = admin(
+        let j = admin_as(
+            USER,
             "join_token",
-            &json!({"room_id": stage, "actor": USER}),
+            &json!({"room_id": stage}),
             &s,
             &k,
             "m5",
@@ -1152,9 +1206,10 @@ mod tests {
         // closed room refuses
         admin("room.close", &json!({"room_id": stage}), &s, &k, "m7", 0).unwrap();
         assert!(matches!(
-            admin(
+            admin_as(
+                USER,
                 "join_token",
-                &json!({"room_id": stage, "actor": USER}),
+                &json!({"room_id": stage}),
                 &s,
                 &k,
                 "m8",
@@ -1204,18 +1259,9 @@ mod tests {
                 "acl.set",
                 json!({"room_id": id, "member": "x", "role": "member"}),
             ),
-            (
-                "room.create",
-                json!({"actor": ADMIN, "label": "", "kind": "community"}),
-            ),
-            (
-                "room.create",
-                json!({"actor": ADMIN, "label": "a", "kind": "event"}),
-            ),
-            (
-                "room.create",
-                json!({"actor": ADMIN, "label": "a", "kind": "stage"}),
-            ),
+            ("room.create", json!({"label": "", "kind": "community"})),
+            ("room.create", json!({"label": "a", "kind": "event"})),
+            ("room.create", json!({"label": "a", "kind": "stage"})),
             ("bogus", json!({})),
         ] {
             assert!(
@@ -1289,15 +1335,8 @@ mod tests {
         let (s, k) = (Svc::default(), Kv::default());
         chat("!room create Game Night", &s, &k, ADMIN);
         let id = "00000000-0000-0000-0000-000000000001";
-        admin(
-            "join_token",
-            &json!({"room_id": id, "actor": USER}),
-            &s,
-            &k,
-            "m2",
-            0,
-        )
-        .unwrap();
+        admin("room.list", &json!({}), &s, &k, "m1", 0).unwrap();
+        admin_as(USER, "join_token", &json!({"room_id": id}), &s, &k, "m2", 0).unwrap();
         chat(&format!("!room close {id}"), &s, &k, ADMIN);
         let mut seen: HashMap<String, Value> = HashMap::new();
         for (tool, args, _) in s.calls.borrow().iter() {
@@ -1312,6 +1351,102 @@ mod tests {
         );
         for (tool, args) in want {
             assert_eq!(seen.get(tool), Some(args), "{tool}");
+        }
+    }
+
+    #[test]
+    fn forged_admin_action_from_a_non_admin_is_refused_and_changes_nothing() {
+        let (s, k) = (Svc::default(), Kv::default());
+        chat("!room create Hall", &s, &k, ADMIN);
+        let id = "00000000-0000-0000-0000-000000000001";
+        // The host refuses `admin.verify` for a non-admin actor.
+        *s.deny_admin.borrow_mut() = true;
+        for (op, args) in [
+            ("room.close", json!({"room_id": id})),
+            (
+                "room.set_access",
+                json!({"room_id": id, "allow_guests": true}),
+            ),
+            (
+                "acl.set",
+                json!({"room_id": id, "member": USER, "role": "admin"}),
+            ),
+            ("room.link_event", json!({"room_id": id, "event_id": EVENT})),
+            ("room.list", json!({})),
+        ] {
+            let r = admin_for_event(op, &args, &s, &k, "m9", 0, USER);
+            assert!(
+                matches!(r, Err(RoomsError::Tool(ToolFail::Forbidden))),
+                "{op}: {r:?}"
+            );
+        }
+        let room = load(&k, id).unwrap();
+        assert!(!room.closed && !room.allow_guests && room.event_ref.is_none());
+        assert_eq!(
+            role_of(&k, id, USER).unwrap(),
+            Role::Member,
+            "ACL untouched"
+        );
+        assert!(
+            s.calls.borrow().iter().all(|c| c.0 != "room.close"),
+            "no mutating tool ran"
+        );
+    }
+
+    #[test]
+    fn actor_in_args_is_rejected_outright_even_for_a_real_admin() {
+        let (s, k) = (Svc::default(), Kv::default());
+        chat("!room create Hall", &s, &k, ADMIN);
+        let id = "00000000-0000-0000-0000-000000000001";
+        for op in ["room.create", "room.list", "acl.set", "join_token"] {
+            let r = admin_for_event(
+                op,
+                &json!({"room_id": id, "actor": ADMIN}),
+                &s,
+                &k,
+                "m",
+                0,
+                USER,
+            );
+            assert!(matches!(r, Err(RoomsError::Denied(_))), "{op}: {r:?}");
+        }
+        assert!(admin_for_event("room.list", &json!({}), &s, &k, "m", 0, "not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn event_path_never_returns_credentials() {
+        let (s, k) = (Svc::default(), Kv::default());
+        chat("!room create Hall", &s, &k, ADMIN);
+        let id = "00000000-0000-0000-0000-000000000001";
+        s.calls.borrow_mut().clear();
+        let r = admin_for_event("join_token", &json!({"room_id": id}), &s, &k, "m", 0, USER);
+        assert!(matches!(r, Err(RoomsError::Denied(m)) if m.contains("not returned over events")));
+        assert!(
+            s.calls
+                .borrow()
+                .iter()
+                .all(|c| c.0 != "whip.endpoint" && c.0 != "whep.endpoint"),
+            "no credential was even minted on the event path"
+        );
+        // Every success the event path can produce is credential-free.
+        for (op, args) in [
+            ("room.list", json!({})),
+            ("room.get", json!({"room_id": id})),
+            (
+                "room.set_access",
+                json!({"room_id": id, "allow_guests": true}),
+            ),
+            (
+                "acl.set",
+                json!({"room_id": id, "member": USER, "role": "moderator"}),
+            ),
+        ] {
+            let out = admin_for_event(op, &args, &s, &k, "m", 0, ADMIN)
+                .unwrap()
+                .to_string();
+            for needle in ["token", "endpoint", "\"url\""] {
+                assert!(!out.contains(needle), "{op} result leaks {needle}: {out}");
+            }
         }
     }
 }

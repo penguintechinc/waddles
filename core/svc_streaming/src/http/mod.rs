@@ -147,13 +147,20 @@ impl AppState {
         ));
         let room_keys = crate::rooms::token::TokenKeys::from_env()
             .expect("WEBRTC_ROOM_TOKEN_SECRET, when set, must be at least 32 bytes");
-        let rooms = Arc::new(crate::rooms::RoomService::new(
-            pc_factory.clone(),
-            rtc_metrics.clone(),
-            room_keys,
-            config.cli.public_base_url.clone(),
-        ));
-        let whep_state = Arc::new(WhepState::new(pc_factory, rtc_metrics, DEFAULT_MAX_VIEWERS));
+        let mut whep = WhepState::new(pc_factory.clone(), rtc_metrics.clone(), DEFAULT_MAX_VIEWERS);
+        if let Some(k) = room_keys.clone() {
+            whep = whep.with_viewer_auth(k);
+        }
+        let whep_state = Arc::new(whep);
+        let rooms = Arc::new(
+            crate::rooms::RoomService::new(
+                pc_factory,
+                rtc_metrics,
+                room_keys,
+                config.cli.public_base_url.clone(),
+            )
+            .with_whep(whep_state.clone()),
+        );
         let engine: SharedEngine = Arc::new(crate::pipeline::StubSupervisor);
         let hls_router_state = HlsRouterState::new(
             stream_data_dir,

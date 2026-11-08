@@ -16,7 +16,7 @@ use uuid::Uuid;
 use webrtc::media_stream::track_local::TrackLocal;
 
 use rtc_common::*;
-use svc_streaming::egress::whep::{self, WhepState, DEFAULT_MAX_VIEWERS};
+use svc_streaming::egress::whep::{self, DEFAULT_MAX_VIEWERS};
 use svc_streaming::ingest::whip::{self, WhipState};
 use svc_streaming::rtc::metrics::RtcMetrics;
 use svc_streaming::rtc::pc_factory::PeerConnectionFactory;
@@ -45,7 +45,7 @@ async fn whip_publish_media_reaches_whep_viewer_over_real_peer_connections() {
         whip_metrics,
     ));
     let whip_router = whip::router(Arc::clone(&whip_state));
-    let whep_state = Arc::new(WhepState::new(
+    let whep_state = Arc::new(whep_with_auth(
         whep_factory,
         whep_metrics,
         DEFAULT_MAX_VIEWERS,
@@ -75,6 +75,7 @@ async fn whip_publish_media_reaches_whep_viewer_over_real_peer_connections() {
     whep_state
         .register_fanout(
             pipeline_id,
+            "c",
             whip_state.fanout_for("loop-token").await.unwrap(),
         )
         .await;
@@ -84,7 +85,11 @@ async fn whip_publish_media_reaches_whep_viewer_over_real_peer_connections() {
     let voffer = offer_sdp(&viewer_pc, &viewer_handler.gather_complete).await;
     let vresp = oneshot(
         whep_router,
-        post_sdp(&format!("/whep/c/{pipeline_id}"), voffer),
+        post_sdp_auth(
+            &format!("/whep/c/{pipeline_id}"),
+            &viewer_token("c", pipeline_id, 60, "pipeline", Uuid::new_v4()),
+            voffer,
+        ),
     )
     .await;
     assert_status(&vresp, StatusCode::CREATED);

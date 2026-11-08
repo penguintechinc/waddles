@@ -104,7 +104,7 @@ async fn whep_output_is_wired_to_the_real_whip_publisher_and_media_flows() {
         loopback_ip(),
         RtcMetrics::register(&prometheus::Registry::new()).unwrap(),
     ));
-    let whep_state = Arc::new(WhepState::new(
+    let whep_state = Arc::new(whep_with_auth(
         whep_factory,
         RtcMetrics::register(&prometheus::Registry::new()).unwrap(),
         DEFAULT_MAX_VIEWERS,
@@ -159,15 +159,85 @@ async fn whep_output_is_wired_to_the_real_whip_publisher_and_media_flows() {
         .await;
     assert!(whep_state.has_fanout(copy.id).await);
 
+    // The stream is registered to community 7 (the spec's community).
+    assert_eq!(whep_state.owner_of(copy.id).await.as_deref(), Some("7"));
+
     let (vpc, vh) = build_recvonly_peer(&viewer_factory).await;
     let voffer = offer_sdp(&vpc, &vh.gather_complete).await;
+    let path = format!("/whep/7/{}", copy.id);
+    let router = whep::router(whep_state.clone());
+    let me = Uuid::new_v4();
+
+    // No token -> 401; expired -> 401; garbage -> 401.
+    let res = oneshot(router.clone(), post_sdp(&path, voffer.clone())).await;
+    assert_status(&res, StatusCode::UNAUTHORIZED);
+    let expired = viewer_token("7", copy.id, -5, "pipeline", me);
     let res = oneshot(
-        whep::router(whep_state.clone()),
-        post_sdp(&format!("/whep/7/{}", copy.id), voffer),
+        router.clone(),
+        post_sdp_auth(&path, &expired, voffer.clone()),
     )
     .await;
+    assert_status(&res, StatusCode::UNAUTHORIZED);
+    let res = oneshot(
+        router.clone(),
+        post_sdp_auth(&path, "garbage", voffer.clone()),
+    )
+    .await;
+    assert_status(&res, StatusCode::UNAUTHORIZED);
+    // Valid token, wrong community (path says 7, token says 8) -> 403.
+    let other_comm = viewer_token("8", copy.id, 60, "pipeline", me);
+    let res = oneshot(
+        router.clone(),
+        post_sdp_auth(&path, &other_comm, voffer.clone()),
+    )
+    .await;
+    assert_status(&res, StatusCode::FORBIDDEN);
+    // Token AND path both claim community 8 for community 7's stream -> 403.
+    let res = oneshot(
+        router.clone(),
+        post_sdp_auth(&format!("/whep/8/{}", copy.id), &other_comm, voffer.clone()),
+    )
+    .await;
+    assert_status(&res, StatusCode::FORBIDDEN);
+    // Token for a different pipeline, or a room-scoped token -> 403.
+    let other_pipe = viewer_token("7", Uuid::new_v4(), 60, "pipeline", me);
+    let res = oneshot(
+        router.clone(),
+        post_sdp_auth(&path, &other_pipe, voffer.clone()),
+    )
+    .await;
+    assert_status(&res, StatusCode::FORBIDDEN);
+    let room_scoped = viewer_token("7", copy.id, 60, "room", me);
+    let res = oneshot(
+        router.clone(),
+        post_sdp_auth(&path, &room_scoped, voffer.clone()),
+    )
+    .await;
+    assert_status(&res, StatusCode::FORBIDDEN);
+    assert_eq!(
+        whep_state.viewer_count(copy.id).await,
+        0,
+        "no refused request created a session"
+    );
+
+    // Valid token -> media.
+    let good = viewer_token("7", copy.id, 60, "pipeline", me);
+    let res = oneshot(router.clone(), post_sdp_auth(&path, &good, voffer)).await;
     assert_status(&res, StatusCode::CREATED);
-    apply_answer(&vpc, body_text(res).await).await;
+    let session_path = location_of(&res);
+    let answer = body_text(res).await;
+    // DELETE only by the session owner.
+    let stranger = viewer_token("7", copy.id, 60, "pipeline", Uuid::new_v4());
+    let res = oneshot(router.clone(), delete_auth(&session_path, &stranger)).await;
+    assert_status(&res, StatusCode::NOT_FOUND);
+    let res = oneshot(router.clone(), delete_request(&session_path)).await;
+    assert_status(&res, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        whep_state.viewer_count(copy.id).await,
+        1,
+        "stranger could not tear it down"
+    );
+    apply_answer(&vpc, answer).await;
     tokio::time::timeout(Duration::from_secs(5), vh.connected.notified())
         .await
         .unwrap();

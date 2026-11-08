@@ -55,6 +55,10 @@ permissions:
   justification: resolves the verified caller to a community user UUID for room access decisions
 - id: storage.kv
   justification: persists room records, the per-room ACL, event links and schedules (community-scoped)
+- id: tool.call:waddles.core.service.webrtc:admin.verify
+  justification: delegates room/token operations to the webrtc service; the media path stays in svc-streaming
+  params:
+    write: false
 - id: tool.call:waddles.core.service.webrtc:room.create
   justification: delegates room/token operations to the webrtc service; the media path stays in svc-streaming
   params:
@@ -85,6 +89,9 @@ platform_compatibility:
   min_version: 1.0.0
   max_version: null
 requested_tools:
+- tool: admin.verify
+  access: read
+  target_app_id: waddles.core.service.webrtc
 - tool: room.create
   access: write
   target_app_id: waddles.core.service.webrtc

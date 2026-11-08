@@ -86,10 +86,27 @@ impl ProcessGuest for Component {
         let payload: Value = serde_json::from_str(&event.payload_json).unwrap_or(Value::Null);
         let ctx = context::get_context();
         if event.event_type == "admin.action" {
+            // The event type and payload authorize NOTHING: the actor is the host-
+            // verified one, `args.actor` is rejected, and `logic` requires the
+            // host-enforced community:admin check (admin.verify) per mutating op.
+            // Results are emitted as an event, so credentials are never produced here.
             let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
             let args = payload.get("args").cloned().unwrap_or(Value::Null);
             let now = (clock::now_millis() / 1000) as i64;
-            let out = logic::admin(op, &args, &WasmTools, &WasmKv, &ctx.message_id, now);
+            let out = match WasmIdent.actor() {
+                Ok(actor) => logic::admin_for_event(
+                    op,
+                    &args,
+                    &WasmTools,
+                    &WasmKv,
+                    &ctx.message_id,
+                    now,
+                    &actor,
+                ),
+                Err(_) => Err(logic::RoomsError::Denied(
+                    "could not verify you as a member".into(),
+                )),
+            };
             let label = if op.starts_with("room.") || op.starts_with("acl.") || op == "join_token" {
                 op
             } else {

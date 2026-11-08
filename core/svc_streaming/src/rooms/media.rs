@@ -7,7 +7,7 @@
 //! - `POST   /rtc/rooms/{room_id}/whep`  (subscribe grant) `?source=<participant>`
 //! - `DELETE /rtc/rooms/{room_id}/sessions/{session_id}` (session owner)
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use axum::extract::{Path, Query, State};
@@ -73,7 +73,34 @@ fn require_sdp(headers: &HeaderMap) -> Result<(), ApiError> {
     }
 }
 
+/// Where a handler finds its session once registered (set after `add_*`), so a
+/// dead peer connection can be reaped from the room.
+#[derive(Clone, Default)]
+struct ReapSlot {
+    target: Arc<OnceLock<(Arc<RoomService>, Uuid, Uuid)>>,
+    ended: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Spawns the reap of a session whose peer connection ended.
+fn reap_if_registered(slot: &ReapSlot) {
+    slot.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some((svc, room, session)) = slot.target.get() {
+        let (svc, room, session) = (Arc::clone(svc), *room, *session);
+        tokio::spawn(async move { svc.reap_session(room, session).await });
+    }
+}
+
+fn peer_ended(s: RTCPeerConnectionState) -> bool {
+    matches!(
+        s,
+        RTCPeerConnectionState::Failed
+            | RTCPeerConnectionState::Closed
+            | RTCPeerConnectionState::Disconnected
+    )
+}
+
 struct PublishHandler {
+    reap: ReapSlot,
     fanouts: MediaFanouts,
     gather: Arc<Notify>,
     metrics: RtcMetrics,
@@ -90,6 +117,9 @@ impl PeerConnectionEventHandler for PublishHandler {
     async fn on_connection_state_change(&self, s: RTCPeerConnectionState) {
         if s == RTCPeerConnectionState::Failed {
             self.metrics.ice_failures_total.inc();
+        }
+        if peer_ended(s) {
+            reap_if_registered(&self.reap);
         }
     }
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
@@ -116,6 +146,7 @@ impl PeerConnectionEventHandler for PublishHandler {
 }
 
 struct ViewerHandler {
+    reap: ReapSlot,
     gather: Arc<Notify>,
     metrics: RtcMetrics,
 }
@@ -130,6 +161,9 @@ impl PeerConnectionEventHandler for ViewerHandler {
     async fn on_connection_state_change(&self, s: RTCPeerConnectionState) {
         if s == RTCPeerConnectionState::Failed {
             self.metrics.ice_failures_total.inc();
+        }
+        if peer_ended(s) {
+            reap_if_registered(&self.reap);
         }
     }
 }
@@ -224,7 +258,9 @@ async fn publish(
     let fanouts = MediaFanouts::new();
     let gather = Arc::new(Notify::new());
     let runtime = svc.factory.runtime();
+    let reap = ReapSlot::default();
     let handler = Arc::new(PublishHandler {
+        reap: reap.clone(),
         fanouts: fanouts.clone(),
         gather: gather.clone(),
         metrics: svc.metrics.clone(),
@@ -265,7 +301,14 @@ async fn publish(
     let answer_sdp = await_gather(&pc, &gather).await?;
 
     let session = match svc
-        .add_publisher(room_id, participant, fanouts, pc.clone())
+        .add_publisher(
+            room_id,
+            participant,
+            fanouts,
+            pc.clone(),
+            reap.ended.clone(),
+            claims.exp,
+        )
         .await
     {
         Ok(s) => s,
@@ -274,6 +317,10 @@ async fn publish(
             return Err(api_error(e));
         }
     };
+    let _ = reap.target.set((Arc::clone(&svc), room_id, session));
+    if reap.ended.load(std::sync::atomic::Ordering::SeqCst) {
+        reap_if_registered(&reap);
+    }
     svc.metrics
         .sessions_active
         .with_label_values(&["room_whip"])
@@ -328,7 +375,9 @@ async fn subscribe(
         .map_err(|e| ApiError::BadRequest(format!("invalid SDP offer: {e}")))?;
 
     let gather = Arc::new(Notify::new());
+    let reap = ReapSlot::default();
     let handler = Arc::new(ViewerHandler {
+        reap: reap.clone(),
         gather: gather.clone(),
         metrics: svc.metrics.clone(),
     });
@@ -361,17 +410,21 @@ async fn subscribe(
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
     let answer_sdp = await_gather(&pc, &gather).await?;
 
-    // Negotiated payload types per sender (video first, audio second -- the
-    // add_track order above); packets are rewritten to match.
-    let senders = pc.get_senders().await;
-    let mut pts = Vec::new();
-    for s in &senders {
-        let pt = s
-            .get_parameters()
-            .await
-            .ok()
-            .and_then(|p| p.rtp_parameters.codecs.first().map(|c| c.payload_type));
-        pts.push(pt);
+    // Negotiated payload type per media kind, matched by the sender's codec mime
+    // type (sender order is not guaranteed); packets are rewritten to match.
+    let (mut video_pt, mut audio_pt) = (None, None);
+    for sender in pc.get_senders().await {
+        let Ok(params) = sender.get_parameters().await else {
+            continue;
+        };
+        if let Some(c) = params.rtp_parameters.codecs.first() {
+            let mime = c.rtp_codec.mime_type.to_ascii_lowercase();
+            if mime.starts_with("video/") {
+                video_pt = Some(c.payload_type);
+            } else if mime.starts_with("audio/") {
+                audio_pt = Some(c.payload_type);
+            }
+        }
     }
     let runtime = svc.factory.runtime();
     spawn_forward(
@@ -379,7 +432,7 @@ async fn subscribe(
         fanouts.video,
         vtrack,
         vssrc,
-        pts.first().copied().flatten(),
+        video_pt,
         svc.metrics.clone(),
     );
     spawn_forward(
@@ -387,17 +440,30 @@ async fn subscribe(
         fanouts.audio,
         atrack,
         assrc,
-        pts.get(1).copied().flatten(),
+        audio_pt,
         svc.metrics.clone(),
     );
 
-    let session = match svc.add_subscriber(room_id, participant, pc.clone()).await {
+    let session = match svc
+        .add_subscriber(
+            room_id,
+            participant,
+            pc.clone(),
+            reap.ended.clone(),
+            claims.exp,
+        )
+        .await
+    {
         Ok(s) => s,
         Err(e) => {
             let _ = pc.close().await;
             return Err(api_error(e));
         }
     };
+    let _ = reap.target.set((Arc::clone(&svc), room_id, session));
+    if reap.ended.load(std::sync::atomic::Ordering::SeqCst) {
+        reap_if_registered(&reap);
+    }
     svc.metrics
         .sessions_active
         .with_label_values(&["room_whep"])

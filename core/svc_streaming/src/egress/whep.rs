@@ -53,6 +53,7 @@ use webrtc::runtime::Runtime;
 use crate::egress::{OutputSink, SinkError};
 use crate::error::ApiError;
 use crate::pipeline::model::{OutputSpec, PipelineId};
+use crate::rooms::token::{RoomClaims, TokenKeys, SCOPE_PIPELINE};
 use crate::rtc::fanout::{MediaFanouts, TrackFanout};
 use crate::rtc::metrics::RtcMetrics;
 use crate::rtc::pc_factory::PeerConnectionFactory;
@@ -69,6 +70,8 @@ pub const DEFAULT_MAX_VIEWERS: usize = 50;
 
 struct WhepViewerSession {
     pipeline_id: PipelineId,
+    /// Token `sub` of the viewer that created the session; only it may delete it.
+    participant: String,
     pc: Arc<dyn PeerConnection>,
 }
 
@@ -82,6 +85,11 @@ pub struct WhepState {
     /// feeding that pipeline's output right now. See this module's doc
     /// comment for why nothing wires this from a real pipeline yet.
     fanouts: RwLock<HashMap<PipelineId, MediaFanouts>>,
+    /// pipeline -> owning community, recorded when a source registers. A viewer
+    /// token is only honored for the community that owns the stream.
+    owners: RwLock<HashMap<PipelineId, String>>,
+    /// Viewer-token verification keys; `None` => WHEP refuses every request (503).
+    viewer_keys: Option<TokenKeys>,
     sessions: RwLock<HashMap<Uuid, WhepViewerSession>>,
 }
 
@@ -96,6 +104,8 @@ impl WhepState {
             metrics,
             max_viewers,
             fanouts: RwLock::new(HashMap::new()),
+            owners: RwLock::new(HashMap::new()),
+            viewer_keys: None,
             sessions: RwLock::new(HashMap::new()),
         }
     }
@@ -104,8 +114,60 @@ impl WhepState {
     /// `pipeline_id` should subscribe to. Called by whichever source is
     /// currently feeding that pipeline's output -- the WHIP ingest handler
     /// for a copy path, or an `RtpIngress` reader for a transcoded one.
-    pub async fn register_fanout(&self, pipeline_id: PipelineId, fanouts: MediaFanouts) {
+    pub async fn register_fanout(
+        &self,
+        pipeline_id: PipelineId,
+        community_id: &str,
+        fanouts: MediaFanouts,
+    ) {
+        self.owners
+            .write()
+            .await
+            .insert(pipeline_id, community_id.to_string());
         self.fanouts.write().await.insert(pipeline_id, fanouts);
+    }
+
+    /// Enables viewer authentication (required: without keys every WHEP request is refused).
+    pub fn with_viewer_auth(mut self, keys: TokenKeys) -> Self {
+        self.viewer_keys = Some(keys);
+        self
+    }
+
+    /// The community that owns `pipeline_id`'s registered source, if any.
+    pub async fn owner_of(&self, pipeline_id: PipelineId) -> Option<String> {
+        self.owners.read().await.get(&pipeline_id).cloned()
+    }
+
+    /// Verifies a viewer bearer token for `pipeline_id`/`community_id` (path values).
+    /// 401 = missing/invalid/expired; 403 = valid token for another community/stream.
+    fn verify_viewer(
+        &self,
+        headers: &axum::http::HeaderMap,
+        community_id: &str,
+        pipeline_id: PipelineId,
+    ) -> Result<RoomClaims, ApiError> {
+        let keys = self.viewer_keys.as_ref().ok_or_else(|| {
+            ApiError::Unimplemented("WHEP viewer authentication is not configured".into())
+        })?;
+        let token = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| ApiError::Unauthorized("missing bearer viewer token".into()))?;
+        let claims = keys
+            .verify(token)
+            .map_err(|_| ApiError::Unauthorized("invalid or expired viewer token".into()))?;
+        if claims.scope != SCOPE_PIPELINE
+            || !claims.subscribe
+            || claims.community != community_id
+            || claims.room != pipeline_id.to_string()
+        {
+            return Err(ApiError::Forbidden(
+                "viewer token is not valid for this stream".into(),
+            ));
+        }
+        Ok(claims)
     }
 
     /// Removes a pipeline's fanout registration -- called when its source
@@ -113,6 +175,7 @@ impl WhepState {
     /// process exits).
     pub async fn unregister_fanout(&self, pipeline_id: PipelineId) {
         self.fanouts.write().await.remove(&pipeline_id);
+        self.owners.write().await.remove(&pipeline_id);
     }
 
     /// Whether a source has registered a fanout for `pipeline_id` (what a
@@ -268,9 +331,25 @@ pub(crate) fn opus_codec() -> RTCRtpCodec {
 /// `pipeline_id` alone.
 async fn create_session(
     State(state): State<Arc<WhepState>>,
-    Path((_community_id, pipeline_id)): Path<(String, PipelineId)>,
+    Path((community_id, pipeline_id)): Path<(String, PipelineId)>,
+    headers: axum::http::HeaderMap,
     body: String,
 ) -> Result<Response, ApiError> {
+    // Authenticate BEFORE touching any registry state (no existence oracle).
+    let claims = state.verify_viewer(&headers, &community_id, pipeline_id)?;
+    match state.owner_of(pipeline_id).await {
+        Some(owner) if owner == community_id => {}
+        Some(_) => {
+            return Err(ApiError::Forbidden(
+                "viewer token is not valid for this stream".into(),
+            ))
+        }
+        None => {
+            return Err(ApiError::NotFound(format!(
+                "no active source for pipeline {pipeline_id}"
+            )))
+        }
+    }
     let fanouts = state
         .fanouts
         .read()
@@ -369,18 +448,21 @@ async fn create_session(
     };
 
     let session_id = Uuid::new_v4();
-    state
-        .sessions
-        .write()
-        .await
-        .insert(session_id, WhepViewerSession { pipeline_id, pc });
+    state.sessions.write().await.insert(
+        session_id,
+        WhepViewerSession {
+            pipeline_id,
+            participant: claims.sub.clone(),
+            pc,
+        },
+    );
     state
         .metrics
         .sessions_active
         .with_label_values(&["whep"])
         .inc();
 
-    let location = format!("/whep/{_community_id}/{pipeline_id}/{session_id}");
+    let location = format!("/whep/{community_id}/{pipeline_id}/{session_id}");
     Ok((
         StatusCode::CREATED,
         [
@@ -396,12 +478,18 @@ async fn create_session(
 /// viewer session down.
 async fn teardown_session(
     State(state): State<Arc<WhepState>>,
-    Path((_community_id, pipeline_id, session_id)): Path<(String, PipelineId, Uuid)>,
+    Path((community_id, pipeline_id, session_id)): Path<(String, PipelineId, Uuid)>,
+    headers: axum::http::HeaderMap,
 ) -> Result<StatusCode, ApiError> {
+    let claims = state.verify_viewer(&headers, &community_id, pipeline_id)?;
     let session = {
         let mut sessions = state.sessions.write().await;
         match sessions.remove(&session_id) {
-            Some(session) if session.pipeline_id == pipeline_id => Some(session),
+            Some(session)
+                if session.pipeline_id == pipeline_id && session.participant == claims.sub =>
+            {
+                Some(session)
+            }
             Some(other) => {
                 sessions.insert(session_id, other);
                 None
@@ -512,7 +600,7 @@ mod tests {
         assert!(state.fanouts.read().await.get(&pipeline_id).is_none());
 
         state
-            .register_fanout(pipeline_id, MediaFanouts::new())
+            .register_fanout(pipeline_id, "7", MediaFanouts::new())
             .await;
         assert!(state.fanouts.read().await.get(&pipeline_id).is_some());
 

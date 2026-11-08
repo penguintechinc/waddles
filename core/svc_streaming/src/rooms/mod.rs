@@ -14,6 +14,7 @@ pub mod media;
 pub mod token;
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +37,14 @@ pub const MAX_ROOMS_PER_COMMUNITY: usize = 100;
 pub const MAX_SUBSCRIBERS_PER_ROOM: usize = 500;
 /// Bound on the revocation list (oldest evicted only after expiry).
 const MAX_REVOKED: usize = 100_000;
+/// Live revoked-token entries one community may hold.
+pub const MAX_REVOKED_PER_COMMUNITY: usize = 1_000;
+/// Bound on the issued-token ledger.
+const MAX_ISSUED: usize = 200_000;
+/// Subscribers across all rooms.
+pub const MAX_SUBSCRIBERS_GLOBAL: usize = 5_000;
+/// Longest TTL of a WHEP pipeline viewer token (seconds).
+pub const MAX_PIPELINE_TOKEN_TTL_SECS: i64 = 300;
 
 /// How a room's publisher media reaches subscribers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,15 +80,24 @@ pub enum RoomError {
     Backend(String),
 }
 
+/// Revoked jti -> (community, expiry), plus insertion order for eviction.
+type RevokedSet = (HashMap<Uuid, (String, i64)>, VecDeque<Uuid>);
+
 struct PublisherEntry {
     fanouts: MediaFanouts,
     pc: Arc<dyn PeerConnection>,
     session: Uuid,
+    /// Set by the peer-connection state hook when it Failed/Closed/Disconnected.
+    ended: Arc<AtomicBool>,
+    /// Token expiry: the session may not outlive the credential that opened it.
+    expires_at: i64,
 }
 
 struct SubscriberEntry {
     pc: Arc<dyn PeerConnection>,
     participant: Uuid,
+    ended: Arc<AtomicBool>,
+    expires_at: i64,
 }
 
 struct Room {
@@ -88,6 +106,8 @@ struct Room {
     max_publishers: usize,
     route: RouteMode,
     created_at: i64,
+    /// Bumped to invalidate every token issued before.
+    epoch: u64,
     publishers: HashMap<Uuid, PublisherEntry>,
     subscribers: HashMap<Uuid, SubscriberEntry>,
 }
@@ -126,8 +146,13 @@ pub struct IssuedToken {
 /// Owns every room, the token keys and the revocation list.
 pub struct RoomService {
     rooms: RwLock<HashMap<Uuid, Room>>,
-    revoked: Mutex<(HashMap<Uuid, i64>, VecDeque<Uuid>)>,
+    /// jti -> (community, expiry) of revoked tokens.
+    revoked: Mutex<RevokedSet>,
+    /// jti -> (community, room, expiry) of every issued token: revocation is only
+    /// honored for a token the caller's own community+room actually issued.
+    issued: Mutex<HashMap<Uuid, (String, Uuid, i64)>>,
     keys: Option<TokenKeys>,
+    whep: Option<Arc<crate::egress::whep::WhepState>>,
     pub(crate) factory: Arc<PeerConnectionFactory>,
     pub(crate) metrics: RtcMetrics,
     public_base_url: String,
@@ -148,11 +173,19 @@ impl RoomService {
         Self {
             rooms: RwLock::new(HashMap::new()),
             revoked: Mutex::new((HashMap::new(), VecDeque::new())),
+            issued: Mutex::new(HashMap::new()),
             keys,
+            whep: None,
             factory,
             metrics,
             public_base_url,
         }
+    }
+
+    /// Attaches the WHEP state so pipeline viewer tokens can be issued for streams it owns.
+    pub fn with_whep(mut self, whep: Arc<crate::egress::whep::WhepState>) -> Self {
+        self.whep = Some(whep);
+        self
     }
 
     /// Externally-reachable base URL used in returned endpoint URLs.
@@ -229,6 +262,7 @@ impl RoomService {
             max_publishers,
             route,
             created_at: now(),
+            epoch: 0,
             publishers: HashMap::new(),
             subscribers: HashMap::new(),
         };
@@ -268,7 +302,7 @@ impl RoomService {
         Ok(info)
     }
 
-    /// Issues a room-scoped join token.
+    /// Issues a room-scoped join token and records it in the issued ledger.
     pub async fn issue_token(
         &self,
         community_id: &str,
@@ -276,7 +310,13 @@ impl RoomService {
         req: IssueRequest,
     ) -> Result<IssuedToken, RoomError> {
         let keys = self.keys()?;
-        self.get(community_id, room_id).await?;
+        let epoch = {
+            let rooms = self.rooms.read().await;
+            match rooms.get(&room_id) {
+                Some(r) if r.community_id == community_id => r.epoch,
+                _ => return Err(RoomError::NotFound),
+            }
+        };
         if !req.publish && !req.subscribe {
             return Err(RoomError::Invalid(
                 "token must grant publish and/or subscribe".into(),
@@ -309,7 +349,11 @@ impl RoomService {
             jti: jti.to_string(),
             iat,
             exp: iat + ttl,
+            scope: token::SCOPE_ROOM.into(),
+            epoch,
         };
+        self.record_issued(jti, community_id, room_id, claims.exp)
+            .await?;
         let token = keys
             .sign(&claims)
             .map_err(|e| RoomError::Backend(e.to_string()))?;
@@ -320,37 +364,146 @@ impl RoomService {
         })
     }
 
-    /// Revokes a token id until its natural expiry (bounded list).
-    pub async fn revoke_token(&self, token_id: Uuid, expires_at: i64) -> Result<(), RoomError> {
+    async fn record_issued(
+        &self,
+        jti: Uuid,
+        community_id: &str,
+        room_id: Uuid,
+        exp: i64,
+    ) -> Result<(), RoomError> {
+        let mut issued = self.issued.lock().await;
+        let t = now();
+        if issued.len() >= MAX_ISSUED {
+            issued.retain(|_, (_, _, e)| *e >= t);
+        }
+        if issued.len() >= MAX_ISSUED {
+            return Err(RoomError::LimitReached("issued-token ledger full".into()));
+        }
+        issued.insert(jti, (community_id.to_string(), room_id, exp));
+        Ok(())
+    }
+
+    /// Issues a short-lived WHEP viewer token for a pipeline stream owned by
+    /// `community_id` (the stream must currently be registered to that community).
+    pub async fn issue_pipeline_token(
+        &self,
+        community_id: &str,
+        pipeline_id: Uuid,
+        ttl_secs: Option<i64>,
+    ) -> Result<(IssuedToken, Uuid), RoomError> {
+        let keys = self.keys()?;
+        let whep = self.whep.as_ref().ok_or(RoomError::Unconfigured(
+            "WHEP is not attached to the room service",
+        ))?;
+        if whep.owner_of(pipeline_id).await.as_deref() != Some(community_id) {
+            return Err(RoomError::NotFound);
+        }
+        let ttl = ttl_secs.unwrap_or(MAX_PIPELINE_TOKEN_TTL_SECS);
+        if !(token::MIN_TTL_SECS..=MAX_PIPELINE_TOKEN_TTL_SECS).contains(&ttl) {
+            return Err(RoomError::Invalid(format!(
+                "ttl_secs must be {}..={MAX_PIPELINE_TOKEN_TTL_SECS}",
+                token::MIN_TTL_SECS
+            )));
+        }
+        let (iat, jti, participant) = (now(), Uuid::new_v4(), Uuid::new_v4());
+        let claims = RoomClaims {
+            iss: token::ROOM_TOKEN_ISSUER.into(),
+            aud: token::ROOM_TOKEN_AUDIENCE.into(),
+            sub: participant.to_string(),
+            room: pipeline_id.to_string(),
+            community: community_id.to_string(),
+            publish: false,
+            subscribe: true,
+            source: None,
+            jti: jti.to_string(),
+            iat,
+            exp: iat + ttl,
+            scope: token::SCOPE_PIPELINE.into(),
+            epoch: 0,
+        };
+        let token = keys
+            .sign(&claims)
+            .map_err(|e| RoomError::Backend(e.to_string()))?;
+        Ok((
+            IssuedToken {
+                token,
+                token_id: jti,
+                expires_at: claims.exp,
+            },
+            participant,
+        ))
+    }
+
+    /// Revokes one token id. Honored only for a token this `community_id` +
+    /// `room_id` issued (anything else is `NotFound`, indistinguishable from an
+    /// unknown id), bounded per community.
+    pub async fn revoke_token(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        token_id: Uuid,
+    ) -> Result<(), RoomError> {
+        let exp = {
+            let issued = self.issued.lock().await;
+            match issued.get(&token_id) {
+                Some((c, r, exp)) if c == community_id && *r == room_id => *exp,
+                _ => return Err(RoomError::NotFound),
+            }
+        };
         let mut guard = self.revoked.lock().await;
         let (map, order) = &mut *guard;
         let t = now();
         while let Some(front) = order.front().copied() {
-            if map.get(&front).is_some_and(|exp| *exp < t) || !map.contains_key(&front) {
-                order.pop_front();
-                map.remove(&front);
-            } else {
-                break;
+            match map.get(&front) {
+                Some((_, e)) if *e >= t => break,
+                _ => {
+                    order.pop_front();
+                    map.remove(&front);
+                }
             }
+        }
+        if map.contains_key(&token_id) {
+            return Ok(());
+        }
+        if map
+            .values()
+            .filter(|(c, e)| c == community_id && *e >= t)
+            .count()
+            >= MAX_REVOKED_PER_COMMUNITY
+        {
+            return Err(RoomError::LimitReached(format!(
+                "{MAX_REVOKED_PER_COMMUNITY} live revocations per community; use revoke_all"
+            )));
         }
         if map.len() >= MAX_REVOKED {
             return Err(RoomError::LimitReached("revocation list full".into()));
         }
-        if map.insert(token_id, expires_at).is_none() {
-            order.push_back(token_id);
-        }
+        map.insert(token_id, (community_id.to_string(), exp));
+        order.push_back(token_id);
         Ok(())
     }
 
+    /// Bumps the room's epoch, invalidating every token issued before; returns it.
+    pub async fn revoke_all(&self, community_id: &str, room_id: Uuid) -> Result<u64, RoomError> {
+        let mut rooms = self.rooms.write().await;
+        match rooms.get_mut(&room_id) {
+            Some(r) if r.community_id == community_id => {
+                r.epoch += 1;
+                Ok(r.epoch)
+            }
+            _ => Err(RoomError::NotFound),
+        }
+    }
+
     /// Verifies a presented token against the live room: signature/expiry,
-    /// revocation, room id, community and room existence.
+    /// scope, revocation, room epoch, room id, community and room existence.
     pub async fn authorize(&self, token: &str, room_id: Uuid) -> Result<RoomClaims, RoomError> {
         let keys = self.keys()?;
         let claims = keys.verify(token).map_err(|e| match e {
             TokenError::NotConfigured => RoomError::Unconfigured("room token secret"),
             _ => RoomError::Unauthorized,
         })?;
-        if claims.room != room_id.to_string() {
+        if claims.scope != token::SCOPE_ROOM || claims.room != room_id.to_string() {
             return Err(RoomError::Unauthorized);
         }
         let jti = Uuid::parse_str(&claims.jti).map_err(|_| RoomError::Unauthorized)?;
@@ -359,7 +512,7 @@ impl RoomService {
         }
         let rooms = self.rooms.read().await;
         match rooms.get(&room_id) {
-            Some(r) if r.community_id == claims.community => Ok(claims),
+            Some(r) if r.community_id == claims.community && r.epoch == claims.epoch => Ok(claims),
             _ => Err(RoomError::Unauthorized),
         }
     }
@@ -371,6 +524,8 @@ impl RoomService {
         participant: Uuid,
         fanouts: MediaFanouts,
         pc: Arc<dyn PeerConnection>,
+        ended: Arc<AtomicBool>,
+        expires_at: i64,
     ) -> Result<Uuid, RoomError> {
         let (session, stale) = {
             let mut rooms = self.rooms.write().await;
@@ -387,6 +542,8 @@ impl RoomService {
                     fanouts,
                     pc,
                     session,
+                    ended,
+                    expires_at,
                 },
             );
             (session, stale)
@@ -397,22 +554,135 @@ impl RoomService {
         Ok(session)
     }
 
-    /// Registers a subscriber session.
+    /// Registers a subscriber session. One active subscriber session per
+    /// participant per room: a new one replaces (and closes) the old. Capped per
+    /// room and globally.
     pub(crate) async fn add_subscriber(
         &self,
         room_id: Uuid,
         participant: Uuid,
         pc: Arc<dyn PeerConnection>,
+        ended: Arc<AtomicBool>,
+        expires_at: i64,
     ) -> Result<Uuid, RoomError> {
-        let mut rooms = self.rooms.write().await;
-        let room = rooms.get_mut(&room_id).ok_or(RoomError::NotFound)?;
-        if room.subscribers.len() >= MAX_SUBSCRIBERS_PER_ROOM {
-            return Err(RoomError::LimitReached("room subscriber limit".into()));
+        let (session, stale) = {
+            let mut rooms = self.rooms.write().await;
+            let total: usize = rooms.values().map(|r| r.subscribers.len()).sum();
+            let room = rooms.get_mut(&room_id).ok_or(RoomError::NotFound)?;
+            let old: Vec<Uuid> = room
+                .subscribers
+                .iter()
+                .filter(|(_, s)| s.participant == participant)
+                .map(|(k, _)| *k)
+                .collect();
+            let replacing = !old.is_empty();
+            if room.subscribers.len() - old.len() >= MAX_SUBSCRIBERS_PER_ROOM {
+                return Err(RoomError::LimitReached("room subscriber limit".into()));
+            }
+            if !replacing && total >= MAX_SUBSCRIBERS_GLOBAL {
+                return Err(RoomError::LimitReached("global subscriber limit".into()));
+            }
+            let stale: Vec<Arc<dyn PeerConnection>> = old
+                .iter()
+                .filter_map(|k| room.subscribers.remove(k).map(|s| s.pc))
+                .collect();
+            let session = Uuid::new_v4();
+            room.subscribers.insert(
+                session,
+                SubscriberEntry {
+                    pc,
+                    participant,
+                    ended,
+                    expires_at,
+                },
+            );
+            (session, stale)
+        };
+        for pc in stale {
+            self.metrics
+                .sessions_active
+                .with_label_values(&["room_whep"])
+                .dec();
+            let _ = pc.close().await;
         }
-        let session = Uuid::new_v4();
-        room.subscribers
-            .insert(session, SubscriberEntry { pc, participant });
         Ok(session)
+    }
+
+    /// Reaps every session whose peer connection has ended (its state hook set
+    /// the `ended` flag). Backstop for a hook that fired before the session was
+    /// registered; a dead session must never stay counted against the caps.
+    /// Returns how many were reaped.
+    pub async fn sweep(&self) -> usize {
+        self.sweep_at(now()).await
+    }
+
+    /// [`Self::sweep`] as of `at` (unix seconds): also reaps sessions whose token
+    /// has expired -- webrtc-rs gives no reliable end-of-peer signal after a
+    /// silent client disappearance, so the credential lifetime bounds the session.
+    pub async fn sweep_at(&self, at: i64) -> usize {
+        let mut dead: Vec<(Uuid, Uuid)> = Vec::new();
+        {
+            let rooms = self.rooms.read().await;
+            for (rid, room) in rooms.iter() {
+                for (sid, s) in &room.subscribers {
+                    if s.ended.load(Ordering::SeqCst) || s.expires_at <= at {
+                        dead.push((*rid, *sid));
+                    }
+                }
+                for p in room.publishers.values() {
+                    if p.ended.load(Ordering::SeqCst) || p.expires_at <= at {
+                        dead.push((*rid, p.session));
+                    }
+                }
+            }
+        }
+        for (rid, sid) in &dead {
+            self.reap_session(*rid, *sid).await;
+        }
+        dead.len()
+    }
+
+    /// Spawns the periodic [`Self::sweep`] (every `every`).
+    pub fn spawn_sweeper(self: &Arc<Self>, every: Duration) {
+        let svc = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut t = tokio::time::interval(every);
+            loop {
+                t.tick().await;
+                let n = svc.sweep().await;
+                if n > 0 {
+                    tracing::info!(reaped = n, "rooms: swept dead peer connections");
+                }
+            }
+        });
+    }
+
+    /// Removes a session whose peer connection ended (Failed/Closed/Disconnected)
+    /// and closes it; a no-op when it is already gone.
+    pub(crate) async fn reap_session(&self, room_id: Uuid, session: Uuid) {
+        let removed = {
+            let mut rooms = self.rooms.write().await;
+            let Some(room) = rooms.get_mut(&room_id) else {
+                return;
+            };
+            if let Some(s) = room.subscribers.remove(&session) {
+                Some((s.pc, "room_whep"))
+            } else {
+                let pid = room
+                    .publishers
+                    .iter()
+                    .find(|(_, p)| p.session == session)
+                    .map(|(k, _)| *k);
+                pid.and_then(|k| room.publishers.remove(&k).map(|p| (p.pc, "room_whip")))
+            }
+        };
+        if let Some((pc, kind)) = removed {
+            self.metrics
+                .sessions_active
+                .with_label_values(&[kind])
+                .dec();
+            let _ = pc.close().await;
+        }
     }
 
     /// Resolves which publisher's fanouts a subscriber attaches to.
@@ -457,19 +727,27 @@ impl RoomService {
                 .get(&session)
                 .is_some_and(|s| s.participant == participant)
             {
-                room.subscribers.remove(&session).map(|s| s.pc)
+                room.subscribers
+                    .remove(&session)
+                    .map(|s| (s.pc, "room_whep"))
             } else if room
                 .publishers
                 .get(&participant)
                 .is_some_and(|p| p.session == session)
             {
-                room.publishers.remove(&participant).map(|p| p.pc)
+                room.publishers
+                    .remove(&participant)
+                    .map(|p| (p.pc, "room_whip"))
             } else {
                 None
             }
         };
         match pc {
-            Some(pc) => {
+            Some((pc, kind)) => {
+                self.metrics
+                    .sessions_active
+                    .with_label_values(&[kind])
+                    .dec();
                 let _ = pc.close().await;
                 Ok(())
             }
@@ -575,7 +853,7 @@ mod tests {
             s.authorize(&t.token, b.room_id).await,
             Err(RoomError::Unauthorized)
         ));
-        s.revoke_token(t.token_id, t.expires_at).await.unwrap();
+        s.revoke_token("7", a.room_id, t.token_id).await.unwrap();
         assert!(matches!(
             s.authorize(&t.token, a.room_id).await,
             Err(RoomError::Unauthorized)

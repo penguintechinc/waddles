@@ -54,6 +54,22 @@ pub struct RoomClaims {
     pub jti: String,
     pub iat: i64,
     pub exp: i64,
+    /// Which data plane this token is for: `room` (rooms endpoints) or `pipeline` (WHEP
+    /// viewing of a pipeline). A token for one is refused by the other.
+    #[serde(default = "default_scope")]
+    pub scope: String,
+    /// Room epoch at issue; bumping the room's epoch invalidates every older token.
+    #[serde(default)]
+    pub epoch: u64,
+}
+
+/// Token scope for room endpoints.
+pub const SCOPE_ROOM: &str = "room";
+/// Token scope for WHEP pipeline viewing.
+pub const SCOPE_PIPELINE: &str = "pipeline";
+
+fn default_scope() -> String {
+    SCOPE_ROOM.to_string()
 }
 
 /// Signs and verifies room tokens with the host-side secret.
@@ -130,6 +146,8 @@ mod tests {
             jti: uuid::Uuid::new_v4().to_string(),
             iat: now,
             exp: now + exp_off,
+            scope: SCOPE_ROOM.into(),
+            epoch: 0,
         }
     }
 

@@ -68,7 +68,7 @@ def _manifest(path: Path) -> dict[str, Any]:
 def test_every_consumed_call_matches_a_webrtc_input_schema() -> None:
     tools = {t["name"]: t for t in _manifest(WEBRTC / "hub-manifest.yaml")["exported_tools"]}
     calls = json.loads((ROOMS / "tests" / "contract_calls.json").read_text())
-    assert len(tools) >= 10, f"only {len(tools)} webrtc tools examined"
+    assert len(tools) >= 12, f"only {len(tools)} webrtc tools examined"
     assert calls, "zero consumed calls examined"
     for name, args in calls.items():
         assert name in tools, f"rooms calls {name}, which webrtc does not export"
@@ -94,7 +94,7 @@ def test_rooms_requested_tools_and_permissions_name_only_exported_tools() -> Non
 
 def test_privileged_tools_carry_the_admin_scope_rooms_relies_on() -> None:
     tools = {t["name"]: t for t in _manifest(WEBRTC / "hub-manifest.yaml")["exported_tools"]}
-    for name in ("room.create", "room.close"):
+    for name in ("room.create", "room.close", "token.revoke_all", "admin.verify"):
         assert tools[name].get("required_scope") == "community:admin", name
 
 
