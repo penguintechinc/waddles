@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import AuthorLink, { CollectionBadge } from '../../components/AuthorLink';
 import { marketplaceApi, unifiedMarketplaceApi } from '../../services/api';
 import { Search, Star, Package, Check, Download, Settings, Filter } from 'lucide-react';
 
@@ -192,7 +193,10 @@ export default function AdminMarketplace() {
               <div className="flex items-center gap-2 text-xs text-fg-muted mb-3">
                 <span className="bg-navy-700 px-2 py-1 rounded">{module.category}</span>
                 <span>v{module.version}</span>
-                <span>by {module.author}</span>
+                <span>
+                  by <AuthorLink author={module.author} />
+                </span>
+                <CollectionBadge collection={module.collection} />
               </div>
 
               {/* Pricing Badge */}

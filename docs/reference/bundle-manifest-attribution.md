@@ -10,13 +10,14 @@ self-host.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `author` | string | Yes, for a vendor-onboarded bundle (`provider: thirdparty` uploaded via `POST /apps/{app_id}/versions` under a `vendor:onboard` token) | Display name, e.g. `"Acme Corp"` |
+| `author` | string | **Yes, every bundle** (`bundle.yaml` v2 / `hub-manifest.yaml`; optional only in the v1 install manifest, validated when present) | A GitHub profile (`github:<handle>`, `@<handle>`, `https://github.com/<handle>`) or a simple name (letters/digits with single space, `-`, `_`, `.` between words, 1-64 chars). Stored canonically as `github:<handle>` or the name; rejected forms (HTML/markdown, other URLs, emoji, control chars) fail with `author_*` reason codes (`author_required`, `author_markup_rejected`, `author_invalid_url`, `author_invalid_github_handle`, `author_invalid_name`, `author_control_chars`, `author_too_long`). The marketplace API returns `author: {display, githubHandle, profileUrl}`; the profile link is derived server-side |
 | `license` | string | Yes, alongside `author`, for the same vendor-onboarded case | SPDX identifier, validated against an allowlist (see below) |
 | `source_url` | string | No | `https://` only |
 | `alternative_to` | list of strings | No | Each entry is an `app_id` (`waddles.<module>.<feature>.<app>`) or a free-text feature/product name |
 | `homepage_url` | string | No | `https://` only |
 | `notice` | string | No | Inline attribution text, or a path to a `NOTICE` file inside the bundle's own source tree |
 | `category` | string | No | Marketplace listing category. Only `alternatives` exists today (paired with `alternative_to`) |
+| `collection` | string | No | Publisher/collection designation (lowercase kebab-case slug), listed separately from internal bundles via `GET /marketplace/bundles?collection=` and `GET /marketplace/bundles/collections`. `superpenguintv` (ports of SuperPenguinTV's PenguinTwitchBot) additionally requires `license: MIT` and a non-empty `notice` (`collection_attribution_required`) |
 
 ```yaml
 provider: thirdparty

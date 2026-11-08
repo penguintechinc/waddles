@@ -1,0 +1,118 @@
+{
+  "contract": "music-tool-contract",
+  "version": 1,
+  "doc": "Common tool names/schemas every music provider bundle implements as music.<provider>.<tool>. Output objects MAY carry extra provider-specific fields; the listed track fields are the portable minimum. explicit is true/false when the provider knows, null when it does not. capability tells the DJ what the provider can do so it degrades loudly (playback: embed|connect|none).",
+  "definitions": {
+    "track": {
+      "type": "object",
+      "properties": {
+        "provider": {"type": "string"},
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "artist": {"type": "string"},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "thumbnail": {"type": ["string", "null"]},
+        "explicit": {"type": ["boolean", "null"]},
+        "source_url": {"type": "string"}
+      },
+      "required": ["provider", "id", "title", "artist", "duration_ms", "thumbnail", "explicit", "source_url"]
+    },
+    "capability": {
+      "type": "object",
+      "properties": {
+        "playback": {"type": "string", "enum": ["embed", "connect", "none"]},
+        "server_audio": {"type": "boolean"},
+        "queue_add": {"type": "boolean"}
+      },
+      "required": ["playback", "server_audio", "queue_add"]
+    }
+  },
+  "tools": {
+    "search": {
+      "access": "read",
+      "risk": "normal",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string", "minLength": 1, "maxLength": 200},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 25}
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "tracks": {"type": "array", "items": {"$ref": "#/definitions/track"}},
+          "cached": {"type": "boolean"},
+          "skipped": {"type": "integer", "minimum": 0},
+          "capability": {"$ref": "#/definitions/capability"}
+        },
+        "required": ["tracks", "capability"]
+      }
+    },
+    "track": {
+      "access": "read",
+      "risk": "normal",
+      "input_schema": {
+        "type": "object",
+        "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 64}},
+        "required": ["id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "track": {"$ref": "#/definitions/track"},
+          "cached": {"type": "boolean"},
+          "capability": {"$ref": "#/definitions/capability"}
+        },
+        "required": ["track", "capability"]
+      }
+    },
+    "playlist.get": {
+      "access": "read",
+      "risk": "normal",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "playlist_id": {"type": "string", "minLength": 1, "maxLength": 64},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+          "page_token": {"type": "string", "minLength": 1, "maxLength": 200}
+        },
+        "required": ["playlist_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "tracks": {"type": "array", "items": {"$ref": "#/definitions/track"}},
+          "next_page_token": {"type": ["string", "null"]},
+          "cached": {"type": "boolean"},
+          "skipped": {"type": "integer", "minimum": 0},
+          "capability": {"$ref": "#/definitions/capability"}
+        },
+        "required": ["tracks", "next_page_token", "capability"]
+      }
+    },
+    "resolve": {
+      "access": "read",
+      "risk": "normal",
+      "input_schema": {
+        "type": "object",
+        "properties": {"url": {"type": "string", "minLength": 1, "maxLength": 512}},
+        "required": ["url"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "track": {"$ref": "#/definitions/track"},
+          "cached": {"type": "boolean"},
+          "capability": {"$ref": "#/definitions/capability"}
+        },
+        "required": ["track", "capability"]
+      }
+    }
+  }
+}

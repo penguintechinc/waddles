@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-wordcount"
-version = "1.0.0"
+version = "1.0.1"
 description = "Per-User Word Counter"
 requires-python = ">=3.13"
 dependencies = []

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-wix"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!wix` -> Wix integration: membership status/link/remove over the Wix REST API (UUID-tokenized links), plus default-off plan-role and event-sync modules."
 requires-python = ">=3.13"
 dependencies = []
