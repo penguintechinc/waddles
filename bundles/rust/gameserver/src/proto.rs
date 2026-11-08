@@ -465,14 +465,13 @@ pub fn parse_mc_status(json: &str) -> Result<McStatus, ProtoError> {
     let sample = players
         .get("sample")
         .and_then(|s| s.as_array())
-        .map(|a| {
+        .map_or_else(Vec::new, |a| {
             a.iter()
                 .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
                 .map(sanitize_text)
                 .take(64)
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     Ok(McStatus {
         motd: sanitize_text(&motd),
         version: sanitize_text(

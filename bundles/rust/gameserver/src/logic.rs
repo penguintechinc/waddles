@@ -388,8 +388,7 @@ fn tool_register(env: &dyn Env, ctx: &ToolContext, args: Value) -> Result<Value,
         Some(_) => return Err(invalid("allowlist must be an array")),
         None => existing
             .as_ref()
-            .map(|r| r.allowlist.clone())
-            .unwrap_or_default(),
+            .map_or_else(Vec::new, |r| r.allowlist.clone()),
     };
     let max_output = match args.get("max_output") {
         Some(v) => {

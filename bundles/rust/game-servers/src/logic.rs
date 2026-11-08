@@ -156,8 +156,7 @@ pub fn status_line(label: &str, st: &Value, with_players: bool) -> String {
         let names: Vec<&str> = st
             .get("player_names")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
+            .map_or_else(Vec::new, |a| a.iter().filter_map(Value::as_str).collect());
         if names.is_empty() {
             s.push_str(" (no player names reported)");
         } else {
@@ -321,8 +320,9 @@ pub fn post_config(config: &Value) -> Result<Option<PostConfig>, String> {
     let servers = config
         .get("status_post_servers")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(alias).collect())
-        .unwrap_or_default();
+        .map_or_else(Vec::new, |a| {
+            a.iter().filter_map(Value::as_str).map(alias).collect()
+        });
     Ok(Some(PostConfig {
         platform,
         channel_id,

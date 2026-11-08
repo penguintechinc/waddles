@@ -73,8 +73,10 @@ impl ProcessGuest for Component {
             return Ok(match logic::post_config(&config) {
                 Ok(None) => None,
                 Ok(Some(cfg)) => {
-                    let text = logic::scheduled_status(&host, &cfg)
-                        .unwrap_or_else(|f| logic::fail_text(&f));
+                    let text = match logic::scheduled_status(&host, &cfg) {
+                        Ok(t) => t,
+                        Err(f) => logic::fail_text(&f),
+                    };
                     Some(reply_event(&event, &cfg.platform, &cfg.channel_id, &text))
                 }
                 Err(msg) => {
