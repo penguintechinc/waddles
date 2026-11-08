@@ -2,11 +2,11 @@ schema_version: 2
 app_id: waddles.core.example.commands
 name: Commands Bundle (Python)
 # 1.0.0: initial -- `!commands` lists the curated catalog of first-party commands (activation-gated, no feature flags).
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/commands
 language: python

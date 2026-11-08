@@ -899,7 +899,7 @@ async fn flooder_cannot_drop_other_principals_records_and_is_refused_then_summar
         }
     }
     assert!(
-        denied >= 16 && denied <= 18,
+        (16..=18).contains(&denied),
         "per-principal quota bounds queued denials: {denied}"
     );
     assert_eq!(denied + refused, 200);

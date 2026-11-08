@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-say"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!say <text>` -> moderator/broadcaster-only announcement relay. Inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot (with permission) -- ideas/design only, no code copied."
 requires-python = ">=3.13"
 dependencies = []
