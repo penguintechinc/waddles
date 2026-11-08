@@ -30,7 +30,7 @@ If the two channel lookups disagree on the owner, or the channel has no chatroom
 A community may hold **one** live Kick connection (the data plane refuses an ambiguous binding).
 
 - **API validation:** a second connect is `409 CONFLICT` before any Kick call is made.
-- **Database constraint:** migration `0082_kick_connection` installs a trigger on `community_connection_access` that raises `unique_violation` (constraint `uq_one_kick_connection_per_community`) for a second non-revoked Kick grant, serialised per community by an advisory lock, so two racing connects admit exactly one. Revoked grants do not count; reconnect after revoking.
+- **Database constraint:** migration `0090_kick_connection` installs a trigger on `community_connection_access` that raises `unique_violation` (constraint `uq_one_kick_connection_per_community`) for a second non-revoked Kick grant, serialised per community by an advisory lock, so two racing connects admit exactly one. Revoked grants do not count; reconnect after revoking.
 - Upgrade refuses (loudly) if a community already holds duplicates: revoke the extras, then re-run.
 
 ## Token lifecycle

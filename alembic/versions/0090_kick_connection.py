@@ -3,8 +3,8 @@
 The Kick adapter (``hub_api/services/provider_connections/kick.py``) stores a community's Kick
 channel as the connection resource. Two schema changes:
 
-1. The ``resource_type`` allow-list CHECK (0035 -> 0064 -> 0073 -> 0078 -> 0081) must name
-   ``kick_channel`` or every Kick insert is refused. Pure CHECK swap, added ``NOT VALID`` then
+1. The ``resource_type`` allow-list CHECK (0035 -> 0064 -> 0073 -> 0078 -> 0081 -> 0086 -> 0089)
+   must name ``kick_channel`` or every Kick insert is refused. Pure CHECK swap, added ``NOT VALID`` then
    validated so the table is never scanned under ACCESS EXCLUSIVE.
 2. The Kick data plane (inbound Pusher, webhook route, outbound sender) resolves its binding *by
    community*, so a second live Kick connection makes every one of them ambiguous and refused.
@@ -19,8 +19,8 @@ channel as the connection resource. Two schema changes:
 Upgrade refuses (loudly) when a community ALREADY holds more than one live Kick grant: silently
 keeping an ambiguous state is the defect this migration exists to remove.
 
-Revision ID: 0082_kick_connection
-Revises: 0081_spectrum_conn_resource
+Revision ID: 0090_kick_connection
+Revises: 0089_gameserver_conn_resource
 Create Date: 2026-11-08
 """
 
@@ -28,15 +28,16 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0082_kick_connection"
-down_revision = "0081_spectrum_conn_resource"
+revision = "0090_kick_connection"
+down_revision = "0089_gameserver_conn_resource"
 branch_labels = None
 depends_on = None
 
 _RESOURCE_CHECK = "platform_connections_resource_type_check"
 _PRIOR_TYPES = (
     "'discord_guild', 'twitch_channel', 'external_http', 'aws_lambda', 'gcp_function', "
-    "'youtube_channel', 'wix_site', 'spectrum_community'"
+    "'youtube_channel', 'wix_site', 'spectrum_community', 'soundcloud_app', 'youtube_api_key', "
+    "'gameserver'"
 )
 _FUNCTION = "enforce_one_kick_connection_per_community"
 _TRIGGER = "trg_one_kick_connection_per_community"
@@ -69,7 +70,7 @@ def upgrade() -> None:
             ) dup;
             IF offenders > 0 THEN
                 RAISE EXCEPTION
-                    '0082 upgrade refused: % communit(ies) hold more than one live Kick '
+                    '0090 upgrade refused: % communit(ies) hold more than one live Kick '
                     'connection; revoke the extras (community_connection_access.status = '
                     '''revoked'') and re-run', offenders;
             END IF;
@@ -131,7 +132,7 @@ def downgrade() -> None:
         BEGIN
             IF EXISTS (SELECT 1 FROM platform_connections WHERE resource_type = 'kick_channel') THEN
                 RAISE EXCEPTION
-                    '0082 downgrade refused: kick_channel connections exist and the previous '
+                    '0090 downgrade refused: kick_channel connections exist and the previous '
                     'release cannot represent them';
             END IF;
         END

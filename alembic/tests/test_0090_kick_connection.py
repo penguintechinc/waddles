@@ -1,4 +1,4 @@
-"""Tests for 0082_kick_connection: chain, CHECK extension, one-Kick-per-community trigger, guards.
+"""Tests for 0090_kick_connection: chain, CHECK extension, one-Kick-per-community trigger, guards.
 
 Static checks pin the revision chain and single head; the real-Postgres tests (docker, skipped where
 the CLI is absent) prove ``kick_channel`` is accepted, the trigger refuses a second live Kick grant
@@ -25,12 +25,12 @@ requires_docker = pytest.mark.skipif(
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
-_MIGRATION_PATH = _ROOT / "alembic" / "versions" / "0082_kick_connection.py"
-_PREVIOUS = "0081_spectrum_conn_resource"
+_MIGRATION_PATH = _ROOT / "alembic" / "versions" / "0090_kick_connection.py"
+_PREVIOUS = "0089_gameserver_conn_resource"
 
 
 def _load() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("migration_0082", _MIGRATION_PATH)
+    spec = importlib.util.spec_from_file_location("migration_0090", _MIGRATION_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -43,12 +43,12 @@ def test_chain_and_id_length() -> None:
     assert len(module.revision) <= 32
 
 
-def test_history_has_exactly_one_head_and_0082_is_in_it() -> None:
+def test_history_has_exactly_one_head_and_0090_is_in_it() -> None:
     cfg = Config(str(_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
     script = ScriptDirectory.from_config(cfg)
     assert len(script.get_heads()) == 1
-    assert "0082_kick_connection" in {r.revision for r in script.walk_revisions()}
+    assert "0090_kick_connection" in {r.revision for r in script.walk_revisions()}
 
 
 def _one(cur: psycopg2.extensions.cursor, sql: str, params: tuple[object, ...] = ()) -> int:
@@ -76,23 +76,23 @@ def _kick(
 
 @requires_docker
 def test_trigger_check_and_guarded_downgrade() -> None:
-    with migrated_postgres("0082-kick") as db:
+    with migrated_postgres("0090-kick") as db:
         conn = psycopg2.connect(db.dsn)
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
                 cur.execute("ALTER TABLE communities ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
-                tenant = _one(cur, "INSERT INTO tenants (slug) VALUES ('t-0082') RETURNING id")
+                tenant = _one(cur, "INSERT INTO tenants (slug) VALUES ('t-0090') RETURNING id")
                 insert = "INSERT INTO communities (name, tenant_id) VALUES (%s, %s) RETURNING id"
-                c1 = _one(cur, insert, ("c1-0082", tenant))
-                c2 = _one(cur, insert, ("c2-0082", tenant))
+                c1 = _one(cur, insert, ("c1-0090", tenant))
+                c2 = _one(cur, insert, ("c2-0090", tenant))
                 _kick(cur, tenant, c1, "1001", "approved")
                 with pytest.raises(psycopg2.errors.UniqueViolation) as caught:
                     _kick(cur, tenant, c1, "1002", "pending")
                 assert caught.value.diag.constraint_name == "uq_one_kick_connection_per_community"
                 _kick(cur, tenant, c1, "1003", "revoked")  # revoked never counts
                 _kick(cur, tenant, c2, "1004", "approved")  # another community is free
-            with pytest.raises(RuntimeError, match="0082 downgrade refused"):
+            with pytest.raises(RuntimeError, match="0090 downgrade refused"):
                 alembic_cli("downgrade", _PREVIOUS, dsn=db.dsn)
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM platform_connections WHERE resource_type='kick_channel'")
@@ -113,7 +113,7 @@ def test_trigger_check_and_guarded_downgrade() -> None:
                 )
                 _kick(cur, tenant, c1, "2001", "approved")
                 _kick(cur, tenant, c1, "2002", "approved")
-            with pytest.raises(RuntimeError, match="0082 upgrade refused"):
+            with pytest.raises(RuntimeError, match="0090 upgrade refused"):
                 alembic_cli("upgrade", "head", dsn=db.dsn)
             with conn.cursor() as cur:
                 cur.execute(
