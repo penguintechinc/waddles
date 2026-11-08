@@ -8,10 +8,10 @@
 //! - `Authorization: Bearer <machine JWT>` -- hub-api-issued, verified by
 //!   `core/service_auth` (PR #438), scoped `egress:connect`, `sub` one of
 //!   the allowed data-plane services.
-//! - `X-Waddles-Egress-Assertion: <compact EdDSA JWT>` -- the signed
+//! - `X-Waddles-Egress-Assertion: <compact ES256 JWT>` -- the signed
 //!   per-tenant/community/app/port allowlist grant (`net.http.fqdn`/
 //!   `.public-ip`/`.private-ip`), signed by the *calling service's own*
-//!   per-service Ed25519 key (the same one it signs its machine JWT with)
+//!   per-service ECDSA P-256 key (the same one it signs its machine JWT with)
 //!   and verified against the identical hub-api JWKS trust bundle used
 //!   for the machine JWT -- see `assertion` module doc for why this is a
 //!   second token rather than a machine-JWT claim, and for the redesign
@@ -77,8 +77,12 @@ use proxy::ProxyState;
 /// `/metrics` surface.
 pub async fn build_state(registry: &prometheus::Registry) -> anyhow::Result<Arc<ProxyState>> {
     let cfg = Config::from_env().map_err(anyhow::Error::from)?;
+    // SERVICE_JWT_ACCEPT_LEGACY_EDDSA: default false (ES256 only); a malformed value fails
+    // startup here rather than silently meaning "off".
+    let accept_legacy_eddsa = service_auth::accept_legacy_eddsa_from_env()?;
     let trust_bundle: Arc<dyn service_auth::TrustBundle> = Arc::new(
-        service_auth::JwksTrustBundle::new(cfg.machine_jwt_jwks_endpoint.clone()),
+        service_auth::JwksTrustBundle::new(cfg.machine_jwt_jwks_endpoint.clone())
+            .with_legacy_eddsa(accept_legacy_eddsa),
     );
     let replay_cache: Arc<dyn assertion::ReplayCache> =
         Arc::new(assertion::InMemoryReplayCache::new());

@@ -390,8 +390,8 @@ test-bundle-flag-on-command-e2e:
 codemod-app-bundles-activation-only:
 	@python3 scripts/codemod_app_bundles_activation_only.py
 
-# Generates the Ed25519 signing keypair for hub-api's per-service machine
-# JWTs (feature/eddsa-machine-jwt) and applies the resulting k8s Secret --
+# Generates the ECDSA P-256 (ES256) signing keypair for hub-api's per-service machine
+# JWTs and applies the resulting k8s Secret --
 # private key never printed/argv'd/persisted. Usage:
 #   KID=2026-09-28 NAMESPACE=waddlebot make generate-service-jwt-key
 generate-service-jwt-key:

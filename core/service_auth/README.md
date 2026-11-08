@@ -1,6 +1,6 @@
 # service_auth
 
-Verifier + caching client for hub-api-issued per-service EdDSA machine JWTs.
+Verifier + caching client for hub-api-issued per-service ES256 machine JWTs.
 See the crate docs in `src/lib.rs` for the SPIFFE/Skauswatch migration notes.
 
 ## Outbound HTTP resilience

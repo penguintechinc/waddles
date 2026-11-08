@@ -23,9 +23,13 @@ pub struct AppPushTrustSource {
 impl AppPushTrustSource {
     /// Builds the trust source from this service's loaded [`Config`] --
     /// `PUSH_JWKS_ENDPOINT`/`PUSH_AUDIENCE`/`PUSH_TRUSTED_ISSUER`.
+    ///
+    /// Honours `SERVICE_JWT_ACCEPT_LEGACY_EDDSA` (default off = ES256 only), parsed
+    /// strictly by clap in [`Config`].
     pub fn from_config(config: &Config) -> Self {
         Self {
-            trust_bundle: JwksTrustBundle::new(config.cli.push_jwks_endpoint.clone()),
+            trust_bundle: JwksTrustBundle::new(config.cli.push_jwks_endpoint.clone())
+                .with_legacy_eddsa(config.cli.service_jwt_accept_legacy_eddsa),
             audience: config.cli.push_audience.clone(),
             trusted_issuer: config.cli.push_trusted_issuer.clone(),
         }
@@ -76,5 +80,24 @@ mod tests {
         let source = AppPushTrustSource::from_config(&test_config());
         assert_eq!(source.expected_audience(), "waddlebot-internal");
         assert_eq!(source.trusted_issuers(), vec!["hub-api"]);
+        assert!(
+            !source.trust_bundle().accept_legacy_eddsa(),
+            "ES256-only by default"
+        );
+    }
+
+    #[test]
+    fn legacy_eddsa_flag_is_wired_and_garbage_is_refused() {
+        let mut config = test_config();
+        config.cli.service_jwt_accept_legacy_eddsa = true;
+        assert!(AppPushTrustSource::from_config(&config)
+            .trust_bundle()
+            .accept_legacy_eddsa());
+        let bad = CliConfig::try_parse_from([
+            "svc-presentation",
+            "--service-jwt-accept-legacy-eddsa",
+            "maybe",
+        ]);
+        assert!(bad.is_err(), "a non-boolean flag value must fail startup");
     }
 }

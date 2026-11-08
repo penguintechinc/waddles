@@ -100,6 +100,7 @@ spec:
           value: {{ .Values.serviceJwt.audience | quote }}
         - name: PUSH_TRUSTED_ISSUER
           value: "hub-api"
+        {{- include "waddlebot.serviceJwtAcceptLegacyEnv" . | nindent 8 }}
         - name: IMAGE_BUCKET_ENDPOINT
           value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
         - name: IMAGE_BUCKET_NAME

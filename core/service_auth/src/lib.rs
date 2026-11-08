@@ -1,9 +1,9 @@
-//! Per-service EdDSA machine JWTs: verification + a caching client.
+//! Per-service ES256 machine JWTs: verification + a caching client.
 //!
 //! Replaces the platform-wide HS256 shared `SECRET_KEY`
 //! (`libs/flask_core/flask_core/auth.py`) and static API keys for
-//! service-to-service calls. hub-api issues short-lived (<=1h) Ed25519
-//! JWTs per service identity (`sub` = a SPIFFE ID,
+//! service-to-service calls. hub-api issues short-lived (<=1h) ES256
+//! (ECDSA P-256 / SHA-256) JWTs per service identity (`sub` = a SPIFFE ID,
 //! `spiffe://penguintech.io/<env>/<service>`), scoped to specific
 //! `scope` claims; this crate is the Rust-side counterpart to
 //! `libs/flask_core/flask_core/service_jwt.py`.
@@ -35,8 +35,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use jsonwebtoken::errors::ErrorKind;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, AlgorithmFamily, DecodingKey, Validation};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use tokio::sync::{Mutex, RwLock};
@@ -49,10 +51,36 @@ use crate::jwt_hardening::{
     REASON_MISSING_CLAIM, REASON_SCOPE_DENIED, REASON_UNKNOWN_KID, VERIFIER_SERVICE_EDDSA,
 };
 
-/// The ONE algorithm the machine-JWT verifier accepts (RFC 8725
-/// one-alg-per-verifier). Ed25519 per RFC 8037; mirrors
+/// The algorithm hub-api signs machine JWTs with and verifiers accept:
+/// ECDSA P-256 / SHA-256 (RFC 7518 section 3.4); mirrors
 /// `libs/flask_core/flask_core/service_jwt.py::SERVICE_JWT_ALGORITHM`.
-pub const SERVICE_JWT_ALGORITHM: &str = "EdDSA";
+/// `alg=none`, HS* and every other algorithm are always refused.
+pub const SERVICE_JWT_ALGORITHM: &str = "ES256";
+
+/// Legacy algorithm, accepted ONLY while `SERVICE_JWT_ACCEPT_LEGACY_EDDSA`
+/// is true (a bounded rollout window); never issued. Mirrors
+/// `LEGACY_SERVICE_JWT_ALGORITHM` in the Python module.
+pub const LEGACY_SERVICE_JWT_ALGORITHM: &str = "EdDSA";
+
+/// Env flag opening the legacy EdDSA verification window. Default: false.
+pub const ENV_ACCEPT_LEGACY_EDDSA: &str = "SERVICE_JWT_ACCEPT_LEGACY_EDDSA";
+
+/// Parse [`ENV_ACCEPT_LEGACY_EDDSA`] strictly: unset/empty/`false`/`0` is off,
+/// `true`/`1` is on, anything else is a loud [`ServiceAuthError::Config`] --
+/// a typo in a security toggle must never silently mean "off".
+pub fn accept_legacy_eddsa_from_env() -> Result<bool, ServiceAuthError> {
+    parse_legacy_flag(std::env::var(ENV_ACCEPT_LEGACY_EDDSA).ok().as_deref())
+}
+
+fn parse_legacy_flag(raw: Option<&str>) -> Result<bool, ServiceAuthError> {
+    match raw.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("" | "false" | "0") => Ok(false),
+        Some("true" | "1") => Ok(true),
+        Some(_) => Err(ServiceAuthError::Config(format!(
+            "{ENV_ACCEPT_LEGACY_EDDSA} must be 'true' or 'false'"
+        ))),
+    }
+}
 
 /// Claims every machine JWT must carry -- mirrors the Python verifier's
 /// `require` list. `tenant` is deliberately absent: hub-api only stamps it
@@ -115,6 +143,14 @@ pub struct ServiceClaims {
 #[async_trait::async_trait]
 pub trait TrustBundle: Send + Sync {
     async fn public_key(&self, kid: &str) -> Option<DecodingKey>;
+
+    /// Whether this verifier's legacy EdDSA window is open
+    /// (`SERVICE_JWT_ACCEPT_LEGACY_EDDSA`). Closed (`false`) unless a bundle
+    /// is explicitly configured otherwise, so ES256 is the only algorithm
+    /// accepted by default.
+    fn accept_legacy_eddsa(&self) -> bool {
+        false
+    }
 }
 
 /// Verify a machine JWT's header, signature, `iss`, `aud`, `exp`/`nbf`/`iat`
@@ -126,13 +162,13 @@ pub trait TrustBundle: Send + Sync {
 ///
 /// H-2 Phase 0 (RFC 8725), mirroring `ServiceJwtVerifier.verify` in
 /// `libs/flask_core/flask_core/service_jwt.py`: the header is vetted before
-/// any key lookup -- `alg` must be exactly [`SERVICE_JWT_ALGORITHM`] (so
+/// any key lookup -- `alg` must be exactly [`SERVICE_JWT_ALGORITHM`] (or [`LEGACY_SERVICE_JWT_ALGORITHM`] while the bundle's legacy window is open; so
 /// `alg: none`, an HMAC token "signed" with the public key, or any other
 /// algorithm is refused outright), `jku`/`jwk`/`x5u`/`x5c`/`crit` are
 /// refused, and a `kid` outside the pinned charset never reaches the trust
 /// bundle. An empty expected audience or issuer is a misconfiguration and
 /// fails closed. Every call emits `waddles_jwt_verifications_total` with
-/// `verifier=service_eddsa`; nothing logged ever contains token material.
+/// `verifier=service_eddsa` (label kept for dashboard continuity; the `alg` label says `es256`/`eddsa`); nothing logged ever contains token material.
 pub async fn verify(
     token: &str,
     trust_bundle: &dyn TrustBundle,
@@ -229,22 +265,39 @@ async fn verify_checked(
         return Err(Failure::reason(REASON_BAD_ISSUER, ALG_LABEL_ABSENT));
     }
 
-    let header = inspect_header(token, &[SERVICE_JWT_ALGORITHM], KidPolicy::Vet).map_err(|r| {
+    let allowed: &[&str] = if trust_bundle.accept_legacy_eddsa() {
+        &[SERVICE_JWT_ALGORITHM, LEGACY_SERVICE_JWT_ALGORITHM]
+    } else {
+        &[SERVICE_JWT_ALGORITHM]
+    };
+    let header = inspect_header(token, allowed, KidPolicy::Vet).map_err(|r| {
         *alg = r.alg;
         Failure::new(r)
     })?;
-    *alg = "eddsa";
+    // `inspect_header` only returns an allow-listed alg, so this is exhaustive.
+    let (algorithm, family, label) = if header.alg == LEGACY_SERVICE_JWT_ALGORITHM {
+        (Algorithm::EdDSA, AlgorithmFamily::Ed, "eddsa")
+    } else {
+        (Algorithm::ES256, AlgorithmFamily::Ec, "es256")
+    };
+    *alg = label;
     let Some(kid) = header.kid else {
-        return Err(Failure::reason(REASON_UNKNOWN_KID, "eddsa"));
+        return Err(Failure::reason(REASON_UNKNOWN_KID, label));
     };
     let Some(key) = trust_bundle.public_key(&kid).await else {
         return Err(Failure {
-            rejection: JwtRejection::new(REASON_UNKNOWN_KID, "eddsa"),
+            rejection: JwtRejection::new(REASON_UNKNOWN_KID, label),
             kid: Some(kid),
         });
     };
+    // Key/alg confusion guard: the key found for `kid` must be of the family
+    // the token's `alg` claims (an EdDSA token naming an EC `kid` is refused
+    // before any signature work).
+    if key.family() != family {
+        return Err(Failure::reason(REASON_ALG_MISMATCH, label));
+    }
 
-    let mut validation = Validation::new(Algorithm::EdDSA);
+    let mut validation = Validation::new(algorithm);
     validation.set_audience(&[expected_audience]);
     validation.set_issuer(trusted_issuers);
     validation.leeway = CLOCK_SKEW_SECONDS;
@@ -258,12 +311,12 @@ async fn verify_checked(
     validation.set_required_spec_claims(&["exp", "nbf", "iss", "aud"]);
 
     let data = jsonwebtoken::decode::<Value>(token, &key, &validation)
-        .map_err(|e| Failure::reason(classify_decode_error(e.kind()), "eddsa"))?;
+        .map_err(|e| Failure::reason(classify_decode_error(e.kind()), label))?;
     let claims = parse_claims(&data.claims, expected_audience, now_secs())
-        .map_err(|reason| Failure::reason(reason, "eddsa"))?;
+        .map_err(|reason| Failure::reason(reason, label))?;
 
     if claims.scope != required_scope {
-        return Err(Failure::reason(REASON_SCOPE_DENIED, "eddsa"));
+        return Err(Failure::reason(REASON_SCOPE_DENIED, label));
     }
     Ok(claims)
 }
@@ -433,6 +486,10 @@ pub struct JwksConfig {
     /// How long a `kid` absent from the JWKS (or whose refetch failed) is
     /// rejected without touching the network.
     pub negative_ttl: Duration,
+    /// Legacy EdDSA window (`SERVICE_JWT_ACCEPT_LEGACY_EDDSA`): when false
+    /// (the default) only ES256 / `EC` P-256 keys are trusted and `OKP`
+    /// entries in the served JWKS are skipped with a warning.
+    pub accept_legacy_eddsa: bool,
 }
 
 impl Default for JwksConfig {
@@ -440,16 +497,20 @@ impl Default for JwksConfig {
         Self {
             http: HttpTimeouts::default(),
             negative_ttl: DEFAULT_JWKS_NEGATIVE_TTL,
+            accept_legacy_eddsa: false,
         }
     }
 }
 
 impl JwksConfig {
-    /// Defaults overridden from the `SERVICE_AUTH_*` env vars.
+    /// Defaults overridden from the `SERVICE_AUTH_*` env vars. The legacy
+    /// EdDSA window stays closed here -- call [`JwksTrustBundle::with_legacy_eddsa`]
+    /// with [`accept_legacy_eddsa_from_env`] to honour `SERVICE_JWT_ACCEPT_LEGACY_EDDSA`.
     pub fn from_env() -> Self {
         Self {
             http: HttpTimeouts::from_env(),
             negative_ttl: duration_from_env(ENV_JWKS_NEGATIVE_TTL_SECS, DEFAULT_JWKS_NEGATIVE_TTL),
+            accept_legacy_eddsa: false,
         }
     }
 }
@@ -470,15 +531,27 @@ pub struct JwksTrustBundle {
     /// `kid` -> instant until which it is known-unknown.
     negative: std::sync::Mutex<HashMap<String, Instant>>,
     negative_ttl: Duration,
+    accept_legacy_eddsa: bool,
 }
 
 impl JwksTrustBundle {
     /// Bundle for hub-api's gRPC endpoint (`https://host:port`; CA from `HUB_API_GRPC_CA_FILE`),
     /// timeouts/TTL from the environment (or defaults). Connects lazily; a bad endpoint/CA is
-    /// reported as an error on every verification attempt (fail closed, loud).
+    /// reported as an error on every verification attempt (fail closed, loud). The legacy
+    /// EdDSA window is closed; see [`JwksTrustBundle::with_legacy_eddsa`].
     pub fn new(endpoint: impl Into<String>) -> Self {
         let config = JwksConfig::from_env();
         Self::build(HubChannel::from_env(endpoint, config.http), config)
+    }
+
+    /// Open or close the legacy EdDSA window on this bundle (builder style). Production
+    /// verifiers pass [`accept_legacy_eddsa_from_env`]`()?` so a malformed
+    /// `SERVICE_JWT_ACCEPT_LEGACY_EDDSA` fails startup rather than silently meaning "off".
+    /// Must be set before the first lookup (the JWKS cache is filtered by it).
+    #[must_use]
+    pub fn with_legacy_eddsa(mut self, accept: bool) -> Self {
+        self.accept_legacy_eddsa = accept;
+        self
     }
 
     /// Bundle with explicit [`JwksConfig`]; validates the endpoint and CA up front.
@@ -504,6 +577,7 @@ impl JwksTrustBundle {
             refresh_gate: Mutex::new(()),
             negative: std::sync::Mutex::new(HashMap::new()),
             negative_ttl: config.negative_ttl,
+            accept_legacy_eddsa: config.accept_legacy_eddsa,
         }
     }
 
@@ -513,7 +587,9 @@ impl JwksTrustBundle {
         // and leaves the previous cache untouched.
         let mut fresh = HashMap::with_capacity(keys.len());
         for entry in keys {
-            fresh.insert(entry.kid.clone(), decoding_key(&entry)?);
+            if let Some(key) = decoding_key(&entry, self.accept_legacy_eddsa)? {
+                fresh.insert(entry.kid.clone(), key);
+            }
         }
         let mut cache = self.cache.write().await;
         cache.clear();
@@ -565,23 +641,55 @@ impl JwksTrustBundle {
     }
 }
 
-/// Build the verification key for one served JWK. Only Ed25519 (`kty=OKP`, `crv=Ed25519`) is
-/// accepted -- that is the sole algorithm `verify` allows; anything else (or an empty `x`, which
-/// can never be a real key) fails the refresh closed instead of caching a key that verifies nothing.
-fn decoding_key(entry: &grpc::pb::Jwk) -> Result<DecodingKey, ServiceAuthError> {
+/// Build the verification key for one served JWK. `kty=EC`/`crv=P-256` (ES256) is always
+/// accepted; `kty=OKP`/`crv=Ed25519` only while the legacy window is open (otherwise the entry is
+/// skipped with a warning -- `Ok(None)` -- since hub-api may still publish it during rollout).
+/// Anything else, or a malformed coordinate (wrong length / not base64url), fails the refresh
+/// closed instead of caching a key that verifies nothing.
+fn decoding_key(
+    entry: &grpc::pb::Jwk,
+    accept_legacy_eddsa: bool,
+) -> Result<Option<DecodingKey>, ServiceAuthError> {
     let bad =
         |why: &str| ServiceAuthError::InvalidToken(format!("bad JWKS entry {}: {why}", entry.kid));
-    if entry.kty != "OKP" || entry.crv != "Ed25519" {
-        return Err(bad("unsupported key type (only OKP/Ed25519)"));
+    match (entry.kty.as_str(), entry.crv.as_str()) {
+        ("EC", "P-256") => {
+            for (name, coord) in [("x", &entry.x), ("y", &entry.y)] {
+                let raw = URL_SAFE_NO_PAD
+                    .decode(coord)
+                    .map_err(|_| bad(&format!("{name} is not base64url")))?;
+                if raw.len() != 32 {
+                    return Err(bad(&format!("{name} is not a 32-byte P-256 coordinate")));
+                }
+            }
+            DecodingKey::from_ec_components(&entry.x, &entry.y)
+                .map(Some)
+                .map_err(|e| bad(&e.to_string()))
+        }
+        ("OKP", "Ed25519") => {
+            if !accept_legacy_eddsa {
+                warn!(kid = %entry.kid, "service_auth.jwks_legacy_eddsa_key_skipped");
+                return Ok(None);
+            }
+            if entry.x.is_empty() {
+                return Err(bad("empty key"));
+            }
+            DecodingKey::from_ed_components(&entry.x)
+                .map(Some)
+                .map_err(|e| bad(&e.to_string()))
+        }
+        _ => Err(bad(
+            "unsupported key type (only EC/P-256, or legacy OKP/Ed25519)",
+        )),
     }
-    if entry.x.is_empty() {
-        return Err(bad("empty key"));
-    }
-    DecodingKey::from_ed_components(&entry.x).map_err(|e| bad(&e.to_string()))
 }
 
 #[async_trait::async_trait]
 impl TrustBundle for JwksTrustBundle {
+    fn accept_legacy_eddsa(&self) -> bool {
+        self.accept_legacy_eddsa
+    }
+
     async fn public_key(&self, kid: &str) -> Option<DecodingKey> {
         if let Some(key) = self.cache.read().await.get(kid) {
             return Some(key.clone());
@@ -924,8 +1032,6 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
     use jsonwebtoken::{EncodingKey, Header};
     use std::sync::Mutex;
 
@@ -954,12 +1060,43 @@ mod tests {
         169, 90, 255, 23, 51, 151, 156, 147, 56, 247, 214, 168, 76, 160, 67, 99, 211, 238, 208, 5,
         69, 236, 245, 115, 4, 81, 1, 42, 23, 107, 4, 187,
     ];
-    pub(super) const KEY_B_PRIV_DER: &[u8] = &[
-        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 145, 56, 92, 35, 32, 192, 103,
-        161, 66, 249, 233, 0, 174, 22, 45, 100, 136, 104, 59, 129, 251, 81, 20, 214, 221, 250, 219,
-        227, 139, 109, 70, 185,
+
+    // PKCS8-DER ECDSA P-256 test keypairs (fixed, test-only; never used outside this test
+    // module), generated once with `cryptography` (`ec.generate_private_key(SECP256R1)`).
+    // `x`/`y` are the base64url public coordinates of key A (the JWKS `EC` form).
+    pub(super) const ES_A_PRIV_DER: &[u8] = &[
+        48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206,
+        61, 3, 1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 209, 234, 92, 37, 28, 130, 216, 139, 48, 1,
+        225, 220, 88, 158, 30, 88, 20, 126, 43, 7, 182, 151, 62, 129, 248, 115, 187, 119, 18, 12,
+        142, 93, 161, 68, 3, 66, 0, 4, 17, 138, 186, 198, 3, 136, 154, 139, 190, 114, 14, 103, 123,
+        44, 247, 26, 31, 171, 203, 86, 236, 40, 175, 97, 236, 72, 32, 22, 179, 142, 109, 144, 173,
+        115, 191, 94, 95, 104, 151, 149, 88, 212, 250, 138, 99, 63, 147, 180, 150, 85, 29, 12, 130,
+        136, 7, 86, 162, 99, 191, 4, 123, 168, 238, 207,
+    ];
+    pub(super) const ES_A_X: &str = "EYq6xgOImou-cg5neyz3Gh-ry1bsKK9h7EggFrOObZA";
+    pub(super) const ES_A_Y: &str = "rXO_Xl9ol5VY1PqKYz-TtJZVHQyCiAdWomO_BHuo7s8";
+    pub(super) const ES_B_X: &str = "YtHRfUTX7D18UCEeYunBn5Dh2RzjqHtJkygZTTHf4NQ";
+    pub(super) const ES_B_Y: &str = "sM_n5KoIvy1BSAhobF_sySiib-uC67WEy_WjZhtVWrA";
+    pub(super) const ES_B_PRIV_DER: &[u8] = &[
+        48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206,
+        61, 3, 1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 20, 206, 40, 170, 137, 187, 67, 100, 72, 148,
+        97, 198, 42, 118, 251, 253, 181, 175, 151, 157, 190, 138, 70, 223, 254, 35, 143, 55, 95,
+        203, 51, 94, 161, 68, 3, 66, 0, 4, 98, 209, 209, 125, 68, 215, 236, 61, 124, 80, 33, 30,
+        98, 233, 193, 159, 144, 225, 217, 28, 227, 168, 123, 73, 147, 40, 25, 77, 49, 223, 224,
+        212, 176, 207, 231, 228, 170, 8, 191, 45, 65, 72, 8, 104, 108, 95, 236, 201, 40, 162, 111,
+        235, 130, 235, 181, 132, 203, 245, 163, 102, 27, 85, 90, 176,
     ];
 
+    /// ES256 keypair A: the signing key hub-api would hold and the verification key a trust
+    /// bundle serves for it.
+    pub(super) fn es256_keypair() -> (EncodingKey, DecodingKey) {
+        (
+            EncodingKey::from_ec_der(ES_A_PRIV_DER),
+            DecodingKey::from_ec_components(ES_A_X, ES_A_Y).expect("test P-256 key"),
+        )
+    }
+
+    /// Legacy Ed25519 keypair (only for the legacy-window tests).
     pub(super) fn ed25519_keypair() -> (EncodingKey, DecodingKey) {
         (
             EncodingKey::from_ed_der(KEY_A_PRIV_DER),
@@ -972,7 +1109,16 @@ mod tests {
         kid: &str,
         claims: &ServiceClaims,
     ) -> String {
-        let mut header = Header::new(Algorithm::EdDSA);
+        make_token_alg(Algorithm::ES256, encoding_key, kid, claims)
+    }
+
+    pub(super) fn make_token_alg(
+        alg: Algorithm,
+        encoding_key: &EncodingKey,
+        kid: &str,
+        claims: &ServiceClaims,
+    ) -> String {
+        let mut header = Header::new(alg);
         header.kid = Some(kid.to_string());
         jsonwebtoken::encode(&header, claims, encoding_key).unwrap()
     }
@@ -992,7 +1138,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_accepts_valid_token() {
-        let (enc, dec) = ed25519_keypair();
+        let (enc, dec) = es256_keypair();
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let now = now_secs();
         let token = make_token(&enc, "k1", &base_claims(now));
@@ -1010,7 +1156,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_rejects_unknown_kid() {
-        let (enc, _dec) = ed25519_keypair();
+        let (enc, _dec) = es256_keypair();
         let bundle = StaticTrustBundle(Mutex::new(HashMap::new()));
         let now = now_secs();
         let token = make_token(&enc, "missing-kid", &base_claims(now));
@@ -1028,7 +1174,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_rejects_expired_token() {
-        let (enc, dec) = ed25519_keypair();
+        let (enc, dec) = es256_keypair();
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let now = now_secs();
         let mut claims = base_claims(now - 3600);
@@ -1048,7 +1194,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_rejects_wrong_audience() {
-        let (enc, dec) = ed25519_keypair();
+        let (enc, dec) = es256_keypair();
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let now = now_secs();
         let mut claims = base_claims(now);
@@ -1068,7 +1214,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_rejects_wrong_scope() {
-        let (enc, dec) = ed25519_keypair();
+        let (enc, dec) = es256_keypair();
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let now = now_secs();
         let token = make_token(&enc, "k1", &base_claims(now));
@@ -1086,7 +1232,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_rejects_token_not_yet_valid() {
-        let (enc, dec) = ed25519_keypair();
+        let (enc, dec) = es256_keypair();
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let now = now_secs();
         let mut claims = base_claims(now);
@@ -1109,7 +1255,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_accepts_token_within_nbf_clock_skew() {
-        let (enc, dec) = ed25519_keypair();
+        let (enc, dec) = es256_keypair();
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let now = now_secs();
         let mut claims = base_claims(now);
@@ -1131,12 +1277,12 @@ mod tests {
 
     #[tokio::test]
     async fn verify_rejects_forged_signature() {
-        let (_enc, dec) = ed25519_keypair();
+        let (_enc, dec) = es256_keypair();
         // A second, different test keypair to sign with -- simulates an
         // attacker who doesn't hold hub-api's private key but guesses/
         // reuses a known `kid`. Verification stays pinned to key A's
         // public key, so a token signed by key B must be rejected.
-        let forged_enc = EncodingKey::from_ed_der(KEY_B_PRIV_DER);
+        let forged_enc = EncodingKey::from_ec_der(ES_B_PRIV_DER);
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let now = now_secs();
         let forged = make_token(&forged_enc, "k1", &base_claims(now));
@@ -1178,12 +1324,12 @@ mod tests {
                 keys.iter()
                     .map(|k| crate::grpc::pb::Jwk {
                         kid: k["kid"].as_str().unwrap_or_default().to_owned(),
-                        kty: k["kty"].as_str().unwrap_or("OKP").to_owned(),
-                        crv: k["crv"].as_str().unwrap_or("Ed25519").to_owned(),
-                        alg: "EdDSA".into(),
+                        kty: k["kty"].as_str().unwrap_or("EC").to_owned(),
+                        crv: k["crv"].as_str().unwrap_or("P-256").to_owned(),
+                        alg: "ES256".into(),
                         r#use: "sig".into(),
                         x: k["x"].as_str().unwrap_or_default().to_owned(),
-                        y: String::new(),
+                        y: k["y"].as_str().unwrap_or_default().to_owned(),
                     })
                     .collect(),
             ),
@@ -1248,7 +1394,7 @@ mod tests {
     }
 
     fn jwks_body(kid: &str) -> String {
-        serde_json::json!({"keys":[{"kid": kid, "kty":"OKP", "crv":"Ed25519", "x": b64url(KEY_A_PUB_RAW)}]})
+        serde_json::json!({"keys":[{"kid": kid, "kty":"EC", "crv":"P-256", "x": ES_A_X, "y": ES_A_Y}]})
             .to_string()
     }
 
@@ -1285,9 +1431,9 @@ mod tests {
 
     #[tokio::test]
     async fn verify_rejects_token_without_kid() {
-        let (enc, dec) = ed25519_keypair();
+        let (enc, dec) = es256_keypair();
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
-        let header = Header::new(Algorithm::EdDSA);
+        let header = Header::new(Algorithm::ES256);
         let token = jsonwebtoken::encode(&header, &base_claims(now_secs()), &enc).expect("encode");
         let err = verify(
             &token,
@@ -1303,7 +1449,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_rejects_untrusted_issuer() {
-        let (enc, dec) = ed25519_keypair();
+        let (enc, dec) = es256_keypair();
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let mut claims = base_claims(now_secs());
         claims.iss = "evil-issuer".into();
@@ -1322,7 +1468,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_rejects_wrong_algorithm_hs256() {
-        let (_enc, dec) = ed25519_keypair();
+        let (_enc, dec) = es256_keypair();
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let mut header = Header::new(Algorithm::HS256);
         header.kid = Some("k1".into());
@@ -1348,7 +1494,7 @@ mod tests {
     async fn jwks_bundle_fetches_and_caches_key() {
         let (url, hits) = mock_server(vec![(200, jwks_body("k1"))]).await;
         let bundle = JwksTrustBundle::new(url);
-        let (enc, _) = ed25519_keypair();
+        let (enc, _) = es256_keypair();
         let token = make_token(&enc, "k1", &base_claims(now_secs()));
         for _ in 0..2 {
             verify(
@@ -1440,6 +1586,7 @@ mod tests {
         let cfg = JwksConfig {
             http: fast_timeouts(),
             negative_ttl: Duration::from_secs(30),
+            accept_legacy_eddsa: false,
         };
         let bundle = JwksTrustBundle::with_config(url, cfg).expect("client");
         let started = Instant::now();
@@ -1515,6 +1662,7 @@ mod tests {
         let cfg = JwksConfig {
             http: HttpTimeouts::default(),
             negative_ttl: Duration::from_millis(300),
+            accept_legacy_eddsa: false,
         };
         let bundle = JwksTrustBundle::with_config(url, cfg).expect("client");
         assert!(bundle.public_key("bogus").await.is_none());
@@ -1936,15 +2084,15 @@ mod tests {
         let message = format!("{}.{}", b64_json(header), b64_json(claims));
         let signature = jsonwebtoken::crypto::sign(
             message.as_bytes(),
-            &EncodingKey::from_ed_der(KEY_A_PRIV_DER),
-            Algorithm::EdDSA,
+            &EncodingKey::from_ec_der(ES_A_PRIV_DER),
+            Algorithm::ES256,
         )
         .expect("sign");
         format!("{message}.{signature}")
     }
 
     fn good_header() -> Value {
-        json!({"alg": "EdDSA", "typ": "JWT", "kid": "k1"})
+        json!({"alg": "ES256", "typ": "JWT", "kid": "k1"})
     }
 
     fn good_claims() -> Value {
@@ -1984,7 +2132,7 @@ mod tests {
     }
 
     fn counting_bundle() -> CountingBundle {
-        let (_enc, dec) = ed25519_keypair();
+        let (_enc, dec) = es256_keypair();
         CountingBundle {
             inner: StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)]))),
             lookups: AtomicUsize::new(0),
@@ -2039,7 +2187,7 @@ mod tests {
         assert_eq!(claims.sub, "spiffe://penguintech.io/alpha/svc-process");
         assert_eq!(claims.aud, AUD);
         assert_eq!(claims.jti, "jti-1");
-        assert_eq!(capture.count("service_eddsa", "eddsa", "ok"), 1);
+        assert_eq!(capture.count("service_eddsa", "es256", "ok"), 1);
         assert_eq!(capture.total(), 1);
         let latency = capture.points("waddles_jwt_verification_seconds");
         assert_eq!(latency.len(), 1);
@@ -2093,9 +2241,11 @@ mod tests {
     async fn other_asymmetric_algorithms_and_odd_alg_values_are_a_mismatch() {
         for (alg_json, label) in [
             (json!("RS256"), "rs256"),
-            (json!("ES256"), "es256"),
+            (json!("ES384"), "es384"),
+            (json!("EdDSA"), "eddsa"),
+            (json!("HS256"), "hs256"),
             (json!("PS512"), "ps512"),
-            (json!("eddsa"), "eddsa"),
+            (json!("es256"), "es256"),
             (json!("Ed25519"), "other"),
             (json!(7), "other"),
             (json!(["EdDSA"]), "other"),
@@ -2126,7 +2276,7 @@ mod tests {
             let mut header = good_header();
             header[param] = json!("https://attacker.example/keys");
             let token = raw_token(&header, &good_claims());
-            assert_refused(&token, REASON_FORBIDDEN_HEADER, "eddsa", true).await;
+            assert_refused(&token, REASON_FORBIDDEN_HEADER, "es256", true).await;
         }
     }
 
@@ -2137,7 +2287,7 @@ mod tests {
         assert_refused(
             &raw_token(&header, &good_claims()),
             REASON_FORBIDDEN_HEADER,
-            "eddsa",
+            "es256",
             true,
         )
         .await;
@@ -2157,7 +2307,7 @@ mod tests {
             assert_refused(
                 &raw_token(&header, &good_claims()),
                 REASON_BAD_KID,
-                "eddsa",
+                "es256",
                 true,
             )
             .await;
@@ -2167,22 +2317,22 @@ mod tests {
     #[tokio::test]
     async fn absent_and_unknown_kid_are_unknown_kid_and_do_not_leak_a_value() {
         let bundle = counting_bundle();
-        let header = json!({"alg": "EdDSA"});
+        let header = json!({"alg": "ES256"});
         let (result, capture) = run(&raw_token(&header, &good_claims()), &bundle).await;
         assert!(matches!(result, Err(ServiceAuthError::UnknownKeyId(None))));
-        assert_eq!(capture.count("service_eddsa", "eddsa", "unknown_kid"), 1);
+        assert_eq!(capture.count("service_eddsa", "es256", "unknown_kid"), 1);
         assert_eq!(
             bundle.lookups.load(Ordering::SeqCst),
             0,
             "no kid, no lookup"
         );
 
-        let header = json!({"alg": "EdDSA", "kid": "rotated-away"});
+        let header = json!({"alg": "ES256", "kid": "rotated-away"});
         let (result, capture) = run(&raw_token(&header, &good_claims()), &bundle).await;
         assert!(
             matches!(&result, Err(ServiceAuthError::UnknownKeyId(Some(k))) if k == "rotated-away")
         );
-        assert_eq!(capture.count("service_eddsa", "eddsa", "unknown_kid"), 1);
+        assert_eq!(capture.count("service_eddsa", "es256", "unknown_kid"), 1);
         assert_eq!(bundle.lookups.load(Ordering::SeqCst), 1);
     }
 
@@ -2206,7 +2356,7 @@ mod tests {
     async fn every_required_claim_missing_is_missing_claim() {
         for name in REQUIRED_SERVICE_CLAIMS {
             let token = raw_token(&good_header(), &claims_without(name));
-            assert_refused(&token, REASON_MISSING_CLAIM, "eddsa", false).await;
+            assert_refused(&token, REASON_MISSING_CLAIM, "es256", false).await;
         }
     }
 
@@ -2218,7 +2368,7 @@ mod tests {
             let (result, capture) = run(&token, &bundle).await;
             assert!(result.is_err(), "{name}=null must not verify");
             assert_eq!(capture.total(), 1);
-            assert_eq!(capture.count("service_eddsa", "eddsa", "ok"), 0, "{name}");
+            assert_eq!(capture.count("service_eddsa", "es256", "ok"), 0, "{name}");
         }
     }
 
@@ -2241,7 +2391,7 @@ mod tests {
             assert!(result.is_err(), "{name}={value} must not verify");
             assert_eq!(capture.total(), 1);
             assert_eq!(
-                capture.count("service_eddsa", "eddsa", "ok"),
+                capture.count("service_eddsa", "es256", "ok"),
                 0,
                 "{name}={value}"
             );
@@ -2249,14 +2399,14 @@ mod tests {
         assert_refused(
             &raw_token(&good_header(), &claims_with("sub", json!(""))),
             REASON_INVALID_CLAIM,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
         assert_refused(
             &raw_token(&good_header(), &claims_with("scope", json!(1))),
             REASON_INVALID_CLAIM,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
@@ -2290,7 +2440,7 @@ mod tests {
             json!({"slug": "x"}),
         ] {
             let token = raw_token(&good_header(), &claims_with("tenant", bad.clone()));
-            assert_refused(&token, REASON_INVALID_CLAIM, "eddsa", false).await;
+            assert_refused(&token, REASON_INVALID_CLAIM, "es256", false).await;
         }
     }
 
@@ -2299,35 +2449,35 @@ mod tests {
         assert_refused(
             &raw_token(&good_header(), &claims_without("iss")),
             REASON_MISSING_CLAIM,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
         assert_refused(
             &raw_token(&good_header(), &claims_without("aud")),
             REASON_MISSING_CLAIM,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
         assert_refused(
             &raw_token(&good_header(), &claims_with("iss", json!("evil"))),
             REASON_BAD_ISSUER,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
         assert_refused(
             &raw_token(&good_header(), &claims_with("aud", json!("other"))),
             REASON_BAD_AUDIENCE,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
         assert_refused(
             &raw_token(&good_header(), &claims_with("aud", json!(["a", "b"]))),
             REASON_BAD_AUDIENCE,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
@@ -2375,7 +2525,7 @@ mod tests {
         assert_refused(
             &raw_token(&good_header(), &claims_with("exp", json!(now - 3600))),
             REASON_EXPIRED,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
@@ -2385,7 +2535,7 @@ mod tests {
                 &claims_with("nbf", json!(now + CLOCK_SKEW_SECONDS + 300)),
             ),
             REASON_IMMATURE,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
@@ -2396,7 +2546,7 @@ mod tests {
                 &claims_with("iat", json!(now + CLOCK_SKEW_SECONDS + 300)),
             ),
             REASON_IMMATURE,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
@@ -2413,14 +2563,14 @@ mod tests {
 
     #[tokio::test]
     async fn bad_signature_and_wrong_scope_have_their_own_outcomes() {
-        let forged = EncodingKey::from_ed_der(KEY_B_PRIV_DER);
+        let forged = EncodingKey::from_ec_der(ES_B_PRIV_DER);
         let message = format!("{}.{}", b64_json(&good_header()), b64_json(&good_claims()));
-        let sig = jsonwebtoken::crypto::sign(message.as_bytes(), &forged, Algorithm::EdDSA)
+        let sig = jsonwebtoken::crypto::sign(message.as_bytes(), &forged, Algorithm::ES256)
             .expect("sign");
         assert_refused(
             &format!("{message}.{sig}"),
             REASON_BAD_SIGNATURE,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
@@ -2431,7 +2581,7 @@ mod tests {
                 &claims_with("scope", json!("some:other:scope")),
             ),
             REASON_SCOPE_DENIED,
-            "eddsa",
+            "es256",
             false,
         )
         .await;
@@ -2591,7 +2741,7 @@ mod tests {
         let bundle = JwksTrustBundle::new(url);
         assert!(bundle.public_key("k1").await.is_none());
         let err = bundle.refresh().await.unwrap_err();
-        assert!(matches!(err, ServiceAuthError::InvalidToken(m) if m.contains("empty key")));
+        assert!(matches!(err, ServiceAuthError::InvalidToken(m) if m.contains("32-byte")));
     }
 
     /// A complete, fixed-time claim payload for the direct `parse_claims` tests.
@@ -2621,7 +2771,7 @@ mod tests {
     fn skew_and_ttl_constants_match_the_python_contract() {
         assert_eq!(CLOCK_SKEW_SECONDS, 30);
         assert_eq!(MAX_TOKEN_TTL_SECONDS, 3600);
-        assert_eq!(SERVICE_JWT_ALGORITHM, "EdDSA");
+        assert_eq!(SERVICE_JWT_ALGORITHM, "ES256");
     }
 }
 
@@ -2632,11 +2782,11 @@ mod tests {
 mod grpc_path_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::tests::{
-        b64url, base_claims, ed25519_keypair, make_token, temp_sa_token, KEY_A_PUB_RAW,
-        KEY_B_PRIV_DER,
+        b64url, base_claims, ed25519_keypair, es256_keypair, make_token, make_token_alg,
+        temp_sa_token, ES_A_X, ES_A_Y, ES_B_PRIV_DER, ES_B_X, ES_B_Y, KEY_A_PUB_RAW,
     };
     use super::*;
-    use crate::mock_hub::{ed25519_jwk, JwksReply, MintReply, MockHub};
+    use crate::mock_hub::{es256_jwk, JwksReply, MintReply, MockHub};
     use jsonwebtoken::EncodingKey;
     use rustls_pki_types::pem::PemObject as _;
     use std::io::Write as _;
@@ -2646,7 +2796,7 @@ mod grpc_path_tests {
 
     /// Mock hub whose mint signs a real token with key A (`kid` k1) and whose JWKS serves key A.
     async fn signing_hub() -> MockHub {
-        let (enc, _) = ed25519_keypair();
+        let (enc, _) = es256_keypair();
         let enc = Arc::new(enc);
         let sign = move |call: &crate::mock_hub::MintCall| {
             let now = now_secs();
@@ -2656,7 +2806,7 @@ mod grpc_path_tests {
         };
         MockHub::builder()
             .mint(vec![MintReply::With(Arc::new(sign))])
-            .jwks(vec![JwksReply::ed25519("k1", &b64url(KEY_A_PUB_RAW))])
+            .jwks(vec![JwksReply::es256("k1", ES_A_X, ES_A_Y)])
             .start()
             .await
     }
@@ -2734,7 +2884,7 @@ mod grpc_path_tests {
     #[tokio::test]
     async fn a_token_signed_by_another_key_is_not_trusted_by_the_served_jwks() {
         let hub = signing_hub().await;
-        let forged_key = EncodingKey::from_ed_der(KEY_B_PRIV_DER);
+        let forged_key = EncodingKey::from_ec_der(ES_B_PRIV_DER);
         let forged = make_token(&forged_key, "k1", &base_claims(now_secs()));
         let bundle = JwksTrustBundle::new(hub.endpoint.clone());
         let err = verify_via(&bundle, &forged, "identity:ephemeral:mint")
@@ -2760,12 +2910,12 @@ mod grpc_path_tests {
     }
 
     #[tokio::test]
-    async fn non_ed25519_jwks_entries_fail_the_refresh_closed() {
-        let mut ec = ed25519_jwk("k1", &b64url(KEY_A_PUB_RAW));
-        ec.kty = "EC".into();
-        ec.crv = "P-256".into();
+    async fn unsupported_jwks_entries_fail_the_refresh_closed() {
+        let mut rsa = es256_jwk("k1", ES_A_X, ES_A_Y);
+        rsa.kty = "RSA".into();
+        rsa.crv = String::new();
         let hub = MockHub::builder()
-            .jwks(vec![JwksReply::Keys(vec![ec])])
+            .jwks(vec![JwksReply::Keys(vec![rsa])])
             .start()
             .await;
         let bundle = JwksTrustBundle::new(hub.endpoint.clone());
@@ -2773,6 +2923,145 @@ mod grpc_path_tests {
             bundle.public_key("k1").await.is_none(),
             "unsupported key type must not be cached"
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_p256_coordinates_fail_the_refresh_closed() {
+        let short = b64url(&[7u8; 31]);
+        for (x, y) in [(short.as_str(), ES_A_Y), (ES_A_X, ""), ("!!!", ES_A_Y)] {
+            let hub = MockHub::builder()
+                .jwks(vec![JwksReply::es256("k1", x, y)])
+                .start()
+                .await;
+            let bundle = JwksTrustBundle::new(hub.endpoint.clone());
+            assert!(bundle.public_key("k1").await.is_none(), "x={x:?} y={y:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn es256_kid_rotation_new_kid_is_picked_up_by_refetch() {
+        let hub = MockHub::builder()
+            .jwks(vec![
+                JwksReply::es256("k1", ES_A_X, ES_A_Y),
+                JwksReply::Keys(vec![
+                    es256_jwk("k1", ES_A_X, ES_A_Y),
+                    es256_jwk("k2", ES_B_X, ES_B_Y),
+                ]),
+            ])
+            .start()
+            .await;
+        let bundle = JwksTrustBundle::new(hub.endpoint.clone());
+        let now = now_secs();
+        let (enc_a, _) = es256_keypair();
+        let tok_a = make_token(&enc_a, "k1", &base_claims(now));
+        verify_via(&bundle, &tok_a, "identity:ephemeral:mint")
+            .await
+            .expect("k1 verifies");
+        // k2 is unknown to the cached set -> one refetch (rotation) -> now trusted.
+        let enc_b = EncodingKey::from_ec_der(ES_B_PRIV_DER);
+        let tok_b = make_token(&enc_b, "k2", &base_claims(now));
+        verify_via(&bundle, &tok_b, "identity:ephemeral:mint")
+            .await
+            .expect("k2 verifies after rotation refetch");
+        // A token signed by B but naming k1 is a bad signature, never accepted.
+        let swapped = make_token(&enc_b, "k1", &base_claims(now));
+        assert!(verify_via(&bundle, &swapped, "identity:ephemeral:mint")
+            .await
+            .is_err());
+    }
+
+    /// Hub serving an ES256 key `k1` AND a legacy Ed25519 key `old`.
+    async fn dual_key_hub() -> MockHub {
+        MockHub::builder()
+            .jwks(vec![JwksReply::Keys(vec![
+                es256_jwk("k1", ES_A_X, ES_A_Y),
+                crate::mock_hub::ed25519_jwk("old", &b64url(KEY_A_PUB_RAW)),
+            ])])
+            .start()
+            .await
+    }
+
+    #[tokio::test]
+    async fn legacy_eddsa_token_rejected_by_default() {
+        let hub = dual_key_hub().await;
+        let bundle = JwksTrustBundle::new(hub.endpoint.clone());
+        assert!(!bundle.accept_legacy_eddsa());
+        let (enc, _) = ed25519_keypair();
+        let token = make_token_alg(Algorithm::EdDSA, &enc, "old", &base_claims(now_secs()));
+        let err = verify_via(&bundle, &token, "identity:ephemeral:mint")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidToken(_)), "{err:?}");
+        // The ES256 key published beside it still works (OKP entry was skipped, not fatal).
+        let (enc_a, _) = es256_keypair();
+        let ok = make_token(&enc_a, "k1", &base_claims(now_secs()));
+        verify_via(&bundle, &ok, "identity:ephemeral:mint")
+            .await
+            .expect("es256 still verifies");
+    }
+
+    #[tokio::test]
+    async fn legacy_eddsa_token_accepted_only_with_the_flag() {
+        let hub = dual_key_hub().await;
+        let config = JwksConfig {
+            accept_legacy_eddsa: true,
+            ..JwksConfig::default()
+        };
+        let bundle = JwksTrustBundle::with_config(hub.endpoint.clone(), config).expect("bundle");
+        assert!(bundle.accept_legacy_eddsa());
+        let (enc, _) = ed25519_keypair();
+        let token = make_token_alg(Algorithm::EdDSA, &enc, "old", &base_claims(now_secs()));
+        let claims = verify_via(&bundle, &token, "identity:ephemeral:mint")
+            .await
+            .expect("legacy window open");
+        assert_eq!(claims.scope, "identity:ephemeral:mint");
+    }
+
+    #[tokio::test]
+    async fn key_alg_confusion_is_refused_even_in_the_legacy_window() {
+        let hub = dual_key_hub().await;
+        let config = JwksConfig {
+            accept_legacy_eddsa: true,
+            ..JwksConfig::default()
+        };
+        let bundle = JwksTrustBundle::with_config(hub.endpoint.clone(), config).expect("bundle");
+        let (enc_ed, _) = ed25519_keypair();
+        // EdDSA-signed token naming the ES256 kid, and an ES256 token naming the Ed25519 kid.
+        let (enc_es, _) = es256_keypair();
+        let now = now_secs();
+        for token in [
+            make_token_alg(Algorithm::EdDSA, &enc_ed, "k1", &base_claims(now)),
+            make_token_alg(Algorithm::ES256, &enc_es, "old", &base_claims(now)),
+        ] {
+            let err = verify_via(&bundle, &token, "identity:ephemeral:mint")
+                .await
+                .unwrap_err();
+            assert!(matches!(err, ServiceAuthError::InvalidToken(_)), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_flag_parses_strictly() {
+        for (raw, want) in [
+            (None, false),
+            (Some(""), false),
+            (Some("false"), false),
+            (Some("0"), false),
+            (Some("true"), true),
+            (Some("TRUE"), true),
+            (Some("1"), true),
+        ] {
+            assert_eq!(parse_legacy_flag(raw).expect("valid"), want, "{raw:?}");
+        }
+        for raw in ["yes", "on", "tru", "2"] {
+            assert!(
+                matches!(
+                    parse_legacy_flag(Some(raw)),
+                    Err(ServiceAuthError::Config(_))
+                ),
+                "{raw:?} must fail loud"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2837,7 +3126,7 @@ mod grpc_path_tests {
     }
 
     async fn tls_signing_hub(pki: &Pki) -> MockHub {
-        let (enc, _) = ed25519_keypair();
+        let (enc, _) = es256_keypair();
         let enc = Arc::new(enc);
         let sign = move |call: &crate::mock_hub::MintCall| {
             let mut claims = base_claims(now_secs());
@@ -2850,7 +3139,7 @@ mod grpc_path_tests {
         let addr = listener.local_addr().expect("addr");
         MockHub::builder()
             .mint(vec![MintReply::With(Arc::new(sign))])
-            .jwks(vec![JwksReply::ed25519("k1", &b64url(KEY_A_PUB_RAW))])
+            .jwks(vec![JwksReply::es256("k1", ES_A_X, ES_A_Y)])
             .spawn(
                 listener,
                 addr,

@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock
 
 import grpc
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey, spiffe_id
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
@@ -45,7 +45,7 @@ async def live_hub(
 ) -> AsyncIterator[tuple[str, int, list[dict[str, str]]]]:
     """Serve the real issuer + token route on loopback; yield `(base_url, community_id, seen)`."""
     dal, community_id = community_db
-    private = Ed25519PrivateKey.generate()
+    private = ec.generate_private_key(ec.SECP256R1())
     identity = ServiceIdentity(
         SERVICE_ID, "waddlebot", "svc-action", frozenset({"connections:resolve"}), "system"
     )

@@ -201,6 +201,17 @@ pub struct CliConfig {
     #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT", default_value = "")]
     pub service_jwt_token_endpoint: String,
 
+    /// Legacy EdDSA verification window for PUSH credentials
+    /// (`SERVICE_JWT_ACCEPT_LEGACY_EDDSA`, default false = ES256 only). clap parses the env
+    /// value strictly, so a malformed value aborts startup instead of silently meaning "off".
+    #[arg(
+        long,
+        env = "SERVICE_JWT_ACCEPT_LEGACY_EDDSA",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub service_jwt_accept_legacy_eddsa: bool,
+
     /// Path to this pod's projected Kubernetes ServiceAccount token, read by
     /// `service_auth::MachineJwtClient` to bootstrap a machine JWT (the same
     /// default every machine-JWT bootstrap in this repo uses).

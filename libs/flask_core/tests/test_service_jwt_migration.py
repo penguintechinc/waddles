@@ -1,7 +1,7 @@
-"""EdDSA service-auth migration: verify-only trust, HS256 rejection, gRPC interceptor, token client.
+"""ES256 service-auth migration: verify-only trust, HS256 rejection, gRPC interceptor, token client.
 
 Covers the HS256 shared-secret removal (security audit HIGH): the legacy fleet-wide
-HS256 token is REJECTED by every EdDSA verifier, a verify-only service can never hold a
+HS256 token is REJECTED by every ES256 verifier, a verify-only service can never hold a
 signing key, cross-module/forged tokens fail, kid rotation works, and the shared gRPC
 interceptor is exercised against a real in-process grpc.aio server.
 """
@@ -15,7 +15,7 @@ import grpc
 import jwt as pyjwt
 import pytest
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.grpc_service_auth import ServiceJwtAuthInterceptor
 from flask_core.service_jwt import (
     InvalidServiceToken,
@@ -37,7 +37,7 @@ LEGACY_FLEET_SECRET = (
 )  # stands in for the shared MODULE_SECRET_KEY / SECRET_KEY
 
 
-def _pem_pub(priv: Ed25519PrivateKey) -> str:
+def _pem_pub(priv: ec.EllipticCurvePrivateKey) -> str:
     return (
         priv.public_key()
         .public_bytes(
@@ -47,7 +47,7 @@ def _pem_pub(priv: Ed25519PrivateKey) -> str:
     )
 
 
-def _pem_priv(priv: Ed25519PrivateKey) -> str:
+def _pem_priv(priv: ec.EllipticCurvePrivateKey) -> str:
     return priv.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8,
@@ -56,9 +56,9 @@ def _pem_priv(priv: Ed25519PrivateKey) -> str:
 
 
 def _issuer(
-    kid: str = "k1", priv: Ed25519PrivateKey | None = None
-) -> tuple[ServiceJwtIssuer, Ed25519PrivateKey]:
-    priv = priv or Ed25519PrivateKey.generate()
+    kid: str = "k1", priv: ec.EllipticCurvePrivateKey | None = None
+) -> tuple[ServiceJwtIssuer, ec.EllipticCurvePrivateKey]:
+    priv = priv or ec.generate_private_key(ec.SECP256R1())
     ident = ServiceIdentity(
         service_id=CALLER,
         k8s_namespace="waddlebot",
@@ -148,8 +148,8 @@ def test_cross_module_forgery_fails(verifier_env) -> None:
     transfer."""
     issuer, _ = verifier_env
     verifier = load_verifier_from_env()
-    # (1) attacker signs with its own Ed25519 key but claims the trusted kid
-    attacker = Ed25519PrivateKey.generate()
+    # (1) attacker signs with its own ES256 key but claims the trusted kid
+    attacker = ec.generate_private_key(ec.SECP256R1())
     forged, _ = _issuer(kid="k1", priv=attacker)
     with pytest.raises(InvalidServiceToken):
         verifier.verify(forged.issue(CALLER, SCOPE_A), required_scope=SCOPE_A)
@@ -216,11 +216,11 @@ def test_verifier_rejects_bad_key_material(
         .decode()
     )
     monkeypatch.setenv("SERVICE_JWT_PUBLIC_KEY_bad", rsa_pem)
-    with pytest.raises(ServiceJwtError, match="not an Ed25519"):
+    with pytest.raises(ServiceJwtError, match="not an ECDSA P-256"):
         load_verifier_from_env()
     monkeypatch.delenv("SERVICE_JWT_PUBLIC_KEY_bad")
     monkeypatch.setenv(
-        "SERVICE_JWT_PUBLIC_KEY_../x", _pem_pub(Ed25519PrivateKey.generate())
+        "SERVICE_JWT_PUBLIC_KEY_../x", _pem_pub(ec.generate_private_key(ec.SECP256R1()))
     )
     with pytest.raises(ServiceJwtError, match="malformed kid"):
         load_verifier_from_env()

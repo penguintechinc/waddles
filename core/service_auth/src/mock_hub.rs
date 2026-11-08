@@ -97,14 +97,34 @@ pub enum JwksReply {
 }
 
 impl JwksReply {
-    /// One Ed25519 key (`x` = base64url raw public key).
+    /// One ECDSA P-256 key (`x`/`y` = base64url public coordinates).
+    #[must_use]
+    pub fn es256(kid: &str, x: &str, y: &str) -> Self {
+        Self::Keys(vec![es256_jwk(kid, x, y)])
+    }
+
+    /// One legacy Ed25519 key (`x` = base64url raw public key).
     #[must_use]
     pub fn ed25519(kid: &str, x: &str) -> Self {
         Self::Keys(vec![ed25519_jwk(kid, x)])
     }
 }
 
-/// An Ed25519 JWK entry as hub-api serves it.
+/// An ES256 (`EC`/`P-256`) JWK entry as hub-api serves it.
+#[must_use]
+pub fn es256_jwk(kid: &str, x: &str, y: &str) -> Jwk {
+    Jwk {
+        kid: kid.to_owned(),
+        kty: "EC".into(),
+        crv: "P-256".into(),
+        alg: "ES256".into(),
+        r#use: "sig".into(),
+        x: x.to_owned(),
+        y: y.to_owned(),
+    }
+}
+
+/// A legacy Ed25519 JWK entry (served only during the EdDSA window).
 #[must_use]
 pub fn ed25519_jwk(kid: &str, x: &str) -> Jwk {
     Jwk {

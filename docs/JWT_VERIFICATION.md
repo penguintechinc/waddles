@@ -7,7 +7,7 @@ audit). It is non-breaking hardening only: **minting is still HS256** with the s
 widening this one.
 
 Code: `libs/flask_core/flask_core/jwt_hardening.py` (shared primitives),
-`flask_core/auth.py` (platform HS256), `flask_core/service_jwt.py` (service EdDSA),
+`flask_core/auth.py` (platform HS256), `flask_core/service_jwt.py` (service ES256),
 `hub_api/services/sso_oidc.py` (IdP ID tokens). Standard: RFC 8725 (JWT BCP).
 
 ## The three verifiers
@@ -15,7 +15,7 @@ Code: `libs/flask_core/flask_core/jwt_hardening.py` (shared primitives),
 | Verifier (`verifier` label) | Algorithm (exactly one) | Token | Entry point |
 |---|---|---|---|
 | `platform_hs256` | `HS256` | user/session JWT, shared secret | `flask_core.auth.verify_jwt_token` |
-| `service_eddsa` | `EdDSA` | per-service machine JWT, hub-api JWKS | `flask_core.service_jwt.ServiceJwtVerifier.verify` |
+| `service_eddsa` | `ES256` (+ legacy `EdDSA` only while `SERVICE_JWT_ACCEPT_LEGACY_EDDSA=true`) | per-service machine JWT, hub-api JWKS | `flask_core.service_jwt.ServiceJwtVerifier.verify` |
 | `oidc_id_token` | `RS*`/`PS*`/`ES*`/`EdDSA` allow-list, one per token | external IdP ID token | `hub_api.services.sso_oidc` |
 
 **One algorithm per verifier.** The header `alg` is compared (case-sensitively) with the
@@ -140,3 +140,24 @@ CRITICAL (`no_key`). The token, its claims, header values and the JWT library's 
   migrate them onto `inspect_header` / `record_verification` module by module.
 - Phase 1+: JWKS endpoint, ES256 minting with real `kid`s, a second (asymmetric) platform
   verifier, then retire HS256.
+
+## Service JWT ES256 cut-over (EdDSA legacy window)
+
+Service (machine) JWTs are signed **ES256** (ECDSA P-256 / SHA-256). hub-api's JWKS publishes
+`{"kty":"EC","crv":"P-256","kid","x","y","alg":"ES256"}`; rotate by adding a new `kid`, flipping
+`SERVICE_JWT_ACTIVE_KID`, and dropping the old key after its longest-lived token expires.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `SERVICE_JWT_ACCEPT_LEGACY_EDDSA` (chart `serviceJwt.acceptLegacyEddsa`) | `false` | `true` additionally accepts `EdDSA` tokens verified against Ed25519 (`OKP`) keys. Bounded rollout window only -- set back to `false` afterwards. Never affects issuance. |
+
+Rules enforced by every verifier (Python `flask_core.service_jwt`, Rust `core/service_auth`,
+`core/egress_assertion`, `core/egress_proxy`, `core/svc_presentation`):
+
+- `alg` must be `ES256` (or `EdDSA` while the flag is on); `none`, `HS*`, `RS*`, `ES384`, ... are `alg_mismatch`.
+- The key resolved by `kid` must be of the family `alg` claims (an `EdDSA` token naming a P-256 `kid` is refused).
+- The flag is parsed strictly (`true`/`false`); anything else fails startup.
+- With the flag off, `OKP` entries in the served JWKS are skipped with a warning (hub-api may still publish them mid-rollout).
+- Operator key generation: `KID=<kid> NAMESPACE=<ns> make generate-service-jwt-key`
+  (`openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve`).
+  Metric label `verifier=service_eddsa` is kept for dashboard continuity; the `alg` label reads `es256`/`eddsa`.

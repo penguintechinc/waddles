@@ -177,52 +177,30 @@ pub fn push_credential(community_id: i64) -> PushCredential {
     }
 }
 
-// -- Real-JWT fixtures: an Ed25519 keypair (PKCS8 private DER / raw public)
-// generated once with `openssl genpkey -algorithm ed25519`, identical to
+// -- Real-JWT fixtures: an ECDSA P-256 keypair (PKCS8 private DER / JWK x,y)
+// generated once with `cryptography`, identical to
 // the test keypair `core/overlay_auth` and `core/service_auth` use. Never
 // used outside tests.
 
 const TEST_PRIV_DER: &[u8] = &[
-    48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 68, 3, 89, 171, 105, 151, 46, 132,
-    159, 252, 253, 237, 160, 158, 76, 76, 117, 168, 49, 93, 237, 107, 129, 150, 211, 28, 65, 232,
-    226, 2, 111, 69,
+    48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206, 61, 3,
+    1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 209, 234, 92, 37, 28, 130, 216, 139, 48, 1, 225, 220,
+    88, 158, 30, 88, 20, 126, 43, 7, 182, 151, 62, 129, 248, 115, 187, 119, 18, 12, 142, 93, 161,
+    68, 3, 66, 0, 4, 17, 138, 186, 198, 3, 136, 154, 139, 190, 114, 14, 103, 123, 44, 247, 26, 31,
+    171, 203, 86, 236, 40, 175, 97, 236, 72, 32, 22, 179, 142, 109, 144, 173, 115, 191, 94, 95,
+    104, 151, 149, 88, 212, 250, 138, 99, 63, 147, 180, 150, 85, 29, 12, 130, 136, 7, 86, 162, 99,
+    191, 4, 123, 168, 238, 207,
 ];
-const TEST_PUB_RAW: &[u8] = &[
-    89, 221, 212, 205, 236, 61, 210, 204, 150, 160, 132, 29, 103, 16, 191, 115, 187, 222, 12, 175,
-    169, 67, 5, 83, 51, 1, 220, 184, 65, 145, 95, 187,
-];
-
-/// Unpadded base64url, the encoding a JWKS `x` member uses.
-fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
-        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        if chunk.len() > 1 {
-            out.push(ALPHABET[(n >> 6) as usize & 63] as char);
-        }
-        if chunk.len() > 2 {
-            out.push(ALPHABET[n as usize & 63] as char);
-        }
-    }
-    out
-}
+const TEST_X: &str = "EYq6xgOImou-cg5neyz3Gh-ry1bsKK9h7EggFrOObZA";
+const TEST_Y: &str = "rXO_Xl9ol5VY1PqKYz-TtJZVHQyCiAdWomO_BHuo7s8";
 
 /// Serves hub-api's JWKS over gRPC (a real in-process `ServiceAuthService`; the test public key
 /// as `kid` `k1`) on an ephemeral loopback port and returns its endpoint. The server lives until
 /// the test's runtime ends.
 pub async fn spawn_jwks_server() -> String {
     service_auth::test_support::MockHub::builder()
-        .jwks(vec![service_auth::test_support::JwksReply::ed25519(
-            "k1",
-            &base64url(TEST_PUB_RAW),
+        .jwks(vec![service_auth::test_support::JwksReply::es256(
+            "k1", TEST_X, TEST_Y,
         )])
         .start_detached()
         .await
@@ -244,12 +222,12 @@ pub fn sign_push_token(community_id: i64) -> String {
         exp: now + 300,
         jti: "test-jti".into(),
     };
-    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
     header.kid = Some("k1".to_string());
     jsonwebtoken::encode(
         &header,
         &claims,
-        &jsonwebtoken::EncodingKey::from_ed_der(TEST_PRIV_DER),
+        &jsonwebtoken::EncodingKey::from_ec_der(TEST_PRIV_DER),
     )
     .expect("sign test JWT")
 }

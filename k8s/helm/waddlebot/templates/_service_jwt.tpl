@@ -1,6 +1,6 @@
 {{/*
-Reusable snippets for the per-service EdDSA machine JWT mechanism
-(feature/eddsa-machine-jwt, values.yaml `serviceJwt`).
+Reusable snippets for the per-service ES256 machine JWT mechanism
+(values.yaml `serviceJwt`).
 
 "waddlebot.serviceJwtBootstrapVolume" -- the projected ServiceAccount
 token volume a calling service (svc-process, svc-action, ...) mounts to
@@ -87,4 +87,16 @@ none of it renders in base/beta/prod where the Python svc-presentation is still 
 */}}
 {{- define "waddlebot.svcActionOverlayPush" -}}
 {{- if and .Values.pipeline.svcPresentation.enabled .Values.presentation.rust.enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+`SERVICE_JWT_ACCEPT_LEGACY_EDDSA` env entry for every service that VERIFIES a service JWT
+(hub-api, egress-proxy, svc-presentation, Python verifiers). Always rendered with an explicit
+"true"/"false" so the verifier's strict parser never falls back on an unset default. Include as:
+
+  {{- include "waddlebot.serviceJwtAcceptLegacyEnv" . | nindent 8 }}
+*/}}
+{{- define "waddlebot.serviceJwtAcceptLegacyEnv" -}}
+- name: SERVICE_JWT_ACCEPT_LEGACY_EDDSA
+  value: {{ .Values.serviceJwt.acceptLegacyEddsa | default false | quote }}
 {{- end -}}

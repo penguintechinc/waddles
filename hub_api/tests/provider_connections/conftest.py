@@ -373,10 +373,10 @@ def entitlements() -> Iterator[Entitlements]:
 
 @pytest.fixture
 def service_issuer() -> ServiceJwtIssuer:
-    """A real Ed25519 machine-JWT issuer allow-listing the data plane for ``connections:resolve``."""
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    """A real ES256 machine-JWT issuer allow-listing the data plane for ``connections:resolve``."""
+    from cryptography.hazmat.primitives.asymmetric import ec
 
-    private = Ed25519PrivateKey.generate()
+    private = ec.generate_private_key(ec.SECP256R1())
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
     identity = ServiceIdentity(
         service_id=SYSTEM_SERVICE_ID,

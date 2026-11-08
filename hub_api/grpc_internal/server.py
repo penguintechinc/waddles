@@ -16,7 +16,7 @@ TLS is mandatory; SPIFFE-ready (mTLS optional today, `ssl_target_name_
 override`/X.509-SVID slot reserved for when Skauswatch/SPIRE issues
 workload certs -- see `penguintech.md` SPIFFE Identity). Client cert
 verification stays optional until SPIRE is deployed in a given
-environment; the EdDSA machine JWT (`AuthInterceptor`) is the mandatory
+environment; the ES256 machine JWT (`AuthInterceptor`) is the mandatory
 authn layer regardless of whether mTLS is live yet.
 """
 

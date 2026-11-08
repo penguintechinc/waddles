@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.97.0"
 license = "AGPL-3.0-or-later"
 publish = false
-description = "Client + verifier for hub-api-issued per-service EdDSA machine JWTs (feature/eddsa-machine-jwt). Bootstraps over gRPC (hub-api ServiceAuthService, TLS 1.3) with the pod's projected Kubernetes ServiceAccount token, caches and refreshes the resulting machine JWT, and verifies inbound machine JWTs against a JWKS-shaped trust bundle. SPIFFE/Skauswatch-ready: TrustBundle is a trait so a future JWT-SVID bundle source drops in without touching callers -- see docs comment in src/lib.rs."
+description = "Client + verifier for hub-api-issued per-service ES256 machine JWTs. Bootstraps over gRPC (hub-api ServiceAuthService, TLS 1.3) with the pod's projected Kubernetes ServiceAccount token, caches and refreshes the resulting machine JWT, and verifies inbound machine JWTs against a JWKS-shaped trust bundle. SPIFFE/Skauswatch-ready: TrustBundle is a trait so a future JWT-SVID bundle source drops in without touching callers -- see docs comment in src/lib.rs."
 
 [lib]
 name = "service_auth"
@@ -34,10 +34,10 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 # "aws_lc_rs" (not jsonwebtoken's "rust_crypto" feature) -- security review
 # finding: `rust_crypto` bundles ed25519-dalek/hmac/p256/p384/rand/rsa/sha2
-# as one all-or-nothing bucket, so verifying only EdDSA still pulled in the
+# as one all-or-nothing bucket, so verifying only one alg still pulled in the
 # RustSec-flagged `rsa` crate (Marvin-attack timing sidechannel, no safe
 # upgrade -- see deny.toml's `bans.deny` entry for `rsa`). `aws_lc_rs`
-# implements EdDSA (and every other alg jsonwebtoken supports) against
+# implements ES256 + EdDSA (and every other alg jsonwebtoken supports) against
 # AWS-LC directly, with no `rsa` crate anywhere in the dependency graph.
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs"] }
 # =2.0.20 (not =2.0.21) -- core/egress_proxy (feature/egress-proxy-service)

@@ -2,7 +2,7 @@
 
 Starts a REAL Postgres 17 container migrated to Alembic head, boots the REAL hub-api blueprints
 (provider-connections admin + internal data-plane routes + the machine-token endpoint) over it with
-the real vault, the real Ed25519 issuer/verifier and the real ``build_default_registry`` adapters,
+the real vault, the real ES256 issuer/verifier and the real ``build_default_registry`` adapters,
 serves them on a loopback port, writes a JSON manifest the Rust test reads, and blocks until
 SIGTERM/SIGINT (then tears the container down).
 
@@ -44,7 +44,7 @@ os.environ["SECRET_KEY"] = secrets.token_hex(32)
 os.environ["CREDENTIAL_ENCRYPTION_KEY"] = secrets.token_hex(32)
 
 import grpc  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 from flask_core import entitlement  # noqa: E402
 from flask_core.auth import create_jwt_token  # noqa: E402
 from flask_core.database import AsyncDAL  # noqa: E402
@@ -167,7 +167,7 @@ async def _serve(manifest_path: Path) -> None:
         os.environ["SERVICE_JWT_IDENTITIES"] = identities_env
         identities = load_identities_from_env(env="alpha")
         os.environ["LIVE_NAMESPACE"] = next(iter(identities)).k8s_namespace
-        private = Ed25519PrivateKey.generate()
+        private = ec.generate_private_key(ec.SECP256R1())
         issuer = ServiceJwtIssuer(
             keys={"k1": SigningKey(kid="k1", private_key=private, public_key=private.public_key())},
             active_kid="k1",

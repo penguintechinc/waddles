@@ -22,10 +22,6 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
 from cryptography.x509.oid import NameOID
 from flask_core.service_jwt import (
     BootstrapRejected,
@@ -58,7 +54,7 @@ class _AuditLog:
 
 
 def _issuer(tenant: str = "acme", scopes: frozenset[str] | None = None) -> ServiceJwtIssuer:
-    priv = Ed25519PrivateKey.generate()
+    priv = ec.generate_private_key(ec.SECP256R1())
     identity = ServiceIdentity(
         service_id=SERVICE_ID,
         k8s_namespace="waddlebot",
@@ -378,8 +374,8 @@ async def test_jwks_needs_no_credential_and_serves_public_keys_only(
             service_auth_pb2.GetServiceJwksRequest(api_version="v1"), timeout=3.0
         )
     (key,) = response.keys
-    assert (key.kid, key.kty, key.crv, key.alg, key.use) == ("k1", "OKP", "Ed25519", "EdDSA", "sig")
-    assert key.x and key.y == ""
+    assert (key.kid, key.kty, key.crv, key.alg, key.use) == ("k1", "EC", "P-256", "ES256", "sig")
+    assert key.x and key.y
     assert "d" not in service_auth_pb2.Jwk.DESCRIPTOR.fields_by_name  # no private component exists
 
 
@@ -453,13 +449,20 @@ async def test_real_path_mint_then_verify_with_jwks_fetched_over_grpc(
         jwks = await service_auth_pb2_grpc.ServiceAuthServiceStub(channel).GetServiceJwks(
             service_auth_pb2.GetServiceJwksRequest(api_version="v1"), timeout=3.0
         )
-    public = {k.kid: Ed25519PublicKey.from_public_bytes(_b64u_decode(k.x)) for k in jwks.keys}
+    public = {
+        k.kid: ec.EllipticCurvePublicNumbers(
+            int.from_bytes(_b64u_decode(k.x), "big"),
+            int.from_bytes(_b64u_decode(k.y), "big"),
+            ec.SECP256R1(),
+        ).public_key()
+        for k in jwks.keys
+    }
     header = jwt.get_unverified_header(minted.token)
-    assert header["alg"] == "EdDSA" and header["kid"] in public
+    assert header["alg"] == "ES256" and header["kid"] in public
     claims = jwt.decode(
         minted.token,
         public[header["kid"]],
-        algorithms=["EdDSA"],
+        algorithms=["ES256"],
         audience="waddlebot-internal",
     )
     assert claims["sub"] == SERVICE_ID
@@ -468,12 +471,12 @@ async def test_real_path_mint_then_verify_with_jwks_fetched_over_grpc(
     # A token signed by any other key must NOT verify against the served JWKS.
     forged = jwt.encode(
         {"sub": SERVICE_ID, "aud": "waddlebot-internal"},
-        Ed25519PrivateKey.generate(),
-        algorithm="EdDSA",
+        ec.generate_private_key(ec.SECP256R1()),
+        algorithm="ES256",
         headers={"kid": "k1"},
     )
     with pytest.raises(jwt.InvalidSignatureError):
-        jwt.decode(forged, public["k1"], algorithms=["EdDSA"], audience="waddlebot-internal")
+        jwt.decode(forged, public["k1"], algorithms=["ES256"], audience="waddlebot-internal")
 
 
 async def test_real_client_surfaces_server_rejection_as_service_token_error(

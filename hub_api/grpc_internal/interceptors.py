@@ -94,7 +94,7 @@ class DeadlineInterceptor(grpc.aio.ServerInterceptor):
 
 @dataclass(slots=True)
 class AuthInterceptor(grpc.aio.ServerInterceptor):
-    """Verifies the `authorization` metadata's EdDSA machine JWT on every RPC.
+    """Verifies the `authorization` metadata's ES256 machine JWT on every RPC.
 
     `required_scopes` maps a full gRPC method name (e.g.
     ``/waddles.hub.internal.v1.IdentityService/MintEphemeralPseudonyms``) to

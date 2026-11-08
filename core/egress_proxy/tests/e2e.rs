@@ -24,35 +24,39 @@ use service_auth::{ServiceClaims, TrustBundle};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-// PKCS8/SPKI-DER-encoded Ed25519 test keypair for `svc-process`'s own
+// PKCS8/SPKI-DER-encoded ECDSA P-256 test keypair for `svc-process`'s own
 // identity (identical fixture to core/service_auth's own test module --
 // test-only, never used outside this file). Post-redesign: this single
 // per-service key signs *both* the machine JWT and the allowlist
 // assertion, verified via the same `kid` against the same trust bundle --
 // simulating `svc-process`'s real key, not a separate hub-api-held one.
 const SVC_PROCESS_PRIV_DER: &[u8] = &[
-    48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 1, 204, 5, 142, 35, 153, 231, 38,
-    150, 122, 1, 218, 34, 237, 70, 125, 233, 62, 126, 103, 151, 16, 11, 238, 95, 122, 209, 74, 183,
-    9, 171, 161,
+    48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206, 61, 3,
+    1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 209, 234, 92, 37, 28, 130, 216, 139, 48, 1, 225, 220,
+    88, 158, 30, 88, 20, 126, 43, 7, 182, 151, 62, 129, 248, 115, 187, 119, 18, 12, 142, 93, 161,
+    68, 3, 66, 0, 4, 17, 138, 186, 198, 3, 136, 154, 139, 190, 114, 14, 103, 123, 44, 247, 26, 31,
+    171, 203, 86, 236, 40, 175, 97, 236, 72, 32, 22, 179, 142, 109, 144, 173, 115, 191, 94, 95,
+    104, 151, 149, 88, 212, 250, 138, 99, 63, 147, 180, 150, 85, 29, 12, 130, 136, 7, 86, 162, 99,
+    191, 4, 123, 168, 238, 207,
 ];
-const SVC_PROCESS_PUB_RAW: &[u8] = &[
-    169, 90, 255, 23, 51, 151, 156, 147, 56, 247, 214, 168, 76, 160, 67, 99, 211, 238, 208, 5, 69,
-    236, 245, 115, 4, 81, 1, 42, 23, 107, 4, 187,
-];
+const SVC_PROCESS_X: &str = "EYq6xgOImou-cg5neyz3Gh-ry1bsKK9h7EggFrOObZA";
+const SVC_PROCESS_Y: &str = "rXO_Xl9ol5VY1PqKYz-TtJZVHQyCiAdWomO_BHuo7s8";
 
-// A second, distinct Ed25519 test keypair simulating a *different* calling
+// A second, distinct ECDSA P-256 test keypair simulating a *different* calling
 // service (`svc-action`) -- used only to prove an assertion signed by one
 // service's key can never authorize a connection authenticated under a
 // different service's machine JWT.
 const SVC_ACTION_PRIV_DER: &[u8] = &[
-    48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 77, 65, 83, 87, 2, 13, 121, 231, 125,
-    130, 252, 109, 198, 133, 79, 69, 66, 86, 80, 167, 34, 213, 224, 124, 197, 5, 224, 50, 184, 86,
-    125, 220,
+    48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206, 61, 3,
+    1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 20, 206, 40, 170, 137, 187, 67, 100, 72, 148, 97, 198,
+    42, 118, 251, 253, 181, 175, 151, 157, 190, 138, 70, 223, 254, 35, 143, 55, 95, 203, 51, 94,
+    161, 68, 3, 66, 0, 4, 98, 209, 209, 125, 68, 215, 236, 61, 124, 80, 33, 30, 98, 233, 193, 159,
+    144, 225, 217, 28, 227, 168, 123, 73, 147, 40, 25, 77, 49, 223, 224, 212, 176, 207, 231, 228,
+    170, 8, 191, 45, 65, 72, 8, 104, 108, 95, 236, 201, 40, 162, 111, 235, 130, 235, 181, 132, 203,
+    245, 163, 102, 27, 85, 90, 176,
 ];
-const SVC_ACTION_PUB_RAW: &[u8] = &[
-    189, 125, 13, 22, 108, 145, 95, 109, 95, 172, 1, 244, 132, 99, 244, 47, 253, 151, 89, 153, 142,
-    44, 125, 48, 4, 254, 117, 34, 146, 239, 144, 185,
-];
+const SVC_ACTION_X: &str = "YtHRfUTX7D18UCEeYunBn5Dh2RzjqHtJkygZTTHf4NQ";
+const SVC_ACTION_Y: &str = "sM_n5KoIvy1BSAhobF_sySiib-uC67WEy_WjZhtVWrA";
 
 struct StaticTrustBundle(Mutex<HashMap<String, DecodingKey>>);
 
@@ -65,15 +69,15 @@ impl TrustBundle for StaticTrustBundle {
 
 fn svc_process_keypair() -> (EncodingKey, DecodingKey) {
     (
-        EncodingKey::from_ed_der(SVC_PROCESS_PRIV_DER),
-        DecodingKey::from_ed_der(SVC_PROCESS_PUB_RAW),
+        EncodingKey::from_ec_der(SVC_PROCESS_PRIV_DER),
+        DecodingKey::from_ec_components(SVC_PROCESS_X, SVC_PROCESS_Y).expect("test P-256 key"),
     )
 }
 
 fn svc_action_keypair() -> (EncodingKey, DecodingKey) {
     (
-        EncodingKey::from_ed_der(SVC_ACTION_PRIV_DER),
-        DecodingKey::from_ed_der(SVC_ACTION_PUB_RAW),
+        EncodingKey::from_ec_der(SVC_ACTION_PRIV_DER),
+        DecodingKey::from_ec_components(SVC_ACTION_X, SVC_ACTION_Y).expect("test P-256 key"),
     )
 }
 
@@ -98,13 +102,13 @@ fn make_machine_jwt(enc: &EncodingKey, kid: &str, aud: &str, sub: &str, scope: &
         exp: now + 300,
         jti: "test-jti".into(),
     };
-    let mut header = Header::new(Algorithm::EdDSA);
+    let mut header = Header::new(Algorithm::ES256);
     header.kid = Some(kid.into());
     jsonwebtoken::encode(&header, &claims, enc).unwrap()
 }
 
 fn make_assertion_jwt(enc: &EncodingKey, kid: &str, assertion: &EgressAssertion) -> String {
-    let mut header = Header::new(Algorithm::EdDSA);
+    let mut header = Header::new(Algorithm::ES256);
     header.kid = Some(kid.into());
     jsonwebtoken::encode(&header, assertion, enc).unwrap()
 }
@@ -988,24 +992,26 @@ async fn forward_authorization_header_is_mapped_to_real_authorization_for_destin
 // crates on either side of the `egress_assertion` shared wire format still
 // agree end to end, not just that each compiles against the same struct.
 
-// PKCS8-DER-encoded Ed25519 test keypair (fixed, test-only, distinct from
+// PKCS8-DER-encoded ECDSA P-256 test keypair (fixed, test-only, distinct from
 // the SVC_PROCESS_*/SVC_ACTION_* pairs above purely so these tests don't
 // share key material with the hand-forged-assertion tests) -- generated
-// once with `openssl genpkey -algorithm ed25519` / `openssl pkey -pubout`,
+// once with `cryptography` (`ec.generate_private_key(SECP256R1)`),
 // never used outside this test module.
 const BUNDLE_SIGNER_PRIV_DER: &[u8] = &[
-    48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 13, 186, 244, 23, 103, 115, 237, 53,
-    220, 205, 68, 209, 2, 224, 53, 221, 134, 143, 240, 210, 4, 242, 252, 217, 89, 189, 18, 56, 10,
-    231, 127, 112,
+    48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206, 61, 3,
+    1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 5, 141, 137, 98, 240, 218, 95, 207, 111, 113, 100, 75,
+    53, 219, 152, 43, 16, 87, 42, 85, 108, 104, 202, 132, 229, 12, 110, 11, 136, 96, 25, 199, 161,
+    68, 3, 66, 0, 4, 100, 115, 14, 223, 78, 227, 164, 172, 191, 236, 5, 213, 49, 184, 197, 30, 3,
+    229, 175, 132, 88, 50, 67, 225, 94, 222, 30, 163, 242, 240, 234, 7, 144, 86, 17, 151, 0, 96,
+    122, 94, 233, 244, 109, 107, 245, 212, 222, 190, 85, 129, 69, 32, 250, 134, 62, 76, 44, 53,
+    196, 18, 78, 28, 240, 45,
 ];
-const BUNDLE_SIGNER_PUB_RAW: &[u8] = &[
-    203, 153, 62, 224, 216, 7, 49, 241, 132, 82, 7, 74, 194, 22, 36, 114, 13, 239, 65, 192, 119,
-    152, 28, 118, 139, 213, 71, 250, 45, 191, 130, 148,
-];
+const BUNDLE_SIGNER_X: &str = "ZHMO307jpKy_7AXVMbjFHgPlr4RYMkPhXt4eo_Lw6gc";
+const BUNDLE_SIGNER_Y: &str = "kFYRlwBgel7p9G1r9dTevlWBRSD6hj5MLDXEEk4c8C0";
 const BUNDLE_SIGNER_SUB: &str = "spiffe://penguintech.io/alpha/svc-process";
 
-/// Minimal PKCS8 PEM encoder for the fixed Ed25519 private key DER above --
-/// `AssertionSigningKey::from_ed25519_pem` (the only public constructor
+/// Minimal PKCS8 PEM encoder for the fixed P-256 private key DER above --
+/// `AssertionSigningKey::from_ec_pem` (the only public constructor
 /// `bundle_host_http`'s signer has for injecting raw key bytes in a test)
 /// takes PEM, not DER. Avoids a `base64` dev-dependency purely to wrap a
 /// fixed 48-byte blob in PKCS8 armor; the label is built from parts (not a
@@ -1014,7 +1020,7 @@ const BUNDLE_SIGNER_SUB: &str = "spiffe://penguintech.io/alpha/svc-process";
 /// heuristic on a string it merely resembles. Mirrors
 /// `core/bundle_host_http/src/egress.rs`'s own test-only helper of the same
 /// shape.
-fn pem_encode_ed25519_private_key(der: &[u8]) -> Vec<u8> {
+fn pem_encode_private_key(der: &[u8]) -> Vec<u8> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut b64 = String::new();
     for chunk in der.chunks(3) {
@@ -1049,11 +1055,11 @@ fn pem_encode_ed25519_private_key(der: &[u8]) -> Vec<u8> {
 }
 
 fn bundle_signer() -> EgressAssertionSigner {
-    let signing_key = AssertionSigningKey::from_ed25519_pem(
-        &pem_encode_ed25519_private_key(BUNDLE_SIGNER_PRIV_DER),
+    let signing_key = AssertionSigningKey::from_ec_pem(
+        &pem_encode_private_key(BUNDLE_SIGNER_PRIV_DER),
         "k-bundle",
     )
-    .expect("valid Ed25519 PEM");
+    .expect("valid P-256 PEM");
     EgressAssertionSigner::new(
         BUNDLE_SIGNER_SUB,
         "tenant-1",
@@ -1066,12 +1072,12 @@ fn bundle_signer() -> EgressAssertionSigner {
 fn bundle_signer_trust_bundle() -> StaticTrustBundle {
     StaticTrustBundle(Mutex::new(HashMap::from([(
         "k-bundle".to_string(),
-        DecodingKey::from_ed_der(BUNDLE_SIGNER_PUB_RAW),
+        DecodingKey::from_ec_components(BUNDLE_SIGNER_X, BUNDLE_SIGNER_Y).expect("test P-256 key"),
     )])))
 }
 
 fn bundle_signer_machine_jwt() -> String {
-    let enc = EncodingKey::from_ed_der(BUNDLE_SIGNER_PRIV_DER);
+    let enc = EncodingKey::from_ec_der(BUNDLE_SIGNER_PRIV_DER);
     make_machine_jwt(
         &enc,
         "k-bundle",
@@ -1169,11 +1175,11 @@ async fn bundle_host_http_signed_assertion_expired_is_rejected() {
     )]));
     let replay_cache = InMemoryReplayCache::new();
 
-    let signing_key = AssertionSigningKey::from_ed25519_pem(
-        &pem_encode_ed25519_private_key(BUNDLE_SIGNER_PRIV_DER),
+    let signing_key = AssertionSigningKey::from_ec_pem(
+        &pem_encode_private_key(BUNDLE_SIGNER_PRIV_DER),
         "k-bundle",
     )
-    .expect("valid Ed25519 PEM");
+    .expect("valid P-256 PEM");
     let mut claims = egress_assertion::build_assertion(
         BUNDLE_SIGNER_SUB,
         "tenant-1",
@@ -1221,11 +1227,11 @@ async fn bundle_host_http_signed_assertion_wrong_sub_is_rejected() {
 
     // Signed under the registered `k-bundle` key, but the `sub` claim
     // names a different service than the machine JWT authenticates.
-    let signing_key = AssertionSigningKey::from_ed25519_pem(
-        &pem_encode_ed25519_private_key(BUNDLE_SIGNER_PRIV_DER),
+    let signing_key = AssertionSigningKey::from_ec_pem(
+        &pem_encode_private_key(BUNDLE_SIGNER_PRIV_DER),
         "k-bundle",
     )
-    .expect("valid Ed25519 PEM");
+    .expect("valid P-256 PEM");
     let claims = egress_assertion::build_assertion(
         "spiffe://penguintech.io/alpha/svc-action",
         "tenant-1",

@@ -117,6 +117,7 @@ spec:
           value: {{ .Values.serviceJwt.audience | quote }}
         - name: MACHINE_JWT_TRUSTED_ISSUERS
           value: "hub-api"
+        {{- include "waddlebot.serviceJwtAcceptLegacyEnv" . | nindent 8 }}
         - name: MACHINE_JWT_REQUIRED_SCOPE
           value: {{ .Values.egressProxy.machineJwtRequiredScope | quote }}
         - name: ALLOWED_CALLER_SERVICES

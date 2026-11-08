@@ -141,6 +141,7 @@ spec:
           value: {{ .Values.serviceJwt.audience | quote }}
         - name: SERVICE_JWT_BOOTSTRAP_AUDIENCE
           value: {{ .Values.serviceJwt.bootstrapAudience | quote }}
+        {{- include "waddlebot.serviceJwtAcceptLegacyEnv" . | nindent 8 }}
         # `grpc_internal/service_auth_servicer.py`'s allow-list -- see
         # templates/_service_jwt.tpl::waddlebot.serviceJwtIdentitiesJson.
         - name: SERVICE_JWT_IDENTITIES

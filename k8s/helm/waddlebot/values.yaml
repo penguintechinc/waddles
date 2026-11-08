@@ -3373,7 +3373,7 @@ spire:
     upstreamRoot:
       enabled: false
 
-# Per-service EdDSA machine JWTs (feature/eddsa-machine-jwt) -- replaces
+# Per-service ES256 (ECDSA P-256 / SHA-256) machine JWTs -- replaces
 # the platform-wide HS256 shared SECRET_KEY / static API keys for
 # service-to-service calls, starting with the new internal PII endpoints.
 # SPIFFE-ready by design (see libs/flask_core/flask_core/service_jwt.py
@@ -3388,6 +3388,11 @@ serviceJwt:
   # Safe to commit -- these are public keys. Populated by the "Public key"
   # line `make generate-service-jwt-key` prints after each rotation.
   publicKeys: {}
+  # ES256 cut-over rollout window: when true, verifiers (hub-api, egress-proxy,
+  # svc-presentation, Python flask_core verifiers) ALSO accept legacy EdDSA tokens/keys
+  # (env SERVICE_JWT_ACCEPT_LEGACY_EDDSA). Issuance is ES256 only regardless. Default false
+  # (ES256 only) -- enable only for a bounded rollout window, then set back to false.
+  acceptLegacyEddsa: false
   audience: waddlebot-internal
   # Audience the bootstrap ServiceAccount token projection (below) must
   # request -- hub-api's TokenReview call rejects any other audience.
@@ -3515,7 +3520,7 @@ serviceJwt:
 # out-of-band controller owns this Secret name and will populate it before the
 # consuming workload starts) or the Secret was pre-created by an operator. See
 # templates/auto-provisioned-secrets.yaml (symmetric keys, pure Helm template) and
-# templates/auto-provisioned-keys-job.yaml (Ed25519 keys, needs openssl -- Sprig/Helm
+# templates/auto-provisioned-keys-job.yaml (Ed25519/P-256 keys, needs openssl -- Sprig/Helm
 # has no Ed25519-pubkey-from-privkey primitive) + chart README "Self-provisioned
 # platform keys" section.
 autoProvisionedKeys:
@@ -3549,7 +3554,7 @@ autoProvisionedKeys:
     publicKeyConfigMapName: ""  # default: "<fullname>-bundle-signing-public" when empty
     keyId: "waddlebot-1"
     externalSecret: false
-  # feature/eddsa-machine-jwt (PR #438) -- per-service EdDSA machine-JWT signing key.
+  # PR #438 -- per-service ES256 (ECDSA P-256) machine-JWT signing key.
   # Private half: SERVICE_JWT_PRIVATE_KEY_<kid>/SERVICE_JWT_ACTIVE_KID in secretName
   # (hub-api only, the sole issuer). Public half: published to
   # publicKeyConfigMapName for hub-api's own verification path and any other service
