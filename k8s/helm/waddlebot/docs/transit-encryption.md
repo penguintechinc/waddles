@@ -21,13 +21,18 @@ connection, never per request.
 
 ## One trust root (F8)
 
-- **cert-manager on** (`global.transitTls.certManager.enabled`: dal2alpha, beta, gamma, production): the Postgres, SeaweedFS
-  and Valkey server certs are issued by the shared `waddlebot-internal-ca` ClusterIssuer (the same issuer as the host-API/gRPC
-  mTLS and hub-api HTTPS certs; `global.internalTransitTls.certManager.issuerName`, when set, overrides it). ECDSA P-256,
-  `ecdsa-with-SHA256`, 90d auto-renew. SANs are FQDN-only because that CA's critical nameConstraints permit only
-  `*.<ns>.svc.cluster.local`; every client dials the FQDN. Secrets: `<release>-postgres-tls`, `<release>-seaweedfs-tls`,
-  `<release>-valkey-tls`. Every client mounts `ca.crt` from the one `<release>-postgres-tls` Secret (the same CA bytes for all
-  three hops). No self-generated CA exists in this mode; `global.valkeyTls.externalSecret` is ignored (cert-manager owns it).
+- **cert-manager on** (`global.transitTls.certManager.enabled`: dal2alpha, beta, gamma, production): the chart renders a
+  name-constrained, namespaced intermediate CA (`<release>-transit-ca`, ECDSA P-256) issued by the shared `waddlebot-internal-ca`
+  root (`global.internalTransitTls.certManager.issuerName`, when set, overrides the parent), plus a namespaced
+  `Issuer/<release>-transit` over it. Postgres, SeaweedFS and Valkey server certs (`<release>-postgres-tls`,
+  `<release>-seaweedfs-tls`, `<release>-valkey-tls`; ECDSA P-256, 90d auto-renew) are issued by that Issuer only: no other
+  namespace can mint data-store certs, and the intermediate's critical nameConstraints permit only the data-store FQDNs. SANs are
+  explicit FQDNs (durable Valkey: one per StatefulSet pod); **no certificate this chart renders carries a wildcard SAN**
+  (`waddlebot.assertNoWildcardSan` fails the render; the grpc-tls and host-api-tls certs list explicit FQDNs too). Every client
+  mounts `ca.crt` from `<release>-transit-ca`, which is the internal ROOT: servers present leaf+intermediate chains, so one root
+  anchors every hop. No self-generated CA exists in this mode; `global.valkeyTls.externalSecret` is ignored.
+  Verify once after the first rollout that the shared CA is the root: `kubectl -n waddlebot get secret <release>-transit-ca -o
+  jsonpath='{.data.ca\\.crt}' | base64 -d | openssl x509 -noout -subject` must equal the `waddlebot-internal-ca` subject.
 - **cert-manager off** (local, values-alpha): `templates/transit-tls-secret.yaml` self-generates one ECDSA CA plus Postgres and
   SeaweedFS leaves into `<release>-transit-tls` (CA key never stored; pre-install/pre-upgrade hook so the migration Jobs can
   mount it); the legacy Valkey cert keeps its own (now ECDSA) CA. beta/gamma/production never use this path.

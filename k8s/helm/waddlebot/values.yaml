@@ -192,8 +192,12 @@ global:
       enabled: false
       issuerKind: "ClusterIssuer"
       issuerName: "waddlebot-internal-ca"
-      duration: "2160h"    # 90d
+      duration: "2160h"    # 90d leaf
       renewBefore: "360h"  # 15d
+      # Namespaced intermediate CA (<release>-transit-ca) chained from the issuer above; the namespaced Issuer
+      # <release>-transit signs the leaves, so no other namespace can mint data-store certs.
+      caDuration: "8760h"      # 1y
+      caRenewBefore: "1440h"   # 60d
     ca:
       crt: ""
     postgres:

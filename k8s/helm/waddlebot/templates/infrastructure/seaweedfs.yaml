@@ -351,6 +351,7 @@ spec:
         - name: transit-tls
           mountPath: /etc/seaweedfs-tls
           readOnly: true
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         {{- with (include "waddlebot.kms.seaweedfsVolumeMounts" .) }}{{ . | nindent 8 }}{{- end }}
         resources:
           requests:
@@ -379,7 +380,7 @@ spec:
             - /bin/sh
             - -c
             - |
-              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --cacert /etc/seaweedfs-tls/ca.crt --resolve "{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}:127.0.0.1" "https://{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}/")
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --cacert /etc/waddles/transit-ca/ca.crt --resolve "{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}:127.0.0.1" "https://{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}/")
               [ "$code" = "200" ] || [ "$code" = "403" ]
           initialDelaySeconds: 30
           periodSeconds: 30
@@ -391,7 +392,7 @@ spec:
             - /bin/sh
             - -c
             - |
-              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --cacert /etc/seaweedfs-tls/ca.crt --resolve "{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}:127.0.0.1" "https://{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}/")
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --cacert /etc/waddles/transit-ca/ca.crt --resolve "{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}:127.0.0.1" "https://{{ include "waddlebot.transitTls.s3Host" . }}:{{ .Values.infrastructure.seaweedfs.s3Port }}/")
               [ "$code" = "200" ] || [ "$code" = "403" ]
           initialDelaySeconds: 10
           periodSeconds: 15
@@ -405,7 +406,8 @@ spec:
         emptyDir: {}
       - name: tmp
         emptyDir: {}
-      # Server leaf + key + CA from the transit-tls Secret (probes verify against the CA, no -k).
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
+      # Server leaf + key from the transit-tls Secret; probes verify against the shared CA volume above (no -k).
       - name: transit-tls
         secret:
           secretName: {{ include "waddlebot.transitTls.s3SecretName" . }}

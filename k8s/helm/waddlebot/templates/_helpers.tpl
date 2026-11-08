@@ -823,7 +823,8 @@ joined: a stable hash input for waddlebot.hostApiTlsSansSha256, and directly
 {{- define "waddlebot.hostApiTlsDesiredDnsNames" -}}
 {{- $fullname := include "waddlebot.fullname" . -}}
 {{- $ns := .Values.namespace -}}
-{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-bundle-executor" $fullname) (printf "*.%s.svc.cluster.local" $ns) | sortAlpha | join "," -}}
+{{- /* Explicit FQDNs, never a `*.<ns>.svc.cluster.local` wildcard: a wildcard cert from the shared internal CA would let any pod holding it impersonate Postgres/Valkey/S3 (security review HIGH). */ -}}
+{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-bundle-executor" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-bundle-executor.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
 {{- end }}
 
 {{/* sha256 of waddlebot.hostApiTlsDesiredDnsNames -- the waddlebot.io/cert-sans-sha256
@@ -993,6 +994,18 @@ the svc-*-rust VALKEY_URL override sites. Never fires when the durable instance 
 {{- define "waddlebot.valkeyDurableEnabled" -}}
 {{- if .Values.infrastructure.valkeyDurable.enabled -}}
 true
+{{- end -}}
+{{- end }}
+
+{{/*
+Render-time guard (security review HIGH): fails when a Certificate that will be signed by the shared internal CA lists a
+wildcard SAN. Args (dict): what (label for the message), names (list of dnsNames).
+*/}}
+{{- define "waddlebot.assertNoWildcardSan" -}}
+{{- range .names -}}
+{{- if contains "*" . -}}
+{{- fail (printf "%s: wildcard SAN %q is forbidden on a certificate issued by the internal CA -- any pod holding it could impersonate other in-cluster services (Postgres/Valkey/S3). List explicit FQDNs instead." $.what .) -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 

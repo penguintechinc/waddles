@@ -59,11 +59,18 @@ true
 {{- if include "waddlebot.transitTls.cm" . -}}{{ include "waddlebot.fullname" . }}-seaweedfs-tls{{- else -}}{{ include "waddlebot.transitTls.secretName" . }}{{- end -}}
 {{- end }}
 
-{{/* Secret every CLIENT mounts ca.crt from: the one shared trust root. */}}
+{{/*
+Secret every CLIENT mounts ca.crt from: the one shared trust root. cert-manager mode: the namespaced intermediate CA Secret
+(<fullname>-transit-ca) -- its ca.crt is the internal ROOT that signed it, the same trust anchor the host-API/gRPC/hub-api certs use.
+*/}}
 {{- define "waddlebot.transitTls.caSecretName" -}}
-{{- if include "waddlebot.transitTls.cm" . -}}
-{{- if .Values.infrastructure.postgresql.enabled -}}{{ include "waddlebot.transitTls.pgSecretName" . }}{{- else -}}{{ include "waddlebot.transitTls.s3SecretName" . }}{{- end -}}
+{{- if include "waddlebot.transitTls.cm" . -}}{{ include "waddlebot.fullname" . }}-transit-ca
 {{- else -}}{{ include "waddlebot.transitTls.secretName" . }}{{- end -}}
+{{- end }}
+
+{{/* Namespaced CA Issuer (chained from the internal CA) that signs the transit certs -- only this namespace can reference it. */}}
+{{- define "waddlebot.transitTls.nsIssuerName" -}}
+{{- printf "%s-transit" (include "waddlebot.fullname" .) -}}
 {{- end }}
 
 {{/* Server volume `items` (key->path) for Postgres/SeaweedFS: the cert-manager Secret uses tls.crt/tls.key, the static one prefixed keys. */}}
@@ -81,8 +88,6 @@ true
 {{- end -}}
 {{- end }}
 {{- define "waddlebot.transitTls.s3Items" -}}
-- key: ca.crt
-  path: ca.crt
 {{ if include "waddlebot.transitTls.cm" . -}}
 - key: tls.crt
   path: tls.crt
@@ -142,11 +147,42 @@ true
 {{- end -}}
 {{- end }}
 
-{{/* Valkey (cache + durable + kv) server SANs for cert-manager: only names inside the issuer's nameConstraints suffix. */}}
+{{/*
+Valkey (cache + durable + kv) server SANs for cert-manager: explicit FQDNs only -- including every durable StatefulSet pod
+(`<sts>-<i>.<headless>.<ns>.svc.cluster.local`, dialed by `tls-replication yes`), never a wildcard.
+*/}}
 {{- define "waddlebot.transitTls.valkeyCmDnsNames" -}}
+{{- $ns := .Values.namespace -}}
+{{- $out := list (printf "%s.%s.svc.cluster.local" .Values.infrastructure.redis.service.name $ns) -}}
+{{- if .Values.infrastructure.valkeyDurable.enabled -}}
+{{- $d := .Values.infrastructure.valkeyDurable -}}
+{{- $out = append $out (printf "%s.%s.svc.cluster.local" $d.service.name $ns) -}}
+{{- range $i := until (int $d.replicas) -}}
+{{- $out = append $out (printf "valkey-durable-%d.%s.%s.svc.cluster.local" $i $d.service.headlessName $ns) -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.infrastructure.valkeyKv.enabled -}}
+{{- $out = append $out (printf "%s.%s.svc.cluster.local" .Values.infrastructure.valkeyKv.service.name $ns) -}}
+{{- end -}}
+{{- $out | toJson -}}
+{{- end }}
+
+{{/*
+Name-constraint domains of the namespaced intermediate: exactly the data-store FQDNs (a dNSName constraint also permits
+their subdomains, i.e. the durable per-pod names). The Issuer can therefore never sign anything else, even if its key leaks.
+*/}}
+{{- define "waddlebot.transitTls.caPermittedDomains" -}}
+{{- $ns := .Values.namespace -}}
 {{- $out := list -}}
-{{- range (include "waddlebot.valkeyTlsDesiredDnsNames" . | splitList ",") -}}
-{{- if hasSuffix ".svc.cluster.local" . -}}{{- $out = append $out . -}}{{- end -}}
+{{- if .Values.infrastructure.postgresql.enabled -}}{{- $out = append $out (printf "%s.%s.svc.cluster.local" .Values.infrastructure.postgresql.service.name $ns) -}}{{- end -}}
+{{- if .Values.infrastructure.seaweedfs.enabled -}}{{- $out = append $out (printf "%s.%s.svc.cluster.local" .Values.infrastructure.seaweedfs.service.name $ns) -}}{{- end -}}
+{{- if .Values.infrastructure.redis.tls.enabled -}}
+{{- $out = append $out (printf "%s.%s.svc.cluster.local" .Values.infrastructure.redis.service.name $ns) -}}
+{{- if .Values.infrastructure.valkeyDurable.enabled -}}
+{{- $out = append $out (printf "%s.%s.svc.cluster.local" .Values.infrastructure.valkeyDurable.service.name $ns) -}}
+{{- $out = append $out (printf "%s.%s.svc.cluster.local" .Values.infrastructure.valkeyDurable.service.headlessName $ns) -}}
+{{- end -}}
+{{- if .Values.infrastructure.valkeyKv.enabled -}}{{- $out = append $out (printf "%s.%s.svc.cluster.local" .Values.infrastructure.valkeyKv.service.name $ns) -}}{{- end -}}
 {{- end -}}
 {{- $out | toJson -}}
 {{- end }}
