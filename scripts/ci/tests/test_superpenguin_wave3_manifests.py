@@ -1,10 +1,10 @@
 """Wave-3 SuperPenguinTV utility ports: manifests agree, grants match the real service catalogs, no secrets in the guest."""
 
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
 import yaml
+from defusedxml import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[3]
 NAMES = (
