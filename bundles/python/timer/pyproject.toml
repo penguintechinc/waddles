@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-timer"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!timer` -> recurring auto-announcement messages (add/del/list/enable/disable/reset), kv-only, posted on chat activity because no scheduler/tick event exists. Original Waddles implementation."
 requires-python = ">=3.13"
 dependencies = []
