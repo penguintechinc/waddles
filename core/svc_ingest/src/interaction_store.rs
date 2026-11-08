@@ -76,6 +76,12 @@ pub struct InteractionRecord {
     /// answer it (fail closed).
     #[serde(default)]
     pub routed_community_id: Option<i64>,
+    /// Raw Discord user id of the INVOKER, captured from the signature/gateway-verified frame
+    /// (`member.user.id`, else `user.id`). The routing step derives the actor from it, so a
+    /// guest event naming someone else's interaction cannot be routed (confused deputy).
+    /// `None` = not captured: routing refuses. Never logged (`Debug` redacts it).
+    #[serde(default)]
+    pub invoker_user_id: Option<String>,
 }
 
 impl std::fmt::Debug for InteractionRecord {
@@ -85,6 +91,7 @@ impl std::fmt::Debug for InteractionRecord {
             .field("token", &"[REDACTED]")
             .field("guild_id", &self.guild_id)
             .field("routed_community_id", &self.routed_community_id)
+            .field("invoker_user_id", &"[REDACTED]")
             .finish()
     }
 }
@@ -165,6 +172,15 @@ pub fn capture(bytes: &[u8]) -> Result<Captured, CaptureError> {
         Some(Value::String(g)) if is_snowflake(g) => Some(g.clone()),
         Some(_) => return Err(CaptureError::Malformed("guild_id")),
     };
+    // Guild interactions carry `member.user`; DMs carry `user`. Either is verified-frame data.
+    let invoker_user_id = d
+        .get("member")
+        .and_then(|m| m.get("user"))
+        .or_else(|| d.get("user"))
+        .and_then(|u| u.get("id"))
+        .and_then(Value::as_str)
+        .filter(|u| is_snowflake(u))
+        .map(str::to_string);
     Ok(Captured {
         id,
         kind,
@@ -173,6 +189,7 @@ pub fn capture(bytes: &[u8]) -> Result<Captured, CaptureError> {
             token,
             guild_id,
             routed_community_id: None,
+            invoker_user_id,
         },
     })
 }
@@ -187,6 +204,37 @@ pub enum StoreError {
     #[error("interaction record corrupt")]
     Corrupt,
 }
+
+/// Result of the write-once routing script.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteOnce {
+    /// Unknown or expired interaction.
+    Unknown,
+    /// First routing: recorded now.
+    Recorded,
+    /// Already routed to this same community (idempotent success).
+    Same,
+    /// Already routed to a DIFFERENT community: refused, record unchanged.
+    Conflict,
+}
+
+/// Sets `routed_community_id` only while null. Returns 0 unknown, 1 recorded, 2 same,
+/// 3 conflict, 4 corrupt record. `KEEPTTL` preserves the interaction's remaining lifetime.
+const ROUTE_ONCE_LUA: &str = r#"
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local ok, rec = pcall(cjson.decode, raw)
+if not ok or type(rec) ~= 'table' then return 4 end
+local want = tonumber(ARGV[1])
+local cur = rec['routed_community_id']
+if cur == nil or cur == cjson.null then
+  rec['routed_community_id'] = want
+  redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
+  return 1
+end
+if cur == want then return 2 end
+return 3
+"#;
 
 /// Valkey-backed store (one multiplexed connection).
 #[derive(Clone)]
@@ -233,27 +281,45 @@ impl InteractionStore {
         Ok(set.is_some())
     }
 
-    /// Records the community `id` was routed to, keeping the remaining TTL. `true` = updated,
-    /// `false` = unknown/expired. Only the host's routing step calls this; a bundle never can.
+    /// Records the community `id` was routed to, WRITE-ONCE. `true` = `id` is now (or already
+    /// was) routed to exactly `community_id`; `false` = unknown/expired OR already routed to a
+    /// DIFFERENT community (use [`InteractionStore::route_once`] to tell them apart). Only the
+    /// host's routing step calls this; a bundle never can.
     ///
     /// # Errors
     /// [`StoreError::Unavailable`] / [`StoreError::Corrupt`].
     pub async fn set_routed(&self, id: &str, community_id: i64) -> Result<bool, StoreError> {
-        let Some(mut rec) = self.get(id).await? else {
-            return Ok(false);
-        };
-        rec.routed_community_id = Some(community_id);
-        let value = serde_json::to_string(&rec).map_err(|_| StoreError::Corrupt)?;
+        Ok(matches!(
+            self.route_once(id, community_id).await?,
+            RouteOnce::Recorded | RouteOnce::Same
+        ))
+    }
+
+    /// Atomic write-once routing (one Lua script, so concurrent routers cannot interleave):
+    /// sets `routed_community_id` only while it is null, keeps the remaining TTL, treats the
+    /// same community as idempotent success and refuses a different one.
+    ///
+    /// # Errors
+    /// [`StoreError::Unavailable`] when Valkey errors; [`StoreError::Corrupt`] when the stored
+    /// value is not a record or the script answers unexpectedly.
+    pub async fn route_once(&self, id: &str, community_id: i64) -> Result<RouteOnce, StoreError> {
+        if !is_snowflake(id) {
+            return Ok(RouteOnce::Unknown);
+        }
         let mut c = self.conn.clone();
-        let set: Option<String> = redis::cmd("SET")
-            .arg(key(id))
-            .arg(value)
-            .arg("XX")
-            .arg("KEEPTTL")
-            .query_async(&mut c)
+        let code: i64 = redis::Script::new(ROUTE_ONCE_LUA)
+            .key(key(id))
+            .arg(community_id)
+            .invoke_async(&mut c)
             .await
             .map_err(|_| StoreError::Unavailable)?;
-        Ok(set.is_some())
+        match code {
+            0 => Ok(RouteOnce::Unknown),
+            1 => Ok(RouteOnce::Recorded),
+            2 => Ok(RouteOnce::Same),
+            3 => Ok(RouteOnce::Conflict),
+            _ => Err(StoreError::Corrupt),
+        }
     }
 
     /// Looks `id` up; `None` = unknown or expired.
@@ -400,5 +466,78 @@ mod tests {
         assert!(s.put_new(&id, &rec).await.unwrap());
         tokio::time::sleep(Duration::from_millis(2200)).await;
         assert_eq!(s.get(&id).await.unwrap(), None);
+    }
+    #[test]
+    fn the_invoker_is_captured_from_the_verified_frame_and_never_debug_printed() {
+        let guild = capture(&body(
+            json!({"member":{"user":{"id":"700000000000000001"}}}),
+        ))
+        .unwrap();
+        assert_eq!(
+            guild.record.invoker_user_id.as_deref(),
+            Some("700000000000000001")
+        );
+        let dm = capture(&body(json!({"user":{"id":"700000000000000002"}}))).unwrap();
+        assert_eq!(
+            dm.record.invoker_user_id.as_deref(),
+            Some("700000000000000002")
+        );
+        // A non-snowflake or absent user records nothing: routing then refuses (fail closed).
+        let bad = capture(&body(json!({"member":{"user":{"id":"not-an-id"}}}))).unwrap();
+        assert_eq!(bad.record.invoker_user_id, None);
+        assert_eq!(
+            capture(&body(json!({}))).unwrap().record.invoker_user_id,
+            None
+        );
+        assert!(!format!("{guild:?}").contains("700000000000000001"));
+    }
+
+    #[tokio::test]
+    async fn routing_is_write_once_same_is_idempotent_different_is_refused() {
+        // regression: a routed interaction must not be re-routable to another community.
+        let s = store(Duration::from_secs(60)).await;
+        let id = unique_id();
+        let rec = capture(&body(json!({"id": id.clone()}))).unwrap().record;
+        assert!(s.put_new(&id, &rec).await.unwrap());
+        assert_eq!(s.route_once(&id, 5).await.unwrap(), RouteOnce::Recorded);
+        assert_eq!(s.route_once(&id, 5).await.unwrap(), RouteOnce::Same);
+        assert_eq!(s.route_once(&id, 6).await.unwrap(), RouteOnce::Conflict);
+        assert!(s.set_routed(&id, 5).await.unwrap());
+        assert!(!s.set_routed(&id, 6).await.unwrap());
+        let kept = s.get(&id).await.unwrap().unwrap();
+        assert_eq!(kept.routed_community_id, Some(5));
+        assert_eq!(kept.token, "aB-_.9", "the rest of the record is untouched");
+        assert_eq!(
+            s.route_once(&unique_id(), 5).await.unwrap(),
+            RouteOnce::Unknown
+        );
+        assert_eq!(
+            s.route_once("not-a-snowflake", 5).await.unwrap(),
+            RouteOnce::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_routers_cannot_both_win() {
+        let s = store(Duration::from_secs(60)).await;
+        let id = unique_id();
+        let rec = capture(&body(json!({"id": id.clone()}))).unwrap().record;
+        assert!(s.put_new(&id, &rec).await.unwrap());
+        let (a, b) = tokio::join!(s.route_once(&id, 1), s.route_once(&id, 2));
+        let outcomes = [a.unwrap(), b.unwrap()];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| **o == RouteOnce::Recorded)
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| **o == RouteOnce::Conflict)
+                .count(),
+            1
+        );
     }
 }

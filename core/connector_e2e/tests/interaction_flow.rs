@@ -313,6 +313,7 @@ async fn another_guilds_or_an_expired_interaction_cannot_be_answered() {
                 token: IX_TOKEN.into(),
                 guild_id: Some("222000".into()),
                 routed_community_id: Some(COMMUNITY),
+                invoker_user_id: None,
             }
         )
         .await
