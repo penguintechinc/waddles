@@ -1,4 +1,4 @@
-"""Tests for 0082_bundle_community_config: chain, single head, real-PG constraints, downgrade."""
+"""Tests for 0085_bundle_community_config: chain, single head, real-PG constraints, downgrade."""
 
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ requires_docker = pytest.mark.skipif(
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
-_PATH = _ROOT / "alembic" / "versions" / "0082_bundle_community_config.py"
-_PREVIOUS = "0081_spectrum_conn_resource"
+_PATH = _ROOT / "alembic" / "versions" / "0085_bundle_community_config.py"
+_PREVIOUS = "0084_user_active_context"
 
 
 def _load() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("migration_0082", _PATH)
+    spec = importlib.util.spec_from_file_location("migration_0085", _PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -36,22 +36,22 @@ def test_chain_and_id_length() -> None:
     assert len(module.revision) <= 32
 
 
-def test_single_head_contains_0082() -> None:
+def test_single_head_contains_0085() -> None:
     cfg = Config(str(_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
     script = ScriptDirectory.from_config(cfg)
     assert len(script.get_heads()) == 1
-    assert "0082_bundle_community_config" in {r.revision for r in script.walk_revisions()}
+    assert "0085_bundle_community_config" in {r.revision for r in script.walk_revisions()}
 
 
 @requires_docker
 def test_table_constraints_and_downgrade() -> None:
-    with migrated_postgres("0082-bundle-config") as db:
+    with migrated_postgres("0085-bundle-config") as db:
         conn = psycopg2.connect(db.dsn)
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO tenants (slug) VALUES ('t-0082') RETURNING id")
+                cur.execute("INSERT INTO tenants (slug) VALUES ('t-0085') RETURNING id")
                 tenant = cur.fetchone()[0]
                 cur.execute("INSERT INTO communities (tenant_id, name) VALUES (%s, 'c') RETURNING id", (tenant,)) if _has_tenant_col(cur) else cur.execute("INSERT INTO communities (name) VALUES ('c') RETURNING id")
                 community = cur.fetchone()[0]

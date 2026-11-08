@@ -9,7 +9,7 @@ webui --> hub-api gateway --(signed Valkey request)--> host (svc-action) --> ser
 ```
 
 Code: `hub_api/blueprints/v1/bundle_admin_gateway.py`, `services/bundle_admin_gateway_service.py`,
-`services/bundle_tool_transport.py`. Migration `0082_bundle_community_config`.
+`services/bundle_tool_transport.py`. Migration `0085_bundle_community_config`.
 
 ## Manifest blocks (both optional, additive)
 
@@ -101,4 +101,4 @@ Until that consumer ships, calls fail loud (504 `bundle_tool_timeout` or 503
 * `hub_api/tests/test_bundle_admin_gateway_pg_integration.py` -- real Postgres at alembic head, the
   **real reputation hub-manifest**, real signed transport; host side is an emulator that verifies the
   MAC and answers per the bundle's own `output_schema`. Real WASM execution awaits S0.
-* `alembic/tests/test_0082_bundle_community_config.py` -- chain, single head, constraints, downgrade.
+* `alembic/tests/test_0085_bundle_community_config.py` -- chain, single head, constraints, downgrade.

@@ -11,8 +11,8 @@ guard -- two racing saves of the same next version cannot both commit.
 PII: `config` is bundle-schema-validated settings; the gateway refuses to log it. `updated_by`
 is `hub_users.id` only (never a name/email).
 
-Revision ID: 0082_bundle_community_config
-Revises: 0081_spectrum_conn_resource
+Revision ID: 0085_bundle_community_config
+Revises: 0084_user_active_context
 Create Date: 2026-11-07
 """
 
@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0082_bundle_community_config"
-down_revision = "0081_spectrum_conn_resource"
+revision = "0085_bundle_community_config"
+down_revision = "0084_user_active_context"
 branch_labels = None
 depends_on = None
 
