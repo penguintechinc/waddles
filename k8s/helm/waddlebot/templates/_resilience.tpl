@@ -60,6 +60,9 @@ startupProbe:
   httpGet:
     path: {{ .path }}
     port: {{ .port }}
+    {{- if .scheme }}
+    scheme: {{ .scheme }}
+    {{- end }}
   periodSeconds: {{ .root.Values.startupProbe.periodSeconds }}
   timeoutSeconds: 5
   failureThreshold: {{ .root.Values.startupProbe.failureThreshold }}

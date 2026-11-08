@@ -21,6 +21,7 @@ pub mod spec_builder;
 pub mod store;
 pub mod stream_key;
 pub mod telemetry;
+pub mod tls;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -197,6 +198,44 @@ where
 
     tracing::info!(%http_addr, %metrics_addr, "listening");
 
+    // One stop signal fans out to the plaintext listener and the TLS listener.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        http_shutdown.await;
+        let _ = stop_tx.send(true);
+    });
+    let mut plain_stop = stop_rx.clone();
+    let http_shutdown = async move {
+        let _ = plain_stop.wait_for(|stopped| *stopped).await;
+    };
+
+    // Optional in-cluster TLS control-plane listener (hub-api -> svc-streaming).
+    // Misconfigured material is a startup error, never a silent plaintext-only boot.
+    let tls_server = match (
+        config.cli.tls_port,
+        &config.cli.tls_cert_file,
+        &config.cli.tls_key_file,
+    ) {
+        (Some(port), Some(cert), Some(key)) => {
+            let server_config = tls::build_server_config(cert, key)
+                .context("building the TLS control-plane server config")?;
+            let tls_addr = SocketAddr::new(config.cli.bind_addr, port);
+            let tls_listener = tokio::net::TcpListener::bind(tls_addr).await?;
+            tracing::info!(%tls_addr, "tls control plane listening");
+            let mut tls_stop = stop_rx.clone();
+            let router = http::router(state.clone());
+            Some(tls::serve(
+                tls_listener,
+                server_config,
+                router,
+                async move {
+                    let _ = tls_stop.wait_for(|stopped| *stopped).await;
+                },
+            ))
+        }
+        _ => None,
+    };
+
     let http_server = axum::serve(http_listener, http::router(state.clone()))
         .with_graceful_shutdown(http_shutdown);
     let metrics_server = axum::serve(metrics_listener, http::metrics_router(state))
@@ -205,6 +244,12 @@ where
     tokio::try_join!(
         async { http_server.await.map_err(anyhow::Error::from) },
         async { metrics_server.await.map_err(anyhow::Error::from) },
+        async {
+            match tls_server {
+                Some(server) => server.await,
+                None => Ok(()),
+            }
+        },
     )?;
 
     Ok(())

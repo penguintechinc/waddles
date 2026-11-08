@@ -464,7 +464,8 @@ and excluded on that basis) -- stdlib `urllib.request` only, no extra dependency
 Usage: {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
 */}}
 {{- define "waddlebot.waitForHubApiInitContainer" -}}
-{{- $url := printf "http://%s-hub-api-v3.%s.svc.cluster.local:%v/ready" (include "waddlebot.fullname" .) .Values.namespace .Values.pipeline.hubApi.port }}
+{{- $scheme := ternary "https" "http" (not (not (include "waddlebot.transitTlsEnabled" .))) }}
+{{- $url := printf "%s://%s-hub-api-v3.%s.svc.cluster.local:%v/ready" $scheme (include "waddlebot.fullname" .) .Values.namespace .Values.pipeline.hubApi.port }}
 - name: wait-for-hub-api
   image: "{{ .Values.waitForHubApi.image }}"
   imagePullPolicy: IfNotPresent
@@ -486,10 +487,23 @@ Usage: {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
     value: {{ .Values.waitForHubApi.stableIntervalSeconds | quote }}
   - name: MAX_BACKOFF_SECONDS
     value: {{ .Values.waitForHubApi.maxBackoffSeconds | quote }}
+  {{- include "waddlebot.transitCaEnv" . | nindent 2 }}
   command: ["python3", "-c"]
   args:
     - |
-      import os, time, random, sys, urllib.request, urllib.error
+      import os, ssl, time, random, sys, urllib.request, urllib.error
+
+      # F3 -- under global.internalTransitTls the probe VERIFIES hub-api against the internal CA
+      # (INTERNAL_CA_PEM from the Secret); a bad/missing CA is a hard error, never an unverified
+      # or plaintext fallback.
+      ctx = None
+      if os.environ["HUB_API_READY_URL"].startswith("https://"):
+          pem = os.environ.get("INTERNAL_CA_PEM", "").strip()
+          if not pem:
+              print("wait-for-hub-api: https URL but INTERNAL_CA_PEM is empty", file=sys.stderr)
+              sys.exit(1)
+          ctx = ssl.create_default_context(cadata=pem)
+          ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
       url = os.environ["HUB_API_READY_URL"]
       need = int(os.environ["STABLE_CHECKS"])
@@ -505,7 +519,7 @@ Usage: {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       while consecutive < need:
           attempt += 1
           try:
-              with urllib.request.urlopen(url, timeout=3) as resp:
+              with urllib.request.urlopen(url, timeout=3, context=ctx) as resp:
                   ok = resp.status == 200
           except (urllib.error.URLError, OSError) as exc:
               ok = False

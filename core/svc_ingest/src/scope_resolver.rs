@@ -462,6 +462,10 @@ struct ScopeDto {
 /// Refuses a plaintext `http://` hub-api URL unless running in alpha -- the
 /// machine JWT rides this connection.
 pub fn check_transport(hub_api_url: &str, environment: &str) -> Result<(), String> {
+    // INTERNAL_TLS_REQUIRED (chart global.internalTransitTls) forbids http:// in EVERY
+    // environment, alpha included; the alpha carve-out below only applies when unset.
+    let tls = service_auth::internal_tls::InternalTls::from_env().map_err(|e| e.to_string())?;
+    tls.check_url(hub_api_url).map_err(|e| e.to_string())?;
     let lower = hub_api_url.trim().to_ascii_lowercase();
     if lower.starts_with("https://") {
         return Ok(());
@@ -489,10 +493,14 @@ impl HubScopeSource {
     pub fn new(
         base_url: &str,
         jwt: Arc<service_auth::MachineJwtClient>,
-    ) -> Result<Self, reqwest::Error> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .connect_timeout(Duration::from_secs(2))
+    ) -> Result<Self, service_auth::internal_tls::InternalTlsError> {
+        let tls = service_auth::internal_tls::InternalTls::from_env()?;
+        let http = tls
+            .apply(
+                reqwest::Client::builder()
+                    .timeout(Duration::from_secs(3))
+                    .connect_timeout(Duration::from_secs(2)),
+            )
             .build()?;
         Ok(Self {
             http,

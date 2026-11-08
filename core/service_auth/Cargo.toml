@@ -21,7 +21,7 @@ tokio = { version = "=1.53.3", features = ["sync", "time", "rt", "fs"] }
 # rustls-tls chain unconditionally pulls the unmaintained `rustls-pemfile`
 # (RUSTSEC-2025-0134); reqwest >=0.12.13 reads PEM via `rustls-pki-types`
 # directly instead. Matches core/svc_process/Cargo.toml's existing pin.
-reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls", "http2"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 # "aws_lc_rs" (not jsonwebtoken's "rust_crypto" feature) -- security review

@@ -109,7 +109,9 @@ spec:
         # `egress:connect` scope granted in `serviceJwt.identities` (see that
         # block's own comment).
         - name: MACHINE_JWT_JWKS_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}/internal/service-jwks.json"
+          value: {{ printf "%s/internal/service-jwks.json" (include "waddlebot.hubApiBaseUrl" .) | quote }}
+        # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         - name: MACHINE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
         - name: MACHINE_JWT_TRUSTED_ISSUERS

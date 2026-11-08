@@ -108,6 +108,27 @@ global:
   # --set-file global.hostApiTls.tls.key=...), cert-manager (certManager.enabled=true), or
   # externalSecret: true delegating to an out-of-band controller -- auto-generation is
   # alpha/local only, fails closed otherwise.
+  # In-cluster HTTP transit TLS (docs/superpowers/specs/2026-11-08-pod-transit-encryption-audit.md
+  # F3/F4/F6): hub-api, hub-webui, core-data and svc-streaming serve HTTPS with an ECDSA P-256 /
+  # SHA-256 cert minted by cert-manager from the internal CA (ClusterIssuer name below = the one
+  # k8s/dal2alpha/internal-ca.yaml and the feature/transit-tls-core PR provision). Every internal
+  # HTTP client then dials https://<svc>.<ns>.svc.cluster.local (FQDN: the CA's nameConstraints
+  # permit only that form), verifies against the CA mounted at /etc/waddlebot/internal-ca/ca.crt
+  # and REFUSES plaintext (INTERNAL_TLS_REQUIRED=true). enabled=false keeps the legacy plaintext
+  # wiring for local/CI clusters without cert-manager; it is never a runtime fallback -- a failed
+  # handshake always fails loud. Profile: TLS 1.3 preferred / 1.2 floor, X25519|P-256, AES-128-GCM
+  # or ChaCha20-Poly1305, session resumption + pooled keep-alive/HTTP2 connections; stronger
+  # protection is the CNI layer (Cilium WireGuard), not a heavier handshake.
+  internalTransitTls:
+    enabled: false
+    certManager:
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
+      duration: "2160h"    # 90d
+      renewBefore: "360h"  # 15d
+    # svc-streaming TLS control-plane port (hub-api -> svc-streaming); plaintext :8208 stays for
+    # the media/NodePort path only.
+    streamingTlsPort: 8448
   hostApiTls:
     certManager:
       enabled: false
@@ -3148,6 +3169,13 @@ httproute:
   gatewayNamespace: gateway
   hostnames: []
   rules: []
+  # F4 -- used only when global.internalTransitTls.enabled: the Gateway re-encrypts to hub-webui
+  # via a BackendTLSPolicy verifying the internal CA. caPem (public CA cert, optional) renders the
+  # CA ConfigMap; otherwise caConfigMapName must pre-exist (k8s/dal2alpha/APPLY.md).
+  backendTls:
+    apiVersion: gateway.networking.k8s.io/v1alpha3
+    caConfigMapName: ""
+    caPem: ""
 
 # Network Policies — namespace-level ingress isolation
 # When enabled, denies all cross-namespace ingress and allows only

@@ -159,7 +159,9 @@ spec:
         - name: HUB_API_GRPC_ENDPOINT
           value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "%s/internal/service-token" (include "waddlebot.hubApiBaseUrl" .)) | quote }}
+        # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         # Matches the audience-scoped projected token this pod already mounts via
         # waddlebot.serviceJwtBootstrapVolume(Mount) below -- NOT the generic default
         # k8s SA token path (wrong audience, hub-api's TokenReview call would reject

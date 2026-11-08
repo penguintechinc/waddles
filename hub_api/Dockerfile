@@ -45,7 +45,7 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-COPY hub_api/app.py hub_api/config.py hub_api/bootstrap.py ./
+COPY hub_api/app.py hub_api/config.py hub_api/bootstrap.py hub_api/healthcheck.py ./
 COPY hub_api/blueprints ./blueprints
 COPY hub_api/routers ./routers
 COPY hub_api/openapi ./openapi
@@ -65,7 +65,7 @@ EXPOSE 8204
 # k8s/helm/waddlebot/templates/hub-api-grpc-networkpolicy.yaml.
 EXPOSE 50204
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
-  CMD python3 -c "import httpx; resp = httpx.get('http://localhost:8204/healthz'); exit(0 if resp.status_code == 200 else 1)" || exit 1
+  CMD python3 healthcheck.py || exit 1
 
 RUN mkdir -p /var/log/waddlebotlog \
     && groupadd -r appuser && useradd -r -g appuser -m appuser \

@@ -114,6 +114,11 @@ spec:
         - name: http
           containerPort: {{ .Values.pipeline.svcStreaming.port }}
           protocol: TCP
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        - name: https
+          containerPort: {{ .Values.global.internalTransitTls.streamingTlsPort }}
+          protocol: TCP
+        {{- end }}
         - name: metrics
           containerPort: {{ .Values.pipeline.svcStreaming.metricsPort }}
           protocol: TCP
@@ -154,6 +159,16 @@ spec:
           value: "streaming"
         - name: MODULE_PORT
           value: {{ .Values.pipeline.svcStreaming.port | quote }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        # F6 -- TLS control-plane listener for hub-api (core/svc_streaming/src/tls.rs: TLS1.3
+        # preferred / 1.2 floor, ECDSA P-256 cert from the internal CA, h2 + http/1.1 via ALPN).
+        # The plaintext MODULE_PORT stays for probes and the alpha media NodePort only.
+        - name: STREAMING_TLS_PORT
+          value: {{ .Values.global.internalTransitTls.streamingTlsPort | quote }}
+        {{- include "waddlebot.transitServerEnv" . | nindent 8 }}
+        # Internal CA + plaintext refusal for svc-streaming's own hub-api ledger client.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
+        {{- end }}
         - name: RTMP_PORT
           value: {{ .Values.pipeline.svcStreaming.rtmpPort | quote }}
         - name: SRT_PORT
@@ -235,6 +250,9 @@ spec:
           mountPath: {{ .Values.pipeline.svcStreaming.streamDataDir }}
         - name: tmp
           mountPath: /tmp
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- include "waddlebot.transitServerVolumeMount" . | nindent 8 }}
+        {{- end }}
         {{- if $amdDevDri }}
         # amd variant, hostPath fallback (streaming.amd.deviceResource empty). See values.yaml.
         - name: dri
@@ -247,6 +265,9 @@ spec:
           sizeLimit: 512Mi
       - name: tmp
         emptyDir: {}
+      {{- if include "waddlebot.transitTlsEnabled" . }}
+      {{- include "waddlebot.transitServerVolume" (dict "root" . "component" "svc-streaming") | nindent 6 }}
+      {{- end }}
       {{- if $amdDevDri }}
       - name: dri
         hostPath:
@@ -272,6 +293,12 @@ spec:
     targetPort: metrics
     protocol: TCP
     name: metrics
+  {{- if include "waddlebot.transitTlsEnabled" . }}
+  - port: {{ .Values.global.internalTransitTls.streamingTlsPort }}
+    targetPort: https
+    protocol: TCP
+    name: https
+  {{- end }}
   - port: {{ .Values.pipeline.svcStreaming.grpcPort }}
     targetPort: grpc
     protocol: TCP
@@ -318,5 +345,5 @@ spec:
     app.kubernetes.io/component: svc-streaming
 {{- end }}
 # R5 posture: ingress scoped to declared ports, default-deny egress, enforced Tetragon exec allowlist.
-{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-streaming" "ports" (list $.Values.pipeline.svcStreaming.port $.Values.pipeline.svcStreaming.metricsPort $.Values.pipeline.svcStreaming.grpcPort $.Values.pipeline.svcStreaming.rtmpPort (printf "%v/UDP" $.Values.pipeline.svcStreaming.srtPort) (printf "%v-%v/UDP" $.Values.pipeline.svcStreaming.webrtcRangeStart $.Values.pipeline.svcStreaming.webrtcRangeEnd)) "runtime" "rust" "binaries" (list "/app/svc-streaming" "/usr/bin/ffmpeg" "/usr/bin/ffprobe") "egress" "world") }}
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-streaming" "ports" (concat (ternary (list $.Values.global.internalTransitTls.streamingTlsPort) (list) (not (not (include "waddlebot.transitTlsEnabled" $)))) (list $.Values.pipeline.svcStreaming.port $.Values.pipeline.svcStreaming.metricsPort $.Values.pipeline.svcStreaming.grpcPort $.Values.pipeline.svcStreaming.rtmpPort (printf "%v/UDP" $.Values.pipeline.svcStreaming.srtPort) (printf "%v-%v/UDP" $.Values.pipeline.svcStreaming.webrtcRangeStart $.Values.pipeline.svcStreaming.webrtcRangeEnd))) "runtime" "rust" "binaries" (list "/app/svc-streaming" "/usr/bin/ffmpeg" "/usr/bin/ffprobe") "egress" "world") }}
 {{- end }}

@@ -23,6 +23,12 @@ axum = "=0.8.9"
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.1", features = ["trace", "cors"] }
 hyper = { version = "=1.11.1", features = ["full"] }
+# In-cluster TLS control-plane listener (src/tls.rs): rustls (ring) over a hand-rolled accept
+# loop so the existing axum Router is served with ALPN h2/http1.1 -- no new server framework.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12", "ring"] }
+rustls-pki-types = "=1.15.1"
+hyper-util = { version = "=0.1.20", features = ["tokio", "server-auto", "service", "http1", "http2"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tracing = "=0.1.44"
@@ -55,7 +61,7 @@ chrono = { version = "=0.4.45", features = ["serde"] }
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "http2"] }
 sea-orm = { version = "=2.0.2", default-features = false, features = [
     "sqlx-postgres",
     "sqlx-sqlite",

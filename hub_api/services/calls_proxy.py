@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from flask_core.internal_tls import InternalTlsPolicy, PooledClient
 
 from services.errors import ApiError
 from services.event_calendar_proxy import ProxyResult
@@ -99,6 +100,9 @@ class CallsProxyClient:
         URL fails loudly (`StreamingUrlNotConfiguredError`) on the first forwarded call.
         """
         self._explicit_config = config
+        # One pooled HTTP/2 client per loop (TLS+CA per INTERNAL_* policy); the timeout is
+        # applied per request below so a config change never needs a new pool.
+        self._pool = PooledClient()
 
     @property
     def _config(self) -> CallsProxyConfig:
@@ -121,10 +125,15 @@ class CallsProxyClient:
         if authorization:
             headers["Authorization"] = authorization
         try:
-            async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
-                response = await client.request(
-                    method, url, params=params, json=json_body, headers=headers
-                )
+            InternalTlsPolicy.from_env().check_url(url)
+            response = await self._pool.get().request(
+                method,
+                url,
+                params=params,
+                json=json_body,
+                headers=headers,
+                timeout=config.timeout_seconds,
+            )
         except httpx.HTTPError as exc:
             logger.error(
                 "svc-streaming call failed: %s %s -> %s: %s",

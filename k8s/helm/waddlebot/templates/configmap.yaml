@@ -145,7 +145,7 @@ data:
   SPECTRUM_ORG_EMIT_BACKLOG: {{ .Values.config.spectrumOrgEmitBacklog | default false | quote }}
 
   # Service Discovery URLs
-  HUB_API_URL: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:8204"
+  HUB_API_URL: {{ include "waddlebot.hubApiBaseUrl" . | quote }}
   PUBLIC_WEBUI_URL: {{ .Values.webui.publicUrl | quote }}
   # #320 Connections: OAuth redirect_uri base for the per-community connect flow. Empty
   # by default -- hub-api falls back to PUBLIC_WEBUI_URL when this is blank. Override

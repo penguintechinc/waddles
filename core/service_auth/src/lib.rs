@@ -22,6 +22,7 @@
 //! is adopted; it's isolated behind the same client type so callers
 //! (`svc_process`, `svc_action`) don't change either.
 
+pub mod internal_tls;
 pub mod jwt_hardening;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -79,6 +80,8 @@ pub enum ServiceAuthError {
     Http(#[from] reqwest::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("internal TLS policy: {0}")]
+    InternalTls(#[from] internal_tls::InternalTlsError),
 }
 
 /// One verified claim set. Field names mirror the JWT payload directly
@@ -395,9 +398,15 @@ impl HttpTimeouts {
 
     /// Build a `reqwest::Client` with both timeouts set.
     fn build_client(self) -> Result<reqwest::Client, ServiceAuthError> {
-        Ok(reqwest::Client::builder()
-            .connect_timeout(self.connect)
-            .timeout(self.request)
+        // In-cluster HTTPS policy (INTERNAL_CA_FILE / INTERNAL_TLS_REQUIRED): pinned CA,
+        // TLS>=1.2, pooled keep-alive, no plaintext. A bad policy is a hard error.
+        let tls = internal_tls::InternalTls::from_env()?;
+        Ok(tls
+            .apply(
+                reqwest::Client::builder()
+                    .connect_timeout(self.connect)
+                    .timeout(self.request),
+            )
             .build()?)
     }
 }

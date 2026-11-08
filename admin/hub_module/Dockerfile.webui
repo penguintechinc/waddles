@@ -47,7 +47,7 @@ RUN npm ci --omit=dev --ignore-scripts \
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
 # Copy the proxy/static server and the built frontend assets
-COPY --chown=nodejs:nodejs admin/hub_module/webui-server/server.js admin/hub_module/webui-server/proxy.js ./
+COPY --chown=nodejs:nodejs admin/hub_module/webui-server/server.js admin/hub_module/webui-server/proxy.js admin/hub_module/webui-server/tls.js ./
 COPY --chown=nodejs:nodejs --from=frontend-build /build/admin/hub_module/frontend/dist ./dist
 
 ENV NODE_ENV=production
@@ -58,7 +58,7 @@ USER nodejs
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD if [ -n "$TLS_CERT_FILE" ]; then curl -fsk "https://localhost:${PORT:-8080}/health"; else curl -f "http://localhost:${PORT:-8080}/health"; fi || exit 1
 
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "server.js"]

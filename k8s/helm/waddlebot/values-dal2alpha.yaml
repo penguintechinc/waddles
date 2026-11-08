@@ -48,6 +48,13 @@ global:
       enabled: true
       issuerKind: "ClusterIssuer"
       issuerName: "waddlebot-internal-ca"
+  # F3/F4/F6 -- HTTPS between pods for hub-api, hub-webui (Gateway hop), core-data, svc-streaming;
+  # certs from the same internal-CA ClusterIssuer (ECDSA P-256). PREREQ: cert-manager + that issuer.
+  internalTransitTls:
+    enabled: true
+    certManager:
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
   # First-run super-admin bootstrap (PR #256) -- email is non-sensitive and
   # documented so alpha's Playwright e2e suite (tests/k8s/alpha/) has a known
   # login. The password is NOT committed here (fix/alpha-helm-deploy) -- it
