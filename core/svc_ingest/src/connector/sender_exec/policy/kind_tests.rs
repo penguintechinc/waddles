@@ -563,23 +563,156 @@ fn youtube_deletes_are_bodyless_with_an_exact_id_query() {
     }
 }
 
+const KK_HDRS: [(&str, &str); 2] = [
+    ("Authorization", "Bearer {{KICK_TOKEN}}"),
+    ("Content-Type", "application/json"),
+];
+const KK_AUTH: [(&str, &str); 1] = [("Authorization", "Bearer {{KICK_TOKEN}}")];
+const KK_TOKEN_REF: [(&str, &str); 1] = [("{{KICK_TOKEN}}", "token")];
+const KK_MOD_REFS: [(&str, &str); 2] = [
+    ("{{KICK_TOKEN}}", "token"),
+    ("{{KICK_BROADCASTER_ID}}", "broadcaster_id"),
+];
+const KK_BANS: &str = "https://api.kick.com/public/v1/moderation/bans";
+
 #[test]
-fn kick_registers_chat_send_only_and_refuses_everything_else() {
+fn kick_registers_chat_and_moderation_ops_and_refuses_everything_else() {
     let p = PlatformPolicy::kick();
     assert_eq!(p.platform, "kick");
     assert_eq!(p.hosts, ["api.kick.com"]);
-    assert_eq!(registered_op("kick", "chat.send"), Some("chat.send"));
-    // chat.delete needs a Kick channel pin (pin_channel ignores requires_pin for kick) and
-    // moderation needs integer body slots: both refused, never sent.
     for op in [
+        "chat.send",
         "chat.delete",
         "mod.ban",
         "mod.timeout",
         "mod.unban",
-        "dm.send",
-        "",
     ] {
+        assert_eq!(registered_op("kick", op), Some(op), "{op}");
+    }
+    for op in ["dm.send", "mod.kick", "role.add", "eventsub.create", ""] {
         assert!(registered_op("kick", op).is_none(), "{op}");
+    }
+}
+
+#[test]
+fn kick_chat_delete_verifies_a_pinned_id_path_and_refuses_a_body() {
+    let p = PlatformPolicy::kick();
+    let url = "https://api.kick.com/public/v1/chat/828f83bb-e391-4c78-9e91-af35a172840e";
+    let ok = tpl("DELETE", url, &KK_AUTH, None, &KK_TOKEN_REF);
+    assert_eq!(check(&p, "chat.delete", &ok), Ok(()));
+    let with_body = tpl(
+        "DELETE",
+        url,
+        &KK_HDRS,
+        Some(serde_json::json!({})),
+        &KK_TOKEN_REF,
+    );
+    assert!(check(&p, "chat.delete", &with_body).is_err());
+    let wrong_method = tpl("POST", url, &KK_AUTH, None, &KK_TOKEN_REF);
+    assert_eq!(
+        check(&p, "chat.delete", &wrong_method),
+        Err(TemplateError::BadMethod)
+    );
+    let traversal = tpl(
+        "DELETE",
+        "https://api.kick.com/public/v1/chat/a%2Fb",
+        &KK_AUTH,
+        None,
+        &KK_TOKEN_REF,
+    );
+    assert!(check(&p, "chat.delete", &traversal).is_err());
+}
+
+#[test]
+fn kick_moderation_broadcaster_must_be_the_host_slot_and_the_target_a_literal_integer() {
+    let p = PlatformPolicy::kick();
+    for (op, method) in [
+        ("mod.ban", "POST"),
+        ("mod.timeout", "POST"),
+        ("mod.unban", "DELETE"),
+    ] {
+        let good = tpl(
+            method,
+            KK_BANS,
+            &KK_HDRS,
+            Some(
+                serde_json::json!({"broadcaster_user_id": "{{KICK_BROADCASTER_ID}}", "user_id": 42}),
+            ),
+            &KK_MOD_REFS,
+        );
+        assert_eq!(check(&p, op, &good), Ok(()), "{op}");
+        // A literal broadcaster id (aiming the token at another channel) is refused.
+        for bc in [serde_json::json!(999), serde_json::json!("999")] {
+            let aimed = tpl(
+                method,
+                KK_BANS,
+                &KK_HDRS,
+                Some(serde_json::json!({"broadcaster_user_id": bc, "user_id": 42})),
+                &KK_TOKEN_REF,
+            );
+            assert!(check(&p, op, &aimed).is_err(), "{op}: {bc}");
+        }
+        // Keys outside the documented set are refused.
+        let extra = tpl(
+            method,
+            KK_BANS,
+            &KK_HDRS,
+            Some(
+                serde_json::json!({"broadcaster_user_id": "{{KICK_BROADCASTER_ID}}", "user_id": 42, "moderator_id": 1}),
+            ),
+            &KK_MOD_REFS,
+        );
+        assert_eq!(
+            check(&p, op, &extra),
+            Err(TemplateError::BodyKeyNotAllowed),
+            "{op}"
+        );
+    }
+}
+
+/// Real path: verify -> render (Int slot becomes a JSON integer) -> protected-target check.
+#[test]
+fn kick_moderation_renders_integers_and_refuses_the_broadcaster_as_target() {
+    use crate::connector::sender_exec::subst::{check_distinct_body_ints, render, SlotValue};
+    use std::collections::BTreeMap;
+    let p = PlatformPolicy::kick();
+    let kind = p.kind("mod.ban").unwrap();
+    let render_for = |target: serde_json::Value| {
+        let t = tpl(
+            "POST",
+            KK_BANS,
+            &KK_HDRS,
+            Some(
+                serde_json::json!({"broadcaster_user_id": "{{KICK_BROADCASTER_ID}}", "user_id": target, "duration": 10}),
+            ),
+            &KK_MOD_REFS,
+        );
+        let v = verify(&p, kind, &t).unwrap();
+        let mut values = BTreeMap::new();
+        values.insert(
+            p.slot_index("KICK_BROADCASTER_ID").unwrap(),
+            SlotValue::new("777".to_string()),
+        );
+        values.insert(
+            p.slot_index("KICK_TOKEN").unwrap(),
+            SlotValue::new("tok".to_string()),
+        );
+        render(&p, &v, &values, &BTreeMap::new())
+    };
+    let ok = render_for(serde_json::json!(42)).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(ok.body.as_ref().unwrap()).unwrap();
+    assert_eq!(body["broadcaster_user_id"], 777);
+    assert!(body["broadcaster_user_id"].is_u64());
+    assert_eq!(
+        check_distinct_body_ints(&kind.distinct_body_ints, ok.body.as_deref()),
+        Ok(())
+    );
+    for bad in [serde_json::json!(777), serde_json::json!("42")] {
+        let r = render_for(bad.clone()).unwrap();
+        assert!(
+            check_distinct_body_ints(&kind.distinct_body_ints, r.body.as_deref()).is_err(),
+            "{bad}"
+        );
     }
 }
 
@@ -673,7 +806,7 @@ fn the_policy_table_matches_the_relay_op_parity_fixture() {
     }
     assert_eq!(
         checked,
-        9 + 13 + 6 + 1,
+        9 + 13 + 6 + 5,
         "denominator: ops compared with the fixture"
     );
 }

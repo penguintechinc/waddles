@@ -883,6 +883,8 @@ where
         let prepared =
             subst::render(policy, &verified, &values, &creds).map_err(ExecError::Subst)?;
         drop((values, creds));
+        subst::check_distinct_body_ints(&kind.distinct_body_ints, prepared.body.as_deref())
+            .map_err(ExecError::Subst)?;
         self.send(prepared, kind.result).await
     }
 

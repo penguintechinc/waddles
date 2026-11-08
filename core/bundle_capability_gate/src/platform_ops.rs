@@ -54,10 +54,18 @@ pub const RELAY_OPS: &[(&str, &[&str])] = &[
             "mod.remove",
         ],
     ),
-    // Kick: `chat.send` only. `chat.delete` (global message id, needs a channel pin the executor
-    // cannot enforce for kick yet) and `mod.*` (integer body ids) are absent on purpose, so they
-    // stay unknown-op refusals until their host seams exist.
-    ("kick", &["chat.send"]),
+    // Kick: chat + moderation. `chat.delete` runs behind the executor's channel pin; `mod.*`
+    // bodies carry integer ids (host `SlotShape::Int` broadcaster slot, protected-target check).
+    (
+        "kick",
+        &[
+            "chat.send",
+            "chat.delete",
+            "mod.ban",
+            "mod.timeout",
+            "mod.unban",
+        ],
+    ),
 ];
 
 /// The static op spelling registered for `(platform, op)`, or `None`.
@@ -152,7 +160,7 @@ mod tests {
                 n += 1;
             }
         }
-        assert_eq!(n, 9 + 13 + 6 + 1);
+        assert_eq!(n, 9 + 13 + 6 + 5);
     }
 
     #[test]
@@ -177,6 +185,11 @@ mod tests {
             ),
             ("youtube", "mod.add", "moderation.youtube"),
             ("youtube", "chat.delete", "chat.delete:youtube"),
+            ("kick", "chat.send", "chat.send:kick"),
+            ("kick", "chat.delete", "chat.delete:kick"),
+            ("kick", "mod.ban", "moderation.kick"),
+            ("kick", "mod.timeout", "moderation.kick"),
+            ("kick", "mod.unban", "moderation.kick"),
         ] {
             assert_eq!(permission_for(p, op).unwrap().canonical_id(), want);
         }
@@ -186,8 +199,8 @@ mod tests {
     fn unknown_or_cross_platform_ops_are_refused_never_defaulted() {
         assert!(permission_for("twitch", "mod.kick").is_none());
         assert!(permission_for("youtube", "eventsub.list").is_none());
-        assert!(permission_for("kick", "mod.ban").is_none());
-        assert!(permission_for("kick", "chat.delete").is_none());
+        assert!(permission_for("kick", "mod.kick").is_none());
+        assert!(permission_for("kick", "dm.send").is_none());
         assert!(permission_for("slack", "chat.send").is_none());
         assert!(permission_for("discord", "role.add").is_none());
         assert!(registered_on_any_platform("mod.kick").is_some());

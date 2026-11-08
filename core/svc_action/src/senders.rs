@@ -16,7 +16,10 @@
 //! are queued to svc-ingest's bot-token REST sender
 //! (`svc_ingest::outbound::run_discord`) -- accepted only while that drain
 //! advertises readiness, and reported successful only once it confirms the
-//! op (`StageCapabilities::handle_discord_queued_op`). Slack/YouTube/Kick
+//! op (`StageCapabilities::handle_discord_queued_op`). **Kick** is queue-wired
+//! ([`SenderStatus::ExecutorQueue`]): `chat.send`/`chat.delete`/`mod.*` are pushed onto
+//! `waddles:transport:irc:kick:outbound` and executed by svc-ingest's generic outbound
+//! executor with host-side credentials. Slack/YouTube
 //! remain a documented `TODO(M3+)` seam -- rather than reimplement connector logic
 //! here, this module leaves an explicit seam per remaining platform naming
 //! the `penguin-connectors` crate that owns it, per the M3 task's own
@@ -75,6 +78,10 @@ pub enum SenderStatus {
     /// {platform}` -- names exactly which upstream crate/module will back
     /// it once the `http` capability (`crate::capabilities`) lands.
     PendingSeam { reason: &'static str },
+    /// Wired end to end through the `relay` host capability onto a Valkey outbound queue that
+    /// svc-ingest's executor drains (Kick: `chat.send`, `chat.delete`, `mod.*`). `queue` is
+    /// the exact list key the producer pushes to (`outbound_relay_queue_key(provider)`).
+    ExecutorQueue { queue: String },
 }
 
 /// Reports which of the five built-in senders spec §16 M3 lists are
@@ -96,9 +103,10 @@ pub fn sender_status(platform: Platform) -> SenderStatus {
             reason: "TODO(M3+): youtube sender -- pending the http host capability \
                      (crate::capabilities) and penguin-connectors' YouTube scaffold",
         },
-        Platform::Kick => SenderStatus::PendingSeam {
-            reason: "TODO(M3+): kick sender -- pending the http host capability \
-                     (crate::capabilities) and penguin-connectors' Kick scaffold",
+        // Kick has no inline REST path: sends queue to svc-ingest's generic outbound executor
+        // (`run_kick_exec`), which drains this exact key.
+        Platform::Kick => SenderStatus::ExecutorQueue {
+            queue: crate::capabilities::outbound_relay_queue_key("kick"),
         },
     }
 }
@@ -214,10 +222,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn twitch_and_discord_are_implemented_every_other_platform_is_a_seam() {
+    fn twitch_discord_kick_are_wired_every_other_platform_is_a_seam() {
         assert_eq!(sender_status(Platform::Twitch), SenderStatus::Implemented);
         assert_eq!(sender_status(Platform::Discord), SenderStatus::Implemented);
-        for platform in [Platform::Slack, Platform::Youtube, Platform::Kick] {
+        assert_eq!(
+            sender_status(Platform::Kick),
+            SenderStatus::ExecutorQueue {
+                queue: "waddles:transport:irc:kick:outbound".to_string()
+            }
+        );
+        for platform in [Platform::Slack, Platform::Youtube] {
             assert!(matches!(
                 sender_status(platform),
                 SenderStatus::PendingSeam { .. }

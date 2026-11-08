@@ -22,12 +22,26 @@ use super::plan::{ConnectorProfile, RuntimeEnv};
 use super::self_echo::{parse_ids, SelfEchoRegistry};
 use crate::connector::spectrum::SpectrumSpec;
 use crate::connector::webhook::WebhookRoute;
+use crate::connector::webhook_verify::Scheme;
 use crate::connector::{PollConfig, WsConfig};
 
 /// Bindings requested per page.
 pub const PAGE_LIMIT: u32 = 200;
 /// Hard cap on pages per discovery; exceeding it is a failure, not a truncation.
 pub const MAX_PAGES: u32 = 100;
+
+/// Which of a binding's transports a [`ConnKey`] names. Most bindings run exactly one
+/// (`Primary`); a binding that is BOTH a socket/poll feed and a verified webhook receiver (Kick)
+/// runs the webhook as a second, independently supervised and leased `Webhook` lane, so the two
+/// can never collapse into one supervisor slot or contend for one lease.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
+pub enum Lane {
+    /// The binding's main transport (the only one for every platform but Kick).
+    #[default]
+    Primary,
+    /// The binding's additional webhook receiver.
+    Webhook,
+}
 
 /// Identity of one supervised connection (numeric ids only, never handles).
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -38,6 +52,8 @@ pub struct ConnKey {
     pub community_id: i64,
     /// Hub-api connection row (numeric).
     pub connection_id: i64,
+    /// Which of the binding's transports this is.
+    pub lane: Lane,
 }
 
 /// How a desired connection receives frames.
@@ -150,7 +166,13 @@ fn claim_of(d: &DesiredConnection) -> Claim {
     match &d.plan {
         TransportPlan::Ws(c) => Claim::Resource(c.source_key.clone()),
         TransportPlan::Poll(c) => Claim::Resource(c.source_key.clone()),
-        TransportPlan::Webhook(w) => Claim::Route(w.route.route_key.clone()),
+        // Kick signs every webhook with ONE global key, so a route is only as exclusive as the
+        // broadcaster it is bound to: the claim is the broadcaster, and two communities binding
+        // the same one are both dropped (fail closed) like a shared Pusher chatroom.
+        TransportPlan::Webhook(w) => match &w.route.scheme {
+            Scheme::Kick(spec) => Claim::Resource(format!("kick-webhook:{}", spec.broadcaster_id)),
+            _ => Claim::Route(w.route.route_key.clone()),
+        },
         TransportPlan::Spectrum(s) => Claim::Resource(s.poll.source_key.clone()),
     }
 }

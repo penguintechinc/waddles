@@ -36,11 +36,25 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct KickBinding {
     /// The OAuth access token (zeroizing, never `Debug`-printed).
     pub oauth_token: SecretString,
+    /// The channel owner's numeric Kick user id (non-secret binding metadata
+    /// `broadcaster_user_id`, a non-zero decimal u64) -- the host-resolved
+    /// `broadcaster_user_id` of every moderation call. `None` when the binding does not carry a
+    /// valid one: moderation is then refused (never guessed); `chat.send` is unaffected.
+    pub broadcaster_user_id: Option<String>,
+}
+
+/// The binding's `broadcaster_user_id` metadata when it is a non-zero decimal `u64`.
+fn broadcaster_from(metadata: &std::collections::BTreeMap<String, String>) -> Option<String> {
+    metadata
+        .get("broadcaster_user_id")
+        .filter(|v| v.bytes().all(|b| b.is_ascii_digit()) && v.parse::<u64>().is_ok_and(|n| n != 0))
+        .cloned()
 }
 
 impl std::fmt::Debug for KickBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KickBinding")
+            .field("broadcaster_user_id", &self.broadcaster_user_id)
             .field("oauth_token", &"[REDACTED]")
             .finish()
     }
@@ -48,10 +62,13 @@ impl std::fmt::Debug for KickBinding {
 
 /// Produces a community's [`KickBinding`]; resolves on every call and never falls back to
 /// another community's credential.
-#[allow(async_fn_in_trait)] // service-binary-internal, as TwitchCredentialSource
 pub trait KickCredentialSource: Send + Sync {
-    /// The binding for `community_id` (`None` = the entry has no scope).
-    async fn binding(&self, community_id: Option<i64>) -> Result<KickBinding, CredError>;
+    /// The binding for `community_id` (`None` = the entry has no scope). The future is `Send`
+    /// so the webhook subscriber can run it on a spawned task.
+    fn binding(
+        &self,
+        community_id: Option<i64>,
+    ) -> impl std::future::Future<Output = Result<KickBinding, CredError>> + Send;
 }
 
 /// Epoch seconds now. A clock before the epoch reads as "far future", so every expiring token is
@@ -154,6 +171,7 @@ impl<R: ConnectionResolve> ResolverKickCredentials<R> {
         };
         Ok(KickBinding {
             oauth_token: access_token,
+            broadcaster_user_id: broadcaster_from(&resolved.metadata),
         })
     }
 }
@@ -215,6 +233,7 @@ mod tests {
         expires_at: Option<i64>,
         non_oauth: bool,
         list_err: bool,
+        metadata: BTreeMap<String, String>,
     }
 
     impl Fake {
@@ -226,6 +245,7 @@ mod tests {
                 expires_at: None,
                 non_oauth: false,
                 list_err: false,
+                metadata: BTreeMap::new(),
             }
         }
     }
@@ -252,7 +272,7 @@ mod tests {
                     }
                 },
                 expires_at: self.expires_at,
-                metadata: BTreeMap::new(),
+                metadata: self.metadata.clone(),
             })
         }
 
@@ -346,6 +366,33 @@ mod tests {
         let mut f = Fake::new(vec![summary(1, 10)]);
         f.expires_at = Some(NOW + EXPIRY_SKEW + 1);
         assert!(src(f).binding(Some(1)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_broadcaster_id_is_read_from_binding_metadata_and_only_when_valid() {
+        for (raw, want) in [
+            ("123456", Some("123456")),
+            ("18446744073709551615", Some("18446744073709551615")),
+            ("0", None),
+            ("", None),
+            ("-5", None),
+            ("1.5", None),
+            ("12 ", None),
+            ("abc", None),
+            ("18446744073709551616", None),
+        ] {
+            let mut f = Fake::new(vec![summary(1, 10)]);
+            f.metadata
+                .insert("broadcaster_user_id".to_string(), raw.to_string());
+            let b = src(f).binding(Some(1)).await.unwrap();
+            assert_eq!(b.broadcaster_user_id.as_deref(), want, "{raw:?}");
+        }
+        // Absent metadata: the binding is still usable (chat.send), moderation has no id.
+        let b = src(Fake::new(vec![summary(1, 10)]))
+            .binding(Some(1))
+            .await
+            .unwrap();
+        assert_eq!(b.broadcaster_user_id, None);
     }
 
     #[tokio::test]

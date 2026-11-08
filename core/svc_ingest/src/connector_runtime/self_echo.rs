@@ -175,6 +175,7 @@ mod tests {
             platform,
             community_id: community,
             connection_id: conn,
+            lane: Default::default(),
         }
     }
 
