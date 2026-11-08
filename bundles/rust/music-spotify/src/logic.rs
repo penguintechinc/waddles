@@ -398,12 +398,10 @@ pub fn track_json(item: &Value) -> Option<Value> {
     let artists: Vec<String> = item
         .get("artists")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.get("name")?.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x.get("name")?.as_str().map(str::to_string))
+        .collect();
     let album = item.get("album");
     let url = item
         .get("external_urls")
@@ -417,7 +415,7 @@ pub fn track_json(item: &Value) -> Option<Value> {
         "provider": "spotify",
         "id": id,
         "title": item.get("name").and_then(Value::as_str).unwrap_or(""),
-        "artist": artists.first().cloned().unwrap_or_default(),
+        "artist": artists.first().map_or("", String::as_str),
         "artists": artists,
         "album": album.and_then(|a| a.get("name")).and_then(Value::as_str).unwrap_or(""),
         "duration_ms": item.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
