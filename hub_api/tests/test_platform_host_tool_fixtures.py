@@ -29,8 +29,10 @@ def _summary(manifest: Path) -> list[dict]:
 
 
 def _bundle_dir(platform: str) -> Path:
-    found = sorted(p.parent for p in (ROOT / "bundles").glob(f"*/{platform}/bundle.yaml"))
-    assert len(found) == 1, f"expected exactly one bundle dir for {platform}, got {found}"
+    # Platform SERVICE connectors are the Rust bundles; `bundles/python/<platform>` (where one
+    # exists, e.g. discord) is a separate APP bundle that declares no host tools.
+    found = sorted(p.parent for p in (ROOT / "bundles/rust").glob(f"{platform}/bundle.yaml"))
+    assert len(found) == 1, f"expected exactly one rust bundle dir for {platform}, got {found}"
     return found[0]
 
 

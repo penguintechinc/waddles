@@ -22,9 +22,9 @@
 use serde_json::{Map, Value, json};
 
 use crate::error::{ConnectorError, Result};
-use crate::{message_ops, moderation};
 use crate::sanitize::guard_text;
 use crate::session::is_snowflake;
+use crate::{message_ops, moderation};
 
 /// Discord REST base the host pins egress to.
 pub const API_BASE: &str = "https://discord.com/api/v10";
@@ -409,7 +409,9 @@ pub fn build_request(action: &Action) -> Result<HttpTpl> {
             build_event_request(action.kind.as_str(), p)
         }
         "mod.kick" | "mod.ban" | "mod.unban" | "mod.timeout" => moderation::build(&action.kind, p),
-        "message.edit" | "reaction.add" => message_ops::build(&action.kind, p),
+        "message.edit" | "reaction.add" | "message.embed" | "webhook.create" => {
+            message_ops::build(&action.kind, p)
+        }
         other => Err(ConnectorError::Unsupported(format!(
             "action kind `{other}`"
         ))),

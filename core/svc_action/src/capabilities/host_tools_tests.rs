@@ -20,11 +20,13 @@ use serde_json::{json, Value};
 
 use super::super::tests::{caps, discord_scope, scope, FakeRelayQueue};
 use super::super::{ActorId, CapabilityHandler, InvokeScope, StageCapabilities, ToolWiring};
-use super::{transitional_decl, validate_args, OpClass};
+use super::{validate_args, OpClass};
 use crate::actor::{ActorDirectory, ActorError, BoxFuture as ActorFuture};
 use crate::host_api::ConnectionRegistry;
 use crate::platform_user::{BoxFuture as UserFuture, PlatformUserResolver, ResolveError};
 
+#[path = "host_tools_discord_manifest_tests.rs"]
+mod discord_manifest_tests;
 #[path = "host_tools_twitch_manifest_tests.rs"]
 mod twitch_manifest_tests;
 
@@ -105,7 +107,7 @@ fn exported(name: &str, scope: Option<&str>, host_op: Option<HostOpDecl>) -> Exp
 /// The host-op tools of a platform bundle's REAL manifest, loaded from the consent summary the
 /// hub approval pipeline derives from it (`scripts/host_tool_summary.py` regenerates the
 /// fixture; a Python test fails when it drifts). Zero tools is a failure, never an empty pass.
-fn manifest_tools(platform: &str) -> Vec<ExportedToolInfo> {
+pub(crate) fn manifest_tools(platform: &str) -> Vec<ExportedToolInfo> {
     let path = format!(
         "{}/tests/fixtures/host_tools/{platform}.json",
         env!("CARGO_MANIFEST_DIR")
@@ -772,7 +774,15 @@ fn plan_for(tool: &str, args: Value) -> ToolPlan {
     }
 }
 
-/// Runs a transitional-declared Discord tool through the generic engine (as `tool.invoke` does
+/// The REAL manifest declaration of a Discord tool (consent-summary fixture).
+fn discord_decl(tool: &str) -> Option<HostOpDecl> {
+    manifest_tools("discord")
+        .into_iter()
+        .find(|t| t.name == tool)
+        .and_then(|t| t.host_op)
+}
+
+/// Runs a manifest-declared Discord tool through the generic engine (as `tool.invoke` does
 /// after the planner).
 async fn run_role(
     c: &StageCapabilities<FakeRelayQueue>,
@@ -780,7 +790,7 @@ async fn run_role(
     tool: &str,
     args: Value,
 ) -> Result<Value, ToolRefusal> {
-    let d = transitional_decl(DISCORD_SVC, tool).unwrap_or_else(|| panic!("no decl for {tool}"));
+    let d = discord_decl(tool).unwrap_or_else(|| panic!("no decl for {tool}"));
     c.run_host_tool(sc, &plan_for(tool, args), &d).await
 }
 
@@ -798,7 +808,7 @@ fn role_args(extra: Value) -> Value {
 }
 
 #[tokio::test]
-async fn transitional_declarations_cover_exactly_the_pre_declaration_discord_tools() {
+async fn the_discord_manifest_declares_every_role_and_event_tool() {
     for t in [
         ROLES_ADD,
         ROLES_REMOVE,
@@ -809,13 +819,13 @@ async fn transitional_declarations_cover_exactly_the_pre_declaration_discord_too
         "discord.scheduled_event.cancel",
         "discord.scheduled_event.delete",
     ] {
-        assert!(transitional_decl(DISCORD_SVC, t).is_some(), "{t}");
-        assert!(
-            transitional_decl(TWITCH_SVC, t).is_none(),
-            "{t} is discord-only"
-        );
+        let d = discord_decl(t).unwrap_or_else(|| panic!("{t} has no manifest host_op"));
+        assert_eq!(d.platform, "discord", "{t} is discord-only");
     }
-    assert!(transitional_decl(DISCORD_SVC, "classify_frame").is_none());
+    assert!(
+        discord_decl("classify_frame").is_none(),
+        "guest tools stay guest-served"
+    );
 }
 
 #[tokio::test]
@@ -1557,6 +1567,8 @@ async fn role_and_event_host_ops_require_the_service_bundles_moderation_grant() 
 
 #[tokio::test]
 async fn a_placeholder_user_wire_cannot_smuggle_a_destructive_op_past_the_protected_check() {
+    // A placeholder wire is allowed for moderation ops (the consumer resolves it), but the
+    // protected-target check still runs host-side against the detokenized user.
     let tools = vec![exported(
         "twitch.moderation.ban",
         None,
@@ -1566,11 +1578,38 @@ async fn a_placeholder_user_wire_cannot_smuggle_a_destructive_op_past_the_protec
         }))),
     )];
     let c = build(Rig::default(), tools, FakeRelayQueue::with_live_drain());
-    // UUID_C is an admin: with a placeholder wire the check would have been skipped.
+    // UUID_C is an admin: refused even though the wire would carry only the placeholder.
     let err = c
         .handle(
             &twitch_event(Some("500")),
             invoke("twitch.moderation.ban", json!({"user": UUID_C})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "forbidden");
+    assert!(err.message.contains("protected_target"), "{}", err.message);
+    assert!(c.relay_queue.envelopes().is_empty());
+}
+
+#[tokio::test]
+async fn a_placeholder_user_wire_is_refused_for_non_role_non_moderation_ops() {
+    let tools = vec![exported(
+        "twitch.chat.delete_by_user",
+        None,
+        Some(decl(json!({
+            "platform": "twitch", "op": "chat.delete", "user": "user",
+            "userWire": "placeholder", "required": ["user"], "origin": "channel"
+        }))),
+    )];
+    let rig = Rig {
+        svc_grants: vec!["chat.delete:twitch".to_string()],
+        ..Rig::default()
+    };
+    let c = build(rig, tools, FakeRelayQueue::with_live_drain());
+    let err = c
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("twitch.chat.delete_by_user", json!({"user": UUID_A})),
         )
         .await
         .unwrap_err();

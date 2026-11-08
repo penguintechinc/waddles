@@ -1,4 +1,4 @@
-//! Discord message ops: `message.edit` and `reaction.add`.
+//! Discord message ops: `message.edit`, `reaction.add`, `message.embed` and `webhook.create`.
 //!
 //! Both act ONLY in the host-pinned channel (`{target.channel_id}`, proven against the stamped
 //! origin by the executor; a bundle-named channel is not expressible). The producer's text rides
@@ -7,14 +7,28 @@
 //! restricts body keys), and reactions are a body-less `PUT .../@me` with the emoji
 //! percent-encoded into the one path segment the policy reserves for it.
 
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 use crate::error::{ConnectorError, Result};
 use crate::sanitize::guard_text;
 use crate::sender::{HttpTpl, TARGET_CHANNEL, content, object, snowflake, str_field, tpl};
 
 /// The kinds this module owns.
-pub const KINDS: &[&str] = &["message.edit", "reaction.add"];
+pub const KINDS: &[&str] = &[
+    "message.edit",
+    "reaction.add",
+    "message.embed",
+    "webhook.create",
+];
+
+/// Most embeds one message may carry (Discord limit).
+const MAX_EMBEDS: usize = 10;
+/// Discord's cap on the characters summed across every embed of one message.
+const MAX_EMBED_TOTAL_CHARS: usize = 6000;
+/// Most fields in one embed (Discord limit).
+const MAX_EMBED_FIELDS: usize = 25;
+/// Longest webhook name Discord accepts (characters).
+const MAX_WEBHOOK_NAME_CHARS: usize = 80;
 
 /// Longest percent-encoded emoji segment the host policy accepts (bytes).
 const MAX_EMOJI_ENCODED: usize = 128;
@@ -44,7 +58,7 @@ fn emoji_segment(raw: &str) -> Result<String> {
             && crate::session::is_snowflake(id)
     });
     let unicode = raw.chars().count() <= 16
-        && raw.chars().any(|c| !c.is_ascii())
+        && !raw.is_ascii()
         && raw
             .chars()
             .all(|c| !c.is_ascii() || c == '#' || c == '*' || c.is_ascii_digit());
@@ -90,10 +104,174 @@ pub fn build(kind: &str, payload: &str) -> Result<HttpTpl> {
                 None,
             ))
         }
+        "message.embed" => {
+            let m = object(payload, &["content"])?;
+            let body = embed_body(str_field(&m, "content")?)?;
+            Ok(tpl(
+                "POST",
+                format!("/channels/{TARGET_CHANNEL}/messages"),
+                Some(body),
+            ))
+        }
+        "webhook.create" => {
+            let m = object(payload, &["name"])?;
+            let name = str_field(&m, "name")?;
+            guard_text("name", name, false)?;
+            let chars = name.chars().count();
+            if chars == 0 || chars > MAX_WEBHOOK_NAME_CHARS {
+                return Err(ConnectorError::Malformed(format!(
+                    "webhook `name` must be 1..={MAX_WEBHOOK_NAME_CHARS} characters"
+                )));
+            }
+            let body = serde_json::to_vec(&json!({ "name": name }))
+                .map_err(|e| ConnectorError::Backend(e.to_string()))?;
+            Ok(tpl(
+                "POST",
+                format!("/channels/{TARGET_CHANNEL}/webhooks"),
+                Some(body),
+            ))
+        }
         other => Err(ConnectorError::Unsupported(format!(
             "discord {other} is not a message op"
         ))),
     }
+}
+
+/// A `Malformed` connector error.
+fn malformed(msg: impl Into<String>) -> ConnectorError {
+    ConnectorError::Malformed(msg.into())
+}
+
+/// A string field of an embed object: bounded and smuggling-guarded; returns its char count.
+fn embed_str(o: &Map<String, Value>, key: &str, max: usize) -> Result<usize> {
+    let Some(v) = o.get(key) else { return Ok(0) };
+    let s = v
+        .as_str()
+        .ok_or_else(|| malformed(format!("embed `{key}` must be a string")))?;
+    guard_text(key, s, true)?;
+    let n = s.chars().count();
+    if n == 0 || n > max {
+        return Err(malformed(format!(
+            "embed `{key}` must be 1..={max} characters"
+        )));
+    }
+    Ok(n)
+}
+
+/// Rejects any key of `o` outside `allowed`.
+fn only(o: &Map<String, Value>, allowed: &[&str], what: &str) -> Result<()> {
+    match o.keys().find(|k| !allowed.contains(&k.as_str())) {
+        Some(k) => Err(malformed(format!("{what} field `{k}` is not accepted"))),
+        None => Ok(()),
+    }
+}
+
+/// Validates one embed (only title/description/color/timestamp/footer.text/fields; no media,
+/// author or url, so the bundle can never make Discord fetch or link an arbitrary URL) and
+/// returns the characters it contributes to the message total.
+fn check_embed(e: &Value) -> Result<usize> {
+    let o = e
+        .as_object()
+        .ok_or_else(|| malformed("an embed must be an object"))?;
+    only(
+        o,
+        &[
+            "title",
+            "description",
+            "color",
+            "timestamp",
+            "footer",
+            "fields",
+        ],
+        "embed",
+    )?;
+    let mut total = embed_str(o, "title", 256)? + embed_str(o, "description", 4096)?;
+    if let Some(c) = o.get("color") {
+        c.as_u64()
+            .filter(|c| *c <= 0x00FF_FFFF)
+            .ok_or_else(|| malformed("embed `color` must be an integer 0..=16777215"))?;
+    }
+    if let Some(t) = o.get("timestamp") {
+        let t = t
+            .as_str()
+            .ok_or_else(|| malformed("embed `timestamp` must be a string"))?;
+        if !crate::sender::is_rfc3339(t) {
+            return Err(malformed("embed `timestamp` must be RFC 3339"));
+        }
+    }
+    if let Some(f) = o.get("footer") {
+        let f = f
+            .as_object()
+            .ok_or_else(|| malformed("embed `footer` must be an object"))?;
+        only(f, &["text"], "embed footer")?;
+        total += embed_str(f, "text", 2048)?;
+    }
+    if let Some(fs) = o.get("fields") {
+        let fs = fs
+            .as_array()
+            .filter(|a| a.len() <= MAX_EMBED_FIELDS)
+            .ok_or_else(|| {
+                malformed(format!(
+                    "embed `fields` must hold at most {MAX_EMBED_FIELDS}"
+                ))
+            })?;
+        for f in fs {
+            let f = f
+                .as_object()
+                .ok_or_else(|| malformed("an embed field must be an object"))?;
+            only(f, &["name", "value", "inline"], "embed field")?;
+            if !(f.contains_key("name") && f.contains_key("value")) {
+                return Err(malformed("an embed field needs `name` and `value`"));
+            }
+            total += embed_str(f, "name", 256)? + embed_str(f, "value", 1024)?;
+            if let Some(i) = f.get("inline") {
+                i.as_bool()
+                    .ok_or_else(|| malformed("embed field `inline` must be a boolean"))?;
+            }
+        }
+    }
+    if total == 0 {
+        return Err(malformed("an embed must carry text"));
+    }
+    Ok(total)
+}
+
+/// Builds the `message.embed` request body from the producer's wire text: a JSON object
+/// `{content?, embeds}` (the host tool's `text_object`). Mentions are limited to users, like
+/// every other message op.
+fn embed_body(text: &str) -> Result<Vec<u8>> {
+    let v: Value =
+        serde_json::from_str(text).map_err(|_| malformed("embed text must be a JSON object"))?;
+    let o = v
+        .as_object()
+        .ok_or_else(|| malformed("embed text must be a JSON object"))?;
+    only(o, &["content", "embeds"], "embed message")?;
+    let embeds = o
+        .get("embeds")
+        .and_then(Value::as_array)
+        .filter(|a| (1..=MAX_EMBEDS).contains(&a.len()))
+        .ok_or_else(|| malformed(format!("`embeds` must hold 1..={MAX_EMBEDS} embeds")))?;
+    let mut total = 0;
+    for e in embeds {
+        total += check_embed(e)?;
+    }
+    if total > MAX_EMBED_TOTAL_CHARS {
+        return Err(malformed(format!(
+            "embeds exceed {MAX_EMBED_TOTAL_CHARS} characters"
+        )));
+    }
+    let mut body = json!({
+        "embeds": embeds,
+        "allowed_mentions": { "parse": ["users"] },
+    });
+    if let Some(c) = o.get("content") {
+        let c = c
+            .as_str()
+            .ok_or_else(|| malformed("`content` must be a string"))?;
+        let m = Map::from_iter([("content".to_string(), Value::from(c))]);
+        body["content"] = Value::from(content(&m)?);
+    }
+    serde_json::to_vec(&body).map_err(|e| ConnectorError::Backend(e.to_string()))
 }
 
 #[cfg(test)]
@@ -186,6 +364,74 @@ mod tests {
                 matches!(build(k, "{}"), Err(ConnectorError::Unsupported(_))),
                 "{k}"
             );
+        }
+    }
+
+    #[test]
+    fn embed_builds_a_channel_pinned_post_with_validated_embeds() {
+        let text = r#"{"content":"hi","embeds":[{"title":"t","description":"d","color":255,"fields":[{"name":"n","value":"v","inline":true}],"footer":{"text":"f"},"timestamp":"2026-12-01T19:00:00Z"}]}"#;
+        let payload = json!({ "content": text }).to_string();
+        let t = build("message.embed", &payload).unwrap();
+        assert_eq!((t.method.as_str(), t.url.as_str()), ("POST", BASE));
+        let b: Value = serde_json::from_slice(&t.body.unwrap()).unwrap();
+        assert_eq!(b["content"], "hi");
+        assert_eq!(b["embeds"][0]["title"], "t");
+        assert_eq!(b["allowed_mentions"], json!({"parse":["users"]}));
+        assert!(b.get("channel_id").is_none());
+    }
+
+    #[test]
+    fn embed_refuses_every_unvalidated_shape() {
+        let wrap = |t: &str| json!({ "content": t }).to_string();
+        let long = "x".repeat(4097);
+        let eleven = [r#"{"title":"t"}"#; 11].join(",");
+        let many_fields = [r#"{"name":"n","value":"v"}"#; 26].join(",");
+        let total = vec![format!(r#"{{"description":"{}"}}"#, "y".repeat(4000)); 2].join(",");
+        for bad in [
+            "nope".to_string(),
+            r#"{"embeds":[]}"#.to_string(),
+            r#"{"content":"x"}"#.to_string(),
+            r#"{"embeds":[{"title":"t"}],"channel_id":"1"}"#.to_string(),
+            r#"{"embeds":[{"image":{"url":"https://x"}}]}"#.to_string(),
+            r#"{"embeds":[{"author":{"name":"a"}}]}"#.to_string(),
+            r#"{"embeds":[{"url":"https://x","title":"t"}]}"#.to_string(),
+            r#"{"embeds":[{}]}"#.to_string(),
+            r#"{"embeds":["s"]}"#.to_string(),
+            r#"{"embeds":[{"title":"t","color":16777216}]}"#.to_string(),
+            r#"{"embeds":[{"title":"t","timestamp":"soon"}]}"#.to_string(),
+            r#"{"embeds":[{"title":"{{SECRET}}"}]}"#.to_string(),
+            format!(r#"{{"embeds":[{{"description":"{long}"}}]}}"#),
+            format!(r#"{{"embeds":[{eleven}]}}"#),
+            format!(r#"{{"embeds":[{{"fields":[{many_fields}]}}]}}"#),
+            format!(r#"{{"embeds":[{total}]}}"#),
+            r#"{"embeds":[{"fields":[{"name":"n"}]}]}"#.to_string(),
+            r#"{"content":"","embeds":[{"title":"t"}]}"#.to_string(),
+        ] {
+            assert!(build("message.embed", &wrap(&bad)).is_err(), "{bad}");
+        }
+        assert!(build("message.embed", r#"{"content":"{}","channel_id":"1"}"#).is_err());
+    }
+
+    #[test]
+    fn webhook_create_posts_only_a_bounded_name_to_the_pinned_channel() {
+        let t = build("webhook.create", r#"{"name":"bridge"}"#).unwrap();
+        assert_eq!(t.method, "POST");
+        assert_eq!(
+            t.url,
+            "https://discord.com/api/v10/channels/{target.channel_id}/webhooks"
+        );
+        let b: Value = serde_json::from_slice(&t.body.unwrap()).unwrap();
+        assert_eq!(b, json!({"name":"bridge"}));
+        let too_long = json!({"name": "n".repeat(81)}).to_string();
+        for bad in [
+            r#"{"name":""}"#,
+            r#"{}"#,
+            r#"{"name":"b","avatar":"x"}"#,
+            r#"{"name":"b","channel_id":"1"}"#,
+            r#"{"name":"{{x}}"}"#,
+            too_long.as_str(),
+        ] {
+            assert!(build("webhook.create", bad).is_err(), "{bad}");
         }
     }
 }
