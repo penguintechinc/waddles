@@ -4,11 +4,11 @@ name: Chat Bingo Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !bingo (card) / bingo (claim) / status / start / call / end. Cards are
 # derived from a per-round seed + the viewer's pseudonym, never stored. See src/app.py's module
 # docstring. Activation-gated only (no feature flag).
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/bingo
 language: python
@@ -55,6 +55,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.1"
+  min_version: "1.0.1"
   max_version: null

@@ -10,6 +10,7 @@ version: 0.1.1
 feature: waddles.core.service
 module: core
 provider: builtin
+author: github:penguintechinc
 language: rust
 artifact: component
 execution_model: wasi-component

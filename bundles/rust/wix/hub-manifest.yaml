@@ -30,7 +30,7 @@ permissions:
     justification: "gates identity.lookup, used to tokenize each Wix member id to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw Wix member id leaves the connector)"
 routes_to: []
 exported_tools: []
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/wix
 config_schema: {}

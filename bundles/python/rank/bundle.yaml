@@ -15,7 +15,7 @@ provider: builtin
 # leveling system, NOT a literal port -- no original source or text reused (contrast
 # bundles/csharp/superpenguin-roll, an actual line-for-line port, which does carry the
 # full verbatim MIT notice). See src/app.py's module docstring for detail.
-author: "superpenguintv (Psychoboy)"
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/rank
 notice: |
@@ -88,8 +88,8 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.5"
-  min_version: "1.0.5"
+  tested_with: "1.0.6"
+  min_version: "1.0.6"
   max_version: null
 requested_tools:
   - tool: rep

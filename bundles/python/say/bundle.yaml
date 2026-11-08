@@ -2,14 +2,14 @@ schema_version: 2
 app_id: waddles.core.example.say
 name: Say Bundle (Python)
 # 1.0.0: initial -- `!say <text>` (moderator/broadcaster only) relays the text as an announcement.
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
 # Attribution: concept inspired by PenguinTwitchBot (SuperPenguinTV / Psychoboy), used with
 # permission -- ideas/design only, NO code copied (same inspiration-only shape as
 # bundles/python/fish; contrast bundles/csharp/superpenguin-roll, a line-for-line port).
-author: "superpenguintv (Psychoboy)"
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/say
 notice: |
