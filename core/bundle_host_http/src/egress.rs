@@ -215,6 +215,18 @@ impl EgressRuleRow {
 /// posture documented on [`EgressGuard::catalog`].
 pub trait EgressRuleSource: Send + Sync {
     fn resolve(&self, app_id: &str) -> Option<EgressRuleRow>;
+
+    /// The row for `app_id` as seen by a call in the host-verified `scope`.
+    /// Sources whose rows differ per `(tenant, community)` activation MUST
+    /// override this (and fail closed in `resolve`); the default suits
+    /// scope-independent sources.
+    fn resolve_scoped(
+        &self,
+        _scope: &crate::credentials::CallScope,
+        app_id: &str,
+    ) -> Option<EgressRuleRow> {
+        self.resolve(app_id)
+    }
 }
 
 /// Operator-tunable limits (spec §7.3/§8.2), sourced from each consuming
@@ -888,7 +900,7 @@ impl EgressGuard {
         // fetched once, up front -- the same row every hop's egress-rule
         // check below reuses, and the *only* source `granted_secret_refs`
         // resolution below is allowed to consult.
-        let row = self.catalog.resolve(app_id);
+        let row = self.catalog.resolve_scoped(scope, app_id);
 
         // Bundle-declared headers only -- kept separate from the resolved
         // secret-ref headers below (`secret_headers`) so the redirect loop
@@ -6900,6 +6912,61 @@ mod tests {
             "Bearer t1"
         );
         assert_eq!(mints.load(Ordering::SeqCst), 2);
+    }
+
+    /// Regression (security review HIGH): through the real guard, community 5's
+    /// approved egress is not usable by community 6 of the same app, nor by
+    /// another tenant, nor by an unscoped call; and a deactivated bundle stops
+    /// resolving after the next wholesale replace.
+    #[tokio::test]
+    async fn guard_resolves_egress_only_for_the_calls_own_scope() {
+        use crate::grants::ActiveEgressSnapshot;
+        let snap = Arc::new(ActiveEgressSnapshot::default());
+        snap.replace_all([(
+            1,
+            5,
+            "app.x".to_string(),
+            vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
+            None,
+        )]);
+        let t = Arc::new(
+            FakeTransport::default()
+                .queue(Ok(ok_response()))
+                .queue(Ok(ok_response())),
+        );
+        let g = EgressGuard::new(
+            Arc::clone(&t) as Arc<dyn HttpTransport>,
+            default_limits(),
+            Arc::clone(&snap) as Arc<dyn EgressRuleSource>,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_resolver(Arc::new(PublicResolver));
+        let args = serde_json::json!({"method": "GET", "url": "https://api.spotify.com/v1/x"});
+        let scope = |t, c| CallScope {
+            tenant_id: t,
+            community_id: c,
+        };
+        g.send_scoped("app.x", &scope(1, 5), &args).await.unwrap();
+        for (tn, c) in [(1, 6), (2, 5), (0, 0)] {
+            let e = g
+                .send_scoped("app.x", &scope(tn, c), &args)
+                .await
+                .unwrap_err();
+            assert_eq!(e.code, "host_not_declared", "scope ({tn},{c})");
+        }
+        assert_eq!(
+            g.send("app.x", &args).await.unwrap_err().code,
+            "host_not_declared"
+        );
+        // deactivation: the next wholesale replace drops it
+        snap.replace_all(std::iter::empty());
+        let e = g
+            .send_scoped("app.x", &scope(1, 5), &args)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, "host_not_declared");
+        assert_eq!(t.requests.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

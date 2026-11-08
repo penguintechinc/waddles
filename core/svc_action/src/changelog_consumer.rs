@@ -429,14 +429,22 @@ async fn apply_active_set(
     // digest bump, staleness window on eviction).
     for row in active.values() {
         kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
-        // The approved manifest egress feeds the bundle http guard (no other
-        // production writer exists for its catalog).
-        bundle_host_http::grants::ActiveEgressSnapshot::global().publish(
-            &row.app_id,
-            row.egress.clone(),
-            row.egress_rps,
-        );
     }
+    // The approved manifest egress feeds the bundle http guard (no other
+    // production writer exists for its catalog): the WHOLE snapshot is rebuilt
+    // from this tick's active set, keyed by (tenant, community, app) -- never
+    // merged across scopes, and a deactivated bundle drops out.
+    bundle_host_http::grants::ActiveEgressSnapshot::global().replace_all(active.iter().map(
+        |((t, c, app), row)| {
+            (
+                i64::from(*t),
+                i64::from(*c),
+                app.clone(),
+                row.egress.clone(),
+                row.egress_rps,
+            )
+        },
+    ));
     // Feeds `crate::dispatch::DispatchDeps::app_version_snapshot` (bundle
     // capability-gate wiring, spec SS12 Phase 4) from the SAME DB truth
     // this consumer just applied -- never a value captured once at

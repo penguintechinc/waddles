@@ -294,14 +294,18 @@ pub async fn run_tick(
     // BundleCatalog`'s identical shape).
     for row in &active {
         kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
-        // The approved manifest egress feeds the bundle http guard (no other
-        // production writer exists for its catalog).
-        bundle_host_http::grants::ActiveEgressSnapshot::global().publish(
-            &row.app_id,
-            row.egress.clone(),
-            row.egress_rps,
-        );
     }
+    // The approved manifest egress feeds the bundle http guard (no other
+    // production writer exists for its catalog): THIS scope's rows are
+    // replaced wholesale every tick, so a deactivated bundle drops out and no
+    // other scope's rows are ever touched or merged.
+    bundle_host_http::grants::ActiveEgressSnapshot::global().replace_scope(
+        i64::from(tenant_id),
+        i64::from(community_id),
+        active
+            .iter()
+            .map(|r| (r.app_id.clone(), r.egress.clone(), r.egress_rps)),
+    );
 
     let plan = diff::plan(loaded, &active);
     if plan.is_empty() {
