@@ -498,12 +498,13 @@ pub fn key_hash(data: &str) -> String {
 fn render(template: &str, s: &Stream) -> String {
     let viewers = s.viewer_count.to_string();
     let title = s.title.clone().unwrap_or_else(|| "(no title)".to_string());
-    let category = s.category.clone().unwrap_or_default();
+    // A stream with no category renders an empty `{category}` placeholder.
+    let category = s.category.as_deref().unwrap_or("");
     let out = template
         .replace("{name}", &s.channel)
         .replace("{platform}", &s.platform)
         .replace("{title}", &title)
-        .replace("{category}", &category)
+        .replace("{category}", category)
         .replace("{viewers}", &viewers);
     clean_text(&out, 400)
 }
