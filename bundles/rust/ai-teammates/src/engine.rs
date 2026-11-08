@@ -110,8 +110,7 @@ fn mutate<H: Host>(
     let mut mine = all
         .get(teammate)
         .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+        .map_or_else(Map::new, Clone::clone);
     f(&mut mine);
     if mine.is_empty() {
         all.remove(teammate);
