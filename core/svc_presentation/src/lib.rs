@@ -20,6 +20,7 @@ pub mod flags;
 pub mod http;
 pub mod images;
 pub mod overlay;
+pub mod surfaces;
 pub mod telemetry;
 
 use std::net::SocketAddr;

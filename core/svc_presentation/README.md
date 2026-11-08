@@ -180,6 +180,17 @@ because per-service role names are provisioned outside Alembic) -- and
   drives it with a real HTTP client: signed PUSH JWT -> SSE viewer receives the detokenized,
   escaped alert; another community's viewer receives nothing.
 
+## Bundle state surfaces
+
+Bundles publish structured state (`music.now_playing`, `music.queue`, `live.channels`,
+`clip.alert`, `alert`) to contract-declared surfaces (`bundles/contracts/surfaces.v1.json`):
+`POST /internal/surfaces/{community}/{surface}/publish` (PUSH JWT scoped to the community),
+`GET /surfaces/{overlay_code}/live?surfaces=a,b&key=` (SSE, replay-on-connect, VIEW key),
+`GET /surfaces/{overlay_code}/view` (static page). Schema-validated, size-capped,
+rate-limited, PII-free, plain-text only. Metrics: `svc_presentation_surface_publishes_total{surface,outcome}`,
+`svc_presentation_surface_replays_total{surface}`. Full design, security properties and the
+per-bundle migration: `docs/bundle-surfaces.md`.
+
 ## Scope history
 
 P1 delivered config, telemetry, the database connection, the SeaORM

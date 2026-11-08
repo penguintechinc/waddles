@@ -167,6 +167,7 @@ egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
 # `Arc<hub_client::HubClient>`. Its build.rs compiles the repo-root
 # `proto/` tree (needs `protoc`; see Dockerfile.rust).
 hub_client = { path = "../hub_client", version = "=0.1.0" }
+jsonschema = { version = "=0.60.2", default-features = false }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
@@ -187,7 +188,11 @@ jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws
 # version axum's own "ws" feature pins above, so cargo-deny sees one
 # resolved version, not two.
 tokio-tungstenite = "=0.29.0"
-
+# Test-only: `tests/surfaces_e2e.rs` publishes through the REAL stage-side
+# host (`bundle_host_surface::SurfaceHost`) over a bound TCP port, so the
+# bundle -> presentation path is exercised end to end. Same-repo path dep
+# (Dockerfile.rust COPYs it so the manifest resolves).
+bundle-host-surface = { path = "../bundle_host_surface", version = "=0.1.0" }
 [profile.release]
 opt-level = 3
 lto = "thin"

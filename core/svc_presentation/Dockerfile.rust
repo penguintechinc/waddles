@@ -47,6 +47,9 @@ COPY overlay_auth ./overlay_auth
 COPY service_auth ./service_auth
 COPY egress_detokenizer ./egress_detokenizer
 COPY hub_client ./hub_client
+# dev-dependency only (tests/surfaces_e2e.rs), but cargo must still resolve its
+# manifest to build, so the path has to exist in the context.
+COPY bundle_host_surface ./bundle_host_surface
 # `hub_client`'s build.rs resolves protos at `CARGO_MANIFEST_DIR/../../
 # proto` -- for `/build/hub_client`, that's `/proto` (image root, NOT under
 # `/build`); supplied as the named `proto` build context, not COPY'd from

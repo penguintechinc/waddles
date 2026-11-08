@@ -1,0 +1,129 @@
+{
+  "contract": "waddles.surfaces",
+  "version": 1,
+  "doc": "Bundle -> presentation surface contract. A bundle calls the `surface.publish(surface_id, payload_json)` host import; svc-presentation validates the payload against the surface's JSON Schema below (structured data ONLY -- never HTML/CSS/JS), enforces the size cap and per-(community, surface) rate limit, caches the last state for replay-on-connect when `replay` is true, and fans the frame out to subscribed overlays and viewers. Payloads carry NO PII: no user ids, handles or names (any `{user:<token>}` placeholder is replaced by a neutral label server-side). Every string is plain text -- consumers MUST render it as text, never as markup. URL fields are https-only. Schemas use only: type, properties, required, additionalProperties, enum, minLength/maxLength, minimum/maximum, items/maxItems, pattern, oneOf, $ref into #/definitions. This file is mirrored byte-for-byte at core/svc_presentation/src/surfaces/surfaces.v1.json (a unit test fails on drift).",
+  "limits": {
+    "hard_max_payload_bytes": 16384,
+    "replay_max_entries": 4096,
+    "replay_ttl_seconds": 21600
+  },
+  "definitions": {
+    "https_url": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 512,
+      "pattern": "^https://[^\\s<>\"']+$"
+    },
+    "public_track": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer", "minimum": 0 },
+        "provider": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "track_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 200 },
+        "artist": { "type": "string", "maxLength": 200 },
+        "duration_s": { "type": "integer", "minimum": 0, "maximum": 86400 },
+        "url": { "oneOf": [ { "$ref": "#/definitions/https_url" }, { "type": "null" } ] }
+      },
+      "required": ["id", "provider", "track_id", "title", "artist", "duration_s"],
+      "additionalProperties": false
+    },
+    "live_stream": {
+      "type": "object",
+      "properties": {
+        "platform": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "channel": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "live": { "type": "boolean" },
+        "since": { "type": ["string", "null"], "maxLength": 40 },
+        "viewer_count": { "type": "integer", "minimum": 0 },
+        "title": { "type": ["string", "null"], "maxLength": 300 },
+        "category": { "type": ["string", "null"], "maxLength": 100 },
+        "thumbnail_url": { "oneOf": [ { "$ref": "#/definitions/https_url" }, { "type": "null" } ] }
+      },
+      "required": ["platform", "channel", "live", "viewer_count"],
+      "additionalProperties": false
+    }
+  },
+  "surfaces": {
+    "music.now_playing": {
+      "doc": "Music Station 'now playing' card (dj `PublicState.now_playing`). `now_playing: null` = nothing playing.",
+      "replay": true,
+      "max_payload_bytes": 4096,
+      "rate_limit_per_minute": 120,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "now_playing": { "oneOf": [ { "$ref": "#/definitions/public_track" }, { "type": "null" } ] },
+          "updated_ms": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["now_playing", "updated_ms"],
+        "additionalProperties": false
+      }
+    },
+    "music.queue": {
+      "doc": "Music Station 'up next' list (dj `PublicState.queue`), at most 50 tracks.",
+      "replay": true,
+      "max_payload_bytes": 16384,
+      "rate_limit_per_minute": 120,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "queue": { "type": "array", "maxItems": 50, "items": { "$ref": "#/definitions/public_track" } },
+          "updated_ms": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["queue", "updated_ms"],
+        "additionalProperties": false
+      }
+    },
+    "live.channels": {
+      "doc": "Who's-live widget (live-now `Snapshot`, minus its error list). `streams` carries only the entries the bundle chooses to show.",
+      "replay": true,
+      "max_payload_bytes": 16384,
+      "rate_limit_per_minute": 30,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "live": { "type": "boolean" },
+          "viewer_count": { "type": "integer", "minimum": 0 },
+          "streams": { "type": "array", "maxItems": 25, "items": { "$ref": "#/definitions/live_stream" } },
+          "as_of_ms": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["live", "viewer_count", "streams", "as_of_ms"],
+        "additionalProperties": false
+      }
+    },
+    "clip.alert": {
+      "doc": "A freshly created clip announcement (twitch-clips). An EVENT, not state: never replayed on connect.",
+      "replay": false,
+      "max_payload_bytes": 2048,
+      "rate_limit_per_minute": 20,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "clip_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,100}$" },
+          "url": { "$ref": "#/definitions/https_url" },
+          "title": { "type": "string", "maxLength": 100 },
+          "created_ms": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["clip_id", "url", "title", "created_ms"],
+        "additionalProperties": false
+      }
+    },
+    "alert": {
+      "doc": "Generic alert. Also bridged into the existing `alert_box` overlay surface (same renderer/escaping as a push). An EVENT: never replayed.",
+      "replay": false,
+      "max_payload_bytes": 2048,
+      "rate_limit_per_minute": 60,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "alert_type": { "type": "string", "enum": ["follow", "sub", "raid", "cheer", "donation", "clip", "info"] },
+          "message": { "type": "string", "maxLength": 300 },
+          "amount": { "type": "integer", "minimum": 0 }
+        },
+        "required": ["alert_type", "message"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

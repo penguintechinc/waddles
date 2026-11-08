@@ -387,6 +387,30 @@ interface overlay {
   /// `full-screen`/`media`, `text` for `crawler`/`ticker`, etc.
   push: func(widget-id: string, surface: surface, payload-json: string)
     -> result<transport-result, transport-error>;
+
+  // ---- Bundle state surfaces (additive; contract: bundles/contracts/surfaces.v1.json) ----
+
+  /// Publishes structured STATE to a contract-declared surface
+  /// (`music.now_playing`, `music.queue`, `live.channels`, `clip.alert`,
+  /// `alert`) -- the generic bundle -> presentation path that replaces
+  /// writing overlay-facing state to kv for svc-presentation to poll.
+  ///
+  /// `surface-id` is an id from `surfaces.v1.json`; `payload-json` is a JSON
+  /// document matching that surface's JSON Schema -- structured data ONLY
+  /// (never HTML/CSS/JS), no PII (no user ids/handles/names), every string
+  /// plain text. svc-presentation validates it (schema, per-surface size cap,
+  /// per-(community, surface) rate limit), caches the last state for replay
+  /// to overlays that connect later (surfaces with `replay: true`), and fans
+  /// it out to subscribed overlays and viewers of THIS community only.
+  ///
+  /// The community is server-derived from the invocation scope
+  /// (`AppScopedResource::Overlay`) -- a bundle never supplies a community id,
+  /// token or address. Errors are loud and never retried silently: a schema
+  /// violation is `code = "invalid"` (non-retryable), a rate-limit hit is
+  /// `code = "rate_limited"` with `retry-after-ms`, an unwired host is
+  /// `code = "not_implemented"`.
+  publish-surface: func(surface-id: string, payload-json: string)
+    -> result<transport-result, transport-error>;
 }
 
 /// Stream-lifecycle hooks a bundle exports to react to svc-streaming-rust

@@ -21,6 +21,8 @@ confidence-threshold = 0.8
 # not viral), no unlicensed/unknown crates.
 allow = [
     "MIT",
+    # borrow-or-share (via jsonschema -> referencing -> fluent-uri); OSI-approved, permissive.
+    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",

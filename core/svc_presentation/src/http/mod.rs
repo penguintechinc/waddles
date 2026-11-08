@@ -106,6 +106,9 @@ pub struct AppState {
     pub caption_store: Arc<dyn CaptionStore>,
     pub captions_flag: Arc<dyn crate::flags::FeatureFlag>,
     pub caption_metrics: CaptionMetrics,
+    /// Bundle -> presentation surfaces (`crate::surfaces`): contract,
+    /// validation, rate limit, fan-out and bounded replay cache.
+    pub surfaces: Arc<crate::surfaces::SurfaceService>,
 }
 
 impl AppState {
@@ -118,6 +121,12 @@ impl AppState {
         let image_metrics = crate::telemetry::register_image_metrics(&metrics);
         let hub_metrics = crate::overlay::hub::register_hub_metrics(&metrics);
         let caption_metrics = crate::telemetry::register_caption_metrics(&metrics);
+        // INVARIANT: the contract is an embedded constant validated by the
+        // `embedded_contract_loads...` unit test, and the metric names are
+        // unique per fresh registry, so this cannot fail at runtime; if it
+        // ever does the service must refuse to start (fail loud).
+        let surfaces = crate::surfaces::SurfaceService::new(&metrics)
+            .expect("embedded surface contract and metrics must initialise");
         let push_metrics = crate::telemetry::register_push_metrics(&metrics);
         let render_metrics = register_render_metrics(&metrics);
         let detok_metrics = register_detok_metrics(&metrics);
@@ -185,6 +194,7 @@ impl AppState {
             caption_store,
             captions_flag,
             caption_metrics,
+            surfaces,
         }
     }
 
@@ -316,11 +326,41 @@ pub fn router(state: AppState) -> Router {
         state.push_trust_source.clone(),
     );
 
+    // Bundle surfaces: viewers (VIEW key, read-only) and the internal
+    // community-scoped publish route (PUSH JWT scoped to the path community).
+    let surfaces_view = crate::overlay::router::with_view_guard(
+        Router::new()
+            .route(
+                "/surfaces/{overlay_code}/view",
+                get(crate::surfaces::page::page),
+            )
+            .route(
+                "/surfaces/{overlay_code}/live",
+                get(crate::surfaces::http::live),
+            ),
+        state.overlay_codes.clone(),
+        state.view_store.clone(),
+    );
+    let surfaces_publish = Router::new()
+        .route(
+            "/internal/surfaces/{community}/{surface}/publish",
+            post(crate::surfaces::http::publish),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.push_trust_source.clone(),
+            overlay_auth::require_push_credential::<Arc<crate::overlay::AppPushTrustSource>>,
+        ))
+        .layer(DefaultBodyLimit::max(
+            crate::surfaces::contract::SurfaceContract::HARD_BODY_LIMIT,
+        ));
+
     let public = Router::new()
         .route("/health", get(health::liveness))
         .route("/readyz", get(health::readiness))
         .merge(overlay_view)
-        .merge(overlay_push);
+        .merge(overlay_push)
+        .merge(surfaces_view)
+        .merge(surfaces_publish);
 
     // The literal `image` segment plays the generic PUSH route's
     // `{surface}` role -- `overlay_auth::push_scope` is keyed on

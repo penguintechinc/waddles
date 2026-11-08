@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Waddles surfaces</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; background: transparent; color: #f4f4f8; font-family: Arial, sans-serif; }
+  #root { display: flex; flex-direction: column; gap: 12px; padding: 12px; max-width: 480px; }
+  .card { background: rgba(20, 20, 28, 0.82); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 12px; padding: 12px 14px; }
+  .card h2 { margin: 0 0 8px; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.7; }
+  .title { font-size: 18px; font-weight: 700; }
+  .sub { font-size: 14px; opacity: 0.8; }
+  .row { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; padding: 3px 0; }
+  .muted { opacity: 0.6; font-size: 12px; }
+  a { color: #9ad1ff; text-decoration: none; }
+  img.thumb { width: 64px; height: 36px; object-fit: cover; border-radius: 4px; }
+  #clip { display: none; border-color: #9ad1ff; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="root">
+  <div class="card" id="now"><h2>Now playing</h2><div id="now-body" class="muted">Nothing playing</div></div>
+  <div class="card" id="queue"><h2>Up next</h2><div id="queue-body" class="muted">Queue is empty</div></div>
+  <div class="card" id="live"><h2>Live now</h2><div id="live-body" class="muted">Nobody is live</div></div>
+  <div class="card" id="clip"><h2>New clip</h2><div id="clip-body"></div></div>
+  <div class="card" id="alert" style="display:none"><h2>Alert</h2><div id="alert-body"></div></div>
+</div>
+<script>
+/* Structured frames only: every server string goes into the DOM via textContent, never innerHTML. */
+var KNOWN = ['music.now_playing', 'music.queue', 'live.channels', 'clip.alert', 'alert'];
+function el(tag, cls, text) {
+  var node = document.createElement(tag);
+  if (cls) { node.className = cls; }
+  if (text !== undefined && text !== null) { node.textContent = String(text); }
+  return node;
+}
+function clear(node) { while (node.firstChild) { node.removeChild(node.firstChild); } }
+function httpsOnly(url) { return typeof url === 'string' && url.indexOf('https://') === 0; }
+function link(url, text) {
+  if (!httpsOnly(url)) { return el('span', '', text); }
+  var a = el('a', '', text);
+  a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+  return a;
+}
+function fmtDuration(s) {
+  var m = Math.floor(s / 60), r = s % 60;
+  return m + ':' + (r < 10 ? '0' : '') + r;
+}
+function trackRow(t) {
+  var row = el('div', 'row');
+  var left = el('div');
+  left.appendChild(link(t.url, t.title));
+  left.appendChild(el('div', 'muted', t.artist));
+  row.appendChild(left);
+  row.appendChild(el('div', 'muted', fmtDuration(t.duration_s)));
+  return row;
+}
+function renderNow(p) {
+  var body = document.getElementById('now-body'); clear(body);
+  if (!p.now_playing) { body.className = 'muted'; body.textContent = 'Nothing playing'; return; }
+  body.className = '';
+  var t = p.now_playing;
+  var title = el('div', 'title'); title.appendChild(link(t.url, t.title));
+  body.appendChild(title);
+  body.appendChild(el('div', 'sub', t.artist + ' · ' + fmtDuration(t.duration_s)));
+}
+function renderQueue(p) {
+  var body = document.getElementById('queue-body'); clear(body);
+  if (!p.queue.length) { body.className = 'muted'; body.textContent = 'Queue is empty'; return; }
+  body.className = '';
+  p.queue.forEach(function (t) { body.appendChild(trackRow(t)); });
+}
+function renderLive(p) {
+  var body = document.getElementById('live-body'); clear(body);
+  if (!p.streams.length) { body.className = 'muted'; body.textContent = 'Nobody is live'; return; }
+  body.className = '';
+  p.streams.forEach(function (s) {
+    var row = el('div', 'row');
+    var left = el('div');
+    if (httpsOnly(s.thumbnail_url)) { var img = el('img', 'thumb'); img.src = s.thumbnail_url; img.alt = ''; left.appendChild(img); }
+    left.appendChild(el('div', 'title', s.channel));
+    left.appendChild(el('div', 'muted', [s.platform, s.category, s.title].filter(Boolean).join(' · ')));
+    row.appendChild(left);
+    row.appendChild(el('div', 'muted', s.viewer_count + ' watching'));
+    body.appendChild(row);
+  });
+}
+var clipTimer = null;
+function renderClip(p) {
+  var card = document.getElementById('clip'); var body = document.getElementById('clip-body'); clear(body);
+  var title = el('div', 'title'); title.appendChild(link(p.url, p.title || p.clip_id));
+  body.appendChild(title);
+  card.style.display = 'block';
+  if (clipTimer) { clearTimeout(clipTimer); }
+  clipTimer = setTimeout(function () { card.style.display = 'none'; }, 10000);
+}
+var alertTimer = null;
+function renderAlert(p) {
+  var card = document.getElementById('alert'); var body = document.getElementById('alert-body'); clear(body);
+  body.appendChild(el('div', 'title', p.alert_type));
+  body.appendChild(el('div', 'sub', p.message));
+  card.style.display = 'block';
+  if (alertTimer) { clearTimeout(alertTimer); }
+  alertTimer = setTimeout(function () { card.style.display = 'none'; }, 8000);
+}
+var RENDER = {
+  'music.now_playing': renderNow, 'music.queue': renderQueue, 'live.channels': renderLive,
+  'clip.alert': renderClip, 'alert': renderAlert
+};
+function onFrame(frame) {
+  if (!frame || typeof frame.surface !== 'string' || !frame.payload) { return; }
+  if (KNOWN.indexOf(frame.surface) < 0) { return; }
+  RENDER[frame.surface](frame.payload);
+}
+var source = new EventSource('live' + window.location.search);
+source.onmessage = function (event) {
+  try { onFrame(JSON.parse(event.data)); } catch (e) { /* malformed frame: skip, stream stays open */ }
+};
+</script>
+</body>
+</html>
