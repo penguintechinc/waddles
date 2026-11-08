@@ -20,16 +20,37 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.superadmin import superadmin_bp
+from services.tenant_key_provisioning import TenantKeyProvisioningError
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
+class _Runtime:
+    """Stand-in envelope runtime; real key provisioning is covered on Postgres elsewhere."""
+
+    service = object()
+
+
 @pytest.fixture
-def app(admin_db: Any) -> Quart:
+def provisioned(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, str]]:
+    """Replace key provisioning with a recorder (the real one needs the Postgres key store)."""
+    calls: list[tuple[int, str]] = []
+
+    async def _fake(dal: Any, service: Any, *, tenant_id: int, slug: str) -> None:
+        calls.append((tenant_id, slug))
+
+    monkeypatch.setattr("blueprints.v1.superadmin.provision_new_tenant", _fake)
+    return calls
+
+
+@pytest.fixture
+def app(admin_db: Any, provisioned: list[tuple[int, str]]) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     quart_app.register_blueprint(superadmin_bp)
     quart_app.config["dal"] = admin_db.dal
     quart_app.config["async_dal"] = admin_db
+    quart_app.config["envelope_runtime"] = _Runtime()
+    quart_app.config["install_dal"] = object()
     return quart_app
 
 
@@ -342,6 +363,51 @@ class TestTenantManagement:
         assert response.status_code == 201
         body = await response.get_json()
         assert body["tenant"]["slug"] == "new-tenant"
+
+    async def test_create_tenant_provisions_its_key(
+        self, client: Any, admin_db: Any, provisioned: list[tuple[int, str]]
+    ) -> None:
+        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(slug="system")
+        admin_db.dal.commit()
+        response = await client.post(
+            "/api/v1/superadmin/tenants",
+            headers=_headers(tenant="system"),
+            json={"slug": "keyed-tenant", "displayName": "Keyed"},
+        )
+        body = await response.get_json()
+        assert response.status_code == 201
+        assert provisioned == [(body["tenant"]["id"], "keyed-tenant")]
+
+    async def test_create_tenant_aborts_when_the_key_cannot_be_provisioned(
+        self, client: Any, admin_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _boom(dal: Any, service: Any, *, tenant_id: int, slug: str) -> None:
+            raise TenantKeyProvisioningError("kms down")
+
+        monkeypatch.setattr("blueprints.v1.superadmin.provision_new_tenant", _boom)
+        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(slug="system")
+        admin_db.dal.commit()
+        response = await client.post(
+            "/api/v1/superadmin/tenants",
+            headers=_headers(tenant="system"),
+            json={"slug": "doomed", "displayName": "Doomed"},
+        )
+        assert response.status_code == 503
+        assert (await response.get_json())["error"]["code"] == "TENANT_KEY_UNAVAILABLE"
+
+    async def test_create_tenant_without_envelope_runtime_creates_nothing(
+        self, client: Any, app: Quart, admin_db: Any
+    ) -> None:
+        app.config["envelope_runtime"] = None
+        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(slug="system")
+        admin_db.dal.commit()
+        response = await client.post(
+            "/api/v1/superadmin/tenants",
+            headers=_headers(tenant="system"),
+            json={"slug": "never", "displayName": "Never"},
+        )
+        assert response.status_code == 503
+        assert admin_db.dal(admin_db.dal.tenants.slug == "never").select().first() is None
 
     async def test_create_tenant_invalid_slug_is_400(self, client: Any) -> None:
         response = await client.post(

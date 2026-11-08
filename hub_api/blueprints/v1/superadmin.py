@@ -27,6 +27,7 @@ from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
+from services.tenant_key_provisioning import TenantKeyProvisioningError, provision_new_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -839,6 +840,10 @@ async def create_tenant(data: CreateTenantRequest) -> tuple[Any, int]:
     ctx = get_tenant_context(request)
     if ctx is None:
         return _err(ApiError("Tenant context required", 403, "FORBIDDEN"))
+    runtime = current_app.config.get("envelope_runtime")
+    if runtime is None:
+        logger.error("create_tenant.envelope_runtime_missing")
+        return _err(ApiError("Encryption service is not available", 503, "TENANT_KEY_UNAVAILABLE"))
     try:
         tenant = await svc.create_tenant(
             async_dal,
@@ -854,6 +859,23 @@ async def create_tenant(data: CreateTenantRequest) -> tuple[Any, int]:
     except ApiError as exc:
         logger.info("api_error_rejected", extra={"code": exc.code, "status": exc.status_code})
         return _err(exc)
+    # No tenant without an at-rest key: on failure the new row is removed and the create fails.
+    try:
+        await provision_new_tenant(
+            current_app.config["install_dal"],
+            runtime.service,
+            tenant_id=tenant.id,
+            slug=tenant.slug,
+        )
+    except TenantKeyProvisioningError:
+        logger.error("create_tenant.key_provisioning_failed", extra={"tenant_id": tenant.id})
+        return _err(
+            ApiError(
+                "Tenant was not created: its encryption key could not be provisioned",
+                503,
+                "TENANT_KEY_UNAVAILABLE",
+            )
+        )
     return jsonify_dto(
         CreateTenantResponse(
             success=True,

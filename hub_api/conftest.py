@@ -20,4 +20,4 @@ if str(_HUB_API_DIR) not in sys.path:
 #: Fixtures for the tamper-evident audit-log tests (`tests/audit_support.py`): registered as a
 #: plugin so test modules use `audit_dal` / `audit_service` / `gate` by name, without importing
 #: fixtures into their own namespace.
-pytest_plugins = ["tests.audit_support"]
+pytest_plugins = ["tests.audit_support", "tests.tenant_keys_pg"]

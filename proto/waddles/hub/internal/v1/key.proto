@@ -14,6 +14,54 @@ service KeyService {
   // Returns a sealed stream DEK for (tenant_id, purpose[, version]).
   // Required scope: "key:stream-dek:read".
   rpc GetStreamDek(GetStreamDekRequest) returns (GetStreamDekResponse);
+
+  // Returns a tenant's at-rest DEK sealed to the caller's ephemeral X25519 key. The data
+  // plane (svc-ingest/svc-process/svc-action) holds the unwrapped DEK in memory and does the
+  // AEAD itself (spec 2026-11-08-tenant-at-rest-encryption). Required scope:
+  // "keys:tenant-dek:read"; the token's tenant claim must be "system" (operator plane).
+  // Errors: INVALID_ARGUMENT (bad request), PERMISSION_DENIED (caller not allow-listed / SVID
+  // mismatch / non-system tenant), NOT_FOUND (no usable key for the tenant), UNAVAILABLE (key
+  // provider down or revoked -- retryable, never a fallback key), RESOURCE_EXHAUSTED (rate
+  // limit), INTERNAL (audit write failed; the key is withheld).
+  rpc GetTenantDek(GetTenantDekRequest) returns (GetTenantDekResponse);
+}
+
+// Which lineage a caller is asking for. Both are served from the tenant's single at-rest DEK;
+// the value is bound into the seal context so a response cannot be replayed across purposes.
+enum TenantDekPurpose {
+  TENANT_DEK_PURPOSE_UNSPECIFIED = 0;
+  TENANT_DEK_PURPOSE_AT_REST = 1;
+  TENANT_DEK_PURPOSE_INGEST_STREAM = 2;
+}
+
+message GetTenantDekRequest {
+  // Numeric tenant id (>= 1). Never a slug or name.
+  uint32 tenant_id = 1;
+  TenantDekPurpose purpose = 2;
+  // 0 requests the active version; non-zero names a specific (possibly retired) version so
+  // old ciphertext stays readable after rotation.
+  uint32 dek_version = 3;
+  // Caller's ephemeral X25519 public key, exactly 32 raw bytes, fresh per call.
+  bytes caller_ephemeral_public_key = 4;
+}
+
+// Seal construction (HPKE-lite, identical to hpke_seal_open in core/svc_ingest identity_crypto.rs):
+//   shared  = X25519(server_one_time_private, caller_ephemeral_public_key)
+//   key||nonce (44 bytes) = HKDF-SHA256(salt = none, ikm = shared, info = context)
+//   ciphertext = AES-256-GCM(key, nonce, aad = context, plaintext = raw 32-byte DEK)
+//   context = "<service_id>|<tenant_id>|<purpose_label>|1" (UTF-8), where service_id is the
+//   verified caller's service name (last path segment of the JWT `sub` SPIFFE id, e.g.
+//   "svc-process"), tenant_id is the decimal tenant id, purpose_label is "at-rest" or
+//   "ingest-stream", and the trailing 1 is the fixed seal-protocol version.
+message GetTenantDekResponse {
+  // Server's one-time X25519 public key (32 raw bytes) for this response.
+  bytes enc = 1;
+  // AES-256-GCM output: 32-byte DEK + 16-byte tag (48 bytes).
+  bytes ciphertext = 2;
+  // The DEK version actually returned (the active one when the request said 0).
+  uint32 dek_version = 3;
+  // Server-asserted cache ceiling in seconds; the client also clamps to its own maximum.
+  uint32 ttl_seconds = 4;
 }
 
 message GetStreamDekRequest {

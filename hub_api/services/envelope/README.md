@@ -54,6 +54,13 @@ TenantEnvelopeService ──► KmsAdapter (Protocol) ──► PlatformKekAdapt
    parametrized scenarios in `test_service_byok.py` (revocation, outage, exit ramp, no-log-leak).
 5. Chart: provider id + credentials Secret in `_kms.tpl`'s validation and `kms.yaml`.
 
+## Provisioning and data-plane key distribution
+
+`TenantEnvelopeService.ensure_tenant_key` is wired into tenant create, hub-api startup and an
+idempotent backfill (`services/tenant_key_provisioning.py`), and `export_dek` is the single raw-DEK
+exit, used only by the `KeyService.GetTenantDek` gRPC broker. See
+`docs/guides/tenant-key-provisioning.md` for the contract.
+
 ## Tests
 
 `hub_api/tests/envelope/` -- see the module docstrings. Real Postgres (`test_repository_pg.py`) needs docker

@@ -56,6 +56,7 @@ from typing import Any
 from flask_core.feature_flags import feature_enabled, get_tier
 from flask_core.tier_catalog import TIER_FREE, TIER_PROFESSIONAL, tier_level
 
+from services.bundle_install_dal import raw_sql_write
 from services.errors import ApiError
 
 logger = logging.getLogger(__name__)
@@ -235,6 +236,21 @@ async def create_community_capped(
             ),
             write=_write,
         )
+    )
+
+
+async def ensure_system_tenant(install_dal: Any) -> None:
+    """Idempotently create the reserved operator-plane ``system`` tenant row (startup only).
+
+    This is the one tenant insert outside :func:`create_tenant_capped`, and it is exempt from the
+    cap by design (``RESERVED_TENANT_SLUGS``): the ``system`` tenant must exist to own its at-rest
+    key, is never user-created, and is excluded from the free-tier tenant count.
+    """
+    await raw_sql_write(
+        install_dal,
+        "INSERT INTO tenants (slug, display_name, is_global) "
+        "VALUES (:slug, 'System', FALSE) ON CONFLICT (slug) DO NOTHING",
+        {"slug": SYSTEM_TENANT_SLUG},
     )
 
 

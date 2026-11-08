@@ -48,6 +48,8 @@ MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 
 #: Full gRPC method name of the detokenizing RPC (its own, tighter rate-limit bucket).
 _PLATFORM_USER_METHOD = "/waddles.hub.internal.v1.IdentityService/ResolvePlatformUser"
+#: The one RPC that releases an unwrapped tenant DEK (tight per-caller bucket).
+_TENANT_DEK_METHOD = "/waddles.hub.internal.v1.KeyService/GetTenantDek"
 
 
 def _load_server_credentials() -> grpc.ServerCredentials:
@@ -96,7 +98,11 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
                 _PLATFORM_USER_METHOD: (
                     float(os.getenv("GRPC_PLATFORM_USER_RPS", "20")),
                     float(os.getenv("GRPC_PLATFORM_USER_BURST", "40")),
-                )
+                ),
+                _TENANT_DEK_METHOD: (
+                    float(os.getenv("GRPC_TENANT_DEK_RPS", "5")),
+                    float(os.getenv("GRPC_TENANT_DEK_BURST", "30")),
+                ),
             },
         ),
         OTelInterceptor(),
@@ -104,7 +110,7 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
 
 
 async def build_internal_grpc_server(
-    *, issuer: ServiceJwtIssuer, async_dal: Any = None
+    *, issuer: ServiceJwtIssuer, async_dal: Any = None, envelope_service: Any = None
 ) -> grpc.aio.Server:
     """Builds (but does not start) the internal gRPC server.
 
@@ -118,7 +124,7 @@ async def build_internal_grpc_server(
         ],
     )
     identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(async_dal), server)
-    key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(), server)
+    key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(async_dal, envelope_service), server)
 
     bind_addr = f"0.0.0.0:{os.environ['GRPC_PORT']}"  # noqa: S104 - internal ClusterIP-only listener, see NetworkPolicy
     server.add_secure_port(bind_addr, _load_server_credentials())
@@ -127,10 +133,12 @@ async def build_internal_grpc_server(
 
 
 async def start_internal_grpc_server(
-    *, issuer: ServiceJwtIssuer, async_dal: Any = None
+    *, issuer: ServiceJwtIssuer, async_dal: Any = None, envelope_service: Any = None
 ) -> grpc.aio.Server:
     """Builds and starts the server -- called from `app.py`'s `before_serving`."""
-    server = await build_internal_grpc_server(issuer=issuer, async_dal=async_dal)
+    server = await build_internal_grpc_server(
+        issuer=issuer, async_dal=async_dal, envelope_service=envelope_service
+    )
     await server.start()
     logger.info("hub_api.grpc_internal.started")
     return server

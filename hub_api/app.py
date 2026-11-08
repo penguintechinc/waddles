@@ -69,6 +69,7 @@ from services.schema import (
     bind_token_billing_tables,
 )
 from services.session_cookie import bearer_token_from_cookie
+from services.tenant_key_provisioning import run_startup_provisioning
 
 logger = logging.getLogger(__name__)
 
@@ -283,11 +284,13 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     @app.route("/ready")
     async def ready() -> tuple[dict[str, str], int]:
         """K8s readinessProbe target -- 200 only once the schema is confirmed at head."""
-        code = 200 if bootstrap_status.is_ready else 503
-        return {
-            "status": bootstrap_status.state.value,
-            "detail": bootstrap_status.detail,
-        }, code
+        code = 200 if bootstrap_status.serving_ready else 503
+        detail = bootstrap_status.detail
+        status_name = bootstrap_status.state.value
+        if bootstrap_status.is_ready and not bootstrap_status.tenant_keys_ready:
+            status_name = "provisioning_tenant_keys"
+            detail = detail or "provisioning per-tenant encryption keys"
+        return {"status": status_name, "detail": detail}, code
 
     @app.before_serving
     async def startup() -> None:
@@ -312,6 +315,8 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         else:
             bootstrap_status.state = BootstrapState.READY
             bootstrap_status.detail = "non-Postgres DATABASE_URL -- bootstrap skipped"
+            # No keystore schema off Postgres (test harness only): nothing to provision.
+            bootstrap_status.tenant_keys_ready = True
         # Per-service EdDSA machine JWT issuance (flask_core.service_jwt,
         # feature/eddsa-machine-jwt) -- built from the `service-jwt-
         # signing-key` Secret (SERVICE_JWT_ACTIVE_KID/SERVICE_JWT_PRIVATE_
@@ -382,7 +387,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # set and the platform KEK is resolved lazily, so the platform-managed
         # baseline needs zero configuration. An ENABLED provider with bad platform
         # credentials raises here -- a loud startup failure, not a first-request one.
-        app.config["envelope_runtime"] = build_envelope_runtime(install_dal)
+        envelope_runtime = build_envelope_runtime(install_dal)
+        app.config["envelope_runtime"] = envelope_runtime
+        # Per-tenant at-rest keys (spec 2026-11-08): after the schema is at head, ensure the
+        # global + system tenants and backfill every existing tenant. Postgres only (the key store
+        # is a Postgres schema); a failure marks hub-api FAILED/not-ready, never silently skipped.
+        app.config["tenant_key_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["tenant_key_task"] = asyncio.create_task(
+                run_startup_provisioning(bootstrap_status, install_dal, envelope_runtime.service)
+            )
         # Object-storage SSE posture (baseline AES256 unless kms.objectStorage.mode=kms): a
         # misconfigured KMS mode raises here; an unentitled one logs a loud ERROR (never silent).
         await get_object_storage_sse().startup_check()
@@ -415,7 +429,9 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         if cfg.grpc_enabled and issuer is not None:
             try:
                 app.config["grpc_server"] = await start_internal_grpc_server(
-                    issuer=issuer, async_dal=async_dal
+                    issuer=issuer,
+                    async_dal=async_dal,
+                    envelope_service=envelope_runtime.service,
                 )
             except Exception as exc:  # noqa: BLE001 - see fail-open/fail-closed note above
                 logger.error(
@@ -476,6 +492,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
                 if not isinstance(exc, asyncio.CancelledError):
                     logger.warning(f"Error stopping identity uuid monitor on shutdown: {exc}")
+        tenant_key_task = app.config.get("tenant_key_task")
+        if tenant_key_task is not None:
+            tenant_key_task.cancel()
+            try:
+                await tenant_key_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Tenant key provisioning ended with an error: {exc}")
         purge_task = app.config.get("suppression_purge_task")
         if purge_task is not None:
             purge_task.cancel()

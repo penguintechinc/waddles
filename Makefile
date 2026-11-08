@@ -1,4 +1,4 @@
-.PHONY: backfill-bundle-author seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: backfill-tenant-keys backfill-bundle-author seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -30,6 +30,10 @@ docker-push:
 
 lint:
 	@bash scripts/lint.sh
+
+# Idempotent: ensure every existing tenant owns an at-rest DEK (needs DATABASE_URL + the KEK env).
+backfill-tenant-keys:
+	@cd hub_api && PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 -m cli.backfill_tenant_keys
 
 backfill-bundle-author:
 	@python3 scripts/backfill_bundle_author.py

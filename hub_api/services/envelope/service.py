@@ -671,6 +671,57 @@ class TenantEnvelopeService:
                 record = await self._provision_first_key(state, tenant_id, tenant_slug)
             return record
 
+    async def export_dek(
+        self, tenant_id: int, *, dek_version: int | None = None
+    ) -> tuple[int, bytearray]:
+        """Unwrap a tenant DEK for the internal data-plane broker (the ONLY raw-DEK exit).
+
+        Returns ``(dek_version, raw_dek)``; ``dek_version=None`` selects the active version, an
+        explicit one may name a retired version (old ciphertext must stay readable). The raw DEK
+        is returned as a ``bytearray`` so the caller can zero it in place once sealed. It is never
+        cached, logged, or stored here. Same failure policy as encrypt/decrypt: a revoked key or
+        unreachable KMS raises :class:`TenantKeyUnavailableError`, a missing/destroyed version
+        :class:`TenantKeyNotFoundError`; there is no fallback key.
+        """
+        state = self._state(tenant_id)
+        if state.blocked_until > self._clock():
+            raise self._blocked_error(state)
+        if dek_version is None:
+            record = await self._keys.get_active(tenant_id)
+        else:
+            record = await self._keys.get_version(tenant_id, dek_version)
+        if record is None or record.wrapped_dek is None or record.status == KEY_DESTROYED:
+            raise TenantKeyNotFoundError("no usable data key for this tenant")
+        try:
+            adapter = await self._adapter_for_record(tenant_id, record)
+            dek = await adapter.unwrap(record.wrapped_dek, context=wrap_context(tenant_id))
+        except KmsAccessDeniedError as exc:
+            await self._on_revoked(state, tenant_id, record, exc)
+            raise TenantKeyUnavailableError(
+                "tenant encryption key unavailable: access denied by the key provider",
+                reason="kms_access_denied",
+            ) from exc
+        except KmsUnavailableError as exc:
+            reason: UnavailableReason = (
+                "kms_platform_credentials"
+                if isinstance(exc, KmsCredentialsError)
+                else "kms_unavailable"
+            )
+            self._start_backoff(state, reason, self._settings.transient_backoff_s)
+            metrics.record_kms_failure(record.kek_kind, "unavailable", tenant_id)
+            raise TenantKeyUnavailableError(
+                "tenant encryption key unavailable: key provider unreachable", reason=reason
+            ) from exc
+        except (KmsError, EnvelopeIntegrityError) as exc:
+            self._start_backoff(state, "kms_rejected", self._settings.transient_backoff_s)
+            metrics.record_kms_failure(record.kek_kind, "rejected", tenant_id)
+            raise TenantKeyUnavailableError(
+                "tenant encryption key unavailable: key provider rejected the key",
+                reason="kms_rejected",
+            ) from exc
+        metrics.record_operation("export_dek", "ok")
+        return record.dek_version, bytearray(dek)
+
     async def rotate_dek(
         self, tenant_id: int, *, tenant_slug: str | None = None, reason: str = "manual"
     ) -> DekRecord:
