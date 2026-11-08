@@ -1566,3 +1566,17 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+
+  # SoundCloud music SERVICE (Rust `kind: service`, world stage-tools): music.soundcloud.{search,
+  # track,playlist.get,resolve}. Metadata + license flags only; OAuth token is a host-side secret ref.
+  - app_id: waddles.core.service.music-soundcloud
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/music-soundcloud
+    manifest_path: music-soundcloud.manifest.yaml
+    artifact_path: music-soundcloud.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
