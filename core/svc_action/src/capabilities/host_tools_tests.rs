@@ -181,9 +181,18 @@ impl Default for Rig {
                 fail: None,
             },
             members: HashMap::from([
-                ("500".to_string(), (UUID_A.to_string(), "moderator".to_string())),
-                ("501".to_string(), (UUID_B.to_string(), "member".to_string())),
-                ("600".to_string(), (UUID_C.to_string(), "community-admin".to_string())),
+                (
+                    "500".to_string(),
+                    (UUID_A.to_string(), "moderator".to_string()),
+                ),
+                (
+                    "501".to_string(),
+                    (UUID_B.to_string(), "member".to_string()),
+                ),
+                (
+                    "600".to_string(),
+                    (UUID_C.to_string(), "community-admin".to_string()),
+                ),
                 ("601".to_string(), (UUID_A.to_string(), "owner".to_string())),
             ]),
             svc_grants: vec!["moderation.twitch".to_string()],
@@ -195,11 +204,19 @@ impl Default for Rig {
 
 /// Builds the stage handler over a twitch service bundle exporting `tools`, a caller app that
 /// requests them all, the given grants, and `queue`.
-fn build(rig: Rig, tools: Vec<ExportedToolInfo>, queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
+fn build(
+    rig: Rig,
+    tools: Vec<ExportedToolInfo>,
+    queue: FakeRelayQueue,
+) -> StageCapabilities<FakeRelayQueue> {
+    let svc = tools
+        .iter()
+        .find_map(|t| t.host_op.as_ref().map(|d| svc_for(&d.platform)))
+        .unwrap_or_else(|| TWITCH_SVC.to_string());
     let requested: Vec<RequestedToolInfo> = tools
         .iter()
         .map(|t| RequestedToolInfo {
-            target: TWITCH_SVC.to_string(),
+            target: svc.clone(),
             tool: t.name.clone(),
             write: true,
         })
@@ -215,7 +232,7 @@ fn build(rig: Rig, tools: Vec<ExportedToolInfo>, queue: FakeRelayQueue) -> Stage
             },
         ),
         row(
-            TWITCH_SVC,
+            &svc,
             SVC_VERSION,
             ToolManifestInfo {
                 is_tool_service: true,
@@ -232,14 +249,14 @@ fn build(rig: Rig, tools: Vec<ExportedToolInfo>, queue: FakeRelayQueue) -> Stage
             .collect(),
     );
     let caller_ids: Vec<String> = if rig.caller_grants {
-        tools.iter().map(|t| tool_call_id(TWITCH_SVC, &t.name)).collect()
+        tools.iter().map(|t| tool_call_id(&svc, &t.name)).collect()
     } else {
         vec![]
     };
     let mut c = caps(queue);
     c.gate = gate(&[
         (APP, APP_VERSION, caller_ids),
-        (TWITCH_SVC, SVC_VERSION, rig.svc_grants),
+        (&svc, SVC_VERSION, rig.svc_grants),
     ]);
     let c = c
         .with_tool(ToolWiring {
@@ -261,12 +278,21 @@ fn ban_decl() -> HostOpDecl {
     }))
 }
 
+/// The registered platform service bundle id of `platform`.
+fn svc_for(platform: &str) -> String {
+    format!("waddles.core.service.{platform}")
+}
+
 fn invoke(tool: &str, args: Value) -> HostCallBody {
+    invoke_to(TWITCH_SVC, tool, args)
+}
+
+fn invoke_to(target: &str, tool: &str, args: Value) -> HostCallBody {
     HostCallBody {
         app_id: APP.to_string(),
         capability: CapabilityKind::Db,
         op: "tool.invoke".to_string(),
-        args: json!({"target": TWITCH_SVC, "tool": tool, "args": args, "idempotency_key": "k-1"}),
+        args: json!({"target": target, "tool": tool, "args": args, "idempotency_key": "k-1"}),
         call_id: 1,
     }
 }
@@ -285,7 +311,11 @@ fn twitch_event(author: Option<&str>) -> InvokeScope {
 
 fn ban_tools() -> Vec<ExportedToolInfo> {
     vec![
-        exported("twitch.moderation.ban", Some("community:moderate"), Some(ban_decl())),
+        exported(
+            "twitch.moderation.ban",
+            Some("community:moderate"),
+            Some(ban_decl()),
+        ),
         exported(
             "twitch.moderation.unban",
             Some("community:moderate"),
@@ -299,11 +329,18 @@ fn ban_tools() -> Vec<ExportedToolInfo> {
 
 #[tokio::test]
 async fn moderator_ban_is_detokenized_host_side_and_queued_pinned_and_signed() {
-    let c = build(Rig::default(), ban_tools(), FakeRelayQueue::with_live_drain());
+    let c = build(
+        Rig::default(),
+        ban_tools(),
+        FakeRelayQueue::with_live_drain(),
+    );
     let out = c
         .handle(
             &twitch_event(Some("500")),
-            invoke("twitch.moderation.ban", json!({"user": UUID_B, "reason": "spam"})),
+            invoke(
+                "twitch.moderation.ban",
+                json!({"user": UUID_B, "reason": "spam"}),
+            ),
         )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
@@ -311,14 +348,23 @@ async fn moderator_ban_is_detokenized_host_side_and_queued_pinned_and_signed() {
     let envs = c.relay_queue.envelopes();
     assert_eq!(envs.len(), 1);
     let e = &envs[0];
-    assert_eq!((e["op"].as_str(), e["platform"].as_str()), (Some("mod.ban"), Some("twitch")));
+    assert_eq!(
+        (e["op"].as_str(), e["platform"].as_str()),
+        (Some("mod.ban"), Some("twitch"))
+    );
     // The tokenized UUID became the platform numeric id, host-side; the UUID never leaves.
     assert_eq!(e["user_id"], "999000111");
     assert!(!e.to_string().contains(UUID_B));
     assert_eq!(e["text"], r#"{"reason":"spam"}"#);
     // Destination = the verified origin channel only; ids stamped from the verified scope.
-    assert_eq!((e["channel"].as_str(), e["origin_channel"].as_str()), (Some("#somechannel"), Some("#somechannel")));
-    assert_eq!((e["tenant_id"].as_i64(), e["community_id"].as_i64()), (Some(7), Some(3)));
+    assert_eq!(
+        (e["channel"].as_str(), e["origin_channel"].as_str()),
+        (Some("#somechannel"), Some("#somechannel"))
+    );
+    assert_eq!(
+        (e["tenant_id"].as_i64(), e["community_id"].as_i64()),
+        (Some(7), Some(3))
+    );
     assert!(e["pin_sig"].as_str().is_some() && e["op_id"].as_str().is_some());
 }
 
@@ -354,7 +400,11 @@ async fn missing_or_insufficient_scope_is_refused_and_queues_nothing() {
 #[tokio::test]
 async fn unresolvable_or_unavailable_user_is_refused_fail_closed() {
     let unknown = "11111111-2222-4333-8444-555566667777";
-    let c = build(Rig::default(), ban_tools(), FakeRelayQueue::with_live_drain());
+    let c = build(
+        Rig::default(),
+        ban_tools(),
+        FakeRelayQueue::with_live_drain(),
+    );
     let err = c
         .handle(
             &twitch_event(Some("500")),
@@ -363,7 +413,11 @@ async fn unresolvable_or_unavailable_user_is_refused_fail_closed() {
         .await
         .unwrap_err();
     assert_eq!(err.code, "invalid_args");
-    assert!(err.message.starts_with("no_linked_account"), "{}", err.message);
+    assert!(
+        err.message.starts_with("no_linked_account"),
+        "{}",
+        err.message
+    );
     assert!(c.relay_queue.envelopes().is_empty());
 
     for (fail, code) in [
@@ -404,7 +458,11 @@ async fn no_platform_user_resolver_refuses_a_user_naming_tool() {
 
 #[tokio::test]
 async fn injected_malformed_and_missing_arguments_are_refused_before_any_io() {
-    let c = build(Rig::default(), ban_tools(), FakeRelayQueue::with_live_drain());
+    let c = build(
+        Rig::default(),
+        ban_tools(),
+        FakeRelayQueue::with_live_drain(),
+    );
     for args in [
         json!({"user": UUID_A, "broadcaster_id": "1"}),
         json!({"user": UUID_A, "moderator_id": "1"}),
@@ -418,7 +476,10 @@ async fn injected_malformed_and_missing_arguments_are_refused_before_any_io() {
         json!([]),
     ] {
         let err = c
-            .handle(&twitch_event(Some("500")), invoke("twitch.moderation.ban", args.clone()))
+            .handle(
+                &twitch_event(Some("500")),
+                invoke("twitch.moderation.ban", args.clone()),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code, "invalid_args", "{args}");
@@ -437,7 +498,10 @@ async fn ungranted_caller_or_service_without_the_platform_permission_is_refused(
         FakeRelayQueue::with_live_drain(),
     );
     let err = c
-        .handle(&twitch_event(Some("500")), invoke("twitch.moderation.ban", json!({"user": UUID_A})))
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("twitch.moderation.ban", json!({"user": UUID_A})),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code, "not_granted");
@@ -451,7 +515,10 @@ async fn ungranted_caller_or_service_without_the_platform_permission_is_refused(
         FakeRelayQueue::with_live_drain(),
     );
     let err = c
-        .handle(&twitch_event(Some("500")), invoke("twitch.moderation.ban", json!({"user": UUID_A})))
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("twitch.moderation.ban", json!({"user": UUID_A})),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code, "forbidden");
@@ -463,11 +530,16 @@ async fn an_op_the_platform_table_does_not_register_is_refused_loudly() {
     let tools = vec![exported(
         "twitch.moderation.kick",
         None,
-        Some(decl(json!({"platform": "twitch", "op": "mod.kick", "user": "user", "required": ["user"]}))),
+        Some(decl(
+            json!({"platform": "twitch", "op": "mod.kick", "user": "user", "required": ["user"]}),
+        )),
     )];
     let c = build(Rig::default(), tools, FakeRelayQueue::with_live_drain());
     let err = c
-        .handle(&twitch_event(Some("500")), invoke("twitch.moderation.kick", json!({"user": UUID_A})))
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("twitch.moderation.kick", json!({"user": UUID_A})),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code, "forbidden");
@@ -480,20 +552,28 @@ async fn chat_clear_is_a_registered_twitch_op_pinned_to_the_origin_channel() {
     let tools = vec![exported(
         "twitch.chat.clear",
         Some("community:moderate"),
-        Some(decl(json!({"platform": "twitch", "op": "chat.clear", "origin": "channel"}))),
+        Some(decl(
+            json!({"platform": "twitch", "op": "chat.clear", "origin": "channel"}),
+        )),
     )];
     let rig = Rig {
-        svc_grants: vec!["chat.delete:twitch".to_string()],
+        svc_grants: vec!["chat.clear:twitch".to_string()],
         ..Rig::default()
     };
     let c = build(rig, tools, FakeRelayQueue::with_live_drain());
     let out = c
-        .handle(&twitch_event(Some("500")), invoke("twitch.chat.clear", json!({})))
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("twitch.chat.clear", json!({})),
+        )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
     assert_eq!(out, json!({"ok": true, "op": "chat.clear"}));
     let e = &c.relay_queue.envelopes()[0];
-    assert_eq!((e["op"].as_str(), e["channel"].as_str()), (Some("chat.clear"), Some("#somechannel")));
+    assert_eq!(
+        (e["op"].as_str(), e["channel"].as_str()),
+        (Some("chat.clear"), Some("#somechannel"))
+    );
     assert!(e.get("user_id").is_none() && e.get("message_id").is_none());
 }
 
@@ -511,10 +591,15 @@ async fn only_allowlisted_reply_keys_reach_the_caller_and_a_webhook_token_is_dro
     let c = build(
         Rig::default(),
         tools,
-        FakeRelayQueue::with_drain_result(r#"{"ok":true,"data":{"id":"77","token":"SECRET-TOKEN"}}"#),
+        FakeRelayQueue::with_drain_result(
+            r#"{"ok":true,"data":{"id":"77","token":"SECRET-TOKEN"}}"#,
+        ),
     );
     let out = c
-        .handle(&twitch_event(Some("500")), invoke("discord.webhook.create", json!({"user": UUID_A})))
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("discord.webhook.create", json!({"user": UUID_A})),
+        )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
     assert_eq!(out, json!({"ok": true, "id": "77"}));
@@ -523,11 +608,20 @@ async fn only_allowlisted_reply_keys_reach_the_caller_and_a_webhook_token_is_dro
     let tools = vec![exported(
         "discord.webhook.create",
         None,
-        Some(decl(json!({"platform": "twitch", "op": "mod.ban", "user": "user", "returns": ["id"], "required": ["user"]}))),
+        Some(decl(
+            json!({"platform": "twitch", "op": "mod.ban", "user": "user", "returns": ["id"], "required": ["user"]}),
+        )),
     )];
-    let c = build(Rig::default(), tools, FakeRelayQueue::with_drain_result(r#"{"ok":true}"#));
+    let c = build(
+        Rig::default(),
+        tools,
+        FakeRelayQueue::with_drain_result(r#"{"ok":true}"#),
+    );
     let err = c
-        .handle(&twitch_event(Some("500")), invoke("discord.webhook.create", json!({"user": UUID_A})))
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("discord.webhook.create", json!({"user": UUID_A})),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code, "target_unavailable");
@@ -538,7 +632,9 @@ async fn a_snowflake_reply_id_is_returned_for_create_style_ops() {
     let tools = vec![exported(
         "twitch.moderation.ban",
         None,
-        Some(decl(json!({"platform": "twitch", "op": "mod.ban", "user": "user", "returns": ["id"], "required": ["user"]}))),
+        Some(decl(
+            json!({"platform": "twitch", "op": "mod.ban", "user": "user", "returns": ["id"], "required": ["user"]}),
+        )),
     )];
     let c = build(
         Rig::default(),
@@ -546,7 +642,10 @@ async fn a_snowflake_reply_id_is_returned_for_create_style_ops() {
         FakeRelayQueue::with_drain_result(r#"{"ok":true,"id":"900000000000000001"}"#),
     );
     let out = c
-        .handle(&twitch_event(Some("500")), invoke("twitch.moderation.ban", json!({"user": UUID_A})))
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("twitch.moderation.ban", json!({"user": UUID_A})),
+        )
         .await
         .unwrap_or_else(|e| panic!("{e:?}"));
     assert_eq!(out, json!({"ok": true, "id": "900000000000000001"}));
@@ -560,20 +659,36 @@ async fn an_unanswered_or_refused_op_is_never_reported_done() {
     let mut c = build(Rig::default(), ban_tools(), q);
     c.discord_ack_timeout = std::time::Duration::from_millis(120);
     let err = c
-        .handle(&twitch_event(Some("500")), invoke("twitch.moderation.ban", json!({"user": UUID_A})))
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("twitch.moderation.ban", json!({"user": UUID_A})),
+        )
         .await
         .unwrap_err();
-    assert_eq!((err.code.as_str(), err.message.as_str()), ("target_unavailable", "not_confirmed"));
+    assert_eq!(
+        (err.code.as_str(), err.message.as_str()),
+        ("target_unavailable", "not_confirmed")
+    );
 
     for (ack, code) in [
         (r#"{"ok":false,"code":"rejected"}"#, "target_unavailable"),
-        (r#"{"ok":false,"code":"ambiguous_paired_guild"}"#, "forbidden"),
+        (
+            r#"{"ok":false,"code":"ambiguous_paired_guild"}"#,
+            "forbidden",
+        ),
         (r#"{"ok":false,"code":"bad_request"}"#, "invalid_args"),
         (r#"{"nope":1}"#, "target_unavailable"),
     ] {
-        let c = build(Rig::default(), ban_tools(), FakeRelayQueue::with_drain_result(ack));
+        let c = build(
+            Rig::default(),
+            ban_tools(),
+            FakeRelayQueue::with_drain_result(ack),
+        );
         let err = c
-            .handle(&twitch_event(Some("500")), invoke("twitch.moderation.ban", json!({"user": UUID_A})))
+            .handle(
+                &twitch_event(Some("500")),
+                invoke("twitch.moderation.ban", json!({"user": UUID_A})),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code, code, "{ack}");
@@ -593,10 +708,27 @@ fn argument_validation_unit_cases() {
     assert_eq!(w.text.as_deref(), Some(r#"{"duration":300}"#));
     assert_eq!(w.user_uuid.as_deref(), Some(UUID_A));
     assert!(validate_args(&d, class, &json!({"user": UUID_A})).is_err());
-    assert!(validate_args(&d, class, &json!({"user": UUID_A, "duration_seconds": 1, "x": 1})).is_err());
+    assert!(validate_args(
+        &d,
+        class,
+        &json!({"user": UUID_A, "duration_seconds": 1, "x": 1})
+    )
+    .is_err());
 }
 
 // ---- migrated Discord role / event tools (behaviour of the retired discord_role_tools) -----
+
+/// Stage capabilities whose gate grants the Discord SERVICE bundle `moderation.discord` (the
+/// permission role and scheduled-event host ops require of the service itself).
+fn dcaps(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
+    let mut c = caps(queue);
+    c.gate = gate(&[(
+        DISCORD_SVC,
+        SVC_VERSION,
+        vec!["moderation.discord".to_string()],
+    )]);
+    c
+}
 
 fn plan_for(tool: &str, args: Value) -> ToolPlan {
     ToolPlan {
@@ -653,7 +785,10 @@ async fn transitional_declarations_cover_exactly_the_pre_declaration_discord_too
         "discord.scheduled_event.delete",
     ] {
         assert!(transitional_decl(DISCORD_SVC, t).is_some(), "{t}");
-        assert!(transitional_decl(TWITCH_SVC, t).is_none(), "{t} is discord-only");
+        assert!(
+            transitional_decl(TWITCH_SVC, t).is_none(),
+            "{t} is discord-only"
+        );
     }
     assert!(transitional_decl(DISCORD_SVC, "classify_frame").is_none());
 }
@@ -661,16 +796,25 @@ async fn transitional_declarations_cover_exactly_the_pre_declaration_discord_too
 #[tokio::test]
 async fn role_tool_queues_the_guild_pinned_role_op_and_returns_ok() {
     for (tool, op) in [(ROLES_ADD, "role.add"), (ROLES_REMOVE, "role.remove")] {
-        let c = caps(FakeRelayQueue::with_live_drain());
+        let c = dcaps(FakeRelayQueue::with_live_drain());
         let out = run_role(&c, &discord_scope(), tool, role_args(json!({}))).await;
-        assert_eq!(out.unwrap_or_else(|e| panic!("{e:?}")), json!({"ok": true, "op": op}));
+        assert_eq!(
+            out.unwrap_or_else(|e| panic!("{e:?}")),
+            json!({"ok": true, "op": op})
+        );
         let envs = c.relay_queue.envelopes();
         let e = &envs[0];
-        assert_eq!((e["op"].as_str(), e["platform"].as_str()), (Some(op), Some("discord")));
+        assert_eq!(
+            (e["op"].as_str(), e["platform"].as_str()),
+            (Some(op), Some("discord"))
+        );
         assert_eq!(e["text"], "vip", "role KEY rides in the MAC-covered text");
         assert_eq!(e["user_id"], format!("{{user:{UUID_A}}}"));
         assert_eq!(e["origin_channel"], "123456789012345678");
-        assert_eq!((e["tenant_id"].as_i64(), e["community_id"].as_i64()), (Some(7), Some(3)));
+        assert_eq!(
+            (e["tenant_id"].as_i64(), e["community_id"].as_i64()),
+            (Some(7), Some(3))
+        );
         for never in ["guild_id", "role_id", "channel"] {
             assert!(e.get(never).is_none(), "{never} must not reach the queue");
         }
@@ -680,7 +824,7 @@ async fn role_tool_queues_the_guild_pinned_role_op_and_returns_ok() {
 
 #[tokio::test]
 async fn injected_role_arguments_are_refused_and_queue_nothing() {
-    let c = caps(FakeRelayQueue::with_live_drain());
+    let c = dcaps(FakeRelayQueue::with_live_drain());
     for extra in [
         json!({"guild_id": "111111111111111111"}),
         json!({"role_id": "222222222222222222"}),
@@ -693,9 +837,16 @@ async fn injected_role_arguments_are_refused_and_queue_nothing() {
         json!({"user": UUID_A.to_uppercase()}),
     ] {
         let r = run_role(&c, &discord_scope(), ROLES_ADD, role_args(extra.clone())).await;
-        assert!(matches!(r, Err(ToolRefusal::InvalidArgs(_))), "{extra}: {r:?}");
+        assert!(
+            matches!(r, Err(ToolRefusal::InvalidArgs(_))),
+            "{extra}: {r:?}"
+        );
     }
-    for bad in [json!("x"), json!({"user": UUID_A}), json!({"role_key": "vip"})] {
+    for bad in [
+        json!("x"),
+        json!({"user": UUID_A}),
+        json!({"role_key": "vip"}),
+    ] {
         let r = run_role(&c, &discord_scope(), ROLES_ADD, bad.clone()).await;
         assert!(matches!(r, Err(ToolRefusal::InvalidArgs(_))), "{bad}");
     }
@@ -704,15 +855,19 @@ async fn injected_role_arguments_are_refused_and_queue_nothing() {
 
 #[tokio::test]
 async fn unready_drain_and_drain_refusals_are_handled_loudly() {
-    let c = caps(FakeRelayQueue::default());
+    let c = dcaps(FakeRelayQueue::default());
     let r = run_role(&c, &discord_scope(), ROLES_REMOVE, role_args(json!({}))).await;
     assert!(matches!(r, Err(ToolRefusal::TargetUnavailable(_))));
     assert!(c.relay_queue.envelopes().is_empty());
     // A drain refusal is surfaced with its typed class (not collapsed to unavailable).
-    let c = caps(FakeRelayQueue::with_drain_result(r#"{"ok":false,"code":"role_not_managed"}"#));
+    let c = dcaps(FakeRelayQueue::with_drain_result(
+        r#"{"ok":false,"code":"role_not_managed"}"#,
+    ));
     let r = run_role(&c, &discord_scope(), ROLES_ADD, role_args(json!({}))).await;
     assert!(matches!(r, Err(ToolRefusal::InvalidArgs(_))), "{r:?}");
-    let c = caps(FakeRelayQueue::with_drain_result(r#"{"ok":false,"code":"ambiguous_paired_guild"}"#));
+    let c = dcaps(FakeRelayQueue::with_drain_result(
+        r#"{"ok":false,"code":"ambiguous_paired_guild"}"#,
+    ));
     match run_role(&c, &discord_scope(), ROLES_ADD, role_args(json!({}))).await {
         Err(ToolRefusal::Forbidden(m)) => assert!(m.starts_with("ambiguous_paired_guild"), "{m}"),
         other => panic!("{other:?}"),
@@ -740,7 +895,7 @@ async fn channel_less_origins_are_allowlisted_and_discord_needs_a_guild() {
         (None, None, None),
     ];
     for (platform, guild, want) in cases {
-        let c = caps(FakeRelayQueue::with_live_drain());
+        let c = dcaps(FakeRelayQueue::with_live_drain());
         let mut sc = scope();
         sc.origin_platform = platform.map(str::to_string);
         sc.origin_channel_id = None;
@@ -752,46 +907,64 @@ async fn channel_less_origins_are_allowlisted_and_discord_needs_a_guild() {
                 assert_eq!(queued_scope(&c), w, "{platform:?} {guild:?}");
             }
             None => {
-                assert!(matches!(r, Err(ToolRefusal::InvalidArgs(_))), "{platform:?} {guild:?}: {r:?}");
+                assert!(
+                    matches!(r, Err(ToolRefusal::InvalidArgs(_))),
+                    "{platform:?} {guild:?}: {r:?}"
+                );
                 assert!(c.relay_queue.envelopes().is_empty());
             }
         }
     }
     // A channel-bearing Discord event keeps the channel pin even when a guild is known.
-    let c = caps(FakeRelayQueue::with_live_drain());
+    let c = dcaps(FakeRelayQueue::with_live_drain());
     let mut sc = discord_scope();
     sc.origin_guild_id = Some("999".to_string());
-    run_role(&c, &sc, ROLES_ADD, role_args(json!({}))).await.unwrap_or_else(|e| panic!("{e:?}"));
+    run_role(&c, &sc, ROLES_ADD, role_args(json!({})))
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
     assert_eq!(queued_scope(&c), "123456789012345678");
 }
 
 #[tokio::test]
 async fn roles_set_queues_one_bulk_op_with_sorted_keys_and_list_returns_roles() {
-    let c = caps(FakeRelayQueue::with_live_drain());
+    let c = dcaps(FakeRelayQueue::with_live_drain());
     let mut sc = discord_scope();
     sc.origin_channel_id = None;
     sc.origin_guild_id = Some("123456789012345679".to_string());
     let args = json!({"user": UUID_A, "role_keys": ["vip", "mod", "vip"]});
-    let out = run_role(&c, &sc, ROLES_SET, args).await.unwrap_or_else(|e| panic!("{e:?}"));
+    let out = run_role(&c, &sc, ROLES_SET, args)
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
     assert_eq!(out, json!({"ok": true, "op": "role.set"}));
     let envs = c.relay_queue.envelopes();
     assert_eq!(envs.len(), 1, "one bulk op; the HOST expands the diff");
     let e = &envs[0];
-    assert_eq!((e["op"].as_str(), e["text"].as_str()), (Some("role.set"), Some("mod,vip")));
+    assert_eq!(
+        (e["op"].as_str(), e["text"].as_str()),
+        (Some("role.set"), Some("mod,vip"))
+    );
     assert_eq!(e["origin_channel"], "guild:123456789012345679");
 
-    let c = caps(FakeRelayQueue::with_drain_result(
+    let c = dcaps(FakeRelayQueue::with_drain_result(
         r#"{"ok":true,"data":{"roles":[{"key":"vip","assignable":true}]}}"#,
     ));
     let mut sc = scope();
     sc.origin_platform = Some("wix".to_string());
-    let out = run_role(&c, &sc, ROLES_LIST, json!({})).await.unwrap_or_else(|e| panic!("{e:?}"));
-    assert_eq!(out, json!({"ok": true, "roles": [{"key": "vip", "assignable": true}]}));
+    let out = run_role(&c, &sc, ROLES_LIST, json!({}))
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(
+        out,
+        json!({"ok": true, "roles": [{"key": "vip", "assignable": true}]})
+    );
     let e = &c.relay_queue.envelopes()[0];
-    assert_eq!((e["op"].as_str(), e["origin_channel"].as_str()), (Some("role.list"), Some("guild:-")));
+    assert_eq!(
+        (e["op"].as_str(), e["origin_channel"].as_str()),
+        (Some("role.list"), Some("guild:-"))
+    );
     assert!(e.get("user_id").is_none() && e.get("text").is_none());
 
-    let c = caps(FakeRelayQueue::with_live_drain());
+    let c = dcaps(FakeRelayQueue::with_live_drain());
     for a in [
         json!({"user": UUID_A, "role_keys": []}),
         json!({"user": UUID_A, "role_keys": ["222222222222222222"]}),
@@ -816,7 +989,9 @@ async fn bulk_drain_refusals_map_to_typed_errors_and_silence_is_not_confirmed() 
         ("guild_mismatch", "forbidden"),
         ("upstream_down", "unavailable"),
     ] {
-        let c = caps(FakeRelayQueue::with_drain_result(&format!(r#"{{"ok":false,"code":"{code}"}}"#)));
+        let c = dcaps(FakeRelayQueue::with_drain_result(&format!(
+            r#"{{"ok":false,"code":"{code}"}}"#
+        )));
         let args = json!({"user": UUID_A, "role_keys": ["vip"]});
         let got = match run_role(&c, &discord_scope(), ROLES_SET, args).await {
             Err(ToolRefusal::InvalidArgs(_)) => "invalid",
@@ -830,7 +1005,9 @@ async fn bulk_drain_refusals_map_to_typed_errors_and_silence_is_not_confirmed() 
 
 #[tokio::test]
 async fn scheduled_event_tools_return_the_platform_id_and_status() {
-    let c = caps(FakeRelayQueue::with_drain_result(r#"{"ok":true,"id":"4242"}"#));
+    let c = dcaps(FakeRelayQueue::with_drain_result(
+        r#"{"ok":true,"id":"4242"}"#,
+    ));
 
     let args = json!({
         "name": "Movie night", "scheduled_start_time": "2026-12-01T19:00:00Z",
@@ -842,11 +1019,19 @@ async fn scheduled_event_tools_return_the_platform_id_and_status() {
     assert_eq!(out["id"], "4242");
     assert_eq!(out["status"], "created");
     // update/cancel/delete echo the event they acted on.
-    let c = caps(FakeRelayQueue::with_live_drain());
-    let out = run_role(&c, &scope(), "discord.scheduled_event.cancel", json!({"event_id": "55"}))
-        .await
-        .unwrap_or_else(|e| panic!("{e:?}"));
-    assert_eq!((out["id"].as_str(), out["status"].as_str()), (Some("55"), Some("cancelled")));
+    let c = dcaps(FakeRelayQueue::with_live_drain());
+    let out = run_role(
+        &c,
+        &scope(),
+        "discord.scheduled_event.cancel",
+        json!({"event_id": "55"}),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(
+        (out["id"].as_str(), out["status"].as_str()),
+        (Some("55"), Some("cancelled"))
+    );
 }
 
 // ---- protected targets + stable refusal codes, per platform --------------------------------
@@ -898,32 +1083,79 @@ async fn protected_targets_are_refused_on_every_platform_and_ordinary_users_are_
     ] {
         // admin (UUID_C), owner (UUID_D) and moderator targets are protected.
         for protected in [UUID_C, UUID_D] {
-            let c = build(rig_for(platform), mod_tools(platform, op), FakeRelayQueue::with_live_drain());
+            let c = build(
+                rig_for(platform),
+                mod_tools(platform, op),
+                FakeRelayQueue::with_live_drain(),
+            );
             let err = c
-                .handle(&platform_event(platform), invoke("platform.moderation.act", json!({"user": protected})))
+                .handle(
+                    &platform_event(platform),
+                    invoke_to(
+                        &svc_for(platform),
+                        "platform.moderation.act",
+                        json!({"user": protected}),
+                    ),
+                )
                 .await
                 .unwrap_err();
             assert_eq!(err.code, "forbidden", "{platform} {op}");
-            assert!(err.message.starts_with("protected_target"), "{platform} {op}: {}", err.message);
-            assert!(c.relay_queue.envelopes().is_empty(), "{platform} {op}: nothing queued");
+            assert!(
+                err.message.starts_with("protected_target"),
+                "{platform} {op}: {}",
+                err.message
+            );
+            assert!(
+                c.relay_queue.envelopes().is_empty(),
+                "{platform} {op}: nothing queued"
+            );
         }
         // A moderator target (member 500's own account) is protected too.
         let mut rig = rig_for(platform);
         rig.users.map.insert(UUID_B.to_string(), "500".to_string());
-        let c = build(rig, mod_tools(platform, op), FakeRelayQueue::with_live_drain());
+        let c = build(
+            rig,
+            mod_tools(platform, op),
+            FakeRelayQueue::with_live_drain(),
+        );
         let err = c
-            .handle(&platform_event(platform), invoke("platform.moderation.act", json!({"user": UUID_B})))
+            .handle(
+                &platform_event(platform),
+                invoke_to(
+                    &svc_for(platform),
+                    "platform.moderation.act",
+                    json!({"user": UUID_B}),
+                ),
+            )
             .await
             .unwrap_err();
-        assert!(err.message.starts_with("protected_target"), "{platform} {op}: {}", err.message);
+        assert!(
+            err.message.starts_with("protected_target"),
+            "{platform} {op}: {}",
+            err.message
+        );
 
         // An ordinary viewer (not a community member) is a valid target.
-        let c = build(rig_for(platform), mod_tools(platform, op), FakeRelayQueue::with_live_drain());
-        c.handle(&platform_event(platform), invoke("platform.moderation.act", json!({"user": UUID_A})))
-            .await
-            .unwrap_or_else(|e| panic!("{platform} {op}: {e:?}"));
+        let c = build(
+            rig_for(platform),
+            mod_tools(platform, op),
+            FakeRelayQueue::with_live_drain(),
+        );
+        c.handle(
+            &platform_event(platform),
+            invoke_to(
+                &svc_for(platform),
+                "platform.moderation.act",
+                json!({"user": UUID_A}),
+            ),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{platform} {op}: {e:?}"));
         let e = &c.relay_queue.envelopes()[0];
-        assert_eq!((e["op"].as_str(), e["platform"].as_str()), (Some(op), Some(platform)));
+        assert_eq!(
+            (e["op"].as_str(), e["platform"].as_str()),
+            (Some(op), Some(platform))
+        );
         assert_eq!(e["user_id"], "141981764");
     }
 }
@@ -931,15 +1163,30 @@ async fn protected_targets_are_refused_on_every_platform_and_ordinary_users_are_
 #[tokio::test]
 async fn non_destructive_moderation_ops_skip_the_protected_check() {
     // Unbanning an admin's id is not an attack; the check is for ban/timeout/kick only.
-    let c = build(Rig::default(), mod_tools("twitch", "mod.unban"), FakeRelayQueue::with_live_drain());
-    c.handle(&platform_event("twitch"), invoke("platform.moderation.act", json!({"user": UUID_C})))
-        .await
-        .unwrap_or_else(|e| panic!("{e:?}"));
+    let c = build(
+        Rig::default(),
+        mod_tools("twitch", "mod.unban"),
+        FakeRelayQueue::with_live_drain(),
+    );
+    c.handle(
+        &platform_event("twitch"),
+        invoke_to(
+            &svc_for("twitch"),
+            "platform.moderation.act",
+            json!({"user": UUID_C}),
+        ),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{e:?}"));
 }
 
 #[tokio::test]
 async fn an_unverifiable_target_is_refused_not_attacked() {
-    let mut c = build(Rig::default(), mod_tools("twitch", "mod.ban"), FakeRelayQueue::with_live_drain());
+    let mut c = build(
+        Rig::default(),
+        mod_tools("twitch", "mod.ban"),
+        FakeRelayQueue::with_live_drain(),
+    );
     c.actor_directory = None;
     // (the planner needs the directory for the scope too, so wire a directory for the actor
     // only through a failing one)
@@ -963,7 +1210,14 @@ async fn an_unverifiable_target_is_refused_not_attacked() {
     }
     c.actor_directory = Some(Arc::new(Down));
     let err = c
-        .handle(&platform_event("twitch"), invoke("platform.moderation.act", json!({"user": UUID_A})))
+        .handle(
+            &platform_event("twitch"),
+            invoke_to(
+                &svc_for("twitch"),
+                "platform.moderation.act",
+                json!({"user": UUID_A}),
+            ),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code, "target_unavailable");
@@ -973,11 +1227,18 @@ async fn an_unverifiable_target_is_refused_not_attacked() {
 #[tokio::test]
 async fn stable_refusal_codes_are_the_message_prefix() {
     // scope_denied: a member (no moderate scope).
-    let c = build(Rig::default(), mod_tools("twitch", "mod.ban"), FakeRelayQueue::with_live_drain());
+    let c = build(
+        Rig::default(),
+        mod_tools("twitch", "mod.ban"),
+        FakeRelayQueue::with_live_drain(),
+    );
     let mut sc = platform_event("twitch");
     sc.origin_user_id = ActorId::new("501");
     let err = c
-        .handle(&sc, invoke("platform.moderation.act", json!({"user": UUID_A})))
+        .handle(
+            &sc,
+            invoke("platform.moderation.act", json!({"user": UUID_A})),
+        )
         .await
         .unwrap_err();
     assert!(err.message.starts_with("scope_denied"), "{}", err.message);
@@ -993,22 +1254,44 @@ async fn stable_refusal_codes_are_the_message_prefix() {
         )
         .await
         .unwrap_err();
-    assert!(err.message.starts_with("no_bound_channel"), "{}", err.message);
+    assert!(
+        err.message.starts_with("no_bound_channel"),
+        "{}",
+        err.message
+    );
 
     // no_linked_account: the target has no linked account in this community.
     let err = c
         .handle(
             &platform_event("twitch"),
-            invoke("platform.moderation.act", json!({"user": "11111111-2222-4333-8444-555566667777"})),
+            invoke(
+                "platform.moderation.act",
+                json!({"user": "11111111-2222-4333-8444-555566667777"}),
+            ),
         )
         .await
         .unwrap_err();
-    assert!(err.message.starts_with("no_linked_account"), "{}", err.message);
+    assert!(
+        err.message.starts_with("no_linked_account"),
+        "{}",
+        err.message
+    );
 
     // not_supported: kick registers no ops; an unregistered op is explicit.
-    let c = build(rig_for("kick"), mod_tools("kick", "mod.ban"), FakeRelayQueue::with_live_drain());
+    let c = build(
+        rig_for("kick"),
+        mod_tools("kick", "mod.ban"),
+        FakeRelayQueue::with_live_drain(),
+    );
     let err = c
-        .handle(&platform_event("kick"), invoke("platform.moderation.act", json!({"user": UUID_A})))
+        .handle(
+            &platform_event("kick"),
+            invoke_to(
+                &svc_for("kick"),
+                "platform.moderation.act",
+                json!({"user": UUID_A}),
+            ),
+        )
         .await
         .unwrap_err();
     assert!(err.message.starts_with("not_supported"), "{}", err.message);
@@ -1021,7 +1304,14 @@ async fn stable_refusal_codes_are_the_message_prefix() {
         FakeRelayQueue::with_drain_result(r#"{"ok":false,"code":"unsupported"}"#),
     );
     let err = c
-        .handle(&platform_event("twitch"), invoke("platform.moderation.act", json!({"user": UUID_A})))
+        .handle(
+            &platform_event("twitch"),
+            invoke_to(
+                &svc_for("twitch"),
+                "platform.moderation.act",
+                json!({"user": UUID_A}),
+            ),
+        )
         .await
         .unwrap_err();
     assert!(err.message.starts_with("not_supported"), "{}", err.message);
@@ -1035,11 +1325,22 @@ async fn an_exhausted_platform_quota_is_a_distinct_refusal_not_a_generic_failure
         FakeRelayQueue::with_drain_result(r#"{"ok":false,"code":"quota_exhausted"}"#),
     );
     let err = c
-        .handle(&platform_event("youtube"), invoke("platform.moderation.act", json!({"user": UUID_A})))
+        .handle(
+            &platform_event("youtube"),
+            invoke_to(
+                &svc_for("youtube"),
+                "platform.moderation.act",
+                json!({"user": UUID_A}),
+            ),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code, "target_unavailable");
-    assert!(err.message.starts_with("quota_exhausted"), "{}", err.message);
+    assert!(
+        err.message.starts_with("quota_exhausted"),
+        "{}",
+        err.message
+    );
 }
 
 #[tokio::test]
@@ -1047,18 +1348,208 @@ async fn every_moderation_tool_declaring_a_required_scope_needs_a_verified_moder
     // The retired per-platform dispatch dropped `required_scope` (the action stage could not
     // verify an actor). With actor resolution, an app holding only the `tool.call` grant but
     // acting on behalf of a non-moderator (or no one) can never moderate.
-    for (platform, op) in [("twitch", "mod.ban"), ("discord", "mod.timeout"), ("youtube", "mod.ban")] {
+    for (platform, op) in [
+        ("twitch", "mod.ban"),
+        ("discord", "mod.timeout"),
+        ("youtube", "mod.ban"),
+    ] {
         for author in [Some("501"), Some("777"), None] {
-            let c = build(rig_for(platform), mod_tools(platform, op), FakeRelayQueue::with_live_drain());
+            let c = build(
+                rig_for(platform),
+                mod_tools(platform, op),
+                FakeRelayQueue::with_live_drain(),
+            );
             let mut sc = platform_event(platform);
             sc.origin_user_id = author.and_then(ActorId::new);
             let err = c
-                .handle(&sc, invoke("platform.moderation.act", json!({"user": UUID_A})))
+                .handle(
+                    &sc,
+                    invoke_to(
+                        &svc_for(platform),
+                        "platform.moderation.act",
+                        json!({"user": UUID_A}),
+                    ),
+                )
                 .await
                 .unwrap_err();
             assert_eq!(err.code, "forbidden", "{platform} {author:?}");
-            assert!(err.message.starts_with("scope_denied"), "{platform} {author:?}: {}", err.message);
+            assert!(
+                err.message.starts_with("scope_denied"),
+                "{platform} {author:?}: {}",
+                err.message
+            );
             assert!(c.relay_queue.envelopes().is_empty());
         }
     }
+}
+
+// ---- security-review hardening ---------------------------------------------------------------
+
+#[tokio::test]
+async fn relay_push_can_never_reach_host_tool_only_ops_even_with_every_grant() {
+    // `caps()` holds a permissive gate; the ops must still be refused before any grant check.
+    for (provider, op) in [("twitch", "chat.clear"), ("discord", "webhook.create")] {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let err = c
+            .handle(
+                &scope(),
+                HostCallBody {
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    capability: CapabilityKind::Relay,
+                    op: "send".to_string(),
+                    args: json!({
+                        "provider": provider,
+                        "message_json": json!({"op": op, "text": "x"}).to_string(),
+                    }),
+                    call_id: 1,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_tool_only", "{provider} {op}");
+        assert!(c.relay_queue.envelopes().is_empty(), "{provider} {op}");
+    }
+}
+
+#[tokio::test]
+async fn chat_clear_needs_its_own_permission_not_chat_delete() {
+    let tools = vec![exported(
+        "twitch.chat.clear",
+        Some("community:moderate"),
+        Some(decl(
+            json!({"platform": "twitch", "op": "chat.clear", "origin": "channel"}),
+        )),
+    )];
+    let rig = Rig {
+        svc_grants: vec![
+            "chat.delete:twitch".to_string(),
+            "moderation.twitch".to_string(),
+        ],
+        ..Rig::default()
+    };
+    let c = build(rig, tools, FakeRelayQueue::with_live_drain());
+    let err = c
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("twitch.chat.clear", json!({})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "forbidden");
+    assert!(c.relay_queue.envelopes().is_empty());
+}
+
+#[tokio::test]
+async fn webhook_create_needs_webhook_manage_not_moderation() {
+    let tools = vec![exported(
+        "discord.webhook.create",
+        None,
+        Some(decl(json!({
+            "platform": "discord", "op": "webhook.create", "text": "name",
+            "required": ["name"], "returns": ["id"], "origin": "channel"
+        }))),
+    )];
+    let args = json!({"name": "bridge"});
+    // Holding moderation.discord is not enough ...
+    let rig = Rig {
+        svc_grants: vec!["moderation.discord".to_string()],
+        ..Rig::default()
+    };
+    let c = build(
+        rig,
+        tools.clone(),
+        FakeRelayQueue::with_drain_result(r#"{"ok":true,"data":{"id":"5","token":"SECRET"}}"#),
+    );
+    let err = c
+        .handle(
+            &platform_event("discord"),
+            invoke_to(&svc_for("discord"), "discord.webhook.create", args.clone()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "forbidden");
+    // ... webhook.manage is, and the token is still never returned.
+    let rig = Rig {
+        svc_grants: vec!["webhook.manage:discord".to_string()],
+        ..Rig::default()
+    };
+    let c = build(
+        rig,
+        tools,
+        FakeRelayQueue::with_drain_result(r#"{"ok":true,"data":{"id":"5","token":"SECRET"}}"#),
+    );
+    let mut sc = platform_event("discord");
+    sc.origin_user_id = ActorId::new("500");
+    let out = c
+        .handle(
+            &sc,
+            invoke_to(&svc_for("discord"), "discord.webhook.create", args),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(out, json!({"ok": true, "id": "5"}));
+}
+
+#[tokio::test]
+async fn host_ops_run_only_from_the_registered_platform_service_bundle() {
+    let c = dcaps(FakeRelayQueue::with_live_drain());
+    let d =
+        decl(json!({"platform": "twitch", "op": "mod.ban", "user": "user", "required": ["user"]}));
+    let mut plan = plan_for("twitch.moderation.ban", json!({"user": UUID_A}));
+    for target in [
+        "waddles.bot.other",
+        DISCORD_SVC,
+        "waddles.core.service.youtube",
+    ] {
+        plan.target_app_id = target.to_string();
+        let r = c.run_host_tool(&twitch_event(Some("500")), &plan, &d).await;
+        match r {
+            Err(ToolRefusal::Forbidden(m)) => {
+                assert!(m.starts_with("not_supported"), "{target}: {m}")
+            }
+            other => panic!("{target}: {other:?}"),
+        }
+    }
+    assert!(c.relay_queue.envelopes().is_empty());
+}
+
+#[tokio::test]
+async fn role_and_event_host_ops_require_the_service_bundles_moderation_grant() {
+    // `caps()` grants the Discord service nothing: the typed classes are refused too.
+    let c = caps(FakeRelayQueue::with_live_drain());
+    let r = run_role(&c, &discord_scope(), ROLES_ADD, role_args(json!({}))).await;
+    assert!(matches!(r, Err(ToolRefusal::Forbidden(_))), "{r:?}");
+    let r = run_role(
+        &c,
+        &scope(),
+        "discord.scheduled_event.cancel",
+        json!({"event_id": "55"}),
+    )
+    .await;
+    assert!(matches!(r, Err(ToolRefusal::Forbidden(_))), "{r:?}");
+    assert!(c.relay_queue.envelopes().is_empty());
+}
+
+#[tokio::test]
+async fn a_placeholder_user_wire_cannot_smuggle_a_destructive_op_past_the_protected_check() {
+    let tools = vec![exported(
+        "twitch.moderation.ban",
+        None,
+        Some(decl(json!({
+            "platform": "twitch", "op": "mod.ban", "user": "user",
+            "userWire": "placeholder", "required": ["user"]
+        }))),
+    )];
+    let c = build(Rig::default(), tools, FakeRelayQueue::with_live_drain());
+    // UUID_C is an admin: with a placeholder wire the check would have been skipped.
+    let err = c
+        .handle(
+            &twitch_event(Some("500")),
+            invoke("twitch.moderation.ban", json!({"user": UUID_C})),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "forbidden");
+    assert!(err.message.contains("placeholder"), "{}", err.message);
+    assert!(c.relay_queue.envelopes().is_empty());
 }

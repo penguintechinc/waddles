@@ -59,9 +59,7 @@ pub trait PlatformUserResolver: Send + Sync {
 /// no whitespace (it becomes a query/path/body value verbatim).
 #[must_use]
 pub fn is_wire_safe_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= MAX_PLATFORM_ID_LEN
-        && id.bytes().all(|b| b.is_ascii_graphic())
+    !id.is_empty() && id.len() <= MAX_PLATFORM_ID_LEN && id.bytes().all(|b| b.is_ascii_graphic())
 }
 
 fn classify(e: &HubClientError) -> ResolveError {
@@ -135,9 +133,21 @@ mod tests {
     fn grpc_codes_map_to_distinct_classes() {
         let g = |c| HubClientError::Grpc(tonic::Status::new(c, "x"));
         assert_eq!(classify(&g(tonic::Code::NotFound)), ResolveError::NotFound);
-        assert_eq!(classify(&g(tonic::Code::PermissionDenied)), ResolveError::Denied);
-        assert_eq!(classify(&g(tonic::Code::ResourceExhausted)), ResolveError::RateLimited);
-        assert_eq!(classify(&g(tonic::Code::InvalidArgument)), ResolveError::Invalid);
-        assert_eq!(classify(&g(tonic::Code::Unavailable)), ResolveError::Unavailable);
+        assert_eq!(
+            classify(&g(tonic::Code::PermissionDenied)),
+            ResolveError::Denied
+        );
+        assert_eq!(
+            classify(&g(tonic::Code::ResourceExhausted)),
+            ResolveError::RateLimited
+        );
+        assert_eq!(
+            classify(&g(tonic::Code::InvalidArgument)),
+            ResolveError::Invalid
+        );
+        assert_eq!(
+            classify(&g(tonic::Code::Unavailable)),
+            ResolveError::Unavailable
+        );
     }
 }

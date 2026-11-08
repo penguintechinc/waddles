@@ -202,7 +202,9 @@ async fn build_platform_user_resolver(
     )
     .await
     {
-        Ok(client) => Some(Arc::new(platform_user::HubPlatformUserResolver::new(client))),
+        Ok(client) => Some(Arc::new(platform_user::HubPlatformUserResolver::new(
+            client,
+        ))),
         Err(err) => {
             tracing::error!(
                 error = %err,

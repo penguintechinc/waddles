@@ -70,7 +70,8 @@ pub async fn resolve_actor_scopes(
 }
 
 /// One row, `LIMIT 2` so a (constraint-forbidden) duplicate is detected, not first-wins.
-const MEMBER_SQL: &str = "SELECT user_uuid::text AS user_uuid, role, is_active_member AS is_active \
+const MEMBER_SQL: &str =
+    "SELECT user_uuid::text AS user_uuid, role, is_active_member AS is_active \
      FROM community_member_identities \
      WHERE tenant_id = $1 AND community_id = $2 AND platform = $3 AND platform_user_id = $4 \
      LIMIT 2";
@@ -107,29 +108,31 @@ impl ActorDirectory for PgActorDirectory {
                     Value::String(Some(platform_user_id.to_string())),
                 ],
             );
-            let rows = match tokio::time::timeout(
-                DIRECTORY_QUERY_TIMEOUT,
-                self.db.query_all_raw(stmt),
-            )
-            .await
-            {
-                Ok(Ok(rows)) => rows,
-                Ok(Err(e)) => {
-                    tracing::error!(error = %e, "actor directory query failed");
-                    return Err(ActorError::Backend);
-                }
-                Err(_) => return Err(ActorError::Unavailable),
-            };
+            let rows =
+                match tokio::time::timeout(DIRECTORY_QUERY_TIMEOUT, self.db.query_all_raw(stmt))
+                    .await
+                {
+                    Ok(Ok(rows)) => rows,
+                    Ok(Err(e)) => {
+                        tracing::error!(error = %e, "actor directory query failed");
+                        return Err(ActorError::Backend);
+                    }
+                    Err(_) => return Err(ActorError::Unavailable),
+                };
             let row = match rows.as_slice() {
                 [] => return Err(ActorError::NotAMember),
                 [row] => row,
                 _ => return Err(ActorError::Backend),
             };
-            let active: bool = row.try_get("", "is_active").map_err(|_| ActorError::Backend)?;
+            let active: bool = row
+                .try_get("", "is_active")
+                .map_err(|_| ActorError::Backend)?;
             if !active {
                 return Err(ActorError::NotAMember);
             }
-            let user: Option<String> = row.try_get("", "user_uuid").map_err(|_| ActorError::Backend)?;
+            let user: Option<String> = row
+                .try_get("", "user_uuid")
+                .map_err(|_| ActorError::Backend)?;
             let role: Option<String> = row.try_get("", "role").map_err(|_| ActorError::Backend)?;
             match (user, role.map(|r| r.trim().to_string())) {
                 (Some(u), Some(r)) if !r.is_empty() && uuid::Uuid::parse_str(&u).is_ok() => {
@@ -149,7 +152,10 @@ mod tests {
 
     fn row(user: Option<&str>, role: Option<&str>, active: bool) -> BTreeMap<String, Value> {
         BTreeMap::from([
-            ("user_uuid".to_string(), Value::String(user.map(str::to_string))),
+            (
+                "user_uuid".to_string(),
+                Value::String(user.map(str::to_string)),
+            ),
             ("role".to_string(), Value::String(role.map(str::to_string))),
             ("is_active".to_string(), Value::Bool(Some(active))),
         ])
@@ -157,7 +163,9 @@ mod tests {
 
     const U: &str = "3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5f";
 
-    async fn resolve(rows: Vec<Vec<BTreeMap<String, Value>>>) -> Result<bundle_tool_call::ActorContext, ActorError> {
+    async fn resolve(
+        rows: Vec<Vec<BTreeMap<String, Value>>>,
+    ) -> Result<bundle_tool_call::ActorContext, ActorError> {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results(rows)
             .into_connection();

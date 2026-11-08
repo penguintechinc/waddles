@@ -98,6 +98,18 @@ fn gate(grants: &[(&str, i64, &str, &str)]) -> Arc<CapabilityGate> {
                 },
             );
     }
+    // The Discord SERVICE bundle itself holds `moderation.discord` (its manifest permission):
+    // host-executed role/event ops require it of the service, not just `tool.call` of the caller.
+    by_scope
+        .entry(("waddles.core.service.discord".to_string(), 44))
+        .or_default()
+        .insert(
+            "moderation.discord".to_string(),
+            GrantedPermission {
+                permission_id: "moderation.discord".to_string(),
+                params: serde_json::json!({}),
+            },
+        );
     for ((grantee, version), grants) in by_scope {
         snapshot.set(
             GrantScopeKey {

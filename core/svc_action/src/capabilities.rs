@@ -64,8 +64,8 @@ use crate::pin_sig::{PinFields, PinKeys};
 use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
-mod host_tools;
 mod event_sync;
+mod host_tools;
 pub use event_sync::{run_event_sync_consumer, EVENT_SYNC_REQUEST_QUEUE, EVENT_SYNC_RESULT_PREFIX};
 mod tool;
 pub use tool::ToolWiring;
@@ -125,8 +125,8 @@ pub struct InvokeScope {
     /// non-Discord (e.g. Wix) event. Used only to ASSERT the source guild equals the community's
     /// own paired guild for channel-less role ops -- it is never a destination.
     pub origin_guild_id: Option<String>,
-    /// The raw platform account id of the delivered event's author (`payload.user_id` /
-    /// `author_id`), host-derived from the verified envelope. The ONLY input of host-side actor
+    /// The raw platform account id of the delivered event's author (`payload.author_id`,
+    /// `message` events only), host-derived from the verified envelope. The ONLY input of host-side actor
     /// resolution ([`crate::actor`]); never guest-supplied, never logged (redacted `Debug`).
     pub origin_user_id: Option<ActorId>,
     /// Numeric `tenants.id`/`communities.id` (spec
@@ -1441,6 +1441,19 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 format!("relay op {raw:?} is not in the registered platform op table"),
             )
         })?;
+        // Ops that exist only behind the host tool path (planner grant + verified actor +
+        // protected-target check, secrets kept host-side) are never reachable by a guest's
+        // `relay.send`, whatever grants the guest holds.
+        if let RelayOp::Registered(name) = op {
+            if bundle_capability_gate::platform_ops::host_tool_only(provider, name) {
+                return Err(denied(
+                    "host_tool_only",
+                    format!(
+                        "relay op {name:?} for provider {provider:?} is only available through a platform service tool"
+                    ),
+                ));
+            }
+        }
         let permission = op.permission(provider).ok_or_else(|| {
             denied(
                 "unknown_op",

@@ -191,7 +191,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         // credential): the planner above has already enforced the manifest request, approved
         // grant, write key and required scope. The manifest's `host_op` declaration (else the
         // transitional Discord table) names the producer op; ONE generic dispatch path.
-        let decl = host_op.or_else(|| super::host_tools::transitional_decl(&plan.target_app_id, &plan.tool));
+        let decl = host_op
+            .or_else(|| super::host_tools::transitional_decl(&plan.target_app_id, &plan.tool));
         if let Some(decl) = decl {
             return self.run_host_tool(scope, &plan, &decl).await;
         }

@@ -61,6 +61,21 @@ pub const RELAY_OPS: &[(&str, &[&str])] = &[
     ("kick", &[]),
 ];
 
+/// Ops reachable ONLY through the host tool path (a manifest `host_op` declaration behind the
+/// planner's grant / verified-actor / protected-target checks), never through the guest
+/// `relay.push` path: `relay.push` has none of those gates, and `webhook.create`'s reply carries
+/// a secret token the host must keep. `relay.push` refuses these as `host_tool_only`.
+pub const HOST_TOOL_ONLY_OPS: &[(&str, &str)] =
+    &[("twitch", "chat.clear"), ("discord", "webhook.create")];
+
+/// `true` when `(platform, op)` may only be executed by the host tool path.
+#[must_use]
+pub fn host_tool_only(platform: &str, op: &str) -> bool {
+    HOST_TOOL_ONLY_OPS
+        .iter()
+        .any(|(p, o)| *p == platform && *o == op)
+}
+
 /// The static op spelling registered for `(platform, op)`, or `None`.
 #[must_use]
 pub fn registered(platform: &str, op: &str) -> Option<&'static str> {
@@ -88,9 +103,10 @@ pub fn permission_for(platform: &str, op: &str) -> Option<PermissionId> {
     let p = platform.to_string();
     Some(match op {
         "chat.send" => PermissionId::ChatSend(p),
-        "chat.delete" | "chat.clear" => PermissionId::ChatDelete(p),
+        "chat.delete" => PermissionId::ChatDelete(p),
+        "chat.clear" => PermissionId::ChatClear(p),
         "message.embed" => PermissionId::ChatSend(p),
-        "webhook.create" => PermissionId::Moderation(p),
+        "webhook.create" => PermissionId::WebhookManage(p),
         "dm.send" => PermissionId::DmSend(p),
         "message.edit" => PermissionId::MessageEdit(p),
         "reaction.add" => PermissionId::MessageReaction(p),
@@ -163,6 +179,8 @@ mod tests {
         for (p, op, want) in [
             ("twitch", "mod.ban", "moderation.twitch"),
             ("twitch", "chat.delete", "chat.delete:twitch"),
+            ("twitch", "chat.clear", "chat.clear:twitch"),
+            ("discord", "webhook.create", "webhook.manage:discord"),
             ("twitch", "eventsub.create", "eventsub.manage:twitch"),
             ("discord", "mod.timeout", "moderation.discord"),
             ("discord", "message.edit", "message.edit:discord"),
@@ -183,6 +201,25 @@ mod tests {
         ] {
             assert_eq!(permission_for(p, op).unwrap().canonical_id(), want);
         }
+    }
+
+    #[test]
+    fn host_tool_only_ops_are_registered_and_distinguished() {
+        for (p, o) in HOST_TOOL_ONLY_OPS {
+            assert!(registered(p, o).is_some(), "{p}/{o} must be registered");
+            assert!(host_tool_only(p, o));
+        }
+        assert!(!host_tool_only("twitch", "mod.ban"));
+        assert!(!host_tool_only("discord", "chat.clear"));
+        // A host-tool-only op never shares a permission with a relay-reachable op.
+        assert_ne!(
+            permission_for("twitch", "chat.clear"),
+            permission_for("twitch", "chat.delete")
+        );
+        assert_ne!(
+            permission_for("discord", "webhook.create"),
+            permission_for("discord", "mod.ban")
+        );
     }
 
     #[test]

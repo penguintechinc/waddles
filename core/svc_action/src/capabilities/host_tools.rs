@@ -180,7 +180,9 @@ struct WireArgs {
 /// not map is REFUSED (never ignored): a caller naming a guild / channel / credential / raw id
 /// is an injection attempt and fails loudly.
 fn validate_args(decl: &HostOpDecl, class: OpClass, args: &Value) -> Result<WireArgs, ToolRefusal> {
-    let obj = args.as_object().ok_or_else(|| bad("args must be an object"))?;
+    let obj = args
+        .as_object()
+        .ok_or_else(|| bad("args must be an object"))?;
     let mut allowed: Vec<&str> = Vec::new();
     allowed.extend(decl.user.as_deref());
     allowed.extend(decl.message_id.as_deref());
@@ -218,9 +220,7 @@ fn validate_args(decl: &HostOpDecl, class: OpClass, args: &Value) -> Result<Wire
         if let Some(v) = obj.get(name) {
             let t = v
                 .as_str()
-                .filter(|t| {
-                    !t.is_empty() && t.len() <= MAX_TEXT_BYTES && !t.contains('\0')
-                })
+                .filter(|t| !t.is_empty() && t.len() <= MAX_TEXT_BYTES && !t.contains('\0'))
                 .ok_or_else(|| bad(format!("`{name}` must be a non-empty string")))?;
             if matches!(class, OpClass::Role("role.add" | "role.remove")) && !is_role_key(t) {
                 return Err(bad(format!(
@@ -285,7 +285,11 @@ fn validate_args(decl: &HostOpDecl, class: OpClass, args: &Value) -> Result<Wire
 /// Discord event without one asserts its host-derived source guild or is refused; an
 /// allowlisted external platform gets `guild:-` (binding guild only); every other origin is
 /// refused.
-fn guild_scope_origin(scope: &InvokeScope, platform: &str, what: &str) -> Result<String, ToolRefusal> {
+fn guild_scope_origin(
+    scope: &InvokeScope,
+    platform: &str,
+    what: &str,
+) -> Result<String, ToolRefusal> {
     let origin_platform = scope.origin_platform.as_deref();
     if platform == "discord" && origin_platform == Some("discord") {
         if let Some(channel) = scope.origin_channel_id.as_deref() {
@@ -388,8 +392,41 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 decl.platform, decl.op
             )));
         }
+        // Host ops run ONLY from the registered platform service bundle: a manifest naming a
+        // platform op on any other target is refused, whatever its declaration says.
+        let service = format!("waddles.core.service.{}", decl.platform);
+        if plan.target_app_id != service {
+            return Err(ToolRefusal::Forbidden(format!(
+                "{NOT_SUPPORTED}: host ops of platform {:?} are served only by {service}",
+                decl.platform
+            )));
+        }
+        // The service bundle itself must hold the op's catalog permission for EVERY class (the
+        // caller holds only `tool.call`): defense in depth on top of the planner. Role grants
+        // and scheduled events are moderation-class community actions.
+        let permission = match class {
+            OpClass::Registered(op) => {
+                bundle_capability_gate::platform_ops::permission_for(&decl.platform, op)
+            }
+            OpClass::Role(_) | OpClass::Event => {
+                Some(PermissionId::Moderation(decl.platform.clone()))
+            }
+        }
+        .ok_or_else(|| {
+            ToolRefusal::Forbidden(format!("host op {:?} has no catalog permission", decl.op))
+        })?;
+        self.authorize_service(scope, plan, permission)?;
         if class == OpClass::Event {
             return self.run_event_class(scope, plan).await;
+        }
+        // A `{user:<uuid>}` placeholder skips host-side detokenization (the consumer resolves
+        // it), so it can never carry a destructive moderation op past the protected-target
+        // check: placeholders are valid only for the typed role ops.
+        if decl.user_wire == HostOpUserWire::Placeholder && !matches!(class, OpClass::Role(_)) {
+            return Err(ToolRefusal::Forbidden(format!(
+                "{NOT_SUPPORTED}: a placeholder user wire is valid only for role ops, not {:?}",
+                decl.op
+            )));
         }
         let what = decl.op.as_str();
         // Phase 1 -- validation only (no I/O): an invalid call costs no readiness probe, rate
@@ -400,15 +437,6 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             HostOpOrigin::GuildScope => Some(guild_scope_origin(scope, &decl.platform, what)?),
             HostOpOrigin::None => None,
         };
-        if let OpClass::Registered(op) = class {
-            // The service bundle itself must hold the platform permission for the op (the
-            // caller holds only `tool.call`): defense in depth on top of the planner.
-            let permission = bundle_capability_gate::platform_ops::permission_for(&decl.platform, op)
-                .ok_or_else(|| {
-                    ToolRefusal::Forbidden(format!("host op {op:?} has no catalog permission"))
-                })?;
-            self.authorize_service(scope, plan, permission)?;
-        }
         // Phase 2 -- producer-side safety checks, cheapest first.
         if decl.platform == "discord" {
             match self.relay_queue.key_exists(DISCORD_DRAIN_READY_KEY).await {
@@ -449,7 +477,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             (Some(u), HostOpUserWire::PlatformId) => {
                 let id = self.detokenize_user(scope, &decl.platform, u).await?;
                 if is_destructive_moderation(what) {
-                    self.refuse_protected_target(scope, &decl.platform, what, &id).await?;
+                    self.refuse_protected_target(scope, &decl.platform, what, &id)
+                        .await?;
                 }
                 Some(id)
             }
@@ -497,7 +526,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                     decl.platform
                 ))
             })?;
-        let ack = self.await_host_ack(&op_id, ack_timeout, &decl.platform, what).await?;
+        let ack = self
+            .await_host_ack(&op_id, ack_timeout, &decl.platform, what)
+            .await?;
         self.usage
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -535,7 +566,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             )
             .map(|_| ())
             .map_err(|d| {
-                ToolRefusal::Forbidden(format!("{SCOPE_DENIED}: the platform bundle lacks a grant: {d}"))
+                ToolRefusal::Forbidden(format!(
+                    "{SCOPE_DENIED}: the platform bundle lacks a grant: {d}"
+                ))
             })
     }
 
@@ -597,7 +630,12 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             ));
         };
         match dir
-            .member(scope.tenant_id, scope.community_id, platform, platform_user_id)
+            .member(
+                scope.tenant_id,
+                scope.community_id,
+                platform,
+                platform_user_id,
+            )
             .await
         {
             Ok((_, role)) if PROTECTED_ROLES.contains(&role.as_str()) => {
@@ -671,7 +709,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 }
                 Ok(None) => {}
                 Err(_) => {
-                    return Err(ToolRefusal::TargetUnavailable("relay_unavailable".to_string()))
+                    return Err(ToolRefusal::TargetUnavailable(
+                        "relay_unavailable".to_string(),
+                    ))
                 }
             }
             if tokio::time::Instant::now() >= deadline {
