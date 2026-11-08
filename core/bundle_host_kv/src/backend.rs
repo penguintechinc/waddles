@@ -96,6 +96,13 @@ use std::pin::Pin;
 
 use redis::AsyncCommands;
 
+/// The lexicographic index key paired with a live-index key: a sorted set
+/// (all scores 0, members = data keys) that backs prefix `list` via
+/// `ZRANGEBYLEX`. Derived so the stages never need to know it exists.
+pub fn lex_key(live_key: &str) -> String {
+    format!("{live_key}:lex")
+}
+
 /// The live index's reserved never-expiring member (see the module doc).
 /// A macro so the same literal feeds both the Rust constant and the Lua
 /// prelude below via `concat!`. Contains `:`, which
@@ -126,8 +133,17 @@ macro_rules! lua_prelude {
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 local function fmt(n) return string.format('%.0f', n) end
-local function trim(live)
-  redis.call('ZREMRANGEBYSCORE', live, '-inf', '(' .. fmt(now))
+local function trim(live, lex)
+  local lapsed = redis.call('ZRANGEBYSCORE', live, '-inf', '(' .. fmt(now))
+  local n = #lapsed
+  local i = 1
+  while i <= n do
+    local j = math.min(i + 499, n)
+    local chunk = {unpack(lapsed, i, j)}
+    redis.call('ZREM', live, unpack(chunk))
+    redis.call('ZREM', lex, unpack(chunk))
+    i = j + 1
+  end
 end
 local function live_count(live)
   local n = redis.call('ZCARD', live)
@@ -409,7 +425,7 @@ const SET_WITH_QUOTA_SCRIPT: &str = concat!(
     lua_prelude!(),
     lua_legacy_counter!(),
     r#"
-trim(KEYS[2])
+trim(KEYS[2], KEYS[4])
 local existed = redis.call('EXISTS', KEYS[1])
 if not redis.call('ZSCORE', KEYS[2], KEYS[1]) then
   if live_count(KEYS[2]) >= tonumber(ARGV[3]) then
@@ -423,6 +439,7 @@ else
   redis.call('SET', KEYS[1], ARGV[1])
 end
 redis.call('ZADD', KEYS[2], expiry_score(ttl), KEYS[1])
+redis.call('ZADD', KEYS[4], 0, KEYS[1])
 if existed == 0 then
   legacy_incr(KEYS[3])
 end
@@ -448,6 +465,7 @@ const DELETE_SCRIPT: &str = concat!(
     r#"
 local deleted = redis.call('DEL', KEYS[1])
 redis.call('ZREM', KEYS[2], KEYS[1])
+redis.call('ZREM', KEYS[4], KEYS[1])
 if deleted == 1 then
   legacy_decr(KEYS[3])
 end
@@ -490,6 +508,7 @@ repeat
       local score = '+inf'
       if pttl >= 0 then score = fmt(now + pttl) end
       redis.call('ZADD', KEYS[1], score, k)
+      redis.call('ZADD', KEYS[3], 0, k)
     end
   end
   count = redis.call('ZCARD', KEYS[1])
@@ -499,6 +518,7 @@ repeat
   end
 until cursor == '0'
 redis.call('ZADD', KEYS[1], '+inf', SENTINEL)
+redis.call('ZADD', KEYS[3], 0, SENTINEL)
 redis.call('DEL', KEYS[2])
 return {1, count}
 "#
@@ -517,7 +537,7 @@ const INCREMENT_WITH_QUOTA_SCRIPT: &str = concat!(
     lua_prelude!(),
     lua_legacy_counter!(),
     r#"
-trim(KEYS[2])
+trim(KEYS[2], KEYS[4])
 local existed = redis.call('EXISTS', KEYS[1])
 if not redis.call('ZSCORE', KEYS[2], KEYS[1]) then
   if live_count(KEYS[2]) >= tonumber(ARGV[3]) then
@@ -532,6 +552,7 @@ else
   redis.call('PERSIST', KEYS[1])
 end
 redis.call('ZADD', KEYS[2], expiry_score(ttl), KEYS[1])
+redis.call('ZADD', KEYS[4], 0, KEYS[1])
 if existed == 0 then
   legacy_incr(KEYS[3])
 end
@@ -579,7 +600,7 @@ const CAS_SCRIPT: &str = concat!(
     lua_legacy_counter!(),
     lua_version!(),
     r#"
-trim(KEYS[2])
+trim(KEYS[2], KEYS[4])
 local cur = redis.call('GET', KEYS[1])
 local curver = 0
 if cur then curver = ver(cur) end
@@ -598,6 +619,7 @@ else
   redis.call('SET', KEYS[1], ARGV[2])
 end
 redis.call('ZADD', KEYS[2], expiry_score(ttl), KEYS[1])
+redis.call('ZADD', KEYS[4], 0, KEYS[1])
 if not cur then
   legacy_incr(KEYS[3])
 end
@@ -619,37 +641,56 @@ if curver ~= tonumber(ARGV[1]) then
 end
 redis.call('DEL', KEYS[1])
 redis.call('ZREM', KEYS[2], KEYS[1])
+redis.call('ZREM', KEYS[4], KEYS[1])
 legacy_decr(KEYS[3])
 return {0, '0'}
 "#
 );
 
-/// `KEYS[1]` = live index. `ARGV` = data-key prefix, after (full data key or
-/// ''), limit. Returns up to `limit` live data keys under the prefix, strictly
-/// after `after`, lexicographically sorted. Lapsed members are trimmed; members
-/// whose data key no longer exists (evicted) are skipped. The index holds at
-/// most `MAX_KEYS_PER_APP` members, so the sort is bounded.
+/// `KEYS[1]` = live index, `KEYS[2]` = lex index (all scores 0, members = data
+/// keys). `ARGV` = data-key prefix, after (full data key or ''), limit, scan cap.
+/// Returns up to `limit` live data keys under the prefix, strictly after
+/// `after`, in lexicographic order.
+///
+/// Cost is bounded by the MATCHING RANGE, never the app's keyspace:
+/// `ZRANGEBYLEX [prefix (prefix\255` visits only members in that range, in
+/// batches, and at most `scan cap` members are examined per call. Lapsed members
+/// are trimmed first (`O(lapsed)`); members whose data key was evicted are
+/// skipped via `EXISTS`. If the lex index is missing (apps that predate it, or
+/// an eviction) it is rebuilt once from the live index, itself capped at
+/// `MAX_KEYS_PER_APP` members.
 const LIST_KEYS_SCRIPT: &str = concat!(
     lua_prelude!(),
     r#"
-trim(KEYS[1])
+if redis.call('EXISTS', KEYS[2]) == 0 then
+  for _, m in ipairs(redis.call('ZRANGE', KEYS[1], 0, -1)) do
+    if m ~= SENTINEL then redis.call('ZADD', KEYS[2], 0, m) end
+  end
+  redis.call('ZADD', KEYS[2], 0, SENTINEL)
+end
+trim(KEYS[1], KEYS[2])
 local prefix = ARGV[1]
 local after = ARGV[2]
 local limit = tonumber(ARGV[3])
-local plen = string.len(prefix)
-local matches = {}
-for _, m in ipairs(redis.call('ZRANGE', KEYS[1], 0, -1)) do
-  if m ~= SENTINEL and string.sub(m, 1, plen) == prefix and (after == '' or m > after) then
-    matches[#matches + 1] = m
-  end
-end
-table.sort(matches)
+local cap = tonumber(ARGV[4])
+local lo = '[' .. prefix
+if after ~= '' then lo = '(' .. after end
+local hi = '[' .. prefix .. '\255'
 local out = {}
-for _, m in ipairs(matches) do
-  if redis.call('EXISTS', m) == 1 then
-    out[#out + 1] = m
-    if #out >= limit then break end
+local examined = 0
+local cursor = lo
+while #out < limit and examined < cap do
+  local batch = math.min(limit - #out + 8, cap - examined)
+  local members = redis.call('ZRANGEBYLEX', KEYS[2], cursor, hi, 'LIMIT', 0, batch)
+  if #members == 0 then break end
+  for _, m in ipairs(members) do
+    examined = examined + 1
+    if redis.call('EXISTS', m) == 1 then
+      out[#out + 1] = m
+      if #out >= limit then break end
+    end
   end
+  cursor = '(' .. members[#members]
 end
 return out
 "#
@@ -709,6 +750,7 @@ impl KvBackend for redis::aio::MultiplexedConnection {
                 .key(data_key)
                 .key(live_key)
                 .key(legacy_count_key)
+                .key(lex_key(live_key))
                 .arg(expected_version)
                 .arg(value)
                 .arg(ttl_seconds)
@@ -738,6 +780,7 @@ impl KvBackend for redis::aio::MultiplexedConnection {
                 .key(data_key)
                 .key(live_key)
                 .key(legacy_count_key)
+                .key(lex_key(live_key))
                 .arg(expected_version)
                 .invoke_async(&mut conn)
                 .await
@@ -761,9 +804,11 @@ impl KvBackend for redis::aio::MultiplexedConnection {
         Box::pin(async move {
             redis::Script::new(LIST_KEYS_SCRIPT)
                 .key(live_key)
+                .key(lex_key(live_key))
                 .arg(data_prefix)
                 .arg(after)
                 .arg(limit)
+                .arg(crate::limits::LIST_SCAN_CAP)
                 .invoke_async(&mut conn)
                 .await
                 .map_err(|e| e.to_string())
@@ -813,6 +858,7 @@ impl KvBackend for redis::aio::MultiplexedConnection {
                 .key(data_key)
                 .key(live_key)
                 .key(legacy_count_key)
+                .key(lex_key(live_key))
                 .arg(value)
                 .arg(ttl_seconds)
                 .arg(max_keys)
@@ -839,6 +885,7 @@ impl KvBackend for redis::aio::MultiplexedConnection {
                 .key(data_key)
                 .key(live_key)
                 .key(legacy_count_key)
+                .key(lex_key(live_key))
                 .invoke_async(&mut conn)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -862,6 +909,7 @@ impl KvBackend for redis::aio::MultiplexedConnection {
                     .key(data_key)
                     .key(live_key)
                     .key(legacy_count_key)
+                    .key(lex_key(live_key))
                     .arg(delta)
                     .arg(ttl_seconds)
                     .arg(max_keys)
@@ -906,6 +954,7 @@ impl KvBackend for redis::aio::MultiplexedConnection {
             let (status, count): (i64, u64) = redis::Script::new(RECONCILE_SCRIPT)
                 .key(live_key)
                 .key(lock_key)
+                .key(lex_key(live_key))
                 .arg(data_scan_pattern)
                 .arg(lock_ttl_ms)
                 .arg(scan_limit)

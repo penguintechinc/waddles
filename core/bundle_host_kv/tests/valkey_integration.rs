@@ -1352,3 +1352,143 @@ async fn v2_byte_budget_is_enforced_per_invocation_in_real_valkey() {
     // a new invocation has a fresh budget
     host.set(&scope, 9, "b-new", &big, 0).await.unwrap();
 }
+
+// ---- kv v2 list: cost is bounded by the matching range, not the keyspace ----
+
+/// Reads `calls` for one command from `INFO commandstats` (0 when never called).
+async fn cmd_calls(conn: &mut MultiplexedConnection, cmd: &str) -> u64 {
+    let info: String = redis::cmd("INFO")
+        .arg("commandstats")
+        .query_async(conn)
+        .await
+        .unwrap();
+    info.lines()
+        .find_map(|l| l.strip_prefix(&format!("cmdstat_{cmd}:calls=")))
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn v2_list_visits_only_the_matching_range_in_a_large_keyspace() {
+    let (_container, url) = start().await;
+    let mut probe = connect(&url).await;
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+
+    // 3000 unrelated keys + 12 under the narrow prefix, written via v1 `set`
+    // (proves v1 writes maintain the lex index too).
+    for i in 0..3000u64 {
+        host.set(&scope, 10_000 + i, &format!("bulk.{i:05}"), b"x", 0)
+            .await
+            .unwrap();
+    }
+    for i in 0..12u64 {
+        host.set(&scope, 20_000 + i, &format!("narrow.{i:02}"), b"x", 0)
+            .await
+            .unwrap();
+    }
+
+    let _: () = redis::cmd("CONFIG")
+        .arg("RESETSTAT")
+        .query_async(&mut probe)
+        .await
+        .unwrap();
+    let page = host
+        .list(&scope, 30_000, "narrow.", None, 200)
+        .await
+        .unwrap();
+    assert_eq!(page.keys.len(), 12);
+    assert!(page.next_cursor.is_none());
+
+    // The full-index scan command is never used, ZRANGEBYLEX is, and the per-key
+    // work (EXISTS) is proportional to the 12 matches -- NOT to the 3012 keys.
+    assert_eq!(
+        cmd_calls(&mut probe, "zrange").await,
+        0,
+        "no whole-index scan"
+    );
+    assert!(cmd_calls(&mut probe, "zrangebylex").await >= 1);
+    let exists = cmd_calls(&mut probe, "exists").await;
+    assert!(
+        (12..=16).contains(&exists),
+        "EXISTS must be ~matches (12) + O(1) overhead, got {exists} for a 3012-key keyspace"
+    );
+
+    // pagination over the narrow range stays range-bounded too
+    let _: () = redis::cmd("CONFIG")
+        .arg("RESETSTAT")
+        .query_async(&mut probe)
+        .await
+        .unwrap();
+    let p1 = host.list(&scope, 30_001, "narrow.", None, 5).await.unwrap();
+    assert_eq!(p1.keys.len(), 5);
+    let p2 = host
+        .list(&scope, 30_001, "narrow.", p1.next_cursor.as_deref(), 5)
+        .await
+        .unwrap();
+    assert_eq!(p2.keys.first().map(String::as_str), Some("narrow.05"));
+    assert!(cmd_calls(&mut probe, "exists").await <= 18);
+    assert_eq!(cmd_calls(&mut probe, "zrange").await, 0);
+
+    // v1 delete and TTL lapse both leave the lex index
+    host.delete(&scope, 30_002, "narrow.00").await.unwrap();
+    host.set(&scope, 30_003, "narrow.ttl", b"x", 1)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let after = host
+        .list(&scope, 30_004, "narrow.", None, 200)
+        .await
+        .unwrap();
+    assert_eq!(after.keys.len(), 11);
+    assert!(!after
+        .keys
+        .iter()
+        .any(|k| k == "narrow.00" || k == "narrow.ttl"));
+}
+
+#[tokio::test]
+async fn v2_list_rebuilds_a_missing_lex_index_from_the_live_index() {
+    let (_container, url) = start().await;
+    let mut probe = connect(&url).await;
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+    for i in 0..5u64 {
+        host.set(&scope, 1 + i, &format!("ev.{i}"), b"x", 0)
+            .await
+            .unwrap();
+    }
+    // simulate an app that predates the lex index (or an evicted one)
+    let lex = bundle_host_kv::backend::lex_key(&scope.live_key());
+    let _: i64 = redis::cmd("DEL")
+        .arg(&lex)
+        .query_async(&mut probe)
+        .await
+        .unwrap();
+    let page = host.list(&scope, 100, "ev.", None, 50).await.unwrap();
+    assert_eq!(page.keys, ["ev.0", "ev.1", "ev.2", "ev.3", "ev.4"]);
+}
+
+#[tokio::test]
+async fn v2_list_calls_per_invocation_are_capped_and_cost_a_fixed_budget() {
+    let (_container, url) = start().await;
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+    host.set(&scope, 1, "a", b"x", 0).await.unwrap();
+    let mut tripped_at = None;
+    for i in 0..40 {
+        if let Err(e) = host.list(&scope, 500, "", None, 10).await {
+            assert_eq!(e.code(), "rate_limited");
+            tripped_at = Some(i);
+            break;
+        }
+    }
+    assert_eq!(
+        tripped_at,
+        Some(bundle_host_kv::MAX_LISTS_PER_INVOKE as i32),
+        "the 17th list in one invocation is refused"
+    );
+    // a fresh invocation can list again
+    host.list(&scope, 501, "", None, 10).await.unwrap();
+}

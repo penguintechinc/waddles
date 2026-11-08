@@ -37,6 +37,7 @@ _RUNTIME = "waddles_bundle_runtime"
 
 
 def upgrade() -> None:
+    """Create the `bundle_data` schema, table registry and usage counters (with RLS)."""
     op.execute(f"CREATE SCHEMA IF NOT EXISTS bundle_data AUTHORIZATION {_MIGRATOR}")
     op.execute(f"GRANT USAGE ON SCHEMA bundle_data TO {_RUNTIME}")
 
@@ -83,12 +84,16 @@ def upgrade() -> None:
         """
     )
     # Teardown/inspection by the DDL role is not scoped to one community.
-    op.execute(f"CREATE POLICY usage_migrator ON bundle_data.usage TO {_MIGRATOR} USING (true) WITH CHECK (true)")
+    op.execute(
+        f"CREATE POLICY usage_migrator ON bundle_data.usage TO {_MIGRATOR} "
+        "USING (true) WITH CHECK (true)"
+    )
     op.execute(f"GRANT SELECT, INSERT, UPDATE ON bundle_data.usage TO {_RUNTIME}")
     op.execute(f"GRANT ALL ON bundle_data.usage TO {_MIGRATOR}")
 
 
 def downgrade() -> None:
+    """Drop the usage counters, registry and schema."""
     op.execute("DROP TABLE IF EXISTS bundle_data.usage")
     op.execute("DROP TABLE IF EXISTS bundle_data.table_registry")
     op.execute("DROP SCHEMA IF EXISTS bundle_data")

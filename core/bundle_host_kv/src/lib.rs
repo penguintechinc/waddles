@@ -43,8 +43,8 @@ pub use backend::{
     BoxFuture, CasDelete, CasOutcome, KvBackend, QuotaOutcome, ReconcileOutcome, VERSION_SCHEME,
 };
 pub use limits::{
-    MAX_BYTES_PER_INVOKE, MAX_GUEST_KEY_LEN, MAX_KEYS_PER_APP, MAX_LIST_LIMIT, MAX_OPS_PER_INVOKE,
-    MAX_TTL_SECONDS, MAX_VALUE_BYTES,
+    LIST_SCAN_CAP, MAX_BYTES_PER_INVOKE, MAX_GUEST_KEY_LEN, MAX_KEYS_PER_APP, MAX_LISTS_PER_INVOKE,
+    MAX_LIST_LIMIT, MAX_OPS_PER_INVOKE, MAX_TTL_SECONDS, MAX_VALUE_BYTES,
 };
 pub use scope::KvScope;
 
@@ -728,7 +728,23 @@ impl<B: KvBackend> KvHost<B> {
             None => String::new(),
         };
         self.check_rate(scope, call_id).await?;
-        self.charge_bytes(scope, call_id, prefix.len()).await?;
+        let lists = self
+            .backend
+            .add_budget(
+                &scope.list_budget_key(call_id),
+                limits::RATE_LIMIT_WINDOW_SECONDS,
+                1,
+            )
+            .await
+            .map_err(KvError::Backend)?;
+        if lists > limits::MAX_LISTS_PER_INVOKE {
+            return Err(KvError::RateLimited(format!(
+                "invocation exceeded {} kv list calls",
+                limits::MAX_LISTS_PER_INVOKE
+            )));
+        }
+        self.charge_bytes(scope, call_id, limits::LIST_BASE_COST_BYTES + prefix.len())
+            .await?;
         self.ensure_count_reconciled(scope).await?;
         // One extra to learn whether another page follows.
         let mut keys = self

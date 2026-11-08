@@ -180,6 +180,11 @@ impl KvScope {
         format!("{}:opb:{}", self.app_prefix(), call_id)
     }
 
+    /// Per-invocation `list` call counter (kv v2).
+    pub fn list_budget_key(&self, call_id: u64) -> String {
+        format!("{}:opl:{}", self.app_prefix(), call_id)
+    }
+
     /// The full data-key prefix for a guest key prefix (`list`).
     pub fn data_prefix(&self, guest_prefix: &str) -> String {
         self.data_key(guest_prefix)
