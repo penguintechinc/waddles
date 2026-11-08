@@ -1,15 +1,17 @@
 //! Kick public-API template policy (<https://docs.kick.com/apis/chat>,
-//! <https://docs.kick.com/apis/moderation>): `chat.send`, `chat.delete`, `mod.ban`,
-//! `mod.timeout`, `mod.unban`. The host is exactly `api.kick.com`; credentials and the
+//! <https://docs.kick.com/apis/moderation>): `chat.send`, `mod.ban`, `mod.timeout`, `mod.unban`. The host is exactly `api.kick.com`; credentials and the
 //! broadcaster id are slots resolved per send by the connection resolver, never visible to the
 //! bundle.
 //!
 //! `chat.send` posts as the application bot (`type: "bot"`), which Kick delivers to the channel
 //! attached to the token, so no channel id appears in the template.
 //!
-//! `chat.delete` (`DELETE /public/v1/chat/{message_id}`) requires a proven channel
-//! (`requires_pin`): `outbound_pin::pin_target` knows `kick`, and `sender_exec::pin_channel` fails
-//! closed for a pinned kind on any platform it cannot pin.
+//! `chat.delete` is deliberately UNREGISTERED (fail closed). Kick's `DELETE /public/v1/chat/{id}`
+//! takes a global message id with no channel, and a bundle-supplied id is not bound to the
+//! community's channel: the community token could delete messages in ANY channel its owner
+//! moderates. The channel pin proves the triggering event's channel, not the message's. Enabling it
+//! needs the host to prove the id belongs to this community (ids seen in its verified ingest stream,
+//! or a host lookup of the message's broadcaster against the binding).
 //!
 //! Moderation bodies carry `broadcaster_user_id` and `user_id` as JSON INTEGERS. The broadcaster
 //! is the host slot `{{KICK_BROADCASTER_ID}}` (`SlotShape::Int`, written as a JSON number from
@@ -78,16 +80,6 @@ impl PlatformPolicy {
                     text_key: "text",
                     ..KindPolicy::new("chat.send", "POST", api(vec![PathSeg::Lit("chat")]))
                 },
-                // https://docs.kick.com/apis/chat (Delete Chat Message)
-                KindPolicy {
-                    slots: vec!["KICK_TOKEN"],
-                    requires_pin: true,
-                    ..KindPolicy::new(
-                        "chat.delete",
-                        "DELETE",
-                        api(vec![PathSeg::Lit("chat"), PathSeg::Id]),
-                    )
-                },
                 // https://docs.kick.com/apis/moderation (Timeout or ban user / Unban user)
                 moderation_kind("mod.ban", "POST"),
                 moderation_kind("mod.timeout", "POST"),
@@ -132,15 +124,6 @@ mod tests {
     }
 
     #[test]
-    fn chat_delete_is_a_pinned_delete_of_one_message_id() {
-        let p = PlatformPolicy::kick();
-        let d = p.kind("chat.delete").unwrap();
-        assert_eq!(d.method, "DELETE");
-        assert!(d.requires_pin && d.max_body.is_none());
-        assert_eq!(d.slots, ["KICK_TOKEN"]);
-    }
-
-    #[test]
     fn moderation_kinds_are_pinned_integer_bodied_and_protect_the_broadcaster() {
         let p = PlatformPolicy::kick();
         for (op, method) in [
@@ -171,7 +154,7 @@ mod tests {
     #[test]
     fn unsupported_ops_stay_absent() {
         let p = PlatformPolicy::kick();
-        for op in ["dm.send", "mod.kick", "role.add", "mod.add"] {
+        for op in ["chat.delete", "dm.send", "mod.kick", "role.add", "mod.add"] {
             assert!(p.kind(op).is_none(), "{op}");
         }
     }

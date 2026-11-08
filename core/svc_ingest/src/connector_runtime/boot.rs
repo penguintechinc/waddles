@@ -46,7 +46,8 @@ use crate::connector::host_calls::{
     ActiveConnections, CallScope, ConnectorHostCalls, HostCallConfig, IdentityTokenizer,
 };
 use crate::connector::kick_subscribe::{
-    BackgroundSubscriber, HttpKickEvents, KickSubscriber, SharedResolver, SubscribeOnAttach,
+    BackgroundSubscriber, HttpKickEvents, KickOwnerVerifier, KickSubscriber, SharedResolver,
+    SubscribeOnAttach,
 };
 use crate::connector::secrets::TransportSecretSource;
 use crate::connector::spectrum::{RedisSpectrumStore, SpectrumStore};
@@ -554,13 +555,25 @@ fn feed_for<R: ConnectionResolve + 'static>(
             metrics,
             self_echo,
         )),
-        "kick" => Some(make(
-            resolver,
-            kick::KickProfile::from_feed().with_webhook(kick_route_keys.cloned()),
-            env,
-            metrics,
-            self_echo,
-        )),
+        "kick" => {
+            let profile = kick::KickProfile::from_feed().with_webhook(kick_route_keys.cloned());
+            let mut feed = HubBindingFeed::new(
+                Arc::clone(resolver),
+                profile,
+                env.clone(),
+                FEED_CALL_TIMEOUT,
+            )
+            .with_metrics(metrics.clone())
+            .with_self_echo(self_echo.clone());
+            if kick_route_keys.is_some() {
+                // The webhook lane's broadcaster comes from editable metadata: it is only
+                // planned once proven to be the owner of the community's own token.
+                let http = HttpKickEvents::new().ok()?;
+                let creds = ResolverKickCredentials::new(SharedResolver(Arc::clone(resolver)));
+                feed = feed.with_lane_verifier(Arc::new(KickOwnerVerifier::new(creds, http)));
+            }
+            Some(Arc::new(feed))
+        }
         "spectrum" => Some(make(
             resolver,
             spectrum::SpectrumProfile::new(),

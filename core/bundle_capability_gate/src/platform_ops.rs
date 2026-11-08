@@ -54,17 +54,12 @@ pub const RELAY_OPS: &[(&str, &[&str])] = &[
             "mod.remove",
         ],
     ),
-    // Kick: chat + moderation. `chat.delete` runs behind the executor's channel pin; `mod.*`
-    // bodies carry integer ids (host `SlotShape::Int` broadcaster slot, protected-target check).
+    // Kick: chat.send + moderation. `chat.delete` is absent on purpose (fail closed): a message id
+    // is global and not bound to the community channel. `mod.*` bodies carry integer ids (host
+    // `SlotShape::Int` broadcaster slot, protected-target check).
     (
         "kick",
-        &[
-            "chat.send",
-            "chat.delete",
-            "mod.ban",
-            "mod.timeout",
-            "mod.unban",
-        ],
+        &["chat.send", "mod.ban", "mod.timeout", "mod.unban"],
     ),
 ];
 
@@ -160,7 +155,7 @@ mod tests {
                 n += 1;
             }
         }
-        assert_eq!(n, 9 + 13 + 6 + 5);
+        assert_eq!(n, 9 + 13 + 6 + 4);
     }
 
     #[test]
@@ -186,7 +181,6 @@ mod tests {
             ("youtube", "mod.add", "moderation.youtube"),
             ("youtube", "chat.delete", "chat.delete:youtube"),
             ("kick", "chat.send", "chat.send:kick"),
-            ("kick", "chat.delete", "chat.delete:kick"),
             ("kick", "mod.ban", "moderation.kick"),
             ("kick", "mod.timeout", "moderation.kick"),
             ("kick", "mod.unban", "moderation.kick"),
@@ -201,6 +195,7 @@ mod tests {
         assert!(permission_for("youtube", "eventsub.list").is_none());
         assert!(permission_for("kick", "mod.kick").is_none());
         assert!(permission_for("kick", "dm.send").is_none());
+        assert!(permission_for("kick", "chat.delete").is_none());
         assert!(permission_for("slack", "chat.send").is_none());
         assert!(permission_for("discord", "role.add").is_none());
         assert!(registered_on_any_platform("mod.kick").is_some());

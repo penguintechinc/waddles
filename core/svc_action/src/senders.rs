@@ -17,7 +17,7 @@
 //! (`svc_ingest::outbound::run_discord`) -- accepted only while that drain
 //! advertises readiness, and reported successful only once it confirms the
 //! op (`StageCapabilities::handle_discord_queued_op`). **Kick** is queue-wired
-//! ([`SenderStatus::ExecutorQueue`]): `chat.send`/`chat.delete`/`mod.*` are pushed onto
+//! ([`SenderStatus::ExecutorQueue`]): `chat.send`/`mod.*` are pushed onto
 //! `waddles:transport:irc:kick:outbound` and executed by svc-ingest's generic outbound
 //! executor with host-side credentials. Slack/YouTube
 //! remain a documented `TODO(M3+)` seam -- rather than reimplement connector logic
@@ -79,7 +79,7 @@ pub enum SenderStatus {
     /// it once the `http` capability (`crate::capabilities`) lands.
     PendingSeam { reason: &'static str },
     /// Wired end to end through the `relay` host capability onto a Valkey outbound queue that
-    /// svc-ingest's executor drains (Kick: `chat.send`, `chat.delete`, `mod.*`). `queue` is
+    /// svc-ingest's executor drains (Kick: `chat.send`, `mod.*`). `queue` is
     /// the exact list key the producer pushes to (`outbound_relay_queue_key(provider)`).
     ExecutorQueue { queue: String },
 }

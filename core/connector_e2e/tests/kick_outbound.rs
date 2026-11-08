@@ -274,49 +274,33 @@ async fn chat_send_reaches_the_kick_api_with_the_host_resolved_token_and_no_dest
     );
 }
 
-/// `chat.delete` is registered and PINNED: the stamped channel must equal the origin, the
-/// community token rides the request, and a mismatched channel never reaches Kick.
+/// Regression (security review, HIGH): `chat.delete` takes a global message id that is not bound
+/// to the community's channel, so it is UNREGISTERED. The executor refuses it for every shape
+/// (pinned, mismatched channel, no origin) and nothing reaches Kick; the bundle may still build the
+/// template, which proves the host (not the guest) is the gate.
 #[tokio::test(flavor = "multi_thread")]
-async fn chat_delete_reaches_kick_only_for_the_pinned_channel() {
+async fn chat_delete_is_refused_fail_closed_and_never_sent() {
     let rig = rig().await;
-    Mock::given(method("DELETE"))
-        .and(path(format!("/public/v1/chat/{MSG_ID}")))
+    Mock::given(wiremock::matchers::any())
         .respond_with(ResponseTemplate::new(204))
         .mount(&rig.server)
         .await;
-    assert_eq!(registered_op("kick", "chat.delete"), Some("chat.delete"));
-    let action = OutboundAction::ChatDelete {
-        channel: CHAN.into(),
-        message_id: MSG_ID.into(),
-        origin_channel: Some(CHAN.into()),
-    };
-    rig.exec.execute(&req(&action)).await.expect("chat.delete");
-    let reqs = rig.server.received_requests().await.unwrap();
-    assert_eq!(reqs.len(), 1);
-    assert_eq!(header(&reqs[0], "authorization"), format!("Bearer {TOKEN}"));
-    assert!(reqs[0].body.is_empty());
-
-    // A channel that is not the stamped origin is refused before anything is resolved or sent.
-    let before = resolves(&rig.hub).await;
-    let other = OutboundAction::ChatDelete {
-        channel: "someone-else".into(),
-        message_id: MSG_ID.into(),
-        origin_channel: Some(CHAN.into()),
-    };
-    let err = rig.exec.execute(&req(&other)).await.unwrap_err();
-    assert!(matches!(err, ExecError::Pin(_)), "got {err:?}");
-    // No origin at all is refused too (a pinned kind never runs unpinned).
-    let none = OutboundAction::ChatDelete {
-        channel: CHAN.into(),
-        message_id: MSG_ID.into(),
-        origin_channel: None,
-    };
-    assert!(matches!(
-        rig.exec.execute(&req(&none)).await.unwrap_err(),
-        ExecError::Pin(_)
-    ));
-    assert_eq!(rig.server.received_requests().await.unwrap().len(), 1);
-    assert_eq!(resolves(&rig.hub).await, before);
+    assert!(registered_op("kick", "chat.delete").is_none());
+    for (channel, origin) in [
+        (CHAN, Some(CHAN)),
+        ("someone-else", Some(CHAN)),
+        (CHAN, None),
+    ] {
+        let action = OutboundAction::ChatDelete {
+            channel: channel.into(),
+            message_id: MSG_ID.into(),
+            origin_channel: origin.map(str::to_string),
+        };
+        let err = rig.exec.execute(&req(&action)).await.unwrap_err();
+        assert!(matches!(err, ExecError::UnsupportedKind), "got {err:?}");
+    }
+    assert!(rig.server.received_requests().await.unwrap().is_empty());
+    assert_eq!(resolves(&rig.hub).await, 0, "no credential resolved either");
 }
 
 #[tokio::test(flavor = "multi_thread")]

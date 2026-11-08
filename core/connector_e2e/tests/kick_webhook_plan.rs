@@ -19,7 +19,7 @@ use connection_resolver::{
     SecretString,
 };
 use svc_ingest::connector::kick_subscribe::{
-    BackgroundSubscriber, HttpKickEvents, KickSubscriber, SharedResolver, EVENTS,
+    BackgroundSubscriber, HttpKickEvents, KickOwnerVerifier, KickSubscriber, SharedResolver, EVENTS,
 };
 use svc_ingest::connector::webhook::{
     BoxFut, DedupToken, SecretError, WebhookDedup, WebhookIngress, WebhookSecretSource,
@@ -151,17 +151,43 @@ fn deriver() -> RouteKeyDeriver {
     RouteKeyDeriver::new(SecretString::new(SECRET.to_owned())).unwrap()
 }
 
+/// A fake Kick whose `GET /users` answers with the token owner's user id.
+async fn kick_users(owner: u64) -> MockServer {
+    let kick = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/public/v1/users"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"user_id": owner, "name": "x"}]})),
+        )
+        .mount(&kick)
+        .await;
+    kick
+}
+
+/// The feed over the real profile; `verify_against` wires the production owner verifier at a
+/// fake Kick (`None` = no verifier configured).
 async fn desired(
     resolver: &Arc<ConnectionResolver>,
     webhook: bool,
+    verify_against: Option<&MockServer>,
 ) -> Result<
     Vec<svc_ingest::connector_runtime::DesiredConnection>,
     svc_ingest::connector_runtime::FeedError,
 > {
     let profile = KickProfile::from_feed().with_webhook(webhook.then(deriver));
-    HubBindingFeed::new(Arc::clone(resolver), profile, env(), Duration::from_secs(5))
-        .desired("kick")
-        .await
+    let mut feed =
+        HubBindingFeed::new(Arc::clone(resolver), profile, env(), Duration::from_secs(5));
+    if let Some(kick) = verify_against {
+        feed = feed.with_lane_verifier(Arc::new(
+            KickOwnerVerifier::new(
+                ResolverKickCredentials::new(SharedResolver(Arc::clone(resolver))),
+                HttpKickEvents::insecure_for_tests().unwrap(),
+            )
+            .with_base(format!("{}/public/v1", kick.uri())),
+        ));
+    }
+    feed.desired("kick").await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -173,11 +199,18 @@ async fn the_feed_plans_two_lanes_and_the_webhook_route_activates_and_subscribes
     .await;
 
     // Without the webhook deriver only the socket lane exists.
-    let chat_only = desired(&resolver, false).await.unwrap();
+    let chat_only = desired(&resolver, false, None).await.unwrap();
     assert_eq!(chat_only.len(), 1);
     assert_eq!(chat_only[0].key.lane, Lane::Primary);
 
-    let both = desired(&resolver, true).await.unwrap();
+    // Fail closed: webhooks on but NO verifier configured -> the webhook lane is refused.
+    let unverified = desired(&resolver, true, None).await.unwrap();
+    assert_eq!(unverified.len(), 1);
+    assert_eq!(unverified[0].key.lane, Lane::Primary);
+
+    // A fake Kick whose `/users` proves the token owner is the claimed broadcaster (555).
+    let owner = kick_users(555).await;
+    let both = desired(&resolver, true, Some(&owner)).await.unwrap();
     assert_eq!(both.len(), 2, "pusher socket + webhook lane");
     assert!(both.iter().any(|d| d.key.lane == Lane::Primary));
     let hook = both.iter().find(|d| d.key.lane == Lane::Webhook).unwrap();
@@ -193,6 +226,11 @@ async fn the_feed_plans_two_lanes_and_the_webhook_route_activates_and_subscribes
 
     // A fake Kick events endpoint: nothing subscribed yet, then the create succeeds.
     let kick = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/public/v1/events/subscriptions"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&kick)
+        .await;
     Mock::given(method("GET"))
         .and(path("/public/v1/events/subscriptions"))
         .and(query_param("broadcaster_user_id", "555"))
@@ -201,7 +239,8 @@ async fn the_feed_plans_two_lanes_and_the_webhook_route_activates_and_subscribes
         .await;
     let created: Vec<serde_json::Value> = EVENTS
         .iter()
-        .map(|(n, _)| serde_json::json!({"name": n, "subscription_id": "s"}))
+        .enumerate()
+        .map(|(i, (n, _))| serde_json::json!({"name": n, "subscription_id": format!("sub{i}")}))
         .collect();
     Mock::given(method("POST"))
         .and(path("/public/v1/events/subscriptions"))
@@ -253,9 +292,27 @@ async fn the_feed_plans_two_lanes_and_the_webhook_route_activates_and_subscribes
     assert_eq!(body["events"].as_array().unwrap().len(), EVENTS.len());
     assert_eq!(background.tracked(), 1);
 
-    // Detach cancels tracking and removes the route (re-activation then succeeds again).
+    // Detach cancels tracking and DELETEs exactly the subscriptions this host created.
     attach.detach(plan);
     assert_eq!(background.tracked(), 0);
+    let mut all = vec![];
+    for _ in 0..100 {
+        all = kick.received_requests().await.unwrap();
+        if all.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(all.len(), 3, "list + create + delete");
+    assert_eq!(all[2].method.as_str(), "DELETE");
+    let q = all[2].url.query().unwrap().to_string();
+    for i in 0..EVENTS.len() {
+        assert!(q.contains(&format!("id=sub{i}")), "{q}");
+    }
+    assert!(all[2]
+        .headers
+        .get("authorization")
+        .is_some_and(|v| v.to_str().unwrap() == format!("Bearer {TOKEN}")));
     let _again = attach.attach(plan, &hook.key).expect("re-activates");
     attach.detach(plan);
 }
@@ -270,13 +327,21 @@ async fn a_binding_without_a_valid_broadcaster_is_refused_loudly_when_webhooks_a
         ),
     ] {
         let (_hub, resolver, _sa) = hub(meta, tag).await;
+        let owner = kick_users(555).await;
         // The feed skips the malformed binding entirely (no chat-only fallback) ...
         assert!(
-            desired(&resolver, true).await.unwrap().is_empty(),
+            desired(&resolver, true, Some(&owner))
+                .await
+                .unwrap()
+                .is_empty(),
             "{tag}: refused"
         );
         // ... while a chat-only deployment (webhooks off) is unaffected.
-        assert_eq!(desired(&resolver, false).await.unwrap().len(), 1, "{tag}");
+        assert_eq!(
+            desired(&resolver, false, None).await.unwrap().len(),
+            1,
+            "{tag}"
+        );
     }
 }
 
@@ -321,7 +386,9 @@ async fn two_communities_binding_one_broadcaster_are_both_dropped() {
         )
         .unwrap(),
     );
-    let got = desired(&resolver, true).await.unwrap();
+    // Both communities' tokens "belong" to 555 here (one Kick account connected twice).
+    let owner = kick_users(555).await;
+    let got = desired(&resolver, true, Some(&owner)).await.unwrap();
     // Distinct chatrooms keep both socket lanes; the shared broadcaster drops BOTH webhook lanes.
     assert_eq!(
         got.iter().filter(|d| d.key.lane == Lane::Primary).count(),
@@ -331,4 +398,32 @@ async fn two_communities_binding_one_broadcaster_are_both_dropped() {
         got.iter().filter(|d| d.key.lane == Lane::Webhook).count(),
         0
     );
+}
+
+/// Regression (security review, MEDIUM): a binding whose editable `broadcaster_user_id` is NOT the
+/// owner of the community's own token is refused (only that binding's webhook lane), and a
+/// verifier outage fails closed. The chat socket lane is untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_broadcaster_that_is_not_the_token_owner_is_refused_and_a_check_outage_fails_closed() {
+    let (_hub, resolver, _sa) = hub(
+        serde_json::json!({"chatroom_id": "4242", "broadcaster_user_id": "555"}),
+        "mismatch",
+    )
+    .await;
+    // The token belongs to 999, not the claimed 555.
+    let owner = kick_users(999).await;
+    let got = desired(&resolver, true, Some(&owner)).await.unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].key.lane, Lane::Primary);
+
+    // Kick `/users` down (500): fail closed, no lane.
+    let down = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/public/v1/users"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&down)
+        .await;
+    let got = desired(&resolver, true, Some(&down)).await.unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].key.lane, Lane::Primary);
 }

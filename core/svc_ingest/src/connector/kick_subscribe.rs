@@ -114,7 +114,7 @@ pub struct Ensured {
 
 /// One Kick request. The token is zeroizing and never `Debug`-printed.
 pub struct KickRequest {
-    /// `GET` or `POST`.
+    /// `GET`, `POST` or `DELETE`.
     pub method: &'static str,
     /// Absolute URL.
     pub url: String,
@@ -181,6 +181,7 @@ impl KickEventsHttp for HttpKickEvents {
             let method = match req.method {
                 "GET" => reqwest::Method::GET,
                 "POST" => reqwest::Method::POST,
+                "DELETE" => reqwest::Method::DELETE,
                 _ => return Err(SubscribeError::Malformed),
             };
             let mut b = self
@@ -270,7 +271,21 @@ impl<C: KickCredentialSource, H: KickEventsHttp> KickSubscriber<C, H> {
     /// # Errors
     /// [`SubscribeError`]; a partially-created set is reported as [`SubscribeError::Refused`].
     pub async fn ensure(&self, community_id: i64) -> Result<Ensured, SubscribeError> {
-        let result = self.ensure_inner(community_id).await;
+        self.ensure_tracked(community_id, &|_| {}).await
+    }
+
+    /// [`Self::ensure`], reporting the ids of every subscription this call CREATED to
+    /// `on_created` the moment the create reply is parsed (even when part of the batch was
+    /// refused), so the caller can delete exactly those when the route goes away.
+    ///
+    /// # Errors
+    /// As [`Self::ensure`].
+    pub async fn ensure_tracked(
+        &self,
+        community_id: i64,
+        on_created: &(dyn Fn(Vec<String>) + Send + Sync),
+    ) -> Result<Ensured, SubscribeError> {
+        let result = self.ensure_inner(community_id, on_created).await;
         let outcome = match &result {
             Ok(_) => "ok",
             Err(e) => e.code(),
@@ -294,7 +309,11 @@ impl<C: KickCredentialSource, H: KickEventsHttp> KickSubscriber<C, H> {
         result
     }
 
-    async fn ensure_inner(&self, community_id: i64) -> Result<Ensured, SubscribeError> {
+    async fn ensure_inner(
+        &self,
+        community_id: i64,
+        on_created: &(dyn Fn(Vec<String>) + Send + Sync),
+    ) -> Result<Ensured, SubscribeError> {
         let binding = self
             .creds
             .binding(Some(community_id))
@@ -350,7 +369,9 @@ impl<C: KickCredentialSource, H: KickEventsHttp> KickSubscriber<C, H> {
         if !(200..300).contains(&status) {
             return Err(SubscribeError::Status(status));
         }
-        let refused = refused_count(&body, created_n)?;
+        let (refused, ids) = parse_create_reply(&body, created_n)?;
+        // Reported BEFORE the refusal check: the ones that did succeed must still be deletable.
+        on_created(ids);
         if refused > 0 {
             return Err(SubscribeError::Refused(refused));
         }
@@ -360,22 +381,100 @@ impl<C: KickCredentialSource, H: KickEventsHttp> KickSubscriber<C, H> {
         })
     }
 
-    /// Runs [`Self::ensure`] in the background with bounded exponential backoff
+    /// Deletes subscriptions THIS host created (`DELETE /events/subscriptions?id=..&id=..`),
+    /// resolving the community's own token fresh. Ids are shape-checked before they reach a URL.
+    ///
+    /// # Errors
+    /// [`SubscribeError`]; a malformed id is [`SubscribeError::Malformed`] and nothing is sent.
+    pub async fn unsubscribe(
+        &self,
+        community_id: i64,
+        ids: &[String],
+    ) -> Result<(), SubscribeError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let result = self.unsubscribe_inner(community_id, ids).await;
+        let outcome = match &result {
+            Ok(()) => "unsubscribe_ok",
+            Err(_) => "unsubscribe_failed",
+        };
+        OUTCOMES.with_label_values(&[outcome]).inc();
+        if let Err(e) = &result {
+            tracing::error!(
+                community_id,
+                code = e.code(),
+                count = ids.len(),
+                "kick events unsubscribe failed; subscriptions may remain until Kick expires them"
+            );
+        }
+        result
+    }
+
+    async fn unsubscribe_inner(
+        &self,
+        community_id: i64,
+        ids: &[String],
+    ) -> Result<(), SubscribeError> {
+        if ids.iter().any(|i| !valid_subscription_id(i)) {
+            return Err(SubscribeError::Malformed);
+        }
+        let binding = self
+            .creds
+            .binding(Some(community_id))
+            .await
+            .map_err(|e: CredError| SubscribeError::Credential(e.reason()))?;
+        let query: Vec<String> = ids.iter().map(|i| format!("id={i}")).collect();
+        let (status, _) = self
+            .http
+            .send(KickRequest {
+                method: "DELETE",
+                url: format!("{}?{}", self.url(), query.join("&")),
+                token: Zeroizing::new(binding.oauth_token.expose().to_owned()),
+                body: None,
+            })
+            .await?;
+        if (200..300).contains(&status) {
+            Ok(())
+        } else {
+            Err(SubscribeError::Status(status))
+        }
+    }
+
+    /// Runs [`Self::ensure_tracked`] in the background with bounded exponential backoff
     /// ([`MAX_ATTEMPTS`]); only retryable errors retry, and the final failure is logged loudly
-    /// and counted. Abort the returned handle to cancel (route detached).
-    pub fn spawn_ensure(self: &Arc<Self>, community_id: i64) -> tokio::task::JoinHandle<()>
+    /// and counted. The task is NEVER aborted mid-request (that could lose the ids of
+    /// subscriptions Kick just created): cancel it with [`Cancel::cancel`] and await the handle;
+    /// it finishes the in-flight attempt (bounded by the HTTP timeout) and stops retrying.
+    pub fn spawn_ensure(
+        self: &Arc<Self>,
+        community_id: i64,
+        created: Arc<std::sync::Mutex<Vec<String>>>,
+        cancel: Arc<Cancel>,
+    ) -> tokio::task::JoinHandle<()>
     where
         C: 'static,
         H: 'static,
     {
         let this = Arc::clone(self);
         tokio::spawn(async move {
+            let record = move |ids: Vec<String>| {
+                if let Ok(mut all) = created.lock() {
+                    all.extend(ids);
+                }
+            };
             let mut delay = FIRST_BACKOFF;
             for attempt in 1..=MAX_ATTEMPTS {
-                match this.ensure(community_id).await {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                match this.ensure_tracked(community_id, &record).await {
                     Ok(_) => return,
                     Err(e) if e.retryable() && attempt < MAX_ATTEMPTS => {
-                        tokio::time::sleep(delay).await;
+                        tokio::select! {
+                            () = tokio::time::sleep(delay) => {}
+                            () = cancel.cancelled() => return,
+                        }
                         delay = delay.saturating_mul(2);
                     }
                     Err(e) => {
@@ -393,19 +492,58 @@ impl<C: KickCredentialSource, H: KickEventsHttp> KickSubscriber<C, H> {
     }
 }
 
+/// Cooperative cancellation of a [`KickSubscriber::spawn_ensure`] task.
+#[derive(Default)]
+pub struct Cancel {
+    flag: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl Cancel {
+    /// Requests cancellation (sticky; wakes a sleeping retry).
+    pub fn cancel(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_one();
+    }
+
+    /// `true` once [`Self::cancel`] was called.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn cancelled(&self) {
+        if !self.is_cancelled() {
+            self.notify.notified().await;
+        }
+    }
+}
+
 /// Starts and stops the background subscription of one webhook route. The webhook attach seam
 /// holds this trait object so it never depends on the credential/HTTP type parameters.
 pub trait SubscribeOnAttach: Send + Sync {
     /// Begins ensuring the subscription for `community_id`, tracked under `route_key`.
     fn start(&self, community_id: i64, route_key: &str);
-    /// Cancels any in-flight attempt for `route_key` (the route was detached).
+    /// Cancels the in-flight attempt for `route_key` and DELETEs every subscription it created
+    /// (the route was detached).
     fn stop(&self, route_key: &str);
 }
 
-/// [`SubscribeOnAttach`] over a [`KickSubscriber`]: one tracked background task per route.
+/// One tracked route: its background task and the subscription ids this host created for it.
+struct Tracked {
+    task: tokio::task::JoinHandle<()>,
+    community_id: i64,
+    created: Arc<std::sync::Mutex<Vec<String>>>,
+    cancel: Arc<Cancel>,
+}
+
+/// [`SubscribeOnAttach`] over a [`KickSubscriber`]: one tracked background task per route. On
+/// `stop` the attempt is cancelled cooperatively, awaited to its end, and every subscription it
+/// created is DELETEd (with bounded retry), so a detached route never leaves live Kick
+/// subscriptions behind.
 pub struct BackgroundSubscriber<C: KickCredentialSource, H: KickEventsHttp> {
     inner: Arc<KickSubscriber<C, H>>,
-    tasks: std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
+    tasks: std::sync::Mutex<std::collections::HashMap<String, Tracked>>,
 }
 
 impl<C: KickCredentialSource + 'static, H: KickEventsHttp + 'static> BackgroundSubscriber<C, H> {
@@ -423,29 +561,66 @@ impl<C: KickCredentialSource + 'static, H: KickEventsHttp + 'static> BackgroundS
     pub fn tracked(&self) -> usize {
         self.tasks.lock().map_or(0, |t| t.len())
     }
+
+    /// Cancels `entry`, waits for its in-flight attempt to finish (so no created id is lost),
+    /// then deletes everything it created with the same bounded backoff as the subscribe path.
+    fn retire(&self, entry: Tracked) {
+        entry.cancel.cancel();
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            if entry.task.await.is_err() {
+                tracing::error!("kick subscription task panicked; its subscriptions may remain");
+            }
+            let ids = entry.created.lock().map(|c| c.clone()).unwrap_or_default();
+            let mut delay = FIRST_BACKOFF;
+            for attempt in 1..=MAX_ATTEMPTS {
+                match inner.unsubscribe(entry.community_id, &ids).await {
+                    Ok(()) => return,
+                    Err(e) if e.retryable() && attempt < MAX_ATTEMPTS => {
+                        tokio::time::sleep(delay).await;
+                        delay = delay.saturating_mul(2);
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+    }
 }
 
 impl<C: KickCredentialSource + 'static, H: KickEventsHttp + 'static> SubscribeOnAttach
     for BackgroundSubscriber<C, H>
 {
     fn start(&self, community_id: i64, route_key: &str) {
-        let handle = self.inner.spawn_ensure(community_id);
+        let created = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cancel = Arc::new(Cancel::default());
+        let task = self
+            .inner
+            .spawn_ensure(community_id, Arc::clone(&created), Arc::clone(&cancel));
+        let entry = Tracked {
+            task,
+            community_id,
+            created,
+            cancel,
+        };
         match self.tasks.lock() {
             Ok(mut t) => {
-                if let Some(old) = t.insert(route_key.to_owned(), handle) {
-                    old.abort();
+                if let Some(old) = t.insert(route_key.to_owned(), entry) {
+                    self.retire(old);
                 }
             }
-            // A poisoned map means a panic elsewhere; the attempt still runs, just untracked.
-            Err(_) => tracing::error!("kick subscription task table poisoned"),
+            // A poisoned map means a panic elsewhere: fail loud rather than run untracked
+            // (an untracked route could never be unsubscribed).
+            Err(_) => {
+                self.retire(entry);
+                tracing::error!("kick subscription task table poisoned; subscription cancelled");
+            }
         }
     }
 
     fn stop(&self, route_key: &str) {
-        if let Ok(mut t) = self.tasks.lock() {
-            if let Some(h) = t.remove(route_key) {
-                h.abort();
-            }
+        let removed = self.tasks.lock().ok().and_then(|mut t| t.remove(route_key));
+        if let Some(entry) = removed {
+            self.retire(entry);
         }
     }
 }
@@ -468,9 +643,18 @@ fn existing_events(body: &[u8], broadcaster: u64) -> Result<BTreeSet<String>, Su
         .collect())
 }
 
-/// Items of a create reply that carry a non-empty `error`; the reply must answer every event
-/// asked for.
-fn refused_count(body: &[u8], asked: usize) -> Result<usize, SubscribeError> {
+/// A Kick subscription id: `[A-Za-z0-9_-]{1,64}` (it is sent back as a query value).
+fn valid_subscription_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// `(refused, created_ids)` of a create reply: an item with a non-empty `error` is refused, every
+/// other item must carry a well-formed `subscription_id`; the reply must answer every event asked
+/// for.
+fn parse_create_reply(body: &[u8], asked: usize) -> Result<(usize, Vec<String>), SubscribeError> {
     let v: Value = serde_json::from_slice(body).map_err(|_| SubscribeError::Malformed)?;
     let items = v
         .get("data")
@@ -479,13 +663,152 @@ fn refused_count(body: &[u8], asked: usize) -> Result<usize, SubscribeError> {
     if items.len() != asked {
         return Err(SubscribeError::Malformed);
     }
-    Ok(items
-        .iter()
-        .filter(|i| {
-            i.get("error")
-                .is_some_and(|e| e.as_str().is_none_or(|s| !s.is_empty()))
+    let (mut refused, mut ids) = (0, Vec::new());
+    for i in items {
+        let errored = i
+            .get("error")
+            .is_some_and(|e| e.as_str().is_none_or(|s| !s.is_empty()));
+        if errored {
+            refused += 1;
+            continue;
+        }
+        let id = i
+            .get("subscription_id")
+            .and_then(Value::as_str)
+            .filter(|id| valid_subscription_id(id))
+            .ok_or(SubscribeError::Malformed)?;
+        ids.push(id.to_owned());
+    }
+    Ok((refused, ids))
+}
+
+/// How long a positive owner check is trusted (a reconcile tick is far shorter).
+const OWNER_TTL: Duration = Duration::from_secs(600);
+
+/// Proves a binding's `broadcaster_user_id` is the owner of the community's OWN Kick token
+/// (`GET /public/v1/users` with no id returns the token's user), so editable binding metadata can
+/// never aim a webhook lane (or a subscription) at another channel. Only a positive answer is
+/// cached; a mismatch or any failure is `false` (fail closed) and is re-checked next reconcile.
+pub struct KickOwnerVerifier<C: KickCredentialSource, H: KickEventsHttp> {
+    creds: C,
+    http: H,
+    base: String,
+    verified: std::sync::Mutex<std::collections::HashMap<(i64, String), std::time::Instant>>,
+}
+
+impl<C: KickCredentialSource, H: KickEventsHttp> KickOwnerVerifier<C, H> {
+    /// The production verifier: [`API_BASE`].
+    #[must_use]
+    pub fn new(creds: C, http: H) -> Self {
+        Self {
+            creds,
+            http,
+            base: API_BASE.to_owned(),
+            verified: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Test seam: a different API base (a local fake Kick).
+    #[must_use]
+    pub fn with_base(mut self, base: impl Into<String>) -> Self {
+        self.base = base.into();
+        self
+    }
+
+    /// `true` only when `broadcaster` is the user id of `community_id`'s own token.
+    pub async fn verify_owner(&self, community_id: i64, broadcaster: &str) -> bool {
+        let key = (community_id, broadcaster.to_owned());
+        if self
+            .verified
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&key).copied())
+            .is_some_and(|at| at.elapsed() < OWNER_TTL)
+        {
+            return true;
+        }
+        let outcome = self.check(community_id, broadcaster).await;
+        let label = match outcome {
+            Ok(true) => "owner_ok",
+            Ok(false) => "owner_mismatch",
+            Err(_) => "owner_error",
+        };
+        OUTCOMES.with_label_values(&[label]).inc();
+        match outcome {
+            Ok(true) => {
+                if let Ok(mut m) = self.verified.lock() {
+                    m.insert(key, std::time::Instant::now());
+                }
+                true
+            }
+            Ok(false) => {
+                tracing::warn!(community_id, "kick broadcaster is not the token owner");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(community_id, code = e.code(), "kick owner check failed");
+                false
+            }
+        }
+    }
+
+    async fn check(&self, community_id: i64, broadcaster: &str) -> Result<bool, SubscribeError> {
+        let want: u64 = broadcaster
+            .parse()
+            .map_err(|_| SubscribeError::NoBroadcaster)?;
+        let binding = self
+            .creds
+            .binding(Some(community_id))
+            .await
+            .map_err(|e: CredError| SubscribeError::Credential(e.reason()))?;
+        let (status, body) = self
+            .http
+            .send(KickRequest {
+                method: "GET",
+                url: format!("{}/users", self.base),
+                token: Zeroizing::new(binding.oauth_token.expose().to_owned()),
+                body: None,
+            })
+            .await?;
+        if !(200..300).contains(&status) {
+            return Err(SubscribeError::Status(status));
+        }
+        let v: Value = serde_json::from_slice(&body).map_err(|_| SubscribeError::Malformed)?;
+        let items = v
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or(SubscribeError::Malformed)?;
+        // Exactly one user (the token's); anything else is not an owner proof.
+        let [one] = items.as_slice() else {
+            return Err(SubscribeError::Malformed);
+        };
+        let got = one
+            .get("user_id")
+            .and_then(Value::as_u64)
+            .ok_or(SubscribeError::Malformed)?;
+        Ok(got == want)
+    }
+}
+
+impl<C: KickCredentialSource + 'static, H: KickEventsHttp + 'static>
+    crate::connector_runtime::feed::WebhookLaneVerifier for KickOwnerVerifier<C, H>
+{
+    fn verify<'a>(
+        &'a self,
+        d: &'a crate::connector_runtime::feed::DesiredConnection,
+    ) -> BoxFut<'a, bool> {
+        Box::pin(async move {
+            use crate::connector_runtime::feed::TransportPlan;
+            let TransportPlan::Webhook(w) = &d.plan else {
+                return false;
+            };
+            let super::webhook_verify::Scheme::Kick(spec) = &w.route.scheme else {
+                return false;
+            };
+            self.verify_owner(d.key.community_id, &spec.broadcaster_id)
+                .await
         })
-        .count())
+    }
 }
 
 /// Lets a runtime that holds `Arc<R>` build the production [`KickCredentialSource`]
@@ -592,7 +915,7 @@ mod tests {
         let data: Vec<Value> = (0..n)
             .map(|i| match err {
                 Some(e) if i == 0 => json!({"name": "x", "error": e}),
-                _ => json!({"name": "x", "subscription_id": "s"}),
+                _ => json!({"name": "x", "subscription_id": format!("sub{i}")}),
             })
             .collect();
         json!({ "data": data }).to_string()
@@ -783,13 +1106,183 @@ mod tests {
             Ok((200, list(&all, 555, "webhook"))),
         ]));
         let s = Arc::new(sub(Ok(Some("555")), &script));
-        s.spawn_ensure(7).await.unwrap();
+        s.spawn_ensure(7, Default::default(), Default::default())
+            .await
+            .unwrap();
         assert_eq!(script.seen.lock().unwrap().len(), 3);
 
         let script = Arc::new(Script::new(vec![Ok((403, String::new()))]));
         let s = Arc::new(sub(Ok(Some("555")), &script));
-        s.spawn_ensure(7).await.unwrap();
+        s.spawn_ensure(7, Default::default(), Default::default())
+            .await
+            .unwrap();
         assert_eq!(script.seen.lock().unwrap().len(), 1, "permanent: no retry");
+    }
+
+    fn ids(prefix_count: usize) -> Vec<String> {
+        (0..prefix_count).map(|i| format!("sub{i}")).collect()
+    }
+
+    #[tokio::test]
+    async fn created_ids_are_reported_even_when_part_of_the_batch_is_refused() {
+        let got = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = {
+            let got = Arc::clone(&got);
+            move |v: Vec<String>| got.lock().unwrap().extend(v)
+        };
+        let script = Arc::new(Script::new(vec![
+            Ok((200, list(&[], 555, "webhook"))),
+            Ok((200, created(EVENTS.len(), Some("forbidden")))),
+        ]));
+        let e = sub(Ok(Some("555")), &script)
+            .ensure_tracked(7, &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(e, SubscribeError::Refused(1));
+        assert_eq!(*got.lock().unwrap(), ids(EVENTS.len())[1..].to_vec());
+        // A success reports every created id.
+        got.lock().unwrap().clear();
+        let script = Arc::new(Script::new(vec![
+            Ok((200, list(&[], 555, "webhook"))),
+            Ok((200, created(EVENTS.len(), None))),
+        ]));
+        sub(Ok(Some("555")), &script)
+            .ensure_tracked(7, &sink)
+            .await
+            .unwrap();
+        assert_eq!(*got.lock().unwrap(), ids(EVENTS.len()));
+        // A success item without a well-formed id is a malformed reply, not an untracked sub.
+        let bad = json!({"data": EVENTS.iter().map(|_| json!({"subscription_id": "a/b"})).collect::<Vec<_>>()});
+        let script = Arc::new(Script::new(vec![
+            Ok((200, list(&[], 555, "webhook"))),
+            Ok((200, bad.to_string())),
+        ]));
+        assert_eq!(
+            sub(Ok(Some("555")), &script).ensure(7).await.unwrap_err(),
+            SubscribeError::Malformed
+        );
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_deletes_exactly_the_given_ids_with_the_communitys_token() {
+        let script = Arc::new(Script::new(vec![Ok((200, String::new()))]));
+        sub(Ok(Some("555")), &script)
+            .unsubscribe(7, &ids(2))
+            .await
+            .unwrap();
+        {
+            let seen = script.seen.lock().unwrap();
+            assert_eq!(seen[0].0, "DELETE");
+            assert_eq!(
+                seen[0].1,
+                "https://api.kick.com/public/v1/events/subscriptions?id=sub0&id=sub1"
+            );
+            assert_eq!(seen[0].3, "KICK-TOKEN");
+        }
+        // Nothing to delete: no request. A hostile id: refused, nothing sent. A non-2xx: loud.
+        let script = Arc::new(Script::new(vec![Ok((500, String::new()))]));
+        let s = sub(Ok(Some("555")), &script);
+        s.unsubscribe(7, &[]).await.unwrap();
+        assert!(script.seen.lock().unwrap().is_empty());
+        assert_eq!(
+            s.unsubscribe(7, &["a&b".to_string()]).await.unwrap_err(),
+            SubscribeError::Malformed
+        );
+        assert!(script.seen.lock().unwrap().is_empty());
+        assert_eq!(
+            s.unsubscribe(7, &ids(1)).await.unwrap_err(),
+            SubscribeError::Status(500)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopping_a_route_deletes_the_subscriptions_it_created() {
+        let script = Arc::new(Script::new(vec![
+            Ok((200, list(&[], 555, "webhook"))),
+            Ok((200, created(EVENTS.len(), None))),
+            Ok((204, String::new())),
+        ]));
+        let bg = BackgroundSubscriber::new(sub(Ok(Some("555")), &script));
+        bg.start(7, "route-a");
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if script.seen.lock().unwrap().len() >= 2 {
+                break;
+            }
+        }
+        assert_eq!(bg.tracked(), 1);
+        bg.stop("route-a");
+        assert_eq!(bg.tracked(), 0);
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if script.seen.lock().unwrap().len() >= 3 {
+                break;
+            }
+        }
+        {
+            let seen = script.seen.lock().unwrap();
+            assert_eq!(seen.len(), 3, "list + create + delete");
+            assert_eq!(seen[2].0, "DELETE");
+            for id in ids(EVENTS.len()) {
+                assert!(seen[2].1.contains(&format!("id={id}")), "{id}");
+            }
+        }
+        // Stopping an unknown route (or one that created nothing) sends nothing.
+        bg.stop("nope");
+        assert_eq!(script.seen.lock().unwrap().len(), 3);
+    }
+
+    fn users(user_id: Value) -> String {
+        json!({"data": [{"user_id": user_id, "name": "x"}]}).to_string()
+    }
+
+    fn verifier(
+        c: Result<Option<&'static str>, CredError>,
+        script: &Arc<Script>,
+    ) -> KickOwnerVerifier<Creds, Arc<Script>> {
+        KickOwnerVerifier::new(Creds(c), Arc::clone(script))
+    }
+
+    #[tokio::test]
+    async fn the_owner_check_passes_only_for_the_token_owners_own_id_and_fails_closed() {
+        // Match, then served from the positive cache (no second request).
+        let script = Arc::new(Script::new(vec![Ok((200, users(json!(555))))]));
+        let v = verifier(Ok(None), &script);
+        assert!(v.verify_owner(7, "555").await);
+        assert!(v.verify_owner(7, "555").await);
+        {
+            let seen = script.seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].1, "https://api.kick.com/public/v1/users");
+            assert_eq!(seen[0].3, "KICK-TOKEN");
+        }
+        // Mismatch, wrong shapes, non-2xx, transport error: all false, none cached.
+        for reply in [
+            Ok((200, users(json!(556)))),
+            Ok((200, users(json!("555")))),
+            Ok((200, json!({"data": []}).to_string())),
+            Ok((
+                200,
+                json!({"data": [{"user_id": 555}, {"user_id": 556}]}).to_string(),
+            )),
+            Ok((200, "nope".to_string())),
+            Ok((401, String::new())),
+            Err(SubscribeError::Unreachable),
+        ] {
+            let script = Arc::new(Script::new(vec![reply.clone(), reply]));
+            let v = verifier(Ok(None), &script);
+            assert!(!v.verify_owner(7, "555").await);
+            assert!(!v.verify_owner(7, "555").await, "failures are never cached");
+        }
+        // A non-numeric claimed id and a missing credential never reach Kick.
+        let script = Arc::new(Script::new(vec![]));
+        assert!(!verifier(Ok(None), &script).verify_owner(7, "abc").await);
+        assert!(
+            !verifier(Err(CredError::NoBinding), &script)
+                .verify_owner(7, "555")
+                .await
+        );
+        assert!(script.seen.lock().unwrap().is_empty());
     }
 
     #[test]

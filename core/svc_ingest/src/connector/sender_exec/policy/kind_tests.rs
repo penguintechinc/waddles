@@ -567,7 +567,6 @@ const KK_HDRS: [(&str, &str); 2] = [
     ("Authorization", "Bearer {{KICK_TOKEN}}"),
     ("Content-Type", "application/json"),
 ];
-const KK_AUTH: [(&str, &str); 1] = [("Authorization", "Bearer {{KICK_TOKEN}}")];
 const KK_TOKEN_REF: [(&str, &str); 1] = [("{{KICK_TOKEN}}", "token")];
 const KK_MOD_REFS: [(&str, &str); 2] = [
     ("{{KICK_TOKEN}}", "token"),
@@ -580,47 +579,20 @@ fn kick_registers_chat_and_moderation_ops_and_refuses_everything_else() {
     let p = PlatformPolicy::kick();
     assert_eq!(p.platform, "kick");
     assert_eq!(p.hosts, ["api.kick.com"]);
-    for op in [
-        "chat.send",
-        "chat.delete",
-        "mod.ban",
-        "mod.timeout",
-        "mod.unban",
-    ] {
+    for op in ["chat.send", "mod.ban", "mod.timeout", "mod.unban"] {
         assert_eq!(registered_op("kick", op), Some(op), "{op}");
     }
-    for op in ["dm.send", "mod.kick", "role.add", "eventsub.create", ""] {
+    // chat.delete: a bundle-supplied global message id is not bound to the community channel.
+    for op in [
+        "chat.delete",
+        "dm.send",
+        "mod.kick",
+        "role.add",
+        "eventsub.create",
+        "",
+    ] {
         assert!(registered_op("kick", op).is_none(), "{op}");
     }
-}
-
-#[test]
-fn kick_chat_delete_verifies_a_pinned_id_path_and_refuses_a_body() {
-    let p = PlatformPolicy::kick();
-    let url = "https://api.kick.com/public/v1/chat/828f83bb-e391-4c78-9e91-af35a172840e";
-    let ok = tpl("DELETE", url, &KK_AUTH, None, &KK_TOKEN_REF);
-    assert_eq!(check(&p, "chat.delete", &ok), Ok(()));
-    let with_body = tpl(
-        "DELETE",
-        url,
-        &KK_HDRS,
-        Some(serde_json::json!({})),
-        &KK_TOKEN_REF,
-    );
-    assert!(check(&p, "chat.delete", &with_body).is_err());
-    let wrong_method = tpl("POST", url, &KK_AUTH, None, &KK_TOKEN_REF);
-    assert_eq!(
-        check(&p, "chat.delete", &wrong_method),
-        Err(TemplateError::BadMethod)
-    );
-    let traversal = tpl(
-        "DELETE",
-        "https://api.kick.com/public/v1/chat/a%2Fb",
-        &KK_AUTH,
-        None,
-        &KK_TOKEN_REF,
-    );
-    assert!(check(&p, "chat.delete", &traversal).is_err());
 }
 
 #[test]
@@ -806,7 +778,7 @@ fn the_policy_table_matches_the_relay_op_parity_fixture() {
     }
     assert_eq!(
         checked,
-        9 + 13 + 6 + 5,
+        9 + 13 + 6 + 4,
         "denominator: ops compared with the fixture"
     );
 }

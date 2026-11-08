@@ -258,7 +258,7 @@ queue entry --(drain: pin_sig HMAC + expiry, FIRST gate)--> ActionExecutor::exec
 | `discord_duties.rs` | `DiscordDuties`: the Discord `DutyHook` (T6d-2) for `dm.send`, `role.add`, `role.remove` |
 | `../platform_users.rs` | `HubPlatformUserResolver`: production `PlatformUserResolver` over `hub_client` `IdentityService.ResolvePlatformUser` |
 
-**Supported kinds:** `chat.send`, `chat.delete` (Twitch, Discord), `chat.send` (YouTube); Kick `chat.send`, `chat.delete`, `mod.ban`,
+**Supported kinds:** `chat.send`, `chat.delete` (Twitch, Discord), `chat.send` (YouTube); Kick `chat.send`, `mod.ban`,
 `mod.timeout`, `mod.unban` (below); Discord `dm.send`, `role.add`, `role.remove` once
 `DiscordDuties` is registered (`SenderExecutor::with_duties`). With no hook (`NoDuties`) a duty kind returns `ExecError::HostDutyMissing`
 (`SenderError::Unsupported`).
@@ -399,7 +399,7 @@ key allowlist, `needs_duty`, `requires_pin`, `ResultMode`). A platform bundle on
 | Guild / broadcaster / moderator / live-chat / application ids are host slots, never literals | `verify` (`query_is_host_slot` / `body_is_host_slot`, duty slots) |
 | Body keys outside the kind's allowlist (e.g. roles on a timeout) refused | `verify` (`BodyKeyNotAllowed`) |
 | App-scoped credentials (`app.` handles: EventSub, command registration) never mix with user-scoped slots and need `SlotSource::supports_app_credentials` | `mod.rs` executor (`slot_credential_scope_mixed` / `slot_app_credential_unsupported`) |
-| Kick: `chat.send`, `chat.delete` (pinned), `mod.ban|timeout|unban` (integer body slot + protected target) | `policy/kick.rs`, `kick_slots.rs` |
+| Kick: `chat.send`, `mod.ban|timeout|unban` (`chat.delete` unregistered: fail closed) (integer body slot + protected target) | `policy/kick.rs`, `kick_slots.rs` |
 
 The producer twin is `bundle_capability_gate::platform_ops` (op -> permission id); both tables
 are parity-tested against `core/bundle_capability_gate/tests/fixtures/platform_relay_ops.json`.

@@ -455,7 +455,7 @@ impl RelayOp {
 /// `chat.send` (inline bot REST, [`StageCapabilities::handle_discord_relay`])
 /// and Discord `chat.delete`/`dm.send` (bot-token REST sender behind the
 /// confirmation handshake, [`StageCapabilities::handle_discord_queued_op`]).
-/// Kick `chat.send`/`chat.delete` and its registered `mod.*` ops queue to the Kick drain
+/// Kick `chat.send` and its registered `mod.*` ops queue to the Kick drain
 /// (`waddles:transport:irc:kick:outbound`, svc-ingest's `run_kick_exec`); `dm.send` is refused.
 /// Twitch/YouTube `chat.delete` and every registered platform op run through the generic
 /// queued path ([`StageCapabilities::handle_platform_queued_op`]) and are confirmed by the
@@ -472,7 +472,7 @@ pub(crate) fn relay_op_supported(provider: &str, op: RelayOp) -> bool {
         (provider, op),
         ("twitch", RelayOp::ChatSend | RelayOp::ChatDelete)
             | ("youtube", RelayOp::ChatSend | RelayOp::ChatDelete)
-            | ("kick", RelayOp::ChatSend | RelayOp::ChatDelete)
+            | ("kick", RelayOp::ChatSend)
             | (
                 "discord",
                 RelayOp::ChatSend
@@ -4848,7 +4848,7 @@ mod tests {
             ("twitch", [true, true, false]),
             ("discord", [true, true, true]),
             ("youtube", [true, true, false]),
-            ("kick", [true, true, false]),
+            ("kick", [true, false, false]),
         ];
         assert_eq!(
             RELAY_PROVIDERS.len(),

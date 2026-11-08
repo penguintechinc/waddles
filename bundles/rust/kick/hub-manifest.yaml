@@ -40,9 +40,6 @@ permissions:
 - id: chat.send:kick
   justification: Template Kick chat messages (bot post); the host resolves the channel from the
     community connection and substitutes the credential
-- id: chat.delete:kick
-  justification: Delete a chat message (DELETE /public/v1/chat/{message_id}); the host requires a
-    proven channel stamp and substitutes the community credential
 - id: moderation.kick
   justification: Ban, timeout and unban viewers (/public/v1/moderation/bans); the broadcaster id is a
     host integer slot from the community connection and the host refuses the broadcaster as target
