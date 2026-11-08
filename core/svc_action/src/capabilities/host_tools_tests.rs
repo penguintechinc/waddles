@@ -19,7 +19,9 @@ use penguin_bundle_host::wire::{CapabilityKind, HostCallBody};
 use serde_json::{json, Value};
 
 use super::super::tests::{caps, discord_scope, scope, FakeRelayQueue};
-use super::super::{ActorId, CapabilityHandler, InvokeScope, StageCapabilities, ToolWiring};
+use super::super::{
+    ActorId, CapabilityHandler, InvokeScope, RelayOp, StageCapabilities, ToolWiring,
+};
 use super::{transitional_decl, validate_args, OpClass};
 use crate::actor::{ActorDirectory, ActorError, BoxFuture as ActorFuture};
 use crate::host_api::ConnectionRegistry;
@@ -1552,4 +1554,93 @@ async fn a_placeholder_user_wire_cannot_smuggle_a_destructive_op_past_the_protec
     assert_eq!(err.code, "forbidden");
     assert!(err.message.contains("placeholder"), "{}", err.message);
     assert!(c.relay_queue.envelopes().is_empty());
+}
+
+#[tokio::test]
+async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() {
+    // The guest relay path has no verified actor, scope check or protected-target check: every
+    // moderation op is host-tool-only. `caps()` holds a permissive gate (moderation.<p> granted),
+    // so the refusal must come from `host_tool_only`, before any grant check.
+    let mut checked = 0;
+    for (provider, ops) in [
+        ("twitch", vec!["mod.ban", "mod.timeout", "mod.unban"]),
+        (
+            "discord",
+            vec!["mod.kick", "mod.ban", "mod.unban", "mod.timeout"],
+        ),
+        (
+            "youtube",
+            vec!["mod.ban", "mod.unban", "mod.add", "mod.remove"],
+        ),
+    ] {
+        for op in ops {
+            let c = caps(FakeRelayQueue::with_live_drain());
+            let err = c
+                .handle(
+                    &twitch_event(Some("500")),
+                    HostCallBody {
+                        app_id: "waddles.bot.commands.default".to_string(),
+                        capability: CapabilityKind::Relay,
+                        op: "send".to_string(),
+                        args: json!({
+                            "provider": provider,
+                            "message_json": json!({"op": op, "user_id": "141981764"}).to_string(),
+                        }),
+                        call_id: 1,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "host_tool_only", "{provider} {op}");
+            assert!(c.relay_queue.envelopes().is_empty(), "{provider} {op}");
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 3 + 4 + 4, "denominator: moderation ops attempted");
+    // Kick registers no ops and is not a relay provider: refused outright, never queued.
+    let c = caps(FakeRelayQueue::with_live_drain());
+    let err = c
+        .handle(
+            &twitch_event(Some("500")),
+            HostCallBody {
+                app_id: "waddles.bot.commands.default".to_string(),
+                capability: CapabilityKind::Relay,
+                op: "send".to_string(),
+                args: json!({
+                    "provider": "kick",
+                    "message_json": json!({"op": "mod.ban", "user_id": "1"}).to_string(),
+                }),
+                call_id: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "unknown_provider");
+    assert!(c.relay_queue.envelopes().is_empty());
+}
+
+#[tokio::test]
+async fn the_generic_queued_producer_itself_refuses_host_tool_only_ops() {
+    // Defense in depth: even called directly (a future caller forgetting the upstream check),
+    // `handle_platform_queued_op` never queues a host-tool-only op.
+    for (provider, op) in [
+        ("twitch", "mod.ban"),
+        ("discord", "mod.kick"),
+        ("youtube", "mod.add"),
+    ] {
+        let c = caps(FakeRelayQueue::with_live_drain());
+        let reg = bundle_capability_gate::platform_ops::registered(provider, op)
+            .unwrap_or_else(|| panic!("{provider}/{op} must be registered"));
+        let err = c
+            .handle_platform_queued_op(
+                &twitch_event(Some("500")),
+                provider,
+                RelayOp::Registered(reg),
+                &json!({"user_id": "141981764"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_tool_only", "{provider} {op}");
+        assert!(c.relay_queue.envelopes().is_empty());
+    }
 }

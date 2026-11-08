@@ -65,15 +65,36 @@ pub const RELAY_OPS: &[(&str, &[&str])] = &[
 /// planner's grant / verified-actor / protected-target checks), never through the guest
 /// `relay.push` path: `relay.push` has none of those gates, and `webhook.create`'s reply carries
 /// a secret token the host must keep. `relay.push` refuses these as `host_tool_only`.
-pub const HOST_TOOL_ONLY_OPS: &[(&str, &str)] =
-    &[("twitch", "chat.clear"), ("discord", "webhook.create")];
+///
+/// EVERY destructive moderation op (`mod.*`: ban, timeout, kick, unban, YouTube moderator
+/// add/remove) is host-tool-only: the scope check against the verified actor and the
+/// protected-target refusal exist only on the host tool path. Listed explicitly for audit;
+/// [`host_tool_only`] additionally treats any registered `mod.*` op as host-tool-only so a
+/// future moderation op (e.g. Kick's) is closed by default.
+pub const HOST_TOOL_ONLY_OPS: &[(&str, &str)] = &[
+    ("twitch", "chat.clear"),
+    ("discord", "webhook.create"),
+    ("twitch", "mod.ban"),
+    ("twitch", "mod.timeout"),
+    ("twitch", "mod.unban"),
+    ("discord", "mod.kick"),
+    ("discord", "mod.ban"),
+    ("discord", "mod.unban"),
+    ("discord", "mod.timeout"),
+    ("youtube", "mod.ban"),
+    ("youtube", "mod.unban"),
+    ("youtube", "mod.add"),
+    ("youtube", "mod.remove"),
+];
 
-/// `true` when `(platform, op)` may only be executed by the host tool path.
+/// `true` when `(platform, op)` may only be executed by the host tool path: listed in
+/// [`HOST_TOOL_ONLY_OPS`], or any registered `mod.*` moderation op.
 #[must_use]
 pub fn host_tool_only(platform: &str, op: &str) -> bool {
     HOST_TOOL_ONLY_OPS
         .iter()
         .any(|(p, o)| *p == platform && *o == op)
+        || (op.starts_with("mod.") && registered(platform, op).is_some())
 }
 
 /// The static op spelling registered for `(platform, op)`, or `None`.
@@ -209,8 +230,27 @@ mod tests {
             assert!(registered(p, o).is_some(), "{p}/{o} must be registered");
             assert!(host_tool_only(p, o));
         }
-        assert!(!host_tool_only("twitch", "mod.ban"));
         assert!(!host_tool_only("discord", "chat.clear"));
+        assert!(!host_tool_only("twitch", "chat.send"));
+        assert!(!host_tool_only("twitch", "eventsub.create"));
+        // Every registered moderation op on every platform is host-tool-only, and the explicit
+        // list covers them all (so the audit table cannot drift from the structural rule).
+        let mut seen = 0;
+        for (platform, ops) in RELAY_OPS {
+            for op in *ops {
+                if op.starts_with("mod.") {
+                    seen += 1;
+                    assert!(host_tool_only(platform, op), "{platform}/{op}");
+                    assert!(
+                        HOST_TOOL_ONLY_OPS.contains(&(*platform, *op)),
+                        "{platform}/{op} missing from the explicit list"
+                    );
+                }
+            }
+        }
+        assert_eq!(seen, 3 + 4 + 4, "denominator: moderation ops checked");
+        // Unregistered ops (kick has none) are not silently host-only: they stay unknown-op.
+        assert!(!host_tool_only("kick", "mod.ban"));
         // A host-tool-only op never shares a permission with a relay-reachable op.
         assert_ne!(
             permission_for("twitch", "chat.clear"),

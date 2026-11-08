@@ -2400,6 +2400,20 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         op: RelayOp,
         message: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
+        // Defense in depth behind `handle_relay`'s check: this guest-reachable producer has no
+        // verified actor, scope check or protected-target check, so it must never queue an op
+        // that exists only behind the host tool path (destructive moderation, chat.clear,
+        // webhook.create), even if a future caller forgets the upstream refusal.
+        if let RelayOp::Registered(name) = op {
+            if bundle_capability_gate::platform_ops::host_tool_only(provider, name) {
+                return Err(denied(
+                    "host_tool_only",
+                    format!(
+                        "op {name:?} for provider {provider:?} is only available through a platform service tool"
+                    ),
+                ));
+            }
+        }
         let id_field = |name: &str| -> Result<Option<&str>, HostResultError> {
             match message.get(name) {
                 None | Some(serde_json::Value::Null) => Ok(None),
@@ -7676,37 +7690,44 @@ mod tests {
     /// queue and only reported successful after the drain's confirmation.
     #[tokio::test]
     async fn a_chat_scoped_registered_op_is_pinned_signed_and_confirmed() {
+        // `message.edit` (a chat-scoped registered op that is NOT host-tool-only; destructive
+        // moderation ops are, and are refused on this guest path -- see the host_tools tests).
         let caps = caps(FakeRelayQueue::with_live_drain());
-        let msg =
-            serde_json::json!({"op":"mod.ban","user_id":"123","channel":"#victim","text":"{}"});
+        let msg = serde_json::json!({
+            "op":"message.edit","message_id":"123456789","channel":"999999999999999999","text":"hi"
+        });
         let out = caps
-            .handle(&twitch_scope(), relay_call("twitch", &msg))
+            .handle(&discord_scope(), relay_call("discord", &msg))
             .await
             .unwrap();
         assert_eq!(out["confirmed"], true);
-        assert_eq!(out["op"], "mod.ban");
+        assert_eq!(out["op"], "message.edit");
         let env = &caps.relay_queue.envelopes()[0];
-        assert_eq!(env["op"], "mod.ban");
-        assert_eq!(env["platform"], "twitch");
-        assert_eq!(env["channel"], "#somechannel");
-        assert_eq!(env["origin_channel"], "#somechannel");
-        assert_eq!(env["user_id"], "123");
+        assert_eq!(env["op"], "message.edit");
+        assert_eq!(env["platform"], "discord");
+        // The bundle-named channel is ignored: pinned to the verified origin.
+        assert_eq!(env["channel"], "123456789012345678");
+        assert_eq!(env["origin_channel"], "123456789012345678");
+        assert_eq!(env["message_id"], "123456789");
         assert_eq!(env["tenant_id"], 7);
         assert!(env["pin_sig"].is_string());
         assert!(env["op_id"].is_string() && env["exp_ms"].is_u64());
         let pushed = caps.relay_queue.pushed.lock().unwrap();
-        assert_eq!(pushed[0].0, "waddles:transport:irc:twitch:outbound");
+        assert_eq!(pushed[0].0, "waddles:transport:irc:discord:outbound");
     }
 
     #[tokio::test]
     async fn a_chat_scoped_op_without_a_matching_origin_is_refused_before_queueing() {
         let caps = caps(FakeRelayQueue::with_live_drain());
         // No origin channel at all, and an origin on another platform.
-        for sc in [scope(), discord_scope()] {
+        for sc in [scope(), twitch_scope()] {
             let err = caps
                 .handle(
                     &sc,
-                    relay_call("twitch", &serde_json::json!({"op":"mod.ban","user_id":"1"})),
+                    relay_call(
+                        "discord",
+                        &serde_json::json!({"op":"message.edit","message_id":"1","text":"x"}),
+                    ),
                 )
                 .await
                 .unwrap_err();
