@@ -76,8 +76,8 @@ use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_platform_table::{
     Change as PlatformTableChange, PlatformTableError, PlatformTableScope, PlatformTableStore,
 };
-use bundle_host_storage::{GrantSet as StorageGrantSet, StorageError, StorageHost, StorageScope};
 use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
+use bundle_host_storage::{GrantSet as StorageGrantSet, StorageError, StorageHost, StorageScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
 use crate::ai::{self, AiWiring, BackendError, GenerateRequest, PromptRefusal};
@@ -2109,7 +2109,10 @@ impl<K: KvBackend> StageCapabilities<K> {
             match args.get(k) {
                 None | Some(serde_json::Value::Null) => Ok(None),
                 Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
-                Some(_) => Err(denied("invalid_args", format!("{k} must be a string or null"))),
+                Some(_) => Err(denied(
+                    "invalid_args",
+                    format!("{k} must be a string or null"),
+                )),
             }
         };
         let owner = opt_str("owner")?;
@@ -2170,9 +2173,7 @@ impl<K: KvBackend> StageCapabilities<K> {
         };
         let host = &wiring.host;
         let owner_ref = owner.as_deref();
-        let info = |i: &bundle_host_storage::host::ObjectInfo| {
-            serde_json::json!({ "key": i.key, "size": i.size, "content_type": i.content_type })
-        };
+        let info = |i: &bundle_host_storage::host::ObjectInfo| serde_json::json!({ "key": i.key, "size": i.size, "content_type": i.content_type });
         match op {
             "put" => {
                 let body = base64::engine::general_purpose::STANDARD
@@ -2797,6 +2798,16 @@ impl<K: KvBackend> StageCapabilities<K> {
             "community": self.community,
             "app_id": self.app_id,
         });
+        // The same signed envelope id survives redelivery. Money-game apps use
+        // it for their persisted outcome/service retry keys. No guest argument
+        // participates; an unanchored invocation still has no message id.
+        if let Some(event_id) = self
+            .invocation_identity
+            .as_ref()
+            .and_then(|identity| identity.event_id())
+        {
+            ctx["message_id"] = serde_json::json!(event_id);
+        }
         // Authoritative numeric scope for `context-v2` guests, from the
         // verified envelope only; v1 guests ignore the extra keys.
         if let Some((tenant_id, community_id)) = self.verified_scope {
@@ -3594,6 +3605,38 @@ mod tests {
         assert_eq!(ctx["community_id"], 7);
         let without = caps().handle_context().expect("context");
         assert!(without.get("tenant_id").is_none() && without.get("community_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn context_exposes_only_the_verified_retry_identity() {
+        let event = penguin_spine::PlatformEvent {
+            platform: "twitch".into(),
+            event_type: "chat.message".into(),
+            actor: Some("platform-actor".into()),
+            payload: serde_json::json!({"text":"!roll", "message_id":"untrusted"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            occurred_at: "2026-11-07T00:00:00Z".into(),
+            source: None,
+        };
+        let id = "6f1c0a52-9d3e-4b7a-8c10-2e5d7f9a1b34";
+        for _ in 0..2 {
+            let mut handler = caps();
+            handler.invocation_identity = Some(Arc::new(
+                InvocationIdentity::for_untokenized_event(&event).with_event_id(id),
+            ));
+            let ctx = handler
+                .handle(call(
+                    CapabilityKind::Context,
+                    "get",
+                    serde_json::json!({"message_id":"guest-spoof"}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(ctx["message_id"], id);
+        }
+        assert!(caps().handle_context().unwrap().get("message_id").is_none());
     }
 
     fn caps() -> StageCapabilities {

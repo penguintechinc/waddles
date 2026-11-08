@@ -2,7 +2,7 @@
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
-        build-superpenguin-roll-bundle test-csharp-bundle-compile \
+        build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
         check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
@@ -306,6 +306,11 @@ test-superpenguin-roll:
 build-superpenguin-roll-bundle:
 	@bash scripts/verify-superpenguin-roll-fixture.sh
 
+# Real-path gate: builds the component, loads it in the REAL bundle-executor and drives
+# process-stage.transform (core/bundle_executor/tests/csharp_superpenguin_roll_e2e.rs).
+test-superpenguin-roll-e2e:
+	@bash scripts/test-superpenguin-roll-e2e.sh
+
 # End-to-end: builds the real bundles/csharp/csping spike bundle through
 # CSharpBuilder (core/bundle_compiler/src/build/csharp.rs), the
 # builder_for("csharp") arm now returns -- ignored by default cargo test
@@ -462,3 +467,15 @@ pre-commit:
 .PHONY: gen-ops-cli-vectors
 gen-ops-cli-vectors:
 	python3 -I scripts/gen_ops_cli_vectors.py
+
+# SuperPenguinTV C# app ports; service-bundle tools own the shared capabilities.
+SUPERPENGUIN_GAMES := slots gamble defuse duel first roulette
+.PHONY: $(addprefix test-superpenguin-,$(SUPERPENGUIN_GAMES)) $(addsuffix -bundle,$(addprefix build-superpenguin-,$(SUPERPENGUIN_GAMES)))
+$(addprefix test-superpenguin-,$(SUPERPENGUIN_GAMES)):
+	bash scripts/test-superpenguin-bundle.sh $(@:test-superpenguin-%=%)
+$(addsuffix -bundle,$(addprefix build-superpenguin-,$(SUPERPENGUIN_GAMES))):
+	bash scripts/build-superpenguin-bundle.sh $(@:build-superpenguin-%-bundle=%)
+
+.PHONY: test-superpenguin-ports-e2e
+test-superpenguin-ports-e2e:
+	bash scripts/test-superpenguin-ports-e2e.sh
