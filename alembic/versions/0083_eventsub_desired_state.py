@@ -9,8 +9,8 @@ platform id. Status / type / failure reason are int enum codes (see
 AES-256-GCM with row-bound AAD in `secret_enc`; `callback_key` is the opaque URL path segment
 the ingest intake resolves a secret by.
 
-Revision ID: 0082_eventsub_desired_state
-Revises: 0081_spectrum_conn_resource
+Revision ID: 0083_eventsub_desired_state
+Revises: 0082_bundle_author_collection
 Create Date: 2026-11-07
 """
 
@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0082_eventsub_desired_state"
-down_revision = "0081_spectrum_conn_resource"
+revision = "0083_eventsub_desired_state"
+down_revision = "0082_bundle_author_collection"
 branch_labels = None
 depends_on = None
 
