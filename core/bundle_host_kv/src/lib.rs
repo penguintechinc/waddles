@@ -28,6 +28,8 @@
 
 pub mod authorize;
 pub mod backend;
+#[cfg(feature = "grpc")]
+pub mod grpc_wiring;
 mod limits;
 mod metrics;
 pub mod policy;
@@ -263,6 +265,11 @@ impl<B: KvBackend> KvHost<B> {
     pub fn with_sealing(mut self, sealing: Sealing) -> Self {
         self.sealing = Some(sealing);
         self
+    }
+
+    /// In-place form of [`Self::with_sealing`] for a host already built.
+    pub fn attach_sealing(&mut self, sealing: Sealing) {
+        self.sealing = Some(sealing);
     }
 
     /// Self-heal, low-severity fix (PR #425 security review): if the live

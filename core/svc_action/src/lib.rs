@@ -80,6 +80,7 @@ pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
 pub mod http;
+pub mod kv_sealing;
 pub mod metrics_facade;
 pub mod pin_sig;
 pub mod retry;
@@ -872,7 +873,22 @@ async fn build_stage_capabilities(
         relay_conn, egress, usage, gate,
     );
     let caps = match kv_conn {
-        Some(kv_conn) => caps.with_kv(kv_conn, kv_capabilities),
+        Some(kv_conn) => {
+            // Per-tenant at-rest sealing of bundle kv values (opt-out
+            // kill-switch `waddles.disable-tenant-at-rest-encryption`).
+            let (sealing, dek_cache) = kv_sealing::build(cli, license.as_ref());
+            match build_redis_client(&spine_cfg) {
+                Some(client) => {
+                    bundle_host_kv::grpc_wiring::spawn_dek_invalidation(client, dek_cache);
+                }
+                None => tracing::error!(
+                    "kv sealing: no spine Valkey client; DEK rotation/revocation signals will \
+                     not be received (cache TTL bounds staleness)"
+                ),
+            }
+            caps.with_kv(kv_conn, kv_capabilities)
+                .with_kv_sealing(sealing)
+        }
         None => caps,
     };
     // Discord relay send (spec: relay providers, `discord`) -- graceful

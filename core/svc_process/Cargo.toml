@@ -155,7 +155,7 @@ bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 # `stage.wit`'s `interface kv`. `core/svc_action` declares the identical
 # dependency so the capability is written and tested exactly once. See
 # `core/bundle_host_kv/Cargo.toml`.
-bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
+bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0", features = ["grpc"] }
 # The standard enforcement gate every host capability arm calls first
 # (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
 # SS5, `src/capabilities.rs`).

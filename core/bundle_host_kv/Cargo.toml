@@ -17,6 +17,10 @@ path = "src/lib.rs"
 # mirror core/svc_process's and core/svc_action's own pins for the same
 # crates -- both already depend on these exact versions, so a path
 # dependency on this crate introduces no second pin of the same package.
+[features]
+# Production gRPC DEK-broker wiring + invalidation listener (svc_process/svc_action).
+grpc = ["bundle-host-crypto/grpc", "dep:tokio"]
+
 [dependencies]
 redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "script"] }
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -35,6 +39,7 @@ sha2 = "=0.10.9"
 opentelemetry = "=0.32.0"
 # Per-tenant at-rest sealing of kv values (spec 2026-11-08-tenant-at-rest-encryption).
 bundle-host-crypto = { path = "../bundle_host_crypto", version = "=0.1.0" }
+tokio = { version = "=1.53.3", features = ["rt", "time", "sync"], optional = true }
 
 [dev-dependencies]
 zeroize = "=1.9.0"

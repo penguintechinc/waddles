@@ -36,7 +36,7 @@ impl DekBroker for FakeBroker {
             let enc = *x25519_dalek::PublicKey::from(&server_secret).as_bytes();
             let shared =
                 server_secret.diffie_hellman(&x25519_dalek::PublicKey::from(client_public_key));
-            let ctx = format!("{}|{tenant_id}|{purpose}|{served}", self.service_id);
+            let ctx = format!("{}|{tenant_id}|{purpose}|1", self.service_id);
             let mut kn = [0u8; 44];
             Hkdf::<Sha256>::new(None, shared.as_bytes())
                 .expand(ctx.as_bytes(), &mut kn)
@@ -62,11 +62,7 @@ impl DekBroker for FakeBroker {
 }
 
 fn provider(service_id: &'static str, fail: bool) -> HubApiDekProvider<FakeBroker> {
-    HubApiDekProvider::new(
-        FakeBroker { service_id, fail },
-        "svc-process",
-        "bundle-data",
-    )
+    HubApiDekProvider::new(FakeBroker { service_id, fail }, "svc-process", "at-rest")
 }
 
 #[tokio::test]

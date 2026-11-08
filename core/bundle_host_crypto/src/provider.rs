@@ -31,8 +31,9 @@ pub type Dek = Zeroizing<[u8; KEY_LEN]>;
 /// Cache ceiling: no DEK is cached longer than this, whatever the broker says.
 pub const DEFAULT_DEK_CACHE_TTL: Duration = Duration::from_secs(600);
 
-/// The `purpose` the data plane requests for bundle at-rest encryption.
-pub const BUNDLE_DATA_PURPOSE: &str = "bundle-data";
+/// The purpose label the data plane requests for bundle at-rest encryption
+/// (`TenantDekPurpose::AtRest`); also the seal-context purpose label.
+pub const BUNDLE_DATA_PURPOSE: &str = "at-rest";
 
 /// Valkey stream carrying DEK rotation/revocation signals.
 pub const DEK_INVALIDATION_STREAM: &str = "keys:tenant-dek:invalidate";
@@ -325,11 +326,10 @@ impl<B: DekBroker> HubApiDekProvider<B> {
             }
         }
 
-        let context = format!(
-            "{}|{}|{}|{}",
-            self.service_id, tenant_id, self.purpose, sealed.dek_version
-        );
-        let dek_bytes = hpke_seal_open(
+        // The trailing `1` is the fixed seal-protocol version (hub-api
+        // `key.proto`), not the DEK version.
+        let context = format!("{}|{}|{}|1", self.service_id, tenant_id, self.purpose);
+        let dek = hpke_seal_open(
             client_secret,
             &sealed.enc,
             &sealed.ciphertext,
@@ -339,7 +339,7 @@ impl<B: DekBroker> HubApiDekProvider<B> {
 
         let ttl = Duration::from_secs(sealed.ttl_seconds).min(DEFAULT_DEK_CACHE_TTL);
         lock(&self.granted_ttls).insert(tenant_id.to_string(), ttl);
-        Ok((Zeroizing::new(dek_bytes), sealed.dek_version))
+        Ok((dek, sealed.dek_version))
     }
 }
 
@@ -361,19 +361,26 @@ impl<B: DekBroker> DekProvider for HubApiDekProvider<B> {
     }
 }
 
-/// HPKE-lite open: X25519 ECDH with the server's one-time key, HKDF-SHA256
-/// over the shared secret bound to `context`, AES-256-GCM open with the
-/// derived key/nonce. Same construction as svc_ingest's `hpke_seal_open`;
-/// takes the ephemeral secret by value so it can never be reused.
+/// HPKE-lite open: X25519 ECDH with the server's one-time key, then
+/// [`open_with_shared`]. Takes the ephemeral secret by value so it can never
+/// be reused; the `x25519-dalek` secret and shared-secret types zeroize on
+/// drop.
 fn hpke_seal_open(
     client_secret: x25519_dalek::EphemeralSecret,
     enc: &[u8; 32],
     ciphertext: &[u8],
     context: &[u8],
-) -> Result<[u8; KEY_LEN], String> {
+) -> Result<Dek, String> {
     let shared_secret = client_secret.diffie_hellman(&x25519_dalek::PublicKey::from(*enc));
+    open_with_shared(shared_secret.as_bytes(), ciphertext, context)
+}
 
-    let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+/// `key||nonce` (44 bytes) = HKDF-SHA256(salt none, ikm `shared`, info
+/// `context`); DEK = AES-256-GCM-open(key, nonce, aad = `context`,
+/// `ciphertext`). Exactly the construction in hub-api's `key.proto`; pure so
+/// the cross-language vector (`tests/fixtures/hpke_vector.json`) can pin it.
+fn open_with_shared(shared: &[u8; 32], ciphertext: &[u8], context: &[u8]) -> Result<Dek, String> {
+    let hk = Hkdf::<Sha256>::new(None, shared);
     let mut key_and_nonce = Zeroizing::new([0u8; KEY_LEN + NONCE_LEN]);
     hk.expand(context, key_and_nonce.as_mut())
         .map_err(|e| format!("HKDF expand failed: {e}"))?;
@@ -397,7 +404,7 @@ fn hpke_seal_open(
             plaintext.len()
         ));
     }
-    let mut out = [0u8; KEY_LEN];
+    let mut out: Dek = Zeroizing::new([0u8; KEY_LEN]);
     out.copy_from_slice(&plaintext);
     Ok(out)
 }
@@ -764,6 +771,36 @@ mod tests {
         // And an uncontended fetch still caches normally.
         let _ = cache.get_dek("1").await;
         assert_eq!(cache.inner.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn hpke_open_matches_python_reference_vector() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/hpke_vector.json"))
+                .unwrap_or_else(|e| panic!("fixture: {e}"));
+        let hex = |k: &str| -> Vec<u8> {
+            let s = v[k].as_str().unwrap_or_default();
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0))
+                .collect()
+        };
+        let shared: [u8; 32] = hex("shared_hex")
+            .try_into()
+            .unwrap_or_else(|_| panic!("32-byte shared"));
+        let context = v["context"]
+            .as_str()
+            .unwrap_or_default()
+            .as_bytes()
+            .to_vec();
+        let dek = open_with_shared(&shared, &hex("ciphertext_hex"), &context)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(&dek[..], &hex("dek_hex")[..]);
+        // Flipped ciphertext byte, or a different context, must not open.
+        let mut bad = hex("ciphertext_hex");
+        bad[0] ^= 1;
+        assert!(open_with_shared(&shared, &bad, &context).is_err());
+        assert!(open_with_shared(&shared, &hex("ciphertext_hex"), b"svc-x|1|at-rest|1").is_err());
     }
 
     #[test]

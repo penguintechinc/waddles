@@ -7,14 +7,15 @@
 //! first DEK request connects, and a failed attempt is retried on the next
 //! request, so hub-api being down at pod start never wedges the stage.
 //!
-//! Wire contract assumed (to be reconciled with hub-api's final proto): RPC
-//! `KeyService.GetStreamDek(tenant_id, purpose, version, caller_ephemeral_
-//! public_key)`; `sealed_dek` is `enc(32 bytes) || ciphertext`, the HPKE-lite
-//! construction in [`crate::provider`], bound to
-//! `service_id|tenant_id|purpose|version`.
+//! Wire contract (hub-api `key.proto`, PR #1166): unary
+//! `KeyService.GetTenantDek(tenant_id u32, purpose, dek_version, caller_
+//! ephemeral_public_key)` returning `enc(32)`, `ciphertext(48)`,
+//! `dek_version`, `ttl_seconds`; sealed with the HPKE-lite construction in
+//! [`crate::provider`], context `service_id|tenant_id|purpose_label|1`.
 
 use std::sync::Arc;
 
+use hub_client::pb::TenantDekPurpose;
 use hub_client::HubClient;
 use tokio::sync::OnceCell;
 
@@ -25,13 +26,13 @@ use crate::provider::{
 use crate::TenantCrypto;
 
 /// Machine-JWT scope requested for key fetches (hub-api
-/// `REQUIRED_SCOPES` for `KeyService/GetStreamDek`).
-pub const KEY_SERVICE_SCOPE: &str = "key:stream-dek:read";
+/// `KeyService/GetTenantDek`; the token's tenant claim must be `system`).
+pub const KEY_SERVICE_SCOPE: &str = "keys:tenant-dek:read";
 
 /// Length of the server's one-time X25519 public key prefix in `sealed_dek`.
 const ENC_LEN: usize = 32;
-/// AES-GCM tag length: the shortest possible non-empty ciphertext.
-const MIN_CIPHERTEXT_LEN: usize = 16;
+/// Sealed DEK length: 32-byte DEK + 16-byte GCM tag.
+const CIPHERTEXT_LEN: usize = 48;
 
 /// Where and how to reach hub-api's internal gRPC key service.
 #[derive(Clone, Debug)]
@@ -97,36 +98,56 @@ impl DekBroker for GrpcDekBroker {
         client_public_key: [u8; 32],
     ) -> BoxFuture<'a, Result<SealedDek, String>> {
         Box::pin(async move {
+            let tenant: u32 = tenant_id
+                .parse()
+                .map_err(|_| format!("tenant id {tenant_id:?} is not a numeric id"))?;
+            let purpose = purpose_enum(purpose)?;
             let client = self.client().await?;
             let resp = client
-                .get_stream_dek(
-                    tenant_id.to_string(),
-                    purpose.to_string(),
-                    version,
-                    client_public_key.to_vec(),
-                )
+                .get_tenant_dek(tenant, purpose, version, client_public_key.to_vec())
                 .await
                 .map_err(|e| format!("key service call failed: {e}"))?;
-            split_sealed(&resp.sealed_dek, resp.version, u64::from(resp.ttl_seconds))
+            sealed_from_response(
+                &resp.enc,
+                &resp.ciphertext,
+                resp.dek_version,
+                resp.ttl_seconds,
+            )
         })
     }
 }
 
-/// Splits `enc(32) || ciphertext` into a [`SealedDek`].
-fn split_sealed(sealed: &[u8], dek_version: u32, ttl_seconds: u64) -> Result<SealedDek, String> {
-    if sealed.len() < ENC_LEN + MIN_CIPHERTEXT_LEN {
+/// Maps the purpose label to the proto enum; unknown labels are refused.
+fn purpose_enum(label: &str) -> Result<TenantDekPurpose, String> {
+    match label {
+        "at-rest" => Ok(TenantDekPurpose::AtRest),
+        "ingest-stream" => Ok(TenantDekPurpose::IngestStream),
+        other => Err(format!("unknown tenant DEK purpose label {other:?}")),
+    }
+}
+
+/// Validates the response shape: `enc` exactly 32 bytes, `ciphertext`
+/// exactly 48 (32-byte DEK + 16-byte tag).
+fn sealed_from_response(
+    enc: &[u8],
+    ciphertext: &[u8],
+    dek_version: u32,
+    ttl_seconds: u32,
+) -> Result<SealedDek, String> {
+    let enc: [u8; ENC_LEN] = enc
+        .try_into()
+        .map_err(|_| format!("enc is {} bytes, expected {ENC_LEN}", enc.len()))?;
+    if ciphertext.len() != CIPHERTEXT_LEN {
         return Err(format!(
-            "sealed_dek is {} bytes, expected enc({ENC_LEN}) || ciphertext",
-            sealed.len()
+            "ciphertext is {} bytes, expected {CIPHERTEXT_LEN}",
+            ciphertext.len()
         ));
     }
-    let mut enc = [0u8; ENC_LEN];
-    enc.copy_from_slice(&sealed[..ENC_LEN]);
     Ok(SealedDek {
         enc,
-        ciphertext: sealed[ENC_LEN..].to_vec(),
+        ciphertext: ciphertext.to_vec(),
         dek_version,
-        ttl_seconds,
+        ttl_seconds: u64::from(ttl_seconds),
     })
 }
 
@@ -153,19 +174,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_sealed_rejects_short_and_splits_layout() {
-        assert!(split_sealed(&[0u8; 47], 1, 1).is_err());
-        let mut raw = vec![1u8; 32];
-        raw.extend_from_slice(&[2u8; 48]);
-        let s = split_sealed(&raw, 7, 60).unwrap_or_else(|e| panic!("{e}"));
+    fn response_shape_is_validated() {
+        assert!(sealed_from_response(&[0u8; 31], &[0u8; 48], 1, 60).is_err());
+        assert!(sealed_from_response(&[0u8; 32], &[0u8; 47], 1, 60).is_err());
+        let s =
+            sealed_from_response(&[1u8; 32], &[2u8; 48], 7, 60).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!((s.enc, s.dek_version, s.ttl_seconds), ([1u8; 32], 7, 60));
         assert_eq!(s.ciphertext, vec![2u8; 48]);
     }
 
+    #[test]
+    fn purpose_labels_map_and_unknown_is_refused() {
+        assert_eq!(purpose_enum("at-rest"), Ok(TenantDekPurpose::AtRest));
+        assert_eq!(
+            purpose_enum("ingest-stream"),
+            Ok(TenantDekPurpose::IngestStream)
+        );
+        assert!(purpose_enum("bundle-data").is_err());
+    }
+
     #[tokio::test]
-    async fn unconfigured_broker_fails_closed() {
+    async fn non_numeric_tenant_and_unconfigured_broker_fail_closed() {
         let b = GrpcDekBroker::new(None);
-        let err = b.fetch_sealed("1", "bundle-data", 0, [0u8; 32]).await.err();
+        let err = b.fetch_sealed("slug", "at-rest", 0, [0u8; 32]).await.err();
+        assert!(err.is_some_and(|e| e.contains("not a numeric id")));
+        let err = b.fetch_sealed("1", "at-rest", 0, [0u8; 32]).await.err();
         assert!(err.is_some_and(|e| e.contains("not configured")));
     }
 }
