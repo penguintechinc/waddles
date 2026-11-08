@@ -237,8 +237,10 @@ mod chat_clear_tests {
     use crate::connector::sender_exec::verify::{verify, TemplateError};
     use crate::connector::sender_exec::RequestTpl;
 
+    type Pairs = Vec<(&'static str, &'static str)>;
+
     fn tpl(method: &str, url: &str, with_creds: bool, body: Option<&str>) -> RequestTpl {
-        let (headers, refs): (Vec<(&str, &str)>, Vec<(&str, &str)>) = if with_creds {
+        let (headers, refs): (Pairs, Pairs) = if with_creds {
             (
                 vec![
                     ("Authorization", "Bearer {{TWITCH_TOKEN}}"),

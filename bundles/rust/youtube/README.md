@@ -61,15 +61,21 @@ an exhausted budget is the explicit `quota_exhausted` refusal.
 
 ## Host-executed tools (`youtube.chat.*`)
 
-Declared in `exported_tools` (`access: write`, `risk: dangerous`) and served by `svc_action`
-(`capabilities/youtube_tools.rs`), not by the guest: `youtube.chat.delete_message{message_id}`,
-`youtube.chat.ban{user, duration_seconds?}`, `youtube.chat.unban{ban_id}`, `youtube.chat.add_moderator{user}`,
-`youtube.chat.remove_moderator{moderator_id}`. Chat and credential are never arguments (extra keys are refused);
-the call acts in the origin chat of the triggering YouTube event. `ban`/`add_moderator` return the created
-resource `id` for later `unban`/`remove_moderator`. Authorization: the planner's approved `tool.call` grant +
-write key (dangerous tools need admin approval -- that grant is the caller's moderation permission), the origin
-pin, the drain's ownership/quota duties, and a per-community daily op cap (`quota_exhausted`). No
-`required_scope`: the action stage has no verified-actor resolution and refuses every scope-restricted tool.
+Declared in `exported_tools` (`access: write`, `risk: dangerous`, `required_scope: community:moderate`) with a
+manifest `host_op` and executed by the generic host tool path in `svc_action` (`capabilities/host_tools.rs`,
+see `docs/bundle-host-tools.md`) -- there is no YouTube-specific dispatch: `youtube.chat.delete_message{message_id}`,
+`youtube.chat.ban{user, duration_seconds?}` (digit string, 1..=1209600), `youtube.chat.unban{ban_id}`,
+`youtube.chat.add_moderator{user}`, `youtube.chat.remove_moderator{moderator_id}`. Chat and credential are never
+arguments (unmapped keys are refused); the call acts in the origin chat of the triggering YouTube event.
+`ban`/`add_moderator` return the created resource `id` for later `unban`/`remove_moderator`.
+Authorization: the planner's approved `tool.call` grant + write key, the host-verified actor holding
+`community:moderate`, the origin pin, the service bundle's own `moderation.youtube` / `chat.delete:youtube`
+grant, the host-side protected-target check (owner/admin/moderator targets refused; the target stays a
+`{user:<uuid>}` placeholder on the wire and svc_ingest's `YoutubeDuties` re-resolves it), and the drain's
+id-ownership + per-community Data API quota duties (`quota_exhausted`). Tests drive the REAL manifest through
+the host planner (`host_tools_youtube_manifest_tests.rs`, fixture
+`core/svc_action/tests/fixtures/host_tools/youtube.json` regenerated with `scripts/host_tool_summary.py`,
+drift-gated by `hub_api/tests/test_platform_host_tool_fixtures.py`).
 
 ## Host config (slots the host must pin and substitute)
 

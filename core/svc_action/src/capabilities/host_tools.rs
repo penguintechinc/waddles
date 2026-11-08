@@ -419,15 +419,6 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         if class == OpClass::Event {
             return self.run_event_class(scope, plan).await;
         }
-        // A `{user:<uuid>}` placeholder skips host-side detokenization (the consumer resolves
-        // it), so it can never carry a destructive moderation op past the protected-target
-        // check: placeholders are valid only for the typed role ops.
-        if decl.user_wire == HostOpUserWire::Placeholder && !matches!(class, OpClass::Role(_)) {
-            return Err(ToolRefusal::Forbidden(format!(
-                "{NOT_SUPPORTED}: a placeholder user wire is valid only for role ops, not {:?}",
-                decl.op
-            )));
-        }
         let what = decl.op.as_str();
         // Phase 1 -- validation only (no I/O): an invalid call costs no readiness probe, rate
         // budget or detokenizer round trip.
@@ -473,7 +464,17 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         // Phase 3 -- detokenize the user HOST-side (fail closed), then build + queue.
         let user_wire = match (&wire.user_uuid, decl.user_wire) {
             (None, _) => None,
-            (Some(u), HostOpUserWire::Placeholder) => Some(format!("{{user:{u}}}")),
+            (Some(u), HostOpUserWire::Placeholder) => {
+                // The consumer re-resolves the placeholder (the raw id never rides the wire),
+                // but a destructive op must still clear the protected-target check here: the
+                // id is resolved ONLY for that check, host-side, and is never queued or logged.
+                if is_destructive_moderation(what) {
+                    let id = self.detokenize_user(scope, &decl.platform, u).await?;
+                    self.refuse_protected_target(scope, &decl.platform, what, &id)
+                        .await?;
+                }
+                Some(format!("{{user:{u}}}"))
+            }
             (Some(u), HostOpUserWire::PlatformId) => {
                 let id = self.detokenize_user(scope, &decl.platform, u).await?;
                 if is_destructive_moderation(what) {

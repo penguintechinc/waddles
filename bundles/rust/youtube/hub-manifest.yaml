@@ -121,6 +121,7 @@ exported_tools:
   - name: youtube.chat.delete_message
     access: write
     risk: dangerous
+    required_scope: community:moderate
     input_schema:
       type: object
       properties:
@@ -132,9 +133,17 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: youtube
+      op: chat.delete
+      message_id: message_id
+      required:
+        - message_id
+      origin: channel
   - name: youtube.chat.ban
     access: write
     risk: dangerous
+    required_scope: community:moderate
     input_schema:
       type: object
       properties:
@@ -142,17 +151,28 @@ exported_tools:
           type: string
           format: uuid
         duration_seconds:
-          type: integer
-          minimum: 1
-          maximum: 1209600
+          type: string
+          pattern: "^[0-9]{1,7}$"
       required:
         - user
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: youtube
+      op: mod.ban
+      user: user
+      user_wire: placeholder
+      text: duration_seconds
+      required:
+        - user
+      origin: channel
+      returns:
+        - id
   - name: youtube.chat.unban
     access: write
     risk: dangerous
+    required_scope: community:moderate
     input_schema:
       type: object
       properties:
@@ -164,9 +184,17 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: youtube
+      op: mod.unban
+      message_id: ban_id
+      required:
+        - ban_id
+      origin: channel
   - name: youtube.chat.add_moderator
     access: write
     risk: dangerous
+    required_scope: community:moderate
     input_schema:
       type: object
       properties:
@@ -178,9 +206,20 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: youtube
+      op: mod.add
+      user: user
+      user_wire: placeholder
+      required:
+        - user
+      origin: channel
+      returns:
+        - id
   - name: youtube.chat.remove_moderator
     access: write
     risk: dangerous
+    required_scope: community:moderate
     input_schema:
       type: object
       properties:
@@ -192,6 +231,13 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: youtube
+      op: mod.remove
+      message_id: moderator_id
+      required:
+        - moderator_id
+      origin: channel
 author: PenguinTech/waddles
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/youtube

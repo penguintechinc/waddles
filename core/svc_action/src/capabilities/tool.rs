@@ -197,14 +197,6 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             return self.run_host_tool(scope, &plan, &decl).await;
         }
 
-        // 5c. The YouTube service bundle's chat moderation tools are HOST-executed too: the
-        // pinned-chat / credential / detokenized-target duties live in svc-ingest's drain.
-        if plan.target_app_id == super::youtube_tools::YOUTUBE_SERVICE_APP_ID {
-            if let Some(res) = self.run_youtube_tool(scope, &plan.tool, &plan.args).await {
-                return res;
-            }
-        }
-
         // 6. Nested invoke on the active executor connection.
         let deadline = bundle_tool_call::nested_deadline(scope.deadline_at)?;
         let conn = wiring.connections.active().ok_or_else(|| {
