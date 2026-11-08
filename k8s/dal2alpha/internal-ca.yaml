@@ -44,10 +44,10 @@ spec:
     # No IP SANs permitted (an empty permitted list is not expressible) -- deny all via excluded.
     excluded:
       ipRanges: ["0.0.0.0/0", "::/0"]
-  # F8 (transit TLS): the key below is ECDSA P-256 => every certificate it signs is ecdsa-with-SHA256. This is the ONE trust root
-  # for in-cluster transit TLS: the Postgres, SeaweedFS S3 and Valkey server certs (global.transitTls.certManager) are issued
-  # by the ClusterIssuer below with FQDN-only SANs (<svc>.<ns>.svc.cluster.local, inside nameConstraints) and the clients dial
-  # the FQDN. No CA re-issue is required: the existing permitted suffix already covers them.
+  # F8 (transit TLS): the key below is ECDSA P-256 => every certificate it signs is ecdsa-with-SHA256. This CA is the trust domain
+  # for the host-API/gRPC mTLS and hub-api HTTPS certs only (explicit FQDN SANs, never a wildcard). Postgres / SeaweedFS S3 / Valkey
+  # use a SEPARATE namespaced root rendered by the chart (templates/transit-data-tls-certificates.yaml), so nothing signed here is
+  # accepted by a data-store client. Recommended: cert-manager approver-policy restricting who may use this ClusterIssuer.
   commonName: waddlebot-internal-ca
   subject:
     organizations: [PenguinTech]

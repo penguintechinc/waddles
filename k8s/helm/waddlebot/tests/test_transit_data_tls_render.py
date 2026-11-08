@@ -96,7 +96,10 @@ def _mounts_ca(c, spec):
     return (
         "transit-ca" in mounts
         and mounts["transit-ca"]["mountPath"] == "/etc/waddles/transit-ca"
-        and vols.get("transit-ca", {}).get("secret", {}).get("items") == [{"key": "ca.crt", "path": "ca.crt"}]
+        and vols.get("transit-ca", {}).get("secret", {}).get("items") in (
+            [{"key": "ca.crt", "path": "ca.crt"}],  # self-generated CA Secret
+            [{"key": "tls.crt", "path": "ca.crt"}],  # dedicated cert-manager root: only the certificate is projected, never its key
+        )
     )
 
 
@@ -298,52 +301,71 @@ def _certs(docs):
 
 
 @pytest.mark.parametrize("values", _CM_ENVS)
-def test_cert_manager_mode_has_one_trust_root(values):
-    """dal2alpha/beta/gamma/prod: Postgres, S3 and Valkey certs are signed by the namespaced Issuer chained from the shared
-    internal CA, and every client mounts the SAME single CA secret; no self-generated CA is rendered at all."""
+def test_cert_manager_mode_uses_a_dedicated_namespaced_transit_root(values):
+    """dal2alpha/beta/gamma/prod: a self-signed root that exists only in the release namespace signs Postgres/S3/Valkey, and every
+    data-store client trusts ONLY it -- never the cluster-wide internal CA."""
     docs = _docs(values)
     names = {d["metadata"]["name"] for d in docs if d["kind"] == "Secret"}
     assert not any(n.endswith("-transit-tls") for n in names), "self-generated transit CA must not render"
     assert not any(n.endswith("-valkey-tls") for n in names), "self-generated Valkey CA must not render"
     certs = _certs(docs)
-    for suffix in ("postgres-tls", "seaweedfs-tls", "valkey-tls"):
-        hit = [spec for n, spec in certs.items() if n.endswith("-" + suffix)]
+    issuers = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Issuer"}
+    assert issuers["w-waddlebot-transit-selfsigned"]["spec"] == {"selfSigned": {}}
+    assert issuers["w-waddlebot-transit"]["spec"] == {"ca": {"secretName": "w-waddlebot-transit-ca"}}
+    assert all(i["metadata"]["namespace"] for i in issuers.values())
+    root = certs["w-waddlebot-transit-ca"]
+    assert root["isCA"] is True
+    assert root["issuerRef"] == {"name": "w-waddlebot-transit-selfsigned", "kind": "Issuer", "group": "cert-manager.io"}
+    assert root["privateKey"]["algorithm"] == "ECDSA" and root["privateKey"]["size"] == 256
+    assert root["nameConstraints"]["critical"] is True
+    permitted = root["nameConstraints"]["permitted"]["dnsDomains"]
+    assert permitted and all(d.endswith(".svc.cluster.local") and "*" not in d for d in permitted)
+    leaf_suffixes = ("-postgres-tls", "-seaweedfs-tls", "-valkey-tls")
+    for suffix in leaf_suffixes:
+        hit = [spec for n, spec in certs.items() if n.endswith(suffix)]
         assert len(hit) == 1, suffix
         spec = hit[0]
         assert spec["issuerRef"] == {"name": "w-waddlebot-transit", "kind": "Issuer", "group": "cert-manager.io"}, suffix
-        assert spec["privateKey"]["algorithm"] == "ECDSA" and spec["privateKey"]["size"] == 256, suffix
-        assert spec["usages"] == ["server auth"]
-        assert spec["dnsNames"] and all(n.endswith(".svc.cluster.local") and "*" not in n for n in spec["dnsNames"]), (suffix, spec["dnsNames"])
+        assert spec["privateKey"]["algorithm"] == "ECDSA" and spec["privateKey"]["size"] == 256 and spec["usages"] == ["server auth"]
+        assert spec["dnsNames"] and all("*" not in n and n.endswith(".svc.cluster.local") for n in spec["dnsNames"]), spec["dnsNames"]
+        for san in spec["dnsNames"]:
+            assert any(san == d or san.endswith("." + d) for d in permitted), (san, permitted)
     assert _fqdn(docs, "postgres") in next(s["dnsNames"] for n, s in certs.items() if n.endswith("-postgres-tls"))
     assert _fqdn(docs, "seaweedfs") in next(s["dnsNames"] for n, s in certs.items() if n.endswith("-seaweedfs-tls"))
-    # durable Valkey replicas are dialled per pod: explicit names, one per replica
     valkey_sans = next(s["dnsNames"] for n, s in certs.items() if n.endswith("-valkey-tls"))
     assert sum(1 for n in valkey_sans if n.startswith("valkey-durable-")) >= 1, valkey_sans
-    # namespaced Issuer chained from the internal root via an intermediate CA that is itself name-constrained
-    issuer = next(d for d in docs if d["kind"] == "Issuer")
-    assert issuer["metadata"]["namespace"] and issuer["spec"] == {"ca": {"secretName": "w-waddlebot-transit-ca"}}
-    inter = certs["w-waddlebot-transit-ca"]
-    assert inter["isCA"] is True and inter["issuerRef"]["name"] == "waddlebot-internal-ca"
-    assert inter["issuerRef"]["kind"] == "ClusterIssuer"
-    assert inter["nameConstraints"]["critical"] is True
-    permitted = inter["nameConstraints"]["permitted"]["dnsDomains"]
-    assert permitted and all(d.endswith(".svc.cluster.local") and "*" not in d for d in permitted)
-    for n, spec in certs.items():
-        if n.endswith(("-postgres-tls", "-seaweedfs-tls", "-valkey-tls")):
-            for san in spec["dnsNames"]:
-                assert any(san == d or san.endswith("." + d) for d in permitted), (san, permitted)
-    sources = set()
-    for d in docs:
-        if d["kind"] in _WORKLOAD_KINDS:
-            for v in _pod_spec(d).get("volumes", []):
-                if v["name"] in ("transit-ca", "valkey-ca"):
-                    assert v["secret"]["items"][0]["key"] == "ca.crt"
-                    sources.add(v["secret"]["secretName"])
-    assert sources == {"w-waddlebot-transit-ca"}, f"clients must mount exactly one CA bundle, found {sources}"
     pg = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "postgres")
     vol = next(v for v in pg["spec"]["template"]["spec"]["volumes"] if v["name"] == "transit-tls")
-    assert vol["secret"]["secretName"] in certs, "server cert Secret must be the cert-manager one"
-    assert [i["key"] for i in vol["secret"]["items"]] == ["tls.crt", "tls.key"]
+    assert vol["secret"]["secretName"] in certs and [i["key"] for i in vol["secret"]["items"]] == ["tls.crt", "tls.key"]
+
+
+@pytest.mark.parametrize("values", _CM_ENVS)
+def test_data_store_clients_trust_only_the_transit_root_not_the_internal_ca(values):
+    """A leaf signed by the cluster-wide waddlebot-internal-ca (even with a Postgres/Valkey SAN) must be rejected: no data-store
+    client mounts any secret from that trust domain, and the ONLY CA volume source is the dedicated root's certificate."""
+    docs = _docs(values)
+    certs = _certs(docs)
+    internal = {n for n, spec in certs.items() if spec["issuerRef"]["name"] == "waddlebot-internal-ca"}
+    assert internal, "expected the grpc/host-api certs to stay on waddlebot-internal-ca"
+    assert not any(n.endswith(("-postgres-tls", "-seaweedfs-tls", "-valkey-tls", "-transit-ca")) for n in internal)
+    sources, n_pods = set(), 0
+    for d in docs:
+        if d["kind"] not in _WORKLOAD_KINDS:
+            continue
+        for v in _pod_spec(d).get("volumes", []):
+            if v["name"] in ("transit-ca", "valkey-ca"):
+                n_pods += 1
+                assert v["secret"]["items"] == [{"key": "tls.crt", "path": "valkey-ca.crt" if v["name"] == "valkey-ca" else "ca.crt"}]
+                sources.add(v["secret"]["secretName"])
+            if v["name"] in ("transit-ca", "valkey-ca", "transit-tls"):
+                assert v["secret"]["secretName"] not in internal
+    assert n_pods >= 20 and sources == {"w-waddlebot-transit-ca"}, (n_pods, sources)
+    # every client-side CA env/path points at the mounted transit CA only
+    for name, c, spec in _containers(docs):
+        env = _env(c)
+        for var in ("PGSSLROOTCERT", "S3_CA_FILE", "AWS_CA_BUNDLE", "BUNDLE_BUCKET_CA_FILE"):
+            if var in env:
+                assert env[var]["value"] == _CA_PATH, (name, var)
 
 
 @pytest.mark.parametrize("values", _ENVS)

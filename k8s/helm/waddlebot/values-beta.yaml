@@ -22,14 +22,13 @@ global:
   #    <release>-hub-api-grpc-tls are owned by an out-of-band ExternalSecret/SealedSecret
   #    (externalSecret: true). They MUST exist before `helm upgrade`; a missing Secret leaves the
   #    pods in ContainerCreating (loud), never a silent plaintext fallback.
-  # ONE trust root: Postgres / SeaweedFS S3 / Valkey server certs come from the same internal-CA ClusterIssuer as the
-  # mTLS identities above (PREREQ: cert-manager + that issuer). Overrides the self-generated transit CA and, for Valkey,
-  # global.valkeyTls.externalSecret (cert-manager owns <release>-valkey-tls in this mode).
+  # Dedicated transit trust root for Postgres / SeaweedFS S3 / Valkey: a namespaced SelfSigned Issuer -> root CA -> CA Issuer
+  # rendered by the chart (PREREQ: cert-manager with the NameConstraints feature gate). Clients trust only that root; the
+  # hostApiTls/grpcTls identities below keep waddlebot-internal-ca. Overrides global.valkeyTls.externalSecret (cert-manager owns
+  # <release>-valkey-tls in this mode).
   transitTls:
     certManager:
       enabled: true
-      issuerKind: "ClusterIssuer"
-      issuerName: "waddlebot-internal-ca"
   hostApiTls:
     certManager:
       enabled: true

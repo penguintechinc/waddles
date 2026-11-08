@@ -6,16 +6,17 @@ Postgres and one for the SeaweedFS S3 gateway; both live, with the CA certificat
 <fullname>-transit-tls (templates/transit-tls-secret.yaml). Clients mount ONLY ca.crt and verify the server against that CA --
 never system roots, never "insecure", never a plaintext fallback.
 
-ONE TRUST ROOT: with global.transitTls.certManager.enabled (dal2alpha/beta/gamma/production) there is no self-generated CA at
-all -- templates/transit-data-tls-certificates.yaml asks the shared `waddlebot-internal-ca` ClusterIssuer for the Postgres,
-SeaweedFS and Valkey server certs (FQDN-only SANs), and every client mounts the ca.crt cert-manager writes next to them
-(waddlebot.transitTls.caSecretName: the SAME CA bytes for all three hops and the existing host-API/gRPC/hub-api trust). Only
-where cert-manager is off (local, values-alpha) does the self-generated CA below apply; the legacy Valkey CA is then separate.
+ONE DEDICATED TRUST ROOT: with global.transitTls.certManager.enabled (dal2alpha/beta/gamma/production) templates/
+transit-data-tls-certificates.yaml renders a self-signed ECDSA root that exists ONLY in the release namespace
+(SelfSigned Issuer -> CA Certificate `<release>-transit-ca` -> namespaced CA Issuer `<release>-transit`) and signs only the
+Postgres, SeaweedFS and Valkey server certs. Data-store clients trust ONLY that root (waddlebot.transitTls.caSecretName): a leaf
+signed by the cluster-wide `waddlebot-internal-ca` (host-API / gRPC / hub-api trust domain) is never accepted for a data store,
+even with the right SAN. Where cert-manager is off (local, values-alpha) the self-generated CA below applies instead.
 
-F8 (CA prerequisites): the cert-manager `waddlebot-internal-ca` CA (k8s/dal2alpha/internal-ca.yaml) has critical nameConstraints
-permitting only `*.<ns>.svc.cluster.local` plus a few bare names, so in cert-manager mode every SAN is the FQDN only and every
-client dials the FQDN (waddlebot.transitTls.pgHost / s3Host / fqdn); no CA re-issue is needed. The self-generated fallback CA has
-no nameConstraints and also carries the short forms. Both are ECDSA P-256 / ecdsa-with-SHA256.
+F8 (CA prerequisites): the dedicated transit root is its own trust domain, so the cluster-wide `waddlebot-internal-ca` (whose
+critical nameConstraints permit only `*.<ns>.svc.cluster.local` plus a few bare names) needs no re-issue. In cert-manager mode every
+SAN is an explicit FQDN (never a wildcard) and every client dials the FQDN (waddlebot.transitTls.pgHost / s3Host / fqdn). Both
+the cert-manager root and the self-generated fallback CA are ECDSA P-256 / ecdsa-with-SHA256.
 
 Negotiation bar (user requirement 2026-11-08): TLS 1.3 preferred, 1.2 minimum, ECDSA P-256, P-256 key exchange,
 AES-128-GCM / ChaCha20-Poly1305, session resumption on, pooled keep-alive client connections.
@@ -39,18 +40,6 @@ true
 {{- end -}}
 {{- end }}
 
-{{/* Shared issuer (name/kind): global.internalTransitTls.certManager.* (hub-api HTTPS) wins when present. */}}
-{{- define "waddlebot.transitTls.issuerName" -}}
-{{- $it := get .Values.global "internalTransitTls" | default dict -}}
-{{- $icm := get $it "certManager" | default dict -}}
-{{- get $icm "issuerName" | default .Values.global.transitTls.certManager.issuerName -}}
-{{- end }}
-{{- define "waddlebot.transitTls.issuerKind" -}}
-{{- $it := get .Values.global "internalTransitTls" | default dict -}}
-{{- $icm := get $it "certManager" | default dict -}}
-{{- get $icm "issuerKind" | default .Values.global.transitTls.certManager.issuerKind -}}
-{{- end }}
-
 {{/* cert-manager-issued server Secret names (one per server; each also carries the shared ca.crt). */}}
 {{- define "waddlebot.transitTls.pgSecretName" -}}
 {{- if include "waddlebot.transitTls.cm" . -}}{{ include "waddlebot.fullname" . }}-postgres-tls{{- else -}}{{ include "waddlebot.transitTls.secretName" . }}{{- end -}}
@@ -60,17 +49,27 @@ true
 {{- end }}
 
 {{/*
-Secret every CLIENT mounts ca.crt from: the one shared trust root. cert-manager mode: the namespaced intermediate CA Secret
-(<fullname>-transit-ca) -- its ca.crt is the internal ROOT that signed it, the same trust anchor the host-API/gRPC/hub-api certs use.
+Secret every CLIENT mounts the transit CA from. cert-manager mode: the dedicated root's Secret `<fullname>-transit-ca` (key tls.crt =
+the self-signed root certificate; the key is never projected into a client). Static mode: <fullname>-transit-tls (key ca.crt).
 */}}
 {{- define "waddlebot.transitTls.caSecretName" -}}
 {{- if include "waddlebot.transitTls.cm" . -}}{{ include "waddlebot.fullname" . }}-transit-ca
 {{- else -}}{{ include "waddlebot.transitTls.secretName" . }}{{- end -}}
 {{- end }}
 
-{{/* Namespaced CA Issuer (chained from the internal CA) that signs the transit certs -- only this namespace can reference it. */}}
+{{/* Key inside that Secret holding the CA certificate. */}}
+{{- define "waddlebot.transitTls.caKey" -}}
+{{- if include "waddlebot.transitTls.cm" . -}}tls.crt{{- else -}}ca.crt{{- end -}}
+{{- end }}
+
+{{/* Namespaced CA Issuer over the dedicated root; signs the data-store leaves. */}}
 {{- define "waddlebot.transitTls.nsIssuerName" -}}
 {{- printf "%s-transit" (include "waddlebot.fullname" .) -}}
+{{- end }}
+
+{{/* Namespaced SelfSigned Issuer that mints the dedicated root. */}}
+{{- define "waddlebot.transitTls.selfSignedIssuerName" -}}
+{{- printf "%s-transit-selfsigned" (include "waddlebot.fullname" .) -}}
 {{- end }}
 
 {{/* Server volume `items` (key->path) for Postgres/SeaweedFS: the cert-manager Secret uses tls.crt/tls.key, the static one prefixed keys. */}}
@@ -168,8 +167,8 @@ Valkey (cache + durable + kv) server SANs for cert-manager: explicit FQDNs only 
 {{- end }}
 
 {{/*
-Name-constraint domains of the namespaced intermediate: exactly the data-store FQDNs (a dNSName constraint also permits
-their subdomains, i.e. the durable per-pod names). The Issuer can therefore never sign anything else, even if its key leaks.
+Name-constraint domains of the dedicated transit root: exactly the data-store FQDNs (a dNSName constraint also permits their
+subdomains, i.e. the durable per-pod names). The root can therefore never sign anything else, even if its key leaks.
 */}}
 {{- define "waddlebot.transitTls.caPermittedDomains" -}}
 {{- $ns := .Values.namespace -}}
@@ -205,7 +204,7 @@ their subdomains, i.e. the durable per-pod names). The Issuer can therefore neve
     secretName: {{ include "waddlebot.transitTls.caSecretName" . }}
     defaultMode: 0444
     items:
-    - key: ca.crt
+    - key: {{ include "waddlebot.transitTls.caKey" . }}
       path: ca.crt
 {{- end -}}
 {{- end }}
