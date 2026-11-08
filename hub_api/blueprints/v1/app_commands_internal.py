@@ -1,19 +1,16 @@
-"""v1 internal data-plane API: slash-command desired state + per-user active context.
+"""v1 internal data-plane API: slash-command desired state.
 
-Consumed by the Discord connector (reconcile) and the ingest router (context). Machine JWT only,
+Consumed by the Discord connector (reconcile). Machine JWT only,
 operator-plane ``system`` tenant (``services.machine_auth``); the tenant is derived server-side from
 the source's pairing, never accepted from the caller. Entities are referenced by public_id UUID
 only (never numeric PKs or names); no PII.
 
 * ``GET    /api/v1/internal/dataplane/app-commands/sources?platform=&limit=&offset=``
 * ``GET    /api/v1/internal/dataplane/app-commands/desired?platform=&source_id=[&if_version=]``
-* ``GET    /api/v1/internal/dataplane/active-context?platform=&source_id=&user=``
-* ``PUT    /api/v1/internal/dataplane/active-context``
-  body ``{platform, sourceId, user, community}``
-* ``DELETE /api/v1/internal/dataplane/active-context?platform=&source_id=&user=``
+Per-user active context is intra-cluster and served over gRPC (``ActiveContextService``), not REST.
 
-Scopes: ``dataplane:app-commands`` (first two), ``dataplane:active-context`` (the rest). Every
-refusal is ``no-store``; a successful read is cacheable for the router's ~1 minute.
+Scope: ``dataplane:app-commands``. Every refusal is ``no-store``; a successful read is cacheable
+for the connector's ~1 minute.
 """
 
 from __future__ import annotations
@@ -26,7 +23,7 @@ from typing import Any, LiteralString, cast
 from flask_core.api_utils import error_response
 from penguin_dal import AsyncDB
 from quart import Blueprint, Response, current_app, request
-from quart_schema import validate_request, validate_response
+from quart_schema import validate_response
 
 from services import app_command_registry as registry
 from services.dataplane_scope import (
@@ -43,7 +40,6 @@ app_commands_internal_bp = Blueprint(
 )
 
 SCOPE_APP_COMMANDS = "dataplane:app-commands"
-SCOPE_ACTIVE_CONTEXT = "dataplane:active-context"
 CACHE_TTL_SECONDS = 60
 DEFAULT_LIMIT = 100
 
@@ -84,45 +80,6 @@ class SlashSourcesDTO:
     offset: int
 
 
-@dataclass(slots=True, frozen=True)
-class SlashCommunityDTO:
-    """A community switchable on the source (``position`` 0 = first-registered default)."""
-
-    publicId: str
-    displayName: str
-    position: int
-
-
-@dataclass(slots=True, frozen=True)
-class SlashContextDTO:
-    """A user's active community for a source."""
-
-    success: bool
-    tenantPublicId: str
-    communityPublicId: str
-    communityName: str
-    explicit: bool
-    communities: list[SlashCommunityDTO] = field(default_factory=list)
-
-
-@dataclass(slots=True, frozen=True)
-class SlashSetContextRequest:
-    """Body of the PUT: ``community`` is the community ``public_id`` UUID (names never resolve)."""
-
-    platform: str
-    sourceId: str
-    user: str
-    community: str
-
-
-@dataclass(slots=True, frozen=True)
-class SlashClearDTO:
-    """Result of a DELETE (``cleared`` False = there was no explicit choice)."""
-
-    success: bool
-    cleared: bool
-
-
 def _auth(scope: str, tag: LiteralString) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Machine-JWT guard requiring ``scope`` (event names are bounded-literal log keys)."""
     return machine_authenticated(
@@ -134,7 +91,6 @@ def _auth(scope: str, tag: LiteralString) -> Callable[[Callable[..., Any]], Call
 
 
 _commands_auth = _auth(SCOPE_APP_COMMANDS, "desired")
-_context_auth = _auth(SCOPE_ACTIVE_CONTEXT, "context")
 
 
 @app_commands_internal_bp.after_request
@@ -234,66 +190,6 @@ async def desired_route() -> Any:
             for c in state.commands
         ],
     )
-
-
-def _context_dto(ctx: registry.ActiveContext) -> SlashContextDTO:
-    return SlashContextDTO(
-        success=True,
-        tenantPublicId=ctx.tenant_public_id,
-        communityPublicId=ctx.community_public_id,
-        communityName=ctx.community_name,
-        explicit=ctx.explicit,
-        communities=[SlashCommunityDTO(c.public_id, c.name, c.position) for c in ctx.communities],
-    )
-
-
-@app_commands_internal_bp.route("/active-context", methods=["GET"])
-@_context_auth
-@validate_response(SlashContextDTO)
-async def get_context_route() -> Any:
-    """``GET`` -- the user's active community (default: first-registered) + switchable list."""
-    try:
-        ctx = await registry.get_active_context(
-            _dal(),
-            request.args.get("platform", ""),
-            request.args.get("source_id", ""),
-            request.args.get("user", ""),
-        )
-    except (ScopeError, registry.ContextNotFoundError) as exc:
-        return _refusal(exc, "get_context")
-    return _context_dto(ctx)
-
-
-@app_commands_internal_bp.route("/active-context", methods=["PUT"])
-@_context_auth
-@validate_request(SlashSetContextRequest)
-@validate_response(SlashContextDTO)
-async def set_context_route(data: SlashSetContextRequest) -> Any:
-    """``PUT`` -- switch the user's active community (community public_id UUID)."""
-    try:
-        ctx = await registry.set_active_context(
-            _dal(), data.platform, data.sourceId, data.user, data.community
-        )
-    except (ScopeError, registry.ContextNotFoundError) as exc:
-        return _refusal(exc, "set_context")
-    return _context_dto(ctx)
-
-
-@app_commands_internal_bp.route("/active-context", methods=["DELETE"])
-@_context_auth
-@validate_response(SlashClearDTO)
-async def clear_context_route() -> Any:
-    """``DELETE`` -- drop the user's explicit choice (revert to the source default)."""
-    try:
-        cleared = await registry.clear_active_context(
-            _dal(),
-            request.args.get("platform", ""),
-            request.args.get("source_id", ""),
-            request.args.get("user", ""),
-        )
-    except ScopeError as exc:
-        return _refusal(exc, "clear_context")
-    return SlashClearDTO(True, cleared)
 
 
 BLUEPRINTS = [app_commands_internal_bp]
