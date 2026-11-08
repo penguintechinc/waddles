@@ -101,6 +101,9 @@ service reads them directly on this branch (reflects the current state,
 not a permanent restriction).
 
 Revision ID: 0034_bar_citizen_guild_pairing
+(Identifier retained verbatim: it is recorded in deployed alembic_version tables and referenced
+by 0035 down_revision; renaming it would orphan applied databases. Treat as the guild-pairing
+migration.)
 Revises: 0033_artifact_digest_not_unique
 Create Date: 2026-10-03
 """
