@@ -9,8 +9,8 @@
 //! * **Machine-JWT auth**: every call carries `authorization: Bearer <jwt>` minted by
 //!   [`service_auth::MachineJwtClient`] with scope [`SCOPE`]; hub-api additionally requires the
 //!   operator-plane `system` tenant and an allow-listed caller.
-//! * **Bounded**: a per-call deadline under hub-api's 5s ceiling, and a circuit breaker so a wedged
-//!   hub-api fails fast. Only server-health failures count; a request the server answered and
+//! * **Bounded**: a per-call deadline under hub-api's 5s ceiling, and a circuit breaker
+//!   ([`crate::rpc::RpcGuard`]) so a wedged hub-api fails fast. Only server-health failures count; a request the server answered and
 //!   declined ([`crate::is_caller_error`]) is breaker-neutral. No in-client retry: the scheduler
 //!   polls on its own cadence and treats a failed listing as "try again next tick".
 //! * **OTel**: each call runs in a `hub_client.bundle_schedules.list` tracing span (exported via the
@@ -21,18 +21,15 @@ use std::time::Duration;
 
 use service_auth::MachineJwtClient;
 use tonic::transport::{Channel, Endpoint};
-use tonic::{Request, Status};
 use tracing::Instrument;
 
 use crate::pb::bundle_schedule_service_client::BundleScheduleServiceClient;
 use crate::pb::{BundleScheduleTarget, ListBundleSchedulesRequest};
-use crate::{build_tls_config, is_caller_error, CircuitBreaker, HubClientError};
+use crate::rpc::RpcGuard;
+use crate::{build_tls_config, HubClientError};
 
 /// Machine-JWT scope hub-api requires for `ListBundleSchedules`.
 pub const SCOPE: &str = "bundle-schedules:read";
-
-/// Per-call deadline (hub-api rejects anything over 5s).
-pub const DEADLINE: Duration = Duration::from_secs(3);
 
 /// Optional listing filters; numeric ids only. `None` = unfiltered.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -46,9 +43,7 @@ pub struct ScheduleFilter {
 #[derive(Clone)]
 pub struct BundleScheduleClient {
     client: BundleScheduleServiceClient<Channel>,
-    token_client: Arc<MachineJwtClient>,
-    breaker: Arc<CircuitBreaker>,
-    deadline: Duration,
+    guard: RpcGuard,
 }
 
 impl BundleScheduleClient {
@@ -84,16 +79,14 @@ impl BundleScheduleClient {
     pub fn with_channel(channel: Channel, token_client: Arc<MachineJwtClient>) -> Self {
         Self {
             client: BundleScheduleServiceClient::new(channel),
-            token_client,
-            breaker: Arc::new(CircuitBreaker::new(5, Duration::from_secs(30))),
-            deadline: DEADLINE,
+            guard: RpcGuard::new(token_client),
         }
     }
 
     /// Overrides the per-call deadline (tests).
     #[must_use]
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
-        self.deadline = deadline;
+        self.guard = self.guard.with_deadline(deadline);
         self
     }
 
@@ -117,29 +110,11 @@ impl BundleScheduleClient {
         );
         let recorder = span.clone();
         async move {
-            if !self.breaker.allow() {
-                recorder.record("outcome", "circuit_open");
-                return Err(HubClientError::CircuitOpen);
-            }
+            self.guard.admit()?;
             let result = self.call(filter).await;
-            match &result {
-                Ok(targets) => {
-                    self.breaker.record_success();
-                    recorder.record("outcome", "ok");
-                    recorder.record("targets", targets.len());
-                }
-                Err(HubClientError::Grpc(status)) if is_caller_error(status) => {
-                    recorder.record("outcome", format!("{:?}", status.code()));
-                }
-                Err(err) => {
-                    self.breaker.record_failure();
-                    let code = match err {
-                        HubClientError::Grpc(status) => format!("{:?}", status.code()),
-                        HubClientError::Auth(_) => "auth".to_owned(),
-                        _ => "error".to_owned(),
-                    };
-                    recorder.record("outcome", code);
-                }
+            recorder.record("outcome", self.guard.settle(&result));
+            if let Ok(targets) = &result {
+                recorder.record("targets", targets.len());
             }
             result
         }
@@ -151,22 +126,20 @@ impl BundleScheduleClient {
         &self,
         filter: &ScheduleFilter,
     ) -> Result<Vec<BundleScheduleTarget>, HubClientError> {
-        let token = self.token_client.get_token().await?;
-        let mut request = Request::new(ListBundleSchedulesRequest {
-            tenant_id: filter.tenant_id,
-            community_id: filter.community_id,
-            app_id: filter.app_id.clone(),
-        });
-        request.set_timeout(self.deadline);
-        request.metadata_mut().insert(
-            "authorization",
-            format!("Bearer {token}")
-                .parse()
-                .map_err(|_| Status::internal("invalid token metadata"))?,
-        );
+        let request = self
+            .guard
+            .request(ListBundleSchedulesRequest {
+                tenant_id: filter.tenant_id,
+                community_id: filter.community_id,
+                app_id: filter.app_id.clone(),
+            })
+            .await?;
         let mut client = self.client.clone();
-        let response = client.list_bundle_schedules(request).await?;
-        Ok(response.into_inner().targets)
+        Ok(client
+            .list_bundle_schedules(request)
+            .await?
+            .into_inner()
+            .targets)
     }
 }
 
@@ -181,6 +154,7 @@ mod tests {
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tonic::{Request, Status};
 
     /// A real tonic server on loopback that records each request's bearer + filters and answers
     /// with a scripted result.
@@ -293,10 +267,6 @@ mod tests {
     #[test]
     fn scope_matches_the_server_contract() {
         assert_eq!(SCOPE, "bundle-schedules:read");
-        assert!(
-            DEADLINE < Duration::from_secs(5),
-            "must stay under hub-api's ceiling"
-        );
     }
 
     #[tokio::test]
@@ -359,7 +329,7 @@ mod tests {
             ));
         }
         // 10 INVALID_ARGUMENT answers never tripped the breaker (still reaches the server).
-        assert!(client.breaker.allow());
+        assert!(client.guard.admit().is_ok());
 
         let (channel, _) = spawn_hub(Err(Status::unavailable("down"))).await;
         let client = client_over(channel).await;
