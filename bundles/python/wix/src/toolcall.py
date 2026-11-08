@@ -13,6 +13,9 @@ from typing import Any
 
 from waddle_sdk import community_kv, log, tool
 
+#: The SDK's host-forwarded logger under the name the no-stubs silent-fallback gate recognises.
+logger = log
+
 #: Service bundle owning the Discord tool definitions.
 DISCORD_SERVICE = "waddles.core.service.discord"
 #: The WIT import the tool-invocation path needs (only in the `stage-next-tools` world).
@@ -80,6 +83,7 @@ async def call(
             DISCORD_SERVICE, name, args, idempotency_key=idempotency_key
         )
     except tool.ToolError as exc:
+        logger.error("wix.tool_call_failed", module=module, tool=name, code=exc.code)
         await record_fault(community, module, exc.code)
         return None
     await clear_fault(community, module)
