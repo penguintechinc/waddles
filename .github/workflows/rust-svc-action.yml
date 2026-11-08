@@ -6,6 +6,8 @@ on:
     paths:
       - 'core/svc_action/**'
       - 'core/bundle_host_kv/**'
+      - 'core/bundle_host_credentials/**'
+      - 'core/connection_resolver/**'
       - 'core/bundle_capability_gate/**'
       - 'core/bundle_tool_call/**'
       - 'core/circuit_breaker/**'
@@ -53,6 +55,8 @@ jobs:
           globs: |
             core/svc_action/**
             core/bundle_host_kv/**
+            core/bundle_host_credentials/**
+            core/connection_resolver/**
             core/bundle_capability_gate/**
             core/bundle_tool_call/**
             core/circuit_breaker/**

@@ -169,6 +169,8 @@ bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 # specific to this repo's own bundle-host wire shapes, not a penguin-libs
 # crate.
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+# Per-community / host-minted credentials + Valkey quota for bundle http.send secret refs (host-seams-2).
+bundle-host-credentials = { path = "../bundle_host_credentials", version = "=0.1.0" }
 # Outbound PII-detokenization pass (`src/capabilities.rs`'s
 # `detokenize_text`/`with_detokenize`) -- the egress half of the PII
 # boundary whose inbound half is `core/svc_process`'s own `pii_tokenize`

@@ -429,6 +429,13 @@ async fn apply_active_set(
     // digest bump, staleness window on eviction).
     for row in active.values() {
         kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
+        // The approved manifest egress feeds the bundle http guard (no other
+        // production writer exists for its catalog).
+        bundle_host_http::grants::ActiveEgressSnapshot::global().publish(
+            &row.app_id,
+            row.egress.clone(),
+            row.egress_rps,
+        );
     }
     // Feeds `crate::dispatch::DispatchDeps::app_version_snapshot` (bundle
     // capability-gate wiring, spec SS12 Phase 4) from the SAME DB truth
@@ -1972,6 +1979,8 @@ mod tests {
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
                     declared_capabilities: Vec::new(),
+                    egress: Vec::new(),
+                    egress_rps: None,
                     tools: Default::default(),
                 }],
                 excluded: Vec::new(),
@@ -2839,6 +2848,8 @@ mod tests {
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
                     declared_capabilities: Vec::new(),
+                    egress: Vec::new(),
+                    egress_rps: None,
                     tools: Default::default(),
                 }],
                 excluded: Vec::new(),

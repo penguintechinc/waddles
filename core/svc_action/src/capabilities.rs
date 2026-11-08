@@ -3235,7 +3235,16 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                         ResourceRef::AppScoped(AppScopedResource::None),
                     )
                     .map_err(denied_from_gate)?;
-                self.egress.send(&scope.app_id, &call.args).await
+                // Host-verified (tenant, community) of THIS invocation: the
+                // community whose connection a `connection:` secret grant
+                // resolves. Never a guest-supplied value.
+                let cred_scope = bundle_host_http::credentials::CallScope {
+                    tenant_id: i64::from(scope.tenant_id),
+                    community_id: i64::from(scope.community_id),
+                };
+                self.egress
+                    .send_scoped(&scope.app_id, &cred_scope, &call.args)
+                    .await
             }
             CapabilityKind::Kv => self.handle_kv(scope, &call).await,
             // `db` is wired below (mirrors svc_process); `handle_db`

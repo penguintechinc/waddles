@@ -27,9 +27,18 @@ pub use bundle_host_http::egress::{
 
 impl EgressRuleSource for crate::distribution::BundleCatalog {
     fn resolve(&self, app_id: &str) -> Option<EgressRuleRow> {
-        self.get(app_id).map(|row| {
-            EgressRuleRow::from_legacy_patterns(row.egress, row.egress_rps, row.granted_secret_refs)
-        })
+        // A legacy env-override row wins; otherwise the egress the active-set
+        // consumers published from the approved manifest (the only
+        // production writer) is used.
+        self.get(app_id)
+            .map(|row| {
+                EgressRuleRow::from_legacy_patterns(
+                    row.egress,
+                    row.egress_rps,
+                    row.granted_secret_refs,
+                )
+            })
+            .or_else(|| bundle_host_http::grants::ActiveEgressSnapshot::global().resolve(app_id))
     }
 }
 

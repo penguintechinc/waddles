@@ -25,6 +25,7 @@ use crate::config::CliConfig;
 use crate::connector::host_api_listener::{self, HostApiTls};
 use crate::connector::sender_exec::discord_duties::DiscordDuties;
 use crate::connector::sender_exec::discord_slots::DiscordSlots;
+use crate::connector::sender_exec::app_credentials::PlatformAppCredentials;
 use crate::connector::sender_exec::twitch_slots::TwitchSlots;
 use crate::connector::sender_exec::youtube_slots::YoutubeSlots;
 use crate::connector::sender_exec::{
@@ -288,6 +289,7 @@ pub type ProdSlots = PlatformSlotRouter<
     TwitchSlots<ResolverTwitchCredentials<Resolver>>,
     DiscordSlots<ResolverDiscordCredentials<Resolver>>,
     YoutubeSlots<ResolverYoutubeCredentials<Resolver>>,
+    PlatformAppCredentials,
 >;
 /// The production Discord host duties.
 pub type ProdDuties = DiscordDuties<ResolverDiscordCredentials<Resolver>, HubPlatformUserResolver>;
@@ -398,6 +400,10 @@ pub fn build_with_link(
         ),
         DiscordSlots::new(ResolverDiscordCredentials::new(resolver(cli)?)),
         YoutubeSlots::new(ResolverYoutubeCredentials::new(resolver(cli)?)),
+    )
+    .with_app_credentials(
+        PlatformAppCredentials::from_env()
+            .map_err(|e| anyhow::anyhow!("app credentials unavailable: {e}"))?,
     );
     let duties = DiscordDuties::new(ResolverDiscordCredentials::new(resolver(cli)?), users);
     let exec_cfg = ExecutorConfig::production(cfg.digests.clone())

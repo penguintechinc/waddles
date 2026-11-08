@@ -69,6 +69,7 @@ jobs:
           - bundle_capability_gate
           - bundle_compiler
           - bundle_executor
+          - bundle_host_credentials
           - bundle_host_db
           - bundle_host_http
           - bundle_host_kv

@@ -289,6 +289,13 @@ pub async fn run_tick(
     // -- see `core/svc_action::bundle_loader::run_tick`'s identical doc.
     for row in &active {
         kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
+        // The approved manifest egress feeds the bundle http guard (no other
+        // production writer exists for its catalog).
+        bundle_host_http::grants::ActiveEgressSnapshot::global().publish(
+            &row.app_id,
+            row.egress.clone(),
+            row.egress_rps,
+        );
     }
     // Wholesale-replace the shared `app_version` snapshot from this SAME
     // read, before the load/unload decision below -- `crate::spine`/
@@ -408,6 +415,8 @@ mod tests {
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
             declared_capabilities: Vec::new(),
+            egress: Vec::new(),
+            egress_rps: None,
             tools: Default::default(),
         }
     }

@@ -294,6 +294,13 @@ pub async fn run_tick(
     // BundleCatalog`'s identical shape).
     for row in &active {
         kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
+        // The approved manifest egress feeds the bundle http guard (no other
+        // production writer exists for its catalog).
+        bundle_host_http::grants::ActiveEgressSnapshot::global().publish(
+            &row.app_id,
+            row.egress.clone(),
+            row.egress_rps,
+        );
     }
 
     let plan = diff::plan(loaded, &active);
@@ -417,6 +424,8 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }
         }

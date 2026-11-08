@@ -647,6 +647,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-credentials"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bundle-host-http",
+ "connection_resolver",
+ "redis",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bundle-host-db"
 version = "0.1.0"
 dependencies = [
@@ -931,6 +944,20 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "connection_resolver"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -4228,6 +4255,7 @@ dependencies = [
  "base64 0.22.1",
  "bundle-active-set",
  "bundle-capability-gate",
+ "bundle-host-credentials",
  "bundle-host-db",
  "bundle-host-economy",
  "bundle-host-http",

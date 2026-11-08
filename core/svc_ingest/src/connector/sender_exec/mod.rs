@@ -31,6 +31,7 @@
 //! `role.add`/`role.remove` and the guild scheduled-event ops
 //! (`event.create|update|cancel|delete`) run as host duties.
 
+pub mod app_credentials;
 pub mod discord_duties;
 pub mod discord_slots;
 pub mod policy;
