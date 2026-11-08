@@ -59,6 +59,14 @@ ALLOWLIST: dict[str, str] = {
         "The seeder's secretKeyRef is deliberately NOT optional: a missing "
         "key must fail closed."
     ),
+    "waddlebot-valkey-tls": (
+        "Valkey TLS Secret owned OUT-OF-BAND (ExternalSecret/SealedSecret) on beta/gamma/"
+        "production (values-{beta,gamma,production}.yaml global.valkeyTls.externalSecret=true), "
+        "so the chart renders no Secret of this name. It MUST pre-exist before `helm upgrade` "
+        "(documented prerequisite); the seeder mounts it as a volume, so a missing Secret "
+        "fails the pod closed (ContainerCreating), never silently. Name is "
+        "'<fullname>-valkey-tls' for the CI release name 'waddlebot'."
+    ),
 }
 
 HOOK_ANNOTATION = "helm.sh/hook"

@@ -47,6 +47,10 @@ RUN apt-get update \
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+# tests/ must exist: Cargo.toml declares [[test]] e2e_real_media with an
+# implicit path, and cargo refuses to parse the manifest without it (even for
+# `cargo build`). Tests are not compiled by the release build.
+COPY tests ./tests
 COPY src ./src
 RUN cargo build --release --locked
 

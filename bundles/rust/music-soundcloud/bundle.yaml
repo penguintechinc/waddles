@@ -1,0 +1,352 @@
+schema_version: 2
+app_id: waddles.core.service.music-soundcloud
+name: SoundCloud Music Service Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.service
+module: core
+provider: builtin
+language: rust
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/music-soundcloud
+artifact: component
+execution_model: wasi-component
+is_default: false
+kind: service
+stages:
+  action:
+    entry: "waddle:bundle/tool-provider#call"
+egress:
+- host: api.soundcloud.com
+  methods: ["GET"]
+data:
+  tables: []
+limits:
+  timeout_ms: 5000
+  memory_mb: 64
+  egress_rps: 1
+permissions:
+- id: net.http.fqdn:api.soundcloud.com
+  justification: SoundCloud public API v2 (tracks, playlists, resolve) read-only; the OAuth client-credentials token is a host-injected Authorization secret ref (soundcloud.access_token), never visible to the component
+  params:
+    methods: ["GET"]
+routes_to: []
+exported_tools:
+- name: music.soundcloud.search
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      query:
+        type: string
+        minLength: 1
+        maxLength: 200
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 25
+    required:
+    - query
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      tracks:
+        type: array
+        items:
+          type: object
+          properties:
+            provider:
+              type: string
+            id:
+              type: string
+            title:
+              type: string
+            artist:
+              type: string
+            duration_ms:
+              type: integer
+              minimum: 0
+            thumbnail:
+              type:
+              - string
+              - 'null'
+            explicit:
+              type:
+              - boolean
+              - 'null'
+            source_url:
+              type: string
+          required:
+          - provider
+          - id
+          - title
+          - artist
+          - duration_ms
+          - thumbnail
+          - explicit
+          - source_url
+      cached:
+        type: boolean
+      skipped:
+        type: integer
+        minimum: 0
+      capability:
+        type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
+    required:
+    - tracks
+    - capability
+- name: music.soundcloud.track
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      id:
+        type: string
+        minLength: 1
+        maxLength: 64
+    required:
+    - id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      track:
+        type: object
+        properties:
+          provider:
+            type: string
+          id:
+            type: string
+          title:
+            type: string
+          artist:
+            type: string
+          duration_ms:
+            type: integer
+            minimum: 0
+          thumbnail:
+            type:
+            - string
+            - 'null'
+          explicit:
+            type:
+            - boolean
+            - 'null'
+          source_url:
+            type: string
+        required:
+        - provider
+        - id
+        - title
+        - artist
+        - duration_ms
+        - thumbnail
+        - explicit
+        - source_url
+      cached:
+        type: boolean
+      capability:
+        type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
+    required:
+    - track
+    - capability
+- name: music.soundcloud.playlist.get
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      playlist_id:
+        type: string
+        minLength: 1
+        maxLength: 64
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 50
+      page_token:
+        type: string
+        minLength: 1
+        maxLength: 200
+    required:
+    - playlist_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      tracks:
+        type: array
+        items:
+          type: object
+          properties:
+            provider:
+              type: string
+            id:
+              type: string
+            title:
+              type: string
+            artist:
+              type: string
+            duration_ms:
+              type: integer
+              minimum: 0
+            thumbnail:
+              type:
+              - string
+              - 'null'
+            explicit:
+              type:
+              - boolean
+              - 'null'
+            source_url:
+              type: string
+          required:
+          - provider
+          - id
+          - title
+          - artist
+          - duration_ms
+          - thumbnail
+          - explicit
+          - source_url
+      next_page_token:
+        type:
+        - string
+        - 'null'
+      cached:
+        type: boolean
+      skipped:
+        type: integer
+        minimum: 0
+      capability:
+        type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
+    required:
+    - tracks
+    - next_page_token
+    - capability
+- name: music.soundcloud.resolve
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      url:
+        type: string
+        minLength: 1
+        maxLength: 512
+    required:
+    - url
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      track:
+        type: object
+        properties:
+          provider:
+            type: string
+          id:
+            type: string
+          title:
+            type: string
+          artist:
+            type: string
+          duration_ms:
+            type: integer
+            minimum: 0
+          thumbnail:
+            type:
+            - string
+            - 'null'
+          explicit:
+            type:
+            - boolean
+            - 'null'
+          source_url:
+            type: string
+        required:
+        - provider
+        - id
+        - title
+        - artist
+        - duration_ms
+        - thumbnail
+        - explicit
+        - source_url
+      cached:
+        type: boolean
+      capability:
+        type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
+    required:
+    - track
+    - capability
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null
