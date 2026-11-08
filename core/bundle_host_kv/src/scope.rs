@@ -144,6 +144,15 @@ impl KvScope {
         format!("{}:live", self.app_prefix())
     }
 
+    /// The persisted "sealed-since" marker for this scope: written the first
+    /// time the scope receives a sealed value, after which non-envelope
+    /// (plaintext) values are refused as an integrity failure
+    /// (`crate::seal`). A reserved sub-segment, never under `:data:`, so a
+    /// guest key can neither collide with nor be scanned as it.
+    pub fn sealed_marker_key(&self) -> String {
+        format!("{}:sealed", self.app_prefix())
+    }
+
     /// The pre-live-index `INCR`/`DECR` counter this crate used to enforce
     /// the quota with. Pods still running the old code keep enforcing
     /// against it during a rolling upgrade (or after a rollback), so this

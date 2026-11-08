@@ -34,6 +34,8 @@ pub mod policy;
 pub mod scope;
 pub mod seal;
 #[cfg(test)]
+mod seal_policy_tests;
+#[cfg(test)]
 mod seal_tests;
 
 use std::sync::Arc;
@@ -347,7 +349,10 @@ impl<B: KvBackend> KvHost<B> {
             .await
             .map_err(KvError::Backend)?;
         match (stored, &self.sealing) {
-            (Some(raw), Some(sealing)) => sealing.open_for_read(scope, key, raw).await.map(Some),
+            (Some(raw), Some(sealing)) => sealing
+                .open_for_read(&self.backend, scope, key, raw)
+                .await
+                .map(Some),
             (stored, _) => Ok(stored),
         }
     }
@@ -391,7 +396,11 @@ impl<B: KvBackend> KvHost<B> {
         // Seal before any backend write: a key failure refuses the op here,
         // so there is no code path that stores plaintext as a fallback.
         let stored = match &self.sealing {
-            Some(sealing) => sealing.seal_for_write(scope, key, value).await?,
+            Some(sealing) => {
+                sealing
+                    .seal_for_write(&self.backend, scope, key, value)
+                    .await?
+            }
             None => value.to_vec(),
         };
         match self

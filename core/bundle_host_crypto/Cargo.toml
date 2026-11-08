@@ -14,7 +14,12 @@ path = "src/lib.rs"
 # Exact-version pins only (rules/critical-rules.md Dependency Pinning); every
 # version mirrors the pin core/svc_ingest, core/svc_process and
 # core/bundle_host_kv already use for the same crate.
+[features]
+# gRPC broker transport over core/hub_client (enabled by svc_process/svc_action).
+grpc = ["dep:hub_client"]
+
 [dependencies]
+hub_client = { path = "../hub_client", version = "=0.1.0", optional = true }
 aes-gcm = "=0.10.3"
 hkdf = "=0.12.4"
 hmac = "=0.12.1"

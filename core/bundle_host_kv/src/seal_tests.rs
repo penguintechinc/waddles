@@ -12,8 +12,8 @@ use crate::backend::fake::FakeBackend;
 use crate::{BoxFuture, CapabilitySnapshot, KvError, KvHost, KvScope, Sealing, SealingGate};
 
 /// Test provider: a fixed DEK per tenant id, switchable to "broker down".
-struct Provider {
-    up: Arc<AtomicBool>,
+pub(crate) struct Provider {
+    pub(crate) up: Arc<AtomicBool>,
 }
 
 impl DekProvider for Provider {
@@ -38,7 +38,7 @@ impl DekProvider for Provider {
     }
 }
 
-struct Gate(Arc<AtomicBool>);
+pub(crate) struct Gate(pub(crate) Arc<AtomicBool>);
 
 impl SealingGate for Gate {
     fn seal_writes(&self) -> BoxFuture<'_, bool> {
@@ -71,7 +71,7 @@ fn rig(backend: FakeBackend) -> Rig {
     }
 }
 
-fn scope(tenant: i32, community: i32) -> KvScope {
+pub(crate) fn scope(tenant: i32, community: i32) -> KvScope {
     KvScope::new("slug", Some("name".to_string()), "app.a").with_ids(tenant, community)
 }
 
@@ -162,9 +162,13 @@ async fn sealed_value_does_not_open_for_other_tenant_or_key() {
         .unwrap_or_else(|e| panic!("{e}"))
         .unwrap_or_default();
     assert!(!stored.windows(6).any(|w| w == b"secret"));
-    let cross_tenant = sealing.open_for_read(&s2, "k", stored.clone()).await;
+    let cross_tenant = sealing
+        .open_for_read(&r.host.backend, &s2, "k", stored.clone())
+        .await;
     assert!(cross_tenant.is_err(), "cross-tenant open must fail");
-    let other_key = sealing.open_for_read(&s1, "other-key", stored).await;
+    let other_key = sealing
+        .open_for_read(&r.host.backend, &s1, "other-key", stored)
+        .await;
     assert!(
         matches!(other_key, Err(KvError::Integrity(_))),
         "{other_key:?}"

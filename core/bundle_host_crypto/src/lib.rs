@@ -9,6 +9,8 @@
 
 pub mod envelope;
 pub mod error;
+#[cfg(feature = "grpc")]
+pub mod grpc;
 pub mod metrics;
 pub mod provider;
 pub mod tenant;

@@ -208,6 +208,16 @@ pub trait KvBackend: Send + Sync {
     /// Plain `GET` -- reads never touch the live index.
     fn get<'a>(&'a self, data_key: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>>;
 
+    /// Persists the scope's sealed-since marker (`SET marker_key 1`, no
+    /// TTL, idempotent). The default fails loud: a backend that cannot
+    /// persist the marker must not be used with sealing attached.
+    fn mark_sealed<'a>(&'a self, marker_key: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        let _ = marker_key;
+        Box::pin(async {
+            Err("this kv backend cannot persist the sealed-since marker".to_string())
+        })
+    }
+
     /// Atomically: trims lapsed members from the live index, admits a *new*
     /// key (one not already in the index) only if fewer than `max_keys` live
     /// keys remain, then `SET`s `value` with `ttl_seconds` (`0` = no
@@ -455,6 +465,15 @@ impl KvBackend for redis::aio::MultiplexedConnection {
         let mut conn = self.clone();
         Box::pin(async move {
             AsyncCommands::get::<_, Option<Vec<u8>>>(&mut conn, data_key)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn mark_sealed<'a>(&'a self, marker_key: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            AsyncCommands::set::<_, _, ()>(&mut conn, marker_key, 1u8)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -865,6 +884,11 @@ pub(crate) mod fake {
                 .live_value(data_key)
                 .map(|e| e.value.clone());
             Box::pin(async move { Ok(value) })
+        }
+
+        fn mark_sealed<'a>(&'a self, marker_key: &'a str) -> BoxFuture<'a, Result<(), String>> {
+            self.seed_unindexed(marker_key, b"1", None);
+            Box::pin(async { Ok(()) })
         }
 
         fn set_with_quota<'a>(
