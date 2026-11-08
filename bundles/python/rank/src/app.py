@@ -109,7 +109,7 @@ from collections.abc import Callable
 from math import isqrt
 from typing import Any, NoReturn
 
-from waddle_sdk import community_kv, db, log, relay
+from waddle_sdk import community_kv, db, identity, log, relay, tool
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
@@ -141,6 +141,14 @@ _UNAVAILABLE_MSG = "rank is temporarily unavailable, try again shortly."
 _KNOWN_COMMANDS = frozenset(
     {"rank_self", "rank_other", "leaderboard", "add", "sub", "usage"}
 )
+
+#: The reputation SERVICE bundle that owns scores/tiers; `!rep` only reads through its `rep` tool
+#: (manifest `tool.call:` grant) -- no reputation state or policy lives in this bundle.
+_REP_SERVICE = "waddles.core.service.reputation"
+_REP_HEADS = frozenset({"!rep", "!reputation"})
+_REP_USAGE = "Usage: !rep | !rep @user"
+_REP_REFUSED = "Reputation lookup refused ({code})."
+_REP_TEXT_MAX = 300
 
 
 def _level_for_xp(xp: int) -> int:
@@ -228,6 +236,8 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
 
     stripped = text.strip()
     head = stripped.partition(" ")[0]
+    if head.lower() in _REP_HEADS:
+        return await _transform_rep(event, stripped)
     if head.lower() != "!rank":
         return None
 
@@ -257,6 +267,44 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         event_type=event.event_type,
         actor=event.actor,
         payload=payload,
+        occurred_at=event.occurred_at,
+    )
+
+
+async def _transform_rep(event: PlatformEvent, stripped: str) -> PlatformEvent:
+    """Resolve `!rep [@user]` to the reputation service's `rep` tool in process-stage.
+
+    The subject is the host-verified caller, or exactly one host-issued mention token (never a
+    typed handle). Service refusals reply explicitly; any other tool failure propagates (fail
+    loud, never a fabricated score). Logs carry only the outcome code, never user identifiers.
+    """
+    channel_id = event.payload.get("channel_id")
+    if not channel_id:
+        raise ValueError("rep requires an origin channel")
+    rest = stripped.partition(" ")[2].strip()
+    try:
+        if rest:
+            tokens = identity.mention_tokens(rest)
+            if len(tokens) != 1 or rest != "{user:" + tokens[0] + "}":
+                raise ValueError("rep target must be a single user mention")
+            subject = await identity.resolve_mention(tokens[0])
+        else:
+            subject = await identity.resolve_actor()
+        result = await tool.invoke(_REP_SERVICE, "rep", {"user": subject})
+        reply = str(result["text"])[:_REP_TEXT_MAX]
+        log.info("rank.rep_ok")
+    except ValueError:
+        reply = _REP_USAGE
+    except tool.ToolError as exc:
+        log.warn("rank.rep_tool_failed", code=exc.code)
+        if exc.code not in {"forbidden", "not_granted", "invalid_args"}:
+            raise
+        reply = _REP_REFUSED.format(code=exc.code)
+    return PlatformEvent(
+        platform=event.platform,
+        event_type=event.event_type,
+        actor=event.actor,
+        payload={"command": "rep_reply", "channel_id": channel_id, "reply": reply},
         occurred_at=event.occurred_at,
     )
 
@@ -550,6 +598,12 @@ async def dispatch(
     if not channel_id:
         raise ValueError("rank reply requires a channel_id from the inbound chat.message")
     command = payload.get("command")
+    if command == "rep_reply":
+        reply = payload.get("reply")
+        if not isinstance(reply, str) or not reply:
+            raise ValueError("rep reply missing")
+        await relay.push(envelope.event.platform, {"channel": channel_id, "text": reply})
+        return DispatchResult(transport=envelope.event.platform, detail="rep_reply")
     if command not in _KNOWN_COMMANDS:
         raise ValueError(f"unrecognized rank command: {command!r}")
 
