@@ -4,7 +4,10 @@ A bundle's `author` is either a GitHub profile (user or org) or a plain display
 name. Accepted spellings are normalized to a structured value so the marketplace
 can render a verified profile link instead of untrusted free text:
 
-* GitHub: `github:<handle>`, `@<handle>`, `https://github.com/<handle>[/]`
+* GitHub: `github:<handle>`, `github/<handle>`, `@<handle>`, `https://github.com/<handle>[/]`
+  (all normalize to kind=github; canonical storage is `github:<handle>`, and manifest
+  text such as `github/<handle>` is never rewritten -- only the stored/display form is
+  normalized, handle case preserved as given)
 * Name: letters/digits joined by single ` `, `-`, `_` or `.` (1-64 chars)
 
 Everything else (HTML/markdown, other URLs, emoji, control characters) is rejected
@@ -29,6 +32,7 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
 _MARKUP_RE = re.compile(r"[<>&`*\[\]()\\|{}~#]")
 _GITHUB_URL_PREFIX = "https://github.com/"
 _GITHUB_PREFIX = "github:"
+_GITHUB_SLASH_PREFIX = "github/"
 
 MAX_NAME_LEN = 64
 #: Raw input ceiling: longest accepted spelling (a 64-char name, or the GitHub URL form).
@@ -87,6 +91,8 @@ def _parse(raw: Any) -> tuple[AuthorKind, str | None, str]:
         )
     elif raw.startswith(_GITHUB_PREFIX):
         handle = raw[len(_GITHUB_PREFIX) :]
+    elif raw.startswith(_GITHUB_SLASH_PREFIX):
+        handle = raw[len(_GITHUB_SLASH_PREFIX) :]
     elif raw.startswith("@"):
         handle = raw[1:]
 

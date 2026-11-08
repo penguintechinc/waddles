@@ -2,7 +2,7 @@
 """Backfill the validated `author` (and `collection`) on every first-party bundle manifest.
 
 Every bundle under bundles/{python,rust,csharp,javascript}/* gets `author: github:penguintechinc`
-(csharp/superpenguin-roll gets `author: github:Psychoboy` + `collection: superpenguintv`). A
+(csharp/superpenguin-roll gets `author: github/psychoboy` + `collection: superpenguintv`). A
 manifest change needs a patch version bump, applied in lockstep to bundle.yaml,
 hub-manifest.yaml, pyproject.toml (python) and the bundles/core-bundles.yaml catalog row.
 
@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BUNDLES = ROOT / "bundles"
 DEFAULT_AUTHOR = "github:penguintechinc"
 OVERRIDES: dict[str, tuple[str, str | None]] = {
-    "csharp/superpenguin-roll": ("github:Psychoboy", "superpenguintv"),
+    "csharp/superpenguin-roll": ("github/psychoboy", "superpenguintv"),
 }
 _AUTHOR_RE = re.compile(r"^author:.*\n", re.MULTILINE)
 _VERSION_RE = re.compile(

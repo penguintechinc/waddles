@@ -13,7 +13,7 @@ is_default: false
 # First bundle to carry these fields: a third-party port credited to its
 # original author (permission granted -- see task context), listed under the
 # "alternatives" category rather than as a Waddles-native feature.
-author: github:Psychoboy
+author: github/psychoboy
 collection: superpenguintv
 license: MIT
 category: alternatives

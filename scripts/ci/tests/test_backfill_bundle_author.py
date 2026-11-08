@@ -34,9 +34,9 @@ def test_set_fields_replaces_existing_author_and_bumps_version() -> None:
 
 def test_set_fields_inserts_author_after_provider_and_adds_collection() -> None:
     text = "version: 2.3.4\nprovider: thirdparty\nlanguage: csharp\n"
-    out = _mod.set_fields(text, "github:Psychoboy", "superpenguintv", "2.3.5")
+    out = _mod.set_fields(text, "github/psychoboy", "superpenguintv", "2.3.5")
     assert (
-        "provider: thirdparty\nauthor: github:Psychoboy\ncollection: superpenguintv\n"
+        "provider: thirdparty\nauthor: github/psychoboy\ncollection: superpenguintv\n"
         in out
     )
     assert out.startswith("version: 2.3.5\n")
@@ -56,7 +56,7 @@ def test_every_bundle_has_the_target_author_and_catalog_versions_match() -> None
         rel = f"{hub.parent.parent.name}/{hub.parent.name}"
         psycho = rel == "csharp/superpenguin-roll"
         assert raw["author"] == (
-            "github:Psychoboy" if psycho else "github:penguintechinc"
+            "github/psychoboy" if psycho else "github:penguintechinc"
         ), rel
         examined += 1
         if raw["app_id"] in catalog_versions:
