@@ -42,6 +42,9 @@ from typing import Any, Final
 from waddle_sdk import clock, community_kv, event_dedupe, identity, log, tool
 from waddle_sdk.safe_text import sanitize_user_text
 
+#: The SDK's host-forwarded logger under the name the no-stubs silent-fallback gate recognises.
+logger = log
+
 ALL: Final = "all"
 MOD_COMMANDS: Final = frozenset(
     {"!ban", "!unban", "!timeout", "!untimeout", "!kick", "!purge", "!modlog"}
@@ -361,15 +364,20 @@ async def _resolve(cmd: ModCommand) -> tuple[str, str] | str:
     try:
         actor_uuid = await identity.resolve_actor()
         target_uuid = await identity.resolve_mention(cmd.token)
-    except identity.NotLinkedError:
+    except identity.NotLinkedError as exc:
+        logger.warn("moderation.resolve_refused", error=type(exc).__name__)
         return "I can't act on that: an account involved isn't linked to the community"
-    except identity.NotFoundError:
+    except identity.NotFoundError as exc:
+        logger.warn("moderation.resolve_refused", error=type(exc).__name__)
         return "user not found"
-    except identity.AmbiguousError:
+    except identity.AmbiguousError as exc:
+        logger.warn("moderation.resolve_refused", error=type(exc).__name__)
         return "that name matches more than one user -- @mention them to pick one"
-    except identity.NotAMemberError:
+    except identity.NotAMemberError as exc:
+        logger.warn("moderation.resolve_refused", error=type(exc).__name__)
         return "that user isn't a member of this community"
-    except identity.DeniedError:
+    except identity.DeniedError as exc:
+        logger.warn("moderation.resolve_refused", error=type(exc).__name__)
         return "moderation is not permitted for this community"
     if actor_uuid == target_uuid:
         return "you can't moderate yourself"
@@ -496,7 +504,8 @@ async def handle(text: str, payload: dict[str, Any], platform: str, community: s
             return await modlog(parse_modlog(text), community)
         return await run(parse(text), payload, platform, community)
     except ModUsageError as exc:
+        logger.info("moderation.usage_error", error=type(exc).__name__, community_id=community)
         return sanitize_user_text(str(exc))
     except (event_dedupe.EventIdError, UnicodeError) as exc:
-        log.error("moderation.event_id", error=type(exc).__name__, community_id=community)
+        logger.error("moderation.event_id", error=type(exc).__name__, community_id=community)
         return "that command can't be processed right now"
