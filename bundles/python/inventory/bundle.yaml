@@ -7,7 +7,7 @@ name: Inventory Bundle (Python)
 # documented grammar extensions.
 # 1.0.3: integrity: lossless give (refund on failed credit), per-user directory lock (no lost updates), item-name/count/quantity bounds, normalized caller identity, strict boolean mod gate (fix/bundle-defects-wave).
 # 1.0.4: activation-gated only -- removed the in-bundle waddles.command-inventory feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.5
+version: 1.0.6
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -15,7 +15,7 @@ provider: builtin
 # broadcaster/mod can grant, and viewers can trade between each other" is common across Twitch
 # economy bots, including superpenguintv (Psychoboy)'s PenguinTwitchBot -- NOT a literal port, no
 # original source or text reused. See src/app.py's module docstring for detail.
-author: "superpenguintv (Psychoboy)"
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/inventory
 notice: |
@@ -83,6 +83,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.5"
-  min_version: "1.0.5"
+  tested_with: "1.0.6"
+  min_version: "1.0.6"
   max_version: null
