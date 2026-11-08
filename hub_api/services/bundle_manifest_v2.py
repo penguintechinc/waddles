@@ -189,6 +189,57 @@ class RequestedTool:
     access: str
 
 
+#: Host bounds for `schedule` -- mirror `core/svc_ingest/src/connector/reconcile_hook.rs`
+#: (`MIN_RECONCILE_INTERVAL`, `MAX_RECONCILE_INTERVAL`, `MAX_JITTER_FRACTION`).
+SCHEDULE_MIN_INTERVAL_S = 30
+SCHEDULE_MAX_INTERVAL_S = 24 * 60 * 60
+SCHEDULE_MAX_JITTER = 0.5
+SCHEDULE_DEFAULT_JITTER = 0.2
+
+
+@dataclass(slots=True, frozen=True)
+class ScheduleDeclaration:
+    """A validated manifest `schedule:` block: the host delivers `bundle.reconcile` this often."""
+
+    interval_s: int
+    jitter: float = SCHEDULE_DEFAULT_JITTER
+
+
+def parse_schedule(raw: Any) -> ScheduleDeclaration | None:
+    """Validate the optional `schedule: {interval_s, jitter}` block; absent (`None`) is `None`.
+
+    `interval_s` is an integer within 30s..=24h (a bool is not an integer); `jitter` is an
+    optional finite fraction within 0.0..=0.5 (default 0.2). Unknown keys are refused so a typo
+    cannot silently disable the schedule. Raises `ManifestV2Error` (`invalid_schedule`).
+    """
+    if raw is None:
+        return None
+    _require(isinstance(raw, dict), "invalid_schedule", "schedule must be a mapping")
+    unknown = sorted(set(raw) - {"interval_s", "jitter"})
+    names = ", ".join(map(str, unknown))
+    _require(not unknown, "invalid_schedule", f"unknown schedule keys: {names}")
+    interval = raw.get("interval_s")
+    _require(
+        isinstance(interval, int) and not isinstance(interval, bool),
+        "invalid_schedule",
+        "schedule.interval_s must be an integer",
+    )
+    _require(
+        SCHEDULE_MIN_INTERVAL_S <= interval <= SCHEDULE_MAX_INTERVAL_S,
+        "invalid_schedule",
+        f"schedule.interval_s must be within {SCHEDULE_MIN_INTERVAL_S}..{SCHEDULE_MAX_INTERVAL_S}",
+    )
+    jitter = raw.get("jitter", SCHEDULE_DEFAULT_JITTER)
+    _require(
+        isinstance(jitter, int | float)
+        and not isinstance(jitter, bool)
+        and 0.0 <= float(jitter) <= SCHEDULE_MAX_JITTER,
+        "invalid_schedule",
+        f"schedule.jitter must be a fraction within 0..{SCHEDULE_MAX_JITTER}",
+    )
+    return ScheduleDeclaration(interval_s=interval, jitter=float(jitter))
+
+
 @dataclass(slots=True, frozen=True)
 class BundleManifestV2:
     """A validated `bundle.yaml` v2 manifest -- the shape every downstream reader consumes."""
@@ -259,6 +310,9 @@ class BundleManifestV2:
     # (op, owner) is ALSO folded into `permission_declarations` as a dangerous
     # `storage.<op>:<owner>` id. Defaulted last for hand-built fixtures.
     storage_access: tuple[StorageAccessRequest, ...] = ()
+    # Periodic host-delivered `hub`/`bundle.reconcile` event (APP and SERVICE bundles); `None`
+    # = the host never schedules one. Defaulted last for hand-built fixtures.
+    schedule: ScheduleDeclaration | None = None
 
     def supports_platform(self, platform: str) -> bool:
         """Return True when this bundle may run on `platform` (absent field = every platform)."""
@@ -1133,4 +1187,5 @@ def parse_bundle_manifest_v2(
         trusted_source=trusted_source,
         table_access=table_access,
         storage_access=storage_access,
+        schedule=parse_schedule(raw.get("schedule")),
     )

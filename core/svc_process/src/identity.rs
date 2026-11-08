@@ -281,6 +281,9 @@ pub struct InvocationIdentity {
     /// The actor's community role, cached after the first successful
     /// [`MemberDirectory::role_for`] (successes only). Never held across an `.await`.
     actor_role: Mutex<Option<String>>,
+    /// A host-verified actor handed in by a signed hub-api bundle-admin request (never an
+    /// event): resolves without a directory lookup. `None` for every event-driven invocation.
+    preverified: Option<bundle_tool_call::ActorContext>,
 }
 
 impl fmt::Debug for InvocationIdentity {
@@ -344,6 +347,7 @@ impl InvocationIdentity {
             event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
+            preverified: None,
         }
     }
 
@@ -398,6 +402,23 @@ impl InvocationIdentity {
             event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
+            preverified: None,
+        }
+    }
+
+    /// An invocation with no inbound event, acting for an actor the host already verified (the
+    /// hub-api gateway's signed `actor_scope`, MAC-checked by `crate::bundle_admin`). Scope
+    /// checks resolve to `actor` without a directory lookup; nothing here is guest input.
+    pub fn for_verified_admin(actor: bundle_tool_call::ActorContext) -> Self {
+        Self {
+            platform: "hub".to_string(),
+            actor_platform_user_id: None,
+            mentions: HashMap::new(),
+            resolved: Mutex::new(HashMap::new()),
+            event_id: None,
+            mutation_seq: Mutex::new(HashMap::new()),
+            actor_role: Mutex::new(None),
+            preverified: Some(actor),
         }
     }
 
@@ -421,6 +442,7 @@ impl InvocationIdentity {
             event_id: mutation_event_id,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
+            preverified: self.preverified.clone(),
         }
     }
 
@@ -598,6 +620,9 @@ pub async fn resolve_actor_scopes(
     inv: &InvocationIdentity,
     scope: IdentityScope,
 ) -> Result<bundle_tool_call::ActorContext, IdentityError> {
+    if let Some(actor) = &inv.preverified {
+        return Ok(actor.clone());
+    }
     let user = resolve_actor(wiring, inv, scope).await?;
     let role = match inv.cached_role() {
         Some(role) => role,

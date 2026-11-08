@@ -378,6 +378,13 @@ where
         // so each independently-spawned receiver task gets its own handle
         // onto the same underlying TTL cache / HTTP client.
         let dek_provider = build_dek_provider(&config, reqwest::Client::new());
+        start_bundle_schedules(
+            &config,
+            &state.metrics,
+            ingest_metrics.clone(),
+            dek_provider.clone(),
+        )
+        .await?;
 
         // Connector service bundle runtime (spec 2026-11-05 PR-E): only when an
         // `CONNECTOR_<P>_ENABLED` baseline is ON. It owns the single executor
@@ -583,6 +590,105 @@ fn try_install_scope_resolver(
     tracing::info!(
         flag = scope_resolver::INGEST_DYNAMIC_CONNECTIONS_FLAG,
         "flag is ON; publishing schema-v3 envelopes with resolver-supplied numeric scope"
+    );
+    Ok(())
+}
+
+/// Env baseline gating the APP/SERVICE bundle reconcile scheduler (default OFF until validated).
+const BUNDLE_SCHEDULES_ENV: &str = "BUNDLE_SCHEDULES_ENABLED";
+
+/// Starts the APP/SERVICE bundle reconcile scheduler
+/// ([`connector::bundle_schedule`]) when `BUNDLE_SCHEDULES_ENABLED=true`. OFF is a logged no-op;
+/// ON with any missing prerequisite (machine-JWT bootstrap, binding keyring, spine, Valkey) is an
+/// `Err` that fails the process -- never a silent downgrade to "no schedules".
+async fn start_bundle_schedules(
+    config: &config::Config,
+    registry: &prometheus::Registry,
+    metrics: Arc<telemetry::IngestMetrics>,
+    dek_provider: identity_crypto::ConfiguredDekProvider<
+        identity_crypto::UnimplementedMachineJwtProvider,
+    >,
+) -> anyhow::Result<()> {
+    use connector::bundle_schedule::{
+        run_manager, HubScheduleSource, ScheduleRunner, SpineReconcileSink, ValkeyScheduleLease,
+        SCHEDULES_JWT_SCOPE,
+    };
+    if std::env::var(BUNDLE_SCHEDULES_ENV).as_deref() != Ok("true") {
+        tracing::info!(
+            env = BUNDLE_SCHEDULES_ENV,
+            "flag is OFF; bundle reconcile schedules not started"
+        );
+        return Ok(());
+    }
+    let cli = &config.cli;
+    if cli.service_jwt_token_endpoint.is_empty() {
+        anyhow::bail!("{BUNDLE_SCHEDULES_ENV} is ON but SERVICE_JWT_TOKEN_ENDPOINT is unset");
+    }
+    scope_resolver::check_transport(&cli.hub_api_url, &cli.environment)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let keyring = resolve_binding_keyring(config, "bundle schedules").ok_or_else(|| {
+        anyhow::anyhow!(
+            "bundle schedules need a valid ENVELOPE_BINDING_KEYS + ENVELOPE_BINDING_ACTIVE_KID"
+        )
+    })?;
+    let spine_cfg = penguin_spine::SpineConfig::from_env()
+        .map_err(|e| anyhow::anyhow!("spine config unavailable for bundle schedules: {e}"))?;
+    let redis_client = outbound::build_redis_client(&spine_cfg).map_err(|e| {
+        anyhow::anyhow!(
+            "valkey client build failed for bundle schedules ({:?})",
+            e.kind()
+        )
+    })?;
+    let spine_metrics: Arc<dyn penguin_spine::SpineMetrics> = metrics.clone();
+    let appender = connect_spine_with_retry(
+        spine_cfg,
+        Arc::clone(&spine_metrics),
+        metrics.as_ref(),
+        "bundle_schedules",
+        &ReceiverFlag::default(),
+        Duration::from_secs(cli.spine_connect_backoff_max_secs),
+        Instant::now() + Duration::from_secs(cli.spine_connect_grace_secs),
+    )
+    .await
+    .ok_or_else(|| {
+        anyhow::anyhow!("bundle schedules: spine did not connect within the grace period")
+    })?;
+    let lease_conn = redis_client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|e| anyhow::anyhow!("bundle schedules: valkey connect failed ({:?})", e.kind()))?;
+    let jwt = Arc::new(service_auth::MachineJwtClient::new(
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        SCHEDULES_JWT_SCOPE,
+    ));
+    let source = HubScheduleSource::new(&cli.hub_api_url, jwt)?;
+    if let Err(e) = connector::reconcile_hook::register_metrics(registry) {
+        tracing::warn!(error = %e, "reconcile metrics already registered; reusing");
+    }
+    let sink = SpineReconcileSink {
+        appender: Arc::new(appender),
+        metrics: spine_metrics,
+        keyring: Arc::new(keyring),
+        active_kid: cli.binding_active_kid.clone(),
+        dek: Arc::new(dek_provider),
+        identity_metrics: metrics.identity_encryption_total.clone(),
+    };
+    let runner = Arc::new(ScheduleRunner::new(
+        ValkeyScheduleLease::new(lease_conn),
+        sink,
+    ));
+    tokio::spawn(run_manager(
+        runner,
+        source,
+        Duration::from_secs(60),
+        async {
+            let _ = shutdown_receiver().await;
+        },
+    ));
+    tracing::info!(
+        env = BUNDLE_SCHEDULES_ENV,
+        "bundle reconcile schedules started"
     );
     Ok(())
 }

@@ -6,6 +6,10 @@
 //! declared interval plus a 0-20% jitter, **single-flight per `(platform, community)`** (an
 //! overrunning pass is skipped, never stacked), and emits a tracing span plus Prometheus
 //! counter/histogram for every pass. The scheduler knows nothing about any platform.
+//!
+//! APP and SERVICE bundles (no connector transport) use the same [`ReconcileSpec`] and the same
+//! metric series through `super::bundle_schedule`, which delivers a `hub`/`bundle.reconcile`
+//! event instead of calling an export.
 
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -14,7 +18,9 @@ use std::time::{Duration, Instant};
 use tracing::Instrument;
 
 /// Shortest interval a manifest may declare.
-pub const MIN_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
+pub const MIN_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+/// Largest jitter fraction a manifest may declare.
+pub const MAX_JITTER_FRACTION: f64 = 0.5;
 /// Longest interval a manifest may declare.
 pub const MAX_RECONCILE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -22,12 +28,19 @@ pub const MAX_RECONCILE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReconcileSpec {
     interval: Duration,
+    /// Jitter as thousandths of the interval (`200` = up to +20%).
+    jitter_permille: u16,
 }
 
 /// The declared interval is outside [`MIN_RECONCILE_INTERVAL`]..=[`MAX_RECONCILE_INTERVAL`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("reconcile interval must be within 60s..=24h")]
+#[error("reconcile interval must be within 30s..=24h")]
 pub struct IntervalOutOfRange;
+
+/// The declared jitter is not a finite fraction within `0.0..=0.5`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("reconcile jitter must be a fraction within 0.0..=0.5")]
+pub struct JitterOutOfRange;
 
 impl ReconcileSpec {
     /// A validated cadence.
@@ -36,10 +49,42 @@ impl ReconcileSpec {
     /// [`IntervalOutOfRange`] when `interval` is outside the host bounds.
     pub fn new(interval: Duration) -> Result<Self, IntervalOutOfRange> {
         if (MIN_RECONCILE_INTERVAL..=MAX_RECONCILE_INTERVAL).contains(&interval) {
-            Ok(Self { interval })
+            Ok(Self {
+                interval,
+                jitter_permille: 200,
+            })
         } else {
             Err(IntervalOutOfRange)
         }
+    }
+
+    /// Replaces the default 20% jitter with `fraction` (manifest `schedule.jitter`).
+    ///
+    /// # Errors
+    /// [`JitterOutOfRange`] when `fraction` is non-finite or outside `0.0..=0.5`.
+    pub fn with_jitter(mut self, fraction: f64) -> Result<Self, JitterOutOfRange> {
+        if !fraction.is_finite() || !(0.0..=MAX_JITTER_FRACTION).contains(&fraction) {
+            return Err(JitterOutOfRange);
+        }
+        // Bounded to 0..=500 by the check above, so the cast cannot truncate.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            self.jitter_permille = (fraction * 1000.0).round() as u16;
+        }
+        Ok(self)
+    }
+
+    /// The delay before the next pass: the interval plus `unit` (`0.0..=1.0`, clamped) of the
+    /// declared jitter. Callers pass a fresh random `unit`, so replicas spread out.
+    #[must_use]
+    pub fn next_delay(&self, unit: f64) -> Duration {
+        let unit = if unit.is_finite() {
+            unit.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let frac = f64::from(self.jitter_permille) / 1000.0 * unit;
+        self.interval.saturating_add(self.interval.mul_f64(frac))
     }
 
     /// The un-jittered interval.
@@ -121,6 +166,16 @@ pub fn register_metrics(registry: &prometheus::Registry) -> Result<(), prometheu
     registry.register(Box::new(RECONCILE_SECONDS.clone()))
 }
 
+/// Records one pass on the shared series (used by the APP/SERVICE bundle scheduler).
+pub(super) fn record_pass(label: &'static str, outcome: &'static str, took: Option<Duration>) {
+    RECONCILE_TOTAL.with_label_values(&[label, outcome]).inc();
+    if let Some(d) = took {
+        RECONCILE_SECONDS
+            .with_label_values(&[label])
+            .observe(d.as_secs_f64());
+    }
+}
+
 /// Count of one label set (test/observability helper).
 #[must_use]
 pub fn reconcile_count(platform: &str, outcome: &str) -> u64 {
@@ -132,6 +187,7 @@ pub fn reconcile_count(platform: &str, outcome: &str) -> u64 {
 /// Bounded platform label (a connector slug outside the known set is `other`).
 fn platform_label(p: &str) -> &'static str {
     match p {
+        "bundle" => "bundle",
         "twitch" => "twitch",
         "discord" => "discord",
         "youtube" => "youtube",
@@ -258,7 +314,8 @@ mod tests {
 
     #[test]
     fn spec_bounds_and_jitter_are_enforced() {
-        assert!(ReconcileSpec::new(Duration::from_secs(59)).is_err());
+        assert!(ReconcileSpec::new(Duration::from_secs(29)).is_err());
+        assert!(ReconcileSpec::new(Duration::from_secs(30)).is_ok());
         assert!(ReconcileSpec::new(Duration::from_secs(24 * 3600 + 1)).is_err());
         let s = ReconcileSpec::new(Duration::from_secs(600)).unwrap();
         assert_eq!(s.interval(), Duration::from_secs(600));
@@ -268,6 +325,24 @@ mod tests {
         assert_eq!(s.jittered(5.0), Duration::from_secs(720));
         assert_eq!(s.jittered(-1.0), Duration::from_secs(600));
         assert_eq!(s.jittered(f64::NAN), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn jitter_is_bounded_and_next_delay_spreads() {
+        let s = ReconcileSpec::new(Duration::from_secs(100)).unwrap();
+        assert!(s.with_jitter(0.51).is_err());
+        assert!(s.with_jitter(-0.1).is_err());
+        assert!(s.with_jitter(f64::NAN).is_err());
+        let s = s.with_jitter(0.5).unwrap();
+        assert_eq!(s.next_delay(0.0), Duration::from_secs(100));
+        assert_eq!(s.next_delay(1.0), Duration::from_secs(150));
+        assert_eq!(s.next_delay(9.0), Duration::from_secs(150));
+        assert_eq!(s.next_delay(f64::NAN), Duration::from_secs(100));
+        let none = ReconcileSpec::new(Duration::from_secs(100))
+            .unwrap()
+            .with_jitter(0.0)
+            .unwrap();
+        assert_eq!(none.next_delay(1.0), Duration::from_secs(100));
     }
 
     #[tokio::test]

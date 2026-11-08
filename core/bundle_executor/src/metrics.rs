@@ -552,6 +552,19 @@ pub fn executor_metrics() -> Arc<ExecutorMetrics> {
     }))
 }
 
+/// The meter bundle-authored metrics (`host::stage_next_metrics`) record into: the same global
+/// provider as [`executor_metrics`], so one OTLP exporter carries both.
+pub fn bundle_meter() -> Meter {
+    #[cfg(test)]
+    {
+        test_support::shared().meter()
+    }
+    #[cfg(not(test))]
+    {
+        opentelemetry::global::meter(SCOPE)
+    }
+}
+
 /// In-memory OTel harness for tests: a real `SdkMeterProvider` whose exports
 /// are captured, so assertions run against the data a collector would
 /// actually receive, not against a mock.

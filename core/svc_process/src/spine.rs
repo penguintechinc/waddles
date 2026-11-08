@@ -975,6 +975,85 @@ fn verified_numeric_scope(
     Ok(Some((t, c)))
 }
 
+/// Builds one invocation's capability set from the stage's process-wide wirings. Shared by the
+/// event path ([`handle_delivered_inner`]) and the hub-api bundle-admin path
+/// (`crate::bundle_admin`), so both authorize through exactly the same gate and wiring.
+/// `invocation` carries the host-derived identity facts (from the raw event, or a verified admin
+/// actor); it is attached only when identity wiring exists.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_stage_capabilities<S: SpineOps>(
+    deps: &ProcessDeps<S>,
+    tenant: String,
+    community: Option<String>,
+    app_version: i64,
+    verified_scope: Option<(i32, i32)>,
+    trace: Option<TraceContext>,
+    invocation: Option<Arc<crate::identity::InvocationIdentity>>,
+) -> StageCapabilities<redis::aio::MultiplexedConnection> {
+    let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+        tenant,
+        community,
+        deps.app_id.clone(),
+        deps.tenant_id,
+        deps.community_id,
+        app_version,
+        Arc::clone(&deps.egress),
+        Arc::clone(&deps.gate),
+    );
+    let caps = caps.with_verified_scope(verified_scope);
+    // `tool.invoke`: a top-level invocation's chain is just this app, and
+    // every nested call is bounded by this invoke's own executor budget.
+    let caps = caps.with_tool(crate::capabilities::ToolContext {
+        connections: Arc::clone(&deps.connections),
+        snapshot: deps.app_version_snapshot.clone(),
+        chain: vec![deps.app_id.clone()],
+        deadline: Some(std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms)),
+        trace: trace.clone(),
+        read_only: false,
+    });
+    let caps = match &deps.kv_conn {
+        Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
+        None => caps,
+    };
+    let caps = match &deps.db_wiring {
+        Some(db) => caps.with_db(db.clone()),
+        None => caps,
+    };
+    let caps = match &deps.reputation_wiring {
+        Some(rep) => caps.with_reputation(rep.clone()),
+        None => caps,
+    };
+    let caps = match &deps.economy_wiring {
+        Some(eco) => caps.with_economy(eco.clone()),
+        None => caps,
+    };
+    let caps = match &deps.platform_table_wiring {
+        Some(pt) => caps.with_platform_table(pt.clone()),
+        None => caps,
+    };
+    // `ai`: every model call is clamped to what remains of THIS invoke's
+    // executor deadline, so the deadline is fixed here, at construction.
+    let caps = match &deps.ai_wiring {
+        Some(ai) => caps.with_ai(
+            ai.clone(),
+            std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
+        ),
+        None => caps,
+    };
+    let caps = match &deps.media_wiring {
+        Some(media) => caps.with_media(
+            media.clone(),
+            std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
+        ),
+        None => caps,
+    };
+    // `identity`: the invocation's host-derived identity facts (see the callers).
+    match (&deps.identity_wiring, invocation) {
+        (Some(identity), Some(invocation)) => caps.with_identity(identity.clone(), invocation),
+        _ => caps,
+    }
+}
+
 async fn handle_delivered<S: SpineOps>(
     d: &Delivered,
     deps: &ProcessDeps<S>,
@@ -1324,86 +1403,29 @@ async fn handle_delivered_inner<S: SpineOps>(
         traceparent: t.traceparent.clone(),
         tracestate: t.tracestate.clone(),
     });
-    let capabilities: Arc<dyn CapabilityHandler> = {
-        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
-            d.env.tenant.clone(),
-            d.env.community.clone(),
-            deps.app_id.clone(),
-            deps.tenant_id,
-            deps.community_id,
-            app_version,
-            Arc::clone(&deps.egress),
-            Arc::clone(&deps.gate),
-        );
-        let caps = caps.with_verified_scope(verified_scope);
-        // `tool.invoke`: a top-level invocation's chain is just this app, and
-        // every nested call is bounded by this invoke's own executor budget.
-        let caps = caps.with_tool(crate::capabilities::ToolContext {
-            connections: Arc::clone(&deps.connections),
-            snapshot: deps.app_version_snapshot.clone(),
-            chain: vec![deps.app_id.clone()],
-            deadline: Some(std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms)),
-            trace: trace.clone(),
-            read_only: false,
-        });
-        let caps = match &deps.kv_conn {
-            Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
-            None => caps,
-        };
-        let caps = match &deps.db_wiring {
-            Some(db) => caps.with_db(db.clone()),
-            None => caps,
-        };
-        let caps = match &deps.reputation_wiring {
-            Some(rep) => caps.with_reputation(rep.clone()),
-            None => caps,
-        };
-        let caps = match &deps.economy_wiring {
-            Some(eco) => caps.with_economy(eco.clone()),
-            None => caps,
-        };
-        let caps = match &deps.platform_table_wiring {
-            Some(pt) => caps.with_platform_table(pt.clone()),
-            None => caps,
-        };
-        // `ai`: every model call is clamped to what remains of THIS invoke's
-        // executor deadline, so the deadline is fixed here, at construction.
-        let caps = match &deps.ai_wiring {
-            Some(ai) => caps.with_ai(
-                ai.clone(),
-                std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
-            ),
-            None => caps,
-        };
-        let caps = match &deps.media_wiring {
-            Some(media) => caps.with_media(
-                media.clone(),
-                std::time::Instant::now() + Duration::from_millis(deps.call_timeout_ms),
-            ),
-            None => caps,
-        };
-        // `identity`: the invocation's host-derived identity facts come from
-        // the RAW event (never the tokenized copy a bundle sees) plus the
-        // mention bindings the tokenization pass produced.
-        let caps = match &deps.identity_wiring {
-            Some(identity) => {
-                let invocation = match mention_bindings {
-                    Some(bindings) => {
-                        crate::identity::InvocationIdentity::from_event(&d.env.event, bindings)
-                    }
-                    None => {
-                        crate::identity::InvocationIdentity::for_untokenized_event(&d.env.event)
-                    }
-                }
-                // The hop-verified envelope id: identical across redeliveries
-                // of this event, the anchor of the economy's idempotency keys.
-                .with_event_id(d.env.event_id.clone());
-                caps.with_identity(identity.clone(), Arc::new(invocation))
+    // The invocation's host-derived identity facts come from the RAW event (never the tokenized
+    // copy a bundle sees) plus the mention bindings the tokenization pass produced.
+    let invocation = deps.identity_wiring.as_ref().map(|_| {
+        let inv = match mention_bindings {
+            Some(bindings) => {
+                crate::identity::InvocationIdentity::from_event(&d.env.event, bindings)
             }
-            None => caps,
-        };
-        Arc::new(caps)
-    };
+            None => crate::identity::InvocationIdentity::for_untokenized_event(&d.env.event),
+        }
+        // The hop-verified envelope id: identical across redeliveries of this event, the anchor
+        // of the economy's idempotency keys.
+        .with_event_id(d.env.event_id.clone());
+        Arc::new(inv)
+    });
+    let capabilities: Arc<dyn CapabilityHandler> = Arc::new(build_stage_capabilities(
+        deps,
+        d.env.tenant.clone(),
+        d.env.community.clone(),
+        app_version,
+        verified_scope,
+        trace.clone(),
+        invocation,
+    ));
 
     let outcome = invoke_transform(
         &connection,

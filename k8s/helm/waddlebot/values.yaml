@@ -1032,6 +1032,12 @@ eventSyncRequest:
   existingSecret: ""
   activeKid: "r1"
 
+# Bundle-admin request integrity key (hub-api signs, svc-process verifies); a DEDICATED ring, see
+# templates/bundle-admin-request-secret.yaml. existingSecret key: BUNDLE_ADMIN_REQUEST_KEYS.
+bundleAdminRequest:
+  existingSecret: ""
+  activeKid: "b1"
+
 pipeline:
   pythonBaseImage: "python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb"
   nodeBaseImage: "node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"

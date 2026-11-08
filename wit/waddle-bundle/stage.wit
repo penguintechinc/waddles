@@ -935,6 +935,34 @@ interface log {
   write: func(lvl: level, message: string, fields-json: string);
 }
 
+/// Real metrics for bundles (counter / histogram / gauge), mapped host-side onto OTel
+/// instruments named `waddles_bundle_<name>`. Capability: always granted; the HOST enforces the
+/// bounds so a bundle can never blow up cardinality or spoof identity:
+/// * `name` matches `^[a-z][a-z0-9_]{0,47}$`; at most 32 distinct names per bundle, and a name is
+///   bound to ONE instrument kind;
+/// * at most 4 labels per call; keys `^[a-z][a-z0-9_]{0,31}$` (never `app_id`, which the host
+///   always stamps itself); values `^[A-Za-z0-9_.-]{1,32}$` -- no free text -- and at most 16
+///   distinct values per (name, key): further values are folded into `other`;
+/// * `counter-add` delta <= 1_000_000; `histogram-record` finite and >= 0; `gauge-set` finite.
+/// Labels carry ids/enums/outcomes only -- never user-supplied text or PII.
+interface metrics {
+  variant error {
+    /// The metric name is malformed, or already bound to another instrument kind.
+    invalid-name,
+    /// A label key/value is malformed, reserved, or there are too many labels.
+    invalid-label,
+    /// The bundle already uses its maximum number of distinct metric names.
+    limit-exceeded,
+    /// The value is non-finite, negative where it must not be, or over the delta cap.
+    invalid-value,
+  }
+  record label { key: string, value: string }
+
+  counter-add: func(name: string, delta: u64, labels: list<label>) -> result<_, error>;
+  histogram-record: func(name: string, value: f64, labels: list<label>) -> result<_, error>;
+  gauge-set: func(name: string, value: f64, labels: list<label>) -> result<_, error>;
+}
+
 /// Capability: always granted.
 interface clock {
   /// Milliseconds since the Unix epoch, as the stage sees it.
@@ -1022,6 +1050,7 @@ world stage-next {
   import %flags;
   import log;
   import clock;
+  import metrics;
   import overlay;
   import reputation;
   import economy;
@@ -1131,6 +1160,7 @@ world stage-v2 {
   import %flags;
   import log;
   import clock;
+  import metrics;
   import overlay;
   import reputation;
   import economy;

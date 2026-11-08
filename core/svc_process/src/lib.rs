@@ -40,6 +40,7 @@
 pub mod active_digests;
 pub mod ai;
 pub mod builtins;
+pub mod bundle_admin;
 pub mod bundle_loader;
 pub mod capabilities;
 pub mod changelog_consumer;
@@ -2118,10 +2119,12 @@ fn try_start_changelog_consumer(
                             None
                         }
                     };
-                    Some(Arc::new(source_supervisor::SpineConsumerSupervisor {
-                        deps: Arc::new(deps),
-                    })
-                        as Arc<dyn source_supervisor::ConsumerSupervisor>)
+                    let deps = Arc::new(deps);
+                    start_bundle_admin_consumer(&deps).await;
+                    Some(
+                        Arc::new(source_supervisor::SpineConsumerSupervisor { deps })
+                            as Arc<dyn source_supervisor::ConsumerSupervisor>,
+                    )
                 }
                 None => None,
             };
@@ -2145,6 +2148,62 @@ fn try_start_changelog_consumer(
         )
         .await;
     });
+}
+
+/// Starts the hub-api bundle-admin consumer (`bundle_admin`) when `BUNDLE_ADMIN_REQUEST_KEYS` is
+/// configured. Unset: logged at WARN (hub-api's admin calls will time out loudly, nothing falls
+/// back). Set but invalid, or Valkey/spine unreachable: logged at ERROR and not started.
+async fn start_bundle_admin_consumer(deps: &Arc<source_supervisor::SupervisorDeps>) {
+    let Ok(raw) = std::env::var("BUNDLE_ADMIN_REQUEST_KEYS") else {
+        tracing::warn!(
+            "BUNDLE_ADMIN_REQUEST_KEYS unset; hub-api bundle-admin requests are not consumed"
+        );
+        return;
+    };
+    let ring = match bundle_admin::KeyRing::parse(&raw) {
+        Ok(r) => Arc::new(r),
+        Err(err) => {
+            tracing::error!(error = %err, "bundle-admin consumer not started");
+            return;
+        }
+    };
+    let Some(client) = build_redis_client(&deps.spine_cfg) else {
+        tracing::error!("bundle-admin consumer: valkey client could not be built; not started");
+        return;
+    };
+    let spine = match penguin_spine::SpineClient::connect(
+        deps.spine_cfg.clone(),
+        deps.metrics.clone(),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::error!(error = %err, "bundle-admin consumer: spine connect failed; not started");
+            return;
+        }
+    };
+    let conn = match client.get_multiplexed_async_connection().await {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!(code = ?err.kind(), "bundle-admin consumer: valkey connect failed; not started");
+            return;
+        }
+    };
+    let backend = Arc::new(bundle_admin::ValkeyBackend::new(conn));
+    let executor = Arc::new(bundle_admin::StageAdminExecutor::new(
+        Arc::clone(deps),
+        spine,
+    ));
+    tracing::info!(keys = ring.len(), "bundle-admin consumer started");
+    tokio::spawn(bundle_admin::run_consumer(
+        client,
+        ring,
+        backend,
+        executor,
+        16,
+        shutdown_signal(),
+    ));
 }
 
 /// Everything the source-binding supervisor needs -- built eagerly, with no
