@@ -18,6 +18,8 @@ use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
 
 use crate::jwt_hardening::{JwtMetrics, METRIC_VERIFICATIONS};
 
+pub use crate::mock_hub::{ed25519_jwk, JwksReply, MintCall, MintReply, MockHub, MockHubBuilder};
+
 /// One exported data point: counter value, or histogram observation count.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Point {
