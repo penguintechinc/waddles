@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-mock"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!mock <text>` -> mOcKs the text in aLtErNaTiNg case (letters alternate lower/UPPER, starting lower) (capped, never logged). Stateless: relay only, no kv/db."
 requires-python = ">=3.13"
 dependencies = []

@@ -76,8 +76,8 @@ use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_platform_table::{
     Change as PlatformTableChange, PlatformTableError, PlatformTableScope, PlatformTableStore,
 };
-use bundle_host_storage::{GrantSet as StorageGrantSet, StorageError, StorageHost, StorageScope};
 use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
+use bundle_host_storage::{GrantSet as StorageGrantSet, StorageError, StorageHost, StorageScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
 use crate::ai::{self, AiWiring, BackendError, GenerateRequest, PromptRefusal};
@@ -2118,7 +2118,10 @@ impl<K: KvBackend> StageCapabilities<K> {
             match args.get(k) {
                 None | Some(serde_json::Value::Null) => Ok(None),
                 Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
-                Some(_) => Err(denied("invalid_args", format!("{k} must be a string or null"))),
+                Some(_) => Err(denied(
+                    "invalid_args",
+                    format!("{k} must be a string or null"),
+                )),
             }
         };
         let owner = opt_str("owner")?;
@@ -2179,9 +2182,7 @@ impl<K: KvBackend> StageCapabilities<K> {
         };
         let host = &wiring.host;
         let owner_ref = owner.as_deref();
-        let info = |i: &bundle_host_storage::host::ObjectInfo| {
-            serde_json::json!({ "key": i.key, "size": i.size, "content_type": i.content_type })
-        };
+        let info = |i: &bundle_host_storage::host::ObjectInfo| serde_json::json!({ "key": i.key, "size": i.size, "content_type": i.content_type });
         match op {
             "put" => {
                 let body = base64::engine::general_purpose::STANDARD

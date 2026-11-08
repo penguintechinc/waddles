@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-defuse"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!defuse [amount|all]` solo wager game over the shared community economy (random win/lose, admin odds config). Original Waddles implementation; idea inspired by PenguinTwitchBot by SuperPenguinTV (with permission) -- ideas/design only, no code copied."
 requires-python = ">=3.13"
 dependencies = []

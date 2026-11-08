@@ -1,6 +1,5 @@
 # feature/e2e-helm-rust-dataplane -- Rust svc-action (core/svc_action, M3 executor
-# integration landed) Deployment, ADDITIVE to templates/svc-action.yaml's Python
-# Deployment -- never replaces it. Gated on the top-level pipeline.rustDataPlane.enabled
+# integration landed) Deployment (the legacy Python svc-action template was removed). Gated on the top-level pipeline.rustDataPlane.enabled
 # flag (default false) plus this stage's own .enabled sub-flag. See
 # templates/svc-ingest-rust.yaml's header for the full `-rust` resource-naming-vs-shared-
 # image-tag rationale (identical here) -- not repeated per file.
@@ -15,6 +14,9 @@
 # "must both be set" error INSIDE its own spawned task (try_start_host_api's graceful-degradation
 # contract), never crashing this pod's HTTP/metrics servers.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcAction.enabled }}
+{{- if and (not .Values.pipeline.rustDataPlane.egressClusterCidrDenylist) (ne .Values.global.deploymentTier "alpha") (ne .Values.global.deploymentTier "local") }}
+{{- fail (printf "pipeline.rustDataPlane.egressClusterCidrDenylist is REQUIRED when global.deploymentTier=%q (outside alpha/local): set this cluster's pod, Service and node CIDRs -- the Rust stage's CliConfig::validate hard-fails startup on an empty list" .Values.global.deploymentTier) }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
