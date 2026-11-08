@@ -404,7 +404,10 @@ impl bundle_host_media::credentials::CredentialResolver for TierRequiredCreds {
         &self,
         _s: &bundle_host_media::Scope,
         _p: &str,
-    ) -> Result<bundle_host_media::credentials::ApiKey, bundle_host_media::credentials::CredentialError> {
+    ) -> Result<
+        bundle_host_media::credentials::ApiKey,
+        bundle_host_media::credentials::CredentialError,
+    > {
         Err(bundle_host_media::credentials::CredentialError::TierRequired)
     }
 }
@@ -421,5 +424,8 @@ async fn hub_tier_required_from_the_byok_resolver_maps_to_tier_required() {
         std::sync::Arc::new(bundle_host_media::SystemClock),
         fast_cfg(),
     );
-    assert_eq!(host.generate_image(&scope("a"), "cat").await.unwrap_err(), MediaError::TierRequired("professional".into()));
+    assert_eq!(
+        host.generate_image(&scope("a"), "cat").await.unwrap_err(),
+        MediaError::TierRequired("professional".into())
+    );
 }
