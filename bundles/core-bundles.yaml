@@ -68,7 +68,7 @@ bundles:
   # IntegrityError, caught by seed_core_bundles.py::_run()'s generic exception handler --
   # logged with type+message, nonzero exit, never a silent success with stale manifest_json).
   - app_id: waddles.core.example.ping
-    version: "1.0.4"
+    version: "1.0.5"
     language: rust
     source_dir: rust/ping
     manifest_path: ping.manifest.yaml
@@ -77,7 +77,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.pyping
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/pyping
     manifest_path: pyping.manifest.yaml
@@ -98,7 +98,7 @@ bundles:
   # version built from the corrected Dockerfile. Mirrors
   # bundles/rust/ping/hub-manifest.yaml's own 1.0.0/1.0.1 retirement comment.
   - app_id: waddles.core.example.csping
-    version: "1.0.2"
+    version: "1.0.3"
     language: csharp
     source_dir: csharp/csping
     manifest_path: csping.manifest.yaml
@@ -125,7 +125,7 @@ bundles:
   # fresh publish+activate. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
   # retirement (fix/csping-version-bump, #575).
   - app_id: waddles.core.example.eightball
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/eightball
     manifest_path: eightball.manifest.yaml
@@ -134,7 +134,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.roll
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/roll
     manifest_path: roll.manifest.yaml
@@ -156,7 +156,7 @@ bundles:
   # (`community_id: null` below) instead of only erroring -- scoped under
   # `waddle_sdk.community_kv.TENANT_WIDE_SENTINEL`, see src/app.py's module docstring.
   - app_id: waddles.core.example.lurk
-    version: "1.0.12"
+    version: "1.0.13"
     language: python
     source_dir: python/lurk
     manifest_path: lurk.manifest.yaml
@@ -170,7 +170,7 @@ bundles:
   # fix (gh-631, #638) -- app_versions is immutable per (app_id, version), so 1.0.3's digest
   # still points at the pre-fix wasm; this bump is the only way the fixed build reaches alpha.
   - app_id: waddles.core.example.count
-    version: "1.0.9"
+    version: "1.0.10"
     language: python
     source_dir: python/count
     manifest_path: count.manifest.yaml
@@ -185,7 +185,7 @@ bundles:
   # firing has no scheduler yet (gh-613) -- `timer ...` persists config and replies saying so, loud
   # not silent; static command CRUD does not depend on that gap.
   - app_id: waddles.core.example.command
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/command
     manifest_path: command.manifest.yaml
@@ -209,7 +209,7 @@ bundles:
   # (`"rps.wins.<hash>"`, `"music.queue"`) before registration here, matching
   # `count`'s own `"count.registry"` convention. Fixed in this PR, not on the source branches.
   - app_id: waddles.core.example.rps
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/rps
     manifest_path: rps.manifest.yaml
@@ -218,7 +218,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.music
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/music
     manifest_path: music.manifest.yaml
@@ -227,7 +227,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.coinflip
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/coinflip
     manifest_path: coinflip.manifest.yaml
@@ -242,7 +242,7 @@ bundles:
   # owner resolves the overlap; `feature_enabled(FLAG_KEY, default=False)` in its own
   # `transform()` keeps it silent by default either way.
   - app_id: waddles.core.example.announce
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/announce
     manifest_path: announce.manifest.yaml
@@ -251,7 +251,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.raffle
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/raffle
     manifest_path: raffle.manifest.yaml
@@ -260,7 +260,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.social
-    version: "1.0.4"
+    version: "1.0.5"
     language: python
     source_dir: python/social
     manifest_path: social.manifest.yaml
@@ -269,7 +269,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.socials
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/socials
     manifest_path: socials.manifest.yaml
@@ -278,7 +278,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.wheel
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/wheel
     manifest_path: wheel.manifest.yaml
@@ -287,7 +287,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.love
-    version: "1.0.4"
+    version: "1.0.5"
     language: python
     source_dir: python/love
     manifest_path: love.manifest.yaml
@@ -296,7 +296,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.roulette
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/roulette
     manifest_path: roulette.manifest.yaml
@@ -305,7 +305,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.joke
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/joke
     manifest_path: joke.manifest.yaml
@@ -314,7 +314,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.first
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/first
     manifest_path: first.manifest.yaml
@@ -331,7 +331,7 @@ bundles:
   # `waddles.command-<name>` PostHog flag (default OFF) inside `transform()` -- this catalog
   # entry only installs the bundle, it does not make it respond.
   - app_id: waddles.core.example.about
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/about
     manifest_path: about.manifest.yaml
@@ -340,7 +340,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.compliment
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/compliment
     manifest_path: compliment.manifest.yaml
@@ -349,7 +349,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.rules
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/rules
     manifest_path: rules.manifest.yaml
@@ -358,7 +358,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.trivia
-    version: "1.0.4"
+    version: "1.0.5"
     language: python
     source_dir: python/trivia
     manifest_path: trivia.manifest.yaml
@@ -367,7 +367,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.hangman
-    version: "1.0.4"
+    version: "1.0.5"
     language: python
     source_dir: python/hangman
     manifest_path: hangman.manifest.yaml
@@ -376,7 +376,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.countdown
-    version: "1.0.4"
+    version: "1.0.5"
     language: python
     source_dir: python/countdown
     manifest_path: countdown.manifest.yaml
@@ -385,7 +385,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.remind
-    version: "1.0.4"
+    version: "1.0.5"
     language: python
     source_dir: python/remind
     manifest_path: remind.manifest.yaml
@@ -394,7 +394,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.duel
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/duel
     manifest_path: duel.manifest.yaml
@@ -403,7 +403,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.slots
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/slots
     manifest_path: slots.manifest.yaml
@@ -412,7 +412,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.fish
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/fish
     manifest_path: fish.manifest.yaml
@@ -421,7 +421,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.poll
-    version: "1.0.4"
+    version: "1.0.5"
     language: python
     source_dir: python/poll
     manifest_path: poll.manifest.yaml
@@ -430,7 +430,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.shoutout
-    version: "1.0.6"
+    version: "1.0.7"
     language: python
     source_dir: python/shoutout
     manifest_path: shoutout.manifest.yaml
@@ -447,8 +447,9 @@ bundles:
   # gates its own reply behind a `waddles.command-<name>` PostHog flag (default OFF) inside
   # `transform()` -- this catalog entry only installs the bundle, it does not make it respond.
   - app_id: waddles.core.example.rank
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
+    wit_world: stage-next-tools
     source_dir: python/rank
     manifest_path: rank.manifest.yaml
     artifact_path: rank.wasm
@@ -456,7 +457,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.quote
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/quote
     manifest_path: quote.manifest.yaml
@@ -465,7 +466,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.loyalty
-    version: "1.0.6"
+    version: "1.0.7"
     language: python
     wit_world: stage-next-tools
     source_dir: python/loyalty
@@ -475,7 +476,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.inventory
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/inventory
     manifest_path: inventory.manifest.yaml
@@ -484,7 +485,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.choose
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/choose
     manifest_path: choose.manifest.yaml
@@ -493,7 +494,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.dadjoke
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/dadjoke
     manifest_path: dadjoke.manifest.yaml
@@ -502,7 +503,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.wave
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/wave
     manifest_path: wave.manifest.yaml
@@ -511,7 +512,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.slap
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/slap
     manifest_path: slap.manifest.yaml
@@ -520,7 +521,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.hug
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/hug
     manifest_path: hug.manifest.yaml
@@ -529,7 +530,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.boop
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/boop
     manifest_path: boop.manifest.yaml
@@ -538,7 +539,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.highfive
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/highfive
     manifest_path: highfive.manifest.yaml
@@ -549,7 +550,7 @@ bundles:
   # Facts pack: three stateless, self-contained random-content bundles (no kv, no external
   # API calls), each gated behind its own `waddles.command-<name>` flag (default OFF).
   - app_id: waddles.core.example.catfact
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/catfact
     manifest_path: catfact.manifest.yaml
@@ -558,7 +559,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.dogfact
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/dogfact
     manifest_path: dogfact.manifest.yaml
@@ -567,7 +568,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.advice
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/advice
     manifest_path: advice.manifest.yaml
@@ -576,7 +577,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.scramble
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/scramble
     manifest_path: scramble.manifest.yaml
@@ -585,7 +586,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.guess
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/guess
     manifest_path: guess.manifest.yaml
@@ -594,7 +595,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.rip
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/rip
     manifest_path: rip.manifest.yaml
@@ -603,7 +604,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.hype
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/hype
     manifest_path: hype.manifest.yaml
@@ -612,7 +613,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.cringe
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/cringe
     manifest_path: cringe.manifest.yaml
@@ -621,7 +622,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.gamble
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/gamble
     manifest_path: gamble.manifest.yaml
@@ -630,7 +631,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.greeter
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/greeter
     manifest_path: greeter.manifest.yaml
@@ -639,7 +640,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.giveaway
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/giveaway
     manifest_path: giveaway.manifest.yaml
@@ -648,7 +649,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.heist
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/heist
     manifest_path: heist.manifest.yaml
@@ -657,7 +658,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.dice
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/dice
     manifest_path: dice.manifest.yaml
@@ -666,7 +667,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.discord
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/discord
     manifest_path: discord.manifest.yaml
@@ -675,7 +676,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.vote
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/vote
     manifest_path: vote.manifest.yaml
@@ -684,7 +685,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.fortune
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/fortune
     manifest_path: fortune.manifest.yaml
@@ -693,7 +694,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.event
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/event
     manifest_path: event.manifest.yaml
@@ -704,7 +705,7 @@ bundles:
   # Wix integration (#485): `!wix` membership status/link over the Wix REST API (GET), with
   # default-off plan-role / event-sync modules (need webhook connector + table-access grant).
   - app_id: waddles.core.integration.wix
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     wit_world: stage-next
     source_dir: python/wix
@@ -714,7 +715,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.echo
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/echo
     manifest_path: echo.manifest.yaml
@@ -723,7 +724,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.waddle
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/waddle
     manifest_path: waddle.manifest.yaml
@@ -732,7 +733,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.hello
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/hello
     manifest_path: hello.manifest.yaml
@@ -741,7 +742,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.bot
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/bot
     manifest_path: bot.manifest.yaml
@@ -750,7 +751,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.time
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/time
     manifest_path: time.manifest.yaml
@@ -759,7 +760,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.bookmark
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/bookmark
     manifest_path: bookmark.manifest.yaml
@@ -768,7 +769,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.lfg
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/lfg
     manifest_path: lfg.manifest.yaml
@@ -777,7 +778,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.ticket
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/ticket
     manifest_path: ticket.manifest.yaml
@@ -786,7 +787,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.label
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/label
     manifest_path: label.manifest.yaml
@@ -795,7 +796,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.faq
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/faq
     manifest_path: faq.manifest.yaml
@@ -804,7 +805,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.death
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/death
     manifest_path: death.manifest.yaml
@@ -813,7 +814,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.roast
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/roast
     manifest_path: roast.manifest.yaml
@@ -822,7 +823,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.ship
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/ship
     manifest_path: ship.manifest.yaml
@@ -831,7 +832,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.iq
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/iq
     manifest_path: iq.manifest.yaml
@@ -840,7 +841,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.mood
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/mood
     manifest_path: mood.manifest.yaml
@@ -849,7 +850,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.winner
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/winner
     manifest_path: winner.manifest.yaml
@@ -865,7 +866,7 @@ bundles:
   # (operator-provisioned, never in the repo). `lastseen` supports self + Discord @mention +
   # literal UUID only -- free-text name lookup needs #429.
   - app_id: waddles.core.example.alias
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/alias
     manifest_path: alias.manifest.yaml
@@ -874,7 +875,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.lastseen
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/lastseen
     manifest_path: lastseen.manifest.yaml
@@ -883,7 +884,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.memories
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/memories
     manifest_path: memories.manifest.yaml
@@ -892,7 +893,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.dailycounter
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/dailycounter
     manifest_path: dailycounter.manifest.yaml
@@ -901,7 +902,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.uptime
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/uptime
     manifest_path: uptime.manifest.yaml
@@ -910,7 +911,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.weather
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/weather
     manifest_path: weather.manifest.yaml
@@ -919,7 +920,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.pronouns
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/pronouns
     manifest_path: pronouns.manifest.yaml
@@ -928,7 +929,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.secret
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/secret
     manifest_path: secret.manifest.yaml
@@ -937,7 +938,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.donate
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/donate
     manifest_path: donate.manifest.yaml
@@ -946,7 +947,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.merch
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/merch
     manifest_path: merch.manifest.yaml
@@ -955,7 +956,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.birthday
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/birthday
     manifest_path: birthday.manifest.yaml
@@ -980,7 +981,7 @@ bundles:
   #
   # 25 bundles on the default `stage` world:
   - app_id: waddles.core.example.affirmation
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/affirmation
     manifest_path: affirmation.manifest.yaml
@@ -989,7 +990,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.clap
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/clap
     manifest_path: clap.manifest.yaml
@@ -998,7 +999,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.commands
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/commands
     manifest_path: commands.manifest.yaml
@@ -1007,7 +1008,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.dance
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/dance
     manifest_path: dance.manifest.yaml
@@ -1016,7 +1017,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.emojify
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/emojify
     manifest_path: emojify.manifest.yaml
@@ -1025,7 +1026,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.fact
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/fact
     manifest_path: fact.manifest.yaml
@@ -1034,7 +1035,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.horoscope
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/horoscope
     manifest_path: horoscope.manifest.yaml
@@ -1043,7 +1044,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.insult
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/insult
     manifest_path: insult.manifest.yaml
@@ -1052,7 +1053,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.kiss
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/kiss
     manifest_path: kiss.manifest.yaml
@@ -1061,7 +1062,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.mock
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/mock
     manifest_path: mock.manifest.yaml
@@ -1070,7 +1071,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.motivate
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/motivate
     manifest_path: motivate.manifest.yaml
@@ -1079,7 +1080,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.numberfact
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/numberfact
     manifest_path: numberfact.manifest.yaml
@@ -1088,7 +1089,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.pat
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/pat
     manifest_path: pat.manifest.yaml
@@ -1097,7 +1098,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.pickup
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/pickup
     manifest_path: pickup.manifest.yaml
@@ -1106,7 +1107,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.poke
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/poke
     manifest_path: poke.manifest.yaml
@@ -1115,7 +1116,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.rate
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/rate
     manifest_path: rate.manifest.yaml
@@ -1124,7 +1125,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.reverse
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/reverse
     manifest_path: reverse.manifest.yaml
@@ -1133,7 +1134,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.riddle
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/riddle
     manifest_path: riddle.manifest.yaml
@@ -1142,7 +1143,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.say
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/say
     manifest_path: say.manifest.yaml
@@ -1151,7 +1152,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.truthordare
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/truthordare
     manifest_path: truthordare.manifest.yaml
@@ -1160,7 +1161,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.uwu
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/uwu
     manifest_path: uwu.manifest.yaml
@@ -1169,7 +1170,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.vibecheck
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/vibecheck
     manifest_path: vibecheck.manifest.yaml
@@ -1178,7 +1179,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.wordcount
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/wordcount
     manifest_path: wordcount.manifest.yaml
@@ -1187,7 +1188,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.wouldyourather
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/wouldyourather
     manifest_path: wouldyourather.manifest.yaml
@@ -1196,7 +1197,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.yomama
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/yomama
     manifest_path: yomama.manifest.yaml
@@ -1206,7 +1207,7 @@ bundles:
         community_id: null
   # 12 bundles on `stage-next` (economy + AI):
   - app_id: waddles.core.example.ask
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/ask
@@ -1216,7 +1217,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.define
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/define
@@ -1226,7 +1227,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.defuse
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/defuse
@@ -1236,7 +1237,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.eli5
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/eli5
@@ -1246,7 +1247,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.jackpot
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/jackpot
@@ -1256,7 +1257,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.rephrase
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/rephrase
@@ -1266,7 +1267,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.sentiment
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/sentiment
@@ -1276,7 +1277,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.steal
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/steal
@@ -1286,7 +1287,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.summarize
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/summarize
@@ -1296,7 +1297,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.tldr
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/tldr
@@ -1306,7 +1307,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.top
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/top
@@ -1316,7 +1317,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.translate
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/translate
@@ -1342,7 +1343,7 @@ bundles:
   #
   # 8 bundles on the default `stage` world:
   - app_id: waddles.core.example.customcommand
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/customcommand
     manifest_path: customcommand.manifest.yaml
@@ -1351,7 +1352,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.counter
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/counter
     manifest_path: counter.manifest.yaml
@@ -1360,7 +1361,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.queue
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/queue
     manifest_path: queue.manifest.yaml
@@ -1369,7 +1370,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.timer
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/timer
     manifest_path: timer.manifest.yaml
@@ -1378,7 +1379,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.level
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/level
     manifest_path: level.manifest.yaml
@@ -1387,7 +1388,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.hypetrain
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/hypetrain
     manifest_path: hypetrain.manifest.yaml
@@ -1396,7 +1397,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.keywordgiveaway
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/keywordgiveaway
     manifest_path: keywordgiveaway.manifest.yaml
@@ -1405,7 +1406,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.bingo
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/bingo
     manifest_path: bingo.manifest.yaml
@@ -1415,7 +1416,7 @@ bundles:
         community_id: null
   # 4 bundles on `stage-next` (economy + identity.resolve host capabilities):
   - app_id: waddles.core.example.prediction
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/prediction
@@ -1425,7 +1426,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.lottery
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/lottery
@@ -1435,7 +1436,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.blackjack
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     wit_world: stage-next
     source_dir: python/blackjack
@@ -1460,7 +1461,7 @@ bundles:
   # the crate's own Cargo.toml `[package.metadata.component.target] world`. The seeder installs
   # it with trusted_source=True (the only path allowed to declare `kind: service`).
   - app_id: waddles.core.service.reputation
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1473,7 +1474,7 @@ bundles:
 
   # Atomic community currency service, installed by the trusted core seeder.
   - app_id: waddles.core.service.economy
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1487,7 +1488,7 @@ bundles:
   # bundle-MCP-tools P6b: twitch platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-twitch defaults OFF.
   - app_id: waddles.core.service.twitch
-    version: "1.0.1"
+    version: "1.0.2"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1501,7 +1502,7 @@ bundles:
   # bundle-MCP-tools P6b: discord platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-discord defaults OFF.
   - app_id: waddles.core.service.discord
-    version: "1.0.6"
+    version: "1.0.7"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1515,7 +1516,7 @@ bundles:
   # bundle-MCP-tools P6b: youtube platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-youtube defaults OFF.
   - app_id: waddles.core.service.youtube
-    version: "1.0.1"
+    version: "1.0.2"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1529,7 +1530,7 @@ bundles:
   # Community feed reader (#484): `!feed` events/info from a per-community configured public
   # JSON feed url; the operator grants net.http.fqdn:<host> per community (no fixed host).
   - app_id: waddles.core.community.feed
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     source_dir: python/community_feed
     manifest_path: community-feed.manifest.yaml
@@ -1541,13 +1542,13 @@ bundles:
   # Wix webhook connector (Rust `kind: service`, inbound-only, `connector-tools` world, egress []).
   # Verified by svc-ingest Scheme::WixJwt; the cutover flag waddles.connector-wix defaults OFF.
   - app_id: waddles.core.service.wix
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: connector-tools
     kind: service
     source_dir: rust/wix
-    manifest_path: wix.manifest.yaml
-    artifact_path: wix.wasm
+    manifest_path: wix-connector.manifest.yaml
+    artifact_path: wix-connector.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null
@@ -1555,13 +1556,27 @@ bundles:
   # RSI Spectrum platform CONNECTOR (gh #486, Rust `kind: service`, `connector` world, inbound-only).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-spectrum defaults OFF.
   - app_id: waddles.core.service.spectrum
-    version: "0.1.0"
+    version: "0.1.1"
     language: rust
     wit_world: connector
     kind: service
     source_dir: rust/spectrum
     manifest_path: spectrum.manifest.yaml
     artifact_path: spectrum.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
+  # SoundCloud music SERVICE (Rust `kind: service`, world stage-tools): music.soundcloud.{search,
+  # track,playlist.get,resolve}. Metadata + license flags only; OAuth token is a host-side secret ref.
+  - app_id: waddles.core.service.music-soundcloud
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/music-soundcloud
+    manifest_path: music-soundcloud.manifest.yaml
+    artifact_path: music-soundcloud.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null

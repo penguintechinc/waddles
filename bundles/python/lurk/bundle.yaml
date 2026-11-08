@@ -21,11 +21,11 @@ name: Lurk Toggle Example Bundle (Python)
 # fixed wasm.
 # 1.0.9: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
 # 1.0.10: activation-gated only -- removed the in-bundle waddles.command-lurk feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.12
+version: 1.0.13
 feature: waddles.core.example
 module: core
 provider: builtin
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/lurk
 language: python
@@ -74,6 +74,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.12"
-  min_version: "1.0.12"
+  tested_with: "1.0.13"
+  min_version: "1.0.13"
   max_version: null

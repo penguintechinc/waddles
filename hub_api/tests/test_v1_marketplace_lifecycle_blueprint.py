@@ -204,7 +204,11 @@ class TestAttributionMetadata:
         body = await listing.get_json()
         bundle = body["bundles"][0]
         assert bundle["appId"] == APP_ID_A
-        assert bundle["author"] == "Acme Corp"
+        assert bundle["author"] == {
+            "display": "Acme Corp",
+            "githubHandle": None,
+            "profileUrl": None,
+        }
         assert bundle["license"] == "MIT"
         assert bundle["licenseReviewRequired"] is False
         assert bundle["sourceUrl"] == "https://github.com/acme/waddles-bundle"
@@ -235,6 +239,89 @@ class TestAttributionMetadata:
         )
         body = await listing.get_json()
         assert [b["appId"] for b in body["bundles"]] == [APP_ID_A]
+
+    async def test_github_author_is_returned_with_profile_link(self, client: Any) -> None:
+        for raw in ("@octo-cat", "https://github.com/octo-cat/", "github:octo-cat"):
+            await _install(client, app_id=APP_ID_A, author=raw)
+            listing = await client.get(
+                "/api/v1/marketplace/bundles", headers=_tenant_admin_headers()
+            )
+            bundle = (await listing.get_json())["bundles"][0]
+            assert bundle["author"] == {
+                "display": "octo-cat",
+                "githubHandle": "octo-cat",
+                "profileUrl": "https://github.com/octo-cat",
+            }
+            await client.delete(
+                f"/api/v1/marketplace/bundles/{APP_ID_A}", headers=_platform_admin_headers()
+            )
+
+    @pytest.mark.parametrize(
+        ("author", "code"),
+        [
+            ("<b>x</b>", "author_markup_rejected"),
+            ("https://evil.example/x", "author_invalid_url"),
+            ("github:-bad", "author_invalid_github_handle"),
+            ("emoji \U0001f600", "author_invalid_name"),
+        ],
+    )
+    async def test_invalid_author_is_400_with_code(
+        self, client: Any, author: str, code: str
+    ) -> None:
+        response = await _install(client, author=author)
+        assert response.status_code == 400
+        assert code in (await response.get_json())["error"]["message"]
+
+    async def test_collection_is_listed_filtered_and_counted(self, client: Any) -> None:
+        await _install(
+            client,
+            app_id=APP_ID_A,
+            provider="thirdparty",
+            author="github:Psychoboy",
+            license="MIT",
+            notice="Ported from X under MIT.",
+            collection="superpenguintv",
+        )
+        await _install(client, app_id=APP_ID_B)
+
+        listing = await client.get(
+            "/api/v1/marketplace/bundles?collection=superpenguintv", headers=_tenant_admin_headers()
+        )
+        bundles = (await listing.get_json())["bundles"]
+        assert [b["appId"] for b in bundles] == [APP_ID_A]
+        assert bundles[0]["collection"] == "superpenguintv"
+
+        everything = await client.get(
+            "/api/v1/marketplace/bundles", headers=_tenant_admin_headers()
+        )
+        by_id = {b["appId"]: b["collection"] for b in (await everything.get_json())["bundles"]}
+        assert by_id == {APP_ID_A: "superpenguintv", APP_ID_B: None}
+
+        collections = await client.get(
+            "/api/v1/marketplace/bundles/collections", headers=_tenant_admin_headers()
+        )
+        assert collections.status_code == 200
+        assert (await collections.get_json())["collections"] == [
+            {"collection": "superpenguintv", "count": 1}
+        ]
+
+    @pytest.mark.parametrize(
+        "extra",
+        [{}, {"license": "Apache-2.0", "notice": "n"}, {"license": "MIT"}],
+    )
+    async def test_superpenguintv_collection_requires_mit_and_notice(
+        self, client: Any, extra: dict[str, str]
+    ) -> None:
+        response = await _install(
+            client, provider="thirdparty", collection="superpenguintv", **extra
+        )
+        assert response.status_code == 400
+        assert "collection_attribution_required" in (await response.get_json())["error"]["message"]
+
+    async def test_invalid_collection_slug_is_400(self, client: Any) -> None:
+        response = await _install(client, collection="Not A Slug")
+        assert response.status_code == 400
+        assert "invalid_collection" in (await response.get_json())["error"]["message"]
 
 
 async def _make_available(client: Any, app_id: str = APP_ID_A) -> Any:

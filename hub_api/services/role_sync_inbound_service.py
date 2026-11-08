@@ -86,7 +86,7 @@ from services.role_sync_service import (
     _resolve_desired_community_role,
     _resolve_tenant_for_community,
 )
-from services.schema import bind_bar_citizen_tables
+from services.schema import bind_guild_pairing_tables
 from services.sync_worker_dal import open_worker_dal
 from services.valkey_admin_client import build_client
 
@@ -392,7 +392,7 @@ def _verified_scope(
 
 def _find_pairing(dal: Any, community_id: int, guild_id: str) -> Any | None:
     """The enabled pairing for EXACTLY this ``(community, guild)``; ``None`` refuses the event."""
-    bind_bar_citizen_tables(dal)
+    bind_guild_pairing_tables(dal)
     t = dal.guild_tenant_pairings
     return (
         dal(
