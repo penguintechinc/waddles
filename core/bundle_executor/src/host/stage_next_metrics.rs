@@ -20,6 +20,9 @@
 //!
 //! A rejected call returns the typed WIT error to the guest and is counted on
 //! `waddles_executor_bundle_metric_rejects_total{reason}`; nothing is silently dropped.
+//!
+//! Exported names are `waddles_bundle_<kind>_<name>` (`counter`/`histogram`/`gauge`), so a name
+//! shared by two bundles with different kinds can never collide on one exported series name.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -203,7 +206,15 @@ impl BundleMetrics {
             st.values.entry((name.to_owned(), k)).or_default().insert(v);
         }
         st.series.insert(series_key);
-        let full = format!("waddles_bundle_{name}");
+        // The kind is part of the exported name: the same bundle-chosen `name` can then never
+        // surface as two different instrument types under one OTel/Prometheus name, whichever
+        // bundles (or kinds) are involved.
+        let kind_word = match kind {
+            Kind::Counter => "counter",
+            Kind::Histogram => "histogram",
+            Kind::Gauge => "gauge",
+        };
+        let full = format!("waddles_bundle_{kind_word}_{name}");
         let key = format!("{full}/{kind:?}");
         let meter = st.meter.clone();
         let inst = st.instruments.entry(key).or_insert_with(|| {
@@ -406,14 +417,29 @@ mod tests {
         let pts = h.points();
         let counter = pts
             .iter()
-            .find(|p| p.name == "waddles_bundle_shared" && p.attrs["app_id"] == OTHER)
+            .find(|p| p.name == "waddles_bundle_counter_shared" && p.attrs["app_id"] == OTHER)
             .expect("other bundle's counter");
         assert_eq!(counter.value, 4.0);
         let gauge = pts
             .iter()
-            .find(|p| p.name == "waddles_bundle_shared" && p.attrs["app_id"] == APP)
+            .find(|p| p.name == "waddles_bundle_gauge_shared" && p.attrs["app_id"] == APP)
             .expect("first bundle's gauge");
         assert_eq!(gauge.value, 1.0);
+        // Same bundle-chosen name, different kinds, two bundles: two DISTINCT exported names.
+        let exported: std::collections::HashSet<&str> = pts
+            .iter()
+            .filter(|p| p.name.ends_with("_shared"))
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(
+            exported,
+            [
+                "waddles_bundle_counter_shared",
+                "waddles_bundle_gauge_shared"
+            ]
+            .into_iter()
+            .collect()
+        );
         // The name budget is per bundle too.
         for i in 0..MAX_NAMES_PER_APP - 1 {
             m.counter_add(OTHER, &format!("n{i}"), 1, &[]).unwrap();
@@ -467,17 +493,17 @@ mod tests {
         assert!(pts.len() >= 3, "data points received: {}", pts.len());
         let c = pts
             .iter()
-            .find(|p| p.name == "waddles_bundle_sent")
+            .find(|p| p.name == "waddles_bundle_counter_sent")
             .unwrap();
         assert_eq!(c.value, 3.0);
         assert_eq!(c.attrs["app_id"], APP);
         assert_eq!(c.attrs["outcome"], "ok");
         assert!(pts
             .iter()
-            .any(|p| p.name == "waddles_bundle_took_seconds" && p.sum == 0.25));
+            .any(|p| p.name == "waddles_bundle_histogram_took_seconds" && p.sum == 0.25));
         assert!(pts
             .iter()
-            .any(|p| p.name == "waddles_bundle_queue_depth" && p.value == 7.0));
+            .any(|p| p.name == "waddles_bundle_gauge_queue_depth" && p.value == 7.0));
     }
 
     #[test]
@@ -553,7 +579,7 @@ mod tests {
         let pts: Vec<_> = h
             .points()
             .into_iter()
-            .filter(|p| p.name == "waddles_bundle_by_channel")
+            .filter(|p| p.name == "waddles_bundle_counter_by_channel")
             .collect();
         assert_eq!(
             pts.len(),

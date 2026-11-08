@@ -53,7 +53,7 @@ mounted only into hub-api (signer) and svc-process-rust (verifier).
 ## 3. Bundle metrics (WIT `waddle:bundle/metrics`)
 
 `counter-add`, `histogram-record`, `gauge-set` on `stage-next`, `stage-v2`, `stage-tools`; mapped by
-the executor onto OTel instruments `waddles_bundle_<name>` with a host-stamped `app_id`. Host-side
+the executor onto OTel instruments `waddles_bundle_<kind>_<name>` with a host-stamped `app_id`. Host-side
 bounds (`core/bundle_executor/src/host/stage_next_metrics.rs`): names `^[a-z][a-z0-9_]{0,47}$`,
 32 names per bundle, one kind per name, <= 4 labels, values `^[A-Za-z0-9_.-]{1,32}$`, <= 16 distinct
 values per label (then `other`), counter delta <= 1e6, histogram >= 0, finite values. Rejections are

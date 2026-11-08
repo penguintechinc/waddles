@@ -936,7 +936,7 @@ interface log {
 }
 
 /// Real metrics for bundles (counter / histogram / gauge), mapped host-side onto OTel
-/// instruments named `waddles_bundle_<name>`. Capability: always granted; the HOST enforces the
+/// instruments named `waddles_bundle_<kind>_<name>` (kind = counter|histogram|gauge). Capability: always granted; the HOST enforces the
 /// bounds so a bundle can never blow up cardinality or spoof identity:
 /// * `name` matches `^[a-z][a-z0-9_]{0,47}$`; at most 32 distinct names per bundle, and a name is
 ///   bound to ONE instrument kind;
