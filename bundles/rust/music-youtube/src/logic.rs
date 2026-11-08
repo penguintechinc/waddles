@@ -315,7 +315,10 @@ impl Service {
             )?;
             for item in data["items"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
                 let track = parse::track_from_item(item).map_err(invalid)?;
-                let id = track["id"].as_str().unwrap_or_default().to_string();
+                let id = track["id"]
+                    .as_str()
+                    .ok_or_else(|| invalid("upstream_track_missing_id"))?
+                    .to_string();
                 Self::kv_err(self.kv.set(
                     &format!("trk.{id}"),
                     track.to_string().as_bytes(),
@@ -385,7 +388,8 @@ impl Service {
         }
         let limit = limit_field(&args, 10, 25)?;
         let cfg = self.config()?;
-        let region = cfg.region_code.clone().unwrap_or_default();
+        // No configured region is a valid configuration: search worldwide.
+        let region = cfg.region_code.as_deref().unwrap_or("").to_string();
         let key = format!(
             "srch.{}",
             parse::fnv_hex(&format!(
@@ -1410,7 +1414,10 @@ mod tests {
             ),
         ];
         for (name, input, out) in cases {
-            let out = out.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let out = match out {
+                Ok(v) => v,
+                Err(e) => panic!("{name}: {e:?}"),
+            };
             let t = &tools[name];
             conforms(&input, &t["input_schema"], defs, "in").unwrap();
             conforms(&out, &t["output_schema"], defs, name).unwrap();
