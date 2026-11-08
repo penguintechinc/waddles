@@ -66,3 +66,7 @@ exit, used only by the `KeyService.GetTenantDek` gRPC broker. See
 `hub_api/tests/envelope/` -- see the module docstrings. Real Postgres (`test_repository_pg.py`) needs docker
 (skipped without it, like the repo's other PG tests); the SeaweedFS E2E is opt-in
 (`make test-seaweedfs-sse-kms`).
+
+## Data-plane DEK invalidation
+
+`rotate_dek` (after the new version commits) and a KMS access-denied revocation `XADD` `keys:tenant-dek:invalidate` with `tenant`, `purpose=at-rest`, `reason` (`rotated`/`revoked`) - the stream `core/bundle_host_crypto` listens on. No key material is carried; the stream is unauthenticated like `bundle:grants:invalidate` (Valkey ACL + TLS). A failed publish logs ERROR (`dek-invalidation-lost`), counts `waddles_envelope_operations_total{operation=dek_invalidation_publish,result=error}`, and raises `DekInvalidationPublishError` on rotation; data-plane caches then fall back to their TTL.
