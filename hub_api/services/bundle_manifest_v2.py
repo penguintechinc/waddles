@@ -240,6 +240,41 @@ def parse_schedule(raw: Any) -> ScheduleDeclaration | None:
     return ScheduleDeclaration(interval_s=interval, jitter=float(jitter))
 
 
+#: The `hub` source platform + event the host delivers on a bundle's schedule; mirrors
+#: `core/svc_ingest/src/connector/bundle_schedule.rs` (`SCHEDULE_PLATFORM`, `RECONCILE_EVENT_TYPE`).
+SCHEDULE_PLATFORM = "hub"
+SCHEDULE_EVENT_TYPE = "bundle.reconcile"
+
+
+def app_id_slug(raw: str) -> str:
+    """Python mirror of `core/svc_ingest/src/publish.rs::app_id_slug` (the `hub` source id).
+
+    Lowercases, maps every char outside `[a-z0-9_-]` to `-`, strips leading non-alphanumerics and
+    falls back to `x` -- byte-identical to the Rust publisher so hub-api's binding names the very
+    stream svc-ingest publishes the scheduled `bundle.reconcile` onto.
+    """
+    out = "".join(
+        c if ("a" <= c <= "z") or ("0" <= c <= "9") or c in "_-" else "-" for c in raw.lower()
+    )
+    out = out.lstrip("_-")
+    return out or "x"
+
+
+def scheduled_consume_rule_ok(app_id: str, consumes: tuple[ConsumeRule, ...]) -> bool:
+    """True when `consumes` has a `hub`/`bundle.reconcile` rule on this app's own source id.
+
+    The rule's `source_id` must be absent or exactly `app_id_slug(app_id)`: the stream only this
+    bundle consumes. Any other source id would never receive the scheduled event.
+    """
+    slug = app_id_slug(app_id)
+    return any(
+        rule.platform == SCHEDULE_PLATFORM
+        and SCHEDULE_EVENT_TYPE in rule.event_types
+        and rule.source_id in (None, slug)
+        for rule in consumes
+    )
+
+
 @dataclass(slots=True, frozen=True)
 class BundleManifestV2:
     """A validated `bundle.yaml` v2 manifest -- the shape every downstream reader consumes."""
@@ -1151,6 +1186,14 @@ def parse_bundle_manifest_v2(
         if pid not in declared_ids
     )
 
+    schedule = parse_schedule(raw.get("schedule"))
+    _require(
+        schedule is None or scheduled_consume_rule_ok(raw["app_id"], consumes),
+        "schedule_requires_hub_consume",
+        f"a scheduled bundle must consume {SCHEDULE_PLATFORM}/{SCHEDULE_EVENT_TYPE} "
+        f"with source_id absent or {app_id_slug(raw['app_id'])!r}",
+    )
+
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -1187,5 +1230,5 @@ def parse_bundle_manifest_v2(
         trusted_source=trusted_source,
         table_access=table_access,
         storage_access=storage_access,
-        schedule=parse_schedule(raw.get("schedule")),
+        schedule=schedule,
     )
