@@ -57,7 +57,6 @@ from services.bundle_data_schema import (
     MAX_INDEX_WIDTH,
     MAX_INDEXES,
     POSTGRES_IDENTIFIER_MAX_LEN,
-    TABLE_NAME_HASH_SUFFIX_LEN,
     ColumnDecl,
     ColumnType,
     IndexColumnRef,
@@ -209,22 +208,29 @@ def validate_schema_v2(
     return SchemaDeclV2(tables=tuple(tables))
 
 
-def derive_v2_table_identity(app_id: str, logical: str, *, provider: str) -> TableIdentity:
-    """Physical ``(schema, table)`` for one logical table: ``<app>__<logical>``.
+#: Hex chars of `sha256(app_id)` embedded in every v2 physical name.
+APP_HASH_LEN = 12
+#: Readable app prefix kept in a v2 physical name (63 - 12 hash - 1 - 2 `__` - 32 logical).
+_APP_PREFIX_LEN = 16
 
-    Built on :func:`derive_table_identity` (provider-driven schema, strict
-    charset). If the result exceeds Postgres' 63 bytes it is truncated with a
-    ``sha256(app_id/logical)`` suffix so two truncated names cannot collide.
+
+def derive_v2_table_identity(app_id: str, logical: str, *, provider: str) -> TableIdentity:
+    """Physical ``(schema, table)`` for one logical table: ``<app16>_<sha12(app_id)>__<logical>``.
+
+    **Injective by construction.** The name embeds a hash of the *exact* ``app_id``
+    (so ``a.b`` / ``a_b`` / over-long ids can never collapse onto one name) and the
+    logical name (validated: no ``__``, so the final ``__`` splits unambiguously).
+    Every v2 name contains ``__`` while v1 names never do (v1 rejects it), so the two
+    families cannot collide either. Provisioning and teardown additionally verify the
+    registry row, so even a hash collision fails closed instead of squatting a table.
     """
     base = derive_table_identity(app_id, provider=provider)
     if not _LOGICAL_NAME_RE.fullmatch(logical) or _TABLE_SEPARATOR in logical:
         raise TableDeclarationError("invalid_table_name", f"bad logical name {logical!r}")
-    table = f"{base.table}{_TABLE_SEPARATOR}{logical}"
-    if len(table) > POSTGRES_IDENTIFIER_MAX_LEN:
-        digest = hashlib.sha256(f"{app_id}/{logical}".encode()).hexdigest()
-        digest = digest[:TABLE_NAME_HASH_SUFFIX_LEN]
-        keep = POSTGRES_IDENTIFIER_MAX_LEN - TABLE_NAME_HASH_SUFFIX_LEN - 1
-        table = f"{table[:keep]}_{digest}"
+    digest = hashlib.sha256(app_id.encode("utf-8")).hexdigest()[:APP_HASH_LEN]
+    prefix = base.table[:_APP_PREFIX_LEN].rstrip("_")
+    table = f"{prefix}_{digest}{_TABLE_SEPARATOR}{logical}"
+    assert len(table) <= POSTGRES_IDENTIFIER_MAX_LEN  # noqa: S101 - arithmetic invariant above
     return TableIdentity(schema=base.schema, table=table)
 
 
@@ -315,17 +321,73 @@ _UPSERT_REGISTRY = sql.SQL(
 )
 
 
+class TableOwnershipError(Exception):
+    """Raised when provisioning/migration/teardown would touch a table this app does not own.
+
+    Fail closed: a physical table that is registered to another ``(app_id, logical)``, or
+    that exists with no registry row at all, is never created over, migrated, or dropped.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        """Store the machine-checkable `reason` code alongside the human-readable `detail`."""
+        self.reason = reason
+        super().__init__(f"{reason}: {detail}")
+
+
+def _schema_kind(identity: TableIdentity) -> str:
+    return "core" if identity.schema == APP_CORE_SCHEMA else "community"
+
+
+def _registered_owner(cursor: Any, identity: TableIdentity) -> tuple[str, str] | None:
+    """The ``(app_id, logical_name)`` the registry says owns this physical table, if any."""
+    cursor.execute(
+        "SELECT app_id, logical_name FROM bundle_data.table_registry"
+        " WHERE schema_kind = %s AND physical_table = %s",
+        (_schema_kind(identity), identity.table),
+    )
+    row = cursor.fetchone()
+    return None if row is None else (row[0], row[1])
+
+
+def _table_exists(cursor: Any, identity: TableIdentity) -> bool:
+    cursor.execute(
+        "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+        " WHERE n.nspname = %s AND c.relname = %s",
+        (identity.schema, identity.table),
+    )
+    return cursor.fetchone() is not None
+
+
+def _create_table(
+    cursor: Any, app_id: str, provider: str, table: TableDeclV2, identity: TableIdentity
+) -> None:
+    """Create one new table, refusing if the physical name is registered or already present."""
+    owner = _registered_owner(cursor, identity)
+    if owner is not None:
+        raise TableOwnershipError(
+            "name_registered",
+            f"physical table {identity.table!r} is already registered to another owner",
+        )
+    if _table_exists(cursor, identity):
+        raise TableOwnershipError(
+            "name_occupied",
+            f"physical table {identity.schema}.{identity.table} already exists unregistered",
+        )
+    for stmt in generate_v2_table_ddl(identity, table):
+        cursor.execute(stmt)
+    cursor.execute(_UPSERT_REGISTRY, registry_row(app_id, provider, table))
+
+
 def provision_schema(cursor: Any, app_id: str, provider: str, schema: SchemaDeclV2) -> None:
     """Create every table (+ RLS, grants, indexes) and register it, in the caller's transaction.
 
-    Run as ``waddles_bundle_migrator``. Atomic with the caller's transaction:
-    a failure part-way leaves neither tables nor registry rows.
+    Run as ``waddles_bundle_migrator``. Atomic with the caller's transaction: a failure
+    part-way leaves neither tables nor registry rows. Refuses (``TableOwnershipError``) to
+    create over a name that is registered to anyone or already exists.
     """
     for table in schema.tables:
         identity = derive_v2_table_identity(app_id, table.name, provider=provider)
-        for stmt in generate_v2_table_ddl(identity, table):
-            cursor.execute(stmt)
-        cursor.execute(_UPSERT_REGISTRY, registry_row(app_id, provider, table))
+        _create_table(cursor, app_id, provider, table, identity)
 
 
 def migrate_schema(
@@ -334,7 +396,8 @@ def migrate_schema(
     """Additive upgrade: new tables, new nullable/defaulted columns, new indexes.
 
     Anything destructive (dropped table or column, type change) raises
-    :class:`MigrationError`, exactly like the v1 additive-only rule.
+    :class:`MigrationError`, exactly like the v1 additive-only rule. An existing table is
+    only altered after the registry confirms it belongs to this ``(app_id, logical)``.
     """
     for old_table in old.tables:
         if new.table(old_table.name) is None:
@@ -343,16 +406,19 @@ def migrate_schema(
         identity = derive_v2_table_identity(app_id, table.name, provider=provider)
         previous = old.table(table.name)
         if previous is None:
-            for stmt in generate_v2_table_ddl(identity, table):
-                cursor.execute(stmt)
-        else:
-            plan = compute_additive_migration(previous.declaration, table.declaration)
-            for stmt in generate_additive_migration_ddl(identity, plan):
-                cursor.execute(stmt)
-            old_keys = {_index_key(i) for i in previous.indexes}
-            for index in table.indexes:
-                if _index_key(index) not in old_keys:
-                    cursor.execute(generate_v2_index_ddl(identity, index))
+            _create_table(cursor, app_id, provider, table, identity)
+            continue
+        if _registered_owner(cursor, identity) != (app_id, table.name):
+            raise TableOwnershipError(
+                "not_owned", f"{identity.table!r} is not registered to {app_id}/{table.name}"
+            )
+        plan = compute_additive_migration(previous.declaration, table.declaration)
+        for stmt in generate_additive_migration_ddl(identity, plan):
+            cursor.execute(stmt)
+        old_keys = {_index_key(i) for i in previous.indexes}
+        for index in table.indexes:
+            if _index_key(index) not in old_keys:
+                cursor.execute(generate_v2_index_ddl(identity, index))
         cursor.execute(_UPSERT_REGISTRY, registry_row(app_id, provider, table))
 
 
@@ -361,9 +427,35 @@ def _index_key(index: IndexDeclV2) -> tuple[Any, ...]:
 
 
 def teardown_schema(cursor: Any, app_id: str, provider: str, schema: SchemaDeclV2) -> None:
-    """Drop every table and its registry/usage rows (uninstall; run as the migrator)."""
+    """Drop this app's tables and its registry/usage rows (uninstall; run as the migrator).
+
+    The registry is the source of truth for ownership: only tables whose registry row
+    ``(app_id, logical) -> physical`` belongs to *this* app, and whose physical name is
+    exactly what :func:`derive_v2_table_identity` yields for it, are dropped. Every row is
+    verified BEFORE the first ``DROP`` (all-or-nothing), and a declared table with no
+    registry row is refused -- never a blind ``DROP`` of a name that merely looks right.
+    """
+    cursor.execute(
+        "SELECT logical_name, schema_kind, physical_table FROM bundle_data.table_registry"
+        " WHERE app_id = %s",
+        (app_id,),
+    )
+    owned = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
     for table in schema.tables:
-        identity = derive_v2_table_identity(app_id, table.name, provider=provider)
+        if table.name not in owned:
+            raise TableOwnershipError(
+                "not_registered", f"{app_id}/{table.name} has no registry row; refusing to drop"
+            )
+    to_drop = []
+    for logical, (kind, physical) in owned.items():
+        identity = derive_v2_table_identity(app_id, logical, provider=provider)
+        if (_schema_kind(identity), identity.table) != (kind, physical):
+            raise TableOwnershipError(
+                "identity_mismatch",
+                f"registry maps {app_id}/{logical} to {physical!r}, expected {identity.table!r}",
+            )
+        to_drop.append(identity)
+    for identity in to_drop:
         cursor.execute(generate_drop_table_ddl(identity))
     cursor.execute("DELETE FROM bundle_data.table_registry WHERE app_id = %s", (app_id,))
     cursor.execute("DELETE FROM bundle_data.usage WHERE app_id = %s", (app_id,))
@@ -376,6 +468,7 @@ __all__ = [
     "IndexColumnV2",
     "IndexDeclV2",
     "SchemaDeclV2",
+    "TableOwnershipError",
     "TableDeclV2",
     "derive_v2_table_identity",
     "generate_v2_index_ddl",

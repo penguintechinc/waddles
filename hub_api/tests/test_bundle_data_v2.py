@@ -7,17 +7,21 @@ across all tables, additive migration, and teardown. Tiers 2/3 use the
 `bundle_data_pg_conn` fixture and are skipped (not failed) without Docker.
 """
 
+# ruff: noqa: S608 -- test SQL interpolates only server-derived physical table names
+
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pytest
 
 from services.bundle_data_ddl import MigrationError, render_ddl_sql
-from services.bundle_data_schema import TableDeclarationError
+from services.bundle_data_schema import TableDeclarationError, derive_table_identity
 from services.bundle_data_v2 import (
     MAX_TABLES,
+    TableOwnershipError,
     derive_v2_table_identity,
     generate_v2_table_ddl,
     migrate_schema,
@@ -49,6 +53,11 @@ _RAW: dict[str, Any] = {
     ]
 }
 _APP = "waddles.cal.test"
+
+
+def _phys(logical: str, app: str = _APP) -> str:
+    """The derived physical table name (hash-qualified; never hand-written in tests)."""
+    return derive_v2_table_identity(app, logical, provider="thirdparty").table
 
 
 def _schema() -> Any:
@@ -122,7 +131,8 @@ class TestIdentityAndRegistry:
 
     def test_identity_is_app_double_underscore_logical(self) -> None:
         ident = derive_v2_table_identity(_APP, "events", provider="thirdparty")
-        assert (ident.schema, ident.table) == ("app_community", "waddles_cal_test__events")
+        assert ident.schema == "app_community"
+        assert re.fullmatch(r"waddles_cal_test_[0-9a-f]{12}__events", ident.table)
         core = derive_v2_table_identity(_APP, "events", provider="builtin")
         assert core.schema == "app_core"
 
@@ -132,6 +142,44 @@ class TestIdentityAndRegistry:
         b = derive_v2_table_identity(app, "events2", provider="thirdparty")
         assert len(a.table) <= 63 and len(b.table) <= 63 and a.table != b.table
 
+    def test_physical_names_are_injective_across_apps_and_logicals(self) -> None:
+        """Regression (security review): `.`/`_` normalization and `__` must not alias names."""
+        apps = [
+            "waddles.cal.test",
+            "waddles_cal_test",
+            "waddles.cal_test",
+            "waddles.cal.test2",
+            "a.b",
+            "a_b",
+            "waddles." + "x" * 70 + "1",
+            "waddles." + "x" * 70 + "2",
+        ]
+        names: dict[tuple[str, str], tuple[str, str]] = {}
+        for app in apps:
+            for logical in ["events", "subs", "a", "events_subs", "x" * 32]:
+                ident = derive_v2_table_identity(app, logical, provider="thirdparty")
+                key = (ident.schema, ident.table)
+                assert key not in names, f"{(app, logical)} collides with {names[key]}"
+                assert len(ident.table) <= 63
+                names[key] = (app, logical)
+        # the same raw app id under the two providers lives in different schemas
+        a = derive_v2_table_identity("a.b", "t", provider="thirdparty")
+        b = derive_v2_table_identity("a.b", "t", provider="builtin")
+        assert (a.schema, a.table) != (b.schema, b.table)
+
+    def test_logical_underscores_cannot_alias_another_logical_name(self) -> None:
+        a = derive_v2_table_identity(_APP, "ab_cd", provider="thirdparty")
+        b = derive_v2_table_identity(_APP, "ab", provider="thirdparty")
+        assert a.table != b.table and a.table.endswith("__ab_cd")
+
+    def test_v1_namespace_is_disjoint_from_v2(self) -> None:
+        """v1 rejects `__`; every v2 name has one -> a v1 app can never squat a v2 table."""
+        for app in ["a..b", "a._b", "x__y", "x.._y"]:
+            with pytest.raises(TableDeclarationError) as e:
+                derive_table_identity(app, provider="thirdparty")
+            assert e.value.reason == "invalid_table_identity"
+        assert "__" in derive_v2_table_identity(_APP, "events", provider="thirdparty").table
+
     def test_guest_cannot_smuggle_a_separator(self) -> None:
         with pytest.raises(TableDeclarationError):
             derive_v2_table_identity(_APP, "a__b", provider="thirdparty")
@@ -139,7 +187,7 @@ class TestIdentityAndRegistry:
     def test_registry_row_shape(self) -> None:
         row = registry_row(_APP, "thirdparty", _schema().table("events"))
         assert row["app_id"] == _APP and row["schema_kind"] == "community"
-        assert row["physical_table"] == "waddles_cal_test__events"
+        assert row["physical_table"] == _phys("events")
         cols = json.loads(row["columns"])
         assert {"name": "kind", "nullable": True, "type": "int4"} in cols
         idx = json.loads(row["indexes"])
@@ -158,7 +206,7 @@ def cur(bundle_data_pg_conn: Any) -> Any:
             " indexes jsonb NOT NULL DEFAULT '[]'::jsonb,"
             " created_at timestamptz NOT NULL DEFAULT now(),"
             " updated_at timestamptz NOT NULL DEFAULT now(),"
-            " PRIMARY KEY (app_id, logical_name))"
+            " PRIMARY KEY (app_id, logical_name), UNIQUE (schema_kind, physical_table))"
         )
         c.execute(
             "CREATE TABLE bundle_data.usage (app_id text NOT NULL, tenant_id integer NOT NULL,"
@@ -174,10 +222,10 @@ class TestGoldenDdl:
     def test_indexes_are_scope_prefixed_and_pattern_ops_applied(self, cur: Any) -> None:
         ident = derive_v2_table_identity(_APP, "events", provider="thirdparty")
         stmts = render_ddl_sql(generate_v2_table_ddl(ident, _schema().table("events")), cur)
-        assert stmts[0].startswith('CREATE TABLE "app_community"."waddles_cal_test__events"')
+        assert stmts[0].startswith(f'CREATE TABLE "app_community"."{_phys("events")}"')
         joined = "\n".join(stmts)
         assert (
-            'ON "app_community"."waddles_cal_test__events" '
+            f'ON "app_community"."{_phys("events")}" '
             '("tenant_id", "community_id", "start_at")' in joined
         )
         assert '("tenant_id", "community_id", "title" text_pattern_ops)' in joined
@@ -201,12 +249,12 @@ class TestRealPostgres:
             "SELECT logical_name, physical_table FROM bundle_data.table_registry ORDER BY 1"
         )
         assert cur.fetchall() == [
-            ("events", "waddles_cal_test__events"),
-            ("subs", "waddles_cal_test__subs"),
+            ("events", _phys("events")),
+            ("subs", _phys("subs")),
         ]
         # unique index is per (tenant, community): same slug in another community is fine
         ins = (
-            "INSERT INTO app_community.waddles_cal_test__subs (tenant_id, community_id, slug)"
+            f"INSERT INTO app_community.{_phys('subs')} (tenant_id, community_id, slug)"
             " VALUES (%s, %s, %s)"
         )
         cur.execute(ins, (1, 7, "daily"))
@@ -219,7 +267,7 @@ class TestRealPostgres:
     ) -> None:
         provision_schema(cur, _APP, "thirdparty", _schema())
         cur.execute(
-            "INSERT INTO app_community.waddles_cal_test__events"
+            f"INSERT INTO app_community.{_phys('events')}"
             " (tenant_id, community_id, title, start_at)"
             " VALUES (1, 7, 'a', now()), (1, 8, 'b', now())"
         )
@@ -227,11 +275,11 @@ class TestRealPostgres:
         cur.execute("SET ROLE v2_probe")
         cur.execute("SELECT set_config('waddles.tenant_id', '1', false)")
         cur.execute("SELECT set_config('waddles.community_id', '7', false)")
-        cur.execute("SELECT title FROM app_community.waddles_cal_test__events")
+        cur.execute(f"SELECT title FROM app_community.{_phys('events')}")
         assert cur.fetchall() == [("a",)]
         # unscoped session sees nothing (fails closed)
         cur.execute("SELECT set_config('waddles.community_id', '', false)")
-        cur.execute("SELECT count(*) FROM app_community.waddles_cal_test__events")
+        cur.execute(f"SELECT count(*) FROM app_community.{_phys('events')}")
         assert cur.fetchone() == (0,)
         cur.execute("RESET ROLE")
 
@@ -250,7 +298,8 @@ class TestRealPostgres:
         migrate_schema(cur, _APP, "thirdparty", old, new)
         cur.execute(
             "SELECT column_name FROM information_schema.columns"
-            " WHERE table_name = 'waddles_cal_test__events' AND column_name = 'room'"
+            " WHERE table_name = %s AND column_name = 'room'",
+            (_phys("events"),),
         )
         assert cur.fetchone() == ("room",)
         cur.execute("SELECT count(*) FROM bundle_data.table_registry WHERE app_id = %s", (_APP,))
@@ -272,9 +321,95 @@ class TestRealPostgres:
         provision_schema(cur, _APP, "thirdparty", s)
         cur.execute("INSERT INTO bundle_data.usage VALUES (%s, 1, 7, 3, 100)", (_APP,))
         teardown_schema(cur, _APP, "thirdparty", s)
-        cur.execute("SELECT to_regclass('app_community.waddles_cal_test__events')")
+        cur.execute("SELECT to_regclass(%s)", (f"app_community.{_phys('events')}",))
         assert cur.fetchone() == (None,)
         cur.execute("SELECT count(*) FROM bundle_data.table_registry")
         assert cur.fetchone() == (0,)
         cur.execute("SELECT count(*) FROM bundle_data.usage")
         assert cur.fetchone() == (0,)
+
+
+class TestOwnershipFailsClosed:
+    """Provisioning / migration / teardown never touch a table this app does not own."""
+
+    def test_provision_refuses_a_name_registered_to_another_app(self, cur: Any) -> None:
+        ident = derive_v2_table_identity(_APP, "events", provider="thirdparty")
+        # a different owner already holds that physical name (e.g. a forced hash collision)
+        cur.execute(
+            "INSERT INTO bundle_data.table_registry VALUES"
+            " ('other.app', 'events', 'community', %s, '[]', '[]')",
+            (ident.table,),
+        )
+        with pytest.raises(TableOwnershipError) as e:
+            provision_schema(cur, _APP, "thirdparty", _schema())
+        assert e.value.reason == "name_registered"
+
+    def test_provision_refuses_an_existing_unregistered_table(self, cur: Any) -> None:
+        ident = derive_v2_table_identity(_APP, "events", provider="thirdparty")
+        cur.execute(f'CREATE TABLE app_community."{ident.table}" (x int)')
+        cur.execute(f'INSERT INTO app_community."{ident.table}" VALUES (1)')
+        with pytest.raises(TableOwnershipError) as e:
+            provision_schema(cur, _APP, "thirdparty", _schema())
+        assert e.value.reason == "name_occupied"
+        cur.execute(f'SELECT count(*) FROM app_community."{ident.table}"')
+        assert cur.fetchone() == (1,), "the squatted table must be left untouched"
+
+    def test_teardown_drops_only_this_apps_tables(self, cur: Any) -> None:
+        mine, theirs = _schema(), _schema()
+        provision_schema(cur, _APP, "thirdparty", mine)
+        provision_schema(cur, "waddles.cal_test", "thirdparty", theirs)  # near-identical id
+        teardown_schema(cur, _APP, "thirdparty", mine)
+        cur.execute("SELECT to_regclass(%s)", (f"app_community.{_phys('events')}",))
+        assert cur.fetchone() == (None,)
+        other = _phys("events", "waddles.cal_test")
+        cur.execute("SELECT to_regclass(%s)", (f"app_community.{other}",))
+        assert cur.fetchone()[0] is not None, "another app's table must survive"
+        cur.execute(
+            "SELECT count(*) FROM bundle_data.table_registry WHERE app_id = 'waddles.cal_test'"
+        )
+        assert cur.fetchone() == (2,)
+
+    def test_teardown_refuses_unregistered_and_tampered_rows_before_dropping_anything(
+        self, cur: Any
+    ) -> None:
+        schema = _schema()
+        # declared tables with no registry rows -> refuse (never blind-drop a lookalike name)
+        ident = derive_v2_table_identity(_APP, "events", provider="thirdparty")
+        cur.execute(f'CREATE TABLE app_community."{ident.table}" (x int)')
+        with pytest.raises(TableOwnershipError) as e:
+            teardown_schema(cur, _APP, "thirdparty", schema)
+        assert e.value.reason == "not_registered"
+        cur.execute("SELECT to_regclass(%s)", (f"app_community.{ident.table}",))
+        assert cur.fetchone()[0] is not None
+        cur.execute(f'DROP TABLE app_community."{ident.table}"')
+        # a registry row pointing at somebody else's table -> refuse, drop nothing
+        provision_schema(cur, _APP, "thirdparty", schema)
+        victim = _phys("events", "victim.app")
+        cur.execute(f'CREATE TABLE app_community."{victim}" (x int)')
+        cur.execute(
+            "UPDATE bundle_data.table_registry SET physical_table = %s"
+            " WHERE app_id = %s AND logical_name = 'subs'",
+            (victim, _APP),
+        )
+        with pytest.raises(TableOwnershipError) as e:
+            teardown_schema(cur, _APP, "thirdparty", schema)
+        assert e.value.reason == "identity_mismatch"
+        cur.execute("SELECT to_regclass(%s)", (f"app_community.{victim}",))
+        assert cur.fetchone()[0] is not None, "victim table survives a tampered registry"
+        cur.execute("SELECT to_regclass(%s)", (f"app_community.{_phys('events')}",))
+        assert cur.fetchone()[0] is not None, "all-or-nothing: nothing dropped on refusal"
+
+    def test_migrate_refuses_a_table_not_registered_to_this_app(self, cur: Any) -> None:
+        old = _schema()
+        provision_schema(cur, _APP, "thirdparty", old)
+        cur.execute(
+            "UPDATE bundle_data.table_registry SET app_id = 'someone.else'"
+            " WHERE app_id = %s AND logical_name = 'events'",
+            (_APP,),
+        )
+        raw = json.loads(json.dumps(_RAW))
+        raw["tables"][0]["columns"].append({"name": "room", "type": "text(20)", "nullable": True})
+        new = validate_schema_v2(raw, provider="thirdparty")
+        with pytest.raises(TableOwnershipError) as e:
+            migrate_schema(cur, _APP, "thirdparty", old, new)
+        assert e.value.reason == "not_owned"

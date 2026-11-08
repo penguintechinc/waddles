@@ -66,7 +66,14 @@ data:
 ```
 
 `data.tables` must equal the set of `data.schema.tables` names. Physical table =
-`<app>__<logical>` (hash-truncated at 63 bytes). Indexes are always created over
+`<app16>_<sha256(app_id)[:12]>__<logical>` (<= 63 bytes): **injective** -- the hash covers the exact
+`app_id`, so `a.b` / `a_b` / over-long ids cannot alias, and logical names cannot contain `__`.
+Every v2 name contains `__` while v1 names never do (v1 now rejects it), so the families are disjoint.
+Provisioning refuses (`TableOwnershipError`) to create over a name that is registered to anyone or
+already exists; `migrate_schema` only alters tables the registry says belong to this `(app_id, logical)`;
+`teardown_schema` verifies every registry row against the derived name BEFORE the first `DROP`
+(all-or-nothing) and never drops a table it cannot prove it owns. `bundle_data.table_registry` has
+`UNIQUE (schema_kind, physical_table)`. Indexes are always created over
 `(tenant_id, community_id, <declared columns>)`. Migrations are additive-only
 (new tables, new nullable/defaulted columns, new indexes); anything destructive is refused.
 
