@@ -122,6 +122,11 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
+        {{- if .Values.bundleStorageV2.migrator.enabled }}
+        # Bundle storage v2: DDL role (waddles_bundle_migrator) password; hub-api only, never
+        # mounted into the data-plane pods. Operator-managed existingSecret, off by default.
+{{- include "waddlebot.bundleMigratorEnv" . | nindent 8 }}
+        {{- end }}
         # `flask_core.service_jwt.load_issuer_from_env` also reads
         # SERVICE_JWT_PUBLIC_KEY_<kid> for every still-valid-for-verification
         # rotation key -- these are public keys, safe to render directly

@@ -856,3 +856,9 @@ config:
   # Monday-demo: ENV baseline for waddles.role_sync -> FLAG_WADDLES_ROLE_SYNC
   # (read by hub-api + the role-sync CronJob via envFrom waddlebot-config; PostHog still overrides).
   roleSyncEnabled: true
+
+# Bundle storage v2 (references only; Secrets are created out-of-band). Enable once the
+# Secrets exist -- off here so the pods keep starting without them:
+# bundleStorageV2:
+#   db: {enabled: true, existingSecret: waddlebot-bundle-db}
+#   migrator: {enabled: true, existingSecret: waddlebot-bundle-migrator}
