@@ -174,7 +174,7 @@ impl StageModel {
                 let tool = args["tool"].as_str().unwrap();
                 assert!(matches!(
                     tool,
-                    "points_view" | "get_balance" | "adjust_balance"
+                    "points_view" | "get_balance" | "adjust_balance" | "transfer_from"
                 ));
                 let user = args["args"]["user"].as_str().unwrap();
                 assert!(matches!(
@@ -590,6 +590,9 @@ async fn csharp_port_matrix_executes_commands_and_replays_through_real_executor(
         ("first", "!first"),
         ("roulette", "!roulette 10"),
         ("duel", "!duel 22222222-2222-4222-8222-222222222222 10"),
+        ("ffa", "!ffa"),
+        ("heist", "!heist 100"),
+        ("steal", "!steal 22222222-2222-4222-8222-222222222222"),
     ];
     let mut examined = 0;
     for (game, command) in cases {
@@ -648,5 +651,5 @@ async fn csharp_port_matrix_executes_commands_and_replays_through_real_executor(
         examined += 1;
         println!("C# real-executor matrix: {game} PASS");
     }
-    assert_eq!(examined, 6, "zero or partial port coverage must fail");
+    assert_eq!(examined, 9, "zero or partial port coverage must fail");
 }

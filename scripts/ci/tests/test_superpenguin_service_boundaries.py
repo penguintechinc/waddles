@@ -1,5 +1,6 @@
 """The C# ports keep game rules in apps and consume existing service contracts."""
 
+import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
-GAMES = ("roll", "slots", "gamble", "defuse", "duel", "first", "roulette")
+GAMES = ("roll", "slots", "gamble", "defuse", "duel", "first", "roulette", "ffa", "heist")
 
 
 @pytest.mark.parametrize("game", GAMES)
@@ -51,3 +52,28 @@ def test_game_operations_never_become_core_economy_tools():
         directory = ROOT / "bundles/csharp" / f"superpenguin-{game}"
         source = "\n".join(path.read_text() for path in directory.glob("*Logic.cs"))
         assert "host.Economy.Wager(" in source
+
+
+def test_steal_requests_only_the_transfer_from_contract_and_never_a_private_ledger():
+    """Steal's victim debit goes through the economy `transfer_from` tool, coded to a contract fixture."""
+    directory = ROOT / "bundles/csharp/superpenguin-steal"
+    manifest = yaml.safe_load((directory / "bundle.yaml").read_text())
+    install = yaml.safe_load((directory / "hub-manifest.yaml").read_text())
+    fixture = json.loads((directory / "contract/transfer_from.json").read_text())
+    assert manifest["permissions"] == install["permissions"]
+    assert manifest["requested_tools"] == install["requested_tools"]
+    assert manifest["author"] == "github/psychoboy"
+    assert manifest["collection"] == "superpenguintv"
+    assert "Copyright (c) 2023 Psychoboy" in manifest["notice"]
+    requests = {r["tool"]: r for r in manifest["requested_tools"]}
+    assert requests["transfer_from"]["access"] == fixture["access"] == "write"
+    assert set(requests) == {"points_view", "get_balance", "transfer_from"}
+    grants = {p["id"]: p for p in manifest["permissions"]}
+    assert not any(key.startswith("economy.") for key in grants)
+    service = yaml.safe_load((ROOT / "bundles/rust/economy/bundle.yaml").read_text())
+    exported = {tool["name"]: tool for tool in service["exported_tools"]}
+    if "transfer_from" in exported:  # once the economy service ships it, it must match the fixture
+        tool = exported["transfer_from"]
+        assert tool["access"] == fixture["access"]
+        assert tool.get("risk") == fixture["risk"]
+        assert set(fixture["args"]) <= set(tool["input_schema"]["properties"])
