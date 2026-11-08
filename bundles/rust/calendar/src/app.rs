@@ -152,8 +152,7 @@ fn run_command(
             let loc = ev
                 .location
                 .as_deref()
-                .map(|l| format!(" @ {}", chat_safe(l)))
-                .unwrap_or_default();
+                .map_or_else(String::new, |l| format!(" @ {}", chat_safe(l)));
             Ok(r(
                 format!(
                     "{}{loc} -- yes: {y}, no: {n}, maybe: {m} (!rsvp {id} yes|no|maybe)",
@@ -340,6 +339,13 @@ fn opt_str(args: &Value, k: &str) -> Option<String> {
     args.get(k).and_then(Value::as_str).map(str::to_string)
 }
 
+/// Optional free-text arg; an absent key is an explicit empty string (not an error).
+fn opt_text(args: &Value, k: &str) -> String {
+    args.get(k)
+        .and_then(Value::as_str)
+        .map_or_else(String::new, str::to_string)
+}
+
 fn req_id(args: &Value) -> Result<u64, CalError> {
     args.get("id")
         .and_then(Value::as_u64)
@@ -392,7 +398,7 @@ pub fn run_admin(
             let zone = parse_tz(tz.as_deref().unwrap_or(&cfg.default_tz))?;
             let n = NewEvent {
                 title: req_str(args, "title")?,
-                description: opt_str(args, "description").unwrap_or_default(),
+                description: opt_text(args, "description"),
                 start: parse_when(&req_str(args, "starts_at")?, &zone)?,
                 end: opt_str(args, "ends_at")
                     .map(|e| parse_when(&e, &zone))

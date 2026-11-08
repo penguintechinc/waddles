@@ -55,9 +55,18 @@ pub fn next_id(kv: &dyn Kv) -> Result<u64, CalError> {
     u64::try_from(n).map_err(|_| CalError::Storage("event id counter went negative".into()))
 }
 
+/// Reads an id list; an absent key is an explicitly empty list (nothing stored yet), a
+/// storage/decode failure propagates.
+fn load_list(kv: &dyn Kv, key: &str) -> Result<Vec<u64>, CalError> {
+    match load::<Vec<u64>>(kv, key)? {
+        Some(v) => Ok(v),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Ids of all stored events, ascending.
 pub fn index(kv: &dyn Kv) -> Result<Vec<u64>, CalError> {
-    Ok(load::<Vec<u64>>(kv, INDEX)?.unwrap_or_default())
+    load_list(kv, INDEX)
 }
 
 /// Adds/removes one id in a shared list with a read-back check: after writing, the list is
@@ -65,7 +74,7 @@ pub fn index(kv: &dyn Kv) -> Result<Vec<u64>, CalError> {
 /// persistent loss is a loud `Conflict`).
 fn update_list(kv: &dyn Kv, key: &str, id: u64, add: bool) -> Result<(), CalError> {
     for _ in 0..LIST_RETRIES {
-        let mut v = load::<Vec<u64>>(kv, key)?.unwrap_or_default();
+        let mut v = load_list(kv, key)?;
         let has = v.contains(&id);
         if has != add {
             if add {
@@ -75,7 +84,7 @@ fn update_list(kv: &dyn Kv, key: &str, id: u64, add: bool) -> Result<(), CalErro
             }
             save(kv, key, &v)?;
         }
-        let check = load::<Vec<u64>>(kv, key)?.unwrap_or_default();
+        let check = load_list(kv, key)?;
         if check.contains(&id) == add {
             return Ok(());
         }
@@ -196,7 +205,7 @@ pub fn put_sync_record(kv: &dyn Kv, id: u64, r: &SyncRecord) -> Result<(), CalEr
 
 /// Event ids owing at least one sync op.
 pub fn pending(kv: &dyn Kv) -> Result<Vec<u64>, CalError> {
-    Ok(load::<Vec<u64>>(kv, PENDQ)?.unwrap_or_default())
+    load_list(kv, PENDQ)
 }
 
 /// Adds an event id to the pending-sync queue (verified).
