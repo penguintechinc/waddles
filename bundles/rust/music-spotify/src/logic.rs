@@ -31,15 +31,15 @@ pub const REF_USER: &str = "spotify.oauth";
 /// Default and maximum search page (legacy parity: 10).
 pub const DEFAULT_SEARCH_LIMIT: u32 = 10;
 /// Largest search page Spotify allows.
-pub const MAX_SEARCH_LIMIT: u32 = 50;
+pub const MAX_SEARCH_LIMIT: u32 = 25;
 /// Default playlist page.
-pub const DEFAULT_PLAYLIST_LIMIT: u32 = 50;
+pub const DEFAULT_PLAYLIST_LIMIT: u32 = 25;
 /// Largest playlist page Spotify allows.
-pub const MAX_PLAYLIST_LIMIT: u32 = 100;
+pub const MAX_PLAYLIST_LIMIT: u32 = 50;
 /// Longest search query accepted.
 pub const MAX_QUERY_LEN: usize = 200;
 /// Longest Spotify reference (URL/URI) accepted.
-pub const MAX_REF_LEN: usize = 200;
+pub const MAX_REF_LEN: usize = 512;
 /// Most URIs one `player.play` may carry (Spotify's cap).
 pub const MAX_PLAY_URIS: usize = 100;
 /// Default upstream calls per community per minute.
@@ -217,15 +217,6 @@ pub enum Kind {
     Playlist,
 }
 
-impl Kind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Kind::Track => "track",
-            Kind::Playlist => "playlist",
-        }
-    }
-}
-
 /// Parses a Spotify URI (`spotify:track:<id>`) or an `https://open.spotify.com`
 /// link into `(kind, id)`. The host is pinned exactly; short links
 /// (`spotify.link`) are refused so the bundle never follows a redirect.
@@ -281,6 +272,24 @@ fn playlist_ref(raw: &str) -> Result<String, ToolError> {
     }
 }
 
+/// A contract `id` argument: <= 64 chars, a bare 22-char Spotify id or a
+/// `spotify:<kind>:<id>` URI of the expected kind.
+fn id_arg(raw: &str, want: Kind) -> Result<String, ToolError> {
+    if raw.is_empty() || raw.len() > 64 {
+        return Err(invalid("invalid_id"));
+    }
+    if valid_id(raw) {
+        return Ok(raw.to_string());
+    }
+    match parse_ref(raw)? {
+        (k, id) if k == want => Ok(id),
+        _ => Err(invalid(match want {
+            Kind::Track => "expected_track_reference",
+            Kind::Playlist => "expected_playlist_reference",
+        })),
+    }
+}
+
 fn device_ok(d: &str) -> bool {
     !d.is_empty()
         && d.len() <= 80
@@ -309,14 +318,15 @@ fn require_key(ctx: &ToolContext) -> Result<&str, ToolError> {
     }
 }
 
-/// Capability flags every output carries so a caller degrades loudly.
+/// Capability flags every output carries (shared music contract: `playback`,
+/// `server_audio`, `queue_add`) so a caller degrades loudly. Spotify plays via
+/// Connect on the streamer's Premium device and never streams audio itself.
 pub fn capability() -> Value {
     json!({
-        "provider": "spotify",
-        "metadata": true,
-        "playback": "spotify-connect",
+        "playback": "connect",
+        "server_audio": false,
+        "queue_add": true,
         "requires_premium": true,
-        "embed_only": false,
     })
 }
 
@@ -405,16 +415,16 @@ pub fn track_json(item: &Value) -> Option<Value> {
         );
     Some(json!({
         "provider": "spotify",
-        "external_id": id,
+        "id": id,
         "title": item.get("name").and_then(Value::as_str).unwrap_or(""),
         "artist": artists.first().cloned().unwrap_or_default(),
         "artists": artists,
         "album": album.and_then(|a| a.get("name")).and_then(Value::as_str).unwrap_or(""),
         "duration_ms": item.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
-        "artwork_url": album.and_then(|a| a.get("images")).and_then(best_image),
-        "url": url,
+        "thumbnail": album.and_then(|a| a.get("images")).and_then(best_image),
+        "source_url": url,
         "uri": format!("spotify:track:{id}"),
-        "explicit": item.get("explicit").and_then(Value::as_bool).unwrap_or(false),
+        "explicit": item.get("explicit").and_then(Value::as_bool),
     }))
 }
 
@@ -428,15 +438,15 @@ struct SearchArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TrackArgs {
-    track: String,
+    id: String,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PlaylistArgs {
-    playlist: String,
+    playlist_id: String,
     limit: Option<u32>,
-    offset: Option<u32>,
+    page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -567,14 +577,15 @@ impl Spotify {
         serde_json::from_slice(&resp.body).map_err(|_| invalid("upstream_malformed"))
     }
 
-    /// Cache read-through keyed by `key`, verified against `material`.
+    /// Cache read-through keyed by `key`, verified against `material`;
+    /// returns `(value, was_cache_hit)`.
     fn cached(
         &self,
         cfg: &Config,
         key: &str,
         material: &str,
         fetch: impl FnOnce() -> Result<Value, ToolError>,
-    ) -> Result<Value, ToolError> {
+    ) -> Result<(Value, bool), ToolError> {
         let now = self.clock.now_millis();
         if let Some(raw) = self.kv.get(key).map_err(kv_err)?
             && let Ok(entry) = serde_json::from_slice::<Value>(&raw)
@@ -587,7 +598,7 @@ impl Spotify {
                 && entry.get("m").and_then(Value::as_str) == Some(material)
                 && let Some(v) = entry.get("v")
             {
-                return Ok(v.clone());
+                return Ok((v.clone(), true));
             }
         }
         let v = fetch()?;
@@ -598,7 +609,7 @@ impl Spotify {
         });
         let bytes = serde_json::to_vec(&entry).map_err(|_| invalid("internal"))?;
         self.kv.set(key, &bytes, cfg.cache_ttl_s).map_err(kv_err)?;
-        Ok(v)
+        Ok((v, false))
     }
 
     fn market_q(cfg: &Config, first: bool) -> String {
@@ -607,7 +618,7 @@ impl Spotify {
         })
     }
 
-    fn fetch_track(&self, cfg: &Config, cred: Cred, id: &str) -> Result<Value, ToolError> {
+    fn fetch_track(&self, cfg: &Config, cred: Cred, id: &str) -> Result<(Value, bool), ToolError> {
         let key = format!("trk.{}.{id}", cred.tag());
         self.cached(cfg, &key, &key, || {
             let resp = self.get(
@@ -627,7 +638,7 @@ impl Spotify {
         id: &str,
         limit: u32,
         offset: u32,
-    ) -> Result<Value, ToolError> {
+    ) -> Result<(Value, bool), ToolError> {
         let key = format!("pl.{}.{id}.{offset}.{limit}", cred.tag());
         self.cached(cfg, &key, &key, || {
             let head = self.get(
@@ -663,24 +674,42 @@ impl Spotify {
                     None => skipped += 1,
                 }
             }
+            let total = head
+                .get("tracks")
+                .and_then(|t| t.get("total"))
+                .and_then(Value::as_u64)
+                .or_else(|| page.get("total").and_then(Value::as_u64))
+                .unwrap_or(0);
+            // Opaque page token = the next numeric offset; absent on the last page.
+            let next_off = u64::from(offset) + rows.len() as u64;
+            let next_page_token = if !rows.is_empty() && next_off < total {
+                json!(next_off.to_string())
+            } else {
+                Value::Null
+            };
             Ok(json!({
                 "playlist": {
                     "id": id,
                     "name": head.get("name").and_then(Value::as_str).unwrap_or(""),
                     "owner": head.get("owner").and_then(|o| o.get("display_name")).and_then(Value::as_str),
-                    "total": head.get("tracks").and_then(|t| t.get("total")).and_then(Value::as_u64)
-                        .or_else(|| page.get("total").and_then(Value::as_u64)).unwrap_or(0),
-                    "url": format!("https://open.spotify.com/playlist/{id}"),
-                    "offset": offset,
-                    "limit": limit,
-                    "returned": tracks.len(),
-                    "skipped": skipped,
+                    "total": total,
+                    "source_url": format!("https://open.spotify.com/playlist/{id}"),
                 },
                 "tracks": tracks,
+                "skipped": skipped,
+                "next_page_token": next_page_token,
             }))
         })
     }
 
+    /// Adds `cached` + `capability` (every output carries both).
+    fn finish(mut v: Value, cached: bool) -> Value {
+        v["cached"] = json!(cached);
+        v["capability"] = capability();
+        v
+    }
+
+    /// Adds `capability` only (player tools: nothing cacheable).
     fn with_cap(mut v: Value) -> Value {
         v["capability"] = capability();
         v
@@ -688,7 +717,7 @@ impl Spotify {
 
     // ---- metadata tools -------------------------------------------------
 
-    /// `music.spotify.search {query, limit?, auth?}` -> `{tracks, count, capability}`.
+    /// `music.spotify.search {query, limit?<=25}` -> `{tracks, cached, skipped, capability}`.
     pub fn search(&self, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
         let a: SearchArgs = parse_args(args)?;
         let query = a.query.trim();
@@ -706,7 +735,7 @@ impl Spotify {
         let cred = Cred::App;
         let material = format!("{}|{limit}|{query}", cred.tag());
         let key = format!("srch.{}", fnv_hex(&material));
-        let v = self.cached(&cfg, &key, &material, || {
+        let (v, hit) = self.cached(&cfg, &key, &material, || {
             let resp = self.get(
                 &cfg,
                 cred,
@@ -723,47 +752,54 @@ impl Spotify {
                 .and_then(Value::as_array)
                 .ok_or_else(|| invalid("upstream_malformed"))?;
             let tracks: Vec<Value> = items.iter().filter_map(track_json).collect();
-            Ok(json!({ "count": tracks.len(), "tracks": tracks }))
+            Ok(json!({ "skipped": items.len() - tracks.len(), "tracks": tracks }))
         })?;
-        Ok(Self::with_cap(v))
+        Ok(Self::finish(v, hit))
     }
 
-    /// `music.spotify.track {track, auth?}` -> a normalized Track.
+    /// `music.spotify.track {id}` -> `{track, cached, capability}`. `id` is a bare
+    /// track id or a `spotify:track:` URI (<= 64 chars, per the shared contract).
     pub fn track(&self, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
         let a: TrackArgs = parse_args(args)?;
-        let id = track_ref(&a.track)?;
+        let id = id_arg(&a.id, Kind::Track)?;
         let cfg = self.config()?;
-        let t = self.fetch_track(&cfg, Cred::App, &id)?;
-        Ok(Self::with_cap(json!({ "track": t })))
+        let (t, hit) = self.fetch_track(&cfg, Cred::App, &id)?;
+        Ok(Self::finish(json!({ "track": t }), hit))
     }
 
-    /// `music.spotify.playlist.get {playlist, limit?, offset?, auth?}`.
+    /// `music.spotify.playlist.get {playlist_id, limit?<=50, page_token?}` ->
+    /// `{tracks, next_page_token, cached, skipped, capability, playlist}`.
     pub fn playlist_get(&self, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
         let a: PlaylistArgs = parse_args(args)?;
-        let id = playlist_ref(&a.playlist)?;
+        let id = id_arg(&a.playlist_id, Kind::Playlist)?;
         let limit = a.limit.unwrap_or(DEFAULT_PLAYLIST_LIMIT);
-        let offset = a.offset.unwrap_or(0);
-        if !(1..=MAX_PLAYLIST_LIMIT).contains(&limit) || offset > 100_000 {
-            return Err(invalid("invalid_paging"));
+        if !(1..=MAX_PLAYLIST_LIMIT).contains(&limit) {
+            return Err(invalid("invalid_limit"));
         }
+        let offset = match a.page_token.as_deref() {
+            None => 0,
+            Some(t) if t.len() <= 200 && !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) => {
+                t.parse::<u32>()
+                    .ok()
+                    .filter(|o| *o <= 100_000)
+                    .ok_or_else(|| invalid("invalid_page_token"))?
+            }
+            Some(_) => return Err(invalid("invalid_page_token")),
+        };
         let cfg = self.config()?;
-        let v = self.fetch_playlist(&cfg, Cred::App, &id, limit, offset)?;
-        Ok(Self::with_cap(v))
+        let (v, hit) = self.fetch_playlist(&cfg, Cred::App, &id, limit, offset)?;
+        Ok(Self::finish(v, hit))
     }
 
-    /// `music.spotify.resolve {url, auth?}` -> `{kind, track|playlist...}`.
+    /// `music.spotify.resolve {url}` -> `{track, cached, capability}`. Only track
+    /// links resolve (shared contract); a playlist link is `expected_track_reference`
+    /// - fetch it with `playlist.get`.
     pub fn resolve(&self, _ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
         let a: ResolveArgs = parse_args(args)?;
-        let (kind, id) = parse_ref(&a.url)?;
+        let id = track_ref(&a.url)?;
         let cfg = self.config()?;
-        let cred = Cred::App;
-        let mut out = match kind {
-            Kind::Track => json!({ "track": self.fetch_track(&cfg, cred, &id)? }),
-            Kind::Playlist => self.fetch_playlist(&cfg, cred, &id, DEFAULT_PLAYLIST_LIMIT, 0)?,
-        };
-        out["kind"] = json!(kind.as_str());
-        out["id"] = json!(id);
-        Ok(Self::with_cap(out))
+        let (t, hit) = self.fetch_track(&cfg, Cred::App, &id)?;
+        Ok(Self::finish(json!({ "track": t }), hit))
     }
 
     // ---- player tools (connected account) --------------------------------
@@ -1270,10 +1306,13 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(out["count"], 1);
+        assert_eq!(out["tracks"].as_array().unwrap().len(), 1);
+        assert_eq!(out["skipped"], 1);
+        assert_eq!(out["cached"], false);
+        assert!(out.get("count").is_none());
         let t = &out["tracks"][0];
         assert_eq!(t["artist"], "Artist One");
-        assert_eq!(t["artwork_url"], "https://i.scdn.co/big");
+        assert_eq!(t["thumbnail"], "https://i.scdn.co/big");
         assert_eq!(t["uri"], format!("spotify:track:{T1}"));
         assert_eq!(out["capability"]["requires_premium"], true);
         let req = &r.http.requests()[0];
@@ -1295,7 +1334,7 @@ mod tests {
         let out = r
             .call("music.spotify.search", json!({"query": "zzzz"}), None)
             .unwrap();
-        assert_eq!(out["count"], 0);
+        assert_eq!(out["tracks"].as_array().unwrap().len(), 0);
     }
 
     #[test]
@@ -1311,13 +1350,17 @@ mod tests {
         let b = r
             .call("music.spotify.search", json!({"query": "x"}), None)
             .unwrap();
-        assert_eq!(a, b);
+        assert_eq!(a["tracks"], b["tracks"]);
+        assert_eq!(
+            (a["cached"].clone(), b["cached"].clone()),
+            (json!(false), json!(true))
+        );
         assert_eq!(r.http.requests().len(), 1, "second call is a cache hit");
         r.clock.advance(301_000);
         let c = r
             .call("music.spotify.search", json!({"query": "x"}), None)
             .unwrap();
-        assert_eq!(c["tracks"][0]["external_id"], T2);
+        assert_eq!(c["tracks"][0]["id"], T2);
         assert_eq!(r.http.requests().len(), 2);
     }
 
@@ -1346,11 +1389,11 @@ mod tests {
             ),
             (
                 "music.spotify.track",
-                json!({"track": T2_URI(), "auth": "connection"}),
+                json!({"id": T2_URI(), "auth": "connection"}),
             ),
             (
                 "music.spotify.playlist.get",
-                json!({"playlist": p, "auth": "connection"}),
+                json!({"playlist_id": p, "auth": "connection"}),
             ),
             (
                 "music.spotify.resolve",
@@ -1363,7 +1406,7 @@ mod tests {
         assert!(r.http.requests().is_empty());
         // and every accepted metadata call rides the app credential only
         r.http.push(200, &spotify_track(T2, "B"));
-        r.call("music.spotify.track", json!({"track": T2_URI()}), None)
+        r.call("music.spotify.track", json!({"id": T2_URI()}), None)
             .unwrap();
         r.http.push(200, &json!({"tracks": {"items": []}}));
         r.call_as(
@@ -1462,7 +1505,7 @@ mod tests {
             json!({"query": "a\u{0}b"}),
             json!({"query": "x".repeat(201)}),
             json!({"query": "x", "limit": 0}),
-            json!({"query": "x", "limit": 51}),
+            json!({"query": "x", "limit": 26}),
             json!({"query": "x", "bogus": 1}),
             json!({}),
         ] {
@@ -1481,7 +1524,7 @@ mod tests {
         let out = r
             .call(
                 "music.spotify.track",
-                json!({"track": format!("https://open.spotify.com/track/{T1}")}),
+                json!({"id": format!("https://open.spotify.com/track/{T1}")}),
                 None,
             )
             .unwrap();
@@ -1490,19 +1533,19 @@ mod tests {
 
         r.http.push(404, &json!({"error": {"status": 404}}));
         assert_eq!(
-            code(r.call("music.spotify.track", json!({"track": T2_URI()}), None)),
+            code(r.call("music.spotify.track", json!({"id": T2_URI()}), None)),
             "not_found"
         );
         assert_eq!(
             code(r.call(
                 "music.spotify.track",
-                json!({"track": format!("spotify:playlist:{P1}")}),
+                json!({"id": format!("spotify:playlist:{P1}")}),
                 None
             )),
             "expected_track_reference"
         );
         assert_eq!(
-            code(r.call("music.spotify.track", json!({"track": "nope"}), None)),
+            code(r.call("music.spotify.track", json!({"id": "nope"}), None)),
             "invalid_spotify_reference"
         );
     }
@@ -1528,12 +1571,13 @@ mod tests {
         let out = r
             .call(
                 "music.spotify.playlist.get",
-                json!({"playlist": P1_URI(), "limit": 25, "offset": 50}),
+                json!({"playlist_id": P1_URI(), "limit": 25, "page_token": "50"}),
                 None,
             )
             .unwrap();
-        assert_eq!(out["playlist"]["returned"], 2);
-        assert_eq!(out["playlist"]["skipped"], 2);
+        assert_eq!(out["tracks"].as_array().unwrap().len(), 2);
+        assert_eq!(out["skipped"], 2);
+        assert_eq!(out["next_page_token"], Value::Null, "50+4 rows >= total 4");
         assert_eq!(out["playlist"]["total"], 4);
         assert_eq!(out["playlist"]["name"], "Mix");
         let reqs = r.http.requests();
@@ -1552,22 +1596,93 @@ mod tests {
     }
 
     #[test]
-    fn playlist_paging_bounds() {
+    fn playlist_paging_bounds_and_tokens() {
         let r = Rig::new();
-        for a in [
-            json!({"playlist": P1_URI(), "limit": 0}),
-            json!({"playlist": P1_URI(), "limit": 101}),
-            json!({"playlist": P1_URI(), "offset": 100001}),
+        for (a, want) in [
+            (
+                json!({"playlist_id": P1_URI(), "limit": 0}),
+                "invalid_limit",
+            ),
+            (
+                json!({"playlist_id": P1_URI(), "limit": 51}),
+                "invalid_limit",
+            ),
+            (
+                json!({"playlist_id": P1_URI(), "page_token": "abc"}),
+                "invalid_page_token",
+            ),
+            (
+                json!({"playlist_id": P1_URI(), "page_token": ""}),
+                "invalid_page_token",
+            ),
+            (
+                json!({"playlist_id": P1_URI(), "page_token": "100001"}),
+                "invalid_page_token",
+            ),
+            (
+                json!({"playlist_id": P1_URI(), "page_token": "-1"}),
+                "invalid_page_token",
+            ),
+            (json!({"playlist": P1_URI()}), "invalid_args"),
+            (
+                json!({"playlist_id": P1_URI(), "offset": 1}),
+                "invalid_args",
+            ),
+            (
+                json!({"playlist_id": format!("spotify:track:{T1}")}),
+                "expected_playlist_reference",
+            ),
+            (json!({"playlist_id": "x".repeat(65)}), "invalid_id"),
         ] {
-            assert_eq!(
-                code(r.call("music.spotify.playlist.get", a, None)),
-                "invalid_paging"
+            assert!(
+                code(r.call("music.spotify.playlist.get", a.clone(), None)).starts_with(want),
+                "{a}"
             );
         }
+        assert!(r.http.requests().is_empty());
     }
 
     #[test]
-    fn resolve_dispatches_by_kind() {
+    fn playlist_next_page_token_walks_pages() {
+        let r = Rig::new();
+        r.http
+            .push(200, &json!({"name": "Mix", "tracks": {"total": 3}}));
+        r.http.push(200, &json!({"items": [{"track": spotify_track(T1, "A")}, {"track": spotify_track(T2, "B")}]}));
+        let a = r
+            .call(
+                "music.spotify.playlist.get",
+                json!({"playlist_id": P1, "limit": 2}),
+                None,
+            )
+            .unwrap();
+        assert_eq!(a["next_page_token"], "2");
+        r.http
+            .push(200, &json!({"name": "Mix", "tracks": {"total": 3}}));
+        r.http
+            .push(200, &json!({"items": [{"track": spotify_track(T1, "A")}]}));
+        let b = r
+            .call(
+                "music.spotify.playlist.get",
+                json!({"playlist_id": P1, "limit": 2, "page_token": "2"}),
+                None,
+            )
+            .unwrap();
+        assert_eq!(b["next_page_token"], Value::Null);
+        assert!(r.http.requests()[3].url.contains("limit=2&offset=2"));
+        // second identical page read is a cache hit
+        let c = r
+            .call(
+                "music.spotify.playlist.get",
+                json!({"playlist_id": P1, "limit": 2, "page_token": "2"}),
+                None,
+            )
+            .unwrap();
+        assert_eq!(c["cached"], true);
+        assert_eq!(r.http.requests().len(), 4);
+    }
+
+    #[test]
+    fn resolve_returns_track_only_and_rejects_playlists() {
         let r = Rig::new();
         r.http.push(200, &spotify_track(T1, "Song"));
         let t = r
@@ -1577,17 +1692,13 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(t["kind"], "track");
-        assert_eq!(t["track"]["external_id"], T1);
-        r.http
-            .push(200, &json!({"name": "Mix", "tracks": {"total": 1}}));
-        r.http
-            .push(200, &json!({"items": [{"track": spotify_track(T1, "A")}]}));
-        let p = r
-            .call("music.spotify.resolve", json!({"url": P1_URI()}), None)
-            .unwrap();
-        assert_eq!(p["kind"], "playlist");
-        assert_eq!(p["tracks"].as_array().unwrap().len(), 1);
+        assert_eq!(t["track"]["id"], T1);
+        assert_eq!(t["cached"], false);
+        assert!(t.get("kind").is_none());
+        assert_eq!(
+            code(r.call("music.spotify.resolve", json!({"url": P1_URI()}), None)),
+            "expected_track_reference"
+        );
         assert_eq!(
             code(r.call(
                 "music.spotify.resolve",
@@ -1596,6 +1707,7 @@ mod tests {
             )),
             "invalid_spotify_reference"
         );
+        assert_eq!(r.http.requests().len(), 1);
     }
 
     #[test]
@@ -1603,20 +1715,20 @@ mod tests {
         let r = Rig::new();
         r.http.push_h(429, &[("Retry-After", "30")], &Value::Null);
         assert_eq!(
-            code(r.call("music.spotify.track", json!({"track": T2_URI()}), None)),
+            code(r.call("music.spotify.track", json!({"id": T2_URI()}), None)),
             "rate_limited:retry_after=30"
         );
         // within the window: no upstream call at all
         r.clock.advance(10_000);
         assert_eq!(
-            code(r.call("music.spotify.track", json!({"track": T2_URI()}), None)),
+            code(r.call("music.spotify.track", json!({"id": T2_URI()}), None)),
             "rate_limited:retry_after=20"
         );
         assert_eq!(r.http.requests().len(), 1);
         r.clock.advance(20_001);
         r.http.push(200, &spotify_track(T2, "B"));
         assert!(
-            r.call("music.spotify.track", json!({"track": T2_URI()}), None)
+            r.call("music.spotify.track", json!({"id": T2_URI()}), None)
                 .is_ok()
         );
     }
@@ -1627,19 +1739,19 @@ mod tests {
         r.http
             .push_h(429, &[("retry-after", "999999")], &Value::Null);
         assert_eq!(
-            code(r.call("music.spotify.track", json!({"track": T2_URI()}), None)),
+            code(r.call("music.spotify.track", json!({"id": T2_URI()}), None)),
             "rate_limited:retry_after=3600"
         );
         let r = Rig::new();
         r.http.push(429, &Value::Null);
         assert_eq!(
-            code(r.call("music.spotify.track", json!({"track": T2_URI()}), None)),
+            code(r.call("music.spotify.track", json!({"id": T2_URI()}), None)),
             "rate_limited:retry_after=5"
         );
         let r = Rig::new();
         r.http.push_h(429, &[("Retry-After", "0")], &Value::Null);
         assert_eq!(
-            code(r.call("music.spotify.track", json!({"track": T2_URI()}), None)),
+            code(r.call("music.spotify.track", json!({"id": T2_URI()}), None)),
             "rate_limited:retry_after=1"
         );
     }
@@ -1689,7 +1801,7 @@ mod tests {
             let r = Rig::new();
             r.kv.put(KEY_CONFIG, bad);
             assert_eq!(
-                code(r.call("music.spotify.track", json!({"track": T2_URI()}), None)),
+                code(r.call("music.spotify.track", json!({"id": T2_URI()}), None)),
                 "invalid_config"
             );
             assert!(r.http.requests().is_empty());
@@ -1699,7 +1811,7 @@ mod tests {
         r.http.push(200, &spotify_track(T1, "A"));
         r.call(
             "music.spotify.track",
-            json!({"track": format!("spotify:track:{T1}")}),
+            json!({"id": format!("spotify:track:{T1}")}),
             None,
         )
         .unwrap();
@@ -1720,14 +1832,14 @@ mod tests {
             let r = Rig::new();
             r.http.push(status, &body);
             assert_eq!(
-                code(r.call("music.spotify.track", json!({"track": T2_URI()}), None)),
+                code(r.call("music.spotify.track", json!({"id": T2_URI()}), None)),
                 want
             );
         }
         let r = Rig::new();
         r.http.push(503, &Value::Null);
         assert!(matches!(
-            r.call("music.spotify.track", json!({"track": T2_URI()}), None),
+            r.call("music.spotify.track", json!({"id": T2_URI()}), None),
             Err(ToolError::TargetUnavailable)
         ));
     }
@@ -1743,20 +1855,20 @@ mod tests {
             let r = Rig::new();
             r.http.push_err(e);
             assert_eq!(
-                code(r.call("music.spotify.track", json!({"track": T2_URI()}), None)),
+                code(r.call("music.spotify.track", json!({"id": T2_URI()}), None)),
                 want
             );
         }
         let r = Rig::new();
         r.http.push_err(HttpError::Timeout);
         assert!(matches!(
-            r.call("music.spotify.track", json!({"track": T2_URI()}), None),
+            r.call("music.spotify.track", json!({"id": T2_URI()}), None),
             Err(ToolError::Timeout)
         ));
         let r = Rig::new();
         r.http.push_err(HttpError::Transport("dns".into()));
         assert!(matches!(
-            r.call("music.spotify.track", json!({"track": T2_URI()}), None),
+            r.call("music.spotify.track", json!({"id": T2_URI()}), None),
             Err(ToolError::TargetUnavailable)
         ));
     }
@@ -1779,7 +1891,7 @@ mod tests {
             .call("music.spotify.player.state", json!({}), None)
             .unwrap();
         assert_eq!(out["device"]["name"], "Desk");
-        assert_eq!(out["track"]["external_id"], T1);
+        assert_eq!(out["track"]["id"], T1);
         assert_eq!(out["repeat"], "track");
     }
 
@@ -1949,7 +2061,7 @@ mod tests {
         let r = Rig::new();
         r.http.push(200, &spotify_track(T1, "A"));
         r.http.push(204, &Value::Null);
-        r.call("music.spotify.track", json!({"track": T2_URI()}), None)
+        r.call("music.spotify.track", json!({"id": T2_URI()}), None)
             .unwrap();
         r.call("music.spotify.player.pause", json!({}), Some("k"))
             .unwrap();
@@ -2001,7 +2113,7 @@ mod tests {
         let reg = build_registry(svc);
         let out = reg.call(
             "music.spotify.track",
-            format!(r#"{{"track":"spotify:track:{T1}"}}"#).as_bytes(),
+            format!(r#"{{"id":"spotify:track:{T1}"}}"#).as_bytes(),
         );
         assert!(matches!(out, Err(ToolError::TargetUnavailable)));
         assert!(http.requests().is_empty());

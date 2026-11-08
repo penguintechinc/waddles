@@ -14,24 +14,114 @@ use waddle_bundle_music_spotify_service::logic::{TOOL_NAMES, build_registry};
 const T1: &str = "4uLU6hMCjMI75M1A2tKUQC";
 const P1: &str = "37i9dQZF1DXcBWIGoYBM5M";
 
-const TRACK_KEYS: [&str; 11] = [
-    "provider",
-    "external_id",
-    "title",
-    "artist",
-    "artists",
-    "album",
-    "duration_ms",
-    "artwork_url",
-    "url",
-    "uri",
-    "explicit",
-];
+const CONTRACT: &str = include_str!("../../../contracts/music-tool-contract.v1.json");
 
-fn keys(v: &Value) -> Vec<String> {
-    let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
-    k.sort();
-    k
+/// Minimal JSON-Schema checker for the subset the shared contract uses
+/// (`$ref`, type, required, properties, items, enum, min/max, min/maxLength,
+/// additionalProperties:false). Returns every violation found.
+fn validate(schema: &Value, v: &Value, defs: &Value, path: &str, errs: &mut Vec<String>) {
+    if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
+        let name = r.rsplit('/').next().unwrap();
+        return validate(&defs[name], v, defs, path, errs);
+    }
+    if let Some(t) = schema.get("type") {
+        let types: Vec<&str> = match t {
+            Value::String(s) => vec![s.as_str()],
+            Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+            _ => vec![],
+        };
+        let ok = types.iter().any(|t| match *t {
+            "string" => v.is_string(),
+            "integer" => v.is_i64() || v.is_u64(),
+            "boolean" => v.is_boolean(),
+            "object" => v.is_object(),
+            "array" => v.is_array(),
+            "null" => v.is_null(),
+            _ => false,
+        });
+        if !ok {
+            errs.push(format!("{path}: type {types:?} != {v}"));
+            return;
+        }
+    }
+    if let Some(e) = schema.get("enum").and_then(Value::as_array)
+        && !e.contains(v)
+    {
+        errs.push(format!("{path}: not in enum"));
+    }
+    if let Some(n) = v.as_i64() {
+        if schema
+            .get("minimum")
+            .and_then(Value::as_i64)
+            .is_some_and(|m| n < m)
+        {
+            errs.push(format!("{path}: below minimum"));
+        }
+        if schema
+            .get("maximum")
+            .and_then(Value::as_i64)
+            .is_some_and(|m| n > m)
+        {
+            errs.push(format!("{path}: above maximum"));
+        }
+    }
+    if let Some(st) = v.as_str() {
+        let len = st.chars().count() as u64;
+        if schema
+            .get("minLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|m| len < m)
+        {
+            errs.push(format!("{path}: too short"));
+        }
+        if schema
+            .get("maxLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|m| len > m)
+        {
+            errs.push(format!("{path}: too long"));
+        }
+    }
+    if let (Some(obj), Some(props)) = (
+        v.as_object(),
+        schema.get("properties").and_then(Value::as_object),
+    ) {
+        for r in schema
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let k = r.as_str().unwrap();
+            if !obj.contains_key(k) {
+                errs.push(format!("{path}: missing required {k}"));
+            }
+        }
+        for (k, val) in obj {
+            match props.get(k) {
+                Some(ps) => validate(ps, val, defs, &format!("{path}.{k}"), errs),
+                None if schema.get("additionalProperties") == Some(&json!(false)) => {
+                    errs.push(format!("{path}: unexpected {k}"));
+                }
+                None => {}
+            }
+        }
+    }
+    if let (Some(arr), Some(items)) = (v.as_array(), schema.get("items")) {
+        for (i, it) in arr.iter().enumerate() {
+            validate(items, it, defs, &format!("{path}[{i}]"), errs);
+        }
+    }
+}
+
+fn check(schema: &Value, v: &Value, defs: &Value) -> Vec<String> {
+    let mut e = Vec::new();
+    validate(schema, v, defs, "$", &mut e);
+    e
+}
+
+fn contract() -> Value {
+    serde_json::from_str(CONTRACT).unwrap()
 }
 
 fn manifest_tool_names(text: &str) -> Vec<String> {
@@ -107,73 +197,132 @@ fn manifest_write_tools_are_dangerous_and_reads_are_normal() {
 }
 
 #[test]
-fn output_shapes_match_the_consumer_contract() {
+fn common_tools_conform_to_the_shared_music_contract() {
+    let c = contract();
+    let defs = &c["definitions"];
     let r = Rig::new();
-    r.http
-        .push(200, &json!({"tracks": {"items": [spotify_track(T1, "S")]}}));
-    let out = r
-        .call("music.spotify.search", json!({"query": "q"}), None)
-        .unwrap();
-    assert_eq!(keys(&out), ["capability", "count", "tracks"]);
-    assert_eq!(keys(&out["tracks"][0]), {
-        let mut k: Vec<String> = TRACK_KEYS.iter().map(|s| s.to_string()).collect();
-        k.sort();
-        k
-    });
+    let mut examined = 0;
 
+    // search
+    r.http.push(
+        200,
+        &json!({"tracks": {"items": [spotify_track(T1, "S"), {"type": "track", "id": null}]}}),
+    );
+    let args = json!({"query": "q", "limit": 25});
+    assert!(check(&c["tools"]["search"]["input_schema"], &args, defs).is_empty());
+    let out = r.call("music.spotify.search", args, None).unwrap();
+    let e = check(&c["tools"]["search"]["output_schema"], &out, defs);
+    assert!(e.is_empty(), "{e:?}");
+    assert_eq!(out["skipped"], 1);
+    examined += 1;
+
+    // track (cached second time still conforms, cached=true)
     r.http.push(200, &spotify_track(T1, "S"));
-    let out = r
-        .call("music.spotify.track", json!({"track": T1_URI()}), None)
-        .unwrap();
-    assert_eq!(keys(&out), ["capability", "track"]);
+    let args = json!({"id": T1});
+    assert!(check(&c["tools"]["track"]["input_schema"], &args, defs).is_empty());
+    for want_cached in [false, true] {
+        let out = r.call("music.spotify.track", args.clone(), None).unwrap();
+        let e = check(&c["tools"]["track"]["output_schema"], &out, defs);
+        assert!(e.is_empty(), "{e:?}");
+        assert_eq!(out["cached"], want_cached);
+        examined += 1;
+    }
 
+    // playlist.get (first page has next token, last page null)
     r.http
-        .push(200, &json!({"name": "M", "tracks": {"total": 1}}));
+        .push(200, &json!({"name": "M", "tracks": {"total": 3}}));
+    r.http.push(
+        200,
+        &json!({"items": [{"track": spotify_track(T1, "S")}, {"track": null}]}),
+    );
+    let args = json!({"playlist_id": P1, "limit": 50});
+    assert!(check(&c["tools"]["playlist.get"]["input_schema"], &args, defs).is_empty());
+    let out = r.call("music.spotify.playlist.get", args, None).unwrap();
+    let e = check(&c["tools"]["playlist.get"]["output_schema"], &out, defs);
+    assert!(e.is_empty(), "{e:?}");
+    assert_eq!(
+        (out["next_page_token"].clone(), out["skipped"].clone()),
+        (json!("2"), json!(1))
+    );
+    examined += 1;
+    let args = json!({"playlist_id": P1, "limit": 50, "page_token": "2"});
+    assert!(check(&c["tools"]["playlist.get"]["input_schema"], &args, defs).is_empty());
+    r.http
+        .push(200, &json!({"name": "M", "tracks": {"total": 3}}));
     r.http
         .push(200, &json!({"items": [{"track": spotify_track(T1, "S")}]}));
-    let out = r
-        .call(
+    let out = r.call("music.spotify.playlist.get", args, None).unwrap();
+    assert!(check(&c["tools"]["playlist.get"]["output_schema"], &out, defs).is_empty());
+    assert_eq!(out["next_page_token"], Value::Null);
+    examined += 1;
+
+    // resolve
+    let args = json!({"url": format!("https://open.spotify.com/track/{T1}")});
+    assert!(check(&c["tools"]["resolve"]["input_schema"], &args, defs).is_empty());
+    let out = r.call("music.spotify.resolve", args, None).unwrap();
+    assert!(check(&c["tools"]["resolve"]["output_schema"], &out, defs).is_empty());
+    examined += 1;
+
+    assert_eq!(examined, 6, "denominator: contract checks executed");
+}
+
+#[test]
+fn contract_input_bounds_are_enforced_by_the_tools() {
+    let c = contract();
+    let defs = &c["definitions"];
+    let r = Rig::new();
+    // inputs the contract schema rejects must also be rejected by the tool, before any upstream call
+    for (tool, name, bad) in [
+        (
+            "music.spotify.search",
+            "search",
+            json!({"query": "q", "limit": 26}),
+        ),
+        ("music.spotify.search", "search", json!({"query": ""})),
+        (
+            "music.spotify.search",
+            "search",
+            json!({"query": "x".repeat(201)}),
+        ),
+        ("music.spotify.track", "track", json!({"id": ""})),
+        (
+            "music.spotify.track",
+            "track",
+            json!({"id": "x".repeat(65)}),
+        ),
+        ("music.spotify.track", "track", json!({"track": T1})),
+        (
             "music.spotify.playlist.get",
-            json!({"playlist": format!("spotify:playlist:{P1}")}),
-            None,
-        )
-        .unwrap();
-    assert_eq!(keys(&out), ["capability", "playlist", "tracks"]);
-    assert_eq!(
-        keys(&out["playlist"]),
-        [
-            "id", "limit", "name", "offset", "owner", "returned", "skipped", "total", "url"
-        ]
-    );
-
-    // resolve of the already-fetched track is served from cache: no upstream push.
-    let out = r
-        .call("music.spotify.resolve", json!({"url": T1_URI()}), None)
-        .unwrap();
-    assert_eq!(keys(&out), ["capability", "id", "kind", "track"]);
-
-    r.http.push(204, &Value::Null);
-    let out = r
-        .call("music.spotify.player.state", json!({}), None)
-        .unwrap();
-    assert_eq!(keys(&out), ["active", "capability", "is_playing"]);
-
-    r.http.push(204, &Value::Null);
-    let out = r
-        .call("music.spotify.player.pause", json!({}), Some("k"))
-        .unwrap();
-    assert_eq!(keys(&out), ["action", "capability", "ok"]);
-
-    assert_eq!(
-        keys(&out["capability"]),
-        [
-            "embed_only",
-            "metadata",
-            "playback",
-            "provider",
-            "requires_premium"
-        ]
-    );
+            "playlist.get",
+            json!({"playlist_id": P1, "limit": 51}),
+        ),
+        (
+            "music.spotify.playlist.get",
+            "playlist.get",
+            json!({"playlist_id": P1, "offset": 5}),
+        ),
+        (
+            "music.spotify.playlist.get",
+            "playlist.get",
+            json!({"playlist": P1}),
+        ),
+        ("music.spotify.resolve", "resolve", json!({"url": ""})),
+        (
+            "music.spotify.resolve",
+            "resolve",
+            json!({"url": "x".repeat(513)}),
+        ),
+    ] {
+        assert!(
+            !check(&c["tools"][name]["input_schema"], &bad, defs).is_empty(),
+            "contract should reject {bad}"
+        );
+        assert!(
+            r.call(tool, bad.clone(), None).is_err(),
+            "{tool} accepted {bad}"
+        );
+    }
+    assert!(r.http.requests().is_empty());
 }
 
 #[allow(non_snake_case)]
@@ -187,7 +336,7 @@ fn wire_boundary_only_api_host_and_only_secret_ref_names() {
     r.http.push(200, &spotify_track(T1, "S"));
     r.http.push(204, &Value::Null);
     r.http.push(204, &Value::Null);
-    r.call("music.spotify.track", json!({"track": T1_URI()}), None)
+    r.call("music.spotify.track", json!({"id": T1_URI()}), None)
         .unwrap();
     r.call("music.spotify.player.next", json!({}), Some("k1"))
         .unwrap();
@@ -219,10 +368,16 @@ fn wire_boundary_only_api_host_and_only_secret_ref_names() {
 fn caller_cannot_redirect_requests_via_args() {
     let r = Rig::new();
     for a in [
-        json!({"track": "https://evil.example/track/4uLU6hMCjMI75M1A2tKUQC"}),
-        json!({"track": "https://open.spotify.com.evil.example/track/4uLU6hMCjMI75M1A2tKUQC"}),
-        json!({"track": "spotify:track:../../v1/me"}),
-        json!({"track": T1_URI(), "url": "https://evil.example"}),
+        json!({"url": "https://evil.example/track/4uLU6hMCjMI75M1A2tKUQC"}),
+        json!({"url": "https://open.spotify.com.evil.example/track/4uLU6hMCjMI75M1A2tKUQC"}),
+        json!({"url": "spotify:track:../../v1/me"}),
+        json!({"url": T1_URI(), "next": "https://evil.example"}),
+    ] {
+        assert!(r.call("music.spotify.resolve", a, None).is_err());
+    }
+    for a in [
+        json!({"id": "../../v1/me"}),
+        json!({"id": T1_URI(), "url": "https://evil.example"}),
     ] {
         assert!(r.call("music.spotify.track", a, None).is_err());
     }

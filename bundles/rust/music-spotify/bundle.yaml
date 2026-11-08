@@ -61,43 +61,71 @@ exported_tools:
       limit:
         type: integer
         minimum: 1
-        maximum: 50
+        maximum: 25
     required:
     - query
     additionalProperties: false
   output_schema:
     type: object
     properties:
-      count:
-        type: integer
       tracks:
         type: array
         items:
           type: object
           properties:
-            provider: {}
-            external_id: {}
-            title: {}
-            artist: {}
-            artists: {}
-            album: {}
-            duration_ms: {}
-            artwork_url: {}
-            url: {}
-            uri: {}
-            explicit: {}
+            provider:
+              type: string
+            id:
+              type: string
+            title:
+              type: string
+            artist:
+              type: string
+            duration_ms:
+              type: integer
+              minimum: 0
+            thumbnail:
+              type:
+              - string
+              - 'null'
+            explicit:
+              type:
+              - boolean
+              - 'null'
+            source_url:
+              type: string
           required:
           - provider
-          - external_id
+          - id
           - title
           - artist
           - duration_ms
-          - url
-          - uri
+          - thumbnail
+          - explicit
+          - source_url
+      cached:
+        type: boolean
+      skipped:
+        type: integer
+        minimum: 0
       capability:
         type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
     required:
-    - count
     - tracks
     - capability
 - name: music.spotify.track
@@ -106,11 +134,12 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      track:
+      id:
         type: string
-        maxLength: 200
+        minLength: 1
+        maxLength: 64
     required:
-    - track
+    - id
     additionalProperties: false
   output_schema:
     type: object
@@ -118,27 +147,55 @@ exported_tools:
       track:
         type: object
         properties:
-          provider: {}
-          external_id: {}
-          title: {}
-          artist: {}
-          artists: {}
-          album: {}
-          duration_ms: {}
-          artwork_url: {}
-          url: {}
-          uri: {}
-          explicit: {}
+          provider:
+            type: string
+          id:
+            type: string
+          title:
+            type: string
+          artist:
+            type: string
+          duration_ms:
+            type: integer
+            minimum: 0
+          thumbnail:
+            type:
+            - string
+            - 'null'
+          explicit:
+            type:
+            - boolean
+            - 'null'
+          source_url:
+            type: string
         required:
         - provider
-        - external_id
+        - id
         - title
         - artist
         - duration_ms
-        - url
-        - uri
+        - thumbnail
+        - explicit
+        - source_url
+      cached:
+        type: boolean
       capability:
         type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
     required:
     - track
     - capability
@@ -148,54 +205,88 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      playlist:
+      playlist_id:
         type: string
-        maxLength: 200
+        minLength: 1
+        maxLength: 64
       limit:
         type: integer
         minimum: 1
-        maximum: 100
-      offset:
-        type: integer
-        minimum: 0
-        maximum: 100000
+        maximum: 50
+      page_token:
+        type: string
+        minLength: 1
+        maxLength: 200
     required:
-    - playlist
+    - playlist_id
     additionalProperties: false
   output_schema:
     type: object
     properties:
-      playlist:
-        type: object
       tracks:
         type: array
         items:
           type: object
           properties:
-            provider: {}
-            external_id: {}
-            title: {}
-            artist: {}
-            artists: {}
-            album: {}
-            duration_ms: {}
-            artwork_url: {}
-            url: {}
-            uri: {}
-            explicit: {}
+            provider:
+              type: string
+            id:
+              type: string
+            title:
+              type: string
+            artist:
+              type: string
+            duration_ms:
+              type: integer
+              minimum: 0
+            thumbnail:
+              type:
+              - string
+              - 'null'
+            explicit:
+              type:
+              - boolean
+              - 'null'
+            source_url:
+              type: string
           required:
           - provider
-          - external_id
+          - id
           - title
           - artist
           - duration_ms
-          - url
-          - uri
+          - thumbnail
+          - explicit
+          - source_url
+      next_page_token:
+        type:
+        - string
+        - 'null'
+      cached:
+        type: boolean
+      skipped:
+        type: integer
+        minimum: 0
       capability:
         type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
     required:
-    - playlist
     - tracks
+    - next_page_token
     - capability
 - name: music.spotify.resolve
   access: read
@@ -205,73 +296,68 @@ exported_tools:
     properties:
       url:
         type: string
-        maxLength: 200
+        minLength: 1
+        maxLength: 512
     required:
     - url
     additionalProperties: false
   output_schema:
     type: object
     properties:
-      kind:
-        type: string
-        enum:
-        - track
-        - playlist
-      id:
-        type: string
       track:
         type: object
         properties:
-          provider: {}
-          external_id: {}
-          title: {}
-          artist: {}
-          artists: {}
-          album: {}
-          duration_ms: {}
-          artwork_url: {}
-          url: {}
-          uri: {}
-          explicit: {}
+          provider:
+            type: string
+          id:
+            type: string
+          title:
+            type: string
+          artist:
+            type: string
+          duration_ms:
+            type: integer
+            minimum: 0
+          thumbnail:
+            type:
+            - string
+            - 'null'
+          explicit:
+            type:
+            - boolean
+            - 'null'
+          source_url:
+            type: string
         required:
         - provider
-        - external_id
+        - id
         - title
         - artist
         - duration_ms
-        - url
-        - uri
-      playlist:
-        type: object
-      tracks:
-        type: array
-        items:
-          type: object
-          properties:
-            provider: {}
-            external_id: {}
-            title: {}
-            artist: {}
-            artists: {}
-            album: {}
-            duration_ms: {}
-            artwork_url: {}
-            url: {}
-            uri: {}
-            explicit: {}
-          required:
-          - provider
-          - external_id
-          - title
-          - artist
-          - duration_ms
-          - url
-          - uri
+        - thumbnail
+        - explicit
+        - source_url
+      cached:
+        type: boolean
       capability:
         type: object
+        properties:
+          playback:
+            type: string
+            enum:
+            - embed
+            - connect
+            - none
+          server_audio:
+            type: boolean
+          queue_add:
+            type: boolean
+        required:
+        - playback
+        - server_audio
+        - queue_add
     required:
-    - kind
-    - id
+    - track
     - capability
 - name: music.spotify.player.state
   access: read
