@@ -8,6 +8,11 @@
 //!   resolves the actor's active community (tokenized user UUID only; hub-api never sees a
 //!   Discord id) and stamps `active_community` (a community `public_id` UUID) into the
 //!   payload; routing keys on that, never on a name.
+//! * Routing is recorded host-side: once the community is resolved, [`ContextSink`] verifies the
+//!   stored interaction against the connection's own guild and application id and calls
+//!   [`InteractionStore::set_routed`] with the hub-resolved numeric community. Only then can the
+//!   sender-side ownership check answer that interaction; none of the three values comes from
+//!   the guest or the payload. A failed check answers the user generically and publishes nothing.
 //! * `/context` is handled HERE, never published to a bundle: bare `/context` echoes the
 //!   current community and lists the switchable ones; `/context <name>` matches the display
 //!   name (or a listed UUID) client-side and PUTs the `public_id`. Names never resolve at
@@ -29,6 +34,8 @@ use crate::commands_reconcile::BoxFut;
 use crate::connector::sink::{EventSink, SinkError};
 use crate::connector::types::{ConnectionCtx, ConnectorEvent};
 use crate::interaction_store::InteractionStore;
+use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry};
+use tracing::Instrument;
 
 /// Machine-JWT scope svc-ingest holds for the active-context endpoints.
 pub const ACTIVE_CONTEXT_JWT_SCOPE: &str = "dataplane:active-context";
@@ -57,6 +64,10 @@ pub struct ContextView {
     /// Active community `public_id`.
     #[serde(rename = "communityPublicId")]
     pub community_public_id: String,
+    /// Active community NUMERIC id (the key the interaction ownership check compares).
+    /// Required: a hub answer without it is `Malformed`, so routing fails closed.
+    #[serde(rename = "communityId")]
+    pub community_id: i64,
     /// Active community display name.
     #[serde(rename = "communityName")]
     pub community_name: String,
@@ -315,6 +326,46 @@ impl InteractionReplier {
     }
 }
 
+/// Prometheus instruments for the routing step. Labels are bounded `&'static str` outcomes
+/// only; never an id, guild or user (PII-free by construction).
+#[derive(Clone)]
+pub struct RoutingMetrics {
+    /// `svc_ingest_interaction_routing_total{outcome}`: `routed` or the refusal reason.
+    pub routing_total: IntCounterVec,
+    /// `svc_ingest_interaction_routing_duration_seconds{outcome}`: verify + record latency.
+    pub routing_duration_seconds: HistogramVec,
+}
+
+/// Registers the routing metrics on `registry` (once per registry).
+///
+/// # Errors
+/// [`prometheus::Error`] when registration fails (e.g. a duplicate).
+pub fn register_routing_metrics(registry: &Registry) -> Result<RoutingMetrics, prometheus::Error> {
+    let routing_total = IntCounterVec::new(
+        Opts::new(
+            "svc_ingest_interaction_routing_total",
+            "Discord interactions routed to a community (or refused), by outcome",
+        ),
+        &["outcome"],
+    )?;
+    let routing_duration_seconds = HistogramVec::new(
+        HistogramOpts::new(
+            "svc_ingest_interaction_routing_duration_seconds",
+            "Interaction routing latency (ownership verify + record) in seconds",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+        ]),
+        &["outcome"],
+    )?;
+    registry.register(Box::new(routing_total.clone()))?;
+    registry.register(Box::new(routing_duration_seconds.clone()))?;
+    Ok(RoutingMetrics {
+        routing_total,
+        routing_duration_seconds,
+    })
+}
+
 const GENERIC_UNAVAILABLE: &str =
     "Sorry, that command is temporarily unavailable. Please try again shortly.";
 
@@ -323,16 +374,66 @@ pub struct ContextSink<S: EventSink> {
     inner: S,
     source: Arc<dyn ContextSource>,
     replier: Arc<InteractionReplier>,
+    store: InteractionStore,
+    application_id: String,
+    metrics: RoutingMetrics,
 }
 
 impl<S: EventSink> ContextSink<S> {
-    /// Wraps `inner`.
+    /// Wraps `inner`. `application_id` is the Discord application (client) id of THIS
+    /// connection's bot, from the host's own credential binding; `store` is the host-held
+    /// interaction store the sender-side ownership check reads.
     #[must_use]
-    pub fn new(inner: S, source: Arc<dyn ContextSource>, replier: Arc<InteractionReplier>) -> Self {
+    pub fn new(
+        inner: S,
+        source: Arc<dyn ContextSource>,
+        replier: Arc<InteractionReplier>,
+        store: InteractionStore,
+        application_id: String,
+        metrics: RoutingMetrics,
+    ) -> Self {
         Self {
             inner,
             source,
             replier,
+            store,
+            application_id,
+            metrics,
+        }
+    }
+
+    /// Verifies the stored interaction belongs to this connection's guild and application,
+    /// then records `community_id` as its routed community. Returns the refusal reason.
+    async fn route(
+        &self,
+        ctx: &ConnectionCtx,
+        id: &str,
+        community_id: i64,
+    ) -> Result<(), &'static str> {
+        if community_id <= 0 {
+            return Err("community_id_invalid");
+        }
+        let rec = self
+            .store
+            .get(id)
+            .await
+            .map_err(|_| "store_unavailable")?
+            .ok_or("interaction_expired")?;
+        if rec.guild_id.as_deref() != Some(ctx.source_id.as_str()) {
+            return Err("guild_mismatch");
+        }
+        if rec.application_id != self.application_id {
+            return Err("application_mismatch");
+        }
+        if self
+            .store
+            .set_routed(id, community_id)
+            .await
+            .map_err(|_| "store_unavailable")?
+        {
+            Ok(())
+        } else {
+            Err("interaction_expired")
         }
     }
 
@@ -404,6 +505,34 @@ impl<S: EventSink> EventSink for ContextSink<S> {
             }
             return Ok(());
         }
+        let started = std::time::Instant::now();
+        let span = tracing::info_span!(
+            "interaction.route",
+            platform = "discord",
+            community_id = view.community_id
+        );
+        let routed = self
+            .route(ctx, &id, view.community_id)
+            .instrument(span.clone())
+            .await;
+        let outcome = routed.err().unwrap_or("routed");
+        self.metrics
+            .routing_total
+            .with_label_values(&[outcome])
+            .inc();
+        self.metrics
+            .routing_duration_seconds
+            .with_label_values(&[outcome])
+            .observe(started.elapsed().as_secs_f64());
+        if let Err(reason) = routed {
+            return self.refuse(&id, reason).await;
+        }
+        tracing::info!(
+            parent: &span,
+            platform = "discord",
+            community_id = view.community_id,
+            "interaction routed to community"
+        );
         if let Some(obj) = payload.as_object_mut() {
             obj.insert(
                 "active_community".to_string(),
@@ -433,6 +562,7 @@ mod tests {
     fn view() -> ContextView {
         ContextView {
             community_public_id: U1.into(),
+            community_id: 1,
             community_name: "Alpha".into(),
             explicit: false,
             communities: vec![
@@ -554,6 +684,21 @@ mod tests {
     async fn rig(
         view: Result<ContextView, ContextError>,
     ) -> (MockServer, ContextSink<Rec>, Rec, Arc<Source>, String) {
+        let (a, b, c, d, e, _) = rig_with(view, "42").await;
+        (a, b, c, d, e)
+    }
+
+    async fn rig_with(
+        view: Result<ContextView, ContextError>,
+        sink_app: &str,
+    ) -> (
+        MockServer,
+        ContextSink<Rec>,
+        Rec,
+        Arc<Source>,
+        String,
+        InteractionStore,
+    ) {
         let server = MockServer::start().await;
         let url = std::env::var("VALKEY_URL").expect("VALKEY_URL (a local valkey) is required");
         let store = InteractionStore::new(
@@ -589,7 +734,7 @@ mod tests {
             vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
         );
         let replier = Arc::new(InteractionReplier::new(
-            store,
+            store.clone(),
             client,
             format!("{}/api/v10", server.uri()),
         ));
@@ -599,8 +744,16 @@ mod tests {
             gets: Mutex::default(),
         });
         let rec = Rec::default();
-        let sink = ContextSink::new(rec.clone(), source.clone(), replier);
-        (server, sink, rec, source, id)
+        let metrics = register_routing_metrics(&Registry::new()).unwrap();
+        let sink = ContextSink::new(
+            rec.clone(),
+            source.clone(),
+            replier,
+            store.clone(),
+            sink_app.to_string(),
+            metrics,
+        );
+        (server, sink, rec, source, id, store)
     }
 
     async fn mock_followup(s: &MockServer, partial: Value) {
@@ -702,5 +855,103 @@ mod tests {
                 "nothing is routed on failure"
             );
         }
+    }
+    #[tokio::test]
+    async fn a_routed_interaction_records_the_hub_community_and_is_published() {
+        let (_server, sink, rec, _s, id, store) = rig_with(Ok(view()), "42").await;
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            None
+        );
+        sink.publish(
+            &ctx(),
+            event("interaction.command", "ping", "", &id, Some(USER)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rec.0.lock().unwrap().len(), 1);
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            Some(1)
+        );
+        assert_eq!(
+            sink.metrics
+                .routing_total
+                .with_label_values(&["routed"])
+                .get(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_application_or_guild_or_bad_community_is_refused_and_left_unrouted() {
+        // Wrong application on the sink.
+        let (server, sink, rec, _s, id, store) = rig_with(Ok(view()), "999").await;
+        mock_followup(&server, json!({"flags":64,"content":GENERIC_UNAVAILABLE})).await;
+        sink.publish(
+            &ctx(),
+            event("interaction.command", "ping", "", &id, Some(USER)),
+        )
+        .await
+        .unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            None
+        );
+        assert_eq!(
+            sink.metrics
+                .routing_total
+                .with_label_values(&["application_mismatch"])
+                .get(),
+            1
+        );
+        // Wrong guild: the connection is guild 222, the record is guild 111.
+        let (server, sink, rec, _s, id, store) = rig_with(Ok(view()), "42").await;
+        mock_followup(&server, json!({"flags":64,"content":GENERIC_UNAVAILABLE})).await;
+        let mut other = ctx();
+        other.source_id = "222".into();
+        sink.publish(
+            &other,
+            event("interaction.command", "ping", "", &id, Some(USER)),
+        )
+        .await
+        .unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            None
+        );
+        assert_eq!(
+            sink.metrics
+                .routing_total
+                .with_label_values(&["guild_mismatch"])
+                .get(),
+            1
+        );
+        // A non-positive numeric community is refused, never recorded.
+        let mut bad = view();
+        bad.community_id = 0;
+        let (server, sink, rec, _s, id, store) = rig_with(Ok(bad), "42").await;
+        mock_followup(&server, json!({"flags":64,"content":GENERIC_UNAVAILABLE})).await;
+        sink.publish(
+            &ctx(),
+            event("interaction.command", "ping", "", &id, Some(USER)),
+        )
+        .await
+        .unwrap();
+        assert!(rec.0.lock().unwrap().is_empty());
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().routed_community_id,
+            None
+        );
+    }
+
+    #[test]
+    fn a_hub_answer_without_a_numeric_community_is_malformed() {
+        let r: Result<ContextView, _> = serde_json::from_value(json!({
+            "communityPublicId": U1, "communityName": "Alpha", "explicit": false
+        }));
+        assert!(r.is_err());
     }
 }

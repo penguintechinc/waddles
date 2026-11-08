@@ -336,6 +336,120 @@ async fn same_guild_other_community_other_application_or_unrouted_is_refused() {
         .unwrap();
 }
 
+struct FixedView(crate::active_context::ContextView);
+impl crate::active_context::ContextSource for FixedView {
+    fn get<'a>(
+        &'a self,
+        _s: &'a str,
+        _u: &'a str,
+    ) -> BoxFut<'a, Result<crate::active_context::ContextView, crate::active_context::ContextError>>
+    {
+        Box::pin(async move { Ok(self.0.clone()) })
+    }
+    fn put<'a>(
+        &'a self,
+        _s: &'a str,
+        _u: &'a str,
+        _c: &'a str,
+    ) -> BoxFut<'a, Result<crate::active_context::ContextView, crate::active_context::ContextError>>
+    {
+        Box::pin(async move { Ok(self.0.clone()) })
+    }
+}
+
+#[derive(Clone, Default)]
+struct Null;
+impl crate::connector::sink::EventSink for Null {
+    async fn publish(
+        &self,
+        _c: &crate::connector::types::ConnectionCtx,
+        _e: crate::connector::types::ConnectorEvent,
+    ) -> Result<(), crate::connector::sink::SinkError> {
+        Ok(())
+    }
+}
+
+/// Routes `id` through the production `ContextSink` (hub view = `community`, sink bound to
+/// `app`), against the rig's real store.
+async fn route_via_sink(r: &IxRig, id: &str, community: i64, app: &str) {
+    use crate::active_context::{
+        register_routing_metrics, ContextSink, ContextView, InteractionReplier,
+    };
+    use crate::connector::sink::EventSink;
+    let view = ContextView {
+        community_public_id: "11111111-1111-4111-8111-111111111111".into(),
+        community_id: community,
+        community_name: "Alpha".into(),
+        explicit: false,
+        communities: vec![],
+    };
+    let replier = Arc::new(InteractionReplier::new(
+        r.store.clone(),
+        guard(),
+        format!("{}/api/v10", r.server.uri()),
+    ));
+    let sink = ContextSink::new(
+        Null,
+        Arc::new(FixedView(view)),
+        replier,
+        r.store.clone(),
+        app.to_string(),
+        register_routing_metrics(&prometheus::Registry::new()).unwrap(),
+    );
+    let ctx = crate::connector::types::ConnectionCtx {
+        platform: "discord".into(),
+        source_id: GUILD.into(),
+        connection_id: "c".into(),
+        session_token: None,
+    };
+    let ev = crate::connector::types::ConnectorEvent {
+        platform: "discord".into(),
+        event_type: "interaction.command".into(),
+        actor: Some("123e4567-e89b-12d3-a456-426614174000".into()),
+        payload_json: json!({"interaction_id": id, "command": "ping", "args": ""}).to_string(),
+        occurred_at: "t".into(),
+    };
+    sink.publish(&ctx, ev).await.unwrap();
+}
+
+#[tokio::test]
+async fn context_sink_routing_makes_the_owner_answerable_and_only_the_owner() {
+    let r = ix_rig(followup_tpl, true, None).await;
+    let owned = unique(1);
+    let unrouted = unique(2);
+    let wrong_comm = unique(3);
+    let wrong_app = unique(4);
+    let mut fresh = rec(Some(GUILD));
+    fresh.routed_community_id = None;
+    for id in [&owned, &unrouted, &wrong_comm, &wrong_app] {
+        assert!(r.store.put_new(id, &fresh).await.unwrap());
+    }
+    // A refused routing also posts the generic notice through the followup webhook.
+    mock_post(&r.server, format!("/api/v10/webhooks/{APP_ID}/{IX_TOKEN}")).await;
+    route_via_sink(&r, &owned, 1, APP_ID).await;
+    route_via_sink(&r, &wrong_comm, 2, APP_ID).await;
+    route_via_sink(&r, &wrong_app, 1, "999").await;
+    for id in [&unrouted, &wrong_comm, &wrong_app] {
+        let e = r
+            .exec
+            .execute(&rq(&op("interaction.followup", Some("{}"), Some(id)), 1))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e,
+            ExecError::Slot(SlotError::Refused("interaction_not_owned")),
+            "{id}"
+        );
+    }
+    r.exec
+        .execute(&rq(
+            &op("interaction.followup", Some("{}"), Some(&owned)),
+            1,
+        ))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn without_a_configured_store_interaction_ops_fail_loud() {
     let r = ix_rig(followup_tpl, false, None).await;
