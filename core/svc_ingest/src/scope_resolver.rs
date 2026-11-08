@@ -1,8 +1,8 @@
 //! Dataplane scope resolver: `(platform, source id)` -> authoritative numeric
 //! `(tenant_id, community_id)` for the schema-v3 envelope producer.
 //!
-//! svc-ingest has no database, so it asks hub-api's
-//! `GET /api/v1/internal/dataplane/resolve-scope` which community a Discord
+//! svc-ingest has no database, so it asks hub-api's internal gRPC
+//! `DataplaneScopeService.ResolveScope` which community a Discord
 //! guild / Twitch channel belongs to. The call is authenticated with a
 //! `service_auth::MachineJwtClient` token (scope `dataplane:resolve-scope`).
 //!
@@ -27,12 +27,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
+use hub_client::resolve_scope::ResolveScopeClient;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 /// Machine-JWT scope svc-ingest's identity holds for this endpoint.
-pub const RESOLVE_SCOPE_JWT_SCOPE: &str = "dataplane:resolve-scope";
+pub const RESOLVE_SCOPE_JWT_SCOPE: &str = hub_client::resolve_scope::SCOPE;
 /// Feature flag gating the whole v3 producer path (default OFF).
 pub const INGEST_DYNAMIC_CONNECTIONS_FLAG: &str = "waddles.ingest-dynamic-connections";
 /// `community_id` meaning "tenant-wide" (the `_tenant` stream segment).
@@ -448,19 +448,9 @@ impl<S: ScopeSource> ScopeResolver<S> {
     }
 }
 
-/// Wire shape of hub-api's 200 response (`ScopeDTO`).
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ScopeDto {
-    tenant_id: i64,
-    community_id: i64,
-    tenant_slug: String,
-    #[serde(default)]
-    community_name: String,
-}
-
 /// Refuses a plaintext `http://` hub-api URL unless running in alpha -- the
-/// machine JWT rides this connection.
+/// machine JWT rides this connection. (No longer used by the resolver itself, which dials gRPC
+/// over TLS only; still used by the REST-backed twitch sessions boot check.)
 pub fn check_transport(hub_api_url: &str, environment: &str) -> Result<(), String> {
     let lower = hub_api_url.trim().to_ascii_lowercase();
     if lower.starts_with("https://") {
@@ -477,68 +467,89 @@ pub fn check_transport(hub_api_url: &str, environment: &str) -> Result<(), Strin
     Err("HUB_API_URL must be an http(s) URL".to_string())
 }
 
-/// Production [`ScopeSource`]: hub-api over HTTP with a machine JWT.
+/// Production [`ScopeSource`]: hub-api's internal gRPC `DataplaneScopeService` (TLS, machine JWT
+/// with scope [`RESOLVE_SCOPE_JWT_SCOPE`]) over one long-lived channel.
 pub struct HubScopeSource {
-    http: reqwest::Client,
-    base_url: String,
-    jwt: Arc<service_auth::MachineJwtClient>,
+    client: ResolveScopeClient,
+}
+
+/// Why [`HubScopeSource::connect`] refused to start.
+#[derive(Debug, thiserror::Error)]
+pub enum HubScopeConnectError {
+    /// The endpoint is not `https://` -- hub-api's internal gRPC listener is TLS-only.
+    #[error("HUB_API_GRPC_ENDPOINT must be an https:// URL (hub-api's internal gRPC is TLS-only)")]
+    NotTls,
+    /// Dialing/authenticating the channel failed (CA unreadable, unreachable, untrusted).
+    #[error("hub-api gRPC channel unavailable: {0}")]
+    Client(#[from] hub_client::HubClientError),
 }
 
 impl HubScopeSource {
-    /// `base_url` is `HUB_API_URL` (no trailing slash needed).
-    pub fn new(
-        base_url: &str,
-        jwt: Arc<service_auth::MachineJwtClient>,
-    ) -> Result<Self, reqwest::Error> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .connect_timeout(Duration::from_secs(2))
-            .build()?;
-        Ok(Self {
-            http,
-            base_url: base_url.trim_end_matches('/').to_string(),
-            jwt,
-        })
+    /// Dials hub-api's internal gRPC `endpoint` (`HUB_API_GRPC_ENDPOINT`, `https://` only) once;
+    /// the channel then lives as long as the source. `ca_cert_path` pins the CA that signed
+    /// hub-api's certificate (`HUB_API_GRPC_CA_FILE`).
+    ///
+    /// # Errors
+    /// [`HubScopeConnectError`] -- fatal at boot, never a silent fallback.
+    pub async fn connect(
+        endpoint: &str,
+        token_endpoint: &str,
+        sa_token_path: &str,
+        ca_cert_path: Option<&str>,
+    ) -> Result<Self, HubScopeConnectError> {
+        if !endpoint.trim().to_ascii_lowercase().starts_with("https://") {
+            return Err(HubScopeConnectError::NotTls);
+        }
+        let client = ResolveScopeClient::connect(
+            endpoint.trim(),
+            token_endpoint,
+            sa_token_path,
+            ca_cert_path,
+        )
+        .await?;
+        Ok(Self { client })
+    }
+
+    /// Wraps an already-built client (loopback servers in tests).
+    #[must_use]
+    pub fn from_client(client: ResolveScopeClient) -> Self {
+        Self { client }
+    }
+}
+
+/// Maps a hub failure to the resolver's classes: the three definitive refusals stay distinct (so
+/// they are negatively cached and the event is dropped), everything else is transient.
+fn classify(err: &hub_client::HubClientError) -> FetchError {
+    use hub_client::HubClientError as E;
+    match err {
+        E::Grpc(status) => match status.code() {
+            tonic::Code::NotFound => FetchError::NotFound,
+            tonic::Code::FailedPrecondition => FetchError::Ambiguous,
+            tonic::Code::InvalidArgument => FetchError::Invalid,
+            tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
+                FetchError::Transient("auth")
+            }
+            _ => FetchError::Transient("status"),
+        },
+        E::Auth(_) => FetchError::Transient("token"),
+        E::CircuitOpen => FetchError::Transient("circuit_open"),
+        _ => FetchError::Transient("transport"),
     }
 }
 
 impl ScopeSource for HubScopeSource {
     async fn fetch(&self, platform: &str, source_id: &str) -> Result<RawScope, FetchError> {
-        let token = self
-            .jwt
-            .get_token()
+        let answer = self
+            .client
+            .resolve(platform, source_id)
             .await
-            .map_err(|_| FetchError::Transient("token"))?;
-        let resp = self
-            .http
-            .get(format!(
-                "{}/api/v1/internal/dataplane/resolve-scope",
-                self.base_url
-            ))
-            .query(&[("platform", platform), ("source_id", source_id)])
-            .bearer_auth(&*token)
-            .send()
-            .await
-            .map_err(|_| FetchError::Transient("transport"))?;
-        match resp.status().as_u16() {
-            200 => {
-                let dto: ScopeDto = resp
-                    .json()
-                    .await
-                    .map_err(|_| FetchError::Transient("parse"))?;
-                Ok(RawScope {
-                    tenant_id: dto.tenant_id,
-                    community_id: dto.community_id,
-                    tenant_slug: dto.tenant_slug,
-                    community_name: dto.community_name,
-                })
-            }
-            404 => Err(FetchError::NotFound),
-            409 => Err(FetchError::Ambiguous),
-            400 => Err(FetchError::Invalid),
-            401 | 403 => Err(FetchError::Transient("auth")),
-            _ => Err(FetchError::Transient("status")),
-        }
+            .map_err(|e| classify(&e))?;
+        Ok(RawScope {
+            tenant_id: answer.tenant_id,
+            community_id: answer.community_id,
+            tenant_slug: answer.tenant_slug,
+            community_name: answer.community_name,
+        })
     }
 }
 
@@ -769,82 +780,156 @@ mod tests {
         assert!(check_transport("ftp://x", "alpha").is_err());
     }
 
-    // ---- HubScopeSource over real HTTP (wiremock) ----
+    #[tokio::test]
+    async fn plaintext_or_non_url_endpoint_is_refused_before_dialing() {
+        for bad in ["http://hub:50204", "hub:50204", ""] {
+            let err = HubScopeSource::connect(bad, "t", "s", None).await;
+            assert!(matches!(err, Err(HubScopeConnectError::NotTls)), "{bad}");
+        }
+    }
 
-    use wiremock::matchers::{header, method, path, query_param};
+    // ---- HubScopeSource over a real tonic server on loopback ----
+
+    use hub_client::pb::dataplane_scope_service_server::{
+        DataplaneScopeService, DataplaneScopeServiceServer,
+    };
+    use hub_client::pb::{
+        ResolveScopeBatchRequest, ResolveScopeBatchResponse, ResolveScopeRequest,
+        ResolveScopeResponse,
+    };
+    use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    async fn hub_source(server: &MockServer) -> (HubScopeSource, std::path::PathBuf) {
+    struct FakeHub {
+        calls: Arc<AtomicUsize>,
+        reply: Result<ResolveScopeResponse, tonic::Status>,
+    }
+
+    #[tonic::async_trait]
+    impl DataplaneScopeService for FakeHub {
+        async fn resolve_scope(
+            &self,
+            request: tonic::Request<ResolveScopeRequest>,
+        ) -> Result<tonic::Response<ResolveScopeResponse>, tonic::Status> {
+            assert_eq!(
+                request.metadata().get("authorization").unwrap(),
+                "Bearer machine.jwt.value"
+            );
+            let r = request.into_inner();
+            assert_eq!(
+                (r.platform.as_str(), r.source_id.as_str()),
+                ("discord", "111")
+            );
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.reply.clone().map(tonic::Response::new)
+        }
+
+        async fn resolve_scope_batch(
+            &self,
+            _request: tonic::Request<ResolveScopeBatchRequest>,
+        ) -> Result<tonic::Response<ResolveScopeBatchResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used by the resolver"))
+        }
+    }
+
+    /// Production [`HubScopeSource`] wired (real machine-JWT bootstrap against a wiremock token
+    /// endpoint) to a real tonic `DataplaneScopeService` answering with `reply`.
+    async fn hub_source(
+        reply: Result<ResolveScopeResponse, tonic::Status>,
+    ) -> (HubScopeSource, MockServer, Arc<AtomicUsize>) {
+        let tokens = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/internal/service-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
                 serde_json::json!({"token": "machine.jwt.value", "expires_in": 3600}),
             ))
-            .mount(server)
+            .mount(&tokens)
             .await;
         let sa = std::env::temp_dir().join(format!("svc-ingest-sa-{}", uuid::Uuid::new_v4()));
         std::fs::write(&sa, "projected-sa-token").unwrap();
-        let jwt = Arc::new(service_auth::MachineJwtClient::new(
-            format!("{}/internal/service-token", server.uri()),
-            sa.to_string_lossy().to_string(),
-            RESOLVE_SCOPE_JWT_SCOPE,
-        ));
-        (HubScopeSource::new(&server.uri(), jwt).unwrap(), sa)
+        let calls = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let svc = DataplaneScopeServiceServer::new(FakeHub {
+            calls: Arc::clone(&calls),
+            reply,
+        });
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(svc)
+                .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener))
+                .await
+                .unwrap();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let client = ResolveScopeClient::with_channel(
+            channel,
+            Arc::new(service_auth::MachineJwtClient::new(
+                format!("{}/token", tokens.uri()),
+                sa.to_string_lossy().to_string(),
+                RESOLVE_SCOPE_JWT_SCOPE,
+            )),
+        );
+        (HubScopeSource::from_client(client), tokens, calls)
     }
 
     #[tokio::test]
-    async fn hub_source_calls_endpoint_with_machine_jwt_and_parses_scope() {
-        let server = MockServer::start().await;
-        let (src, sa) = hub_source(&server).await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/internal/dataplane/resolve-scope"))
-            .and(query_param("platform", "discord"))
-            .and(query_param("source_id", "111"))
-            .and(header("authorization", "Bearer machine.jwt.value"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "success": true, "tenantId": 2, "communityId": 9,
-                "tenantSlug": "acme", "communityName": "main"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+    async fn hub_source_calls_hub_with_machine_jwt_and_returns_the_scope() {
+        let (src, _tokens, calls) = hub_source(Ok(ResolveScopeResponse {
+            tenant_id: 2,
+            community_id: 9,
+            tenant_slug: "acme".into(),
+            community_name: "main".into(),
+        }))
+        .await;
         let got = src.fetch("discord", "111").await.unwrap();
         assert_eq!(got, raw(2, 9, "acme", "main"));
-        let _ = std::fs::remove_file(sa);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn hub_source_maps_status_codes_to_fetch_errors() {
-        for (status, want) in [
-            (404, FetchError::NotFound),
-            (409, FetchError::Ambiguous),
-            (400, FetchError::Invalid),
-            (403, FetchError::Transient("auth")),
-            (500, FetchError::Transient("status")),
+    async fn hub_source_maps_grpc_status_to_fetch_errors() {
+        for (code, want) in [
+            (tonic::Code::NotFound, FetchError::NotFound),
+            (tonic::Code::FailedPrecondition, FetchError::Ambiguous),
+            (tonic::Code::InvalidArgument, FetchError::Invalid),
+            (tonic::Code::PermissionDenied, FetchError::Transient("auth")),
+            (tonic::Code::Unauthenticated, FetchError::Transient("auth")),
+            (tonic::Code::Internal, FetchError::Transient("status")),
+            (tonic::Code::Unavailable, FetchError::Transient("status")),
         ] {
-            let server = MockServer::start().await;
-            let (src, sa) = hub_source(&server).await;
-            Mock::given(method("GET"))
-                .and(path("/api/v1/internal/dataplane/resolve-scope"))
-                .respond_with(ResponseTemplate::new(status))
-                .mount(&server)
-                .await;
-            assert_eq!(src.fetch("twitch", "chan").await, Err(want), "{status}");
-            let _ = std::fs::remove_file(sa);
+            let (src, _tokens, _calls) = hub_source(Err(tonic::Status::new(code, "x"))).await;
+            assert_eq!(src.fetch("discord", "111").await, Err(want), "{code:?}");
         }
     }
 
     #[tokio::test]
     async fn hub_source_without_a_token_is_transient_not_a_panic() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
         let jwt = Arc::new(service_auth::MachineJwtClient::new(
             "http://127.0.0.1:1/token",
             "/nonexistent/sa-token",
             RESOLVE_SCOPE_JWT_SCOPE,
         ));
-        let src = HubScopeSource::new("http://127.0.0.1:1", jwt).unwrap();
+        let src = HubScopeSource::from_client(ResolveScopeClient::with_channel(channel, jwt));
         assert_eq!(
             src.fetch("twitch", "c").await,
             Err(FetchError::Transient("token"))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_open_breaker_is_transient_never_a_default_scope() {
+        let (src, _tokens, _calls) = hub_source(Err(tonic::Status::unavailable("down"))).await;
+        for _ in 0..5 {
+            let _ = src.fetch("discord", "111").await;
+        }
+        assert_eq!(
+            src.fetch("discord", "111").await,
+            Err(FetchError::Transient("circuit_open"))
         );
     }
 }
