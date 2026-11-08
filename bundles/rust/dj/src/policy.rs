@@ -383,7 +383,8 @@ pub fn evaluate(
     now_ms: u64,
     skip_dup_id: Option<u64>,
 ) -> Option<Violation> {
-    let rules = cfg.rules.clone().unwrap_or_default();
+    let default_rules = Rules::default();
+    let rules = cfg.rules.as_ref().unwrap_or(&default_rules);
 
     if state.banned.contains(&track.key()) {
         return v("banned_track", "that song is banned here");
@@ -495,6 +496,5 @@ pub fn evaluate(
 pub fn fuzzy_rules(cfg: &Config) -> Vec<String> {
     cfg.rules
         .as_ref()
-        .map(|r| r.fuzzy.clone())
-        .unwrap_or_default()
+        .map_or_else(Vec::new, |r| r.fuzzy.clone())
 }

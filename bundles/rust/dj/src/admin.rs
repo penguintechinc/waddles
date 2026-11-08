@@ -42,8 +42,7 @@ impl Engine<'_> {
         let toks: Vec<&str> = args.split_whitespace().collect();
         let verb = toks
             .first()
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
+            .map_or_else(String::new, |s| s.to_ascii_lowercase());
         let rest = args[verb.len().min(args.len())..].trim_start();
         match verb.as_str() {
             "set" => self.set(&toks),
@@ -83,7 +82,7 @@ impl Engine<'_> {
             "remove" => false,
             _ => return Ok("expected add or remove".into()),
         };
-        let value = toks.get(3..).map(|v| v.join(" ")).unwrap_or_default();
+        let value = toks.get(3..).map_or_else(String::new, |v| v.join(" "));
         let mut cfg = self.config()?;
         match cfg.edit_list(&list.to_ascii_lowercase(), add, &value) {
             Ok(()) => {
@@ -112,8 +111,7 @@ impl Engine<'_> {
     fn ai_cmd(&self, text: &str, toks: &[&str]) -> Reply {
         let sub = toks
             .get(1)
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
+            .map_or_else(String::new, |s| s.to_ascii_lowercase());
         let mut cfg = self.config()?;
         match sub.as_str() {
             "on" => {
@@ -285,8 +283,7 @@ impl Engine<'_> {
     fn playlist_cmd(&self, toks: &[&str], rest: &str) -> Reply {
         let sub = toks
             .get(1)
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
+            .map_or_else(String::new, |s| s.to_ascii_lowercase());
         let name = toks.get(2).map(|s| s.to_ascii_lowercase());
         let need_name = |f: &dyn Fn(&str) -> Reply| match &name {
             Some(n) if valid_name(n) => f(n),
@@ -497,7 +494,10 @@ impl Engine<'_> {
     /// `!dj playlist import <name> <provider> <playlist id/url>`.
     fn pl_import(&self, name: &str, provider: Option<&str>, reference: Option<&str>) -> Reply {
         let (Some(provider), Some(reference)) = (provider, reference) else {
-            return Ok("usage: !dj playlist import <name> <youtube|spotify|soundcloud> <playlist id>".into());
+            return Ok(
+                "usage: !dj playlist import <name> <youtube|spotify|soundcloud> <playlist id>"
+                    .into(),
+            );
         };
         let provider = provider.to_ascii_lowercase();
         if !PROVIDERS.contains(&provider.as_str()) {

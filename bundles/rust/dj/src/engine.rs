@@ -460,8 +460,7 @@ impl<'a> Engine<'a> {
         let toks: Vec<&str> = args.split_whitespace().collect();
         let verb = toks
             .first()
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
+            .map_or_else(String::new, |s| s.to_ascii_lowercase());
         match verb.as_str() {
             "" | "list" | "queue" => self.show(),
             "now" => self.now_playing(),
