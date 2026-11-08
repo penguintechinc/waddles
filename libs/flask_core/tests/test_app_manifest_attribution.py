@@ -117,3 +117,30 @@ def test_invalid_category_rejected() -> None:
 def test_alternatives_category_parses() -> None:
     manifest = parse_manifest(_data(category="alternatives"))
     assert manifest.category == "alternatives"
+
+
+@pytest.mark.parametrize(
+    ("author", "stored"),
+    [("@octo", "github:octo"), ("https://github.com/octo", "github:octo"), ("Jane Doe", "Jane Doe")],
+)
+def test_author_is_normalized_when_present(author: str, stored: str) -> None:
+    assert parse_manifest(_data(author=author)).author == stored
+
+
+@pytest.mark.parametrize("author", ["<b>x</b>", "https://evil.example/x", "github:-x", 7])
+def test_invalid_author_is_rejected_with_code(author: Any) -> None:
+    with pytest.raises(ManifestError) as exc:
+        parse_manifest(_data(author=author))
+    assert exc.value.reason.startswith("author_")
+
+
+def test_collection_slug_and_attribution_rules() -> None:
+    assert parse_manifest(_data(collection="community-ports")).collection == "community-ports"
+    with pytest.raises(ManifestError) as exc:
+        parse_manifest(_data(collection="Bad Slug"))
+    assert exc.value.reason == "invalid_collection"
+    with pytest.raises(ManifestError) as exc:
+        parse_manifest(_data(collection="superpenguintv", license="Apache-2.0", notice="n"))
+    assert exc.value.reason == "collection_attribution_required"
+    ok = parse_manifest(_data(collection="superpenguintv", license="MIT", notice="MIT, ported"))
+    assert ok.collection == "superpenguintv"
