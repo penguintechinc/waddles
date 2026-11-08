@@ -8,10 +8,11 @@
 schema_version: 2
 app_id: waddles.core.service.discord
 name: Discord Platform Connector (Rust)
-version: 1.0.6
+version: 1.0.7
 feature: waddles.core.service
 module: core
 provider: builtin
+author: github:penguintechinc
 language: rust
 artifact: prebuilt
 execution_model: native

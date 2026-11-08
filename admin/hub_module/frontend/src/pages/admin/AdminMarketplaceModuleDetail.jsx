@@ -13,6 +13,7 @@ import {
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import { unifiedMarketplaceApi } from '../../services/api';
+import AuthorLink from '../../components/AuthorLink';
 
 const PRICING_BADGES = {
   free: { label: 'Free', className: 'bg-green-900/40 border-green-600 text-green-400' },
@@ -173,7 +174,9 @@ export default function AdminMarketplaceModuleDetail() {
               )}
               <div>
                 <h1 className="text-2xl font-bold text-white">{module.displayName || module.name}</h1>
-                <p className="text-fg-muted text-sm">by {module.author || module.vendorName}</p>
+                <p className="text-fg-muted text-sm">
+                  by {module.author ? <AuthorLink author={module.author} /> : module.vendorName}
+                </p>
               </div>
             </div>
 

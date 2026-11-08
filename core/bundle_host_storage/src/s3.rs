@@ -53,11 +53,18 @@ fn attrs(content_type: &str, tags: &[String]) -> Attributes {
     a
 }
 
-fn meta_from(key: &str, size: u64, a: &Attributes) -> ObjectMeta {
-    let content_type = a
-        .get(&Attribute::ContentType)
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+fn meta_from(key: &str, size: u64, a: &Attributes) -> Result<ObjectMeta, StorageError> {
+    // Every object is written with a content type (`attrs`); a missing one means
+    // the stored metadata is corrupt, so fail loudly instead of guessing a default.
+    let content_type = match a.get(&Attribute::ContentType) {
+        Some(v) => v.to_string(),
+        None => {
+            tracing::error!(key, "stored object has no content type");
+            return Err(StorageError::Backend(format!(
+                "object {key} has no content type"
+            )));
+        }
+    };
     let tags = a
         .get(&Attribute::Metadata(TAGS_ATTR.into()))
         .map(|v| {
@@ -68,12 +75,12 @@ fn meta_from(key: &str, size: u64, a: &Attributes) -> ObjectMeta {
                 .collect()
         })
         .unwrap_or_default();
-    ObjectMeta {
+    Ok(ObjectMeta {
         key: key.into(),
         size,
         content_type,
         tags,
-    }
+    })
 }
 
 impl S3Backend {
@@ -127,7 +134,7 @@ impl ObjectBackend for S3Backend {
             )
             .await
         {
-            Ok(r) => Ok(Some(meta_from(key, r.meta.size, &r.attributes))),
+            Ok(r) => meta_from(key, r.meta.size, &r.attributes).map(Some),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(be(e)),
         }
@@ -139,7 +146,7 @@ impl ObjectBackend for S3Backend {
                 let (size, attributes) = (r.meta.size, r.attributes.clone());
                 let body = r.bytes().await.map_err(be)?;
                 Ok(Some(StoredObject {
-                    meta: meta_from(key, size, &attributes),
+                    meta: meta_from(key, size, &attributes)?,
                     body,
                 }))
             }
