@@ -33,6 +33,9 @@ sha2 = "=0.10.9"
 # same exact version pin `penguin-logging` itself uses so no second copy
 # of the crate ever enters either service's dependency graph.
 opentelemetry = "=0.32.0"
+# Per-tenant at-rest sealing of kv values (spec 2026-11-08-tenant-at-rest-encryption).
+bundle-host-crypto = { path = "../bundle_host_crypto", version = "=0.1.0" }
 
 [dev-dependencies]
+zeroize = "=1.9.0"
 tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread"] }

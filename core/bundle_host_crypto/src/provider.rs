@@ -97,7 +97,17 @@ type CacheKey = (String, Option<u32>);
 pub struct TtlCachedDekProvider<D: DekProvider> {
     inner: Arc<D>,
     ttl: Duration,
-    cache: Arc<Mutex<HashMap<CacheKey, CacheEntry>>>,
+    cache: Arc<Mutex<CacheState>>,
+}
+
+/// Cache entries plus a per-tenant invalidation generation. A fetch records
+/// the generation before calling the broker and only stores its result if the
+/// generation is unchanged, so a revoke/rotate that lands mid-fetch is never
+/// overwritten by the (now stale) DEK the in-flight fetch returns.
+#[derive(Default)]
+struct CacheState {
+    entries: HashMap<CacheKey, CacheEntry>,
+    generations: HashMap<String, u64>,
 }
 
 impl<D: DekProvider> Clone for TtlCachedDekProvider<D> {
@@ -116,29 +126,59 @@ impl<D: DekProvider> TtlCachedDekProvider<D> {
         Self {
             inner: Arc::new(inner),
             ttl,
-            cache: Arc::new(Mutex::new(HashMap::new())),
+            cache: Arc::new(Mutex::new(CacheState::default())),
         }
     }
 
-    /// Evicts every cached entry (active and versioned) for `tenant_id`.
+    /// Evicts every cached entry (active and versioned) for `tenant_id` and
+    /// bumps its generation so any fetch already in flight will not cache
+    /// the DEK it is about to return.
     pub fn invalidate(&self, tenant_id: &str) {
-        lock(&self.cache).retain(|(t, _), _| t != tenant_id);
+        let mut state = lock(&self.cache);
+        state.entries.retain(|(t, _), _| t != tenant_id);
+        let generation = state.generations.entry(tenant_id.to_string()).or_insert(0);
+        *generation = generation.wrapping_add(1);
+    }
+
+    fn generation(&self, tenant_id: &str) -> u64 {
+        lock(&self.cache)
+            .generations
+            .get(tenant_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn lookup(&self, key: &CacheKey) -> Option<(Dek, u32)> {
-        let cache = lock(&self.cache);
-        cache
+        let state = lock(&self.cache);
+        state
+            .entries
             .get(key)
             .filter(|e| e.expires_at > Instant::now())
             .map(|e| (e.dek.clone(), e.dek_version))
     }
 
-    fn store(&self, key: CacheKey, dek: &Dek, dek_version: u32, tenant_id: &str) {
+    /// Stores a fetched DEK only if no invalidation for the tenant landed
+    /// since `observed_generation` was read; otherwise the DEK is returned
+    /// to the caller uncached and the next call re-fetches.
+    fn store(
+        &self,
+        key: CacheKey,
+        dek: &Dek,
+        dek_version: u32,
+        tenant_id: &str,
+        observed_generation: u64,
+    ) {
         let ttl = self
             .inner
             .granted_ttl(tenant_id)
             .map_or(self.ttl, |g| g.min(self.ttl));
-        lock(&self.cache).insert(
+        let mut state = lock(&self.cache);
+        let current = state.generations.get(tenant_id).copied().unwrap_or(0);
+        if current != observed_generation {
+            tracing::info!("dek fetch raced an invalidation; not caching the fetched DEK");
+            return;
+        }
+        state.entries.insert(
             key,
             CacheEntry {
                 dek: dek.clone(),
@@ -156,8 +196,9 @@ impl<D: DekProvider> DekProvider for TtlCachedDekProvider<D> {
             metrics::record_dek_cache_hit();
             return Ok(hit);
         }
+        let observed = self.generation(tenant_id);
         let (dek, version) = self.inner.get_dek(tenant_id).await?;
-        self.store(key, &dek, version, tenant_id);
+        self.store(key, &dek, version, tenant_id, observed);
         Ok((dek, version))
     }
 
@@ -178,8 +219,9 @@ impl<D: DekProvider> DekProvider for TtlCachedDekProvider<D> {
             return Ok(dek);
         }
         // Unknown version: exactly one forced broker call, then fail closed.
+        let observed = self.generation(tenant_id);
         let dek = self.inner.get_dek_version(tenant_id, version).await?;
-        self.store(key, &dek, version, tenant_id);
+        self.store(key, &dek, version, tenant_id, observed);
         Ok(dek)
     }
 }
@@ -674,6 +716,54 @@ mod tests {
         );
         assert!(c.get_dek_version("1", 1).await.is_ok());
         assert!(c.get_dek_version("1", 9).await.is_err());
+    }
+
+    /// Provider whose fetch parks mid-flight until released, so a test can
+    /// land an invalidation while `get_dek` is in progress.
+    struct GatedProvider {
+        calls: AtomicU32,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl DekProvider for GatedProvider {
+        async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            Ok((Zeroizing::new([7u8; KEY_LEN]), 1))
+        }
+    }
+
+    // regression: revocation landing during an in-flight fetch must not be
+    // overwritten by the stale DEK that fetch then returns.
+    #[tokio::test]
+    async fn invalidation_during_inflight_fetch_is_not_overwritten() {
+        let cache = TtlCachedDekProvider::new(
+            GatedProvider {
+                calls: AtomicU32::new(0),
+                started: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            },
+            Duration::from_secs(60),
+        );
+        let inflight = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.get_dek("1").await.map(|(_, v)| v) })
+        };
+        cache.inner.started.notified().await;
+        cache.invalidate("1");
+        cache.inner.release.notify_one();
+        assert_eq!(inflight.await.ok().and_then(Result::ok), Some(1));
+        // The racing fetch's DEK was returned but not cached: next call
+        // re-fetches instead of serving the stale entry.
+        let _ = cache.get_dek("1").await;
+        assert_eq!(cache.inner.calls.load(Ordering::SeqCst), 2);
+        // And an uncontended fetch still caches normally.
+        let _ = cache.get_dek("1").await;
+        assert_eq!(cache.inner.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

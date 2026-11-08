@@ -32,6 +32,9 @@ mod limits;
 mod metrics;
 pub mod policy;
 pub mod scope;
+pub mod seal;
+#[cfg(test)]
+mod seal_tests;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,6 +47,7 @@ pub use limits::{
     MAX_GUEST_KEY_LEN, MAX_KEYS_PER_APP, MAX_OPS_PER_INVOKE, MAX_TTL_SECONDS, MAX_VALUE_BYTES,
 };
 pub use scope::KvScope;
+pub use seal::{AlwaysSeal, Sealing, SealingGate};
 
 /// The `kv` capability's error surface. Deliberately richer than
 /// `stage.wit`'s two-variant `kv.error` (`too-large`/`backend`) --
@@ -82,6 +86,15 @@ pub enum KvError {
     /// Valkey itself failed (network, protocol, script error).
     #[error("backend error: {0}")]
     Backend(String),
+    /// The tenant's data key could not be resolved (broker down, revoked,
+    /// unknown tenant) or the scope lacks numeric ids. The op is refused;
+    /// nothing is ever written in plaintext as a fallback.
+    #[error("tenant data key unavailable: {0}")]
+    KeyUnavailable(String),
+    /// A sealed value failed authentication (wrong tenant/community/app/key
+    /// binding, tamper, or corruption).
+    #[error("integrity failure: {0}")]
+    Integrity(String),
 }
 
 impl KvError {
@@ -111,6 +124,8 @@ impl KvError {
             | KvError::QuotaExceeded(m)
             | KvError::RateLimited(m)
             | KvError::Reconciling(m)
+            | KvError::KeyUnavailable(m)
+            | KvError::Integrity(m)
             | KvError::Backend(m) => m.clone(),
         }
     }
@@ -128,6 +143,8 @@ impl KvError {
             KvError::RateLimited(_) => "rate_limited",
             KvError::Reconciling(_) => "reconciling",
             KvError::Backend(_) => "backend",
+            KvError::KeyUnavailable(_) => "key_unavailable",
+            KvError::Integrity(_) => "integrity",
         }
     }
 }
@@ -223,6 +240,10 @@ pub struct KvHost<B: KvBackend> {
     /// "undeclared means denied" is the default for any `app_id` it has
     /// never been told about.
     capabilities: Arc<CapabilitySnapshot>,
+    /// Per-tenant value sealing ([`seal`]). `None` only for hosts built
+    /// without it (unit tests of unrelated behaviour); every production
+    /// stage attaches it via [`KvHost::with_sealing`].
+    sealing: Option<Sealing>,
 }
 
 impl<B: KvBackend> KvHost<B> {
@@ -230,7 +251,16 @@ impl<B: KvBackend> KvHost<B> {
         Self {
             backend,
             capabilities,
+            sealing: None,
         }
+    }
+
+    /// Attaches per-tenant at-rest value sealing: `set` seals before the
+    /// write, `get` opens sealed values (and passes legacy plaintext through).
+    #[must_use]
+    pub fn with_sealing(mut self, sealing: Sealing) -> Self {
+        self.sealing = Some(sealing);
+        self
     }
 
     /// Self-heal, low-severity fix (PR #425 security review): if the live
@@ -311,10 +341,15 @@ impl<B: KvBackend> KvHost<B> {
             .map_err(|d| KvError::NotGranted(d.message))?;
         validate_key(key)?;
         self.check_rate(scope, call_id).await?;
-        self.backend
+        let stored = self
+            .backend
             .get(&scope.data_key(key))
             .await
-            .map_err(KvError::Backend)
+            .map_err(KvError::Backend)?;
+        match (stored, &self.sealing) {
+            (Some(raw), Some(sealing)) => sealing.open_for_read(scope, key, raw).await.map(Some),
+            (stored, _) => Ok(stored),
+        }
     }
 
     /// `stage.wit` `kv.set`. `ttl_seconds` of `0` means no expiry; a value
@@ -353,13 +388,19 @@ impl<B: KvBackend> KvHost<B> {
         self.check_rate(scope, call_id).await?;
         self.ensure_count_reconciled(scope).await?;
         let ttl = limits::clamp_ttl_seconds(ttl_seconds);
+        // Seal before any backend write: a key failure refuses the op here,
+        // so there is no code path that stores plaintext as a fallback.
+        let stored = match &self.sealing {
+            Some(sealing) => sealing.seal_for_write(scope, key, value).await?,
+            None => value.to_vec(),
+        };
         match self
             .backend
             .set_with_quota(
                 &scope.data_key(key),
                 &scope.live_key(),
                 &scope.legacy_count_key(),
-                value,
+                &stored,
                 ttl,
                 limits::MAX_KEYS_PER_APP,
             )

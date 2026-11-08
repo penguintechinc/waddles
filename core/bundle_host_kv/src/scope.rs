@@ -77,6 +77,12 @@ pub struct KvScope {
     pub tenant: String,
     pub community: Option<String>,
     pub app_id: String,
+    /// Authoritative numeric `(tenant_id, community_id)` from the verified
+    /// invocation (`community_id` 0 = tenant-wide). Value sealing keys the
+    /// tenant DEK and binds the AAD to these, never to the mutable names
+    /// above. `None` means the caller did not supply them; sealing then
+    /// refuses (fails closed) rather than guessing.
+    pub ids: Option<(i32, i32)>,
 }
 
 impl KvScope {
@@ -89,7 +95,15 @@ impl KvScope {
             tenant: tenant.into(),
             community,
             app_id: app_id.into(),
+            ids: None,
         }
+    }
+
+    /// Attaches the numeric `(tenant_id, community_id)` sealing needs.
+    #[must_use]
+    pub fn with_ids(mut self, tenant_id: i32, community_id: i32) -> Self {
+        self.ids = Some((tenant_id, community_id));
+        self
     }
 
     fn community_segment(&self) -> &str {
