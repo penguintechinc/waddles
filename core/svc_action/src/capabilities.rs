@@ -1262,6 +1262,19 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         self
     }
 
+    /// Attaches per-tenant at-rest sealing to the `kv` capability: values are
+    /// sealed with the tenant DEK on write and opened on read. Call after
+    /// [`Self::with_kv`]; a no-op when `kv` is not configured. Every
+    /// production construction calls this; a host without it would store
+    /// plaintext.
+    #[must_use]
+    pub fn with_kv_sealing(mut self, sealing: bundle_host_kv::Sealing) -> Self {
+        if let Some(kv) = self.kv.as_mut() {
+            kv.attach_sealing(sealing);
+        }
+        self
+    }
+
     /// Attaches the `db` capability's live wiring -- called once at
     /// startup (`crate::lib`) with the shared, process-wide [`DbWiring`],
     /// never per-connection. Builder-style so existing `StageCapabilities::new`
@@ -2464,7 +2477,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             scope.tenant.clone(),
             scope.community.clone(),
             scope.app_id.clone(),
-        );
+        )
+        .with_ids(scope.tenant_id, scope.community_id);
 
         match call.op.as_str() {
             "get" => {

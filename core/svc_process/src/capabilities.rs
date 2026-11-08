@@ -519,6 +519,8 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// sees `not_implemented` rather than this loop failing to start if
     /// the Valkey connection for `kv` was never configured).
     kv: Option<Arc<KvHost<K>>>,
+    /// Per-tenant at-rest value sealing for `kv` ([`Self::with_kv_sealing`]).
+    kv_sealing: Option<bundle_host_kv::Sealing>,
     /// The shared, per-process [`EgressGuard`] backing the `http`
     /// capability -- see [`Self::handle_http`].
     egress: Arc<EgressGuard>,
@@ -618,6 +620,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             community_id,
             app_version,
             kv: None,
+            kv_sealing: None,
             egress,
             gate,
             db: None,
@@ -693,7 +696,33 @@ impl<K: KvBackend> StageCapabilities<K> {
         backend: K,
         capabilities: std::sync::Arc<bundle_host_kv::CapabilitySnapshot>,
     ) -> Self {
-        self.kv = Some(Arc::new(KvHost::new(backend, capabilities)));
+        let mut host = KvHost::new(backend, capabilities);
+        if let Some(sealing) = &self.kv_sealing {
+            host = host.with_sealing(sealing.clone());
+        }
+        self.kv = Some(Arc::new(host));
+        self
+    }
+
+    /// Attaches per-tenant at-rest sealing to the `kv` capability: values are
+    /// sealed with the tenant DEK on write and opened on read. Order-
+    /// independent with [`Self::with_kv`]. Every production construction
+    /// calls this; a host without it would store plaintext.
+    #[must_use]
+    pub fn with_kv_sealing(mut self, sealing: bundle_host_kv::Sealing) -> Self {
+        if let Some(kv) = self.kv.as_mut() {
+            // `with_kv` just built this Arc, so it is uniquely owned; if that
+            // ever stops being true, drop the capability (fail closed,
+            // `not_implemented`) rather than serve it unsealed.
+            match Arc::get_mut(kv) {
+                Some(host) => host.attach_sealing(sealing.clone()),
+                None => {
+                    tracing::error!("kv host is shared; cannot attach sealing, disabling kv");
+                    self.kv = None;
+                }
+            }
+        }
+        self.kv_sealing = Some(sealing);
         self
     }
 
@@ -2873,7 +2902,8 @@ impl<K: KvBackend> StageCapabilities<K> {
             self.tenant.clone(),
             self.community.clone(),
             self.app_id.clone(),
-        );
+        )
+        .with_ids(self.tenant_id, self.community_id);
 
         match call.op.as_str() {
             "get" => {

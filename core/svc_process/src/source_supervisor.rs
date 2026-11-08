@@ -144,6 +144,9 @@ pub struct SupervisorDeps {
     /// `changelog_consumer::run` poll writes to, cloned (the `Arc`, not the
     /// snapshot) into every binding consumer's own `ProcessDeps`.
     pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
+    /// See `spine::ProcessDeps::kv_sealing`'s doc -- cloned into every
+    /// binding consumer's own `ProcessDeps`.
+    pub kv_sealing: Option<bundle_host_kv::Sealing>,
     /// See `spine::ProcessDeps::gate`'s doc -- cloned into every binding
     /// consumer's own `ProcessDeps` in [`run_binding_consumer`] below.
     pub gate: Arc<bundle_capability_gate::CapabilityGate>,
@@ -339,6 +342,7 @@ async fn run_binding_consumer(
             license: Arc::clone(&deps.license),
             kv_conn: deps.kv_conn.clone(),
             kv_capabilities: Arc::clone(&deps.kv_capabilities),
+            kv_sealing: deps.kv_sealing.clone(),
             gate: Arc::clone(&deps.gate),
             tenant_id: binding.tenant_id,
             community_id: binding.community_id,

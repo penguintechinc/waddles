@@ -49,8 +49,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use pb::identity_service_client::IdentityServiceClient;
 use pb::key_service_client::KeyServiceClient;
 use pb::{
-    EphemeralPseudonym, GetStreamDekRequest, GetStreamDekResponse, MintEphemeralPseudonymRequest,
-    MintEphemeralPseudonymsRequest, ResolveDisplayNamesRequest, ResolveDisplayNamesResponse,
+    EphemeralPseudonym, GetStreamDekRequest, GetStreamDekResponse, GetTenantDekRequest,
+    GetTenantDekResponse, MintEphemeralPseudonymRequest, MintEphemeralPseudonymsRequest, ResolveDisplayNamesRequest, ResolveDisplayNamesResponse,
     ResolveHandleRequest, ResolveHandleResponse, ResolvePlatformUserRequest,
     ResolvePlatformUserResponse,
 };
@@ -469,6 +469,42 @@ impl HubClient {
                 let mut client = self.key.clone();
                 client
                     .get_stream_dek(request)
+                    .await
+                    .map(|r| r.into_inner())
+                    .map_err(HubClientError::from)
+            }
+        })
+        .await
+    }
+
+    /// Returns a tenant's DEK sealed to `caller_ephemeral_public_key`
+    /// (`KeyService.GetTenantDek`, required scope `keys:tenant-dek:read`).
+    /// `dek_version` 0 requests the active version. Idempotent: transient
+    /// `UNAVAILABLE`/`DEADLINE_EXCEEDED` are retried within the per-RPC
+    /// deadline (<= 5s); every other status (`NOT_FOUND`,
+    /// `PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`, ...) is returned as-is --
+    /// the caller must fail closed, never fall back to another key.
+    pub async fn get_tenant_dek(
+        &self,
+        tenant_id: u32,
+        purpose: pb::TenantDekPurpose,
+        dek_version: u32,
+        caller_ephemeral_public_key: Vec<u8>,
+    ) -> Result<GetTenantDekResponse, HubClientError> {
+        self.call_with_retry(&self.circuits.key, self.max_retries, || {
+            let caller_ephemeral_public_key = caller_ephemeral_public_key.clone();
+            async move {
+                let request = self
+                    .authed_request(GetTenantDekRequest {
+                        tenant_id,
+                        purpose: purpose as i32,
+                        dek_version,
+                        caller_ephemeral_public_key,
+                    })
+                    .await?;
+                let mut client = self.key.clone();
+                client
+                    .get_tenant_dek(request)
                     .await
                     .map(|r| r.into_inner())
                     .map_err(HubClientError::from)
