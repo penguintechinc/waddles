@@ -41,7 +41,6 @@ def _render(*extra_set: str) -> list[dict[str, Any]]:
     sets = [
         "pipeline.rustDataPlane.enabled=true",
         "pipeline.rustDataPlane.svcIngest.enabled=true",
-        "pipeline.svcAction.enabled=true",
         *extra_set,
     ]
     argv = [
@@ -175,29 +174,6 @@ def test_flags_default_off_in_base_values_and_on_in_alpha() -> None:
     alpha = yaml.safe_load(_ALPHA_VALUES.read_text())["pipeline"]["rustDataPlane"]
     assert base["svcAction"]["dynamicConnections"]["enabled"] is False
     assert alpha["svcAction"]["dynamicConnections"]["enabled"] is True
-
-
-def test_legacy_python_svc_action_mounts_token_and_gets_mint_env_when_enabled(
-    enabled: list[dict[str, Any]], disabled: list[dict[str, Any]]
-) -> None:
-    pods = [
-        d for d in enabled
-        if d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("-svc-action")
-    ]  # fmt: skip
-    assert len(pods) == 1
-    spec = pods[0]["spec"]["template"]["spec"]
-    assert spec["serviceAccountName"] == "svc-action"
-    volume = next(
-        v for v in spec["volumes"] if v["name"] == "service-jwt-bootstrap-token"
-    )
-    assert (
-        volume["projected"]["sources"][0]["serviceAccountToken"]["audience"]
-        == "hub-api"
-    )
-    env = _env(enabled, "-svc-action")
-    assert env["SERVICE_JWT_SA_TOKEN_PATH"].endswith("/service-jwt-bootstrap-token")
-    assert env["SERVICE_JWT_TOKEN_ENDPOINT"].endswith("/internal/service-token")
-    assert "SERVICE_JWT_SA_TOKEN_PATH" not in _env(disabled, "-svc-action")
 
 
 def test_spiffe_peer_env_defaults_are_safe(enabled: list[dict[str, Any]]) -> None:

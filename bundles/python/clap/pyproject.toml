@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-clap"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!clap <text>` -> puts a clap between each word (hello world -> hello clap world clap) (capped, never logged). Stateless: relay only, no kv/db."
 requires-python = ">=3.13"
 dependencies = []

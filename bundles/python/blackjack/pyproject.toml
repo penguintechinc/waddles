@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-blackjack"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!blackjack <stake>` / `!hit` / `!stand` -- a solo blackjack game against the dealer-bot over the shared community economy (escrowed stake, atomic per-player action lock, replay-safe)."
 requires-python = ">=3.13"
 dependencies = []
