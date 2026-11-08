@@ -42,6 +42,9 @@ permissions:
     credential
 - id: chat.delete:twitch
   justification: Template Twitch chat message deletion in the host-pinned channel
+- id: chat.clear:twitch
+  justification: Clear the whole chat of the host-pinned channel (moderator-scoped Helix
+    call); admin-approved dangerous grant
 - id: moderation.twitch
   justification: Chat deletion is a moderation action; admin-approved dangerous grant,
     host-pinned channel and moderator
@@ -201,6 +204,20 @@ exported_tools:
     message_id: message_id
     required:
     - message_id
+    origin: channel
+- name: twitch.chat.clear
+  access: write
+  risk: dangerous
+  required_scope: community:moderate
+  input_schema:
+    type: object
+    properties: {}
+    additionalProperties: false
+  output_schema:
+    type: object
+  host_op:
+    platform: twitch
+    op: chat.clear
     origin: channel
 author: PenguinTech/waddles
 license: AGPL-3.0-or-later
