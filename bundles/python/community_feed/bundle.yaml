@@ -1,11 +1,11 @@
 schema_version: 2
 app_id: waddles.core.community.feed
 name: Community Feed Reader (Python)
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.community
 module: core
 provider: builtin
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/community_feed
 language: python

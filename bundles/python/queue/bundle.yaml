@@ -3,11 +3,11 @@ app_id: waddles.core.example.queue
 name: Viewer Queue Bundle (Python)
 # 1.0.0: initial kv-only viewer queue -- !vqueue (not !queue: music owns it) join/leave/(position)/list/next/clear. See
 # src/app.py's module docstring (feature/bundles-queue-timer).
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/queue
 language: python
@@ -54,6 +54,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.1"
+  min_version: "1.0.1"
   max_version: null
