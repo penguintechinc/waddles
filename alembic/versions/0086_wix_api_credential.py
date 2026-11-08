@@ -12,8 +12,8 @@ write-only through the admin API and reaches the data plane only via the ``conne
 resolver path. The existing ``secret_shape`` CHECK keeps ``sealed_secret`` NULL on kind 1, so a new
 column (rather than overloading ``sealed_secret``) preserves that invariant.
 
-Revision ID: 0082_wix_api_credential
-Revises: 0081_spectrum_conn_resource
+Revision ID: 0086_wix_api_credential
+Revises: 0085_bundle_community_config
 Create Date: 2026-11-07
 """
 
@@ -21,8 +21,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0082_wix_api_credential"
-down_revision = "0081_spectrum_conn_resource"
+revision = "0086_wix_api_credential"
+down_revision = "0085_bundle_community_config"
 branch_labels = None
 depends_on = None
 
@@ -78,7 +78,7 @@ def downgrade() -> None:
                        WHERE resource_type IN ('soundcloud_app', 'youtube_api_key')
                           OR sealed_api_credential IS NOT NULL) THEN
                 RAISE EXCEPTION
-                    '0082 downgrade refused: soundcloud/youtube_api connections or sealed Wix '
+                    '0086 downgrade refused: soundcloud/youtube_api connections or sealed Wix '
                     'API credentials exist and the previous release cannot represent them';
             END IF;
         END
