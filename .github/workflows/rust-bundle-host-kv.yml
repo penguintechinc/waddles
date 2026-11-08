@@ -5,6 +5,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/bundle_host_kv/**'
+      - 'core/bundle_host_crypto/**'
       - 'core/test_support/**'
       - '.github/workflows/rust-bundle-host-kv.yml'
       - '.github/workflows/rust-crate-ci.yml'
@@ -46,6 +47,7 @@ jobs:
           area: rust
           globs: |
             core/bundle_host_kv/**
+            core/bundle_host_crypto/**
             core/test_support/**
 
   lint-test:

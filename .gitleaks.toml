@@ -23,6 +23,8 @@ paths = [
   # (core/bundle_compiler/tests/scan_test.rs::secret_in_source_blocks) --
   # never a real credential.
   "core/bundle_compiler/tests/fixtures/bundles/scan-secret/app\\.py",
+  # Python/Rust parity golden vector: fixed test DEK (bytes 1..32), no real key.
+  "core/bundle_host_crypto/tests/fixtures/golden_vector\\.json",
   # Test fixtures only (fake keys / PUBLIC Discord application client IDs),
   # triaged 2026-10-12 when the gitleaks counter stopped being masked and
   # reported 3 findings above the history baseline. Each is a test file; none
