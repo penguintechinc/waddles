@@ -2326,7 +2326,7 @@ async fn spawn_v2_registry_refresh(
         Ok(n) => tracing::info!(bundles = n, "db v2: schema registry loaded"),
         Err(e) => tracing::error!(
             error = %e,
-            "db v2: initial schema registry load failed (has alembic 0082_bundle_data_v2 run?); \
+            "db v2: initial schema registry load failed (has alembic 0087_bundle_data_v2 run?); \
              db v2 calls will report invalid_table until a refresh succeeds"
         ),
     }
