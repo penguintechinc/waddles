@@ -19,8 +19,9 @@ use bundle_executor::heartbeat::Heartbeat;
 use bundle_executor::invoke::{ComponentSource, Executor};
 use bundle_executor::wire::run_connection;
 use penguin_bundle_host::wire::{
-    read_frame, write_frame, CapabilityKind, ExportKind, Frame, HelloBody, HelloLimits, HelloOkBody,
-    HostResultBody, HostResultError, InvokeBody, LoadBody, LoadLimits, Message, SandboxInfo, ShutdownBody,
+    read_frame, write_frame, CapabilityKind, ExportKind, Frame, HelloBody, HelloLimits,
+    HelloOkBody, HostResultBody, HostResultError, InvokeBody, LoadBody, LoadLimits, Message,
+    SandboxInfo, ShutdownBody,
 };
 use sha2::{Digest, Sha256};
 
@@ -46,14 +47,22 @@ fn load_wasm() -> Vec<u8> {
          (run `make test-superpenguin-roll-e2e`) -- a missing artifact FAILS, it never skips",
     );
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
-    assert!(bytes.len() > 1_000_000, "{path} is implausibly small ({} bytes)", bytes.len());
+    assert!(
+        bytes.len() > 1_000_000,
+        "{path} is implausibly small ({} bytes)",
+        bytes.len()
+    );
     bytes
 }
 
 fn test_config() -> CliConfig {
     use clap::Parser;
-    CliConfig::try_parse_from(["bundle-executor", "--stage-host-api-addr", "svc-process:8301"])
-        .expect("static test args always parse")
+    CliConfig::try_parse_from([
+        "bundle-executor",
+        "--stage-host-api-addr",
+        "svc-process:8301",
+    ])
+    .expect("static test args always parse")
 }
 
 /// The simulated stage: a tiny model of kv + the knobs each scenario turns.
@@ -72,16 +81,31 @@ struct StageModel {
 }
 
 impl StageModel {
-    fn answer(&mut self, capability: CapabilityKind, op: &str, args: serde_json::Value) -> HostResultBody {
-        self.calls.push((format!("{capability:?}"), op.to_string(), args.clone()));
-        let ok = |v: serde_json::Value| HostResultBody { result: Some(v), error: None };
+    fn answer(
+        &mut self,
+        capability: CapabilityKind,
+        op: &str,
+        args: serde_json::Value,
+    ) -> HostResultBody {
+        self.calls
+            .push((format!("{capability:?}"), op.to_string(), args.clone()));
+        let ok = |v: serde_json::Value| HostResultBody {
+            result: Some(v),
+            error: None,
+        };
         let err = |code: &str, message: &str| HostResultBody {
             result: None,
-            error: Some(HostResultError { code: code.to_string(), message: message.to_string() }),
+            error: Some(HostResultError {
+                code: code.to_string(),
+                message: message.to_string(),
+            }),
         };
         match (capability, op) {
             (CapabilityKind::Flags, "enabled") => {
-                assert_eq!(args["key"], FLAG_KEY, "the roll flag must be checked under its documented key");
+                assert_eq!(
+                    args["key"], FLAG_KEY,
+                    "the roll flag must be checked under its documented key"
+                );
                 assert_eq!(args["default_value"], false, "the flag must default OFF");
                 ok(serde_json::json!({ "enabled": self.flag_on }))
             }
@@ -92,12 +116,18 @@ impl StageModel {
             (CapabilityKind::Log, _) => ok(serde_json::json!({})),
             (CapabilityKind::Kv, "get") => {
                 let key = args["key"].as_str().unwrap().to_string();
-                assert!(!key.contains(':'), "kv key {key:?} contains ':' (host rejects it)");
+                assert!(
+                    !key.contains(':'),
+                    "kv key {key:?} contains ':' (host rejects it)"
+                );
                 ok(serde_json::json!({ "value": self.kv.get(&key) }))
             }
             (CapabilityKind::Kv, "set") => {
                 let key = args["key"].as_str().unwrap().to_string();
-                assert!(!key.contains(':'), "kv key {key:?} contains ':' (host rejects it)");
+                assert!(
+                    !key.contains(':'),
+                    "kv key {key:?} contains ':' (host rejects it)"
+                );
                 let bytes: Vec<u8> = serde_json::from_value(args["value"].clone()).unwrap();
                 self.kv.insert(key, bytes);
                 ok(serde_json::json!({}))
@@ -108,14 +138,24 @@ impl StageModel {
             }
             (CapabilityKind::Kv, "increment") => {
                 let key = args["key"].as_str().unwrap().to_string();
-                assert!(!key.contains(':'), "kv key {key:?} contains ':' (host rejects it)");
-                let current = self.kv.get(&key).map_or(0, |b| i64::from_le_bytes(b.clone().try_into().unwrap()));
+                assert!(
+                    !key.contains(':'),
+                    "kv key {key:?} contains ':' (host rejects it)"
+                );
+                let current = self
+                    .kv
+                    .get(&key)
+                    .map_or(0, |b| i64::from_le_bytes(b.clone().try_into().unwrap()));
                 let next = current + args["delta"].as_i64().unwrap();
                 self.kv.insert(key, next.to_le_bytes().to_vec());
                 ok(serde_json::json!({ "value": next }))
             }
-            (CapabilityKind::Db, "identity.resolve_actor") => ok(serde_json::json!({ "user": ACTOR_UUID })),
-            (CapabilityKind::Db, "economy.max_bet") => ok(serde_json::json!({ "max_bet": self.max_bet })),
+            (CapabilityKind::Db, "identity.resolve_actor") => {
+                ok(serde_json::json!({ "user": ACTOR_UUID }))
+            }
+            (CapabilityKind::Db, "economy.max_bet") => {
+                ok(serde_json::json!({ "max_bet": self.max_bet }))
+            }
             (CapabilityKind::Db, "economy.wager") => match self.wager_refusal {
                 Some((code, message)) => err(code, message),
                 None => ok(serde_json::json!({ "balance": self.balance_after_wager })),
@@ -124,7 +164,9 @@ impl StageModel {
                 assert_eq!(args["target"], "waddles.core.service.economy");
                 assert_eq!(args["tool"], "points_view");
                 assert_eq!(args["args"], serde_json::json!({ "user": ACTOR_UUID }));
-                ok(serde_json::json!({ "ok": { "user": ACTOR_UUID, "balance": 1, "alias": self.alias } }))
+                ok(
+                    serde_json::json!({ "ok": { "user": ACTOR_UUID, "balance": 1, "alias": self.alias } }),
+                )
             }
             other => panic!("unexpected host call from the bundle: {other:?}"),
         }
@@ -137,11 +179,15 @@ struct Run {
     calls: Vec<(String, String, serde_json::Value)>,
 }
 
+/// One named `transform` step: the invoke label plus its stage-model mutation.
+type Step = (&'static str, Box<dyn FnOnce(&mut StageModel) + Send>);
+
 /// One load + a sequence of `transform` invokes on one connection, the stage model carrying kv between them.
-async fn run(wasm: Vec<u8>, steps: Vec<(&'static str, Box<dyn FnOnce(&mut StageModel) + Send>)>) -> Vec<Run> {
+async fn run(wasm: Vec<u8>, steps: Vec<Step>) -> Vec<Run> {
     let (executor_io, stage_io) = tokio::io::duplex(256 * 1024);
     let digest = format!("sha256:{:x}", Sha256::digest(&wasm));
-    let executor = Arc::new(Executor::new(&test_config(), WasmSource(wasm)).expect("executor builds"));
+    let executor =
+        Arc::new(Executor::new(&test_config(), WasmSource(wasm)).expect("executor builds"));
 
     let stage = tokio::spawn(async move {
         let mut io = stage_io;
@@ -153,7 +199,11 @@ async fn run(wasm: Vec<u8>, steps: Vec<(&'static str, Box<dyn FnOnce(&mut StageM
                 Message::HelloOk(HelloOkBody {
                     stage: "svc-process".to_string(),
                     protocol_version: 1,
-                    limits: HelloLimits { call_timeout_ms: 5000, memory_mb: 64, max_concurrent_calls: 32 },
+                    limits: HelloLimits {
+                        call_timeout_ms: 5000,
+                        memory_mb: 64,
+                        max_concurrent_calls: 32,
+                    },
                 }),
             ),
         )
@@ -172,21 +222,34 @@ async fn run(wasm: Vec<u8>, steps: Vec<(&'static str, Box<dyn FnOnce(&mut StageM
                     component_key: "k".to_string(),
                     sidecar_key: "s".to_string(),
                     capabilities: vec![],
-                    limits: LoadLimits { timeout_ms: 5000, memory_mb: 64 },
+                    limits: LoadLimits {
+                        timeout_ms: 5000,
+                        memory_mb: 64,
+                    },
                 }),
             ),
         )
         .await
         .unwrap();
         let loaded = read_frame(&mut io).await.expect("loaded reply");
-        assert!(matches!(loaded.message, Message::Loaded(_)), "component must load, got {:?}", loaded.message);
+        assert!(
+            matches!(loaded.message, Message::Loaded(_)),
+            "component must load, got {:?}",
+            loaded.message
+        );
 
-        let mut model = StageModel { max_bet: 500, balance_after_wager: 1234, alias: "stars", ..Default::default() };
+        let mut model = StageModel {
+            max_bet: 500,
+            balance_after_wager: 1234,
+            alias: "stars",
+            ..Default::default()
+        };
         let mut runs = Vec::new();
         for (i, (text, prepare)) in steps.into_iter().enumerate() {
             model.calls.clear();
             prepare(&mut model);
-            let payload_json = serde_json::json!({ "text": text, "channel_id": "chan-1" }).to_string();
+            let payload_json =
+                serde_json::json!({ "text": text, "channel_id": "chan-1" }).to_string();
             write_frame(
                 &mut io,
                 &Frame::new(
@@ -207,7 +270,9 @@ async fn run(wasm: Vec<u8>, steps: Vec<(&'static str, Box<dyn FnOnce(&mut StageM
             .await
             .unwrap();
             let result = loop {
-                let frame = read_frame(&mut io).await.expect("host-call or result frame");
+                let frame = read_frame(&mut io)
+                    .await
+                    .expect("host-call or result frame");
                 match frame.message {
                     Message::Result(body) => break Some(body),
                     // An unhandled guest exception surfaces as a WasmTrap error frame: the loud-failure path.
@@ -217,7 +282,9 @@ async fn run(wasm: Vec<u8>, steps: Vec<(&'static str, Box<dyn FnOnce(&mut StageM
                     }
                     Message::HostCall(call) => {
                         let body = model.answer(call.capability, &call.op, call.args);
-                        write_frame(&mut io, &Frame::new(frame.id, Message::HostResult(body))).await.unwrap();
+                        write_frame(&mut io, &Frame::new(frame.id, Message::HostResult(body)))
+                            .await
+                            .unwrap();
                     }
                     other => panic!("expected a host-call or result, got {other:?}"),
                 }
@@ -225,14 +292,25 @@ async fn run(wasm: Vec<u8>, steps: Vec<(&'static str, Box<dyn FnOnce(&mut StageM
             let trapped = result.is_none();
             let reply = match result {
                 Some(r) if !r.payload.is_null() => {
-                    let inner = r.payload["payload_json"].as_str().expect("payload_json string");
+                    let inner = r.payload["payload_json"]
+                        .as_str()
+                        .expect("payload_json string");
                     Some(serde_json::from_str(inner).expect("reply json"))
                 }
                 _ => None,
             };
-            runs.push(Run { reply, calls: model.calls.clone(), trapped });
+            runs.push(Run {
+                reply,
+                calls: model.calls.clone(),
+                trapped,
+            });
         }
-        write_frame(&mut io, &Frame::new(9999, Message::Shutdown(ShutdownBody { grace_ms: 100 }))).await.unwrap();
+        write_frame(
+            &mut io,
+            &Frame::new(9999, Message::Shutdown(ShutdownBody { grace_ms: 100 })),
+        )
+        .await
+        .unwrap();
         runs
     });
 
@@ -245,7 +323,10 @@ async fn run(wasm: Vec<u8>, steps: Vec<(&'static str, Box<dyn FnOnce(&mut StageM
                 wasmtime_version: bundle_executor::engine::WASMTIME_VERSION.to_string(),
                 wasmtime_abi: bundle_executor::engine::WASMTIME_VERSION.to_string(),
                 collector: "drc".to_string(),
-                sandbox: SandboxInfo { runtime: "runc".to_string(), verified: false },
+                sandbox: SandboxInfo {
+                    runtime: "runc".to_string(),
+                    verified: false,
+                },
             },
             Arc::clone(&executor),
             "test-peer",
@@ -255,7 +336,10 @@ async fn run(wasm: Vec<u8>, steps: Vec<(&'static str, Box<dyn FnOnce(&mut StageM
     });
 
     let runs = stage.await.expect("stage task");
-    executor_task.await.expect("executor task").expect("connection ran to a clean shutdown");
+    executor_task
+        .await
+        .expect("executor task")
+        .expect("connection ran to a clean shutdown");
     runs
 }
 
@@ -264,7 +348,13 @@ fn ops(run: &Run) -> Vec<&str> {
 }
 
 fn reply_text(run: &Run) -> String {
-    run.reply.as_ref().expect("a reply").get("text").and_then(|t| t.as_str()).expect("reply text").to_string()
+    run.reply
+        .as_ref()
+        .expect("a reply")
+        .get("text")
+        .and_then(|t| t.as_str())
+        .expect("reply text")
+        .to_string()
 }
 
 /// Pulls the two dice out of `... rolls a [d1] and [d2]. ...`.
@@ -282,69 +372,163 @@ async fn csharp_roll_bundle_wagers_replays_and_fails_loud_through_the_real_execu
     type Step = (&'static str, Box<dyn FnOnce(&mut StageModel) + Send>);
     let steps: Vec<Step> = vec![
         // 0: flag OFF -> no reply, no economy/identity/kv traffic, and the flag key/default asserted in the model.
-        ("!roll", Box::new(|m| { m.flag_on = false; m.message_id = "evt-0".into(); })),
+        (
+            "!roll",
+            Box::new(|m| {
+                m.flag_on = false;
+                m.message_id = "evt-0".into();
+            }),
+        ),
         // 1: fresh roll, stake 10.
-        ("!roll 10", Box::new(|m| { m.flag_on = true; m.message_id = "evt-1".into(); })),
+        (
+            "!roll 10",
+            Box::new(|m| {
+                m.flag_on = true;
+                m.message_id = "evt-1".into();
+            }),
+        ),
         // 2: a second roll by the same actor inside the cooldown -> silently dropped.
-        ("!roll 10", Box::new(|m| { m.message_id = "evt-2".into(); })),
+        (
+            "!roll 10",
+            Box::new(|m| {
+                m.message_id = "evt-2".into();
+            }),
+        ),
         // 3: redelivery of event 1 -> same outcome, no cooldown drop, no fresh roll.
-        ("!roll 10", Box::new(|m| { m.message_id = "evt-1".into(); })),
+        (
+            "!roll 10",
+            Box::new(|m| {
+                m.message_id = "evt-1".into();
+            }),
+        ),
         // 4: !dice has its own cooldown; the host refuses the wager for insufficient funds -> user-facing reply.
-        ("!dice 10", Box::new(|m| {
-            m.message_id = "evt-4".into();
-            m.wager_refusal = Some(("insufficient_funds", "3"));
-        })),
+        (
+            "!dice 10",
+            Box::new(|m| {
+                m.message_id = "evt-4".into();
+                m.wager_refusal = Some(("insufficient_funds", "3"));
+            }),
+        ),
         // 5: the host denies the wager (not granted) -> the invoke FAILS loudly, no unpaid reply.
-        ("!roll 10", Box::new(|m| {
-            m.kv.clear();
-            m.message_id = "evt-5".into();
-            m.wager_refusal = Some(("not_granted", "no"));
-        })),
+        (
+            "!roll 10",
+            Box::new(|m| {
+                m.kv.clear();
+                m.message_id = "evt-5".into();
+                m.wager_refusal = Some(("not_granted", "no"));
+            }),
+        ),
     ];
     let runs = run(wasm, steps).await;
 
     // 0: flag off.
-    assert_eq!(ops(&runs[0]), vec!["enabled"], "flag-off must stop after the flag check");
+    assert_eq!(
+        ops(&runs[0]),
+        vec!["enabled"],
+        "flag-off must stop after the flag check"
+    );
     assert!(runs[0].reply.is_none());
 
     // 1: fresh roll: exactly one wager, payout consistent with the printed dice, alias + placeholder + balance in text.
     let r1 = &runs[1];
-    assert_eq!(r1.calls.iter().filter(|(_, op, _)| op == "economy.wager").count(), 1, "exactly one atomic wager per roll");
-    let wager = r1.calls.iter().find(|(_, op, _)| op == "economy.wager").unwrap();
+    assert_eq!(
+        r1.calls
+            .iter()
+            .filter(|(_, op, _)| op == "economy.wager")
+            .count(),
+        1,
+        "exactly one atomic wager per roll"
+    );
+    let wager = r1
+        .calls
+        .iter()
+        .find(|(_, op, _)| op == "economy.wager")
+        .unwrap();
     assert_eq!(wager.2["user"], ACTOR_UUID);
     assert_eq!(wager.2["stake"], 10);
     let text1 = reply_text(r1);
     let (d1, d2) = dice(&text1);
     let multipliers = [2u64, 3, 4, 6, 8, 10];
-    let expected_payout = if d1 == d2 { 10 * multipliers[(d1 - 1) as usize] } else { 0 };
-    assert_eq!(wager.2["payout"], expected_payout, "payout must match the dice the reply printed");
-    assert!(text1.contains(&format!("{{user:{ACTOR_UUID}}}")), "reply must use the display-name placeholder: {text1}");
-    assert!(text1.contains("Balance: 1234 stars"), "balance + economy-service alias in reply: {text1}");
+    let expected_payout = if d1 == d2 {
+        10 * multipliers[(d1 - 1) as usize]
+    } else {
+        0
+    };
     assert_eq!(
-        r1.reply.as_ref().unwrap()["channel_id"], "chan-1",
+        wager.2["payout"], expected_payout,
+        "payout must match the dice the reply printed"
+    );
+    assert!(
+        text1.contains(&format!("{{user:{ACTOR_UUID}}}")),
+        "reply must use the display-name placeholder: {text1}"
+    );
+    assert!(
+        text1.contains("Balance: 1234 stars"),
+        "balance + economy-service alias in reply: {text1}"
+    );
+    assert_eq!(
+        r1.reply.as_ref().unwrap()["channel_id"],
+        "chan-1",
         "reply keeps the origin channel"
     );
 
     // 2: cooldown -> silent drop, and crucially NO wager.
-    assert!(runs[2].reply.is_none(), "a roll inside the cooldown is silently dropped");
+    assert!(
+        runs[2].reply.is_none(),
+        "a roll inside the cooldown is silently dropped"
+    );
     assert!(!ops(&runs[2]).contains(&"economy.wager"));
 
     // 3: redelivery -> identical text, the same wager args, and no cooldown claim attempt.
     let r3 = &runs[3];
-    assert_eq!(reply_text(r3), text1, "a redelivered event reprints the original outcome");
-    let wager3 = r3.calls.iter().find(|(_, op, _)| op == "economy.wager").unwrap();
-    assert_eq!(wager3.2, wager.2, "the replayed wager is byte-identical so the host can de-duplicate it");
-    assert!(!ops(r3).contains(&"increment"), "a replay must not re-take the cooldown");
-    assert!(!ops(r3).contains(&"economy.max_bet"), "a replay skips fresh validation");
+    assert_eq!(
+        reply_text(r3),
+        text1,
+        "a redelivered event reprints the original outcome"
+    );
+    let wager3 = r3
+        .calls
+        .iter()
+        .find(|(_, op, _)| op == "economy.wager")
+        .unwrap();
+    assert_eq!(
+        wager3.2, wager.2,
+        "the replayed wager is byte-identical so the host can de-duplicate it"
+    );
+    assert!(
+        !ops(r3).contains(&"increment"),
+        "a replay must not re-take the cooldown"
+    );
+    assert!(
+        !ops(r3).contains(&"economy.max_bet"),
+        "a replay skips fresh validation"
+    );
 
     // 4: insufficient funds -> user-facing reply and the cooldown handed back (kv delete of the claim + outcome).
     let r4 = &runs[4];
-    assert!(reply_text(r4).contains("you don't have 10 stars to roll"), "{}", reply_text(r4));
-    assert!(ops(r4).iter().filter(|o| **o == "delete").count() >= 2, "outcome record and cooldown released: {:?}", ops(r4));
+    assert!(
+        reply_text(r4).contains("you don't have 10 stars to roll"),
+        "{}",
+        reply_text(r4)
+    );
+    assert!(
+        ops(r4).iter().filter(|o| **o == "delete").count() >= 2,
+        "outcome record and cooldown released: {:?}",
+        ops(r4)
+    );
 
     // 5: not_granted is loud: no reply was produced.
-    assert!(runs[5].trapped, "a host denial must fail the invoke loudly (trap), not return normally");
-    assert!(runs[5].reply.is_none(), "a host denial must never become an unpaid chat reply");
-    assert!(runs[..5].iter().all(|r| !r.trapped), "only the denial scenario may trap");
+    assert!(
+        runs[5].trapped,
+        "a host denial must fail the invoke loudly (trap), not return normally"
+    );
+    assert!(
+        runs[5].reply.is_none(),
+        "a host denial must never become an unpaid chat reply"
+    );
+    assert!(
+        runs[..5].iter().all(|r| !r.trapped),
+        "only the denial scenario may trap"
+    );
     assert!(ops(&runs[5]).contains(&"economy.wager"));
 }
