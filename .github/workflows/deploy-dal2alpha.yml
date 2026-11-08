@@ -92,7 +92,7 @@ jobs:
           - { service: hub-api, file: hub_api/Dockerfile, context: ".", extra_ctx: "", target: "", suffix: "" }
           - { service: hub-webui, file: admin/hub_module/Dockerfile.webui, context: ".", extra_ctx: "", target: "", suffix: "" }
           - { service: migrations, file: migrations/Dockerfile, context: ".", extra_ctx: "", target: "", suffix: "" }
-          - { service: core-bundle-seeder, file: bundles/Dockerfile.core-bundles, context: ".", extra_ctx: "", target: "", suffix: "" }
+          - { service: seeder, file: bundles/Dockerfile.core-bundles, context: ".", extra_ctx: "", target: "", suffix: "" }
           - { service: reputation-module, file: core/reputation_module/Dockerfile, context: ".", extra_ctx: "", target: "", suffix: "" }
           - { service: svc-bundles-executor, file: core/bundle_executor/Dockerfile.rust, context: ".", extra_ctx: "", target: "", suffix: "" }
           - { service: svc-ingest, file: core/svc_ingest/Dockerfile.rust, context: core, extra_ctx: "proto=./proto", target: "", suffix: "" }

@@ -62,7 +62,7 @@ global:
 # odoo-sync / bundle-signing CronJobs) to the sync-worker DAL fix, rebuilt as
 # ghcr.io/penguintechinc/waddles/hub-api:demo-881ac8dd-syncfix
 # (sha256:0b018eb209f49de03b68088b7576cb51d4a6cbeb8c37aa53547a5da050629954). Every other workload
-# (svc-*-rust, core-bundle-seeder, migrations, ...) stays on global.imageTag above --
+# (svc-*-rust, seeder, migrations, ...) stays on global.imageTag above --
 # those images only exist at demo-881ac8dd. Replace with a digest pin for production.
 hubApi:
   imageTag: "demo-881ac8dd-syncfix"

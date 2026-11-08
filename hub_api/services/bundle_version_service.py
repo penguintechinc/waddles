@@ -49,6 +49,7 @@ from typing import Any
 
 import yaml
 from flask_core.bundle_attribution import license_requires_review
+from flask_core.bundle_author import canonical_author
 from flask_core.stream_pipeline import bundle_stream_key
 from penguin_dal import AsyncDB
 
@@ -504,7 +505,7 @@ async def _publish_prebuilt_version(
         built_at=now,
         builder="hub_api",
         scan_status="not_scanned",
-        author=manifest_json.get("author"),
+        author=canonical_author(manifest_json["author"]) if manifest_json.get("author") else None,
         license=license_id,
         license_review_required=license_requires_review(license_id) if license_id else False,
         source_url=manifest_json.get("source_url"),

@@ -249,14 +249,14 @@ info "Deploying release SHA ${SHA} (tag ${SHA8}) to context ${KUBE_CONTEXT}, nam
 # than the per-commit SHA8 (same pattern as bundleExecutor's own comment:
 # "built locally + pushed to the local registry ... same as every other
 # alpha-only module image") -- see service_image_tag below.
-readonly SERVICES="hub-api hub-webui migrations svc-ingest svc-process svc-action egress-proxy core-bundle-seeder reputation-module svc-presentation svc-streaming svc-bundles-executor"
+readonly SERVICES="hub-api hub-webui migrations svc-ingest svc-process svc-action egress-proxy seeder reputation-module svc-presentation svc-streaming svc-bundles-executor"
 
 service_dockerfile() {
     case "$1" in
         hub-api) echo "hub_api/Dockerfile" ;;
         hub-webui) echo "admin/hub_module/Dockerfile.webui" ;;
         migrations) echo "migrations/Dockerfile" ;;
-        core-bundle-seeder) echo "bundles/Dockerfile.core-bundles" ;;
+        seeder) echo "bundles/Dockerfile.core-bundles" ;;
         svc-ingest) echo "core/svc_ingest/Dockerfile.rust" ;;
         svc-process) echo "core/svc_process/Dockerfile.rust" ;;
         svc-action) echo "core/svc_action/Dockerfile.rust" ;;
@@ -279,7 +279,7 @@ service_context() {
     case "$1" in
         # svc-bundles-executor's Dockerfile COPYs core/bundle_executor AND wit/ from the repo
         # root (see its own header comment) -- same "." context as hub-api et al.
-        hub-api|hub-webui|migrations|core-bundle-seeder|reputation-module|svc-bundles-executor) echo "." ;;
+        hub-api|hub-webui|migrations|seeder|reputation-module|svc-bundles-executor) echo "." ;;
         svc-ingest|svc-process|svc-action|egress-proxy|svc-presentation) echo "core" ;;
         svc-streaming) echo "core/svc_streaming" ;;
         *) err "unknown service: $1"; exit 1 ;;
