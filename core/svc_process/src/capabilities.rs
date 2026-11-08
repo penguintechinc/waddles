@@ -612,7 +612,12 @@ struct ElevatedPlan {
 
 impl ElevatedPlan {
     /// A single-target elevated op whose audit reason is its own label.
-    fn single(permission: ElevatedPermission, op: &'static str, user: uuid::Uuid, amount: i64) -> Self {
+    fn single(
+        permission: ElevatedPermission,
+        op: &'static str,
+        user: uuid::Uuid,
+        amount: i64,
+    ) -> Self {
         Self {
             permission,
             op,
@@ -1667,14 +1672,12 @@ impl<K: KvBackend> StageCapabilities<K> {
                     reason: reason.clone(),
                 })
             }
-            Op::Debit { user, amount } if via_app && non_actor_debit => {
-                Some(ElevatedPlan::single(
-                    ElevatedPermission::TransferFrom,
-                    "debit",
-                    *user,
-                    *amount,
-                ))
-            }
+            Op::Debit { user, amount } if via_app && non_actor_debit => Some(ElevatedPlan::single(
+                ElevatedPermission::TransferFrom,
+                "debit",
+                *user,
+                *amount,
+            )),
             Op::ConditionalDebit { user, amount, .. } if via_app && non_actor_debit => {
                 Some(ElevatedPlan::single(
                     ElevatedPermission::TransferFrom,
@@ -1739,9 +1742,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             Op::Transfer { from, .. } => Some(("transfer", Some(*from))),
             // Spends and the exchange move the ACTOR's own funds: bound -- except
             // an elevated debit of a non-actor, authorized by the app's grant.
-            Op::Debit { user, .. } => {
-                Some(("debit", (!non_actor_debit).then_some(*user)))
-            }
+            Op::Debit { user, .. } => Some(("debit", (!non_actor_debit).then_some(*user))),
             Op::ConditionalDebit { user, .. } => {
                 Some(("conditional_debit", (!non_actor_debit).then_some(*user)))
             }
@@ -1908,7 +1909,8 @@ impl<K: KvBackend> StageCapabilities<K> {
         let is_transfer_from = matches!(op, Op::TransferFrom { .. });
         let mut reserved: Option<i64> = None;
         let result = 'run: {
-            if let (Some(plan), Some(caller), false) = (&elevated, &self.tool_caller, is_transfer_from)
+            if let (Some(plan), Some(caller), false) =
+                (&elevated, &self.tool_caller, is_transfer_from)
             {
                 let Some(key) = idempotency.as_ref() else {
                     break 'run Err(EconomyError::Backend(
@@ -1922,7 +1924,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                     target: plan.target,
                     counterparty: plan.counterparty,
                     amount: plan.amount,
-                    reason: plan.op,
+                    reason: &plan.reason,
                     key,
                 };
                 match wiring.store.elevated_reserve(&scope, &req).await {
@@ -1931,210 +1933,213 @@ impl<K: KvBackend> StageCapabilities<K> {
                 }
             }
             match op {
-            Op::TransferFrom {
-                from,
-                to,
-                amount,
-                reason,
-            } => {
-                let (Some(caller), Some(key)) = (&self.tool_caller, idempotency.as_ref()) else {
-                    break 'run Err(EconomyError::ElevatedNotGranted);
-                };
-                let req = ElevatedRequest {
-                    caller_app: &caller.app_id,
-                    permission: ElevatedPermission::TransferFrom,
-                    op: "transfer_from",
-                    target: from,
-                    counterparty: Some(to),
+                Op::TransferFrom {
+                    from,
+                    to,
                     amount,
-                    reason: &reason,
-                    key,
-                };
-                wiring.store.transfer_from(&scope, &req).await.map(|o| {
-                    serde_json::json!({
-                        "from_balance": o.from_balance,
-                        "to_balance": o.to_balance,
+                    reason,
+                } => {
+                    let (Some(caller), Some(key)) = (&self.tool_caller, idempotency.as_ref())
+                    else {
+                        break 'run Err(EconomyError::ElevatedNotGranted);
+                    };
+                    let req = ElevatedRequest {
+                        caller_app: &caller.app_id,
+                        permission: ElevatedPermission::TransferFrom,
+                        op: "transfer_from",
+                        target: from,
+                        counterparty: Some(to),
+                        amount,
+                        reason: &reason,
+                        key,
+                    };
+                    wiring.store.transfer_from(&scope, &req).await.map(|o| {
+                        serde_json::json!({
+                            "from_balance": o.from_balance,
+                            "to_balance": o.to_balance,
+                        })
                     })
-                })
-            }
-            Op::Balance(user) => wiring
-                .store
-                .balance(&scope, user)
-                .await
-                .map(|balance| serde_json::json!({ "balance": balance })),
-            Op::MaxBet(user) => {
-                // The cap is the grant's declared `max_bet` clamped to the
-                // catalog ceiling: the exact number the gate enforces on a
-                // wager's stake.
-                let cap = family
-                    .economy_amount_bound(&authorized.params)
-                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
-                wiring
+                }
+                Op::Balance(user) => wiring
                     .store
-                    .max_bet(&scope, user, cap)
+                    .balance(&scope, user)
                     .await
-                    .map(|max_bet| serde_json::json!({ "max_bet": max_bet }))
-            }
-            Op::Wager {
-                user,
-                stake,
-                payout,
-            } => {
-                let cap = family
-                    .economy_amount_bound(&authorized.params)
-                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                wiring
-                    .store
-                    .wager(
-                        &scope,
-                        user,
-                        stake,
-                        payout,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::Transfer { from, to, amount } => {
-                let cap = family
-                    .economy_amount_bound(&authorized.params)
-                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                wiring
-                    .store
-                    .transfer(&scope, from, to, amount, cap, economy_caps(family), key)
-                    .await
-                    .map(|()| serde_json::json!({}))
-            }
-            Op::Credit { user, amount } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .credit(
-                        &scope,
-                        user,
-                        amount,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::BatchCredit(entries) => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .batch_credit(
-                        &scope,
-                        &entries,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
-                        key,
-                    )
-                    .await
-                    .map(|()| serde_json::json!({}))
-            }
-            Op::Debit { user, amount } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .debit(&scope, user, amount, cap, economy_caps(family), key)
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::ConditionalDebit {
-                user,
-                amount,
-                min_balance,
-            } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .conditional_debit(
-                        &scope,
-                        user,
-                        amount,
-                        min_balance,
-                        cap,
-                        economy_caps(family),
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::AdminAdjust { user, adjust } => {
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                wiring
-                    .store
-                    .admin_adjust(
-                        &scope,
-                        user,
-                        adjust,
-                        economy_max_supply(),
-                        admin_gate_passed,
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::PayPot(winners) => {
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                // The pot is host-derived (the bundle never names it).
-                wiring
-                    .store
-                    .pay_pot(&scope, pot_account(&scope), &winners, key)
-                    .await
-                    .map(|()| serde_json::json!({}))
-            }
-            Op::Exchange {
-                user,
-                from_amount,
-                rate_num,
-                rate_den,
-            } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .exchange(
-                        &scope,
-                        user,
-                        from_amount,
-                        rate_num,
-                        rate_den,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::Leaderboard(limit) => wiring.store.leaderboard(&scope, limit).await.map(|rows| {
-                serde_json::json!({
-                    "entries": rows
-                        .into_iter()
-                        .map(|r| serde_json::json!({
-                            "user": r.user.to_string(),
-                            "balance": r.balance,
-                        }))
-                        .collect::<Vec<_>>(),
-                })
-            }),
+                    .map(|balance| serde_json::json!({ "balance": balance })),
+                Op::MaxBet(user) => {
+                    // The cap is the grant's declared `max_bet` clamped to the
+                    // catalog ceiling: the exact number the gate enforces on a
+                    // wager's stake.
+                    let cap = family
+                        .economy_amount_bound(&authorized.params)
+                        .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                    wiring
+                        .store
+                        .max_bet(&scope, user, cap)
+                        .await
+                        .map(|max_bet| serde_json::json!({ "max_bet": max_bet }))
+                }
+                Op::Wager {
+                    user,
+                    stake,
+                    payout,
+                } => {
+                    let cap = family
+                        .economy_amount_bound(&authorized.params)
+                        .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    wiring
+                        .store
+                        .wager(
+                            &scope,
+                            user,
+                            stake,
+                            payout,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::Transfer { from, to, amount } => {
+                    let cap = family
+                        .economy_amount_bound(&authorized.params)
+                        .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    wiring
+                        .store
+                        .transfer(&scope, from, to, amount, cap, economy_caps(family), key)
+                        .await
+                        .map(|()| serde_json::json!({}))
+                }
+                Op::Credit { user, amount } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .credit(
+                            &scope,
+                            user,
+                            amount,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::BatchCredit(entries) => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .batch_credit(
+                            &scope,
+                            &entries,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|()| serde_json::json!({}))
+                }
+                Op::Debit { user, amount } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .debit(&scope, user, amount, cap, economy_caps(family), key)
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::ConditionalDebit {
+                    user,
+                    amount,
+                    min_balance,
+                } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .conditional_debit(
+                            &scope,
+                            user,
+                            amount,
+                            min_balance,
+                            cap,
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::AdminAdjust { user, adjust } => {
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    wiring
+                        .store
+                        .admin_adjust(
+                            &scope,
+                            user,
+                            adjust,
+                            economy_max_supply(),
+                            admin_gate_passed,
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::PayPot(winners) => {
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    // The pot is host-derived (the bundle never names it).
+                    wiring
+                        .store
+                        .pay_pot(&scope, pot_account(&scope), &winners, key)
+                        .await
+                        .map(|()| serde_json::json!({}))
+                }
+                Op::Exchange {
+                    user,
+                    from_amount,
+                    rate_num,
+                    rate_den,
+                } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .exchange(
+                            &scope,
+                            user,
+                            from_amount,
+                            rate_num,
+                            rate_den,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::Leaderboard(limit) => {
+                    wiring.store.leaderboard(&scope, limit).await.map(|rows| {
+                        serde_json::json!({
+                            "entries": rows
+                                .into_iter()
+                                .map(|r| serde_json::json!({
+                                    "user": r.user.to_string(),
+                                    "balance": r.balance,
+                                }))
+                                .collect::<Vec<_>>(),
+                        })
+                    })
+                }
             }
         };
         // Settle an elevated reservation: applied/failed are definitive; an
@@ -2147,7 +2152,11 @@ impl<K: KvBackend> StageCapabilities<K> {
                 Err(_) => Some(false),
             };
             if let Some(applied) = applied {
-                if let Err(e) = wiring.store.elevated_settle(&scope, audit_id, applied).await {
+                if let Err(e) = wiring
+                    .store
+                    .elevated_settle(&scope, audit_id, applied)
+                    .await
+                {
                     tracing::warn!(audit_id, error = %e, "elevated audit settle failed; the reservation stays counted");
                 }
             }

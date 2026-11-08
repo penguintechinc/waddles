@@ -62,7 +62,9 @@ struct TransferResultWire {
     to_balance: i64,
 }
 
-fn decode_transfer_result(value: serde_json::Value) -> Result<economy::TransferResult, economy::Error> {
+fn decode_transfer_result(
+    value: serde_json::Value,
+) -> Result<economy::TransferResult, economy::Error> {
     serde_json::from_value::<TransferResultWire>(value)
         .map(|w| economy::TransferResult {
             from_balance: w.from_balance,

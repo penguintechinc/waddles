@@ -365,14 +365,16 @@ impl EconomyStore for RecordingStore {
                 "transfer_from:{}:{}:{}",
                 req.caller_app, req.amount, req.reason
             ));
-            self.next_transfer_from.lock().unwrap().take().unwrap_or(Ok(
-                TransferFromOutcome {
+            self.next_transfer_from
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Ok(TransferFromOutcome {
                     from_balance: 1,
                     to_balance: 2,
                     audit_id: 9,
                     grant_id: 4,
-                },
-            ))
+                }))
         })
     }
     fn elevated_reserve<'a>(
@@ -381,7 +383,12 @@ impl EconomyStore for RecordingStore {
         req: &'a ElevatedRequest<'a>,
     ) -> bundle_host_economy::BoxFuture<'a, Result<i64, EconomyError>> {
         Box::pin(async move {
-            self.record("elevated_reserve", scope, vec![req.target], vec![req.amount]);
+            self.record(
+                "elevated_reserve",
+                scope,
+                vec![req.target],
+                vec![req.amount],
+            );
             self.elevated.lock().unwrap().push(format!(
                 "reserve:{}:{}:{}:{}",
                 req.caller_app,
