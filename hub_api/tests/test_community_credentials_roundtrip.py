@@ -1,7 +1,8 @@
 """`waddle_transports.community_credentials` against a LIVE hub-api Quart app over real HTTP.
 
-No httpx mocking: hypercorn serves the real `service_jwt_bp` + `connections_internal_bp` on a
-loopback port and the library's own `httpx.AsyncClient` round-trips to it. Only the Kubernetes
+No httpx mocking: hypercorn serves the real `connections_internal_bp` on a loopback port, the real
+gRPC `ServiceAuthService` (production interceptor chain) serves the machine-JWT mint on another, and
+the library's own gRPC mint client + `httpx.AsyncClient` round-trip to them. Only the Kubernetes
 TokenReview call (the cluster is not available here) and the provider-token DB read are stubbed.
 """
 
@@ -14,16 +15,19 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
+import grpc
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey, spiffe_id
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
 from quart import Quart, request
-from waddle_transports import community_credentials
+from waddle_transports import community_credentials, service_jwt_client
+from waddles.hub.internal.v1 import service_auth_pb2_grpc
 
 import blueprints.v1.community_connections as connections_module
-from blueprints import service_jwt_bp as bp_module
+from grpc_internal.server import build_interceptor_chain
+from grpc_internal.service_auth_servicer import ServiceAuthServicer
 from services.community_connections import DecryptedTokens
 
 SERVICE_ID = spiffe_id("alpha", "svc-action")
@@ -51,7 +55,6 @@ async def live_hub(
         identities={SERVICE_ID: identity},
     )
     app = Quart(__name__)
-    app.register_blueprint(bp_module.service_jwt_bp)
     app.register_blueprint(connections_module.connections_internal_bp)
     app.config["dal"] = dal
     app.config["async_dal"] = dal
@@ -63,9 +66,13 @@ async def live_hub(
     async def _record() -> None:
         seen.append({"path": request.path, **{k.lower(): v for k, v in request.headers.items()}})
 
-    monkeypatch.setattr(
-        bp_module, "verify_service_account_token", lambda **_kw: ("waddlebot", "svc-action")
+    grpc_server = grpc.aio.server(interceptors=build_interceptor_chain(issuer))
+    service_auth_pb2_grpc.add_ServiceAuthServiceServicer_to_server(
+        ServiceAuthServicer(issuer, token_reviewer=lambda **_kw: ("waddlebot", "svc-action")),
+        grpc_server,
     )
+    grpc_port = grpc_server.add_insecure_port("127.0.0.1:0")
+    await grpc_server.start()
     monkeypatch.setattr(
         connections_module.connections_svc,
         "get_decrypted_tokens",
@@ -81,7 +88,7 @@ async def live_hub(
     sa = tmp_path / "sa-token"
     sa.write_text("projected-sa", encoding="utf-8")
     monkeypatch.setenv("SERVICE_JWT_SA_TOKEN_PATH", str(sa))
-    monkeypatch.delenv("SERVICE_JWT_TOKEN_ENDPOINT", raising=False)
+    monkeypatch.setenv("SERVICE_JWT_TOKEN_ENDPOINT", f"http://127.0.0.1:{grpc_port}")
     # A valid shared key exists in the environment -- the client must never send it.
     monkeypatch.setenv("SERVICE_API_KEY", "test-service-key")
 
@@ -105,6 +112,8 @@ async def live_hub(
     finally:
         shutdown.set()
         await task
+        await grpc_server.stop(grace=None)
+        await service_jwt_client.close_channels()
         community_credentials.reset_cache_for_tests()
 
 
@@ -120,11 +129,9 @@ async def test_waddle_transports_client_sends_bearer_not_service_key(
 
     assert tokens is not None and tokens.access_token == "AT_LIVE"
     paths = [r["path"] for r in seen]
-    assert paths == [
-        "/internal/service-token",
-        f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
-    ]
-    resource = seen[1]
+    # The mint is gRPC now: the only HTTP request is the resource call itself.
+    assert paths == [f"/api/v1/internal/communities/{community_id}/connections/youtube/token"]
+    resource = seen[0]
     assert resource["authorization"].startswith("Bearer ")
     assert "x-service-key" not in resource
     assert all("x-service-key" not in r for r in seen)

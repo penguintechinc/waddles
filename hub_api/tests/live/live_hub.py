@@ -43,6 +43,7 @@ sys.path.insert(0, str(_REPO / "alembic" / "tests"))
 os.environ["SECRET_KEY"] = secrets.token_hex(32)
 os.environ["CREDENTIAL_ENCRYPTION_KEY"] = secrets.token_hex(32)
 
+import grpc  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
 from flask_core import entitlement  # noqa: E402
 from flask_core.auth import create_jwt_token  # noqa: E402
@@ -58,15 +59,16 @@ from pg_docker import migrated_postgres  # type: ignore[import-not-found]  # noq
 from pydal import Field  # noqa: E402
 from quart import Quart  # noqa: E402
 from quart_schema import QuartSchema  # noqa: E402
+from waddles.hub.internal.v1 import service_auth_pb2_grpc  # noqa: E402
 
-import blueprints.service_jwt_bp as service_jwt_bp_module  # noqa: E402
-from blueprints.service_jwt_bp import service_jwt_bp  # noqa: E402
 from blueprints.v1.provider_connections import (  # noqa: E402
     SERVICE_CONFIG_KEY,
     provider_connections_bp,
     provider_connections_internal_bp,
 )
 from config import HubAPIConfig  # noqa: E402
+from grpc_internal.server import build_interceptor_chain  # noqa: E402
+from grpc_internal.service_auth_servicer import ServiceAuthServicer  # noqa: E402
 from services.provider_connections import (  # noqa: E402
     PlatformKeyVault,
     ProviderConnectionService,
@@ -172,7 +174,6 @@ async def _serve(manifest_path: Path) -> None:
             identities={i.service_id: i for i in identities},
             audience="waddlebot-internal",
         )
-        service_jwt_bp_module.verify_service_account_token = _fake_token_review  # type: ignore[assignment]
         previous_client = entitlement._default_client
         Entitlements().set_tier("enterprise")
 
@@ -209,7 +210,6 @@ async def _serve(manifest_path: Path) -> None:
         QuartSchema(app)
         app.register_blueprint(provider_connections_bp)
         app.register_blueprint(provider_connections_internal_bp)
-        app.register_blueprint(service_jwt_bp)
         cfg: HubAPIConfig = hub_config()
         app.config.update(
             dal=async_dal.dal,
@@ -227,6 +227,19 @@ async def _serve(manifest_path: Path) -> None:
             },
         )
 
+        # The machine-JWT mint/JWKS are gRPC now: serve the real ServiceAuthService (production
+        # interceptor chain) on its own loopback port; only the k8s TokenReview call is faked.
+        grpc_server = grpc.aio.server(interceptors=build_interceptor_chain(issuer))
+        service_auth_pb2_grpc.add_ServiceAuthServiceServicer_to_server(
+            ServiceAuthServicer(
+                issuer,
+                token_reviewer=lambda **kw: _fake_token_review(**kw),  # noqa: PLW0108
+            ),
+            grpc_server,
+        )
+        grpc_port = grpc_server.add_insecure_port("127.0.0.1:0")
+        await grpc_server.start()
+
         port = _free_port()
         admin_token = create_jwt_token(
             user_id=str(ids["admin_user"]), username="live-admin", email="admin@example.invalid",
@@ -235,6 +248,7 @@ async def _serve(manifest_path: Path) -> None:
         )  # fmt: skip
         manifest: dict[str, Any] = {
             "hub_url": f"http://127.0.0.1:{port}",
+            "grpc_url": f"http://127.0.0.1:{grpc_port}",
             "admin_token": admin_token,
             "tenant_id": ids["tenant"],
             "community_a": ids["a"],
@@ -259,6 +273,7 @@ async def _serve(manifest_path: Path) -> None:
         os.chmod(tmp, 0o600)
         tmp.rename(manifest_path)  # atomic: the script polls for this file
         await server
+        await grpc_server.stop(grace=None)
         await install_dal.close()
         entitlement._default_client = previous_client
 

@@ -28,7 +28,7 @@ from typing import Any
 
 import grpc
 from flask_core.service_jwt import ServiceJwtIssuer
-from waddles.hub.internal.v1 import identity_pb2_grpc, key_pb2_grpc
+from waddles.hub.internal.v1 import identity_pb2_grpc, key_pb2_grpc, service_auth_pb2_grpc
 
 from grpc_internal.interceptors import (
     AuthInterceptor,
@@ -36,6 +36,7 @@ from grpc_internal.interceptors import (
     OTelInterceptor,
     RateLimitInterceptor,
 )
+from grpc_internal.service_auth_servicer import BOOTSTRAP_METHODS, ServiceAuthServicer
 from grpc_internal.servicers import REQUIRED_SCOPES, IdentityServicer, KeyServicer
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,11 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
     """
     return [
         DeadlineInterceptor(),
-        AuthInterceptor(verifier=issuer.as_verifier(), required_scopes=REQUIRED_SCOPES),
+        AuthInterceptor(
+            verifier=issuer.as_verifier(),
+            required_scopes=REQUIRED_SCOPES,
+            public_methods=BOOTSTRAP_METHODS,
+        ),
         RateLimitInterceptor(
             requests_per_second=float(os.getenv("GRPC_RATE_LIMIT_RPS", "50")),
             burst=float(os.getenv("GRPC_RATE_LIMIT_BURST", "100")),
@@ -96,7 +101,17 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
                 _PLATFORM_USER_METHOD: (
                     float(os.getenv("GRPC_PLATFORM_USER_RPS", "20")),
                     float(os.getenv("GRPC_PLATFORM_USER_BURST", "40")),
-                )
+                ),
+                # Bootstrap RPCs have no verified caller identity: each gets its own bucket,
+                # keyed per peer host, so a flood on one neither drains the other nor any
+                # authenticated caller's budget.
+                **{
+                    method: (
+                        float(os.getenv("GRPC_BOOTSTRAP_RPS", "20")),
+                        float(os.getenv("GRPC_BOOTSTRAP_BURST", "60")),
+                    )
+                    for method in sorted(BOOTSTRAP_METHODS)
+                },
             },
         ),
         OTelInterceptor(),
@@ -104,7 +119,7 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
 
 
 async def build_internal_grpc_server(
-    *, issuer: ServiceJwtIssuer, async_dal: Any = None
+    *, issuer: ServiceJwtIssuer, async_dal: Any = None, audit_logger: Any = None
 ) -> grpc.aio.Server:
     """Builds (but does not start) the internal gRPC server.
 
@@ -115,10 +130,17 @@ async def build_internal_grpc_server(
         options=[
             ("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
             ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
+            # Long-lived channels: clients hold one HTTP/2 connection open and send keepalive
+            # pings while idle -- permit them instead of answering with GOAWAY(too_many_pings).
+            ("grpc.keepalive_permit_without_calls", 1),
+            ("grpc.http2.min_recv_ping_interval_without_data_ms", 10_000),
         ],
     )
     identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(async_dal), server)
     key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(), server)
+    service_auth_pb2_grpc.add_ServiceAuthServiceServicer_to_server(
+        ServiceAuthServicer(issuer, audit_logger=audit_logger), server
+    )
 
     bind_addr = f"0.0.0.0:{os.environ['GRPC_PORT']}"  # noqa: S104 - internal ClusterIP-only listener, see NetworkPolicy
     server.add_secure_port(bind_addr, _load_server_credentials())
@@ -127,10 +149,12 @@ async def build_internal_grpc_server(
 
 
 async def start_internal_grpc_server(
-    *, issuer: ServiceJwtIssuer, async_dal: Any = None
+    *, issuer: ServiceJwtIssuer, async_dal: Any = None, audit_logger: Any = None
 ) -> grpc.aio.Server:
     """Builds and starts the server -- called from `app.py`'s `before_serving`."""
-    server = await build_internal_grpc_server(issuer=issuer, async_dal=async_dal)
+    server = await build_internal_grpc_server(
+        issuer=issuer, async_dal=async_dal, audit_logger=audit_logger
+    )
     await server.start()
     logger.info("hub_api.grpc_internal.started")
     return server
