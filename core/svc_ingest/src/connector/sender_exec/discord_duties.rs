@@ -297,7 +297,7 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
             .as_deref()
             .filter(|h| is_snowflake(h))
             .ok_or_else(|| refused("interaction_handle_invalid"))?;
-        let (_, binding) = self.binding(cx).await?;
+        let (community, binding) = self.binding(cx).await?;
         let rec = store
             .get(handle)
             .await
@@ -308,6 +308,14 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
             .ok_or_else(|| refused("interaction_expired"))?;
         // A DM interaction (no guild) can never be answered through a guild binding.
         if rec.guild_id.as_deref() != Some(binding.guild_id.as_str()) {
+            return Err(refused("interaction_not_owned"));
+        }
+        // A guild can be paired to several communities and applications: the interaction must
+        // be for THIS binding's application and have been routed to THIS community. A record
+        // not yet routed (or routed elsewhere) can be answered by no one.
+        if binding.application_id.as_deref() != Some(rec.application_id.as_str())
+            || rec.routed_community_id != Some(community)
+        {
             return Err(refused("interaction_not_owned"));
         }
         Ok((handle.to_string(), rec))

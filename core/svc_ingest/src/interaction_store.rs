@@ -71,6 +71,11 @@ pub struct InteractionRecord {
     pub token: String,
     /// Guild the interaction happened in (`None` = a DM).
     pub guild_id: Option<String>,
+    /// Numeric community the interaction was ROUTED to (set by [`InteractionStore::set_routed`]
+    /// once active-context routing resolved it). `None` = not routed yet: no community may
+    /// answer it (fail closed).
+    #[serde(default)]
+    pub routed_community_id: Option<i64>,
 }
 
 impl std::fmt::Debug for InteractionRecord {
@@ -79,6 +84,7 @@ impl std::fmt::Debug for InteractionRecord {
             .field("application_id", &self.application_id)
             .field("token", &"[REDACTED]")
             .field("guild_id", &self.guild_id)
+            .field("routed_community_id", &self.routed_community_id)
             .finish()
     }
 }
@@ -166,6 +172,7 @@ pub fn capture(bytes: &[u8]) -> Result<Captured, CaptureError> {
             application_id,
             token,
             guild_id,
+            routed_community_id: None,
         },
     })
 }
@@ -220,6 +227,29 @@ impl InteractionStore {
             .arg("NX")
             .arg("EX")
             .arg(self.ttl.as_secs().max(1))
+            .query_async(&mut c)
+            .await
+            .map_err(|_| StoreError::Unavailable)?;
+        Ok(set.is_some())
+    }
+
+    /// Records the community `id` was routed to, keeping the remaining TTL. `true` = updated,
+    /// `false` = unknown/expired. Only the host's routing step calls this; a bundle never can.
+    ///
+    /// # Errors
+    /// [`StoreError::Unavailable`] / [`StoreError::Corrupt`].
+    pub async fn set_routed(&self, id: &str, community_id: i64) -> Result<bool, StoreError> {
+        let Some(mut rec) = self.get(id).await? else {
+            return Ok(false);
+        };
+        rec.routed_community_id = Some(community_id);
+        let value = serde_json::to_string(&rec).map_err(|_| StoreError::Corrupt)?;
+        let mut c = self.conn.clone();
+        let set: Option<String> = redis::cmd("SET")
+            .arg(key(id))
+            .arg(value)
+            .arg("XX")
+            .arg("KEEPTTL")
             .query_async(&mut c)
             .await
             .map_err(|_| StoreError::Unavailable)?;

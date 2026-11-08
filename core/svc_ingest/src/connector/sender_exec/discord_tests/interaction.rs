@@ -165,6 +165,8 @@ fn rec(guild: Option<&str>) -> InteractionRecord {
         application_id: APP_ID.to_string(),
         token: IX_TOKEN.to_string(),
         guild_id: guild.map(str::to_string),
+        // Routed to community 1 (the rig's primary community).
+        routed_community_id: Some(1),
     }
 }
 
@@ -279,6 +281,59 @@ async fn community_two_cannot_answer_community_ones_interaction() {
         ExecError::Slot(SlotError::Refused("interaction_not_owned"))
     );
     assert!(seen(&r.server).await.is_empty());
+}
+
+#[tokio::test]
+async fn same_guild_other_community_other_application_or_unrouted_is_refused() {
+    let r = ix_rig(followup_tpl, true, None).await;
+    let routed_elsewhere = unique(3);
+    let other_app = unique(2);
+    let unrouted = unique(1);
+    let owner = unique(9);
+    let mut a = rec(Some(GUILD));
+    a.routed_community_id = Some(2);
+    let mut b = rec(Some(GUILD));
+    b.application_id = "999".into();
+    let mut c = rec(Some(GUILD));
+    c.routed_community_id = None;
+    for (id, rc) in [
+        (&routed_elsewhere, a),
+        (&other_app, b),
+        (&unrouted, c),
+        (&owner, rec(Some(GUILD))),
+    ] {
+        assert!(r.store.put_new(id, &rc).await.unwrap());
+    }
+    mock_post(&r.server, format!("/api/v10/webhooks/{APP_ID}/{IX_TOKEN}")).await;
+    for id in [&routed_elsewhere, &other_app, &unrouted] {
+        let e = r
+            .exec
+            .execute(&rq(&op("interaction.followup", Some("{}"), Some(id)), 1))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e,
+            ExecError::Slot(SlotError::Refused("interaction_not_owned"))
+        );
+    }
+    assert!(seen(&r.server).await.is_empty());
+    // The owner (routed to community 1, same application) is answered.
+    r.exec
+        .execute(&rq(
+            &op("interaction.followup", Some("{}"), Some(&owner)),
+            1,
+        ))
+        .await
+        .unwrap();
+    // set_routed after the fact makes an unrouted record answerable by exactly that community.
+    assert!(r.store.set_routed(&unrouted, 1).await.unwrap());
+    r.exec
+        .execute(&rq(
+            &op("interaction.followup", Some("{}"), Some(&unrouted)),
+            1,
+        ))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

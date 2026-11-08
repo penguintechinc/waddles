@@ -575,6 +575,7 @@ mod tests {
                     application_id: "42".into(),
                     token: "ctxTOKEN-secret".into(),
                     guild_id: Some("111".into()),
+                    routed_community_id: None,
                 },
             )
             .await

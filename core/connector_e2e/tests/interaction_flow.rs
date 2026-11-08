@@ -276,6 +276,8 @@ async fn interaction_is_acked_stored_then_answered_through_the_real_connector() 
         TapVerdict::Duplicate,
         "redelivery is neither re-acked nor re-routed"
     );
+    // Active-context routing resolved the community (host-side); only then may it be answered.
+    assert!(r.store.set_routed(&id, COMMUNITY).await.unwrap());
     // 2. the bundle replies with only the handle + a logical reply (no token anywhere).
     Mock::given(method("POST"))
         .and(path(format!("/api/v10/webhooks/{APP}/{IX_TOKEN}")))
@@ -310,6 +312,7 @@ async fn another_guilds_or_an_expired_interaction_cannot_be_answered() {
                 application_id: APP.into(),
                 token: IX_TOKEN.into(),
                 guild_id: Some("222000".into()),
+                routed_community_id: Some(COMMUNITY),
             }
         )
         .await
