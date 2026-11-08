@@ -6,7 +6,7 @@
 # component. Cutover flag: PostHog `waddles.connector-wix` (default OFF).
 schema_version: 2
 app_id: waddles.core.service.wix
-name: Wix Connector (Rust)
+name: Wix Webhook Connector (Rust)
 version: 1.1.0
 feature: waddles.core.service
 module: core
@@ -147,7 +147,7 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/wix
 config_schema: {}
