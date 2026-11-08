@@ -36,6 +36,15 @@ Rotation: delete the Secret and `helm upgrade` (alpha), or rotate via the Extern
 (`checksum/transit-tls`); a rotated CA/leaf with unchanged SANs needs `kubectl rollout restart` of Postgres, SeaweedFS and
 the clients.
 
+## First rollout onto an existing release (dal2alpha)
+
+The db-migrate Job is a pre-upgrade hook and now connects with `verify-full`, but the running Postgres is still the
+pre-TLS pod until the upgrade applies. For the one upgrade that introduces TLS, bring Postgres up first:
+`helm upgrade ... --set pipeline.migrationsJob.enabled=false --set pipeline.hubAdminSeedJob.enabled=false`, wait for
+`postgres`, `redis` and `seaweedfs` to roll (they restart: `Recreate`), then run the normal `helm upgrade`. Fresh installs
+need nothing special. The existing `<release>-valkey-tls` Secret keeps its RSA leaf (still negotiated: the Valkey cipher list
+carries ECDSA and RSA suites); delete it before the upgrade to re-mint it as ECDSA P-256.
+
 ## Failure behaviour
 
 No plaintext fallback exists: `verify-full`, `hostnossl reject`, `--port 0`, `https://` endpoints with the CA pinned. A

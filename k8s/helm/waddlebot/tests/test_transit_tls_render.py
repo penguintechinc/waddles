@@ -258,6 +258,15 @@ def test_every_s3_client_is_https_with_ca(values):
     assert not re.findall(r"http://[^\s\"']*seaweedfs[^\s\"']*:8333", blob), "plaintext S3 URL survived"
 
 
+@pytest.mark.parametrize("values", ("values-alpha.yaml", "values-dal2alpha.yaml"))
+def test_generated_valkey_ca_and_leaf_are_ecdsa_p256(values):
+    docs = _docs(values)
+    sec = next(d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-valkey-tls"))
+    for key in ("ca.crt", "tls.crt"):
+        txt = _openssl_text(sec["stringData"][key])
+        assert "ecdsa-with-SHA256" in txt and "prime256v1" in txt, key
+
+
 @pytest.mark.parametrize("values", _ENVS)
 def test_seaweedfs_serves_s3_over_tls_and_probes_verify(values):
     docs = _docs(values)
