@@ -4,7 +4,7 @@ Reusable snippets for the per-service EdDSA machine JWT mechanism
 
 "waddlebot.serviceJwtBootstrapVolume" -- the projected ServiceAccount
 token volume a calling service (svc-process, svc-action, ...) mounts to
-bootstrap against hub-api's /internal/service-token endpoint. Include in
+bootstrap against hub-api's gRPC ServiceAuthService (MintServiceToken). Include in
 any Deployment's `.spec.template.spec.volumes`:
 
   {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 8 }}

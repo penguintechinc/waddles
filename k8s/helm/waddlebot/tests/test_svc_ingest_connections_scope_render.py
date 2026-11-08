@@ -165,7 +165,9 @@ def test_svc_ingest_deployment_projects_the_audience_scoped_bootstrap_token(
     )
     env = {e["name"]: e.get("value") for e in container["env"]}
     assert env["SERVICE_JWT_SA_TOKEN_PATH"].endswith("/service-jwt-bootstrap-token")
-    assert env["SERVICE_JWT_TOKEN_ENDPOINT"].endswith("/internal/service-token")
+    # The mint is gRPC now: hub-api's internal gRPC port over TLS, never the REST port/path.
+    assert env["SERVICE_JWT_TOKEN_ENDPOINT"].startswith("https://")
+    assert "/internal/service-token" not in env["SERVICE_JWT_TOKEN_ENDPOINT"]
 
 
 def test_dynamic_connections_defaults_off_in_base_values_and_on_only_in_alpha() -> None:

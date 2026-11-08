@@ -158,7 +158,7 @@ fn test_config(allowed_ports: Vec<u16>) -> Config {
             "10.244.0.0/16".parse().unwrap(),
             "10.96.0.0/12".parse().unwrap(),
         ],
-        machine_jwt_jwks_url: String::new(),
+        machine_jwt_jwks_endpoint: String::new(),
         machine_jwt_audience: "egress-proxy".into(),
         machine_jwt_trusted_issuers: vec!["hub-api".into()],
         machine_jwt_required_scope: "egress:connect".into(),

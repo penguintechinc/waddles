@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use axum::routing::get;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use clap::Parser;
@@ -216,28 +215,17 @@ fn base64url(bytes: &[u8]) -> String {
     out
 }
 
-/// Serves `/jwks` (the test public key as `kid` `k1`) on an ephemeral
-/// loopback port and returns its URL. The server task lives for the test
-/// process.
+/// Serves hub-api's JWKS over gRPC (a real in-process `ServiceAuthService`; the test public key
+/// as `kid` `k1`) on an ephemeral loopback port and returns its endpoint. The server lives until
+/// the test's runtime ends.
 pub async fn spawn_jwks_server() -> String {
-    let body = serde_json::json!({
-        "keys": [{ "kid": "k1", "kty": "OKP", "crv": "Ed25519", "x": base64url(TEST_PUB_RAW) }]
-    });
-    let app = Router::new().route(
-        "/jwks",
-        get(move || {
-            let body = body.clone();
-            async move { axum::Json(body) }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    service_auth::test_support::MockHub::builder()
+        .jwks(vec![service_auth::test_support::JwksReply::ed25519(
+            "k1",
+            &base64url(TEST_PUB_RAW),
+        )])
+        .start_detached()
         .await
-        .expect("bind JWKS listener");
-    let addr = listener.local_addr().expect("JWKS addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("JWKS server");
-    });
-    format!("http://{addr}/jwks")
 }
 
 /// Signs a hub-api-style PUSH machine JWT scoped to `community_id`.
@@ -272,7 +260,7 @@ pub async fn state_with_real_push_trust(enabled: bool) -> AppState {
     let jwks_url = spawn_jwks_server().await;
     let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
     let mut state = AppState::new(
-        config_with(&["--push-jwks-url", &jwks_url]),
+        config_with(&["--push-jwks-endpoint", &jwks_url]),
         prometheus::Registry::new(),
         db,
     );
@@ -301,7 +289,7 @@ pub async fn state_with_real_push_trust_and_view(
         }]])
         .into_connection();
     let mut state = AppState::new(
-        config_with(&["--push-jwks-url", &jwks_url]),
+        config_with(&["--push-jwks-endpoint", &jwks_url]),
         prometheus::Registry::new(),
         db,
     );

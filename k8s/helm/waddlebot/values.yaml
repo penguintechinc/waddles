@@ -1530,6 +1530,9 @@ pipeline:
     # `disable-pii-detokenization` kill-switches in any environment where this isn't
     # resolved yet, rather than deploying straight into a crash-loop.
     hubApiGrpcEndpoint: ""
+    # Machine-JWT bootstrap (ServiceAuthService.MintServiceToken) is gRPC: this is hub-api's
+    # internal gRPC address, the same one as hubApiGrpcEndpoint (default: hub-api's in-cluster
+    # Service on pipeline.hubApi.grpcPort; TLS 1.3, CA pinned via HUB_API_GRPC_CA_FILE).
     serviceJwtTokenEndpoint: ""
 
     svcIngest:
@@ -3498,7 +3501,7 @@ serviceJwt:
   # secret distributed to callers. Reusable via the
   # `waddlebot.serviceJwtBootstrapVolume` named template
   # (templates/_service_jwt.tpl) -- add its volume/volumeMount output to
-  # any deployment that calls hub-api's /internal/service-token endpoint.
+  # any deployment that mints machine JWTs from hub-api's gRPC ServiceAuthService.
   bootstrapTokenProjection:
     expirationSeconds: 3600
     path: service-jwt-bootstrap-token

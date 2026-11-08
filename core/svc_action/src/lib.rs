@@ -2122,7 +2122,7 @@ mod tests {
             "--hub-api-grpc-endpoint",
             &format!("http://{hub_addr}"),
             "--service-jwt-token-endpoint",
-            &format!("http://{hub_addr}/internal/service-token"),
+            &format!("http://{hub_addr}"),
         ]);
         // Shutdown futures resolve immediately, so the servers bind, log,
         // and drain right away instead of blocking on a real OS signal.
@@ -2772,7 +2772,7 @@ mod tests {
             "--hub-api-grpc-endpoint",
             &format!("http://{addr}"),
             "--service-jwt-token-endpoint",
-            &format!("http://{addr}/internal/service-token"),
+            &format!("http://{addr}"),
         ]);
         let err = match build_hub_client(&cli, true).await {
             Ok(_) => panic!("an unreachable hub-api gRPC endpoint must fail loud at startup"),

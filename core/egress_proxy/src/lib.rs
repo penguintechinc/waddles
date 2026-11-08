@@ -78,7 +78,7 @@ use proxy::ProxyState;
 pub async fn build_state(registry: &prometheus::Registry) -> anyhow::Result<Arc<ProxyState>> {
     let cfg = Config::from_env().map_err(anyhow::Error::from)?;
     let trust_bundle: Arc<dyn service_auth::TrustBundle> = Arc::new(
-        service_auth::JwksTrustBundle::new(cfg.machine_jwt_jwks_url.clone()),
+        service_auth::JwksTrustBundle::new(cfg.machine_jwt_jwks_endpoint.clone()),
     );
     let replay_cache: Arc<dyn assertion::ReplayCache> =
         Arc::new(assertion::InMemoryReplayCache::new());
@@ -308,7 +308,7 @@ mod tests {
         "ALLOWED_PORTS",
         "DENY_CIDRS",
         "DENY_CLUSTER_CIDRS",
-        "MACHINE_JWT_JWKS_URL",
+        "MACHINE_JWT_JWKS_ENDPOINT",
         "MACHINE_JWT_AUDIENCE",
         "MACHINE_JWT_TRUSTED_ISSUERS",
         "MACHINE_JWT_REQUIRED_SCOPE",
@@ -336,7 +336,7 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK, held by every caller of this
         // helper.
         unsafe {
-            std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json");
+            std::env::set_var("MACHINE_JWT_JWKS_ENDPOINT", "https://hub-api.example:50204");
             std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy");
         }
     }
@@ -357,8 +357,8 @@ mod tests {
         assert_eq!(state.cfg.allowed_ports, vec![80, 443, 6697]);
         assert_eq!(state.cfg.per_tenant_max_connections, 50);
         assert_eq!(
-            state.cfg.machine_jwt_jwks_url,
-            "https://hub-api.example/jwks.json"
+            state.cfg.machine_jwt_jwks_endpoint,
+            "https://hub-api.example:50204"
         );
         assert!(state.cluster_cidrs.is_empty());
 
@@ -374,11 +374,11 @@ mod tests {
 
         let registry = prometheus::Registry::new();
         let err = match build_state(&registry).await {
-            Ok(_) => panic!("expected MACHINE_JWT_JWKS_URL to be required"),
+            Ok(_) => panic!("expected MACHINE_JWT_JWKS_ENDPOINT to be required"),
             Err(e) => e,
         };
         assert!(
-            err.to_string().contains("MACHINE_JWT_JWKS_URL"),
+            err.to_string().contains("MACHINE_JWT_JWKS_ENDPOINT"),
             "expected a clear missing-var message, got: {err}"
         );
 

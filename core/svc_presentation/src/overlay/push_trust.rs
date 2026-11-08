@@ -22,10 +22,10 @@ pub struct AppPushTrustSource {
 
 impl AppPushTrustSource {
     /// Builds the trust source from this service's loaded [`Config`] --
-    /// `PUSH_JWKS_URL`/`PUSH_AUDIENCE`/`PUSH_TRUSTED_ISSUER`.
+    /// `PUSH_JWKS_ENDPOINT`/`PUSH_AUDIENCE`/`PUSH_TRUSTED_ISSUER`.
     pub fn from_config(config: &Config) -> Self {
         Self {
-            trust_bundle: JwksTrustBundle::new(config.cli.push_jwks_url.clone()),
+            trust_bundle: JwksTrustBundle::new(config.cli.push_jwks_endpoint.clone()),
             audience: config.cli.push_audience.clone(),
             trusted_issuer: config.cli.push_trusted_issuer.clone(),
         }
@@ -55,8 +55,8 @@ mod tests {
     fn test_config() -> Config {
         let cli = CliConfig::parse_from([
             "svc-presentation",
-            "--push-jwks-url",
-            "http://hub-api.internal/.well-known/jwks.json",
+            "--push-jwks-endpoint",
+            "https://hub-api.internal:50204",
             "--push-audience",
             "waddlebot-internal",
             "--push-trusted-issuer",

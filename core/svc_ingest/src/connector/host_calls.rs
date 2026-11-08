@@ -1112,8 +1112,6 @@ mod tests {
         ResolveHandleResponse, ResolvePlatformUserRequest, ResolvePlatformUserResponse,
     };
     use tonic::{Request, Response, Status};
-    use wiremock::matchers::{body_partial_json, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
 
@@ -2029,7 +2027,7 @@ mod tests {
         tokenizer: HubIdentityTokenizer,
         calls: Arc<AtomicUsize>,
         seen: Arc<Mutex<Vec<hub_client::pb::MintEphemeralPseudonymRequest>>>,
-        _hub: MockServer,
+        _hub: service_auth::test_support::MockHub,
         sa: std::path::PathBuf,
     }
 
@@ -2077,17 +2075,14 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(up, "fake hub did not start");
-        let hub = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/internal/service-token"))
-            .and(body_partial_json(
-                serde_json::json!({"scope": IDENTITY_MINT_SCOPE}),
-            ))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"token": "hub-jwt", "expires_in": 3600})),
-            )
-            .mount(&hub)
+        // The machine-JWT mint is gRPC: a real in-process `ServiceAuthService`.
+        let hub = service_auth::test_support::MockHub::builder()
+            .mint(vec![service_auth::test_support::MintReply::when(
+                |call| call.scope == IDENTITY_MINT_SCOPE,
+                "hub-jwt",
+                3600,
+            )])
+            .start()
             .await;
         let sa = std::env::temp_dir().join(format!("hc-sa-{}", uuid::Uuid::new_v4()));
         std::fs::write(&sa, "synthetic-sa").unwrap();
@@ -2097,7 +2092,7 @@ mod tests {
             .connect_lazy();
         let tokenizer = HubIdentityTokenizer::from_channel(
             channel,
-            format!("{}/internal/service-token", hub.uri()),
+            hub.endpoint.clone(),
             sa.to_string_lossy().to_string(),
         );
         HubRig {

@@ -33,11 +33,9 @@ built so that swap is a *configuration* change, not a rewrite --
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
-import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -685,7 +683,7 @@ def require_service_scope(scope: str) -> Callable[[F], F]:
 
 
 # ---------------------------------------------------------------------------
-# Verify-only trust bundle + caller-side token client
+# Verify-only trust bundle (callers mint over gRPC: ServiceAuthService)
 #
 # Privilege separation (H-2 / security audit HIGH, HS256 shared secret): ONLY
 # hub-api (the issuer) may hold an Ed25519 private key. Every other service
@@ -761,68 +759,3 @@ def load_verifier_from_env(
         if trusted_issuers is not None
         else frozenset({ISSUER}),
     )
-
-
-@dataclass(slots=True)
-class ServiceTokenClient:
-    """Caller-side: exchange the pod's projected SA token for a cached machine JWT.
-
-    Replaces `jwt.encode(..., SECRET_KEY, 'HS256')` at every minting site -- the
-    caller never holds a signing key. Any failure raises `BootstrapRejected`;
-    there is deliberately no fallback token source.
-    """
-
-    token_endpoint: str
-    scope: str
-    sa_token_path: str
-    timeout_seconds: float = 5.0
-    refresh_margin_seconds: int = 60
-    _token: str = ""
-    _expires_at: float = 0.0
-    _lock: threading.Lock = field(default_factory=threading.Lock)
-
-    def get_token(self) -> str:
-        """Return a valid cached token, fetching a fresh one when near expiry."""
-        with self._lock:
-            if (
-                self._token
-                and time.time() < self._expires_at - self.refresh_margin_seconds
-            ):
-                return self._token
-            self._token, self._expires_at = self._fetch()
-            return self._token
-
-    async def get_token_async(self) -> str:
-        """`get_token` off the event loop (blocking file + HTTP I/O)."""
-        return await asyncio.to_thread(self.get_token)
-
-    def _fetch(self) -> tuple[str, float]:
-        try:
-            with open(self.sa_token_path, encoding="ascii") as fh:
-                sa_token = fh.read().strip()
-        except OSError as exc:
-            raise BootstrapRejected(
-                "projected ServiceAccount token unreadable"
-            ) from exc
-        if not sa_token:
-            raise BootstrapRejected("projected ServiceAccount token is empty")
-        try:
-            response = requests.post(
-                self.token_endpoint,
-                json={"scope": self.scope},
-                headers={"Authorization": f"Bearer {sa_token}"},
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-            body = response.json()
-            token = body["token"]
-            expires_in = int(body["expires_in"])
-        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-            raise BootstrapRejected("service token request failed") from exc
-        if (
-            not isinstance(token, str)
-            or not token
-            or not 0 < expires_in <= MAX_TOKEN_TTL_SECONDS
-        ):
-            raise BootstrapRejected("service token response malformed")
-        return token, time.time() + expires_in

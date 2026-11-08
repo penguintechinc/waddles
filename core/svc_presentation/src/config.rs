@@ -10,7 +10,7 @@
 //! Unlike `core/svc_streaming/src/config.rs`, there is no static
 //! `SERVICE_API_KEY`/`JWT_HMAC_SECRET` here: the overlay PUSH credential
 //! (`overlay_auth::require_push_credential`) is a hub-api-issued machine
-//! JWT verified against hub-api's JWKS endpoint (`PUSH_JWKS_URL` below),
+//! JWT verified against hub-api's JWKS endpoint (`PUSH_JWKS_ENDPOINT` below),
 //! replacing the Python alpha's static `PRESENTATION_PUSH_TOKEN` bearer
 //! secret entirely -- see `core/overlay_auth/src/lib.rs` module doc.
 
@@ -100,16 +100,15 @@ pub struct CliConfig {
     #[arg(long, env = "CACHE_PORT", default_value_t = 6379)]
     pub cache_port: u16,
 
-    /// hub-api's JWKS endpoint -- `overlay::push_trust::AppPushTrustSource`
-    /// verifies every PUSH credential's signature against the keys this
-    /// returns (`service_auth::JwksTrustBundle`). No static shared secret
-    /// is configured anywhere in this service.
-    #[arg(
-        long,
-        env = "PUSH_JWKS_URL",
-        default_value = "http://hub-api/.well-known/jwks.json"
-    )]
-    pub push_jwks_url: String,
+    /// hub-api's internal gRPC address serving the JWKS
+    /// (`ServiceAuthService.GetServiceJwks`, e.g. `https://hub-api:50204`; TLS 1.3, CA from
+    /// `HUB_API_GRPC_CA_FILE`) -- `overlay::push_trust::AppPushTrustSource` verifies every PUSH
+    /// credential's signature against the keys this returns (`service_auth::JwksTrustBundle`).
+    /// Empty means "not configured": every PUSH credential is then refused (fail closed, the
+    /// bundle reports a configuration error). No static shared secret is configured anywhere
+    /// in this service.
+    #[arg(long, env = "PUSH_JWKS_ENDPOINT", default_value = "")]
+    pub push_jwks_endpoint: String,
 
     /// Expected `aud` claim on an inbound PUSH credential.
     #[arg(long, env = "PUSH_AUDIENCE", default_value = "waddlebot-internal")]
@@ -195,9 +194,9 @@ pub struct CliConfig {
     #[arg(long, env = "HUB_API_GRPC_ENDPOINT", default_value = "")]
     pub hub_api_grpc_endpoint: String,
 
-    /// hub-api's machine-JWT bootstrap endpoint
-    /// (`POST /internal/service-token`, `service_auth::MachineJwtClient`'s
-    /// `token_endpoint`). Empty means "not configured" -- same fail-loud
+    /// hub-api's machine-JWT bootstrap endpoint: its internal gRPC address
+    /// (`ServiceAuthService.MintServiceToken`, `service_auth::MachineJwtClient`'s
+    /// `token_endpoint`; TLS 1.3, CA from `HUB_API_GRPC_CA_FILE`). Empty means "not configured" -- same fail-loud
     /// contract as [`Self::hub_api_grpc_endpoint`].
     #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT", default_value = "")]
     pub service_jwt_token_endpoint: String,
@@ -401,17 +400,14 @@ mod tests {
             "--hub-api-grpc-endpoint",
             "https://hub:50204",
             "--service-jwt-token-endpoint",
-            "http://hub:8204/internal/service-token",
+            "https://hub:50204",
             "--hub-api-grpc-ca-file",
             "/ca.pem",
             "--pii-detokenization-enabled-override",
             "false",
         ]);
         assert_eq!(cli.hub_api_grpc_endpoint, "https://hub:50204");
-        assert_eq!(
-            cli.service_jwt_token_endpoint,
-            "http://hub:8204/internal/service-token"
-        );
+        assert_eq!(cli.service_jwt_token_endpoint, "https://hub:50204");
         assert_eq!(cli.hub_api_grpc_ca_file, "/ca.pem");
         assert_eq!(cli.pii_detokenization_enabled_override, Some(false));
     }

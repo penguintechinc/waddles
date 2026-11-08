@@ -32,7 +32,7 @@ from . import _service_auth_pb2 as pb
 logger = logging.getLogger(__name__)
 
 _MINT_METHOD = "/waddles.hub.internal.v1.ServiceAuthService/MintServiceToken"
-_DEFAULT_SA_TOKEN_PATH = "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"  # noqa: S105,E501 - path
+_DEFAULT_SA_TOKEN_PATH = "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"  # noqa: S105,E501 - path  # nosec B105 -- file path, not a secret
 _CHANNEL_OPTIONS = (
     ("grpc.keepalive_time_ms", 30_000),
     ("grpc.keepalive_timeout_ms", 10_000),

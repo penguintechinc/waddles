@@ -56,6 +56,27 @@ pub enum MintReply {
 }
 
 impl MintReply {
+    /// Mint `token` only for calls satisfying `pred`; any other call is refused as an unknown
+    /// caller (`NOT_FOUND`, i.e. a bootstrap rejection) -- the gRPC analogue of a request-matching
+    /// stub that only answers the exact request the code under test is expected to send.
+    #[must_use]
+    pub fn when(
+        pred: impl Fn(&MintCall) -> bool + Send + Sync + 'static,
+        token: &str,
+        expires_in: u64,
+    ) -> Self {
+        let token = token.to_owned();
+        Self::With(Arc::new(move |call: &MintCall| {
+            if pred(call) {
+                Ok((token.clone(), expires_in))
+            } else {
+                Err(Status::not_found(
+                    "MockHub: no mint scripted for this request",
+                ))
+            }
+        }))
+    }
+
     /// Shorthand for [`MintReply::Token`].
     #[must_use]
     pub fn token(token: &str, expires_in: u64) -> Self {
@@ -224,6 +245,16 @@ impl MockHubBuilder {
             .local_addr()
             .unwrap_or_else(|e| panic!("MockHub: local_addr: {e}"));
         self.spawn(listener, addr, None)
+    }
+
+    /// Start serving and return only the endpoint, leaving the server running until the calling
+    /// test's tokio runtime ends. For fixtures that cannot carry a [`MockHub`] handle; use
+    /// [`MockHubBuilder::start`] whenever the test inspects calls or wants an explicit shutdown.
+    pub async fn start_detached(self) -> String {
+        let hub = self.start().await;
+        let endpoint = hub.endpoint.clone();
+        std::mem::forget(hub);
+        endpoint
     }
 
     /// As [`MockHubBuilder::start`] for synchronous fixtures: binds with `std` and registers the

@@ -350,10 +350,10 @@ pub struct CliConfig {
     /// identical addition -- same env var names across both services.
     #[arg(long, env = "HUB_API_GRPC_ENDPOINT", default_value = "")]
     pub hub_api_grpc_endpoint: String,
-    /// hub-api's machine-JWT bootstrap endpoint
-    /// (`hub_api/blueprints/service_jwt_bp.py`'s `POST /internal/
-    /// service-token`, `service_auth::MachineJwtClient`'s `token_endpoint`),
-    /// e.g. `http://waddlebot-hub-api-v3:8204/internal/service-token`.
+    /// hub-api's machine-JWT bootstrap endpoint: its internal gRPC address
+    /// (`ServiceAuthService.MintServiceToken`, `service_auth::MachineJwtClient`'s
+    /// `token_endpoint`), e.g. `https://waddlebot-hub-api-v3:50204` -- the same
+    /// address as [`Self::hub_api_grpc_endpoint`]. TLS 1.3, CA from `HUB_API_GRPC_CA_FILE`.
     /// Empty (the default) means "not configured" -- same fail-loud
     /// contract as [`Self::hub_api_grpc_endpoint`].
     #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT", default_value = "")]
