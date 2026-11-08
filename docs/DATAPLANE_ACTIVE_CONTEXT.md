@@ -2,59 +2,47 @@
 
 A Discord guild can be paired to several communities. Slash interactions are guild-wide, so the
 invoking **user's active context** picks the processing community: their explicit choice, else the
-first-registered community of the source. svc-ingest (no database) asks hub-api; the client is
-`core/svc_ingest/src/active_context.rs` (`ContextSink`, `/context`).
+first-registered community of the source. svc-ingest (no database) asks hub-api over **internal
+gRPC**; the client is `core/svc_ingest/src/active_context.rs` (`ContextSink`, `/context`) on
+`hub_client::active_context`.
 
-## Endpoint
+## Contract
 
-`/api/v1/internal/dataplane/active-context` — machine JWT only, scope `dataplane:active-context`,
-`system` tenant (any other tenant: 403). Granted in the chart to svc-ingest's SPIFFE identity alone.
-Every response is `Cache-Control: no-store`.
+`proto/waddles/hub/internal/v1/active_context.proto` — `ActiveContextService` on hub-api's internal
+TLS gRPC listener (`hub_api/grpc_internal/active_context_servicer.py`). Machine JWT in the
+`authorization` metadata, scope `dataplane:active-context`, `system` tenant (any other tenant:
+`PERMISSION_DENIED`). Granted in the chart to svc-ingest's SPIFFE identity alone.
 
-| Verb | Input | Success |
+| RPC | Input | Success |
 |---|---|---|
-| `GET` | `platform`, `source_id`, `user` (query) | `ActiveContextDTO` |
-| `PUT` | `{platform, sourceId, user, community}` | `ActiveContextDTO` (the new context) |
+| `GetActiveContext` | `platform`, `source_id`, `user` | `ActiveContext` |
+| `SetActiveContext` | `platform`, `source_id`, `user`, `community` | `ActiveContext` (the new context) |
 
-`user` is the **tokenized user UUID** (`hub_users.uuid`); hub-api never sees a platform user id.
-`community` is a community `public_id` UUID — names never resolve at hub-api.
+`user` is the **tokenized user UUID**; hub-api never sees a platform user id. `community` is a
+community `public_id` UUID — names never resolve at hub-api. `community_id` is the **numeric**
+community id: the key the data plane routes on and the interaction ownership check compares
+(numeric-id rule); svc-ingest treats an answer without it as `Malformed` and fails closed. The
+field set is pinned by a regression test.
 
-```json
-{
-  "communityPublicId": "uuid",
-  "communityId": 12,
-  "communityName": "display alias",
-  "explicit": false,
-  "communities": [{"publicId": "uuid", "displayName": "alias", "position": 0}]
-}
-```
-
-`communityId` is the **numeric** community id: the key the data plane routes on and the interaction
-ownership check compares (numeric-id rule). It is required by svc-ingest — an answer without it is
-`Malformed` and routing fails closed. The field set is pinned by a regression test.
-
-| Status | Meaning |
+| gRPC status | Meaning |
 |---|---|
-| 400 | `platform`, `source_id`, `user` or `community` not in canonical form (`platform=community` is not a source) |
-| 401 / 403 / 503 | missing/wrong-scope credential / non-`system` tenant / verifier unconfigured |
-| 404 `SCOPE_NOT_FOUND` | no usable community is linked to the source (an inactive verified claimant never falls back to a legacy claim) |
-| 409 `SCOPE_AMBIGUOUS` | the source is claimed by more than one tenant (judged before the activity filter) |
-| 404 `COMMUNITY_NOT_SWITCHABLE` | PUT target is not in the source's switchable set |
+| `INVALID_ARGUMENT` | `platform`, `source_id`, `user` or `community` not in canonical form |
+| `UNAUTHENTICATED` / `PERMISSION_DENIED` | missing/wrong-scope credential / non-`system` tenant |
+| `NOT_FOUND` | no usable community linked to the source, or `community` not paired to it |
+| `FAILED_PRECONDITION` | the source is paired across tenants (never pinned) |
+| `ABORTED` | the pairing changed between the two reads of one request — retry |
+| `UNAVAILABLE` | the install store is not configured (never a default answer) |
 
-## Switchable set
+## Logic and storage
 
-Resolved by the ONE shared rule `dataplane_scope.resolve_claimants`, also used by
-`dataplane/resolve-scope`: an approved `community_servers` link beats a legacy
-`communities.platform_server_id`; an inactive verified claimant refuses (404) with no legacy
-fallback; a source claimed across tenants is refused (409) on the pre-filter claimants, never pinned
-to one tenant. Ordered by first-registered link. Inactive, deleted, tenant-less and inactive-tenant
-communities are never members. A stored choice that has left the set yields to the default
-(`explicit=false`).
+The choice itself is owned by `services/app_command_registry.py` (`get_active_context` /
+`set_active_context`, table `user_active_context` from migration `0082_user_active_context`): the
+switchable set is the source's paired communities in registration order, a stored choice that has
+left the set yields to the default (`explicit=false`), and a source paired across tenants is
+refused. The gRPC adapter only adds the numeric id (resolved from the same paired set) and the
+`system`-tenant check. Rows are deleted on Art. 17 erasure
+(`erasure_registry`: `delete("user_active_context", uuid("user_uuid"))`).
 
-## Storage
-
-Alembic `0082_user_active_context`: `communities.public_id` (UUID, unique, backfilled) and
-`user_active_contexts (platform, source_id, user_uuid) -> community_id` (FK cascade). Rows are
-deleted on Art. 17 erasure (`erasure_registry`: `delete("user_active_contexts", uuid("user_uuid"))`).
-
-Tests: `hub_api/tests/dataplane_active_context/` (real Postgres migrated to head, real verifier).
+Tests: `hub_api/tests/test_active_context_grpc.py` (real gRPC, production interceptor chain, real
+Postgres migrated to head, one real TLS listener); client side in
+`core/hub_client/src/active_context.rs` and `core/svc_ingest/src/active_context.rs`.

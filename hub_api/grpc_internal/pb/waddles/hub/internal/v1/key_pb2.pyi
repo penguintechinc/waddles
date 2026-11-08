@@ -15,7 +15,13 @@ class GetStreamDekRequest(_message.Message):
     purpose: str
     version: int
     caller_ephemeral_public_key: bytes
-    def __init__(self, tenant_id: str | None = ..., purpose: str | None = ..., version: int | None = ..., caller_ephemeral_public_key: bytes | None = ...) -> None: ...
+    def __init__(
+        self,
+        tenant_id: str | None = ...,
+        purpose: str | None = ...,
+        version: int | None = ...,
+        caller_ephemeral_public_key: bytes | None = ...,
+    ) -> None: ...
 
 class GetStreamDekResponse(_message.Message):
     __slots__ = ("sealed_dek", "version", "ttl_seconds")
@@ -25,4 +31,9 @@ class GetStreamDekResponse(_message.Message):
     sealed_dek: bytes
     version: int
     ttl_seconds: int
-    def __init__(self, sealed_dek: bytes | None = ..., version: int | None = ..., ttl_seconds: int | None = ...) -> None: ...
+    def __init__(
+        self,
+        sealed_dek: bytes | None = ...,
+        version: int | None = ...,
+        ttl_seconds: int | None = ...,
+    ) -> None: ...
