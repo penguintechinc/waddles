@@ -36,12 +36,15 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 from flask_core.bundle_attribution import (
     MARKETPLACE_CATEGORIES,
+    collection_attribution_problem,
     is_https_url,
     is_known_spdx,
     license_requires_review,
     valid_alternative_to_entry,
+    valid_collection_slug,
     valid_notice,
 )
+from flask_core.bundle_author import AuthorError, canonical_author
 
 # SCCEBM product modules (docs/plans/2026-08-31-v3-sccebm-program-plan.md
 # §1.1/§9 P4) -- 7 modules, each independently toggleable as a Helm
@@ -185,6 +188,8 @@ REASON_INVALID_HOMEPAGE_URL = "invalid_homepage_url"
 REASON_INVALID_ALTERNATIVE_TO = "invalid_alternative_to"
 REASON_INVALID_NOTICE = "invalid_notice"
 REASON_INVALID_CATEGORY = "invalid_category"
+REASON_INVALID_COLLECTION = "invalid_collection"
+REASON_COLLECTION_ATTRIBUTION = "collection_attribution_required"
 REASON_INVALID_KIND = "invalid_kind"
 
 # Optional `kind` field. Deliberately duplicates hub_api's
@@ -308,6 +313,7 @@ class AppManifest:
     homepage_url: Optional[str] = None
     notice: Optional[str] = None
     category: Optional[str] = None
+    collection: Optional[str] = None
     kind: str = "app"  # 'app' | 'service'
 
 
@@ -557,6 +563,13 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
     # two manifest schemas can never silently drift on what counts as a
     # valid license or URL for whichever fields ARE present.
     author = data.get("author")
+    if author is not None:
+        # Optional in this schema, but when present it must be a valid GitHub/name author;
+        # stored in canonical form (`github:<handle>` or plain name).
+        try:
+            author = canonical_author(author)
+        except AuthorError as exc:
+            raise ManifestError(exc.code, str(exc)) from exc
     license_id = data.get("license")
     license_needs_review = False
     if license_id:
@@ -597,6 +610,17 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
             f"{category!r} is not one of {sorted(MARKETPLACE_CATEGORIES)}",
         )
 
+    collection = data.get("collection")
+    if collection is not None and not (
+        isinstance(collection, str) and valid_collection_slug(collection)
+    ):
+        raise ManifestError(
+            REASON_INVALID_COLLECTION, f"{collection!r} is not a lowercase kebab-case slug"
+        )
+    problem = collection_attribution_problem(collection, license_id, notice)
+    if problem:
+        raise ManifestError(REASON_COLLECTION_ATTRIBUTION, problem)
+
     raw_kind = data.get("kind")
     if raw_kind is not None and raw_kind not in KNOWN_KINDS:
         raise ManifestError(
@@ -628,5 +652,6 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
         homepage_url=homepage_url,
         notice=notice,
         category=category,
+        collection=collection,
         kind=kind,
     )

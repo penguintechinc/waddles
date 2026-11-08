@@ -1,10 +1,11 @@
 schema_version: 2
 app_id: waddles.core.service.economy
 name: Economy Service Bundle (Rust)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.service
 module: core
 provider: builtin
+author: github:penguintechinc
 language: rust
 artifact: prebuilt
 execution_model: native

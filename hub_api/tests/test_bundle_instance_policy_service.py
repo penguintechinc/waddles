@@ -41,6 +41,7 @@ def _manifest_raw(permissions: list[dict[str, Any]]) -> dict[str, Any]:
         "feature": "waddles.socials.music",
         "module": "socials",
         "provider": "builtin",
+        "author": "github:penguintechinc",
         "language": "python",
         "artifact": "source",
         "stages": {

@@ -73,10 +73,6 @@ readonly REGISTRY="localhost:32000/waddlebot"
 readonly SERVICE_ORDER=(
     "hub-api"
     "hub-webui"
-    "svc-ingest"
-    "svc-process"
-    "svc-action"
-    "svc-presentation"
     "svc-streaming"
     "reputation-module"
     "migrations"
@@ -90,10 +86,6 @@ readonly SERVICE_ORDER=(
 declare -A SERVICE_CONTEXT=(
     ["hub-api"]="."
     ["hub-webui"]="."
-    ["svc-ingest"]="."
-    ["svc-process"]="."
-    ["svc-action"]="."
-    ["svc-presentation"]="."
     ["svc-streaming"]="core/svc_streaming"
     ["reputation-module"]="."
     ["migrations"]="."
@@ -105,10 +97,6 @@ declare -A SERVICE_CONTEXT=(
 declare -A SERVICE_DOCKERFILE=(
     ["hub-api"]="hub_api/Dockerfile"
     ["hub-webui"]="admin/hub_module/Dockerfile.webui"
-    ["svc-ingest"]="core/svc_ingest/Dockerfile"
-    ["svc-process"]="core/svc_process/Dockerfile"
-    ["svc-action"]="core/svc_action/Dockerfile"
-    ["svc-presentation"]="core/svc_presentation/Dockerfile"
     ["svc-streaming"]="core/svc_streaming/Dockerfile.rust"
     ["reputation-module"]="core/reputation_module/Dockerfile"
     ["migrations"]="migrations/Dockerfile"
@@ -495,10 +483,6 @@ REQUIRED SECRETS (env vars, never defaulted/committed — see docs/SECRETS_SETUP
 SERVICES (built/pushed as ${REGISTRY}/<service>:<tag>):
     hub-api                (hub_api/Dockerfile)
     hub-webui              (admin/hub_module/Dockerfile.webui)
-    svc-ingest              (core/svc_ingest/Dockerfile)
-    svc-process             (core/svc_process/Dockerfile)
-    svc-action              (core/svc_action/Dockerfile)
-    svc-presentation        (core/svc_presentation/Dockerfile)
     svc-streaming           (core/svc_streaming/Dockerfile.rust)
     reputation-module       (core/reputation_module/Dockerfile)
     migrations    (migrations/Dockerfile)
