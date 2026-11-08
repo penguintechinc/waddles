@@ -1,10 +1,14 @@
-"""Valid/invalid matrix for `flask_core.bundle_author`."""
+"""Valid/invalid matrix for `flask_core.bundle_author` and the `collection` helpers."""
 
 from __future__ import annotations
 
 from typing import Any
 
 import pytest
+from flask_core.bundle_attribution import (
+    collection_attribution_problem,
+    valid_collection_slug,
+)
 from flask_core.bundle_author import (
     AuthorError,
     AuthorKind,
@@ -32,6 +36,8 @@ _VALID: list[tuple[str, AuthorKind, str | None, str, str]] = [
     ("github/psychoboy", AuthorKind.GITHUB, "psychoboy", "psychoboy", "github:psychoboy"),
     ("github/octo-cat", AuthorKind.GITHUB, "octo-cat", "octo-cat", "github:octo-cat"),
     ("github/" + "a" * 39, AuthorKind.GITHUB, "a" * 39, "a" * 39, "github:" + "a" * 39),
+    ("github/Psychoboy", AuthorKind.GITHUB, "Psychoboy", "Psychoboy", "github:Psychoboy"),
+    ("github/penguintechinc", AuthorKind.GITHUB, "penguintechinc", "penguintechinc", "github:penguintechinc"),
     ("@octo-cat", AuthorKind.GITHUB, "octo-cat", "octo-cat", "github:octo-cat"),
     ("@a", AuthorKind.GITHUB, "a", "a", "github:a"),
     (
@@ -86,6 +92,8 @@ _INVALID: list[tuple[Any, str]] = [
     ("github/a?tab=repos", "author_invalid_github_handle"),
     ("github/a#readme", "author_invalid_github_handle"),
     ("github/a\nb", "author_control_chars"),
+    ("github/a/b", "author_invalid_github_handle"),
+    ("github//x", "author_invalid_github_handle"),
     ("@", "author_invalid_github_handle"),
     ("github:-lead", "author_invalid_github_handle"),
     ("github:trail-", "author_invalid_github_handle"),
@@ -189,3 +197,34 @@ def test_slash_author_manifest_attribution() -> None:
             "github_handle": "psychoboy",
             "profile_url": "https://github.com/psychoboy",
         }
+
+@pytest.mark.parametrize("slug", ["superpenguintv", "a", "a-b-c", "x1", "9"])
+def test_valid_collection_slugs(slug: str) -> None:
+    assert valid_collection_slug(slug)
+
+
+@pytest.mark.parametrize(
+    "slug", ["", "Upper", "a_b", "-a", "a-", "a--b", "a b", "a\n", "x" * 51]
+)
+def test_invalid_collection_slugs(slug: str) -> None:
+    assert not valid_collection_slug(slug)
+
+
+@pytest.mark.parametrize(
+    ("collection", "license_id", "notice", "problem"),
+    [
+        (None, None, None, False),
+        ("other", None, None, False),
+        ("superpenguintv", "MIT", "Ported from X. MIT License", False),
+        ("superpenguintv", "Apache-2.0", "notice", True),
+        ("superpenguintv", None, "notice", True),
+        ("superpenguintv", "MIT", None, True),
+        ("superpenguintv", "MIT", "   ", True),
+    ],
+)
+def test_attributed_collection_requires_mit_and_notice(
+    collection: str | None, license_id: str | None, notice: str | None, problem: bool
+) -> None:
+    assert (
+        collection_attribution_problem(collection, license_id, notice) is not None
+    ) is problem

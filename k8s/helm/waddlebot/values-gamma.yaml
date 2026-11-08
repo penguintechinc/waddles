@@ -11,6 +11,23 @@ global:
   # Per-deploy unique gamma-<epoch> tags -> IfNotPresent (matches values.yaml default; stated
   # explicitly so all four env files declare the policy). Always only for a mutable tag.
   imagePullPolicy: IfNotPresent
+  # Rust data plane TLS prerequisites (pipeline.rustDataPlane below). Names only, never material:
+  #  - host-API mTLS (svc-process/svc-action/bundle-executor): cert-manager mints
+  #    <release>-host-api-tls from the ClusterIssuer below (PREREQ: cert-manager + that issuer in
+  #    this cluster); the chart derives the stage identity itself on this path.
+  #  - Valkey server TLS + hub-api internal gRPC TLS: Secrets <release>-valkey-tls and
+  #    <release>-hub-api-grpc-tls are owned by an out-of-band ExternalSecret/SealedSecret
+  #    (externalSecret: true). They MUST exist before `helm upgrade`; a missing Secret leaves the
+  #    pods in ContainerCreating (loud), never a silent plaintext fallback.
+  hostApiTls:
+    certManager:
+      enabled: true
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
+  valkeyTls:
+    externalSecret: true
+  hubApiGrpcTls:
+    externalSecret: true
 
 pipeline:
   hubApi:
@@ -22,6 +39,30 @@ pipeline:
     bundleSigning:
       secretName: ""
   rustDataPlane:
+    # Rust data plane (svc-ingest/svc-process/svc-action + bundle-executor x2) -- the legacy
+    # Python stages no longer exist in the chart, so this is the only ingest/process/action
+    # path. Per-stage sub-toggles, replicas and resources inherit the base values.yaml defaults.
+    enabled: true
+    # Bundle `http` egress SSRF backstop (REQUIRED outside alpha/local -- the chart fails the
+    # render when empty). Same pod/Service/node CIDRs as this file's egressPolicy.clusterCidrs;
+    # confirm against the live cluster (`kubectl cluster-info dump | grep -E 'cluster-cidr|service-cluster-ip-range'`).
+    egressClusterCidrDenylist:
+      - "10.244.0.0/16"
+      - "10.96.0.0/12"
+      - "10.0.0.0/8"
+    # Process-stage executor dials svc-process-rust:8301 (same override values-alpha/dal2alpha
+    # carry); bundleExecutorAction keeps the svc-action-rust:8302 base default.
+    bundleExecutor:
+      stageTarget: "svc-process-rust"
+      stagePort: 8301
+      # Compiling large Python/.NET components via Cranelift OOMs below this (alpha finding).
+      resources:
+        requests: { cpu: "500m", memory: "1Gi" }
+        limits: { cpu: "2000m", memory: "16Gi" }
+    bundleExecutorAction:
+      resources:
+        requests: { cpu: "500m", memory: "1Gi" }
+        limits: { cpu: "2000m", memory: "16Gi" }
     # fix/chart-autogen-bundle-signing-key -- no longer required once the executor is
     # enabled on gamma: it sources BUNDLE_SIGNING_PUBLIC_KEYS from the
     # auto-provisioned ConfigMap by default (templates/auto-provisioned-keys-job.yaml
@@ -51,6 +92,11 @@ spire:
   environment: "gamma"
 
 infrastructure:
+  # SeaweedFS at-rest SSE-S3 KEK Secret NAME (pre-create via `make generate-seaweedfs-sse-key`;
+  # the template fails closed outside alpha without it). Name only, same as values-beta.yaml.
+  seaweedfs:
+    encryption:
+      secretName: "seaweedfs-sse-kek"
   # Durable delivery-state Valkey: primary + 1 warm replica, required anti-affinity.
   # Set infrastructure.valkeyDurable.password explicitly (no auto-generation outside alpha/local).
   valkeyDurable:
