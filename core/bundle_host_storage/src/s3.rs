@@ -65,16 +65,17 @@ fn meta_from(key: &str, size: u64, a: &Attributes) -> Result<ObjectMeta, Storage
             )));
         }
     };
-    let tags = a
-        .get(&Attribute::Metadata(TAGS_ATTR.into()))
-        .map(|v| {
-            v.as_ref()
-                .split(',')
-                .filter(|t| !t.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    // An object written without tags simply has no tag attribute: empty is the
+    // correct value, not a swallowed error.
+    let tags: Vec<String> = match a.get(&Attribute::Metadata(TAGS_ATTR.into())) {
+        Some(v) => v
+            .as_ref()
+            .split(',')
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
     Ok(ObjectMeta {
         key: key.into(),
         size,
