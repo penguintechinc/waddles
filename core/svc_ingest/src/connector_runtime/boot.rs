@@ -29,6 +29,7 @@ use connection_resolver::{ConnectionRef, ConnectionResolve};
 use penguin_spine::{KeyRing, SpineMetrics};
 
 use super::feed::{ConnKey, DynFeed, FeedSet, HubBindingFeed, TransportPlan, WebhookPlan};
+use super::interaction_routing::{InteractionRouting, RoutedSink, RoutingSinkFactory};
 use super::metrics::RuntimeMetrics;
 use super::plan::{ConnectorProfile, RuntimeEnv};
 use super::profiles::{discord, spectrum, twitch, wix, youtube};
@@ -441,6 +442,10 @@ where
     /// The Discord IDENTIFY budget backend. REQUIRED when Discord is ON:
     /// [`assemble`] refuses to build a Discord runtime without it.
     pub identify_budget: Option<IdentifyBudgetBackend>,
+    /// Discord interaction routing deps. REQUIRED when Discord is ON: [`assemble`]
+    /// refuses to build a Discord runtime without them (a ContextSink-less runtime
+    /// would leave every interaction followup refused).
+    pub interaction_routing: Option<InteractionRouting>,
     /// Registry that receives the runtime/connector series.
     pub registry: prometheus::Registry,
     /// Loopback test seams (`Default` in production).
@@ -448,8 +453,12 @@ where
 }
 
 /// The concrete runtime type this boot builds.
-pub type BootedRuntime<A, D> =
-    ConnectorRuntime<FeedSet, WireConnectorInvoker, ConnectionSink<A, D>, ConnectorValkeyLease>;
+pub type BootedRuntime<A, D> = ConnectorRuntime<
+    FeedSet,
+    WireConnectorInvoker,
+    RoutedSink<ConnectionSink<A, D>>,
+    ConnectorValkeyLease,
+>;
 
 /// Builds the profile-specific feed for `platform`.
 fn feed_for<R: ConnectionResolve + 'static>(
@@ -549,6 +558,14 @@ where
                 Arc::new(crate::interaction_tap::InteractionAcker::new()),
             )) as Arc<dyn crate::interaction_tap::FrameTap>
         });
+    let interaction_routing = if settings.platforms.contains(&"discord") {
+        Some(
+            deps.interaction_routing
+                .ok_or(BootError::Missing("the Discord interaction routing deps"))?,
+        )
+    } else {
+        None
+    };
     let env = settings.runtime_env();
     let mut feeds = FeedSet::new();
     let mut providers = BTreeMap::new();
@@ -581,6 +598,11 @@ where
         deps.dek,
         deps.identity_metrics,
         Arc::clone(&deps.scope),
+    );
+    let sinks = RoutingSinkFactory::new(
+        Arc::new(sinks),
+        Arc::clone(&deps.resolver),
+        interaction_routing,
     );
     let webhook = deps
         .webhook
@@ -798,6 +820,17 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
             anyhow::anyhow!("connector runtime: valkey connect failed ({:?})", e.kind())
         })?;
     let budget_conn = lease_conn.clone();
+    // Same gate as the interaction tap: routing exists exactly when Discord is ON, and a
+    // missing dependency is a boot error here (never a ContextSink-less Discord runtime).
+    let interaction_routing = if settings.platforms.contains(&"discord") {
+        Some(InteractionRouting::from_config(
+            cli,
+            crate::interaction_store::InteractionStore::new(lease_conn.clone()),
+            &registry,
+        )?)
+    } else {
+        None
+    };
     let link = Arc::clone(&bridge.link);
     let runtime = assemble(
         settings,
@@ -820,6 +853,7 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
             }),
             bridge,
             webhook,
+            interaction_routing,
             registry,
             seams: LoopbackSeams::default(),
         },
@@ -1398,9 +1432,97 @@ mod tests {
             lease_conn: lease_conn().await,
             bridge: HostBridge::new(Arc::new(NoTok), &["twitch", "youtube"]).unwrap(),
             webhook: None,
+            interaction_routing: Some(test_routing().await),
             registry,
             seams: LoopbackSeams::default(),
         }
+    }
+
+    struct NoHubContext;
+    impl crate::active_context::ContextSource for NoHubContext {
+        fn get<'a>(
+            &'a self,
+            _s: &'a str,
+            _u: &'a str,
+        ) -> BoxFut<
+            'a,
+            Result<crate::active_context::ContextView, crate::active_context::ContextError>,
+        > {
+            Box::pin(async { Err(crate::active_context::ContextError::Unavailable) })
+        }
+        fn put<'a>(
+            &'a self,
+            _s: &'a str,
+            _u: &'a str,
+            _c: &'a str,
+        ) -> BoxFut<
+            'a,
+            Result<crate::active_context::ContextView, crate::active_context::ContextError>,
+        > {
+            Box::pin(async { Err(crate::active_context::ContextError::Unavailable) })
+        }
+    }
+
+    async fn test_routing() -> InteractionRouting {
+        let store = crate::interaction_store::InteractionStore::new(lease_conn().await);
+        InteractionRouting {
+            source: Arc::new(NoHubContext),
+            replier: Arc::new(crate::active_context::InteractionReplier::new(
+                store.clone(),
+                GuardedClient::new(
+                    GuardedLimits {
+                        max_redirects: 0,
+                        timeout: Duration::from_secs(1),
+                        max_response_bytes: 1024,
+                    },
+                    Vec::new(),
+                ),
+                "http://127.0.0.1:9".into(),
+            )),
+            store,
+            metrics: crate::active_context::register_routing_metrics(&prometheus::Registry::new())
+                .unwrap(),
+        }
+    }
+
+    /// Discord ON without the interaction routing deps is refused at assembly (a
+    /// ContextSink-less Discord runtime would leave every followup refused); the
+    /// dependency is not needed without Discord.
+    #[tokio::test]
+    async fn assemble_refuses_discord_without_interaction_routing() {
+        let hub = Arc::new(EmptyHub(std::sync::atomic::AtomicUsize::new(0)));
+        let mut d = deps(hub.clone(), prometheus::Registry::new()).await;
+        d.interaction_routing = None;
+        assert_eq!(
+            assemble(&settings(vec!["discord"]), d).err(),
+            Some(BootError::Missing("the Discord interaction routing deps"))
+        );
+        let mut d = deps(hub, prometheus::Registry::new()).await;
+        d.interaction_routing = None;
+        assert!(
+            assemble(&settings(vec!["twitch", "youtube"]), d).is_ok(),
+            "no Discord, no routing deps needed"
+        );
+    }
+
+    /// `InteractionRouting::from_config` fails loud on a missing JWT bootstrap and a
+    /// duplicate metric registration.
+    #[tokio::test]
+    async fn interaction_routing_from_config_fails_loud() {
+        let mut cli = cli_alpha();
+        cli.service_jwt_token_endpoint = String::new();
+        let store = crate::interaction_store::InteractionStore::new(lease_conn().await);
+        let registry = prometheus::Registry::new();
+        let e = InteractionRouting::from_config(&cli, store.clone(), &registry)
+            .err()
+            .expect("must fail");
+        assert!(e.to_string().contains("SERVICE_JWT_TOKEN_ENDPOINT"));
+        cli.service_jwt_token_endpoint = "http://sa/token".into();
+        assert!(InteractionRouting::from_config(&cli, store.clone(), &registry).is_ok());
+        assert!(
+            InteractionRouting::from_config(&cli, store, &registry).is_err(),
+            "duplicate metric registration is a boot error"
+        );
     }
 
     /// `assemble` builds a runtime that reconciles every enabled platform's feed
