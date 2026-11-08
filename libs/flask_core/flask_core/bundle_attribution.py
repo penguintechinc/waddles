@@ -16,6 +16,8 @@ reason-code contract is untouched -- this module never raises.
 
 from __future__ import annotations
 
+import re
+
 #: Permissive/OSS-friendly SPDX license identifiers auto-approved for a
 #: vendor bundle without further review (general.md Supply Chain Security:
 #: prefer well-known Western/international open-source licenses).
@@ -73,6 +75,17 @@ SPDX_KNOWN = SPDX_ALLOWLIST | SPDX_COPYLEFT_REVIEW
 #: falls through as an unindexed value.
 MARKETPLACE_CATEGORIES = frozenset({"alternatives"})
 
+#: Marketplace `collection` (publisher designation): a lowercase slug, e.g. `superpenguintv`
+#: groups bundles ported from SuperPenguinTV's PenguinTwitchBot so they list apart from internal
+#: ones even in the default public marketplace. Matched with fullmatch().
+_COLLECTION_SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+MAX_COLLECTION_LEN = 50
+
+#: Collections whose members are third-party ports: the listing must carry the MIT license and a
+#: non-empty attribution `notice`, so a port can never be listed without its credit/terms.
+ATTRIBUTED_COLLECTIONS = frozenset({"superpenguintv"})
+ATTRIBUTED_COLLECTION_LICENSE = "MIT"
+
 _MAX_NOTICE_LEN = 10_000
 _MAX_ALT_ENTRY_LEN = 200
 
@@ -100,3 +113,24 @@ def valid_alternative_to_entry(entry: str) -> bool:
 def valid_notice(notice: str) -> bool:
     """Whether an inline/path `notice` value is non-empty and within the size ceiling."""
     return bool(notice) and len(notice) <= _MAX_NOTICE_LEN
+
+
+def valid_collection_slug(slug: str) -> bool:
+    """Whether `slug` is a lowercase kebab-case collection id of at most 50 characters."""
+    return (
+        len(slug) <= MAX_COLLECTION_LEN
+        and _COLLECTION_SLUG_RE.fullmatch(slug) is not None
+    )
+
+
+def collection_attribution_problem(
+    collection: str | None, license_id: str | None, notice: str | None
+) -> str | None:
+    """Reason a bundle in an attributed collection is non-compliant, else None."""
+    if collection not in ATTRIBUTED_COLLECTIONS:
+        return None
+    if license_id != ATTRIBUTED_COLLECTION_LICENSE:
+        return f"collection {collection!r} requires license: {ATTRIBUTED_COLLECTION_LICENSE}"
+    if not notice or not notice.strip():
+        return f"collection {collection!r} requires a non-empty notice"
+    return None

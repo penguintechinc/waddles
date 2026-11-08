@@ -459,6 +459,29 @@ components:
       - displayName
       title: AuthProviderDTO
       type: object
+    AuthorDTO:
+      description: Author of a marketplace entry; `profileUrl`/`githubHandle` are
+        set for GitHub authors.
+      properties:
+        display:
+          title: Display
+          type: string
+        githubHandle:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Githubhandle
+        profileUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Profileurl
+      required:
+      - display
+      - githubHandle
+      - profileUrl
+      title: AuthorDTO
+      type: object
     AvailabilityDTO:
       description: 'Response DTO: one `app_tenant_availability` row, joined to its
         `app_catalog` metadata.'
@@ -571,14 +594,18 @@ components:
           type: string
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         category:
           anyOf:
           - type: string
           - type: 'null'
           title: Category
+        collection:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Collection
         compatibleWith:
           items:
             type: string
@@ -664,6 +691,7 @@ components:
       - homepageUrl
       - notice
       - category
+      - collection
       title: BundleDTO
       type: object
     BundleVersionSummaryDTO:
@@ -747,9 +775,8 @@ components:
       properties:
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         avgRating:
           title: Avgrating
           type: string
@@ -1014,6 +1041,21 @@ components:
       - message_type
       - created_at
       title: ChatMessage
+      type: object
+    CollectionEntryDTO:
+      description: One distinct bundle collection (publisher designation) + its bundle
+        count.
+      properties:
+        collection:
+          title: Collection
+          type: string
+        count:
+          title: Count
+          type: integer
+      required:
+      - collection
+      - count
+      title: CollectionEntryDTO
       type: object
     CommandDTO:
       description: Commands reference DTO -- snake_case verbatim, matching Node's
@@ -3150,9 +3192,8 @@ components:
       properties:
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         avgRating:
           title: Avgrating
           type: string
@@ -3241,9 +3282,8 @@ components:
       properties:
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         avgRating:
           title: Avgrating
           type: string
@@ -5293,6 +5333,27 @@ components:
       - active30d
       title: StatsUsersDTO
       type: object
+    StorageAccessDTO:
+      description: One requested cross-prefix object-storage access block -- explicit
+        shape.
+      properties:
+        ops:
+          items:
+            type: string
+          title: Ops
+          type: array
+        prefixOwner:
+          title: Prefixowner
+          type: string
+        reason:
+          title: Reason
+          type: string
+      required:
+      - prefixOwner
+      - ops
+      - reason
+      title: StorageAccessDTO
+      type: object
     StreamConfigDTO:
       description: Wire DTO for a community's stream config -- never includes the
         key or its hash.
@@ -5559,6 +5620,33 @@ components:
       - transcode_applied
       - destinations_enabled
       title: StreamStatusDTO
+      type: object
+    TableAccessDTO:
+      description: One requested platform-table access block (table/columns/ops/reason)
+        -- explicit shape.
+      properties:
+        columns:
+          items:
+            type: string
+          title: Columns
+          type: array
+        ops:
+          items:
+            type: string
+          title: Ops
+          type: array
+        reason:
+          title: Reason
+          type: string
+        table:
+          title: Table
+          type: string
+      required:
+      - table
+      - columns
+      - ops
+      - reason
+      title: TableAccessDTO
       type: object
     TenantAdminDTO:
       description: Tenant admin DTO.
@@ -12775,6 +12863,11 @@ paths:
             schema:
               description: Request DTO for `POST /community/<community_id>/activation`.
               properties:
+                acknowledgedAccessGrants:
+                  items:
+                    type: string
+                  title: Acknowledgedaccessgrants
+                  type: array
                 appId:
                   title: Appid
                   type: string
@@ -12845,6 +12938,181 @@ paths:
           description: Generic message response DTO.
       summary: Deactivate an app for this community (hot-unload). Requires community-admin
         membership.
+  /api/v1/apps/community/{community_id}/activation/{app_id}/access-grants:
+    get:
+      description: '
+
+        Resolves the exact version an activation would run; community-admin only.
+        The
+
+        activation POST must then acknowledge every approved id (`acknowledgedAccessGrants`).'
+      operationId: get_activation_access_grants
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: the dangerous access grants a version
+                  requests and their approval state.
+
+
+                  `requestedIds` is every `platform.table.*` (etc.) permission id
+                  the manifest
+
+                  declares; `approvedIds` the globally-approved subset (anything requested
+                  but not
+
+                  approved is unusable until a global admin re-approves it). A new
+                  grant kind adds
+
+                  its own list field here (e.g. `storageAccess`).'
+                properties:
+                  approvedIds:
+                    items:
+                      type: string
+                    title: Approvedids
+                    type: array
+                  dangerousIds:
+                    items:
+                      type: string
+                    title: Dangerousids
+                    type: array
+                  requestedIds:
+                    items:
+                      type: string
+                    title: Requestedids
+                    type: array
+                  storageAccess:
+                    items:
+                      $ref: '#/components/schemas/StorageAccessDTO'
+                    title: Storageaccess
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  tableAccess:
+                    items:
+                      $ref: '#/components/schemas/TableAccessDTO'
+                    title: Tableaccess
+                    type: array
+                required:
+                - success
+                - requestedIds
+                - approvedIds
+                - dangerousIds
+                title: AccessGrantsResponse
+                type: object
+          description: 'Response DTO: the dangerous access grants a version requests
+            and their approval state.
+
+
+            `requestedIds` is every `platform.table.*` (etc.) permission id the manifest
+
+            declares; `approvedIds` the globally-approved subset (anything requested
+            but not
+
+            approved is unusable until a global admin re-approves it). A new grant
+            kind adds
+
+            its own list field here (e.g. `storageAccess`).'
+      summary: The dangerous access grants activating `app_id` here would carry (red
+        warning source).
+  /api/v1/apps/community/{community_id}/{app_id}/access-grants:
+    get:
+      description: ''
+      operationId: get_get_community_access_grants
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: the dangerous access grants a version
+                  requests and their approval state.
+
+
+                  `requestedIds` is every `platform.table.*` (etc.) permission id
+                  the manifest
+
+                  declares; `approvedIds` the globally-approved subset (anything requested
+                  but not
+
+                  approved is unusable until a global admin re-approves it). A new
+                  grant kind adds
+
+                  its own list field here (e.g. `storageAccess`).'
+                properties:
+                  approvedIds:
+                    items:
+                      type: string
+                    title: Approvedids
+                    type: array
+                  dangerousIds:
+                    items:
+                      type: string
+                    title: Dangerousids
+                    type: array
+                  requestedIds:
+                    items:
+                      type: string
+                    title: Requestedids
+                    type: array
+                  storageAccess:
+                    items:
+                      $ref: '#/components/schemas/StorageAccessDTO'
+                    title: Storageaccess
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  tableAccess:
+                    items:
+                      $ref: '#/components/schemas/TableAccessDTO'
+                    title: Tableaccess
+                    type: array
+                required:
+                - success
+                - requestedIds
+                - approvedIds
+                - dangerousIds
+                title: AccessGrantsResponse
+                type: object
+          description: 'Response DTO: the dangerous access grants a version requests
+            and their approval state.
+
+
+            `requestedIds` is every `platform.table.*` (etc.) permission id the manifest
+
+            declares; `approvedIds` the globally-approved subset (anything requested
+            but not
+
+            approved is unusable until a global admin re-approves it). A new grant
+            kind adds
+
+            its own list field here (e.g. `storageAccess`).'
+      summary: 'COMMUNITY tier: the access grants shown (again) before activation.
+        Community admin only.'
   /api/v1/apps/community/{community_id}/{app_id}/permissions/grant:
     post:
       description: ''
@@ -13459,6 +13727,91 @@ paths:
           description: Response DTO for `GET /apps/{app_id}/versions/{version}`.
       summary: The state-machine state, reject reason (if any), scan status and digest
         for one version.
+  /api/v1/apps/{app_id}/versions/{version}/access-grants:
+    get:
+      description: ''
+      operationId: get_get_version_access_grants
+      parameters:
+      - in: path
+        name: app_id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: version
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO: the dangerous access grants a version
+                  requests and their approval state.
+
+
+                  `requestedIds` is every `platform.table.*` (etc.) permission id
+                  the manifest
+
+                  declares; `approvedIds` the globally-approved subset (anything requested
+                  but not
+
+                  approved is unusable until a global admin re-approves it). A new
+                  grant kind adds
+
+                  its own list field here (e.g. `storageAccess`).'
+                properties:
+                  approvedIds:
+                    items:
+                      type: string
+                    title: Approvedids
+                    type: array
+                  dangerousIds:
+                    items:
+                      type: string
+                    title: Dangerousids
+                    type: array
+                  requestedIds:
+                    items:
+                      type: string
+                    title: Requestedids
+                    type: array
+                  storageAccess:
+                    items:
+                      $ref: '#/components/schemas/StorageAccessDTO'
+                    title: Storageaccess
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  tableAccess:
+                    items:
+                      $ref: '#/components/schemas/TableAccessDTO'
+                    title: Tableaccess
+                    type: array
+                required:
+                - success
+                - requestedIds
+                - approvedIds
+                - dangerousIds
+                title: AccessGrantsResponse
+                type: object
+          description: 'Response DTO: the dangerous access grants a version requests
+            and their approval state.
+
+
+            `requestedIds` is every `platform.table.*` (etc.) permission id the manifest
+
+            declares; `approvedIds` the globally-approved subset (anything requested
+            but not
+
+            approved is unusable until a global admin re-approves it). A new grant
+            kind adds
+
+            its own list field here (e.g. `storageAccess`).'
+      summary: 'GLOBAL tier: dangerous access grants a version requests (feeds the
+        red warning).'
   /api/v1/apps/{app_id}/versions/{version}/approve:
     post:
       description: ''
@@ -18151,6 +18504,12 @@ paths:
                   - type: 'null'
                   default: null
                   title: Category
+                collection:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Collection
                 compatibleWith:
                   items:
                     type: string
@@ -18239,6 +18598,34 @@ paths:
                 type: object
           description: Response DTO for message-only endpoints.
       summary: Install a bundle into the global catalog.
+  /api/v1/marketplace/bundles/collections:
+    get:
+      description: ''
+      operationId: get_list_bundle_collections
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /bundles/collections`.
+                properties:
+                  collections:
+                    items:
+                      $ref: '#/components/schemas/CollectionEntryDTO'
+                    title: Collections
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - collections
+                title: CollectionsResponse
+                type: object
+          description: Response DTO for `GET /bundles/collections`.
+      summary: List distinct bundle collections (e.g. `superpenguintv`) with counts
+        -- any tenant member.
   /api/v1/marketplace/bundles/{app_id}:
     delete:
       description: ''

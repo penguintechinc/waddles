@@ -60,13 +60,20 @@ describe('bundleActivationApi', () => {
     expect(sent().url).toBe('/api/v1/apps/community/7/activation');
   });
 
-  it('activate POSTs the appId and returns the message envelope', async () => {
+  it('activate POSTs the appId + (default-empty) access-grant acks and returns the message envelope', async () => {
     rec.reply.data = { success: true, message: 'activated' };
 
     await expect(bundleActivationApi.activate(7, 'a.b')).resolves.toEqual({ success: true, message: 'activated' });
     expect(sent().method).toBe('post');
     expect(sent().url).toBe('/api/v1/apps/community/7/activation');
-    expect(bodyOf(sent())).toEqual({ appId: 'a.b' });
+    expect(bodyOf(sent())).toEqual({ appId: 'a.b', acknowledgedAccessGrants: [] });
+  });
+
+  it('activate forwards the acknowledged dangerous access grants', async () => {
+    rec.reply.data = { success: true, message: 'activated' };
+
+    await bundleActivationApi.activate(7, 'a.b', ['platform.table.x']);
+    expect(bodyOf(sent())).toEqual({ appId: 'a.b', acknowledgedAccessGrants: ['platform.table.x'] });
   });
 
   it('deactivate DELETEs the per-app activation path', async () => {
