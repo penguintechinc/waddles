@@ -174,7 +174,8 @@ service_roles.py enforces at migration time, so a bad value fails here, at rende
 
 {{/* Connection target pieces (the in-chart Postgres Service). */}}
 {{- define "waddlebot.postgres.host" -}}
-{{- .Values.infrastructure.postgresql.service.name -}}
+{{- /* FQDN (feature/transit-tls-core F8): always in the server cert's SANs and inside the internal CA's nameConstraints suffix, so sslmode=verify-full holds. */ -}}
+{{- include "waddlebot.transitTls.pgHost" . -}}
 {{- end }}
 {{- define "waddlebot.postgres.port" -}}
 {{- .Values.infrastructure.postgresql.service.port -}}
@@ -1129,7 +1130,7 @@ existingSecret (SSE assertion mandatory). Fails the render on any inconsistency.
 {{- include "waddlebot.bundleStorage.validate" . -}}
 {{- if eq .Values.bundleStorage.mode "bundled" }}
 - name: BUNDLE_STORAGE_ENDPOINT
-  value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+  value: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
 - name: BUNDLE_STORAGE_BUCKET
   value: {{ .Values.bundleStorage.bucketName | quote }}
 - name: BUNDLE_STORAGE_REGION

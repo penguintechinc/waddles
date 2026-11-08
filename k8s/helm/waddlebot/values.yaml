@@ -172,6 +172,28 @@ global:
   # global.valkeyTls.ca.crt=... --set-file global.valkeyTls.tls.crt=...
   # --set-file global.valkeyTls.tls.key=...` (or an out-of-git values override /
   # ExternalSecrets/SealedSecrets) before infrastructure.redis.tls.enabled=true.
+  # feature/transit-tls-core -- in-cluster transit TLS for Postgres (F1) and the SeaweedFS S3 gateway (F5).
+  # One chart-owned ECDSA P-256 / SHA-256 CA signs a server leaf for each; clients mount ONLY the CA and
+  # verify (Postgres sslmode=verify-full, S3 https with the CA pinned, system roots disabled). See
+  # templates/_transit_tls.tpl for the design, templates/transit-tls-secret.yaml for the provisioning policy.
+  # alpha/local self-generate (lookup-keep); beta/gamma/production REQUIRE material below (never a literal in git)
+  # or externalSecret: true. There is NO plaintext toggle: Postgres and SeaweedFS are TLS-only whenever enabled.
+  # Negotiation: TLS 1.3 preferred / 1.2 minimum, ECDSA P-256, P-256 key exchange, AES-128-GCM or ChaCha20-Poly1305,
+  # session resumption on, pooled keep-alive clients. Customers wanting stronger protection can additionally enable
+  # CNI encryption (e.g. Cilium WireGuard) -- see docs/transit-encryption.md.
+  transitTls:
+    ca:
+      crt: ""
+    postgres:
+      tls:
+        crt: ""
+        key: ""
+    seaweedfs:
+      tls:
+        crt: ""
+        key: ""
+    externalSecret: false
+
   valkeyTls:
     ca:
       crt: ""

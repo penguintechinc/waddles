@@ -50,6 +50,29 @@ data:
     GRANT ALL PRIVILEGES ON SCHEMA community TO {{ .Values.infrastructure.postgresql.username }};
 
 ---
+# feature/transit-tls-core (F1) -- TLS-only pg_hba. `local` (unix socket: pg_isready probes, the image's
+# initdb temp server) stays trust like the stock image; every TCP connection MUST be hostssl + scram, and a
+# non-TLS TCP attempt is explicitly rejected (loud, never silently downgraded). Replaces the image's stock
+# `host all all all scram-sha-256` line, which would also accept plaintext. Applies to an EXISTING PVC too
+# (hba_file is a server flag, not baked into PGDATA).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-hba
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+data:
+  pg_hba.conf: |
+    local   all   all                  trust
+    hostssl all   all   0.0.0.0/0      scram-sha-256
+    hostssl all   all   ::/0           scram-sha-256
+    hostnossl all all   0.0.0.0/0      reject
+    hostnossl all all   ::/0           reject
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -78,6 +101,9 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        # Roll the server when the transit-TLS SAN identity changes (the Secret object itself is kept by name).
+        checksum/transit-tls: {{ include "waddlebot.transitTls.podChecksum" . | quote }}
       labels:
         app.kubernetes.io/name: postgres
         app.kubernetes.io/instance: {{ .Release.Name }}
@@ -93,7 +119,26 @@ spec:
         {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.infrastructure.postgresql.securityContext | nindent 10 }}
-        args: ["-c", "max_connections=300"]
+        # feature/transit-tls-core (F1): TLS-only. TLS 1.2 minimum (1.3 negotiated when the client offers it), ECDSA
+        # P-256 cert, P-256 key exchange, AEAD-only TLS 1.2 suites (AES-128-GCM / ChaCha20-Poly1305). Session tickets are
+        # on by default in OpenSSL; clients pool connections (sqlx / SQLAlchemy / pydal pools), so no per-request handshake.
+        args:
+        - "-c"
+        - "max_connections=300"
+        - "-c"
+        - "ssl=on"
+        - "-c"
+        - "ssl_cert_file=/etc/postgres-tls/tls.crt"
+        - "-c"
+        - "ssl_key_file=/etc/postgres-tls/tls.key"
+        - "-c"
+        - "ssl_min_protocol_version=TLSv1.2"
+        - "-c"
+        - "ssl_ecdh_curve=prime256v1"
+        - "-c"
+        - "ssl_ciphers=ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305"
+        - "-c"
+        - "hba_file=/etc/postgres-hba/pg_hba.conf"
         ports:
         - name: postgres
           containerPort: 5432
@@ -135,6 +180,12 @@ spec:
           mountPath: /var/run/postgresql
         - name: tmp
           mountPath: /tmp
+        - name: transit-tls
+          mountPath: /etc/postgres-tls
+          readOnly: true
+        - name: postgres-hba
+          mountPath: /etc/postgres-hba
+          readOnly: true
         resources:
           requests:
             memory: {{ .Values.infrastructure.postgresql.resources.requests.memory }}
@@ -173,6 +224,20 @@ spec:
         emptyDir: {}
       - name: tmp
         emptyDir: {}
+      # Server leaf + key from the transit-tls Secret. 0440 root:fsGroup(999) satisfies Postgres' key-permission check
+      # (root-owned, group-readable, no world access).
+      - name: transit-tls
+        secret:
+          secretName: {{ include "waddlebot.transitTls.secretName" . }}
+          defaultMode: 0440
+          items:
+          - key: postgres.crt
+            path: tls.crt
+          - key: postgres.key
+            path: tls.key
+      - name: postgres-hba
+        configMap:
+          name: postgres-hba
 ---
 apiVersion: v1
 kind: Service

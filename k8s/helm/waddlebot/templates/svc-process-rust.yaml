@@ -120,6 +120,7 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_process") | nindent 8 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.port | quote }}
         - name: METRICS_PORT
@@ -193,7 +194,7 @@ spec:
         - name: CACHE_HOST
           value: {{ .Values.infrastructure.redis.service.name | quote }}
         - name: CACHE_PORT
-          value: {{ .Values.infrastructure.redis.service.port | quote }}
+          value: {{ .Values.infrastructure.redis.tls.port | quote }}
         - name: CACHE_PASSWORD
           valueFrom:
             secretKeyRef:
@@ -295,7 +296,7 @@ spec:
         # from the shared secret (empty by default -- the loader stays disabled until a
         # real RO-account password is provisioned, see templates/secrets.yaml).
         - name: DB_READER_HOST
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderHost | default .Values.infrastructure.postgresql.service.name | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderHost | default (include "waddlebot.postgres.host" .) | quote }}
         - name: DB_READER_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderPort | default .Values.infrastructure.postgresql.service.port | quote }}
         - name: DB_READER_NAME
@@ -394,6 +395,7 @@ spec:
         resources:
           {{- toYaml .Values.pipeline.rustDataPlane.svcProcess.resources | nindent 10 }}
         volumeMounts:
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         - name: tmp
           mountPath: /tmp
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
@@ -407,6 +409,7 @@ spec:
         {{- end }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       - name: tmp
         emptyDir: {}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
