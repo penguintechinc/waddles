@@ -84,6 +84,25 @@ Tools `twitch.moderation.{ban,timeout,unban,delete_message}` (manifest `required
 
 Not implemented (fail loud): `clear_chat` (policy has no kind for `DELETE /moderation/chat` without `message_id`) and whispers (`dm.send` needs a host duty). Parity vs legacy `twitch_service.py`: `tests/moderation_parity.rs` (moderator is the bot connection, not the broadcaster).
 
+## Channel extras (v1.2.0)
+
+| tool | kind | where it runs | Helix |
+|---|---|---|---|
+| `twitch.clip.create` | `clip.create` | host op (`clips:edit`) | `POST /clips?broadcaster_id=` |
+| `twitch.clip.get` / `.list` | - | guest read | `GET /clips` |
+| `twitch.schedule.create/update/delete` | `schedule.*` | host op (`channel:manage:schedule`) | `POST/PATCH/DELETE /schedule/segment` |
+| `twitch.schedule.list` | - | guest read | `GET /schedule` |
+| `twitch.live.channels` | - | guest read | `GET /users` + `GET /streams` |
+| (reconcile) | `eventsub.create/delete/list` | host op, APP token | `/eventsub/subscriptions` |
+
+Schemas: clips = twitch-clips `contract/twitch-clip-tools.json`; schedule create/update/delete = calendar `contracts/twitch.schedule.*.schema.json`; live = `bundles/contracts/live-channels-contract.v1.json` (manifest entry verified by `scripts/gen-live-manifest-tools.py twitch --check`). Failure codes (`InvalidArgs("<code>: ...")`): `not_live|rate_limited|not_connected|clips_disabled|platform_unavailable`; `clip.create` status->code mapping is the host executor's (404 not live, 403 clips disabled, 401 not connected, 429 rate limited).
+
+- Host ops follow the moderation pattern: the guest refuses, `tools::host_op` validates, the producer envelope carries parameters as JSON-object `text`, `broadcaster_id` is the host slot. Schedule update/delete: the segment id rides in `text`; the HOST strips it and fills the `id` query (`TWITCH_SEGMENT_ID` duty slot) because segment ids are base64 with `=` padding.
+- Reads run in the guest through the guarded `http` import like `get_followers` (same host-substitution precondition for `{{TWITCH_BROADCASTER_ID}}`). `clip.get` needs no broadcaster, so it works without it.
+- **EventSub** (`eventsub_sub.rs`): `create` carries only `{type, version}`; `transport.callback` and `transport.secret` are HOST-DUTY slots (`TwitchDuties`, `core/svc_ingest/.../twitch_slots.rs`) built from the work item's opaque `callbackKey` (the secret is fetched from hub-api per call and never reaches the guest or a template). The condition names only `app.broadcaster_id`. `reconcile()` implements the hub-api pass (reconcile -> execute -> results with nonces); orphan GC runs only when `enabledIdsComplete`, the Twitch listing is one complete page, and only for our webhook path (cap 25/pass).
+- **Cross-tenant guard.** The app token can act on every community's subscriptions, so `eventsub.delete` is ownership-bound by the host (`TwitchDuties::check_owned`: it resolves the subscription and refuses unless its condition names the invoking community's own broadcaster) and is not claimed at all without a `TwitchAppSource`; `eventsub.list` is claimed by no hook and fails closed (`HostDutyMissing`), so the reconcile GC cannot run until a per-broadcaster filter exists (it then deletes nothing). Regression tests: `twitch_slots.rs` + `outbound_exec.rs::twitch_eventsub_delete_is_bound...`.
+- Unsupported, fail loud: clip `title` / `duration_s` (query values the host verifier cannot carry), `twitch.live.channels` `scope: linked`, whispers (`dm.send`, needs the host DM duty).
+
 ## Build / test
 
 ```

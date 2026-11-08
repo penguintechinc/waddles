@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.service.twitch
 name: Twitch Platform Connector (Rust)
-version: 1.1.0
+version: 1.2.0
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -47,13 +47,14 @@ permissions:
     host-pinned channel and moderator
 - id: eventsub.manage:twitch
   justification: Template EventSub subscription create/delete/list with the host-held
-    APP credential; the broadcaster, callback and secret are host slots, never bundle input
+    APP credential; the broadcaster, callback and secret are host slots, never bundle
+    input
 - id: connector.pii.read
-  justification: Gates identity.lookup, used to resolve the actor to its canonical UUID
-    and the read-tool users; first-party core only, dangerous, global-admin-approved
+  justification: Gates identity.lookup, used to resolve the actor to its canonical
+    UUID and the read-tool users; first-party core only, dangerous, global-admin-approved
 - id: flags.read
-  justification: Reads the waddles.connector-twitch cutover flag (default OFF) as the
-    connector's defence-in-depth gate; without it the gate always reads OFF
+  justification: Reads the waddles.connector-twitch cutover flag (default OFF) as
+    the connector's defence-in-depth gate; without it the gate always reads OFF
 routes_to: []
 exported_tools:
 - name: get_chatters
@@ -62,11 +63,11 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      first: &id001
+      first:
         type: integer
         minimum: 1
         maximum: 1000
-      after: &id002
+      after:
         type: string
         maxLength: 512
     required: []
@@ -79,8 +80,13 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      first: *id001
-      after: *id002
+      first:
+        type: integer
+        minimum: 1
+        maximum: 1000
+      after:
+        type: string
+        maxLength: 512
     required: []
     additionalProperties: false
   output_schema:
@@ -91,8 +97,13 @@ exported_tools:
   input_schema:
     type: object
     properties:
-      first: *id001
-      after: *id002
+      first:
+        type: integer
+        minimum: 1
+        maximum: 1000
+      after:
+        type: string
+        maxLength: 512
     required: []
     additionalProperties: false
   output_schema:
@@ -168,6 +179,317 @@ exported_tools:
     additionalProperties: false
   output_schema:
     type: object
+- name: twitch.clip.create
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      title:
+        type: string
+        minLength: 1
+        maxLength: 100
+      duration_s:
+        type: integer
+        minimum: 5
+        maximum: 60
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      clip_id:
+        type: string
+        pattern: ^[A-Za-z0-9_-]{1,100}$
+      edit_url:
+        type: string
+    required:
+    - clip_id
+- name: twitch.clip.get
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      clip_id:
+        type: string
+        pattern: ^[A-Za-z0-9_-]{1,100}$
+    required:
+    - clip_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      ready:
+        type: boolean
+      clip:
+        type: object
+        properties:
+          clip_id:
+            type: string
+            pattern: ^[A-Za-z0-9_-]{1,100}$
+          url:
+            type: string
+            pattern: ^https://(clips\.twitch\.tv|www\.twitch\.tv|twitch\.tv)/
+          title:
+            type: string
+            maxLength: 100
+          created_at:
+            type: string
+        required:
+        - clip_id
+        - url
+    required:
+    - ready
+- name: twitch.clip.list
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+      cursor:
+        type: string
+      started_at:
+        type: string
+      ended_at:
+        type: string
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      clips:
+        type: array
+        items:
+          type: object
+          properties:
+            clip_id:
+              type: string
+              pattern: ^[A-Za-z0-9_-]{1,100}$
+            url:
+              type: string
+              pattern: ^https://(clips\.twitch\.tv|www\.twitch\.tv|twitch\.tv)/
+            title:
+              type: string
+              maxLength: 100
+            created_at:
+              type: string
+          required:
+          - clip_id
+          - url
+      cursor:
+        type: string
+    required:
+    - clips
+- name: twitch.schedule.create
+  access: write
+  risk: dangerous
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      start_time:
+        type: string
+      timezone:
+        type: string
+        minLength: 1
+      duration:
+        type: integer
+        minimum: 30
+        maximum: 1380
+      title:
+        type: string
+        minLength: 1
+        maxLength: 140
+      is_recurring:
+        type: boolean
+    required:
+    - start_time
+    - timezone
+    - duration
+    - title
+    - is_recurring
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: twitch.schedule.update
+  access: write
+  risk: dangerous
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      segment_id:
+        type: string
+        minLength: 1
+      start_time:
+        type: string
+      timezone:
+        type: string
+        minLength: 1
+      duration:
+        type: integer
+        minimum: 30
+        maximum: 1380
+      title:
+        type: string
+        minLength: 1
+        maxLength: 140
+      is_recurring:
+        type: boolean
+    required:
+    - segment_id
+    - start_time
+    - timezone
+    - duration
+    - title
+    - is_recurring
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: twitch.schedule.delete
+  access: write
+  risk: dangerous
+  required_scope: community:admin
+  input_schema:
+    type: object
+    properties:
+      segment_id:
+        type: string
+        minLength: 1
+    required:
+    - segment_id
+    additionalProperties: false
+  output_schema:
+    type: object
+- name: twitch.schedule.list
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 25
+      cursor:
+        type: string
+        minLength: 1
+        maxLength: 512
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      segments:
+        type: array
+        items:
+          type: object
+          properties:
+            segment_id:
+              type: string
+            start_time:
+              type: string
+            end_time:
+              type: string
+            title:
+              type: string
+            category:
+              type: string
+            is_recurring:
+              type: boolean
+            canceled_until:
+              type: string
+          required:
+          - segment_id
+      cursor:
+        type: string
+    required:
+    - segments
+- name: twitch.live.channels
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties:
+      scope:
+        type: string
+        enum:
+        - community
+        - linked
+      cursor:
+        type: string
+        minLength: 1
+        maxLength: 512
+      limit:
+        type: integer
+        minimum: 1
+        maximum: 100
+    required:
+    - scope
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      channels:
+        type: array
+        items:
+          type: object
+          properties:
+            channel_ref:
+              type: string
+              minLength: 1
+              maxLength: 256
+            display_name:
+              type: string
+              minLength: 1
+              maxLength: 100
+            is_live:
+              type: boolean
+            title:
+              type:
+              - string
+              - 'null'
+              maxLength: 300
+            category:
+              type:
+              - string
+              - 'null'
+              maxLength: 100
+            viewers:
+              type:
+              - integer
+              - 'null'
+              minimum: 0
+            started_at:
+              type:
+              - string
+              - 'null'
+              maxLength: 40
+            thumbnail_ref:
+              type:
+              - string
+              - 'null'
+              maxLength: 512
+          required:
+          - channel_ref
+          - display_name
+          - is_live
+      cursor:
+        type:
+        - string
+        - 'null'
+        maxLength: 512
+      as_of:
+        type: string
+        maxLength: 40
+    required:
+    - channels
+    - as_of
 author: PenguinTech/waddles
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/twitch

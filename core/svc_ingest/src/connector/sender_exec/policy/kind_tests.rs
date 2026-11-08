@@ -115,12 +115,12 @@ const APP_HDRS: [(&str, &str); 3] = [
     ("Client-Id", "{{TWITCH_APP_CLIENT_ID}}"),
     ("Content-Type", "application/json"),
 ];
-const APP_REFS: [(&str, &str); 5] = [
+// The callback + secret are HOST-DUTY slots (filled by the claiming `DutyHook` from the work
+// item's `callbackKey`), so the connector declares no `secret-refs` handle for them.
+const APP_REFS: [(&str, &str); 3] = [
     ("{{TWITCH_APP_TOKEN}}", "app.token"),
     ("{{TWITCH_APP_CLIENT_ID}}", "app.client_id"),
     ("{{TWITCH_APP_BROADCASTER_ID}}", "app.broadcaster_id"),
-    ("{{TWITCH_EVENTSUB_CALLBACK}}", "app.eventsub_callback"),
-    ("{{TWITCH_EVENTSUB_SECRET}}", "app.eventsub_secret"),
 ];
 
 fn eventsub_body() -> serde_json::Value {
@@ -158,7 +158,7 @@ fn twitch_eventsub_kinds_are_app_scoped_and_key_restricted() {
     // A callback / secret literal is not a slot position: refused (host-held only).
     let mut body = eventsub_body();
     body["transport"]["secret"] = serde_json::json!("hunter2");
-    let lit = tpl("POST", url, &APP_HDRS, Some(body), &APP_REFS[..4]);
+    let lit = tpl("POST", url, &APP_HDRS, Some(body), &APP_REFS);
     assert_eq!(
         check(&p, "eventsub.create", &lit),
         Err(TemplateError::SlotMisplaced)
@@ -633,6 +633,11 @@ fn the_policy_table_matches_the_relay_op_parity_fixture() {
     .unwrap();
     // Ops with their own typed producer paths (not `relay.send`-reachable by name).
     let typed = [
+        // Twitch channel ops reached through the tool host handlers, not `relay.send` by name.
+        "clip.create",
+        "schedule.create",
+        "schedule.update",
+        "schedule.delete",
         "role.add",
         "role.remove",
         "event.create",

@@ -19,11 +19,15 @@
 use std::collections::HashMap;
 
 use bundle_host_http::guarded::{GuardedClient, GuardedLimits};
+use connection_resolver::SecretString;
 use serde::Deserialize;
+use serde_json::{Map, Value};
 
+use super::policy::APP_HANDLE_PREFIX;
 use super::subst::SlotValue;
-use super::{SlotError, SlotRequest, SlotSource};
+use super::{DutyCx, DutyHook, ExecError, SlotError, SlotRequest, SlotSource};
 use crate::outbound_creds::{CredError, TwitchCredentialSource};
+use crate::outbound_ops::{OutboundAction, PolicyOp};
 
 /// Helix users endpoint.
 const USERS_URL: &str = "https://api.twitch.tv/helix/users";
@@ -39,15 +43,51 @@ struct User {
     login: String,
 }
 
-/// Per-community Twitch slot resolution over a [`TwitchCredentialSource`].
-pub struct TwitchSlots<C: TwitchCredentialSource> {
+/// Source of the APP-scoped Twitch credentials (client-credentials token + the broadcaster a
+/// community's connection names) behind the `app.*` slot handles. EventSub webhook
+/// subscriptions are created with an APP token, never the community's user token.
+#[allow(async_fn_in_trait)] // service-binary-internal, see outbound.rs::IrcOutbound
+pub trait TwitchAppSource: Send + Sync {
+    /// `false` only for [`NoApp`]: an app-scoped kind is then refused (fail-closed) rather
+    /// than falling back to a user token.
+    const AVAILABLE: bool;
+
+    /// A current app access token (client-credentials grant). Resolved per call, never logged.
+    async fn app_token(&self) -> Result<SecretString, SlotError>;
+
+    /// The numeric Twitch user id of the broadcaster the community's connection names. The
+    /// HOST decides it from the connection record -- never the guest or the queue payload.
+    async fn broadcaster_id(&self, community_id: i64) -> Result<String, SlotError>;
+}
+
+/// The default [`TwitchAppSource`]: app credentials are unavailable, so every app-scoped kind
+/// is refused loudly.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoApp;
+
+impl TwitchAppSource for NoApp {
+    const AVAILABLE: bool = false;
+
+    async fn app_token(&self) -> Result<SecretString, SlotError> {
+        Err(SlotError::Refused("slot_app_credential_unsupported"))
+    }
+
+    async fn broadcaster_id(&self, _community_id: i64) -> Result<String, SlotError> {
+        Err(SlotError::Refused("slot_app_credential_unsupported"))
+    }
+}
+
+/// Per-community Twitch slot resolution over a [`TwitchCredentialSource`] (and, for app-scoped
+/// kinds, a [`TwitchAppSource`]).
+pub struct TwitchSlots<C: TwitchCredentialSource, A: TwitchAppSource = NoApp> {
     creds: C,
     client_id: String,
     client: GuardedClient,
     users_url: String,
+    app: A,
 }
 
-impl<C: TwitchCredentialSource> TwitchSlots<C> {
+impl<C: TwitchCredentialSource> TwitchSlots<C, NoApp> {
     /// Production wiring: the real Helix users endpoint through a default
     /// (empty-allowlist) guarded client.
     #[must_use]
@@ -73,7 +113,45 @@ impl<C: TwitchCredentialSource> TwitchSlots<C> {
             client_id,
             client,
             users_url,
+            app: NoApp,
         }
+    }
+
+    /// Enables the `app.*` handles (EventSub) over `app`.
+    #[must_use]
+    pub fn with_app_source<A: TwitchAppSource>(self, app: A) -> TwitchSlots<C, A> {
+        TwitchSlots {
+            creds: self.creds,
+            client_id: self.client_id,
+            client: self.client,
+            users_url: self.users_url,
+            app,
+        }
+    }
+}
+
+impl<C: TwitchCredentialSource, A: TwitchAppSource> TwitchSlots<C, A> {
+    /// Resolves the APP-scoped handles for the community: the app token, the app's client id
+    /// and the connection's broadcaster. No channel pin is involved (EventSub is per
+    /// connection, not per chat event); the community scope is mandatory.
+    async fn resolve_app(
+        &self,
+        req: &SlotRequest<'_>,
+    ) -> Result<HashMap<String, SlotValue>, SlotError> {
+        let community = req
+            .community_id
+            .ok_or(SlotError::Refused("no_community_scope"))?;
+        let mut out = HashMap::new();
+        for h in req.handles {
+            let v = match *h {
+                "app.token" => SlotValue::new(self.app.app_token().await?.expose().to_owned()),
+                "app.client_id" => SlotValue::new(self.client_id.clone()),
+                "app.broadcaster_id" => SlotValue::new(self.app.broadcaster_id(community).await?),
+                _ => return Err(SlotError::Refused("unknown_handle")),
+            };
+            out.insert((*h).to_string(), v);
+        }
+        Ok(out)
     }
 
     /// Maps the two logins to numeric ids with one guarded GET.
@@ -134,13 +212,25 @@ pub(crate) fn map_cred(e: CredError) -> SlotError {
     }
 }
 
-impl<C: TwitchCredentialSource> SlotSource for TwitchSlots<C> {
+impl<C: TwitchCredentialSource, A: TwitchAppSource> SlotSource for TwitchSlots<C, A> {
+    fn supports_app_credentials(&self, platform: &str) -> bool {
+        platform == "twitch" && A::AVAILABLE
+    }
+
     async fn resolve(
         &self,
         req: &SlotRequest<'_>,
     ) -> Result<HashMap<String, SlotValue>, SlotError> {
         if req.platform != "twitch" {
             return Err(SlotError::Refused("unsupported_platform"));
+        }
+        if req.handles.iter().any(|h| h.starts_with(APP_HANDLE_PREFIX)) {
+            // The executor refuses a kind mixing app and user handles before getting here; a
+            // direct caller doing so is refused too, never half-served.
+            if !req.handles.iter().all(|h| h.starts_with(APP_HANDLE_PREFIX)) {
+                return Err(SlotError::Refused("slot_credential_scope_mixed"));
+            }
+            return self.resolve_app(req).await;
         }
         let channel = req
             .pinned_channel
@@ -178,6 +268,383 @@ impl<C: TwitchCredentialSource> SlotSource for TwitchSlots<C> {
             SlotValue::new(self.client_id.clone()),
         );
         Ok(out)
+    }
+}
+
+/// Fetches the per-subscription EventSub webhook secret by its opaque `callbackKey` (hub-api
+/// `GET /api/v1/internal/eventsub/secret/<callback_key>`, scope `eventsub:secret-read`, held by
+/// the svc-ingest identity ONLY, never the bundle's). The value is injected into
+/// `transport.secret` host-side and never enters guest memory.
+#[allow(async_fn_in_trait)] // service-binary-internal, see outbound.rs::IrcOutbound
+pub trait EventSubSecretSource: Send + Sync {
+    /// The webhook secret for `callback_key`.
+    async fn secret(&self, callback_key: &str) -> Result<SecretString, SlotError>;
+}
+
+/// Kinds [`TwitchDuties`] claims.
+const DUTY_KINDS: [&str; 3] = ["eventsub.create", "schedule.update", "schedule.delete"];
+
+/// `[A-Za-z0-9_-]{8,128}`: the opaque, URL-safe `callbackKey` of an EventSub work item.
+fn is_callback_key(k: &str) -> bool {
+    (8..=128).contains(&k.len())
+        && k.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Schedule segment ids are base64 text (`=` padding, standard or url-safe alphabet).
+fn is_segment_id(k: &str) -> bool {
+    (1..=256).contains(&k.len())
+        && k.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'=' | b'+' | b'/'))
+}
+
+/// The queue entry's [`PolicyOp`] (every duty kind is a generic policy op).
+fn policy_op<'a>(cx: &DutyCx<'a>) -> Result<&'a PolicyOp, ExecError> {
+    match cx.action {
+        OutboundAction::PolicyOp(p) => Ok(p),
+        _ => Err(ExecError::BadAction),
+    }
+}
+
+/// The producer's parameter object (`text` is JSON-object text); absent/invalid is refused.
+fn params(p: &PolicyOp) -> Result<Map<String, Value>, ExecError> {
+    let raw = p.text.as_deref().ok_or(ExecError::BadAction)?;
+    match serde_json::from_str::<Value>(raw) {
+        Ok(Value::Object(m)) => Ok(m),
+        _ => Err(ExecError::BadAction),
+    }
+}
+
+/// A required string parameter satisfying `ok`.
+fn str_param<'a>(
+    m: &'a Map<String, Value>,
+    key: &str,
+    ok: fn(&str) -> bool,
+) -> Result<&'a str, ExecError> {
+    m.get(key)
+        .and_then(Value::as_str)
+        .filter(|v| ok(v))
+        .ok_or(ExecError::BadAction)
+}
+
+/// Twitch host duties for the generic outbound executor: the [`DutyHook`] behind
+/// `eventsub.create` (callback + secret slots), `schedule.update` and `schedule.delete`
+/// (segment-id slot).
+///
+/// | duty | enforcement |
+/// |---|---|
+/// | `transport.callback` | built by the HOST as `<configured base>/eventsub/twitch/webhook/<callbackKey>`; a URL written by the bundle (or a hub-api work item) is never used, so deliveries cannot be redirected |
+/// | `transport.secret` | fetched by the host from [`EventSubSecretSource`] by `callbackKey` per call; never cached, never in the payload, template, logs or guest memory |
+/// | `id` (segment) | taken from the producer's validated parameters (base64 charset, <= 256) and percent-encoded by the substituter |
+/// | parameters | `text` is a JSON object; `eventsub.create` accepts EXACTLY `{type, version, callbackKey}` and the connector sees only `{type, version}`; `schedule.delete` accepts EXACTLY `{segment_id}` |
+///
+/// The broadcaster of an EventSub condition is the `app.broadcaster_id` handle (the host's
+/// [`TwitchAppSource`]), so a subscription can only name the community's own channel.
+///
+/// **`eventsub.delete` is ownership-bound.** The app token can delete ANY subscription of the
+/// application, so before the delete the host resolves the subscription (`GET
+/// /eventsub/subscriptions?id=`) and refuses unless its condition names THIS community's own
+/// broadcaster (`subscription_not_owned` / `subscription_not_found`; any lookup failure also
+/// refuses). Without an app source ([`NoApp`], the default) delete is not claimed at all.
+/// **`eventsub.list` is claimed by no hook**: the app token lists every community's
+/// subscriptions, so it fails closed (`HostDutyMissing`) until a per-broadcaster filter exists.
+pub struct TwitchDuties<S: EventSubSecretSource, A: TwitchAppSource = NoApp> {
+    secrets: S,
+    callback_base: String,
+    app: A,
+    client_id: String,
+    subs_url: String,
+}
+
+/// Helix EventSub subscriptions endpoint (ownership lookups).
+const SUBS_URL: &str = "https://api.twitch.tv/helix/eventsub/subscriptions";
+
+/// `[A-Za-z0-9_-]{1,64}`: a Twitch EventSub subscription id.
+fn is_sub_id(k: &str) -> bool {
+    (1..=64).contains(&k.len())
+        && k.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+impl<S: EventSubSecretSource> TwitchDuties<S, NoApp> {
+    /// Duties over `secrets`, with webhook callbacks under `callback_base` (host config,
+    /// `TWITCH_EVENTSUB_CALLBACK_BASE_URL`).
+    ///
+    /// # Errors
+    /// A stable reason when `callback_base` is not a bare `https://host[:port][/path]` URL.
+    pub fn new(secrets: S, callback_base: &str) -> Result<Self, &'static str> {
+        let base = callback_base.trim_end_matches('/');
+        let rest = base
+            .strip_prefix("https://")
+            .ok_or("callback_base_not_https")?;
+        let plain = !rest.is_empty()
+            && rest.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'/' | b'_')
+            });
+        if !plain || rest.starts_with('/') || rest.contains("//") {
+            return Err("callback_base_invalid");
+        }
+        Ok(Self {
+            secrets,
+            callback_base: base.to_string(),
+            app: NoApp,
+            client_id: String::new(),
+            subs_url: SUBS_URL.to_string(),
+        })
+    }
+
+    /// Enables the ownership-bound `eventsub.delete` over `app` (the same app source the slot
+    /// resolver uses) with the app's public `client_id`.
+    #[must_use]
+    pub fn with_app_source<A: TwitchAppSource>(
+        self,
+        app: A,
+        client_id: String,
+    ) -> TwitchDuties<S, A> {
+        TwitchDuties {
+            secrets: self.secrets,
+            callback_base: self.callback_base,
+            app,
+            client_id,
+            subs_url: self.subs_url,
+        }
+    }
+}
+
+impl<S: EventSubSecretSource, A: TwitchAppSource> TwitchDuties<S, A> {
+    /// Test seam: point the ownership lookup at a local fake.
+    #[must_use]
+    pub fn with_subs_endpoint(mut self, url: String) -> Self {
+        self.subs_url = url;
+        self
+    }
+
+    /// The validated `callbackKey` of an `eventsub.create` entry.
+    fn callback_key(cx: &DutyCx<'_>) -> Result<String, ExecError> {
+        let m = params(policy_op(cx)?)?;
+        str_param(&m, "callbackKey", is_callback_key).map(str::to_string)
+    }
+
+    /// The validated subscription id of an `eventsub.delete` entry.
+    fn delete_id<'a>(cx: &DutyCx<'a>) -> Result<&'a str, ExecError> {
+        policy_op(cx)?
+            .message_id
+            .as_deref()
+            .filter(|i| is_sub_id(i))
+            .ok_or(ExecError::BadAction)
+    }
+
+    /// Refuses (fail closed) unless subscription `id`'s condition names the invoking
+    /// community's OWN broadcaster. Any lookup problem is a refusal, never a pass.
+    async fn check_owned(&self, cx: &DutyCx<'_>, id: &str) -> Result<(), ExecError> {
+        let community = cx
+            .community_id
+            .ok_or(ExecError::Slot(SlotError::Refused("no_community_scope")))?;
+        let broadcaster = self
+            .app
+            .broadcaster_id(community)
+            .await
+            .map_err(ExecError::Slot)?;
+        let token = self.app.app_token().await.map_err(ExecError::Slot)?;
+        let unavailable = || ExecError::Slot(SlotError::Unavailable("subscription_lookup_failed"));
+        let resp = cx
+            .client
+            .fetch(
+                reqwest::Method::GET,
+                &format!("{}?id={id}", self.subs_url),
+                vec![
+                    (
+                        "Authorization".to_string(),
+                        format!("Bearer {}", token.expose()),
+                    ),
+                    ("Client-Id".to_string(), self.client_id.clone()),
+                ],
+                None,
+            )
+            .await
+            .map_err(|_| unavailable())?;
+        match resp.status {
+            200..=299 => {}
+            404 => return Err(ExecError::Slot(SlotError::Refused("subscription_not_found"))),
+            _ => return Err(unavailable()),
+        }
+        let v: Value = serde_json::from_slice(&resp.body).map_err(|_| unavailable())?;
+        let sub = v
+            .get("data")
+            .and_then(Value::as_array)
+            .and_then(|d| d.iter().find(|s| s.get("id").and_then(Value::as_str) == Some(id)))
+            .ok_or(ExecError::Slot(SlotError::Refused("subscription_not_found")))?;
+        let cond = sub.get("condition");
+        let names = |k: &str| cond.and_then(|c| c.get(k)).and_then(Value::as_str);
+        // Exactly one of the two keys the seven supported types use must be present and equal.
+        let owner = names("broadcaster_user_id").or_else(|| names("to_broadcaster_user_id"));
+        if owner == Some(broadcaster.as_str()) {
+            Ok(())
+        } else {
+            Err(ExecError::Slot(SlotError::Refused("subscription_not_owned")))
+        }
+    }
+}
+
+impl<S: EventSubSecretSource, A: TwitchAppSource> DutyHook for TwitchDuties<S, A> {
+    fn claims(&self, platform: &str, kind: &str) -> bool {
+        platform == "twitch"
+            && (DUTY_KINDS.contains(&kind) || (kind == "eventsub.delete" && A::AVAILABLE))
+    }
+
+    async fn gate(&self, cx: &DutyCx<'_>) -> Result<(), ExecError> {
+        // Every claimed family acts for one community's own connection.
+        if cx.community_id.is_none() {
+            return Err(ExecError::Slot(SlotError::Refused("no_community_scope")));
+        }
+        if policy_op(cx)?.op == "eventsub.delete" {
+            let id = Self::delete_id(cx)?;
+            self.check_owned(cx, id).await?;
+        }
+        Ok(())
+    }
+
+    async fn payload(&self, cx: &DutyCx<'_>) -> Result<String, ExecError> {
+        let p = policy_op(cx)?;
+        if p.op == "eventsub.delete" {
+            return Ok(serde_json::json!({ "message_id": Self::delete_id(cx)? }).to_string());
+        }
+        let mut m = params(p)?;
+        let for_guest = match p.op {
+            "eventsub.create" => {
+                let mut keep = Map::new();
+                for k in ["type", "version"] {
+                    let v = m.remove(k).ok_or(ExecError::BadAction)?;
+                    keep.insert(k.to_string(), v);
+                }
+                str_param(&m, "callbackKey", is_callback_key)?;
+                m.remove("callbackKey");
+                if !m.is_empty() {
+                    return Err(ExecError::BadAction);
+                }
+                Some(keep)
+            }
+            "schedule.update" => {
+                str_param(&m, "segment_id", is_segment_id)?;
+                m.remove("segment_id");
+                Some(m)
+            }
+            "schedule.delete" => {
+                str_param(&m, "segment_id", is_segment_id)?;
+                m.remove("segment_id");
+                if !m.is_empty() {
+                    return Err(ExecError::BadAction);
+                }
+                None
+            }
+            _ => return Err(ExecError::BadAction),
+        };
+        let payload = match for_guest {
+            Some(fields) => serde_json::json!({ "text": Value::Object(fields).to_string() }),
+            None => serde_json::json!({}),
+        };
+        Ok(payload.to_string())
+    }
+
+    async fn dynamic_slot(
+        &self,
+        cx: &DutyCx<'_>,
+        slot: &str,
+        _client: &GuardedClient,
+    ) -> Result<SlotValue, ExecError> {
+        match slot {
+            "TWITCH_EVENTSUB_CALLBACK" => {
+                let key = Self::callback_key(cx)?;
+                Ok(SlotValue::new(format!(
+                    "{}/eventsub/twitch/webhook/{key}",
+                    self.callback_base
+                )))
+            }
+            "TWITCH_EVENTSUB_SECRET" => {
+                let key = Self::callback_key(cx)?;
+                let secret = self.secrets.secret(&key).await.map_err(ExecError::Slot)?;
+                Ok(SlotValue::new(secret.expose().to_owned()))
+            }
+            "TWITCH_SEGMENT_ID" => {
+                let m = params(policy_op(cx)?)?;
+                str_param(&m, "segment_id", is_segment_id).map(|id| SlotValue::new(id.to_string()))
+            }
+            _ => Err(ExecError::HostDutyMissing),
+        }
+    }
+}
+
+/// Two duty hooks as one: a kind goes to the first hook that claims it (the second otherwise).
+/// Lets the production executor run the Discord and Twitch duties side by side.
+pub struct DutyPair<A: DutyHook, B: DutyHook> {
+    first: A,
+    second: B,
+}
+
+impl<A: DutyHook, B: DutyHook> DutyPair<A, B> {
+    /// A pair; `first` wins when both claim a kind.
+    #[must_use]
+    pub fn new(first: A, second: B) -> Self {
+        Self { first, second }
+    }
+
+    fn first_claims(&self, cx: &DutyCx<'_>) -> bool {
+        self.first.claims(cx.platform, cx.action.op())
+    }
+}
+
+impl<A: DutyHook, B: DutyHook> DutyHook for DutyPair<A, B> {
+    fn claims(&self, platform: &str, kind: &str) -> bool {
+        self.first.claims(platform, kind) || self.second.claims(platform, kind)
+    }
+
+    async fn gate(&self, cx: &DutyCx<'_>) -> Result<(), ExecError> {
+        if self.first_claims(cx) {
+            self.first.gate(cx).await
+        } else {
+            self.second.gate(cx).await
+        }
+    }
+
+    async fn bind_template(
+        &self,
+        cx: &DutyCx<'_>,
+        tpl: &mut super::RequestTpl,
+    ) -> Result<(), ExecError> {
+        if self.first_claims(cx) {
+            self.first.bind_template(cx, tpl).await
+        } else {
+            self.second.bind_template(cx, tpl).await
+        }
+    }
+
+    async fn payload(&self, cx: &DutyCx<'_>) -> Result<String, ExecError> {
+        if self.first_claims(cx) {
+            self.first.payload(cx).await
+        } else {
+            self.second.payload(cx).await
+        }
+    }
+
+    async fn role_bulk(&self, cx: &DutyCx<'_>) -> Result<super::RoleBulkPlan, ExecError> {
+        if self.first_claims(cx) {
+            self.first.role_bulk(cx).await
+        } else {
+            self.second.role_bulk(cx).await
+        }
+    }
+
+    async fn dynamic_slot(
+        &self,
+        cx: &DutyCx<'_>,
+        slot: &str,
+        client: &GuardedClient,
+    ) -> Result<SlotValue, ExecError> {
+        if self.first_claims(cx) {
+            self.first.dynamic_slot(cx, slot, client).await
+        } else {
+            self.second.dynamic_slot(cx, slot, client).await
+        }
     }
 }
 
@@ -432,5 +899,401 @@ mod tests {
     fn login_of_strips_hash_and_lowercases() {
         assert_eq!(login_of("#MiXed"), "mixed");
         assert_eq!(login_of("plain"), "plain");
+    }
+
+    struct App;
+    impl TwitchAppSource for App {
+        const AVAILABLE: bool = true;
+        async fn app_token(&self) -> Result<SecretString, SlotError> {
+            Ok(SecretString::new("app-tok".to_string()))
+        }
+        async fn broadcaster_id(&self, community_id: i64) -> Result<String, SlotError> {
+            if community_id == 7 {
+                Ok("111".to_string())
+            } else {
+                Err(SlotError::Refused("no_connection"))
+            }
+        }
+    }
+
+    const APP_ALL: [&str; 3] = ["app.token", "app.client_id", "app.broadcaster_id"];
+
+    #[tokio::test]
+    async fn app_handles_resolve_without_a_pin_and_never_touch_the_user_credential() {
+        let server = MockServer::start().await;
+        let (s, calls) = slots(&server, Ok(()));
+        let s = s.with_app_source(App);
+        assert!(s.supports_app_credentials("twitch"));
+        assert!(!s.supports_app_credentials("discord"));
+        let got = s.resolve(&req(&APP_ALL, None)).await.unwrap();
+        assert_eq!(got["app.token"].expose(), "app-tok");
+        assert_eq!(got["app.client_id"].expose(), "cid");
+        assert_eq!(got["app.broadcaster_id"].expose(), "111");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no user credential resolved");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn app_handles_are_refused_without_a_source_scope_or_with_a_user_mix() {
+        let server = MockServer::start().await;
+        // Default NoApp: unsupported, and never falls back to the user token.
+        let (s, calls) = slots(&server, Ok(()));
+        assert!(!s.supports_app_credentials("twitch"));
+        assert_eq!(
+            s.resolve(&req(&APP_ALL, Some("#Chan"))).await.unwrap_err(),
+            SlotError::Refused("slot_app_credential_unsupported")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let (s, _) = slots(&server, Ok(()));
+        let s = s.with_app_source(App);
+        let mut no_scope = req(&APP_ALL, None);
+        no_scope.community_id = None;
+        assert_eq!(
+            s.resolve(&no_scope).await.unwrap_err(),
+            SlotError::Refused("no_community_scope")
+        );
+        let mut other = req(&APP_ALL, None);
+        other.community_id = Some(8);
+        assert_eq!(
+            s.resolve(&other).await.unwrap_err(),
+            SlotError::Refused("no_connection")
+        );
+        assert_eq!(
+            s.resolve(&req(&["app.token", "token"], Some("#Chan")))
+                .await
+                .unwrap_err(),
+            SlotError::Refused("slot_credential_scope_mixed")
+        );
+        assert_eq!(
+            s.resolve(&req(&["app.nope"], None)).await.unwrap_err(),
+            SlotError::Refused("unknown_handle")
+        );
+    }
+
+    struct Secrets;
+    impl EventSubSecretSource for Secrets {
+        async fn secret(&self, key: &str) -> Result<SecretString, SlotError> {
+            if key == "key-abcdefgh" {
+                Ok(SecretString::new("whsec".to_string()))
+            } else {
+                Err(SlotError::Refused("secret_unavailable"))
+            }
+        }
+    }
+
+    fn policy_action(op: &'static str, text: Option<&str>) -> OutboundAction {
+        OutboundAction::PolicyOp(PolicyOp {
+            op,
+            channel: None,
+            text: text.map(str::to_string),
+            message_id: None,
+            user_id: None,
+            origin_channel: None,
+            tenant_id: Some(3),
+        })
+    }
+
+    fn duties() -> TwitchDuties<Secrets> {
+        TwitchDuties::new(Secrets, "https://hooks.example.com/base/").unwrap()
+    }
+
+    fn client() -> GuardedClient {
+        GuardedClient::new(GuardedLimits::default(), Vec::new())
+    }
+
+    async fn payload(op: &'static str, text: Option<&str>) -> Result<String, ExecError> {
+        let action = policy_action(op, text);
+        let c = client();
+        let cx = DutyCx {
+            platform: "twitch",
+            action: &action,
+            community_id: Some(7),
+            pinned_channel: None,
+            client: &c,
+        };
+        duties().payload(&cx).await
+    }
+
+    async fn slot(op: &'static str, text: &str, name: &str) -> Result<String, ExecError> {
+        let action = policy_action(op, Some(text));
+        let c = client();
+        let cx = DutyCx {
+            platform: "twitch",
+            action: &action,
+            community_id: Some(7),
+            pinned_channel: None,
+            client: &c,
+        };
+        duties()
+            .dynamic_slot(&cx, name, &c)
+            .await
+            .map(|v| v.expose().to_string())
+    }
+
+    #[test]
+    fn duties_claim_exactly_the_twitch_duty_kinds() {
+        let d = duties();
+        for k in ["eventsub.create", "schedule.update", "schedule.delete"] {
+            assert!(d.claims("twitch", k), "{k}");
+            assert!(!d.claims("discord", k), "{k}");
+        }
+        for k in ["eventsub.delete", "clip.create", "mod.ban", "dm.send"] {
+            assert!(!d.claims("twitch", k), "{k}");
+        }
+        assert!(TwitchDuties::new(Secrets, "http://x.example").is_err());
+        assert!(TwitchDuties::new(Secrets, "https://").is_err());
+        assert!(TwitchDuties::new(Secrets, "https://a.example/?q=1").is_err());
+        assert!(TwitchDuties::new(Secrets, "https://a.example//x").is_err());
+    }
+
+    #[tokio::test]
+    async fn eventsub_payload_hides_the_callback_key_from_the_connector() {
+        let t = r#"{"type":"channel.follow","version":2,"callbackKey":"key-abcdefgh"}"#;
+        let p = payload("eventsub.create", Some(t)).await.unwrap();
+        assert!(!p.contains("key-abcdefgh") && !p.contains("callbackKey"));
+        let v: Value = serde_json::from_str(&p).unwrap();
+        let inner: Value = serde_json::from_str(v["text"].as_str().unwrap()).unwrap();
+        assert_eq!(inner, serde_json::json!({"type":"channel.follow","version":2}));
+        for bad in [
+            r#"{"type":"channel.follow","version":2}"#,
+            r#"{"type":"channel.follow","version":2,"callbackKey":"a/b"}"#,
+            r#"{"type":"channel.follow","callbackKey":"key-abcdefgh"}"#,
+            r#"{"type":"x","version":1,"callbackKey":"key-abcdefgh","secret":"s"}"#,
+            "nope",
+        ] {
+            assert_eq!(
+                payload("eventsub.create", Some(bad)).await.unwrap_err(),
+                ExecError::BadAction,
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            payload("eventsub.create", None).await.unwrap_err(),
+            ExecError::BadAction
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_payloads_strip_the_segment_id_and_delete_takes_nothing_else() {
+        let upd = r#"{"segment_id":"ZXhh==","title":"t","duration":60}"#;
+        let p: Value = serde_json::from_str(&payload("schedule.update", Some(upd)).await.unwrap())
+            .unwrap();
+        let inner: Value = serde_json::from_str(p["text"].as_str().unwrap()).unwrap();
+        assert_eq!(inner, serde_json::json!({"title":"t","duration":60}));
+        assert_eq!(
+            payload("schedule.delete", Some(r#"{"segment_id":"ZXhh=="}"#))
+                .await
+                .unwrap(),
+            "{}"
+        );
+        for bad in [
+            r#"{"segment_id":"ZXhh==","x":1}"#,
+            r#"{"segment_id":"a b"}"#,
+            r#"{"segment_id":""}"#,
+            r#"{"x":1}"#,
+        ] {
+            assert_eq!(
+                payload("schedule.delete", Some(bad)).await.unwrap_err(),
+                ExecError::BadAction,
+                "{bad}"
+            );
+        }
+        assert!(payload("schedule.update", Some(r#"{"title":"t"}"#))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn dynamic_slots_are_host_built_and_refuse_bad_input() {
+        let t = r#"{"type":"stream.online","version":1,"callbackKey":"key-abcdefgh"}"#;
+        assert_eq!(
+            slot("eventsub.create", t, "TWITCH_EVENTSUB_CALLBACK").await.unwrap(),
+            "https://hooks.example.com/base/eventsub/twitch/webhook/key-abcdefgh"
+        );
+        assert_eq!(
+            slot("eventsub.create", t, "TWITCH_EVENTSUB_SECRET").await.unwrap(),
+            "whsec"
+        );
+        let unknown = r#"{"type":"stream.online","version":1,"callbackKey":"unknown-key-1"}"#;
+        assert_eq!(
+            slot("eventsub.create", unknown, "TWITCH_EVENTSUB_SECRET")
+                .await
+                .unwrap_err(),
+            ExecError::Slot(SlotError::Refused("secret_unavailable"))
+        );
+        assert_eq!(
+            slot("schedule.delete", r#"{"segment_id":"ZXhh=="}"#, "TWITCH_SEGMENT_ID")
+                .await
+                .unwrap(),
+            "ZXhh=="
+        );
+        assert!(slot("schedule.delete", r#"{"segment_id":"a&b"}"#, "TWITCH_SEGMENT_ID")
+            .await
+            .is_err());
+        assert_eq!(
+            slot("eventsub.create", t, "TWITCH_ANYTHING").await.unwrap_err(),
+            ExecError::HostDutyMissing
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_needs_a_community_scope() {
+        let action = policy_action("eventsub.create", None);
+        let c = client();
+        let cx = DutyCx {
+            platform: "twitch",
+            action: &action,
+            community_id: None,
+            pinned_channel: None,
+            client: &c,
+        };
+        assert_eq!(
+            duties().gate(&cx).await.unwrap_err(),
+            ExecError::Slot(SlotError::Refused("no_community_scope"))
+        );
+    }
+
+    fn local_client() -> GuardedClient {
+        GuardedClient::new(
+            GuardedLimits {
+                max_redirects: 0,
+                timeout: Duration::from_secs(5),
+                max_response_bytes: 4096,
+            },
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        )
+    }
+
+    fn delete_action(id: &str) -> OutboundAction {
+        OutboundAction::PolicyOp(PolicyOp {
+            op: "eventsub.delete",
+            channel: None,
+            text: None,
+            message_id: Some(id.to_string()),
+            user_id: None,
+            origin_channel: Some("guild:-".to_string()),
+            tenant_id: Some(3),
+        })
+    }
+
+    fn app_duties(server: &MockServer) -> TwitchDuties<Secrets, App> {
+        TwitchDuties::new(Secrets, "https://hooks.example.com/base")
+            .unwrap()
+            .with_app_source(App, "cid".to_string())
+            .with_subs_endpoint(format!("{}/helix/eventsub/subscriptions", server.uri()))
+    }
+
+    async fn mount_sub(server: &MockServer, id: &str, condition: Value) {
+        Mock::given(method("GET"))
+            .and(path("/helix/eventsub/subscriptions"))
+            .and(query_param("id", id))
+            .and(header("authorization", "Bearer app-tok"))
+            .and(header("client-id", "cid"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"data": [{"id": id, "condition": condition}]}),
+            ))
+            .mount(server)
+            .await;
+    }
+
+    async fn gate_delete(
+        d: &TwitchDuties<Secrets, App>,
+        community: Option<i64>,
+        id: &str,
+    ) -> Result<(), ExecError> {
+        let action = delete_action(id);
+        let c = local_client();
+        let cx = DutyCx {
+            platform: "twitch",
+            action: &action,
+            community_id: community,
+            pinned_channel: None,
+            client: &c,
+        };
+        d.gate(&cx).await
+    }
+
+    // regression: cross-tenant BOLA -- the app token can delete any subscription of the app.
+    #[tokio::test]
+    async fn delete_is_bound_to_the_communitys_own_broadcaster() {
+        let server = MockServer::start().await;
+        mount_sub(&server, "mine", serde_json::json!({"broadcaster_user_id": "111"})).await;
+        mount_sub(&server, "raid", serde_json::json!({"to_broadcaster_user_id": "111"})).await;
+        mount_sub(&server, "theirs", serde_json::json!({"broadcaster_user_id": "999"})).await;
+        mount_sub(&server, "nocond", serde_json::json!({})).await;
+        let d = app_duties(&server);
+        assert!(d.claims("twitch", "eventsub.delete"));
+        assert_eq!(gate_delete(&d, Some(7), "mine").await, Ok(()));
+        assert_eq!(gate_delete(&d, Some(7), "raid").await, Ok(()));
+        for (id, code) in [
+            ("theirs", "subscription_not_owned"),
+            ("nocond", "subscription_not_owned"),
+            ("absent", "subscription_not_found"),
+        ] {
+            assert_eq!(
+                gate_delete(&d, Some(7), id).await.unwrap_err(),
+                ExecError::Slot(SlotError::Refused(code)),
+                "{id}"
+            );
+        }
+        // Community 8 has no connection (the app source refuses): nothing is looked up or passed.
+        assert_eq!(
+            gate_delete(&d, Some(8), "mine").await.unwrap_err(),
+            ExecError::Slot(SlotError::Refused("no_connection"))
+        );
+        assert_eq!(
+            gate_delete(&d, None, "mine").await.unwrap_err(),
+            ExecError::Slot(SlotError::Refused("no_community_scope"))
+        );
+        for bad in ["a&b", "", "x/../y", &"y".repeat(65)] {
+            assert_eq!(
+                gate_delete(&d, Some(7), bad).await.unwrap_err(),
+                ExecError::BadAction,
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_lookup_failures_refuse_and_the_default_does_not_claim_delete_or_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let d = app_duties(&server);
+        assert_eq!(
+            gate_delete(&d, Some(7), "mine").await.unwrap_err(),
+            ExecError::Slot(SlotError::Unavailable("subscription_lookup_failed"))
+        );
+        // Without an app source delete is unclaimed; list is never claimed.
+        assert!(!duties().claims("twitch", "eventsub.delete"));
+        assert!(!d.claims("twitch", "eventsub.list"));
+        assert!(!duties().claims("twitch", "eventsub.list"));
+    }
+
+    #[tokio::test]
+    async fn duty_pair_routes_by_claim() {
+        let pair = DutyPair::new(super::super::NoDuties, duties());
+        assert!(pair.claims("twitch", "eventsub.create"));
+        assert!(!pair.claims("twitch", "mod.ban"));
+        let t = r#"{"type":"stream.online","version":1,"callbackKey":"key-abcdefgh"}"#;
+        let action = policy_action("eventsub.create", Some(t));
+        let c = client();
+        let cx = DutyCx {
+            platform: "twitch",
+            action: &action,
+            community_id: Some(7),
+            pinned_channel: None,
+            client: &c,
+        };
+        assert!(pair.payload(&cx).await.is_ok());
+        assert_eq!(
+            pair.dynamic_slot(&cx, "TWITCH_EVENTSUB_SECRET", &c)
+                .await
+                .unwrap()
+                .expose(),
+            "whsec"
+        );
     }
 }

@@ -24,6 +24,12 @@ pub trait HelixHost: Send + Sync {
     fn get(&self, url: &str) -> Result<(u16, Vec<u8>), ToolError>;
 }
 
+/// Wall clock (wasm glue: the `clock` import).
+pub trait ClockHost: Send + Sync {
+    /// RFC 3339 UTC now.
+    fn now_rfc3339(&self) -> String;
+}
+
 /// Platform-user-id -> canonical UUID (wasm glue: `identity.lookup`).
 pub trait IdentityHost: Send + Sync {
     /// Resolves one Twitch numeric user id.
@@ -53,6 +59,28 @@ pub const MODERATION_TOOLS: &[(&str, &str)] = &[
     ("twitch.moderation.unban", "mod.unban"),
     ("twitch.moderation.delete_message", "chat.delete"),
 ];
+
+/// Host-executed channel-operation tools beyond moderation: `(tool name, outbound kind)`. Like
+/// [`MODERATION_TOOLS`] the guest refuses them; the host queues the pinned op whose template
+/// [`crate::clips`] / [`crate::schedule`] build. Validation: [`host_op`].
+pub const CHANNEL_TOOLS: &[(&str, &str)] = &[
+    ("twitch.clip.create", "clip.create"),
+    ("twitch.schedule.create", "schedule.create"),
+    ("twitch.schedule.update", "schedule.update"),
+    ("twitch.schedule.delete", "schedule.delete"),
+];
+
+/// Validates a host-executed channel tool call (clip / schedule) and returns the op to queue.
+///
+/// # Errors
+/// `InvalidArgs` for an unknown tool or any value outside its contract schema.
+pub fn host_op(tool: &str, args: &Value) -> Result<crate::helix::HostOp, ToolError> {
+    match tool {
+        "twitch.clip.create" => crate::clips::create_op(args),
+        t if t.starts_with("twitch.schedule.") => crate::schedule::host_op(t, args),
+        _ => Err(bad("unknown channel tool")),
+    }
+}
 
 /// One validated moderation tool call, ready for the host to queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,8 +250,39 @@ fn reply(key: &str, resp: &Value, rows: Vec<Value>, cursor: Option<String>) -> V
 }
 
 /// Builds the tool table over the given hosts.
-pub fn build_registry(helix: Arc<dyn HelixHost>, ident: Arc<dyn IdentityHost>) -> ToolRegistry {
+pub fn build_registry(
+    helix: Arc<dyn HelixHost>,
+    ident: Arc<dyn IdentityHost>,
+    clock: Arc<dyn ClockHost>,
+) -> ToolRegistry {
     let mut r = ToolRegistry::new();
+    for (name, _) in CHANNEL_TOOLS {
+        r.register(name, |_ctx, _args| {
+            Err(ToolError::InvalidArgs(
+                "channel tools are executed by the host, not the guest".to_string(),
+            ))
+        });
+    }
+    {
+        let h = helix.clone();
+        r.register("twitch.clip.get", move |_ctx, args| crate::clips::get(h.as_ref(), &args));
+    }
+    {
+        let h = helix.clone();
+        r.register("twitch.clip.list", move |_ctx, args| crate::clips::list(h.as_ref(), &args));
+    }
+    {
+        let h = helix.clone();
+        r.register("twitch.schedule.list", move |_ctx, args| {
+            crate::schedule::list(h.as_ref(), &args)
+        });
+    }
+    {
+        let (h, c) = (helix.clone(), clock);
+        r.register("twitch.live.channels", move |_ctx, args| {
+            crate::live::channels(h.as_ref(), c.as_ref(), &args)
+        });
+    }
     // Host-mediated: reaching the guest is a wiring error, refused loudly (never a no-op Ok).
     for (name, _) in MODERATION_TOOLS {
         r.register(name, |_ctx, _args| {
@@ -291,6 +350,12 @@ mod tests {
             Ok((self.status, self.body.clone().into_bytes()))
         }
     }
+    struct TestClock;
+    impl ClockHost for TestClock {
+        fn now_rfc3339(&self) -> String {
+            "2026-11-07T00:00:00.000Z".to_string()
+        }
+    }
     struct Ident;
     impl IdentityHost for Ident {
         fn uuid_for(&self, id: &str) -> Result<String, ToolError> {
@@ -303,7 +368,7 @@ mod tests {
             body: body.to_string(),
             urls: Mutex::new(vec![]),
         });
-        (build_registry(f.clone(), Arc::new(Ident)), f)
+        (build_registry(f.clone(), Arc::new(Ident), Arc::new(TestClock)), f)
     }
     fn call(r: &ToolRegistry, n: &str, a: Value) -> Result<Value, ToolError> {
         r.call(n, a.to_string().as_bytes())
