@@ -37,6 +37,60 @@ const H_VERSION: HeaderName = HeaderName::from_static("kick-event-version");
 /// Longest accepted event-type header (`channel.subscription.renewal` is 28).
 const MAX_TYPE_LEN: usize = 64;
 
+/// Binding metadata key: the Kick user id of the broadcaster this connection is for. Kick signs
+/// with ONE global key, so the signature alone cannot say which community a delivery belongs to;
+/// the route is bound to this id and refuses every other broadcaster (like Wix's instance id).
+pub const META_BROADCASTER_ID: &str = "broadcaster_user_id";
+
+/// `true` for a Kick numeric user id: 1..=20 ASCII digits, not all zero.
+#[must_use]
+pub fn valid_broadcaster_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 20
+        && s.bytes().all(|b| b.is_ascii_digit())
+        && s.bytes().any(|b| b != b'0')
+}
+
+/// A body id as a string, whether Kick wrote a JSON number or a numeric string.
+fn id_text(v: &Value) -> Option<String> {
+    match v {
+        Value::Number(n) => n.as_u64().map(|n| n.to_string()),
+        Value::String(s) if valid_broadcaster_id(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// The body keys that identify each handled event type. The `Kick-Event-Type` header is NOT
+/// covered by the signature, so a captured delivery could be replayed under a different type;
+/// requiring the claimed type's discriminators (and none of another type's) pins the type to
+/// what the signed body actually is.
+const DISCRIMINATORS: [(&[&str], &str); 5] = [
+    (&["chat.message.sent"], "content"),
+    (&["channel.followed"], "follower"),
+    (
+        &["channel.subscription.new", "channel.subscription.renewal"],
+        "subscriber",
+    ),
+    (&["channel.subscription.gifts"], "giftees"),
+    (&["livestream.status.updated"], "is_live"),
+];
+
+/// `true` when `body` has exactly the discriminator of `event_type` (an event type this host does
+/// not discriminate passes: the guest ignores it).
+fn shape_matches(event_type: &str, body: &Value) -> bool {
+    let Some(own) = DISCRIMINATORS
+        .iter()
+        .find(|(types, _)| types.contains(&event_type))
+    else {
+        return true;
+    };
+    body.get(own.1).is_some()
+        && DISCRIMINATORS
+            .iter()
+            .filter(|(_, key)| *key != own.1)
+            .all(|(_, key)| body.get(*key).is_none())
+}
+
 /// A structurally valid, NOT yet signature-checked delivery.
 #[derive(Debug)]
 pub struct Prepared {
@@ -46,6 +100,10 @@ pub struct Prepared {
     version: u64,
     message_id: String,
     timestamp: String,
+    /// `broadcaster.user_id` the body claims (trusted only after the signature verifies).
+    broadcaster: Option<String>,
+    /// The body is a JSON object whose shape matches the claimed event type.
+    shape_ok: bool,
     /// Stable per-delivery id for dedup: the digest of the signed message, so a replay cannot
     /// dodge dedup by varying an unsigned header.
     pub dedup_id: String,
@@ -106,6 +164,15 @@ pub fn prepare(
         .decode(sig_b64)
         .map_err(|_| VerifyError::BadSignature)?;
 
+    let parsed: Option<Value> = serde_json::from_slice(body).ok().filter(Value::is_object);
+    let broadcaster = parsed
+        .as_ref()
+        .and_then(|v| v.get("broadcaster")?.get("user_id"))
+        .and_then(id_text);
+    let shape_ok = parsed
+        .as_ref()
+        .is_some_and(|v| shape_matches(event_type, v));
+
     let mut signed = Vec::with_capacity(message_id.len() + timestamp.len() + body.len() + 2);
     signed.extend_from_slice(message_id.as_bytes());
     signed.push(b'.');
@@ -123,6 +190,8 @@ pub fn prepare(
         version,
         message_id: message_id.to_string(),
         timestamp: timestamp.to_string(),
+        broadcaster,
+        shape_ok,
     })
 }
 
@@ -161,6 +230,22 @@ impl Prepared {
             Err(VerifyError::BadSignature)
         } else {
             Err(VerifyError::BadKey)
+        }
+    }
+
+    /// [`Prepared::verify_any`], then the connection binding: the (now authenticated) body's
+    /// broadcaster must be `expected_broadcaster` and its shape must match the claimed event
+    /// type. Order matters: nothing about the binding is revealed for a forged signature.
+    ///
+    /// # Errors
+    /// As [`Prepared::verify_any`], plus [`VerifyError::NotBound`] for a genuine Kick delivery
+    /// that belongs to another broadcaster/connection or whose type does not match its body.
+    pub fn verify_bound(&self, pems: &str, expected_broadcaster: &str) -> Result<(), VerifyError> {
+        self.verify_any(pems)?;
+        if self.shape_ok && self.broadcaster.as_deref() == Some(expected_broadcaster) {
+            Ok(())
+        } else {
+            Err(VerifyError::NotBound)
         }
     }
 
@@ -342,5 +427,127 @@ mod tests {
     #[test]
     fn the_key_source_is_the_documented_endpoint() {
         assert_eq!(PUBLIC_KEY_URL, "https://api.kick.com/public/v1/public-key");
+    }
+
+    #[test]
+    fn a_genuine_delivery_for_another_broadcaster_is_refused_after_the_signature() {
+        let sig = signed_for(BODY);
+        let p = prepare(&headers(&sig, "channel.followed"), BODY, NOW, 300).unwrap();
+        // BODY's broadcaster is user 1: bound to 1 verifies, to anyone else is NotBound.
+        p.verify_bound(&key().public_pem, "1").unwrap();
+        for other in ["2", "10", "01", ""] {
+            assert_eq!(
+                p.verify_bound(&key().public_pem, other),
+                Err(VerifyError::NotBound),
+                "{other:?}"
+            );
+        }
+        // A forged signature never reveals the binding result.
+        let forged = prepare(&headers(&[7u8; 256], "channel.followed"), BODY, NOW, 300).unwrap();
+        assert_eq!(
+            forged.verify_bound(&key().public_pem, "2"),
+            Err(VerifyError::BadSignature)
+        );
+        // String ids bind the same way as numbers.
+        let body = br#"{"broadcaster":{"user_id":"77"},"follower":{"user_id":2}}"#;
+        let p = prepare(
+            &headers(&signed_for(body), "channel.followed"),
+            body,
+            NOW,
+            300,
+        )
+        .unwrap();
+        p.verify_bound(&key().public_pem, "77").unwrap();
+    }
+
+    #[test]
+    fn a_body_without_a_usable_broadcaster_is_never_bound() {
+        for body in [
+            &br#"{"follower":{"user_id":2}}"#[..],
+            br#"{"broadcaster":{},"follower":{"user_id":2}}"#,
+            br#"{"broadcaster":{"user_id":-1},"follower":{"user_id":2}}"#,
+            br#"{"broadcaster":{"user_id":"x1"},"follower":{"user_id":2}}"#,
+            br#"[1]"#,
+        ] {
+            let p = prepare(
+                &headers(&signed_for(body), "channel.followed"),
+                body,
+                NOW,
+                300,
+            )
+            .unwrap();
+            assert_eq!(
+                p.verify_bound(&key().public_pem, "1"),
+                Err(VerifyError::NotBound),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    /// The type header is unsigned: a genuine delivery replayed under another type is refused.
+    #[test]
+    fn the_unsigned_type_header_must_match_the_signed_body() {
+        let sig = signed_for(BODY);
+        for lie in [
+            "chat.message.sent",
+            "channel.subscription.new",
+            "channel.subscription.renewal",
+            "channel.subscription.gifts",
+            "livestream.status.updated",
+        ] {
+            let p = prepare(&headers(&sig, lie), BODY, NOW, 300).unwrap();
+            assert_eq!(
+                p.verify_bound(&key().public_pem, "1"),
+                Err(VerifyError::NotBound),
+                "{lie}"
+            );
+        }
+        // A body mixing two event shapes is refused under either type.
+        let mixed = br#"{"broadcaster":{"user_id":1},"follower":{"user_id":2},"is_live":true}"#;
+        let sig = signed_for(mixed);
+        for ty in ["channel.followed", "livestream.status.updated"] {
+            let p = prepare(&headers(&sig, ty), mixed, NOW, 300).unwrap();
+            assert_eq!(
+                p.verify_bound(&key().public_pem, "1"),
+                Err(VerifyError::NotBound)
+            );
+        }
+        // The honest type verifies, and an event type this host does not discriminate passes.
+        let live = br#"{"broadcaster":{"user_id":1},"is_live":true}"#;
+        for ty in ["livestream.status.updated", "kicks.gifted"] {
+            let p = prepare(&headers(&signed_for(live), ty), live, NOW, 300).unwrap();
+            p.verify_bound(&key().public_pem, "1").unwrap();
+        }
+    }
+
+    #[test]
+    fn verify_any_tries_each_key_block_and_fails_closed_without_a_usable_one() {
+        let sig = signed_for(BODY);
+        let p = prepare(&headers(&sig, "channel.followed"), BODY, NOW, 300).unwrap();
+        let other = generate();
+        let both = format!("{}\n{}", other.public_pem, key().public_pem);
+        p.verify_any(&both).unwrap();
+        assert_eq!(
+            p.verify_any(&other.public_pem),
+            Err(VerifyError::BadSignature)
+        );
+        for none in [
+            "",
+            "garbage",
+            "-----BEGIN PUBLIC KEY-----\n!!\n-----END PUBLIC KEY-----",
+        ] {
+            assert_eq!(p.verify_any(none), Err(VerifyError::BadKey), "{none:?}");
+        }
+    }
+
+    #[test]
+    fn broadcaster_ids_are_numeric_user_ids() {
+        for ok in ["1", "123456", "18446744073709551615"] {
+            assert!(valid_broadcaster_id(ok), "{ok}");
+        }
+        for bad in ["", "0", "000", "-1", "1a", " 1", "123456789012345678901"] {
+            assert!(!valid_broadcaster_id(bad), "{bad:?}");
+        }
     }
 }

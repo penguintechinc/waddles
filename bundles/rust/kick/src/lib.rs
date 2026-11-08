@@ -83,8 +83,17 @@ mod component {
     }
 
     impl ReceiverGuest for Component {
-        fn on_connect(_ctx: ConnectionCtx) -> Result<HandshakePayload, FrameError> {
+        fn on_connect(ctx: ConnectionCtx) -> Result<HandshakePayload, FrameError> {
             gate()?;
+            // A webhook session (the host's opaque `wh-` source id) has no upstream socket to
+            // subscribe on: an empty handshake, which the webhook transport accepts. The Pusher
+            // subscribe belongs to the chat WebSocket only.
+            if ctx.source_id.starts_with(super::common::WEBHOOK_SOURCE_PREFIX) {
+                return Ok(HandshakePayload {
+                    bytes: Vec::new(),
+                    secret_refs: Vec::new(),
+                });
+            }
             let (bytes, refs) = pusher::handshake();
             Ok(HandshakePayload {
                 bytes,

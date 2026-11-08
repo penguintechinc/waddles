@@ -241,8 +241,12 @@ pub fn scheme_for(platform: &str) -> Result<Scheme, BootError> {
     match platform {
         "discord" => discord_scheme(),
         "twitch" => Ok(Scheme::twitch_eventsub()),
-        // Kick: RSA signature with Kick's published (rotating) key, see `connector::kick_keys`.
-        "kick" => Ok(Scheme::kick()),
+        // Kick routes are bound to one connection's broadcaster id (Kick signs with a single
+        // global key): the scheme is built per connection from its binding metadata
+        // (`Scheme::kick`), never from a platform constant.
+        "kick" => Err(BootError::Scheme(
+            "kick scheme is built per connection from its broadcaster id".into(),
+        )),
         // Wix routes are bound to a per-connection instance id: their scheme
         // is built by `profiles::wix`, never from a platform constant.
         "wix" => Err(BootError::Scheme(
@@ -459,6 +463,12 @@ mod tests {
             scheme_for("slack"),
             Err(BootError::UnsupportedPlatform(_))
         ));
+        // Kick is bound per connection (its signing key is global), never a platform constant.
+        assert!(matches!(scheme_for("kick"), Err(BootError::Scheme(_))));
+        Scheme::kick("12345").validate().unwrap();
+        for bad in ["", "0", "abc", "12 3"] {
+            assert!(Scheme::kick(bad).validate().is_err(), "{bad:?}");
+        }
     }
 
     #[test]

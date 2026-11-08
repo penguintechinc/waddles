@@ -42,6 +42,10 @@ pub enum VerifyError {
     /// Secret/key absent, empty or unusable -- fail closed.
     #[error("unusable key")]
     BadKey,
+    /// Authentic delivery, but for another connection (global-key schemes: Kick) or with a type
+    /// that does not match its body.
+    #[error("delivery is not bound to this route")]
+    NotBound,
 }
 
 /// How a signature (and an Ed25519 key) is text-encoded.
@@ -234,6 +238,14 @@ pub struct WixSpec {
     pub instance_id: String,
 }
 
+/// Kick webhook binding: the broadcaster the route's connection is for (host registration data,
+/// from the connection's non-secret binding metadata; never from the request).
+#[derive(Debug, Clone)]
+pub struct KickSpec {
+    /// The connection's Kick broadcaster user id (numeric string).
+    pub broadcaster_id: String,
+}
+
 /// The signature scheme of a registered route (host-side config only).
 #[derive(Debug, Clone)]
 pub enum Scheme {
@@ -246,10 +258,10 @@ pub enum Scheme {
     /// Wix app webhooks: raw RS256 JWT body, public key = the secret.
     WixJwt(WixSpec),
     /// Kick webhooks (`connector::kick_webhook`): RSA PKCS#1 v1.5 / SHA-256 over
-    /// `id.timestamp.body` with Kick's rotating public key (the route's secret resolves to
-    /// that key via `connector::kick_keys`, never to a per-community secret). Marker variant:
-    /// every shape is fixed by Kick's documented scheme, so there is nothing to configure.
-    Kick,
+    /// `id.timestamp.body` with Kick's rotating public key (resolved via `connector::kick_keys`,
+    /// never a per-community secret). The key is GLOBAL, so the route is bound to ONE connection's
+    /// broadcaster id ([`KickSpec`]); any other broadcaster's genuine delivery is refused.
+    Kick(KickSpec),
     /// The fixed Twitch EventSub preset: a distinct, constructor-only
     /// marker (not a shape). It is the ONLY scheme exempt from the
     /// adjacent-placeholder rule; a configurable `HmacSha256` never is.
@@ -293,7 +305,10 @@ enum PreparedKind {
         jwt: super::wix_jwt::ParsedJwt,
         instance_id: String,
     },
-    Kick(super::kick_webhook::Prepared),
+    Kick {
+        prepared: super::kick_webhook::Prepared,
+        broadcaster_id: String,
+    },
 }
 
 fn header_str<'a>(h: &'a HeaderMap, name: &HeaderName) -> Result<&'a str, VerifyError> {
@@ -330,17 +345,20 @@ impl Scheme {
         Self::TwitchEventSub
     }
 
-    /// The Kick webhook scheme (see [`Scheme::Kick`]).
+    /// The Kick webhook scheme bound to `broadcaster_id` (see [`Scheme::Kick`]); registration
+    /// refuses an id that is not a Kick numeric user id.
     #[must_use]
-    pub fn kick() -> Self {
-        Self::Kick
+    pub fn kick(broadcaster_id: impl Into<String>) -> Self {
+        Self::Kick(KickSpec {
+            broadcaster_id: broadcaster_id.into(),
+        })
     }
 
     /// `true` when this scheme's verification key is fetched (and rotates upstream), so a
     /// signature mismatch is worth ONE forced key refresh before the delivery is refused.
     #[must_use]
     pub fn rotates_keys(&self) -> bool {
-        matches!(self, Self::Kick)
+        matches!(self, Self::Kick(_))
     }
 
     /// Structural validation at registration time (fail loud, not per-request).
@@ -368,8 +386,15 @@ impl Scheme {
                     Ok(())
                 };
             }
-            // Fixed, known-good presets; TwitchEventSub is the only adjacency exemption.
-            Self::TwitchEventSub | Self::Kick => return Ok(()),
+            Self::Kick(k) => {
+                return if super::kick_webhook::valid_broadcaster_id(&k.broadcaster_id) {
+                    Ok(())
+                } else {
+                    Err("kick route needs a numeric broadcaster user id".into())
+                };
+            }
+            // Fixed, known-good preset; the only adjacency exemption.
+            Self::TwitchEventSub => return Ok(()),
         };
         if template.needs_id() && id_header.is_none() {
             return Err("template uses {id} but no id_header configured".into());
@@ -446,11 +471,14 @@ impl Scheme {
                     dedup_id,
                 })
             }
-            Self::Kick => {
+            Self::Kick(k) => {
                 let p = super::kick_webhook::prepare(headers, body, now_unix, window_secs)?;
                 Ok(Prepared {
                     dedup_id: p.dedup_id.clone(),
-                    kind: PreparedKind::Kick(p),
+                    kind: PreparedKind::Kick {
+                        prepared: p,
+                        broadcaster_id: k.broadcaster_id.clone(),
+                    },
                 })
             }
             Self::WixJwt(w) => {
@@ -524,7 +552,7 @@ impl Prepared {
     #[must_use]
     pub fn frame(&self, body: &[u8]) -> Option<Vec<u8>> {
         match &self.kind {
-            PreparedKind::Kick(p) => p.envelope(body),
+            PreparedKind::Kick { prepared, .. } => prepared.envelope(body),
             _ => Some(body.to_vec()),
         }
     }
@@ -557,7 +585,10 @@ impl Prepared {
                 }
             }
             PreparedKind::Wix { jwt, instance_id } => jwt.verify(secret, instance_id),
-            PreparedKind::Kick(p) => p.verify_any(secret),
+            PreparedKind::Kick {
+                prepared,
+                broadcaster_id,
+            } => prepared.verify_bound(secret, broadcaster_id),
             PreparedKind::Ed25519 {
                 message,
                 signature,

@@ -10,6 +10,10 @@ pub const CONNECTOR_FLAG: &str = "waddles.connector-kick";
 /// Platform slug every emitted event carries (the host rejects any other).
 pub const PLATFORM: &str = "kick";
 
+/// Prefix of the opaque source id the host gives a WEBHOOK session (`connector::webhook::
+/// opaque_source_id`); such a session has no upstream socket, so it takes no handshake.
+pub const WEBHOOK_SOURCE_PREFIX: &str = "wh-";
+
 /// A connector-reported frame failure (mirrors WIT `frame-error`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameErr {

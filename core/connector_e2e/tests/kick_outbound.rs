@@ -4,30 +4,32 @@
 //! (`PlatformPolicy::kick`), verifier, substituter and `GuardedClient` run unmodified, and the
 //! request is asserted on the wire at a local fake Kick endpoint.
 //!
-//! Doubles (and only these): the per-community slot source (the `KickSlots` seam belongs to the
-//! host seams, see `bundles/rust/kick/README.md` "Needs from host seams") and a
-//! `TemplateBuilder` decorator that rewrites ONLY the scheme+host of the bundle's template to the
-//! local fake after asserting the bundle named the real Kick API host (https cannot be terminated
-//! by a local plain-http fake). No Valkey is needed: this drives `SenderExecutor::execute`
-//! directly (the Kick queue drain is part of the host seams).
+//! The per-community slot source is the PRODUCTION `KickSlots` over `ResolverKickCredentials`
+//! over the real `ConnectionResolver`, talking to a local fake hub-api. The only double besides
+//! the fake endpoints is a `TemplateBuilder` decorator that rewrites ONLY the scheme+host of the
+//! bundle's template to the local fake after asserting the bundle named the real Kick API host
+//! (https cannot be terminated by a local plain-http fake). No Valkey is needed: this drives
+//! `SenderExecutor::execute` directly.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bundle_executor::manifest::WitWorld;
 use bundle_host_http::guarded::GuardedLimits;
+use connection_resolver::{ConnectionKind, ConnectionResolver, ResolverConfig, ResolverMetrics};
 use connector_e2e::{digest_of, RigConnector, WireRig};
+use svc_ingest::connector::sender_exec::kick_slots::KickSlots;
 use svc_ingest::connector::sender_exec::policy::registered_op;
 use svc_ingest::connector::sender_exec::{
     BuildError, BuiltTemplate, ExecError, ExecRequest, ExecutorConfig, PlatformPolicy,
-    SenderAction, SenderExecutor, SlotError, SlotRequest, SlotSource, SlotValue, TemplateBuilder,
-    WireTemplateBuilder,
+    SenderAction, SenderExecutor, TemplateBuilder, WireTemplateBuilder,
 };
 use svc_ingest::outbound_boot::CachedFlagGate;
+use svc_ingest::outbound_creds_kick::ResolverKickCredentials;
 use svc_ingest::outbound_ops::OutboundAction;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -38,38 +40,84 @@ const TOKEN: &str = "KICK-OAUTH-SECRET";
 const CHAN: &str = "kick-chan";
 const MSG_ID: &str = "828f83bb-e391-4c78-9e91-af35a172840e";
 
-/// Test double for the (host-seam) Kick slot source: one community, one token, the pinned
-/// channel must be the one it owns. Records every request it was asked to resolve.
-/// `(community_id, handles)` of every resolve call.
-type AskLog = Arc<Mutex<Vec<(Option<i64>, Vec<String>)>>>;
+struct NoMetrics;
 
-struct KickSlots {
-    asked: AskLog,
+impl ResolverMetrics for NoMetrics {
+    fn resolve(&self, _: ConnectionKind, _: &'static str, _: Duration) {}
+    fn list(&self, _: &'static str) {}
 }
 
-impl SlotSource for KickSlots {
-    async fn resolve(
-        &self,
-        req: &SlotRequest<'_>,
-    ) -> Result<HashMap<String, SlotValue>, SlotError> {
-        self.asked.lock().unwrap().push((
-            req.community_id,
-            req.handles.iter().map(|h| (*h).to_string()).collect(),
-        ));
-        if req.platform != "kick" || req.community_id != Some(COMMUNITY) {
-            return Err(SlotError::Refused("no_binding"));
+/// Synthetic service-account token file, removed on drop.
+struct TestSa(std::path::PathBuf);
+
+impl Drop for TestSa {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.0) {
+            eprintln!("synthetic sa token cleanup failed: {e}");
         }
-        if req.handles.iter().any(|h| *h != "token") {
-            return Err(SlotError::Refused("unknown_handle"));
-        }
-        if req.pinned_channel.is_some_and(|c| c != CHAN) {
-            return Err(SlotError::Refused("channel_not_owned"));
-        }
-        Ok(HashMap::from([(
-            "token".to_string(),
-            SlotValue::new(TOKEN.to_string()),
-        )]))
     }
+}
+
+type Slots = KickSlots<ResolverKickCredentials<ConnectionResolver>>;
+
+/// A fake hub-api serving ONE Kick connection (community 7, connection 12, kind-1 token).
+/// Returns the server (request counts are read back from it) and the production slot source.
+async fn hub() -> (MockServer, Slots, TestSa) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/internal/service-token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"token": "machine-tok", "expires_in": 3600})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/internal/provider-connections"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "items": [{"communityId": COMMUNITY, "connectionId": 12, "tenantId": 3,
+                       "secretVersion": 1, "provider": "kick", "kind": 1, "metadata": {}}],
+            "nextAfter": null
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/api/v1/internal/communities/{COMMUNITY}/provider-connections/12/resolve"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "communityId": COMMUNITY, "connectionId": 12, "provider": "kick", "kind": 1,
+            "accessToken": TOKEN, "expiresAt": null, "metadata": {}
+        })))
+        .mount(&server)
+        .await;
+    let sa = std::env::temp_dir().join(format!("kick-sa-{}", std::process::id()));
+    std::fs::write(&sa, "synthetic-sa").unwrap();
+    let resolver = ConnectionResolver::new(
+        ResolverConfig::new(
+            server.uri(),
+            "alpha",
+            format!("{}/internal/service-token", server.uri()),
+            sa.to_string_lossy().to_string(),
+        ),
+        Arc::new(NoMetrics),
+    )
+    .unwrap();
+    (
+        server,
+        KickSlots::new(ResolverKickCredentials::new(resolver)),
+        TestSa(sa),
+    )
+}
+
+async fn resolves(hub: &MockServer) -> usize {
+    hub.received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().ends_with("/resolve"))
+        .count()
 }
 
 struct Rewrite {
@@ -95,17 +143,14 @@ impl TemplateBuilder for Rewrite {
     }
 }
 
-type Exec = SenderExecutor<
-    Rewrite,
-    KickSlots,
-    CachedFlagGate,
-    svc_ingest::connector::sender_exec::NoDuties,
->;
+type Exec =
+    SenderExecutor<Rewrite, Slots, CachedFlagGate, svc_ingest::connector::sender_exec::NoDuties>;
 
 struct Rig {
     exec: Exec,
     server: MockServer,
-    asked: AskLog,
+    hub: MockServer,
+    _sa: TestSa,
     _wire: WireRig,
 }
 
@@ -140,22 +185,21 @@ async fn rig() -> Rig {
         },
         vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
     );
-    let asked = Arc::new(Mutex::new(Vec::new()));
+    let (hub, slots, sa) = hub().await;
     let exec = SenderExecutor::new(
         Rewrite {
             inner: WireTemplateBuilder::new(Arc::clone(&wire.link), Arc::clone(&wire.registry)),
             base: server.uri(),
         },
-        KickSlots {
-            asked: Arc::clone(&asked),
-        },
+        slots,
         CachedFlagGate(true),
         cfg,
     );
     Rig {
         exec,
         server,
-        asked,
+        hub,
+        _sa: sa,
         _wire: wire,
     }
 }
@@ -207,10 +251,13 @@ async fn chat_send_reaches_the_kick_api_with_the_host_resolved_token_and_no_dest
         serde_json::json!({"content": "hello kick", "type": "bot"}),
         "no channel/broadcaster field is ever sent"
     );
-    // The token was resolved by the host, per send, only under the `token` handle.
+    // The token was resolved by the host from hub-api, once for this one send.
+    assert_eq!(resolves(&rig.hub).await, 1);
+    rig.exec.execute(&req(&action)).await.expect("second send");
     assert_eq!(
-        *rig.asked.lock().unwrap(),
-        vec![(Some(COMMUNITY), vec!["token".to_string()])]
+        resolves(&rig.hub).await,
+        2,
+        "resolved fresh per send, never cached"
     );
 }
 
@@ -279,6 +326,11 @@ async fn hostile_input_and_unowned_channels_send_nothing() {
     assert!(
         rig.server.received_requests().await.unwrap().is_empty(),
         "zero requests may reach Kick"
+    );
+    assert_eq!(
+        resolves(&rig.hub).await,
+        0,
+        "no credential is resolved for a refused send"
     );
 }
 

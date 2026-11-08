@@ -5,6 +5,11 @@
 //! configured or hardcoded and never comes from a request; this module is the only place that
 //! obtains it.
 //!
+//! The key is GLOBAL: a valid signature proves "this came from Kick", not which community it is
+//! for. Binding a delivery to ONE connection is the scheme's job (`Scheme::Kick` carries the
+//! connection's broadcaster id and refuses any other, see `kick_webhook`); this module never
+//! decides that.
+//!
 //! ```text
 //!  webhook route (Scheme::Kick)
 //!        |  WebhookSecretSource::resolve_for(scheme)            -> KickKeySecrets -> KickKeyCache::keys
@@ -13,22 +18,29 @@
 //! ```
 //!
 //! * **TTL** ([`DEFAULT_TTL`]): a cached key is served until it ages out, then re-fetched.
-//! * **Rotation overlap**: when a fetch returns a DIFFERENT key, the old one is kept as
-//!   `previous` and both are offered (`Prepared::verify_any`), so deliveries signed just before the
-//!   switch still verify.
+//! * **Rotation overlap, bounded**: when a fetch returns a DIFFERENT key, the old one is kept as
+//!   `previous` for [`DEFAULT_OVERLAP`] only (the webhook replay window plus a margin: exactly as
+//!   long as an in-flight delivery signed with it can still be inside the window). After that it
+//!   is dropped, so a retired (possibly compromised) key stops verifying.
 //! * **Forced refresh**: a signature mismatch triggers ONE re-fetch (picks up a rotation inside
-//!   the TTL). Fetches are rate-limited to one per [`MIN_REFRESH`] whatever the trigger, so a
-//!   forged-signature flood cannot amplify into Kick API calls.
-//! * **Outage**: a failed fetch serves the stale key for up to [`MAX_STALE`] (a Kick API blip never
-//!   drops deliveries); with no usable key at all the route answers unavailable (503, Kick retries).
+//!   the TTL).
+//! * **Spacing is always applied**: at most one fetch attempt per [`MIN_REFRESH`], whatever the
+//!   trigger and whether or not a key is cached (a never-fetched cache inside the window answers
+//!   unavailable, it does not hammer Kick), so a forged-signature flood or an outage cannot
+//!   amplify into Kick API calls.
+//! * **No I/O under a lock**: the state lock is held only for bookkeeping. A fetch runs outside it
+//!   behind a single-flight gate; every concurrent caller is answered immediately from the cached
+//!   key (stale is fine inside [`MAX_STALE`]) or `Unavailable`, never queued behind the network.
+//! * **Outage**: a failed fetch serves the stale key for up to [`MAX_STALE`]; with no usable key
+//!   the route answers unavailable (503, Kick retries).
 //!
 //! The key is public, so nothing here is secret, but the fetch URL is a host constant and the
 //! response is size-capped and validated as an RSA key before it is ever cached.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use connection_resolver::{ConnectionRef, SecretString};
+use connection_resolver::SecretString;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
@@ -38,10 +50,12 @@ use super::webhook_verify::Scheme;
 
 /// How long a fetched key is served before it is re-fetched.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(3600);
-/// Minimum spacing between key fetches (amplification bound).
+/// Minimum spacing between key fetch attempts (amplification bound).
 pub const MIN_REFRESH: Duration = Duration::from_secs(30);
 /// How long a stale key may keep verifying while Kick's key endpoint is unreachable.
 pub const MAX_STALE: Duration = Duration::from_secs(24 * 3600);
+/// How long a rotated-out key keeps verifying: the 300 s webhook replay window plus a 60 s margin.
+pub const DEFAULT_OVERLAP: Duration = Duration::from_secs(360);
 /// Largest accepted key-endpoint response body.
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 /// Bound on the whole key fetch.
@@ -153,38 +167,57 @@ struct Entry {
     fetched: Instant,
 }
 
+struct Previous {
+    pem: String,
+    rotated_out_at: Instant,
+}
+
 #[derive(Default)]
 struct State {
     current: Option<Entry>,
-    previous: Option<String>,
+    previous: Option<Previous>,
     last_attempt: Option<Instant>,
 }
 
 impl State {
+    /// Drops a rotated-out key once its overlap is over.
+    fn expire_previous(&mut self, now: Instant, overlap: Duration) {
+        if self
+            .previous
+            .as_ref()
+            .is_some_and(|p| now.saturating_duration_since(p.rotated_out_at) >= overlap)
+        {
+            self.previous = None;
+        }
+    }
+
     fn joined(&self) -> Option<String> {
         let cur = self.current.as_ref()?;
         Some(match &self.previous {
-            Some(prev) => format!("{}\n{}", cur.pem, prev),
+            Some(prev) => format!("{}\n{}", cur.pem, prev.pem),
             None => cur.pem.clone(),
         })
     }
 }
 
-/// TTL + rotation cache over a [`KickKeyFetch`]. One async lock serializes fetches (single
-/// flight): concurrent deliveries share one fetch instead of stampeding Kick.
+/// TTL + rotation cache over a [`KickKeyFetch`]. The state lock is a plain mutex held only for
+/// bookkeeping (never across an await); the fetch runs behind a single-flight gate.
 pub struct KickKeyCache<F: KickKeyFetch> {
     fetch: F,
     ttl: Duration,
     min_refresh: Duration,
     max_stale: Duration,
-    state: Mutex<State>,
+    overlap: Duration,
+    state: StdMutex<State>,
+    gate: Mutex<()>,
 }
 
 impl<F: KickKeyFetch> KickKeyCache<F> {
-    /// A cache with the production bounds ([`DEFAULT_TTL`], [`MIN_REFRESH`], [`MAX_STALE`]).
+    /// A cache with the production bounds ([`DEFAULT_TTL`], [`MIN_REFRESH`], [`MAX_STALE`],
+    /// [`DEFAULT_OVERLAP`]).
     #[must_use]
     pub fn new(fetch: F) -> Self {
-        Self::with_bounds(fetch, DEFAULT_TTL, MIN_REFRESH, MAX_STALE)
+        Self::with_bounds(fetch, DEFAULT_TTL, MIN_REFRESH, MAX_STALE, DEFAULT_OVERLAP)
     }
 
     /// A cache with explicit bounds (tests).
@@ -194,20 +227,28 @@ impl<F: KickKeyFetch> KickKeyCache<F> {
         ttl: Duration,
         min_refresh: Duration,
         max_stale: Duration,
+        overlap: Duration,
     ) -> Self {
         Self {
             fetch,
             ttl,
             min_refresh,
             max_stale,
-            state: Mutex::new(State::default()),
+            overlap,
+            state: StdMutex::new(State::default()),
+            gate: Mutex::new(()),
         }
+    }
+
+    fn state(&self) -> MutexGuard<'_, State> {
+        // The state is plain data; a panic elsewhere cannot leave it half-updated.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The PEM(s) to verify against: the cached key, re-fetched when older than the TTL.
     ///
     /// # Errors
-    /// [`SecretError::Unavailable`] when no usable key can be had (never cached, fetch failing).
+    /// [`SecretError::Unavailable`] when no usable key can be had.
     pub async fn keys(&self) -> Result<String, SecretError> {
         self.load(false).await
     }
@@ -222,40 +263,58 @@ impl<F: KickKeyFetch> KickKeyCache<F> {
     }
 
     async fn load(&self, force: bool) -> Result<String, SecretError> {
-        let mut st = self.state.lock().await;
         let now = Instant::now();
-        let age = st
-            .current
-            .as_ref()
-            .map(|e| now.saturating_duration_since(e.fetched));
-        let fresh = age.is_some_and(|a| a < self.ttl);
-        let may_fetch = st
-            .last_attempt
-            .is_none_or(|t| now.saturating_duration_since(t) >= self.min_refresh);
-        if fresh && !(force && may_fetch) {
-            return st.joined().ok_or(SecretError::Unavailable);
-        }
-        if may_fetch || st.current.is_none() {
-            st.last_attempt = Some(now);
-            match self.fetch.fetch().await {
-                Ok(pem) => {
-                    let changed = st.current.as_ref().is_some_and(|c| c.pem != pem);
-                    if changed {
-                        st.previous = st.current.take().map(|c| c.pem);
-                        tracing::info!(
-                            "kick webhook public key rotated; previous key kept for overlap"
-                        );
-                    }
-                    st.current = Some(Entry { pem, fetched: now });
-                    return st.joined().ok_or(SecretError::Unavailable);
-                }
-                Err(e) => tracing::warn!(error = %e, "kick public key fetch failed"),
+        // Bookkeeping only, under the plain lock: what can be served right now, and whether this
+        // caller wins the right to fetch (claimed by stamping `last_attempt` BEFORE the fetch, so
+        // concurrent callers inside the spacing window cannot also fetch).
+        let (servable, want_fetch) = {
+            let mut st = self.state();
+            st.expire_previous(now, self.overlap);
+            let age = st
+                .current
+                .as_ref()
+                .map(|e| now.saturating_duration_since(e.fetched));
+            let fresh = age.is_some_and(|a| a < self.ttl);
+            let may_fetch = st
+                .last_attempt
+                .is_none_or(|t| now.saturating_duration_since(t) >= self.min_refresh);
+            let servable = age
+                .filter(|a| *a < self.max_stale)
+                .and_then(|_| st.joined());
+            let want_fetch = may_fetch && (!fresh || force);
+            if want_fetch {
+                st.last_attempt = Some(now);
             }
+            (servable, want_fetch)
+        };
+        if !want_fetch {
+            return servable.ok_or(SecretError::Unavailable);
         }
-        // Fetch failed or was rate-limited: a not-too-stale key keeps verifying.
-        match age {
-            Some(a) if a < self.max_stale => st.joined().ok_or(SecretError::Unavailable),
-            _ => Err(SecretError::Unavailable),
+        // Single flight: a loser answers from what it has instead of queueing behind the network.
+        let Ok(_gate) = self.gate.try_lock() else {
+            return servable.ok_or(SecretError::Unavailable);
+        };
+        match self.fetch.fetch().await {
+            Ok(pem) => {
+                let now = Instant::now();
+                let mut st = self.state();
+                if st.current.as_ref().is_some_and(|c| c.pem != pem) {
+                    st.previous = st.current.take().map(|c| Previous {
+                        pem: c.pem,
+                        rotated_out_at: now,
+                    });
+                    tracing::info!(
+                        "kick webhook public key rotated; previous key kept for a bounded overlap"
+                    );
+                }
+                st.current = Some(Entry { pem, fetched: now });
+                st.expire_previous(now, self.overlap);
+                st.joined().ok_or(SecretError::Unavailable)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "kick public key fetch failed");
+                servable.ok_or(SecretError::Unavailable)
+            }
         }
     }
 }
@@ -279,16 +338,19 @@ impl<S: WebhookSecretSource, F: KickKeyFetch> KickKeySecrets<S, F> {
 impl<S: WebhookSecretSource, F: KickKeyFetch + 'static> WebhookSecretSource
     for KickKeySecrets<S, F>
 {
-    fn resolve(&self, secret_ref: ConnectionRef) -> BoxFut<'_, Result<SecretString, SecretError>> {
+    fn resolve(
+        &self,
+        secret_ref: connection_resolver::ConnectionRef,
+    ) -> BoxFut<'_, Result<SecretString, SecretError>> {
         self.inner.resolve(secret_ref)
     }
 
     fn resolve_for<'a>(
         &'a self,
         scheme: &'a Scheme,
-        secret_ref: ConnectionRef,
+        secret_ref: connection_resolver::ConnectionRef,
     ) -> BoxFut<'a, Result<SecretString, SecretError>> {
-        if !matches!(scheme, Scheme::Kick) {
+        if !matches!(scheme, Scheme::Kick(_)) {
             return self.inner.resolve_for(scheme, secret_ref);
         }
         Box::pin(async move { self.cache.keys().await.map(SecretString::new) })
@@ -297,9 +359,9 @@ impl<S: WebhookSecretSource, F: KickKeyFetch + 'static> WebhookSecretSource
     fn resolve_refreshed_for<'a>(
         &'a self,
         scheme: &'a Scheme,
-        secret_ref: ConnectionRef,
+        secret_ref: connection_resolver::ConnectionRef,
     ) -> BoxFut<'a, Result<SecretString, SecretError>> {
-        if !matches!(scheme, Scheme::Kick) {
+        if !matches!(scheme, Scheme::Kick(_)) {
             return self.inner.resolve_refreshed_for(scheme, secret_ref);
         }
         Box::pin(async move { self.cache.refreshed().await.map(SecretString::new) })
@@ -311,7 +373,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex as StdMutex;
+
+    use connection_resolver::ConnectionRef;
 
     use super::*;
     use crate::connector::wix_jwt::wix_sign::generate;
@@ -353,9 +416,10 @@ mod tests {
     const TTL: Duration = Duration::from_secs(100);
     const MIN: Duration = Duration::from_secs(10);
     const STALE: Duration = Duration::from_secs(1000);
+    const OVERLAP: Duration = Duration::from_secs(60);
 
     fn cache(s: &Arc<Script>) -> KickKeyCache<Arc<Script>> {
-        KickKeyCache::with_bounds(Arc::clone(s), TTL, MIN, STALE)
+        KickKeyCache::with_bounds(Arc::clone(s), TTL, MIN, STALE, OVERLAP)
     }
 
     #[tokio::test(start_paused = true)]
@@ -372,17 +436,26 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn rotation_offers_the_new_key_first_and_keeps_the_old_one_for_overlap() {
+    async fn rotation_offers_the_new_key_first_and_keeps_the_old_one_for_the_overlap_only() {
         let s = Script::new(vec![Ok(pem(1)), Ok(pem(2)), Ok(pem(3))]);
         let c = cache(&s);
         c.keys().await.unwrap();
         tokio::time::advance(MIN).await;
         let got = c.refreshed().await.unwrap();
         assert_eq!(got, format!("{}\n{}", pem(2), pem(1)));
-        // A second rotation drops the oldest: only current + one previous are offered.
+        // Inside the overlap the retired key still verifies ...
+        tokio::time::advance(OVERLAP - Duration::from_secs(1)).await;
+        assert_eq!(c.keys().await.unwrap(), format!("{}\n{}", pem(2), pem(1)));
+        // ... and once the overlap is over it is GONE (no fetch needed to drop it).
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(c.keys().await.unwrap(), pem(2));
+        assert_eq!(s.calls(), 2);
+        // A second rotation keeps only the immediately previous key.
         tokio::time::advance(MIN).await;
-        let got = c.refreshed().await.unwrap();
-        assert_eq!(got, format!("{}\n{}", pem(3), pem(2)));
+        assert_eq!(
+            c.refreshed().await.unwrap(),
+            format!("{}\n{}", pem(3), pem(2))
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -406,6 +479,24 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn spacing_applies_when_nothing_is_cached_so_an_outage_is_not_a_fetch_storm() {
+        let s = Script::new(vec![Err(KeyFetchError::Unavailable), Ok(pem(1))]);
+        let c = cache(&s);
+        for _ in 0..50 {
+            assert_eq!(c.keys().await.unwrap_err(), SecretError::Unavailable);
+            assert_eq!(c.refreshed().await.unwrap_err(), SecretError::Unavailable);
+        }
+        assert_eq!(
+            s.calls(),
+            1,
+            "one attempt per MIN_REFRESH window, cached or not"
+        );
+        tokio::time::advance(MIN).await;
+        assert_eq!(c.keys().await.unwrap(), pem(1));
+        assert_eq!(s.calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_failed_fetch_serves_the_stale_key_until_max_stale_then_goes_unavailable() {
         let s = Script::new(vec![Ok(pem(1))]);
         let c = cache(&s);
@@ -416,15 +507,65 @@ mod tests {
         assert_eq!(c.keys().await.unwrap_err(), SecretError::Unavailable);
     }
 
+    /// A fetcher that parks until released, to prove nobody else waits behind the network.
+    struct Slow {
+        release: tokio::sync::Notify,
+        started: tokio::sync::Notify,
+        calls: AtomicUsize,
+    }
+
+    impl KickKeyFetch for Arc<Slow> {
+        fn fetch(&self) -> BoxFut<'_, Result<String, KeyFetchError>> {
+            Box::pin(async move {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return Ok(pem(1));
+                }
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok(pem(2))
+            })
+        }
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn with_no_key_ever_fetched_a_failure_is_unavailable_and_retries_after_the_window() {
-        let s = Script::new(vec![Err(KeyFetchError::Unavailable), Ok(pem(1))]);
-        let c = cache(&s);
-        assert_eq!(c.keys().await.unwrap_err(), SecretError::Unavailable);
+    async fn the_fetch_runs_outside_the_state_lock_and_readers_are_never_queued_behind_it() {
+        let slow = Arc::new(Slow {
+            release: tokio::sync::Notify::new(),
+            started: tokio::sync::Notify::new(),
+            calls: AtomicUsize::new(0),
+        });
+        let c = Arc::new(KickKeyCache::with_bounds(
+            Arc::clone(&slow),
+            TTL,
+            MIN,
+            STALE,
+            OVERLAP,
+        ));
+        assert_eq!(c.keys().await.unwrap(), pem(1));
+        tokio::time::advance(TTL + MIN).await;
+        // The refresh parks inside the fetch ...
+        let refresher = {
+            let c = Arc::clone(&c);
+            tokio::spawn(async move { c.keys().await })
+        };
+        slow.started.notified().await;
+        // ... while concurrent readers are answered at once from the (stale) cached key.
+        for _ in 0..5 {
+            let got = tokio::time::timeout(Duration::from_secs(1), c.keys())
+                .await
+                .expect("a reader blocked behind the in-flight key fetch");
+            assert_eq!(got.unwrap(), pem(1));
+        }
         assert_eq!(
-            c.keys().await.unwrap(),
-            pem(1),
-            "nothing cached: the next call may fetch"
+            slow.calls.load(Ordering::SeqCst),
+            2,
+            "single flight: one fetch"
+        );
+        slow.release.notify_one();
+        assert_eq!(
+            refresher.await.unwrap().unwrap(),
+            format!("{}\n{}", pem(2), pem(1))
         );
     }
 
@@ -443,7 +584,8 @@ mod tests {
             community_id: 7,
             connection_id: 12,
         };
-        let k = src.resolve_for(&Scheme::kick(), r).await.unwrap();
+        let kick = Scheme::kick("42");
+        let k = src.resolve_for(&kick, r).await.unwrap();
         assert_eq!(k.expose(), pem(1));
         let other = src
             .resolve_for(&Scheme::twitch_eventsub(), r)
@@ -457,7 +599,7 @@ mod tests {
         assert_eq!(other.expose(), "inner");
         assert_eq!(s.calls(), 1, "non-Kick schemes never touch the key cache");
         tokio::time::advance(MIN).await;
-        let k = src.resolve_refreshed_for(&Scheme::kick(), r).await.unwrap();
+        let k = src.resolve_refreshed_for(&kick, r).await.unwrap();
         assert_eq!(k.expose(), format!("{}\n{}", pem(2), pem(1)));
     }
 
