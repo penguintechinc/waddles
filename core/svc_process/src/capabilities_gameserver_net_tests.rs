@@ -368,6 +368,72 @@ async fn host_rejects_smuggled_commands_and_unregistered_servers() {
     );
 }
 
+// regression: the cap must count a session that is out of the map for in-flight I/O
+#[tokio::test]
+async fn session_cap_holds_while_a_session_is_out_of_the_table_for_io() {
+    let port = rcon_server().await;
+    let f = fixture(CORE_APP, &["gameserver.net"], true, true, port);
+    let open = || {
+        call(
+            CORE_APP,
+            "gameserver_net.tcp_open",
+            serde_json::json!({"server": SERVER}),
+        )
+    };
+    let h1 = f.caps.handle(open()).await.unwrap()["handle"]
+        .as_u64()
+        .unwrap();
+    let h2 = f.caps.handle(open()).await.unwrap()["handle"]
+        .as_u64()
+        .unwrap();
+    // Simulate both sessions mid-I/O (taken out of the map): map.len() would now be 0.
+    let s1 = f.caps.take_session(h1).await.unwrap();
+    let s2 = f.caps.take_session(h2).await.unwrap();
+    let err = f.caps.handle(open()).await.unwrap_err();
+    assert_eq!(
+        (err.code.as_str(), err.message.as_str()),
+        ("denied", "too_many_connections")
+    );
+    f.caps.put_session(h1, s1).await;
+    f.caps.put_session(h2, s2).await;
+    let err = f.caps.handle(open()).await.unwrap_err();
+    assert_eq!(err.message, "too_many_connections");
+    // closing frees the permit; a failed open frees its permit too
+    f.caps
+        .handle(call(
+            CORE_APP,
+            "gameserver_net.tcp_close",
+            serde_json::json!({"handle": h1}),
+        ))
+        .await
+        .unwrap();
+    f.caps.handle(open()).await.unwrap();
+    f.caps
+        .handle(call(
+            CORE_APP,
+            "gameserver_net.tcp_close",
+            serde_json::json!({"handle": h2}),
+        ))
+        .await
+        .unwrap();
+    let bad = || {
+        call(
+            CORE_APP,
+            "gameserver_net.tcp_open",
+            serde_json::json!({"server": "00000000-0000-0000-0000-000000000000"}),
+        )
+    };
+    // (the gate quota is 10 opens/s: keep the total number of opens in this test below it)
+    for _ in 0..2 {
+        let e = f.caps.handle(bad()).await.unwrap_err();
+        assert_eq!(
+            e.message, "not_registered",
+            "a failed open must not leak a permit"
+        );
+    }
+    f.caps.handle(open()).await.unwrap();
+}
+
 #[tokio::test]
 async fn per_invocation_session_cap_is_enforced() {
     let port = rcon_server().await;

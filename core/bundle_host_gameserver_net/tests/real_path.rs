@@ -164,8 +164,8 @@ async fn rcon_round_trip_host_logs_in_and_guest_never_sees_the_password() {
     );
     assert!(!rendered.contains("127.0.0.1"), "address in audit");
     assert!(events.iter().any(|e| matches!(e,
-        AuditEvent::Command { command, outcome, server, .. }
-            if command == "status" && outcome == "ok" && server == SERVER)));
+        AuditEvent::Command { verb, len, outcome, server, .. }
+            if verb == "status" && *len == 6 && outcome == "ok" && server == SERVER)));
     assert!(events.iter().any(
         |e| matches!(e, AuditEvent::Open { op: "rcon_open_source", outcome, .. } if outcome == "ok")
     ));
@@ -246,6 +246,59 @@ async fn host_rejects_smuggled_commands_oversize_and_reauth_on_the_wire() {
     );
     assert!(audit.0.lock().unwrap().iter().any(|e| matches!(e,
         AuditEvent::Command { outcome, .. } if outcome == "denied:command_rejected")));
+}
+
+// regression: the audit log must never carry raw command text (passwords / PII in arguments)
+#[tokio::test]
+async fn audit_never_records_raw_command_arguments() {
+    let (addr, _) = rcon_server(PASSWORD, vec![]).await;
+    let c = GameNetConfig {
+        rcon_max_out: 4096,
+        ..cfg()
+    };
+    let (net, audit) = net_with(addr, PASSWORD, c);
+    let mut s = net
+        .rcon_open(&SCOPE, SERVER, Scheme::SourceRcon)
+        .await
+        .unwrap();
+    for cmd in [
+        "rcon_password hunter2-new",
+        "sv_password lobbyp4ss",
+        "say my pin is 424242",
+        "ban someone@example.com",
+        "frobnicate secret-argument",
+    ] {
+        s.write_all(&exec(1, cmd)).await.unwrap();
+    }
+    drop(s);
+    let events = audit.0.lock().unwrap();
+    let rendered = format!("{events:?}");
+    for leak in [
+        "hunter2-new",
+        "lobbyp4ss",
+        "424242",
+        "someone@example.com",
+        "secret-argument",
+    ] {
+        assert!(
+            !rendered.contains(leak),
+            "{leak} leaked into audit: {rendered}"
+        );
+    }
+    let verbs: Vec<(&str, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            AuditEvent::Command { verb, digest, .. } => Some((verb.as_str(), digest.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(verbs.len(), 5);
+    assert_eq!(verbs[0], ("rcon_password", "-"));
+    assert_eq!(verbs[1], ("sv_password", "-"));
+    assert_eq!(verbs[2].0, "say");
+    assert_eq!(verbs[3].0, "ban");
+    assert_eq!(verbs[4].0, "other");
+    assert!(verbs[2..].iter().all(|(_, d)| d.len() == 16));
 }
 
 #[tokio::test]

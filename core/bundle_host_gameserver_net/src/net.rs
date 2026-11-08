@@ -6,7 +6,7 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
-use crate::audit::{AuditEvent, AuditSink};
+use crate::audit::{summarize, AuditEvent, AuditSink};
 use crate::config::GameNetConfig;
 use crate::directory::{Scope, ServerDirectory, ServerTarget};
 use crate::error::NetError;
@@ -39,6 +39,8 @@ pub struct GameNet {
     audit: Arc<dyn AuditSink>,
     cfg: GameNetConfig,
     limits: Limits,
+    /// Per-process random key for audit digests (never leaves the process).
+    salt: Arc<std::hash::RandomState>,
 }
 
 impl GameNet {
@@ -54,6 +56,7 @@ impl GameNet {
             audit,
             cfg,
             limits,
+            salt: Arc::new(std::hash::RandomState::new()),
         }
     }
 
@@ -140,6 +143,7 @@ impl GameNet {
             bytes_in: 0,
             bytes_out: 0,
             audit: Arc::clone(&self.audit),
+            salt: Arc::clone(&self.salt),
             _permits: permits,
         })
     }
@@ -168,6 +172,7 @@ impl GameNet {
             bytes_in: 0,
             bytes_out: 0,
             audit: Arc::clone(&self.audit),
+            salt: Arc::clone(&self.salt),
             _permits: permits,
         })
     }
@@ -285,6 +290,7 @@ pub struct Session {
     bytes_out: usize,
     audit: Arc<dyn AuditSink>,
     _permits: Permits,
+    salt: Arc<std::hash::RandomState>,
 }
 
 impl Session {
@@ -301,7 +307,9 @@ impl Session {
                     self.audit.record(&AuditEvent::Command {
                         scope: self.scope,
                         server: self.server_id.clone(),
-                        command: String::new(),
+                        verb: "rejected".to_string(),
+                        len: bytes.len(),
+                        digest: "-".to_string(),
                         outcome: "denied:command_rejected".to_string(),
                     });
                     return Err(e);
@@ -315,10 +323,13 @@ impl Session {
                 Err(_) => "timeout",
             };
             for command in summary.commands {
+                let s = summarize(&command, &self.salt);
                 self.audit.record(&AuditEvent::Command {
                     scope: self.scope,
                     server: self.server_id.clone(),
-                    command,
+                    verb: s.verb,
+                    len: s.len,
+                    digest: s.digest,
                     outcome: outcome.to_string(),
                 });
             }

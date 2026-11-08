@@ -16,7 +16,7 @@ use base64::Engine as _;
 use bundle_capability_gate::{AppScopedResource, PermissionId, ResourceRef};
 use bundle_host_gameserver_net::{GameNet, NetError, Scheme, Scope, Session};
 use penguin_bundle_host::wire::{HostCallBody, HostResultError};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use bundle_host_kv::KvBackend;
 
@@ -45,10 +45,30 @@ pub struct GameServerNetWiring {
 
 /// One invocation's open sessions, keyed by an opaque handle. Dropped (closing every socket)
 /// when the invocation's [`StageCapabilities`] is dropped.
-#[derive(Default)]
+///
+/// The per-invocation cap is a semaphore: a permit is taken BEFORE a session is opened and stored
+/// alongside it, so it is held for the session's whole lifetime -- including while the session is
+/// temporarily out of the map for I/O (a `map.len()` check would undercount exactly then).
 pub(super) struct SessionTable {
     next: AtomicU64,
-    map: Mutex<HashMap<u64, Session>>,
+    slots: Arc<Semaphore>,
+    map: Mutex<HashMap<u64, Slot>>,
+}
+
+/// An open session plus the cap permit that pays for it.
+pub(super) struct Slot {
+    session: Session,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Default for SessionTable {
+    fn default() -> Self {
+        Self {
+            next: AtomicU64::new(0),
+            slots: Arc::new(Semaphore::new(MAX_SESSIONS_PER_INVOCATION)),
+            map: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 fn net_error_to_host(err: NetError) -> HostResultError {
@@ -155,17 +175,17 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
                     "minecraft-rcon" => Scheme::MinecraftRcon,
                     _ => return Err(denied("invalid_args", "unknown scheme")),
                 };
-                self.reserve_slot().await?;
+                let permit = self.reserve_slot()?;
                 let r = wiring
                     .net
                     .rcon_open(&scope, str_arg(args, "server")?, scheme)
                     .await;
-                self.store_session(r).await
+                self.store_session(r, permit).await
             }
             "tcp_open" => {
-                self.reserve_slot().await?;
+                let permit = self.reserve_slot()?;
                 let r = wiring.net.tcp_open(&scope, str_arg(args, "server")?).await;
-                self.store_session(r).await
+                self.store_session(r, permit).await
             }
             "udp_exchange" => {
                 let payload = bytes_arg(args, "payload_b64")?;
@@ -184,9 +204,9 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             "tcp_write" => {
                 let handle = handle_arg(args)?;
                 let bytes = bytes_arg(args, "bytes_b64")?;
-                let mut session = self.take_session(handle).await?;
-                let r = session.write_all(&bytes).await;
-                self.put_session(handle, session).await;
+                let mut slot = self.take_session(handle).await?;
+                let r = slot.session.write_all(&bytes).await;
+                self.put_session(handle, slot).await;
                 r.map_err(net_error_to_host)?;
                 Ok(serde_json::json!({}))
             }
@@ -197,9 +217,9 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
                     .and_then(|v| v.as_u64())
                     .and_then(|v| u32::try_from(v).ok())
                     .ok_or_else(|| denied("invalid_args", "max must be a u32"))?;
-                let mut session = self.take_session(handle).await?;
-                let r = session.read(max).await;
-                self.put_session(handle, session).await;
+                let mut slot = self.take_session(handle).await?;
+                let r = slot.session.read(max).await;
+                self.put_session(handle, slot).await;
                 let bytes = r.map_err(net_error_to_host)?;
                 Ok(serde_json::json!({ "bytes_b64": B64.encode(bytes) }))
             }
@@ -211,26 +231,34 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
         }
     }
 
-    /// Fails closed when this invocation already holds the maximum number of sessions.
-    async fn reserve_slot(&self) -> Result<(), HostResultError> {
-        if self.gs_sessions.map.lock().await.len() >= MAX_SESSIONS_PER_INVOCATION {
-            return Err(denied("denied", "too_many_connections"));
-        }
-        Ok(())
+    /// Takes one of this invocation's session permits or fails closed. The permit lives as long as
+    /// the session it pays for (dropped on close, failed open, or invocation end).
+    fn reserve_slot(&self) -> Result<OwnedSemaphorePermit, HostResultError> {
+        Arc::clone(&self.gs_sessions.slots)
+            .try_acquire_owned()
+            .map_err(|_| denied("denied", "too_many_connections"))
     }
 
     async fn store_session(
         &self,
         opened: Result<Session, NetError>,
+        permit: OwnedSemaphorePermit,
     ) -> Result<serde_json::Value, HostResultError> {
         let session = opened.map_err(net_error_to_host)?;
         let handle = self.gs_sessions.next.fetch_add(1, Ordering::Relaxed) + 1;
-        self.gs_sessions.map.lock().await.insert(handle, session);
+        self.gs_sessions.map.lock().await.insert(
+            handle,
+            Slot {
+                session,
+                _permit: permit,
+            },
+        );
         Ok(serde_json::json!({ "handle": handle }))
     }
 
-    /// Takes a session out of the table for the duration of one I/O (no lock held across it).
-    async fn take_session(&self, handle: u64) -> Result<Session, HostResultError> {
+    /// Takes a session (and its permit) out of the table for the duration of one I/O (no lock held
+    /// across it). The permit travels with it, so the cap still counts the session meanwhile.
+    async fn take_session(&self, handle: u64) -> Result<Slot, HostResultError> {
         self.gs_sessions
             .map
             .lock()
@@ -239,8 +267,8 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             .ok_or_else(|| denied("invalid_args", "unknown or busy session handle"))
     }
 
-    async fn put_session(&self, handle: u64, session: Session) {
-        self.gs_sessions.map.lock().await.insert(handle, session);
+    async fn put_session(&self, handle: u64, slot: Slot) {
+        self.gs_sessions.map.lock().await.insert(handle, slot);
     }
 }
 
