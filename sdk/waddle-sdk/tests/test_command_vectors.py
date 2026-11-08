@@ -44,7 +44,9 @@ def test_fixture_is_non_empty() -> None:
 
 @pytest.mark.parametrize("case", _VECTORS["parse_command"], ids=lambda c: repr(c["text"])[:60])
 def test_parse_command_vectors(case: dict) -> None:
-    spec = CommandSpec(name=case["spec"]["name"], sub_modules=frozenset(case["spec"]["sub_modules"]))
+    spec = CommandSpec(
+        name=case["spec"]["name"], sub_modules=frozenset(case["spec"]["sub_modules"])
+    )
     if "error" in case:
         with pytest.raises(CommandUsageError) as exc:
             parse_command(case["text"], spec)
