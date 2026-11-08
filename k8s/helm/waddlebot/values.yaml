@@ -207,7 +207,7 @@ global:
 # falls back to global.imageTag, so unset = unchanged behavior for every environment.
 # Applies ONLY to workloads pulling the `hub-api` image repository: the hub-api Deployment
 # + role-sync / event-sync-reconcile / odoo-sync / bundle-signing-reconciler CronJobs + the
-# bundle-signing-backfill hook Job. The SEPARATE images (core-bundle-seeder, migrations,
+# bundle-signing-backfill hook Job. The SEPARATE images (seeder, migrations,
 # svc-*, bundle-executor, hub-webui, ...) are NOT affected -- they stay on global.imageTag.
 # (Distinct from `pipeline.hubApi`, which holds hub-api's port/replicas/resources.)
 hubApi:
