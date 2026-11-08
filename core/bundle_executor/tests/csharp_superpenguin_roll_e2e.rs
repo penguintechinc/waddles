@@ -104,6 +104,13 @@ impl StageModel {
             }),
         };
         match (capability, op) {
+            // Optional sub-feature flags (fishing tournaments) are modelled OFF; the app flag below is the one under test.
+            (CapabilityKind::Flags, "enabled")
+                if args["key"].as_str().is_some_and(|k| k.ends_with("-tournaments")) =>
+            {
+                assert_eq!(args["default_value"], false, "sub-feature flags must default OFF");
+                ok(serde_json::json!({ "enabled": false }))
+            }
             (CapabilityKind::Flags, "enabled") => {
                 assert_eq!(
                     args["key"], self.flag_key,
@@ -590,9 +597,19 @@ async fn csharp_port_matrix_executes_commands_and_replays_through_real_executor(
         ("first", "!first"),
         ("roulette", "!roulette 10"),
         ("duel", "!duel 22222222-2222-4222-8222-222222222222 10"),
+        ("fishing", "!fish 3"),
     ];
+    // SUPERPENGUIN_ONLY=<game> runs a single port (fast iteration); unset = every port, and partial coverage fails.
+    let only = std::env::var("SUPERPENGUIN_ONLY").ok();
+    let expected = cases
+        .iter()
+        .filter(|(g, _)| only.as_deref().is_none_or(|o| o == *g))
+        .count();
     let mut examined = 0;
     for (game, command) in cases {
+        if only.as_deref().is_some_and(|o| o != game) {
+            continue;
+        }
         let path = std::path::Path::new(&directory).join(format!("superpenguin_{game}.wasm"));
         let wasm = std::fs::read(path).expect("a real built component is required for EVERY port");
         assert!(wasm.len() > 1_000_000);
@@ -642,11 +659,12 @@ async fn csharp_port_matrix_executes_commands_and_replays_through_real_executor(
             runs[1]
                 .calls
                 .iter()
-                .any(|(_, op, _)| op == "economy.wager" || op == "tool.invoke"),
+                .any(|(_, op, _)| op == "economy.wager" || op == "tool.invoke" || (game == "fishing" && op == "set")),
             "{game}: must cross its real economy/service binding"
         );
         examined += 1;
         println!("C# real-executor matrix: {game} PASS");
     }
-    assert_eq!(examined, 6, "zero or partial port coverage must fail");
+    assert_eq!(examined, expected, "zero or partial port coverage must fail");
+    assert!(expected >= 1 && (only.is_some() || expected == 7), "zero or partial port coverage must fail");
 }
