@@ -79,6 +79,39 @@ struct WhepViewerSession {
     pc: Arc<dyn PeerConnection>,
 }
 
+/// Per-pipeline revocation state: a nonce (the process boot nonce until the
+/// counter overflows, then a fresh random one) and a counter. The epoch is
+/// `nonce << EPOCH_COUNTER_BITS | counter`.
+#[derive(Clone, Copy)]
+struct PipelineEpoch {
+    nonce: u64,
+    counter: u64,
+}
+
+impl PipelineEpoch {
+    fn value(self) -> u64 {
+        (self.nonce << EPOCH_COUNTER_BITS) | self.counter
+    }
+
+    /// Advances to a strictly new epoch. At the counter limit it does NOT
+    /// saturate (which would stop invalidating tokens): it takes a fresh nonce
+    /// distinct from the current one and restarts the counter, so every earlier
+    /// token stops matching.
+    fn bump(self) -> Self {
+        if self.counter < (1u64 << EPOCH_COUNTER_BITS) - 1 {
+            return Self {
+                counter: self.counter + 1,
+                ..self
+            };
+        }
+        let mut nonce = random_boot();
+        while nonce == self.nonce {
+            nonce = random_boot();
+        }
+        Self { nonce, counter: 0 }
+    }
+}
+
 /// Bits of the per-pipeline revocation counter inside an epoch; the boot nonce
 /// occupies the bits above.
 pub const EPOCH_COUNTER_BITS: u32 = 24;
@@ -106,7 +139,7 @@ pub struct WhepState {
     /// Per-pipeline token epoch; bumped on unregister/revoke so every older viewer
     /// token (and its sessions) dies at once. Never reset, so a re-registered
     /// pipeline cannot resurrect an old token.
-    epochs: RwLock<HashMap<PipelineId, u64>>,
+    epochs: RwLock<HashMap<PipelineId, PipelineEpoch>>,
     /// Random per-process nonce folded into every epoch: epochs are in-memory, so a
     /// restart must not let a pre-restart (revoked) token match a fresh counter.
     boot: u64,
@@ -158,14 +191,20 @@ impl WhepState {
     /// Current token epoch of a pipeline: boot nonce | revocation counter. A token
     /// minted by another process incarnation never matches.
     pub async fn epoch_of(&self, pipeline_id: PipelineId) -> u64 {
-        let counter = self
-            .epochs
+        self.epochs
             .read()
             .await
             .get(&pipeline_id)
             .copied()
-            .unwrap_or(0);
-        (self.boot << EPOCH_COUNTER_BITS) | counter
+            .unwrap_or(self.initial_epoch())
+            .value()
+    }
+
+    fn initial_epoch(&self) -> PipelineEpoch {
+        PipelineEpoch {
+            nonce: self.boot,
+            counter: 0,
+        }
     }
 
     /// Test/operator override of the boot nonce (truncated to 40 bits).
@@ -179,9 +218,10 @@ impl WhepState {
     pub async fn revoke_viewers(&self, pipeline_id: PipelineId) -> u64 {
         let epoch = {
             let mut e = self.epochs.write().await;
-            let v = e.entry(pipeline_id).or_insert(0);
-            *v = (*v + 1).min((1u64 << EPOCH_COUNTER_BITS) - 1);
-            (self.boot << EPOCH_COUNTER_BITS) | *v
+            let cur = e.get(&pipeline_id).copied().unwrap_or(self.initial_epoch());
+            let next = cur.bump();
+            e.insert(pipeline_id, next);
+            next.value()
         };
         let dead: Vec<Arc<dyn PeerConnection>> = {
             let mut sessions = self.sessions.write().await;
@@ -210,9 +250,7 @@ impl WhepState {
         // Snapshot current epochs first (never hold two locks across an await).
         let current: HashMap<PipelineId, u64> = {
             let e = self.epochs.read().await;
-            e.iter()
-                .map(|(k, v)| (*k, (self.boot << EPOCH_COUNTER_BITS) | *v))
-                .collect()
+            e.iter().map(|(k, v)| (*k, v.value())).collect()
         };
         let dead: Vec<Arc<dyn PeerConnection>> = {
             let mut sessions = self.sessions.write().await;
@@ -222,7 +260,7 @@ impl WhepState {
                     let want = current
                         .get(&s.pipeline_id)
                         .copied()
-                        .unwrap_or(self.boot << EPOCH_COUNTER_BITS);
+                        .unwrap_or(self.initial_epoch().value());
                     s.expires_at <= at || s.epoch != want
                 })
                 .map(|(k, _)| *k)
@@ -892,7 +930,13 @@ mod tests {
             .unwrap();
         assert_eq!(state.sweep().await, 0);
         // Simulate a revoke that bumped the epoch but failed to close sessions.
-        state.epochs.write().await.insert(pid, 5);
+        state.epochs.write().await.insert(
+            pid,
+            PipelineEpoch {
+                nonce: state.boot,
+                counter: 5,
+            },
+        );
         assert_eq!(state.sweep().await, 1);
         assert_eq!(state.viewer_count(pid).await, 0);
     }
@@ -913,5 +957,44 @@ mod tests {
             b.revoke_viewers(pid).await,
             "same counter, different boot"
         );
+    }
+
+    /// Regression: when the counter reaches its limit, a further revoke must still
+    /// invalidate earlier tokens (fresh nonce + counter reset), not saturate.
+    #[tokio::test]
+    async fn revoke_at_the_counter_limit_still_invalidates_old_epochs() {
+        let (state, factory) = test_state().await;
+        let pid = Uuid::new_v4();
+        state.register_fanout(pid, "7", MediaFanouts::new()).await;
+        let max = (1u64 << EPOCH_COUNTER_BITS) - 1;
+        state.epochs.write().await.insert(
+            pid,
+            PipelineEpoch {
+                nonce: state.boot,
+                counter: max,
+            },
+        );
+        let old = state.epoch_of(pid).await;
+        // A session admitted at the limit epoch is live...
+        state
+            .commit_session(Uuid::new_v4(), session(&factory, pid, old).await)
+            .await
+            .unwrap();
+        // ...and a revoke AT the limit must kill it and change the epoch.
+        let new = state.revoke_viewers(pid).await;
+        assert_ne!(new, old, "epoch must change at the counter limit");
+        assert_eq!(state.epoch_of(pid).await, new);
+        assert_eq!(state.viewer_count(pid).await, 0, "live session closed");
+        assert!(
+            state
+                .commit_session(Uuid::new_v4(), session(&factory, pid, old).await)
+                .await
+                .is_err(),
+            "a token minted at the limit epoch is refused after the revoke"
+        );
+        // And the next revoke keeps moving (no saturation afterwards either).
+        let newer = state.revoke_viewers(pid).await;
+        assert_ne!(newer, new);
+        assert_ne!(newer, old);
     }
 }
