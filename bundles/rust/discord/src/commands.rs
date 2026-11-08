@@ -30,6 +30,8 @@ pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_DESCRIPTION_CHARS: usize = 100;
 /// Host-substituted placeholder: the application (client) id of the bot connection.
 pub const APP_ID: &str = "{app.application_id}";
+/// Opaque handle the host resolves the application id from (app-scoped).
+pub const APP_ID_HANDLE: &str = "app.application_id";
 /// Host-substituted placeholder: the bound guild.
 pub const TARGET_GUILD: &str = "{target.guild_id}";
 /// The fixed free-text option every chat-input command carries (`/verb args:<text>`).
@@ -209,7 +211,11 @@ pub fn build(kind: &str, payload_json: &str) -> Result<HttpTpl> {
                 url: format!("{API_BASE}/applications/{APP_ID}/guilds/{TARGET_GUILD}/commands"),
                 headers: vec![("Content-Type".to_string(), "application/json".to_string())],
                 body: Some(body),
-                secret_refs: vec![("Authorization".to_string(), AUTH_HANDLE.to_string())],
+                // The bot credential, plus the app-scoped application-id slot the host fills.
+                secret_refs: vec![
+                    ("Authorization".to_string(), AUTH_HANDLE.to_string()),
+                    (APP_ID.to_string(), APP_ID_HANDLE.to_string()),
+                ],
             })
         }
         "commands.register" => Err(ConnectorError::Unsupported(
@@ -288,7 +294,10 @@ mod tests {
         );
         assert_eq!(
             t.secret_refs,
-            vec![("Authorization".into(), "discord-bot".into())]
+            vec![
+                ("Authorization".into(), "discord-bot".into()),
+                ("{app.application_id}".into(), "app.application_id".into())
+            ]
         );
         let body: Value = serde_json::from_slice(&t.body.unwrap()).unwrap();
         assert!(body.is_array());

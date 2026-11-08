@@ -547,6 +547,7 @@ fn start(sh: &Shared3, cfg: RuntimeConfig, owner: &str, opts: Opts) -> Running {
     let rt = ConnectorRuntime::new(
         RuntimeDeps {
             gates: None,
+            frame_tap: None,
             activator: opts.activator.clone(),
             spectrum: opts.spectrum.clone(),
             feed: FakeFeed(sh.feed.clone()),
@@ -1126,6 +1127,7 @@ async fn construction_rejects_an_invalid_config() {
     let res = ConnectorRuntime::new(
         RuntimeDeps {
             gates: None,
+            frame_tap: None,
             activator: None,
             spectrum: None,
             feed: FakeFeed(sh.feed.clone()),
@@ -1178,6 +1180,7 @@ fn core_rig(cfg: RuntimeConfig) -> (TestCore, Arc<LeaseStore>, RuntimeMetrics) {
     let rt = ConnectorRuntime::new(
         RuntimeDeps {
             gates: None,
+            frame_tap: None,
             activator: None,
             spectrum: None,
             feed: FakeFeed(sh3.feed.clone()),

@@ -37,6 +37,9 @@ use crate::twitch_sessions::spec::{MAX_PAGES, PAGE_LIMIT};
 const PROVIDER: &str = "discord";
 /// Metadata key: the pinned guild snowflake.
 pub const META_GUILD_ID: &str = "guild_id";
+/// Metadata key: the application (client) id the bot connection belongs to (optional;
+/// required only for application-scoped ops such as command registration).
+pub const META_APPLICATION_ID: &str = "application_id";
 /// Metadata key: the managed-roles allowlist.
 pub const META_MANAGED_ROLES: &str = "managed_roles";
 /// Most managed roles one binding may list.
@@ -50,6 +53,8 @@ pub struct DiscordBinding {
     pub bot_token: SecretString,
     /// The guild the binding pins (numeric snowflake).
     pub guild_id: String,
+    /// The application (client) id, when the binding declares one.
+    pub application_id: Option<String>,
     /// Managed-role allowlist: key -> role snowflake.
     pub managed_roles: BTreeMap<String, String>,
 }
@@ -204,9 +209,16 @@ impl<R: ConnectionResolve> ResolverDiscordCredentials<R> {
         else {
             return Err(CredError::NotUsable);
         };
+        // A present-but-malformed application id makes the binding unusable (never guessed).
+        let application_id = match resolved.metadata.get(META_APPLICATION_ID).map(|a| a.trim()) {
+            None | Some("") => None,
+            Some(a) if is_snowflake(a) => Some(a.to_string()),
+            Some(_) => return Err(CredError::NotUsable),
+        };
         Ok(DiscordBinding {
             bot_token: token,
             guild_id,
+            application_id,
             managed_roles,
         })
     }

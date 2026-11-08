@@ -57,6 +57,10 @@ pub struct AppState {
     /// one-shot valkey probe disabled discord receiver while the pod stayed
     /// Ready forever (alpha 2026-10-02).
     pub receiver_readiness: Arc<crate::ReceiverReadiness>,
+    /// Host-held interaction token store; the Discord webhook door stores each
+    /// signature-verified interaction here. `None` = no store (an interaction is then
+    /// refused with 503, never acked-and-orphaned).
+    pub interactions: Option<crate::interaction_store::InteractionStore>,
 }
 
 impl AppState {
@@ -76,6 +80,7 @@ impl AppState {
             eventsub: None,
             webhook: None,
             receiver_readiness: Arc::new(crate::ReceiverReadiness::new()),
+            interactions: None,
         }
     }
 }

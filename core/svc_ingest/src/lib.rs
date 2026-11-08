@@ -62,6 +62,8 @@
 //! Per spec S4.1, this service has **no database** -- no `sea-orm`
 //! dependency, unlike `svc_process`/`svc_action`.
 
+pub mod active_context;
+pub mod commands_reconcile;
 pub mod config;
 pub mod connector;
 pub mod connector_runtime;
@@ -71,6 +73,8 @@ pub mod error;
 pub mod http;
 pub mod identity_crypto;
 pub mod ingest;
+pub mod interaction_store;
+pub mod interaction_tap;
 pub mod license;
 pub mod normalize;
 pub mod outbound;

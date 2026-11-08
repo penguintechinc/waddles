@@ -639,6 +639,10 @@ fn the_policy_table_matches_the_relay_op_parity_fixture() {
         "event.update",
         "event.cancel",
         "event.delete",
+        // Reconciler-only: a bulk overwrite of the guild's shared command set is never
+        // bundle-callable (`relay.send`); the host builds + verifies the payload itself.
+        "commands.register",
+        "commands.register.guild",
     ];
     let mut checked = 0;
     for p in PlatformPolicy::production_set() {
@@ -662,7 +666,7 @@ fn the_policy_table_matches_the_relay_op_parity_fixture() {
     }
     assert_eq!(
         checked,
-        9 + 13 + 6,
+        9 + 11 + 6,
         "denominator: ops compared with the fixture"
     );
 }

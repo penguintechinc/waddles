@@ -33,6 +33,7 @@ const TOKEN: &str = "BOT-SECRET-ONE";
 const TOKEN2: &str = "BOT-SECRET-TWO";
 const CHANNEL: &str = "123456789";
 const GUILD: &str = "111";
+const APP_ID: &str = "424242";
 const UUID_A: &str = "123e4567-e89b-12d3-a456-426614174000";
 const UUID_B: &str = "223e4567-e89b-12d3-a456-426614174000";
 const RAW_A: &str = "700000000000000001";
@@ -93,6 +94,7 @@ impl DiscordCredentialSource for Creds {
         Ok(DiscordBinding {
             bot_token: SecretString::new(t.clone()),
             guild_id: g.clone(),
+            application_id: Some(APP_ID.to_string()),
             managed_roles: r.clone(),
         })
     }
@@ -2183,3 +2185,5 @@ fn a_discord_404_on_an_event_op_acks_a_distinct_not_found_code() {
         assert_eq!(e.ack_code(), "failed", "{op} {st}");
     }
 }
+
+mod interaction;

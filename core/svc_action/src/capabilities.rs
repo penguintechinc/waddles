@@ -7546,7 +7546,6 @@ mod tests {
             ("eventsub.create", "twitch", "eventsub.manage:twitch"),
             ("message.edit", "discord", "message.edit:discord"),
             ("reaction.add", "discord", "message.reaction:discord"),
-            ("commands.register", "discord", "commands.register:discord"),
             (
                 "interaction.callback",
                 "discord",
@@ -7560,8 +7559,17 @@ mod tests {
             assert_eq!(parsed.permission(provider).unwrap().canonical_id(), want);
             assert!(relay_op_supported(provider, parsed), "{provider}/{op}");
         }
-        // Not in the table at all, or not registered for that provider.
-        for op in ["mod.nuke", "", "MOD.BAN", "role.set", "event.create"] {
+        // Not in the table at all, or not registered for that provider. Command registration is
+        // reconciler-only (bulk overwrite of the guild's shared set): never a relay op.
+        for op in [
+            "mod.nuke",
+            "",
+            "MOD.BAN",
+            "role.set",
+            "event.create",
+            "commands.register",
+            "commands.register.guild",
+        ] {
             assert_eq!(RelayOp::parse(op), None, "{op:?}");
         }
         let kick = RelayOp::parse("mod.kick").unwrap();

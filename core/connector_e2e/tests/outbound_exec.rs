@@ -105,6 +105,7 @@ impl DiscordCredentialSource for DcCreds {
         Ok(DiscordBinding {
             bot_token: SecretString::new(DC_TOKEN.to_string()),
             guild_id: GUILD.to_string(),
+            application_id: None,
             managed_roles: BTreeMap::from([("vip".to_string(), "222".to_string())]),
         })
     }
