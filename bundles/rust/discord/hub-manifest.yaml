@@ -468,6 +468,7 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    required_scope: community:moderate
     host_op:
       platform: discord
       op: message.edit
@@ -496,6 +497,7 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    required_scope: community:moderate
     host_op:
       platform: discord
       op: reaction.add
@@ -548,6 +550,7 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    required_scope: community:moderate
     host_op:
       platform: discord
       op: message.embed

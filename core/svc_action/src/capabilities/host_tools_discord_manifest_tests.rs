@@ -39,8 +39,16 @@ const EXPECTED: [(&str, &str, Option<&str>); 9] = [
         "mod.timeout",
         Some("community:moderate"),
     ),
-    ("discord.message.edit", "message.edit", None),
-    ("discord.message.react", "reaction.add", None),
+    (
+        "discord.message.edit",
+        "message.edit",
+        Some("community:moderate"),
+    ),
+    (
+        "discord.message.react",
+        "reaction.add",
+        Some("community:moderate"),
+    ),
     (
         "discord.message.delete",
         "chat.delete",
@@ -425,4 +433,40 @@ async fn invalid_calls_are_refused_loudly_and_queue_nothing() {
         assert!(err.starts_with("invalid_args"), "{tool} {args}: {err}");
     }
     assert!(c.relay_queue.envelopes().is_empty());
+}
+
+#[tokio::test]
+async fn a_non_moderator_is_refused_every_message_and_embed_tool_and_nothing_is_queued() {
+    let c = stage_with(
+        rig(&[]),
+        FakeRelayQueue::with_drain_result(r#"{"ok":true,"id":"900000000000000009"}"#),
+    );
+    for (tool, args) in [
+        (
+            "discord.message.edit",
+            json!({"message_id": "42", "content": "x"}),
+        ),
+        (
+            "discord.message.react",
+            json!({"message_id": "42", "emoji": "\u{1F44D}"}),
+        ),
+        ("discord.message.delete", json!({"message_id": "42"})),
+        ("discord.message.embed", json!({"embeds": [{"title": "t"}]})),
+        ("discord.webhook.create", json!({"name": "bridge"})),
+    ] {
+        // 501 is a plain member; 500 (a moderator) is accepted for the same call.
+        let err = call_as(&c, "501", tool, args.clone()).await.unwrap_err();
+        assert!(
+            err.starts_with("forbidden") && err.contains("scope_denied"),
+            "{tool}: {err}"
+        );
+        call_as(&c, "500", tool, args)
+            .await
+            .unwrap_or_else(|e| panic!("{tool} as moderator: {e}"));
+    }
+    assert_eq!(
+        c.relay_queue.envelopes().len(),
+        5,
+        "only the moderator calls queued"
+    );
 }

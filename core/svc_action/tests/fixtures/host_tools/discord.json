@@ -89,6 +89,7 @@
       "text": "content"
     },
     "name": "discord.message.edit",
+    "requiredScope": "community:moderate",
     "risk": "dangerous"
   },
   {
@@ -109,6 +110,7 @@
       }
     },
     "name": "discord.message.embed",
+    "requiredScope": "community:moderate",
     "risk": "dangerous"
   },
   {
@@ -125,6 +127,7 @@
       "text": "emoji"
     },
     "name": "discord.message.react",
+    "requiredScope": "community:moderate",
     "risk": "dangerous"
   },
   {
