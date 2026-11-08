@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-ask"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!ask <question>` -> SFW-guarded AI answer via the ai.generate host capability."
 requires-python = ">=3.13"
 dependencies = []
