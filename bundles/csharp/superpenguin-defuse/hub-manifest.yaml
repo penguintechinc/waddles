@@ -1,3 +1,4 @@
+schema_version: 2
 app_id: waddles.integrations.superpenguin.defuse
 name: Defuse (SuperPenguinTV PastyGames)
 version: 1.0.0
