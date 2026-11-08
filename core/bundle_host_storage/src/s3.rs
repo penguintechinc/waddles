@@ -65,16 +65,16 @@ fn meta_from(key: &str, size: u64, a: &Attributes) -> Result<ObjectMeta, Storage
             )));
         }
     };
-    let tags = a
-        .get(&Attribute::Metadata(TAGS_ATTR.into()))
-        .map(|v| {
-            v.as_ref()
-                .split(',')
-                .filter(|t| !t.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    // An absent tags attribute is the valid "untagged object" state, not an error.
+    let tags = match a.get(&Attribute::Metadata(TAGS_ATTR.into())) {
+        Some(v) => v
+            .as_ref()
+            .split(',')
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
     Ok(ObjectMeta {
         key: key.into(),
         size,

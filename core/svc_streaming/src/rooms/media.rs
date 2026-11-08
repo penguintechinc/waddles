@@ -62,8 +62,9 @@ fn bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
 fn require_sdp(headers: &HeaderMap) -> Result<(), ApiError> {
     let ct = headers
         .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
+        .ok_or_else(|| ApiError::BadRequest("Content-Type must be application/sdp".into()))?
+        .to_str()
+        .map_err(|_| ApiError::BadRequest("Content-Type header is not valid text".into()))?;
     if ct.starts_with("application/sdp") {
         Ok(())
     } else {

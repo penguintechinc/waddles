@@ -188,7 +188,11 @@ fn acl_key(room: &str, actor: &str) -> String {
 const INDEX_KEY: &str = "rooms.index";
 
 fn index(s: &dyn Store) -> Result<Vec<String>, RoomsError> {
-    Ok(kv_json(s, INDEX_KEY)?.unwrap_or_default())
+    // Absent key == no rooms created yet (an explicit, valid state); corrupt data errors in kv_json.
+    match kv_json::<Vec<String>>(s, INDEX_KEY)? {
+        Some(ids) => Ok(ids),
+        None => Ok(Vec::new()),
+    }
 }
 
 fn load(s: &dyn Store, id: &str) -> Result<Room, RoomsError> {
