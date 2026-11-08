@@ -25,6 +25,7 @@ _BASE = {
     "feature": "waddles.socials.edge",
     "module": "socials",
     "provider": "builtin",
+    "author": "github:penguintechinc",
     "language": "python",
     "artifact": "source",
     "stages": {

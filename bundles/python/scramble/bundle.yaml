@@ -3,11 +3,11 @@ app_id: waddles.core.example.scramble
 name: Scramble Bundle (Python)
 # 1.0.0: initial release -- per-community word-unscramble game (feature/bundles-wordgames-pack).
 # 1.0.1: activation-gated only -- removed the in-bundle waddles.command-scramble feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.2
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/scramble
 language: python
@@ -54,6 +54,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.2"
-  min_version: "1.0.2"
+  tested_with: "1.0.3"
+  min_version: "1.0.3"
   max_version: null

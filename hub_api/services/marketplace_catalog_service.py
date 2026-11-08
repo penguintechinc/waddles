@@ -49,9 +49,11 @@ from datetime import datetime
 from typing import Any
 
 from flask_core.auth import DEFAULT_TENANT_SLUG, verify_jwt_token
+from flask_core.bundle_author import AuthorError, canonical_author
 from flask_core.secrets import require_secret_key
 
 from services.errors import ApiError, bad_request, conflict, not_found
+from services.marketplace_author import AuthorDTO, to_author_dto
 
 _MAX_LIMIT = 100
 
@@ -129,7 +131,7 @@ class CatalogEntry:
     priceCents: int
     pricingModel: str | None
     version: str | None
-    author: str | None
+    author: AuthorDTO | None
     communicationModel: str | None
     integrationType: str | None
     avgRating: str
@@ -250,7 +252,7 @@ def _to_catalog_entry(
         priceCents=row.price_cents or 0,
         pricingModel=row.pricing_model,
         version=row.version,
-        author=row.author,
+        author=to_author_dto(row.author),
         communicationModel=row.communication_model,
         integrationType=row.integration_type,
         avgRating=f"{float(row.avg_rating or 0):.1f}",
@@ -399,7 +401,7 @@ class ModuleEntry:
     displayName: str
     description: str | None
     version: str | None
-    author: str | None
+    author: AuthorDTO | None
     category: str | None
     iconUrl: str | None
     isCore: bool
@@ -451,7 +453,7 @@ class ModuleDetail:
     displayName: str
     description: str | None
     version: str | None
-    author: str | None
+    author: AuthorDTO | None
     category: str | None
     iconUrl: str | None
     isCore: bool
@@ -531,7 +533,7 @@ def _to_module_entry(
         displayName=row.display_name or row.name,
         description=row.description,
         version=row.version,
-        author=row.author,
+        author=to_author_dto(row.author),
         category=row.category,
         iconUrl=row.icon_url,
         isCore=bool(row.is_core),
@@ -661,7 +663,7 @@ def get_module(dal: Any, module_id: int) -> ModuleDetail:
         displayName=row.display_name or row.name,
         description=row.description,
         version=row.version,
-        author=row.author,
+        author=to_author_dto(row.author),
         category=row.category,
         iconUrl=row.icon_url,
         isCore=bool(row.is_core),
@@ -703,13 +705,28 @@ def _validate_url_field(payload: dict[str, Any], key: str) -> str | None:
     return raw.strip()
 
 
+def _validate_author(payload: dict[str, Any]) -> str | None:
+    """Validate an optional `author` payload value; returns its canonical storage form.
+
+    Accepts a GitHub profile (`github:<h>`, `@<h>`, `https://github.com/<h>`) or a simple name;
+    anything else is a 400 carrying the stable `author_*` reason code.
+    """
+    raw = payload.get("author")
+    if raw is None:
+        return None
+    try:
+        return canonical_author(raw)
+    except AuthorError as exc:
+        raise bad_request(f"author invalid ({exc.code}): {exc}") from exc
+
+
 def create_module(dal: Any, payload: dict[str, Any], user_id: int) -> ModuleCreated:
     """Validate + insert a new `hub_modules` row -- port of `createModule()`. Raises `ApiError`."""
     name = _validate_text(payload, "name", min_len=3, max_len=100, required=True)
     display_name = _validate_text(payload, "displayName", min_len=3, max_len=255, required=False)
     description = _validate_text(payload, "description", min_len=0, max_len=5000, required=False)
     version = _validate_text(payload, "version", min_len=1, max_len=50, required=True)
-    author = _validate_text(payload, "author", min_len=1, max_len=255, required=False)
+    author = _validate_author(payload)
     category = _validate_text(payload, "category", min_len=1, max_len=100, required=False)
     icon_url = _validate_url_field(payload, "iconUrl")
     is_core = bool(payload.get("isCore", False))
@@ -773,7 +790,7 @@ def update_module(dal: Any, module_id: int, payload: dict[str, Any], user_id: in
             payload, "version", min_len=1, max_len=50, required=False
         )
     if "author" in payload:
-        fields["author"] = _validate_text(payload, "author", min_len=1, max_len=255, required=False)
+        fields["author"] = _validate_author(payload)
     if "category" in payload:
         fields["category"] = _validate_text(
             payload, "category", min_len=1, max_len=100, required=False
