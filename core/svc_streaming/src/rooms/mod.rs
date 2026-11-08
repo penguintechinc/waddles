@@ -13,7 +13,7 @@ pub mod host_api;
 pub mod media;
 pub mod token;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,6 +41,10 @@ const MAX_REVOKED: usize = 100_000;
 pub const MAX_REVOKED_PER_COMMUNITY: usize = 1_000;
 /// Bound on the issued-token ledger.
 const MAX_ISSUED: usize = 200_000;
+/// Live issued-token entries one community may hold.
+pub const MAX_ISSUED_PER_COMMUNITY: usize = 10_000;
+/// Subscribers one community may hold across all its rooms (well below the global cap).
+pub const MAX_SUBSCRIBERS_PER_COMMUNITY: usize = 1_000;
 /// Subscribers across all rooms.
 pub const MAX_SUBSCRIBERS_GLOBAL: usize = 5_000;
 /// Longest TTL of a WHEP pipeline viewer token (seconds).
@@ -78,6 +82,45 @@ pub enum RoomError {
     Ambiguous(String),
     #[error("backend error: {0}")]
     Backend(String),
+}
+
+/// Issued-token ledger: jti -> (community, room, expiry), an expiry-ordered index
+/// for pruning, and live counts per community.
+#[derive(Default)]
+struct Ledger {
+    by_jti: HashMap<Uuid, (String, Uuid, i64)>,
+    by_exp: BTreeSet<(i64, Uuid)>,
+    per_community: HashMap<String, usize>,
+}
+
+impl Ledger {
+    fn get(&self, jti: &Uuid) -> Option<&(String, Uuid, i64)> {
+        self.by_jti.get(jti)
+    }
+
+    /// Drops every entry that expired before `t`, oldest-expiry first.
+    fn prune(&mut self, t: i64) {
+        while let Some(&(exp, jti)) = self.by_exp.first() {
+            if exp >= t {
+                break;
+            }
+            self.by_exp.remove(&(exp, jti));
+            if let Some((community, _, _)) = self.by_jti.remove(&jti) {
+                if let Some(n) = self.per_community.get_mut(&community) {
+                    *n -= 1;
+                    if *n == 0 {
+                        self.per_community.remove(&community);
+                    }
+                }
+            }
+        }
+    }
+
+    fn insert(&mut self, jti: Uuid, community: &str, room: Uuid, exp: i64) {
+        self.by_jti.insert(jti, (community.to_string(), room, exp));
+        self.by_exp.insert((exp, jti));
+        *self.per_community.entry(community.to_string()).or_insert(0) += 1;
+    }
 }
 
 /// Revoked jti -> (community, expiry), plus insertion order for eviction.
@@ -150,7 +193,8 @@ pub struct RoomService {
     revoked: Mutex<RevokedSet>,
     /// jti -> (community, room, expiry) of every issued token: revocation is only
     /// honored for a token the caller's own community+room actually issued.
-    issued: Mutex<HashMap<Uuid, (String, Uuid, i64)>>,
+    issued: Mutex<Ledger>,
+    max_community_subscribers: usize,
     keys: Option<TokenKeys>,
     whep: Option<Arc<crate::egress::whep::WhepState>>,
     pub(crate) factory: Arc<PeerConnectionFactory>,
@@ -173,13 +217,36 @@ impl RoomService {
         Self {
             rooms: RwLock::new(HashMap::new()),
             revoked: Mutex::new((HashMap::new(), VecDeque::new())),
-            issued: Mutex::new(HashMap::new()),
+            issued: Mutex::new(Ledger::default()),
+            max_community_subscribers: MAX_SUBSCRIBERS_PER_COMMUNITY,
             keys,
             whep: None,
             factory,
             metrics,
             public_base_url,
         }
+    }
+
+    /// Overrides the per-community subscriber cap (tests / operators).
+    pub fn with_community_subscriber_cap(mut self, cap: usize) -> Self {
+        self.max_community_subscribers = cap;
+        self
+    }
+
+    /// Revokes every WHEP viewer token of a pipeline `community_id` owns and closes
+    /// its live viewer sessions; returns the new epoch.
+    pub async fn revoke_pipeline_viewers(
+        &self,
+        community_id: &str,
+        pipeline_id: Uuid,
+    ) -> Result<u64, RoomError> {
+        let whep = self.whep.as_ref().ok_or(RoomError::Unconfigured(
+            "WHEP is not attached to the room service",
+        ))?;
+        if whep.owner_of(pipeline_id).await.as_deref() != Some(community_id) {
+            return Err(RoomError::NotFound);
+        }
+        Ok(whep.revoke_viewers(pipeline_id).await)
     }
 
     /// Attaches the WHEP state so pipeline viewer tokens can be issued for streams it owns.
@@ -372,14 +439,17 @@ impl RoomService {
         exp: i64,
     ) -> Result<(), RoomError> {
         let mut issued = self.issued.lock().await;
-        let t = now();
-        if issued.len() >= MAX_ISSUED {
-            issued.retain(|_, (_, _, e)| *e >= t);
+        issued.prune(now());
+        if issued.per_community.get(community_id).copied().unwrap_or(0) >= MAX_ISSUED_PER_COMMUNITY
+        {
+            return Err(RoomError::LimitReached(format!(
+                "{MAX_ISSUED_PER_COMMUNITY} live tokens per community"
+            )));
         }
-        if issued.len() >= MAX_ISSUED {
+        if issued.by_jti.len() >= MAX_ISSUED {
             return Err(RoomError::LimitReached("issued-token ledger full".into()));
         }
-        issued.insert(jti, (community_id.to_string(), room_id, exp));
+        issued.insert(jti, community_id, room_id, exp);
         Ok(())
     }
 
@@ -419,7 +489,7 @@ impl RoomService {
             iat,
             exp: iat + ttl,
             scope: token::SCOPE_PIPELINE.into(),
-            epoch: 0,
+            epoch: whep.epoch_of(pipeline_id).await,
         };
         let token = keys
             .sign(&claims)
@@ -568,6 +638,16 @@ impl RoomService {
         let (session, stale) = {
             let mut rooms = self.rooms.write().await;
             let total: usize = rooms.values().map(|r| r.subscribers.len()).sum();
+            let community = rooms
+                .get(&room_id)
+                .ok_or(RoomError::NotFound)?
+                .community_id
+                .clone();
+            let in_community: usize = rooms
+                .values()
+                .filter(|r| r.community_id == community)
+                .map(|r| r.subscribers.len())
+                .sum();
             let room = rooms.get_mut(&room_id).ok_or(RoomError::NotFound)?;
             let old: Vec<Uuid> = room
                 .subscribers
@@ -578,6 +658,9 @@ impl RoomService {
             let replacing = !old.is_empty();
             if room.subscribers.len() - old.len() >= MAX_SUBSCRIBERS_PER_ROOM {
                 return Err(RoomError::LimitReached("room subscriber limit".into()));
+            }
+            if !replacing && in_community >= self.max_community_subscribers {
+                return Err(RoomError::LimitReached("community subscriber limit".into()));
             }
             if !replacing && total >= MAX_SUBSCRIBERS_GLOBAL {
                 return Err(RoomError::LimitReached("global subscriber limit".into()));

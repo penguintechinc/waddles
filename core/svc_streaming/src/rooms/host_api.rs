@@ -182,6 +182,12 @@ struct PipelineTokenReq {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PipelineRevokeReq {
+    community_id: String,
+    pipeline_id: Uuid,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EndpointReq {
     community_id: String,
     room_id: Uuid,
@@ -251,6 +257,11 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
             let r: RoomReq = parse(body)?;
             let epoch = svc.revoke_all(&r.community_id, r.room_id).await?;
             Ok(json!({"room_id": r.room_id, "epoch": epoch}))
+        }
+        "pipeline.revoke_viewers" => {
+            let r: PipelineRevokeReq = parse(body)?;
+            let epoch = svc.revoke_pipeline_viewers(&r.community_id, r.pipeline_id).await?;
+            Ok(json!({"pipeline_id": r.pipeline_id, "epoch": epoch}))
         }
         "pipeline.whep_token" => {
             let r: PipelineTokenReq = parse(body)?;

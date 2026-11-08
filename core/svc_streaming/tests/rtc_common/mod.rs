@@ -311,6 +311,18 @@ pub const VIEWER_SECRET: &str = "0123456789abcdef0123456789abcdef";
 /// A signed WHEP viewer token for `community`/`pipeline` valid for `ttl` seconds
 /// (negative = already expired), with the given `scope`.
 pub fn viewer_token(community: &str, pipeline: Uuid, ttl: i64, scope: &str, sub: Uuid) -> String {
+    viewer_token_epoch(community, pipeline, ttl, scope, sub, 0)
+}
+
+/// [`viewer_token`] for a specific pipeline token epoch.
+pub fn viewer_token_epoch(
+    community: &str,
+    pipeline: Uuid,
+    ttl: i64,
+    scope: &str,
+    sub: Uuid,
+    epoch: u64,
+) -> String {
     use svc_streaming::rooms::token::{
         RoomClaims, TokenKeys, ROOM_TOKEN_AUDIENCE, ROOM_TOKEN_ISSUER,
     };
@@ -330,7 +342,7 @@ pub fn viewer_token(community: &str, pipeline: Uuid, ttl: i64, scope: &str, sub:
             iat: now,
             exp: now + ttl,
             scope: scope.into(),
-            epoch: 0,
+            epoch,
         })
         .unwrap()
 }

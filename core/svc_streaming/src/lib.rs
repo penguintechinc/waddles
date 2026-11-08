@@ -194,6 +194,7 @@ where
 
     // --- WebRTC rooms host-API (mTLS; off + logged when HOST_API_* unset).
     state.rooms.spawn_sweeper(Duration::from_secs(5));
+    state.whep_state.spawn_sweeper(Duration::from_secs(5));
     rooms::host_api::spawn_from_env(config.cli.bind_addr, state.rooms.clone())
         .await
         .context("starting the webrtc rooms host-API listener")?;

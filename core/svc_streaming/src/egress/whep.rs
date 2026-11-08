@@ -72,6 +72,8 @@ struct WhepViewerSession {
     pipeline_id: PipelineId,
     /// Token `sub` of the viewer that created the session; only it may delete it.
     participant: String,
+    /// Token expiry: the session may not outlive the credential that opened it.
+    expires_at: i64,
     pc: Arc<dyn PeerConnection>,
 }
 
@@ -90,6 +92,10 @@ pub struct WhepState {
     owners: RwLock<HashMap<PipelineId, String>>,
     /// Viewer-token verification keys; `None` => WHEP refuses every request (503).
     viewer_keys: Option<TokenKeys>,
+    /// Per-pipeline token epoch; bumped on unregister/revoke so every older viewer
+    /// token (and its sessions) dies at once. Never reset, so a re-registered
+    /// pipeline cannot resurrect an old token.
+    epochs: RwLock<HashMap<PipelineId, u64>>,
     sessions: RwLock<HashMap<Uuid, WhepViewerSession>>,
 }
 
@@ -106,6 +112,7 @@ impl WhepState {
             fanouts: RwLock::new(HashMap::new()),
             owners: RwLock::new(HashMap::new()),
             viewer_keys: None,
+            epochs: RwLock::new(HashMap::new()),
             sessions: RwLock::new(HashMap::new()),
         }
     }
@@ -133,6 +140,91 @@ impl WhepState {
         self
     }
 
+    /// Current token epoch of a pipeline (0 until first revoked/unregistered).
+    pub async fn epoch_of(&self, pipeline_id: PipelineId) -> u64 {
+        self.epochs
+            .read()
+            .await
+            .get(&pipeline_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Invalidates every viewer token of `pipeline_id` (epoch bump) and closes
+    /// its live sessions. Returns the new epoch.
+    pub async fn revoke_viewers(&self, pipeline_id: PipelineId) -> u64 {
+        let epoch = {
+            let mut e = self.epochs.write().await;
+            let v = e.entry(pipeline_id).or_insert(0);
+            *v += 1;
+            *v
+        };
+        let dead: Vec<Arc<dyn PeerConnection>> = {
+            let mut sessions = self.sessions.write().await;
+            let ids: Vec<Uuid> = sessions
+                .iter()
+                .filter(|(_, s)| s.pipeline_id == pipeline_id)
+                .map(|(k, _)| *k)
+                .collect();
+            ids.iter()
+                .filter_map(|k| sessions.remove(k).map(|s| s.pc))
+                .collect()
+        };
+        for pc in dead {
+            self.metrics
+                .sessions_active
+                .with_label_values(&["whep"])
+                .dec();
+            let _ = pc.close().await;
+        }
+        epoch
+    }
+
+    /// Closes sessions whose token has expired as of `at` (unix seconds); returns
+    /// how many. A session never outlives the credential that opened it.
+    pub async fn sweep_at(&self, at: i64) -> usize {
+        let dead: Vec<Arc<dyn PeerConnection>> = {
+            let mut sessions = self.sessions.write().await;
+            let ids: Vec<Uuid> = sessions
+                .iter()
+                .filter(|(_, s)| s.expires_at <= at)
+                .map(|(k, _)| *k)
+                .collect();
+            ids.iter()
+                .filter_map(|k| sessions.remove(k).map(|s| s.pc))
+                .collect()
+        };
+        let n = dead.len();
+        for pc in dead {
+            self.metrics
+                .sessions_active
+                .with_label_values(&["whep"])
+                .dec();
+            let _ = pc.close().await;
+        }
+        n
+    }
+
+    /// [`Self::sweep_at`] as of now.
+    pub async fn sweep(&self) -> usize {
+        self.sweep_at(chrono::Utc::now().timestamp()).await
+    }
+
+    /// Spawns the periodic expiry sweep.
+    pub fn spawn_sweeper(self: &Arc<Self>, every: Duration) {
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut t = tokio::time::interval(every);
+            loop {
+                t.tick().await;
+                let n = me.sweep().await;
+                if n > 0 {
+                    tracing::info!(reaped = n, "whep: closed sessions with expired tokens");
+                }
+            }
+        });
+    }
+
     /// The community that owns `pipeline_id`'s registered source, if any.
     pub async fn owner_of(&self, pipeline_id: PipelineId) -> Option<String> {
         self.owners.read().await.get(&pipeline_id).cloned()
@@ -140,7 +232,7 @@ impl WhepState {
 
     /// Verifies a viewer bearer token for `pipeline_id`/`community_id` (path values).
     /// 401 = missing/invalid/expired; 403 = valid token for another community/stream.
-    fn verify_viewer(
+    async fn verify_viewer(
         &self,
         headers: &axum::http::HeaderMap,
         community_id: &str,
@@ -167,6 +259,9 @@ impl WhepState {
                 "viewer token is not valid for this stream".into(),
             ));
         }
+        if claims.epoch != self.epoch_of(pipeline_id).await {
+            return Err(ApiError::Unauthorized("viewer token was revoked".into()));
+        }
         Ok(claims)
     }
 
@@ -176,6 +271,7 @@ impl WhepState {
     pub async fn unregister_fanout(&self, pipeline_id: PipelineId) {
         self.fanouts.write().await.remove(&pipeline_id);
         self.owners.write().await.remove(&pipeline_id);
+        self.revoke_viewers(pipeline_id).await;
     }
 
     /// Whether a source has registered a fanout for `pipeline_id` (what a
@@ -336,7 +432,9 @@ async fn create_session(
     body: String,
 ) -> Result<Response, ApiError> {
     // Authenticate BEFORE touching any registry state (no existence oracle).
-    let claims = state.verify_viewer(&headers, &community_id, pipeline_id)?;
+    let claims = state
+        .verify_viewer(&headers, &community_id, pipeline_id)
+        .await?;
     match state.owner_of(pipeline_id).await {
         Some(owner) if owner == community_id => {}
         Some(_) => {
@@ -360,7 +458,14 @@ async fn create_session(
             ApiError::NotFound(format!("no active source for pipeline {pipeline_id}"))
         })?;
 
-    if state.viewer_count(pipeline_id).await >= state.max_viewers {
+    let others = state
+        .sessions
+        .read()
+        .await
+        .values()
+        .filter(|s| s.pipeline_id == pipeline_id && s.participant != claims.sub)
+        .count();
+    if others >= state.max_viewers {
         return Err(ApiError::Forbidden(format!(
             "WHEP_MAX_VIEWERS ({}) reached for this pipeline",
             state.max_viewers
@@ -448,14 +553,38 @@ async fn create_session(
     };
 
     let session_id = Uuid::new_v4();
-    state.sessions.write().await.insert(
-        session_id,
-        WhepViewerSession {
-            pipeline_id,
-            participant: claims.sub.clone(),
-            pc,
-        },
-    );
+    // One active session per (pipeline, participant): a new one replaces and closes
+    // the old, so a single token can never accumulate sessions.
+    let stale: Vec<Arc<dyn PeerConnection>> = {
+        let mut sessions = state.sessions.write().await;
+        let old: Vec<Uuid> = sessions
+            .iter()
+            .filter(|(_, s)| s.pipeline_id == pipeline_id && s.participant == claims.sub)
+            .map(|(k, _)| *k)
+            .collect();
+        let stale = old
+            .iter()
+            .filter_map(|k| sessions.remove(k).map(|s| s.pc))
+            .collect();
+        sessions.insert(
+            session_id,
+            WhepViewerSession {
+                pipeline_id,
+                participant: claims.sub.clone(),
+                expires_at: claims.exp,
+                pc,
+            },
+        );
+        stale
+    };
+    for old in stale {
+        state
+            .metrics
+            .sessions_active
+            .with_label_values(&["whep"])
+            .dec();
+        let _ = old.close().await;
+    }
     state
         .metrics
         .sessions_active
@@ -481,7 +610,9 @@ async fn teardown_session(
     Path((community_id, pipeline_id, session_id)): Path<(String, PipelineId, Uuid)>,
     headers: axum::http::HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let claims = state.verify_viewer(&headers, &community_id, pipeline_id)?;
+    let claims = state
+        .verify_viewer(&headers, &community_id, pipeline_id)
+        .await?;
     let session = {
         let mut sessions = state.sessions.write().await;
         match sessions.remove(&session_id) {
