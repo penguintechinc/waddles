@@ -179,6 +179,9 @@ async def reconcile_route(data: ReconcileRequest) -> Any:
             limit=data.limit,
         )
     except es.EventSubError as exc:
+        logger.warning(
+            "eventsub_refused op=%s type=%s", "reconcile", type(exc).__name__, exc_info=True
+        )
         return _refusal(exc)
     return ReconcileResponse(
         success=True,
@@ -237,10 +240,14 @@ async def results_route(data: ResultsRequest) -> Any:
             for r in data.results
         ]
     except ValueError:
+        logger.warning("eventsub_bad_results op=results", exc_info=True)
         return error_response("unknown outcome or failure reason", 400, "BAD_REQUEST")
     try:
         applied = await es.report_results(_dal(), reports)
     except es.EventSubError as exc:
+        logger.warning(
+            "eventsub_refused op=%s type=%s", "results", type(exc).__name__, exc_info=True
+        )
         return _refusal(exc)
     return ResultsResponse(success=True, applied=applied)
 
@@ -255,6 +262,9 @@ async def secret_route(callback_key: str) -> Any:
             success=True, secret=await es.secret_for_callback_key(_dal(), callback_key)
         )
     except es.EventSubError as exc:
+        logger.warning(
+            "eventsub_refused op=%s type=%s", "secret", type(exc).__name__, exc_info=True
+        )
         return _refusal(exc)
 
 
