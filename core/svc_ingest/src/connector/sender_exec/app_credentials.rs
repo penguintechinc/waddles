@@ -189,7 +189,11 @@ mod tests {
             .resolve(
                 "twitch",
                 Some(1),
-                &["app.client_id", "app.eventsub_secret", "app.eventsub_callback"],
+                &[
+                    "app.client_id",
+                    "app.eventsub_secret",
+                    "app.eventsub_callback",
+                ],
             )
             .await
             .unwrap();
@@ -215,7 +219,8 @@ mod tests {
             SlotError::Refused("unknown_handle")
         );
         assert_eq!(
-            e(s.resolve("twitch", Some(1), &["app.client_id", "token"]).await),
+            e(s.resolve("twitch", Some(1), &["app.client_id", "token"])
+                .await),
             SlotError::Refused("slot_credential_scope_mixed")
         );
         assert_eq!(

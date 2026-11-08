@@ -235,7 +235,9 @@ mod tests {
         // youtube has no app surface; kick/unknown neither.
         assert!(!r.supports_app_credentials("youtube"));
         assert_eq!(
-            r.resolve(&app_req("youtube", &["app.token"])).await.unwrap_err(),
+            r.resolve(&app_req("youtube", &["app.token"]))
+                .await
+                .unwrap_err(),
             SlotError::Refused("slot_app_credential_unsupported")
         );
     }
