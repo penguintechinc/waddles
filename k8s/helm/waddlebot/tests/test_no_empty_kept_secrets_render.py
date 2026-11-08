@@ -112,7 +112,9 @@ class TestFailsClosedOutsideAlphaLocal:
     """
 
     def test_waddlebot_secrets_fails_without_explicit_values(self) -> None:
-        result = _helm_template(_BETA_VALUES)
+        # Valkey durable admin password is its own explicit fail-closed guard (different message);
+        # supply it so the generic "outside alpha/local" auto-generation guard is what fires.
+        result = _helm_template(_BETA_VALUES, ["infrastructure.valkeyDurable.adminPassword=fresh-test-pw"])
         assert result.returncode != 0, "beta render should fail closed with no generated secrets supplied"
         assert "outside alpha/local" in result.stderr or "outside alpha/local" in result.stdout
 

@@ -34,10 +34,11 @@ name: Ping Example Bundle (Rust)
 # to bump (manifest-only change, but app_versions.artifact_digest is immutable+globally
 # UNIQUE per version string) and for the caveat that the resulting artifact digest actually
 # differing from 1.0.2's was not verified byte-level in this change.
-version: 1.0.4
+version: 1.0.5
 feature: waddles.core.example
 module: core
 provider: builtin
+author: github:penguintechinc
 language: rust
 artifact: prebuilt
 execution_model: native

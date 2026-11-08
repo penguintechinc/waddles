@@ -2330,6 +2330,8 @@ def bind_lifecycle_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("homepage_url", "text"),
         Field("notice", "text"),
         Field("category", "string", length=50),
+        # migration 0082 -- publisher/collection designation (e.g. "superpenguintv").
+        Field("collection", "string", length=50),
         # migration 0068 -- denormalized listing convenience; `manifest_json`
         # stays the source of truth. Nullable (pre-0068 rows have no kind).
         Field("kind", "string", length=20),
@@ -2423,6 +2425,8 @@ def bind_app_bundle_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("homepage_url", "text"),
         Field("notice", "text"),
         Field("category", "string", length=50),
+        # migration 0082 -- publisher/collection designation (e.g. "superpenguintv").
+        Field("collection", "string", length=50),
         # migration 0068 -- denormalized listing convenience; `manifest_json`
         # stays the source of truth. Nullable (pre-0068 rows have no kind).
         Field("kind", "string", length=20),

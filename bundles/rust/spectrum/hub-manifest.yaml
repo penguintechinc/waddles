@@ -11,13 +11,16 @@ version: 0.1.1
 feature: waddles.core.service
 module: core
 provider: builtin
+author: github:penguintechinc
 language: rust
 artifact: prebuilt
 execution_model: native
 is_default: false
 kind: service
-# Inbound-only connector: it runs no process/action stage, but manifest v2 requires the key.
-stages: {}
+# Inbound-only connector: the host drives `receiver.on-frame` (the poll hot path); no consumes.
+stages:
+  action:
+    entry: waddle:connector/receiver#on-frame
 # Guest egress is EMPTY by design: the RSI poll host allowlist + session credential live in the
 # host-side poll transport config (svc_ingest Spectrum profile), exactly as for YouTube.
 egress: []

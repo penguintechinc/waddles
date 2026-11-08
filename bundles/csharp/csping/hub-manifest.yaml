@@ -24,10 +24,11 @@
 schema_version: 2
 app_id: waddles.core.example.csping
 name: Ping Example Bundle (C#)
-version: 1.0.2
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
+author: github:penguintechinc
 language: csharp
 artifact: prebuilt
 execution_model: native

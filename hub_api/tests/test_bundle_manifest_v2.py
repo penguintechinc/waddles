@@ -18,6 +18,7 @@ _VALID_MANIFEST = {
     "feature": "waddles.socials.music",
     "module": "socials",
     "provider": "builtin",
+    "author": "github:penguintechinc",
     "language": "python",
     "artifact": "source",
     "stages": {
@@ -296,8 +297,8 @@ def test_unsupported_language_rejected() -> None:
 
 def test_vendor_bundle_without_author_rejected() -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse({"provider": "thirdparty", "license": "MIT"})
-    assert exc.value.reason == "vendor_author_required"
+        _parse({"provider": "thirdparty", "license": "MIT", "author": None})
+    assert exc.value.reason == "author_required"
 
 
 def test_vendor_bundle_without_license_rejected() -> None:
@@ -306,9 +307,15 @@ def test_vendor_bundle_without_license_rejected() -> None:
     assert exc.value.reason == "vendor_license_required"
 
 
-def test_builtin_bundle_without_attribution_parses() -> None:
+def test_builtin_bundle_without_author_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"author": None})
+    assert exc.value.reason == "author_required"
+
+
+def test_builtin_bundle_without_license_attribution_parses() -> None:
     manifest = _parse({})
-    assert manifest.author is None  # type: ignore[attr-defined]
+    assert manifest.author == "github:penguintechinc"  # type: ignore[attr-defined]
     assert manifest.license is None  # type: ignore[attr-defined]
     assert manifest.license_requires_review is False  # type: ignore[attr-defined]
 

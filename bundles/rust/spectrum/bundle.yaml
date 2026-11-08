@@ -10,6 +10,7 @@ version: 0.1.1
 feature: waddles.core.service
 module: core
 provider: builtin
+author: github:penguintechinc
 language: rust
 artifact: component
 execution_model: wasi-component
@@ -23,7 +24,7 @@ data:
 limits:
   timeout_ms: 2000
   memory_mb: 64
-  egress_rps: 0
+  egress_rps: 1
 permissions:
   - id: connector.pii.read
     justification: "gates identity.lookup, used to tokenize each Spectrum member to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw member id or handle leaves the connector)"

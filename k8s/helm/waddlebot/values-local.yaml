@@ -657,9 +657,8 @@ pipeline:
         identifyBudgetReady: true
 
 # chore/presentation-beta-slice -- local/MicroK8s runs the Rust svc-presentation (the overlay
-# beta path), exactly like alpha/dal2alpha. templates/svc-presentation-rust.yaml renders INSTEAD
-# of the Python templates/svc-presentation.yaml (mutually exclusive, same Deployment/Service
-# names) so the two can never serve the same routes. Image: svc-presentation-rust:<global.imageTag>.
+# beta path), exactly like alpha/dal2alpha. templates/svc-presentation-rust.yaml is the only
+# presentation template (the Python one was removed). Image: svc-presentation-rust:<global.imageTag>.
 presentation:
   rust:
     enabled: true
