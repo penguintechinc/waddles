@@ -353,8 +353,8 @@ def _parse_user(user: str) -> str:
     """Return the canonical (hyphenated, lowercase) tokenized user UUID, else invalid input."""
     try:
         return str(uuid.UUID(user))
-    except (ValueError, AttributeError, TypeError) as exc:
-        raise InvalidSourceError("user is not a valid UUID") from exc
+    except (ValueError, AttributeError, TypeError):
+        raise InvalidSourceError("user is not a valid UUID") from None
 
 
 async def get_active_context(
@@ -391,8 +391,8 @@ def _select_community(pair: PairedSource, selector: str) -> PairedCommunity:
     """Resolve a community public_id UUID among the paired communities (names never resolve)."""
     try:
         wanted = str(uuid.UUID(selector))
-    except (ValueError, AttributeError, TypeError) as exc:
-        raise InvalidSourceError("community is not a valid UUID") from exc
+    except (ValueError, AttributeError, TypeError):
+        raise InvalidSourceError("community is not a valid UUID") from None
     found = next((c for c in pair.communities if c.public_id == wanted), None)
     if found is None:
         raise ContextNotFoundError("community is not paired to this source")

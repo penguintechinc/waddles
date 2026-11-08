@@ -152,8 +152,12 @@ def _dal() -> AsyncDB:
     return cast(AsyncDB, current_app.config["install_dal"])
 
 
-def _refusal(exc: Exception) -> tuple[dict[str, object], int]:
-    """Map a registry refusal to the JSON error envelope (fixed, application-authored text)."""
+def _refusal(exc: Exception, op: str) -> tuple[dict[str, object], int]:
+    """Map a registry refusal to the JSON error envelope (fixed, application-authored text).
+
+    Logs only the static op, exception class and stable code -- never ``exc_info`` or the
+    exception text, so no user/source/community value reaches the logs via a traceback.
+    """
     if isinstance(exc, InvalidSourceError):
         status, code, message = (
             400,
@@ -166,6 +170,7 @@ def _refusal(exc: Exception) -> tuple[dict[str, object], int]:
         status, code, message = 404, "CONTEXT_NOT_FOUND", "community is not paired to this source"
     else:
         status, code, message = 404, "SCOPE_NOT_FOUND", "no community is linked to this source"
+    logger.warning("slash_refused op=%s type=%s code=%s", op, type(exc).__name__, code)
     return error_response(message, status, code)  # type: ignore[no-any-return]
 
 
@@ -192,10 +197,7 @@ async def list_sources_route() -> Any:
             offset=_int_arg("offset", 0),
         )
     except ScopeError as exc:
-        logger.warning(
-            "slash_refused op=%s type=%s", "list_sources", type(exc).__name__, exc_info=True
-        )
-        return _refusal(exc)
+        return _refusal(exc, "list_sources")
     return SlashSourcesDTO(True, list(page.items), page.total, page.limit, page.offset)
 
 
@@ -209,8 +211,7 @@ async def desired_route() -> Any:
             _dal(), request.args.get("platform", ""), request.args.get("source_id", "")
         )
     except ScopeError as exc:
-        logger.warning("slash_refused op=%s type=%s", "desired", type(exc).__name__, exc_info=True)
-        return _refusal(exc)
+        return _refusal(exc, "desired")
     unchanged = request.args.get("if_version") == state.version
     return SlashDesiredDTO(
         success=True,
@@ -259,10 +260,7 @@ async def get_context_route() -> Any:
             request.args.get("user", ""),
         )
     except (ScopeError, registry.ContextNotFoundError) as exc:
-        logger.warning(
-            "slash_refused op=%s type=%s", "get_context", type(exc).__name__, exc_info=True
-        )
-        return _refusal(exc)
+        return _refusal(exc, "get_context")
     return _context_dto(ctx)
 
 
@@ -277,10 +275,7 @@ async def set_context_route(data: SlashSetContextRequest) -> Any:
             _dal(), data.platform, data.sourceId, data.user, data.community
         )
     except (ScopeError, registry.ContextNotFoundError) as exc:
-        logger.warning(
-            "slash_refused op=%s type=%s", "set_context", type(exc).__name__, exc_info=True
-        )
-        return _refusal(exc)
+        return _refusal(exc, "set_context")
     return _context_dto(ctx)
 
 
@@ -297,10 +292,7 @@ async def clear_context_route() -> Any:
             request.args.get("user", ""),
         )
     except ScopeError as exc:
-        logger.warning(
-            "slash_refused op=%s type=%s", "clear_context", type(exc).__name__, exc_info=True
-        )
-        return _refusal(exc)
+        return _refusal(exc, "clear_context")
     return SlashClearDTO(True, cleared)
 
 
