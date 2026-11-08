@@ -7,7 +7,7 @@ name: Chat Rank/Level Bundle (Python)
 # automatic per-message XP accrual (not implemented here).
 # 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
 # 1.0.4: activation-gated only -- removed the in-bundle waddles.command-rank feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.5
+version: 1.0.6
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -15,7 +15,7 @@ provider: builtin
 # leveling system, NOT a literal port -- no original source or text reused (contrast
 # bundles/csharp/superpenguin-roll, an actual line-for-line port, which does carry the
 # full verbatim MIT notice). See src/app.py's module docstring for detail.
-author: "superpenguintv (Psychoboy)"
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/rank
 notice: |
@@ -36,11 +36,11 @@ stages:
       - platform: twitch
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!rank"]
+          command_prefix: ["!rank", "!rep", "!reputation"]
       - platform: discord
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!rank"]
+          command_prefix: ["!rank", "!rep", "!reputation"]
     produces: []
     config: {}
     spec:
@@ -78,10 +78,20 @@ permissions:
     justification: "rank replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
   - id: "chat.send:twitch"
     justification: "rank replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
+  - id: identity.resolve
+    justification: "resolves the verified caller to its community user UUID for the !rep reputation lookup"
+  - id: "tool.call:waddles.core.service.reputation:rep"
+    justification: "delegates the !rep read (score, tier, next tier) to the reputation service; read-only"
+    params:
+      write: false
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.5"
-  min_version: "1.0.5"
+  tested_with: "1.0.6"
+  min_version: "1.0.6"
   max_version: null
+requested_tools:
+  - tool: rep
+    access: read
+    target_app_id: waddles.core.service.reputation

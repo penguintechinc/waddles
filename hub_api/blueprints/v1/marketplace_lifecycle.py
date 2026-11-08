@@ -59,6 +59,7 @@ from services import marketplace_lifecycle_service as svc
 from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
 from services.errors import ApiError
+from services.marketplace_author import AuthorDTO, to_author_dto
 from services.tenant_service import require_matching_tenant
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,7 @@ class InstallBundleRequest:
     homepageUrl: str | None = None
     notice: str | None = None
     category: str | None = None
+    collection: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -192,7 +194,7 @@ class BundleDTO:
     incompatibleWith: list[str]
     status: str
     installedAt: str | None
-    author: str | None
+    author: AuthorDTO | None
     license: str | None
     licenseReviewRequired: bool
     sourceUrl: str | None
@@ -200,6 +202,23 @@ class BundleDTO:
     homepageUrl: str | None
     notice: str | None
     category: str | None
+    collection: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class CollectionEntryDTO:
+    """One distinct bundle collection (publisher designation) + its bundle count."""
+
+    collection: str
+    count: int
+
+
+@dataclass(slots=True, frozen=True)
+class CollectionsResponse:
+    """Response DTO for `GET /bundles/collections`."""
+
+    success: bool
+    collections: list[CollectionEntryDTO]
 
 
 @dataclass(slots=True, frozen=True)
@@ -330,6 +349,7 @@ def _manifest_payload(data: InstallBundleRequest) -> dict[str, Any]:
         "homepage_url": data.homepageUrl,
         "notice": data.notice,
         "category": data.category,
+        "collection": data.collection,
     }
 
 
@@ -347,7 +367,7 @@ def _bundle_dto(row: Any) -> BundleDTO:
         incompatibleWith=list(row.incompatible_with or []),
         status=row.status,
         installedAt=_iso(row.installed_at),
-        author=row.author,
+        author=to_author_dto(row.author),
         license=row.license,
         licenseReviewRequired=bool(row.license_review_required),
         sourceUrl=row.source_url,
@@ -355,6 +375,7 @@ def _bundle_dto(row: Any) -> BundleDTO:
         homepageUrl=row.homepage_url,
         notice=row.notice,
         category=row.category,
+        collection=row.collection,
     )
 
 
@@ -405,6 +426,7 @@ async def list_bundles() -> BundleListResponse:
     provider = request.args.get("provider")
     status = request.args.get("status")
     category = request.args.get("category")
+    collection = request.args.get("collection")
     rows, total, total_pages = await svc.list_installed(
         dal,
         module=module,
@@ -412,6 +434,7 @@ async def list_bundles() -> BundleListResponse:
         provider=provider,
         status=status,
         category=category,
+        collection=collection,
         page=page,
         limit=limit,
     )
@@ -419,6 +442,21 @@ async def list_bundles() -> BundleListResponse:
         success=True,
         bundles=[_bundle_dto(r) for r in rows],
         pagination=PaginationDTO(page=page, limit=limit, total=total, totalPages=total_pages),
+    )
+
+
+@marketplace_lifecycle_bp.route("/bundles/collections", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@validate_response(CollectionsResponse)
+async def list_bundle_collections() -> CollectionsResponse:
+    """List distinct bundle collections (e.g. `superpenguintv`) with counts -- any tenant member."""
+    _, dal = _dal()
+    return CollectionsResponse(
+        success=True,
+        collections=[
+            CollectionEntryDTO(collection=name, count=count)
+            for name, count in svc.list_collections(dal)
+        ],
     )
 
 

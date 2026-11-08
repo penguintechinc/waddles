@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-affirmation"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!affirmation` -> a random positive affirmation from a static built-in list. Static, SFW, stateless."
 requires-python = ">=3.13"
 dependencies = []
