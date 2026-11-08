@@ -228,13 +228,10 @@ spec:
       # (root-owned, group-readable, no world access).
       - name: transit-tls
         secret:
-          secretName: {{ include "waddlebot.transitTls.secretName" . }}
+          secretName: {{ include "waddlebot.transitTls.pgSecretName" . }}
           defaultMode: 0440
           items:
-          - key: postgres.crt
-            path: tls.crt
-          - key: postgres.key
-            path: tls.key
+          {{- include "waddlebot.transitTls.pgItems" . | nindent 10 }}
       - name: postgres-hba
         configMap:
           name: postgres-hba

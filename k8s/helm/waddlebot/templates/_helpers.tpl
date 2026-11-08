@@ -1092,10 +1092,11 @@ rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
 {{- define "waddlebot.valkeyTlsCaVolume" -}}
 - name: valkey-ca
   secret:
-    secretName: {{ include "waddlebot.fullname" . }}-valkey-tls
+    {{- /* cert-manager mode: the ONE shared CA bundle (same bytes as the Postgres/S3 CA); static mode: the Valkey CA. */}}
+    secretName: {{ if include "waddlebot.transitTls.cm" . }}{{ include "waddlebot.transitTls.caSecretName" . }}{{ else }}{{ include "waddlebot.fullname" . }}-valkey-tls{{ end }}
     defaultMode: 0440
     items:
-    - key: valkey-ca.crt
+    - key: ca.crt
       path: valkey-ca.crt
 {{- end }}
 

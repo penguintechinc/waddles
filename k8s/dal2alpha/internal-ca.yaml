@@ -44,9 +44,10 @@ spec:
     # No IP SANs permitted (an empty permitted list is not expressible) -- deny all via excluded.
     excluded:
       ipRanges: ["0.0.0.0/0", "::/0"]
-  # F8 (transit TLS): key is ECDSA P-256 below => certificates it signs are ecdsa-with-SHA256. This CA is NOT used for the
-  # Postgres / SeaweedFS transit hops: those use the chart-owned CA in <release>-transit-tls (no nameConstraints), dialed by
-  # FQDN -- see k8s/helm/waddlebot/templates/_transit_tls.tpl. No CA re-issue is required for them.
+  # F8 (transit TLS): the key below is ECDSA P-256 => every certificate it signs is ecdsa-with-SHA256. This is the ONE trust root
+  # for in-cluster transit TLS: the Postgres, SeaweedFS S3 and Valkey server certs (global.transitTls.certManager) are issued
+  # by the ClusterIssuer below with FQDN-only SANs (<svc>.<ns>.svc.cluster.local, inside nameConstraints) and the clients dial
+  # the FQDN. No CA re-issue is required: the existing permitted suffix already covers them.
   commonName: waddlebot-internal-ca
   subject:
     organizations: [PenguinTech]

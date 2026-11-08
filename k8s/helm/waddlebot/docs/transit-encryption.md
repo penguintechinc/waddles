@@ -19,22 +19,23 @@ OpenSSL/Go tickets elsewhere). Every client keeps a pooled keep-alive connection
 redis-py `ConnectionPool`, redis-rs connection manager, `object_store` / boto3 HTTP pools), so a handshake happens per
 connection, never per request.
 
-## CA and certificates (F8)
+## One trust root (F8)
 
-`templates/transit-tls-secret.yaml` renders `<release>-transit-tls`: `ca.crt` (the CA certificate only, no CA key),
-`postgres.crt/.key`, `seaweedfs.crt/.key`. SANs: `<svc>`, `<svc>.<ns>`, `<svc>.<ns>.svc`, `<svc>.<ns>.svc.cluster.local`;
-clients always dial the FQDN. The chart-owned CA has no nameConstraints. The cert-manager `waddlebot-internal-ca`
-ClusterIssuer (`k8s/dal2alpha/internal-ca.yaml`) is not used for these hops: its critical nameConstraints permit only the
-`waddlebot.svc.cluster.local` suffix plus 7 bare names, so short-name dials can never validate against it. It is already
-ECDSA P-256 / SHA-256.
+- **cert-manager on** (`global.transitTls.certManager.enabled`: dal2alpha, beta, gamma, production): the Postgres, SeaweedFS
+  and Valkey server certs are issued by the shared `waddlebot-internal-ca` ClusterIssuer (the same issuer as the host-API/gRPC
+  mTLS and hub-api HTTPS certs; `global.internalTransitTls.certManager.issuerName`, when set, overrides it). ECDSA P-256,
+  `ecdsa-with-SHA256`, 90d auto-renew. SANs are FQDN-only because that CA's critical nameConstraints permit only
+  `*.<ns>.svc.cluster.local`; every client dials the FQDN. Secrets: `<release>-postgres-tls`, `<release>-seaweedfs-tls`,
+  `<release>-valkey-tls`. Every client mounts `ca.crt` from the one `<release>-postgres-tls` Secret (the same CA bytes for all
+  three hops). No self-generated CA exists in this mode; `global.valkeyTls.externalSecret` is ignored (cert-manager owns it).
+- **cert-manager off** (local, values-alpha): `templates/transit-tls-secret.yaml` self-generates one ECDSA CA plus Postgres and
+  SeaweedFS leaves into `<release>-transit-tls` (CA key never stored; pre-install/pre-upgrade hook so the migration Jobs can
+  mount it); the legacy Valkey cert keeps its own (now ECDSA) CA. beta/gamma/production never use this path.
 
-Provisioning: alpha/local self-generate (kept across upgrades while the SAN identity is unchanged); beta/gamma/production
-must supply `global.transitTls.*` or set `global.transitTls.externalSecret=true`; otherwise the render fails closed. The
-Secret is a pre-install/pre-upgrade hook so the migration/seed hook Jobs can mount the CA.
+The nameConstrained CA is why nothing here relies on short Service names: `infra-postgres.waddlebot.svc.cluster.local`, etc.
 
-Rotation: delete the Secret and `helm upgrade` (alpha), or rotate via the ExternalSecret. Server pods roll on a SAN change
-(`checksum/transit-tls`); a rotated CA/leaf with unchanged SANs needs `kubectl rollout restart` of Postgres, SeaweedFS and
-the clients.
+Rotation: cert-manager renews 15 days before expiry; pods pick up the new leaf on restart (Postgres/SeaweedFS/Valkey read
+the files at start). In the self-generated mode delete the Secret and `helm upgrade`.
 
 ## First rollout onto an existing release (dal2alpha)
 
@@ -42,8 +43,8 @@ The db-migrate Job is a pre-upgrade hook and now connects with `verify-full`, bu
 pre-TLS pod until the upgrade applies. For the one upgrade that introduces TLS, bring Postgres up first:
 `helm upgrade ... --set pipeline.migrationsJob.enabled=false --set pipeline.hubAdminSeedJob.enabled=false`, wait for
 `postgres`, `redis` and `seaweedfs` to roll (they restart: `Recreate`), then run the normal `helm upgrade`. Fresh installs
-need nothing special. The existing `<release>-valkey-tls` Secret keeps its RSA leaf (still negotiated: the Valkey cipher list
-carries ECDSA and RSA suites); delete it before the upgrade to re-mint it as ECDSA P-256.
+need nothing special. With cert-manager on, the old self-generated `<release>-valkey-tls` Secret is replaced by the cert-manager one of the same
+name: delete the old Secret before the upgrade (cert-manager will not adopt a Secret it did not create).
 
 ## Failure behaviour
 

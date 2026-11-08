@@ -408,15 +408,10 @@ spec:
       # Server leaf + key + CA from the transit-tls Secret (probes verify against the CA, no -k).
       - name: transit-tls
         secret:
-          secretName: {{ include "waddlebot.transitTls.secretName" . }}
+          secretName: {{ include "waddlebot.transitTls.s3SecretName" . }}
           defaultMode: 0440
           items:
-          - key: seaweedfs.crt
-            path: tls.crt
-          - key: seaweedfs.key
-            path: tls.key
-          - key: ca.crt
-            path: ca.crt
+          {{- include "waddlebot.transitTls.s3Items" . | nindent 10 }}
       {{- with (include "waddlebot.kms.seaweedfsVolumes" .) }}{{ . | nindent 6 }}{{- end }}
 ---
 apiVersion: v1

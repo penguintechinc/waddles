@@ -30,12 +30,18 @@ _CA_PATH = "/etc/waddles/transit-ca/ca.crt"
 _WORKLOAD_KINDS = ("Deployment", "StatefulSet", "Job", "CronJob")
 
 
-def _docs(values):
+_STATIC = ("global.transitTls.certManager.enabled=false",)  # force the self-generated-CA fallback
+_CM_ENVS = ("values-dal2alpha.yaml", "values-beta.yaml", "values-gamma.yaml", "values-production.yaml")
+
+
+def _docs(values, extra=()):
     """Render the chart for one values file and return the parsed documents."""
     args = [
         "helm", "template", "w", str(_CHART), "--kube-version", "1.30.0",
         "--values", str(_CHART / values), "--set", "global.deploymentTier=alpha",
     ]
+    for kv in extra:
+        args += ["--set", kv]
     r = subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603
     assert r.returncode == 0, r.stderr
     docs = [d for d in yaml.safe_load_all(r.stdout) if d]
@@ -106,7 +112,8 @@ def _openssl_text(pem: str) -> str:
 
 @pytest.mark.parametrize("values", _ENVS)
 def test_transit_secret_is_ecdsa_p256_sha256_and_chains(values):
-    docs = _docs(values)
+    """Self-generated fallback CA (cert-manager off): every env is forced static here."""
+    docs = _docs(values, _STATIC)
     secs = [d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls")]
     assert len(secs) == 1, "exactly one transit-tls Secret expected"
     data = secs[0]["stringData"]
@@ -133,7 +140,7 @@ def test_transit_secret_is_ecdsa_p256_sha256_and_chains(values):
 
 @pytest.mark.parametrize("values", _ENVS)
 def test_secret_is_a_pre_hook_so_migration_hooks_can_mount_it(values):
-    sec = next(d for d in _docs(values) if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls"))
+    sec = next(d for d in _docs(values, _STATIC) if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls"))
     ann = sec["metadata"]["annotations"]
     assert ann["helm.sh/hook"] == "pre-install,pre-upgrade"
 
@@ -213,6 +220,8 @@ def test_every_cache_url_is_rediss_with_ca_pinned(values):
     assert {"REDIS_URL", "VALKEY_URL"} <= set(urls)
     for k, v in urls.items():
         assert v.startswith("rediss://"), (k, "plaintext redis:// URL")
+        host = re.match(r"rediss://(?:[^@]*@)?([^:/]+)", v).group(1)
+        assert host.endswith(".svc.cluster.local"), (k, host, "must dial the FQDN (issuer nameConstraints)")
         if "@" in v:  # self-contained (Python) URLs must pin the CA and check the hostname
             assert "ssl_cert_reqs=required" in v and "ssl_ca_certs=/etc/waddles/ca/valkey-ca.crt" in v, k
             assert "ssl_check_hostname=true" in v, k
@@ -260,7 +269,7 @@ def test_every_s3_client_is_https_with_ca(values):
 
 @pytest.mark.parametrize("values", ("values-alpha.yaml", "values-dal2alpha.yaml"))
 def test_generated_valkey_ca_and_leaf_are_ecdsa_p256(values):
-    docs = _docs(values)
+    docs = _docs(values, _STATIC)
     sec = next(d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-valkey-tls"))
     for key in ("ca.crt", "tls.crt"):
         txt = _openssl_text(sec["stringData"][key])
@@ -282,3 +291,49 @@ def test_seaweedfs_serves_s3_over_tls_and_probes_verify(values):
     jc = job["spec"]["template"]["spec"]["containers"][0]
     assert 'ENDPOINT="https://' in jc["command"][-1]
     assert _mounts_ca(jc, job["spec"]["template"]["spec"])
+
+
+def _certs(docs):
+    return {d["metadata"]["name"]: d["spec"] for d in docs if d["kind"] == "Certificate"}
+
+
+@pytest.mark.parametrize("values", _CM_ENVS)
+def test_cert_manager_mode_has_one_trust_root(values):
+    """dal2alpha/beta/gamma/prod: Postgres, S3 and Valkey certs all come from the shared internal-CA issuer and
+    every client mounts the SAME single CA secret; no self-generated CA is rendered at all."""
+    docs = _docs(values)
+    names = {d["metadata"]["name"] for d in docs if d["kind"] == "Secret"}
+    assert not any(n.endswith("-transit-tls") for n in names), "self-generated transit CA must not render"
+    assert not any(n.endswith("-valkey-tls") for n in names), "self-generated Valkey CA must not render"
+    certs = _certs(docs)
+    want = {"postgres-tls": "infra-postgres", "seaweedfs-tls": None, "valkey-tls": None}
+    for suffix in want:
+        hit = [spec for n, spec in certs.items() if n.endswith("-" + suffix)]
+        assert len(hit) == 1, suffix
+        spec = hit[0]
+        assert spec["issuerRef"] == {"name": "waddlebot-internal-ca", "kind": "ClusterIssuer", "group": "cert-manager.io"}, suffix
+        assert spec["privateKey"]["algorithm"] == "ECDSA" and spec["privateKey"]["size"] == 256, suffix
+        assert spec["usages"] == ["server auth"]
+        # nameConstraints of waddlebot-internal-ca permit only *.<ns>.svc.cluster.local: FQDN-only SANs, no IP, no short names
+        assert spec["dnsNames"] and all(n.endswith(".svc.cluster.local") for n in spec["dnsNames"]), (suffix, spec["dnsNames"])
+    assert f"{_fqdn(docs, 'postgres')}" in next(s["dnsNames"] for n, s in certs.items() if n.endswith("-postgres-tls"))
+    assert f"{_fqdn(docs, 'seaweedfs')}" in next(s["dnsNames"] for n, s in certs.items() if n.endswith("-seaweedfs-tls"))
+    sources = set()
+    for d in docs:
+        if d["kind"] in _WORKLOAD_KINDS:
+            for v in _pod_spec(d).get("volumes", []):
+                if v["name"] in ("transit-ca", "valkey-ca"):
+                    assert v["secret"]["items"][0]["key"] == "ca.crt"
+                    sources.add(v["secret"]["secretName"])
+    assert len(sources) == 1, f"clients must mount exactly one CA bundle, found {sources}"
+    pg = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "postgres")
+    vol = next(v for v in pg["spec"]["template"]["spec"]["volumes"] if v["name"] == "transit-tls")
+    assert vol["secret"]["secretName"] in {n for n in certs}, "server cert Secret must be the cert-manager one"
+    assert [i["key"] for i in vol["secret"]["items"]] == ["tls.crt", "tls.key"]
+
+
+def test_static_fallback_only_when_cert_manager_is_off():
+    """values-alpha (no cert-manager) self-generates one CA; the cert-manager Certificates are absent."""
+    docs = _docs("values-alpha.yaml")
+    assert not [d for d in docs if d["kind"] == "Certificate" and d["metadata"]["name"].endswith(("-postgres-tls", "-seaweedfs-tls", "-valkey-tls"))]
+    assert any(d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls") for d in docs)

@@ -1,0 +1,57 @@
+{{- /*
+feature/transit-tls-core -- cert-manager path (global.transitTls.certManager.enabled=true) for the Postgres, SeaweedFS S3 and
+Valkey server certificates: ONE trust root. All three are issued by the shared internal-CA issuer (default ClusterIssuer
+`waddlebot-internal-ca`, the same one the host-API/gRPC mTLS identities and the hub-api HTTPS cert use), ECDSA P-256 so the
+signature is ecdsa-with-SHA256, 90d with auto-renewal. SANs are FQDN-only: that CA's critical nameConstraints permit only
+`*.<ns>.svc.cluster.local` names (k8s/dal2alpha/internal-ca.yaml), and every client dials the FQDN. cert-manager writes the
+CA next to each leaf (ca.crt), which is what every client mounts (waddlebot.transitTls.caSecretName).
+With the issuer missing the Secrets never appear and the pods stay ContainerCreating -- fail loud, no plaintext fallback.
+Regular resources (not hooks): the first-rollout ordering in docs/transit-encryption.md covers the pre-upgrade migration Job.
+*/ -}}
+{{- if include "waddlebot.transitTls.cm" . }}
+{{- $tt := .Values.global.transitTls.certManager }}
+{{- $issuer := include "waddlebot.transitTls.issuerName" . }}
+{{- if not $issuer }}
+{{- fail "global.transitTls.certManager.enabled=true requires an issuer name (global.transitTls.certManager.issuerName)" }}
+{{- end }}
+{{- $targets := list }}
+{{- if .Values.infrastructure.postgresql.enabled }}
+{{- $targets = append $targets (dict "secret" (include "waddlebot.transitTls.pgSecretName" .) "component" "postgres-tls" "dns" (include "waddlebot.transitTls.pgDnsNames" . | fromJsonArray)) }}
+{{- end }}
+{{- if .Values.infrastructure.seaweedfs.enabled }}
+{{- $targets = append $targets (dict "secret" (include "waddlebot.transitTls.s3SecretName" .) "component" "seaweedfs-tls" "dns" (include "waddlebot.transitTls.s3DnsNames" . | fromJsonArray)) }}
+{{- end }}
+{{- if .Values.infrastructure.redis.tls.enabled }}
+{{- $targets = append $targets (dict "secret" (printf "%s-valkey-tls" (include "waddlebot.fullname" .)) "component" "valkey-tls" "dns" (include "waddlebot.transitTls.valkeyCmDnsNames" . | fromJsonArray)) }}
+{{- end }}
+{{- range $t := $targets }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $t.secret }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $t.component }}
+spec:
+  secretName: {{ $t.secret }}
+  duration: {{ $tt.duration | default "2160h" | quote }}
+  renewBefore: {{ $tt.renewBefore | default "360h" | quote }}
+  # Server certs only; clients verify, they do not present certs.
+  usages:
+    - server auth
+  dnsNames:
+    {{- range $t.dns }}
+    - {{ . | quote }}
+    {{- end }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: {{ $issuer }}
+    kind: {{ include "waddlebot.transitTls.issuerKind" $ }}
+    group: cert-manager.io
+{{- end }}
+{{- end }}

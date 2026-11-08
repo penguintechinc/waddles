@@ -1,18 +1,21 @@
 {{/*
 feature/transit-tls-core -- in-cluster transit encryption for the Postgres (F1) and SeaweedFS S3 (F5) hops.
 
-One chart-owned, ECDSA P-256 / SHA-256 internal CA ("transit CA") signs a server leaf for Postgres and one
-for the SeaweedFS S3 gateway; both live, together with the CA certificate (never the CA key), in the single
-Secret <fullname>-transit-tls (templates/transit-tls-secret.yaml). Clients mount ONLY ca.crt from it
-(waddlebot.transitTls.caVolume) and verify the server against that CA -- never system roots, never
-"insecure", never a plaintext fallback. The Valkey hops keep their own CA (templates/infrastructure/
-valkey-tls-secret.yaml, global.valkeyTls) and are NOT part of this Secret.
+Self-generated fallback (cert-manager off): one chart-owned ECDSA P-256 / SHA-256 CA ("transit CA") signs a server leaf for
+Postgres and one for the SeaweedFS S3 gateway; both live, with the CA certificate (never the CA key), in the single Secret
+<fullname>-transit-tls (templates/transit-tls-secret.yaml). Clients mount ONLY ca.crt and verify the server against that CA --
+never system roots, never "insecure", never a plaintext fallback.
 
-F8 (CA prerequisites): this CA is chart-owned and carries NO nameConstraints, and every leaf SAN list includes
-the <svc>.<ns>.svc.cluster.local FQDN. The cert-manager waddlebot-internal-ca ClusterIssuer
-(k8s/dal2alpha/internal-ca.yaml) is deliberately NOT used for these hops: its critical nameConstraints permit only
-the FQDN suffix plus 7 bare names, so a short-name dial (infra-postgres) can never validate against it. Clients
-here dial the FQDN anyway (waddlebot.transitTls.pgHost / s3Host), so a future move to that CA needs no URL change.
+ONE TRUST ROOT: with global.transitTls.certManager.enabled (dal2alpha/beta/gamma/production) there is no self-generated CA at
+all -- templates/transit-data-tls-certificates.yaml asks the shared `waddlebot-internal-ca` ClusterIssuer for the Postgres,
+SeaweedFS and Valkey server certs (FQDN-only SANs), and every client mounts the ca.crt cert-manager writes next to them
+(waddlebot.transitTls.caSecretName: the SAME CA bytes for all three hops and the existing host-API/gRPC/hub-api trust). Only
+where cert-manager is off (local, values-alpha) does the self-generated CA below apply; the legacy Valkey CA is then separate.
+
+F8 (CA prerequisites): the cert-manager `waddlebot-internal-ca` CA (k8s/dal2alpha/internal-ca.yaml) has critical nameConstraints
+permitting only `*.<ns>.svc.cluster.local` plus a few bare names, so in cert-manager mode every SAN is the FQDN only and every
+client dials the FQDN (waddlebot.transitTls.pgHost / s3Host / fqdn); no CA re-issue is needed. The self-generated fallback CA has
+no nameConstraints and also carries the short forms. Both are ECDSA P-256 / ecdsa-with-SHA256.
 
 Negotiation bar (user requirement 2026-11-08): TLS 1.3 preferred, 1.2 minimum, ECDSA P-256, P-256 key exchange,
 AES-128-GCM / ChaCha20-Poly1305, session resumption on, pooled keep-alive client connections.
@@ -27,6 +30,75 @@ true
 
 {{- define "waddlebot.transitTls.secretName" -}}
 {{- printf "%s-transit-tls" (include "waddlebot.fullname" .) -}}
+{{- end }}
+
+{{/* "true" when the shared cert-manager issuer provides every transit cert (no self-generated CA). */}}
+{{- define "waddlebot.transitTls.cm" -}}
+{{- if .Values.global.transitTls.certManager.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/* Shared issuer (name/kind): global.internalTransitTls.certManager.* (hub-api HTTPS) wins when present. */}}
+{{- define "waddlebot.transitTls.issuerName" -}}
+{{- $it := get .Values.global "internalTransitTls" | default dict -}}
+{{- $icm := get $it "certManager" | default dict -}}
+{{- get $icm "issuerName" | default .Values.global.transitTls.certManager.issuerName -}}
+{{- end }}
+{{- define "waddlebot.transitTls.issuerKind" -}}
+{{- $it := get .Values.global "internalTransitTls" | default dict -}}
+{{- $icm := get $it "certManager" | default dict -}}
+{{- get $icm "issuerKind" | default .Values.global.transitTls.certManager.issuerKind -}}
+{{- end }}
+
+{{/* cert-manager-issued server Secret names (one per server; each also carries the shared ca.crt). */}}
+{{- define "waddlebot.transitTls.pgSecretName" -}}
+{{- if include "waddlebot.transitTls.cm" . -}}{{ include "waddlebot.fullname" . }}-postgres-tls{{- else -}}{{ include "waddlebot.transitTls.secretName" . }}{{- end -}}
+{{- end }}
+{{- define "waddlebot.transitTls.s3SecretName" -}}
+{{- if include "waddlebot.transitTls.cm" . -}}{{ include "waddlebot.fullname" . }}-seaweedfs-tls{{- else -}}{{ include "waddlebot.transitTls.secretName" . }}{{- end -}}
+{{- end }}
+
+{{/* Secret every CLIENT mounts ca.crt from: the one shared trust root. */}}
+{{- define "waddlebot.transitTls.caSecretName" -}}
+{{- if include "waddlebot.transitTls.cm" . -}}
+{{- if .Values.infrastructure.postgresql.enabled -}}{{ include "waddlebot.transitTls.pgSecretName" . }}{{- else -}}{{ include "waddlebot.transitTls.s3SecretName" . }}{{- end -}}
+{{- else -}}{{ include "waddlebot.transitTls.secretName" . }}{{- end -}}
+{{- end }}
+
+{{/* Server volume `items` (key->path) for Postgres/SeaweedFS: the cert-manager Secret uses tls.crt/tls.key, the static one prefixed keys. */}}
+{{- define "waddlebot.transitTls.pgItems" -}}
+{{- if include "waddlebot.transitTls.cm" . -}}
+- key: tls.crt
+  path: tls.crt
+- key: tls.key
+  path: tls.key
+{{- else -}}
+- key: postgres.crt
+  path: tls.crt
+- key: postgres.key
+  path: tls.key
+{{- end -}}
+{{- end }}
+{{- define "waddlebot.transitTls.s3Items" -}}
+- key: ca.crt
+  path: ca.crt
+{{ if include "waddlebot.transitTls.cm" . -}}
+- key: tls.crt
+  path: tls.crt
+- key: tls.key
+  path: tls.key
+{{- else -}}
+- key: seaweedfs.crt
+  path: tls.crt
+- key: seaweedfs.key
+  path: tls.key
+{{- end }}
+{{- end }}
+
+{{/* FQDN of any in-chart Service: args (dict "root" . "name" <svc>) -- the form every transit URL uses. */}}
+{{- define "waddlebot.transitTls.fqdn" -}}
+{{- printf "%s.%s.svc.cluster.local" .name .root.Values.namespace -}}
 {{- end }}
 
 {{/* Path the CA is mounted at inside every client container. */}}
@@ -53,13 +125,30 @@ true
 {{- define "waddlebot.transitTls.pgDnsNames" -}}
 {{- $s := .Values.infrastructure.postgresql.service.name -}}
 {{- $ns := .Values.namespace -}}
+{{- if include "waddlebot.transitTls.cm" . -}}
+{{- list (printf "%s.%s.svc.cluster.local" $s $ns) | toJson -}}
+{{- else -}}
 {{- list $s (printf "%s.%s" $s $ns) (printf "%s.%s.svc" $s $ns) (printf "%s.%s.svc.cluster.local" $s $ns) | toJson -}}
+{{- end -}}
 {{- end }}
 
 {{- define "waddlebot.transitTls.s3DnsNames" -}}
 {{- $s := .Values.infrastructure.seaweedfs.service.name -}}
 {{- $ns := .Values.namespace -}}
+{{- if include "waddlebot.transitTls.cm" . -}}
+{{- list (printf "%s.%s.svc.cluster.local" $s $ns) | toJson -}}
+{{- else -}}
 {{- list $s (printf "%s.%s" $s $ns) (printf "%s.%s.svc" $s $ns) (printf "%s.%s.svc.cluster.local" $s $ns) | toJson -}}
+{{- end -}}
+{{- end }}
+
+{{/* Valkey (cache + durable + kv) server SANs for cert-manager: only names inside the issuer's nameConstraints suffix. */}}
+{{- define "waddlebot.transitTls.valkeyCmDnsNames" -}}
+{{- $out := list -}}
+{{- range (include "waddlebot.valkeyTlsDesiredDnsNames" . | splitList ",") -}}
+{{- if hasSuffix ".svc.cluster.local" . -}}{{- $out = append $out . -}}{{- end -}}
+{{- end -}}
+{{- $out | toJson -}}
 {{- end }}
 
 {{/* Identity hash over the SANs + algorithm marker: a changed Service name/namespace regenerates (alpha) or fails closed. */}}
@@ -77,7 +166,7 @@ true
 {{- if include "waddlebot.transitTls.enabled" . -}}
 - name: transit-ca
   secret:
-    secretName: {{ include "waddlebot.transitTls.secretName" . }}
+    secretName: {{ include "waddlebot.transitTls.caSecretName" . }}
     defaultMode: 0444
     items:
     - key: ca.crt

@@ -175,13 +175,25 @@ global:
   # feature/transit-tls-core -- in-cluster transit TLS for Postgres (F1) and the SeaweedFS S3 gateway (F5).
   # One chart-owned ECDSA P-256 / SHA-256 CA signs a server leaf for each; clients mount ONLY the CA and
   # verify (Postgres sslmode=verify-full, S3 https with the CA pinned, system roots disabled). See
-  # templates/_transit_tls.tpl for the design, templates/transit-tls-secret.yaml for the provisioning policy.
+  # templates/_transit_data_tls.tpl for the design, templates/transit-tls-secret.yaml for the provisioning policy.
   # alpha/local self-generate (lookup-keep); beta/gamma/production REQUIRE material below (never a literal in git)
   # or externalSecret: true. There is NO plaintext toggle: Postgres and SeaweedFS are TLS-only whenever enabled.
   # Negotiation: TLS 1.3 preferred / 1.2 minimum, ECDSA P-256, P-256 key exchange, AES-128-GCM or ChaCha20-Poly1305,
   # session resumption on, pooled keep-alive clients. Customers wanting stronger protection can additionally enable
   # CNI encryption (e.g. Cilium WireGuard) -- see docs/transit-encryption.md.
   transitTls:
+    # ONE trust root: when certManager.enabled (dal2alpha/beta/gamma/production) the Postgres, SeaweedFS S3 AND Valkey
+    # server certs are all issued by this ClusterIssuer (the same `waddlebot-internal-ca` the host-API/gRPC mTLS and the
+    # hub-api HTTPS certs use; k8s/dal2alpha/internal-ca.yaml) with FQDN-only SANs (its nameConstraints permit nothing else)
+    # and every client mounts that one CA. enabled=false (local / values-alpha) self-generates the chart-owned CA below.
+    # issuerName is shared with global.internalTransitTls.certManager.issuerName (hub-api HTTPS): if that block exists and
+    # sets an issuerName it wins, so there is a single place to repoint the trust root.
+    certManager:
+      enabled: false
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
+      duration: "2160h"    # 90d
+      renewBefore: "360h"  # 15d
     ca:
       crt: ""
     postgres:
