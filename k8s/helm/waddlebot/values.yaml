@@ -3555,6 +3555,9 @@ serviceJwt:
         # to this identity alone and, like the grant above, only rendered while
         # pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled is true.
         - "dataplane:resolve-scope"
+        # per-user active community context (slash routing): GET/PUT
+        # /api/v1/internal/dataplane/active-context. Numeric community id out; no secret.
+        - "dataplane:active-context"
         # feature/hubapi-platform-user-and-binding-meta -- the ONE detokenization point: the
         # outbound executor (Discord dm.send / role.add / role.remove) resolves a tokenized
         # user UUID to the raw platform user id through IdentityService.ResolvePlatformUser

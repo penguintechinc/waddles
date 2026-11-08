@@ -126,7 +126,13 @@ def test_chart_grants_svc_ingest_exactly_connections_resolve_on_the_system_tenan
     identity = chart_identities[_SVC_INGEST]
     # Minimum: the data-plane scopes (connections, scope resolver, platform-user detokenizer).
     assert identity.allowed_scopes == frozenset(
-        {_SCOPE, _LIST_SCOPE, "dataplane:resolve-scope", "identity:platform-user:resolve"}
+        {
+            _SCOPE,
+            _LIST_SCOPE,
+            "dataplane:resolve-scope",
+            "dataplane:active-context",
+            "identity:platform-user:resolve",
+        }
     )
     assert "connections:resolve:static" not in identity.allowed_scopes
     assert identity.tenant == "system"

@@ -273,6 +273,7 @@ RULES: tuple[Rule, ...] = (
     delete("community_join_requests", hub("user_id")),
     delete("connected_calendars", hub("hub_user_id")),
     delete("economy_balances", uuid("user_uuid")),
+    delete("user_active_contexts", uuid("user_uuid")),
     delete("economy_ledger", uuid("user_uuid")),
     delete("form_submissions", hub("user_id")),
     delete("golden_ticket_holders", hub("user_id")),
