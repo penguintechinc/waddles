@@ -221,7 +221,7 @@ public sealed class FishingLogic : WaddleProcessStageNext
                     outcome = new CastOutcome(actor, command.Name, seed, casts, Compose(actor, results, state), results);
                     // Record BEFORE the state write, so a crash in between is repaired from the recorded seed on redelivery.
                     store.SetJson(key, outcome, FishingJsonContext.Default.CastOutcome, OutcomeTtlSeconds);
-                    state.MarkApplied(applied);
+                    state.MarkApplied(applied, host.Clock.NowMillis());
                     fs.SavePlayer(actor, state);
                     freshlyApplied = true;
                 }
@@ -330,7 +330,7 @@ public sealed class FishingLogic : WaddleProcessStageNext
 
             var text = replay ? recorded!.Text : result.Message;
             store.SetJson(key, new ShopOutcome(actor, command.Name, text), FishingJsonContext.Default.ShopOutcome, OutcomeTtlSeconds);
-            state.MarkApplied(applied);
+            state.MarkApplied(applied, host.Clock.NowMillis());
             fs.SavePlayer(actor, state);
             host.Log.Info("fishing.shop", new LogFields().With("command", command.Name).With("replay", replay).Build());
             return text;
@@ -550,18 +550,14 @@ public sealed class FishingLogic : WaddleProcessStageNext
             }
 
             var aggregate = fs.LoadAggregate(window.Id, actor);
-            if (!aggregate.Applied.Contains(applied))
+            if (!AppliedMarks.Has(aggregate.Applied, applied))
             {
                 foreach (var cast in counted)
                 {
                     FishingTournament.Record(aggregate, cast);
                 }
 
-                aggregate.Applied.Add(applied);
-                if (aggregate.Applied.Count > 8)
-                {
-                    aggregate.Applied.RemoveRange(0, aggregate.Applied.Count - 8);
-                }
+                AppliedMarks.Add(aggregate.Applied, applied, now);
 
                 fs.SaveAggregate(window.Id, actor, aggregate);
             }
@@ -664,13 +660,13 @@ public sealed class FishingLogic : WaddleProcessStageNext
         try
         {
             var state = fs.LoadPlayer(user);
-            if (state.HasApplied(mark))
+            if (state.HasPaid(mark))
             {
                 return;
             }
 
             state.Gold = Math.Min(int.MaxValue, state.Gold + gold);
-            state.MarkApplied(mark);
+            state.MarkPaid(mark);
             fs.SavePlayer(user, state);
         }
         finally

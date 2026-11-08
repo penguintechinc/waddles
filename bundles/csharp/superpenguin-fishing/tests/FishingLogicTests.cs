@@ -498,6 +498,121 @@ public class FishingLogicTests
         Assert.Equal($"Top earners: 1. {AliceTag} 5g. Biggest losses: 1. {AliceTag} 100g.", w2.Say(logic, World.Alice, "!fishtop"));
     }
 
+    // ------------------------------------------------------------------ replay marks (regression: no count-based eviction)
+
+    [Fact]
+    public void replay_marks_outlive_the_outcome_record_so_they_are_never_evicted_by_count()
+    {
+        Assert.True(AppliedMarks.RetentionMillis >= FishingLogic.OutcomeTtlSeconds * 1000UL);
+        Assert.True(AppliedMarks.MaxLive > 100);
+    }
+
+    [Fact]
+    public void a_purchase_replayed_after_far_more_than_24_later_actions_is_still_not_applied_twice()
+    {
+        var w = Rich();
+        var logic = Logic();
+        var first = w.Send(logic, World.Alice, "!fishbuy bamboo rod", "buy-1")!;
+        var gold = w.Player(World.Alice).Gold;
+        for (var i = 0; i < 60; i++) // the old cap was 24 marks
+        {
+            w.Send(logic, World.Alice, "!fishequip 1", "eq-" + i);
+        }
+
+        Assert.True(w.Player(World.Alice).Applied.Count >= 61);
+        Assert.Equal(first, w.Send(logic, World.Alice, "!fishbuy bamboo rod", "buy-1"));
+        Assert.Equal(gold, w.Player(World.Alice).Gold);
+        Assert.Single(w.Player(World.Alice).Items);
+    }
+
+    [Fact]
+    public void a_cast_replayed_after_far_more_than_24_later_casts_is_still_not_applied_twice()
+    {
+        var w = new World();
+        var logic = Logic(Cat.Of());
+        var first = w.Send(logic, World.Alice, "!fish", "evt-first")!;
+        for (var i = 0; i < 40; i++)
+        {
+            Cool(w, World.Alice);
+            w.Send(logic, World.Alice, "!fish", "evt-" + i);
+        }
+
+        var before = w.Player(World.Alice);
+        Assert.Equal(first, w.Send(logic, World.Alice, "!fish", "evt-first"));
+        var after = w.Player(World.Alice);
+        Assert.Equal(before.Gold, after.Gold);
+        Assert.Equal(before.Casts, after.Casts);
+    }
+
+    [Fact]
+    public void a_tournament_catch_replayed_after_far_more_than_8_later_catches_is_not_double_counted()
+    {
+        var w = new World(tournaments: true);
+        var logic = Logic(CupCatalog());
+        w.Send(logic, World.Alice, "!fish", "evt-first");
+        var window = FishingTournament.ActiveWindow(Cup(), w.Clock.Now)!;
+        for (var i = 0; i < 30; i++)
+        {
+            Cool(w, World.Alice);
+            w.Send(logic, World.Alice, "!fish", "evt-" + i);
+        }
+
+        var count = w.Store.LoadAggregate(window.Id, World.Alice).Count;
+        Assert.Equal(31, count);
+        w.Send(logic, World.Alice, "!fish", "evt-first");
+        Assert.Equal(31, w.Store.LoadAggregate(window.Id, World.Alice).Count);
+    }
+
+    [Fact]
+    public void marks_age_out_only_after_the_retention_window()
+    {
+        var marks = new List<string>();
+        AppliedMarks.Add(marks, "old", 60_000UL * 10);
+        AppliedMarks.Add(marks, "new", 60_000UL * 10 + AppliedMarks.RetentionMillis - 60_000UL);
+        Assert.True(AppliedMarks.Has(marks, "old")); // still inside the window
+        AppliedMarks.Add(marks, "newer", 60_000UL * 10 + AppliedMarks.RetentionMillis + 120_000UL);
+        Assert.False(AppliedMarks.Has(marks, "old")); // aged out
+        Assert.True(AppliedMarks.Has(marks, "new"));
+        Assert.True(AppliedMarks.Has(marks, "newer"));
+        AppliedMarks.Add(marks, "newer", 60_000UL * 10 + AppliedMarks.RetentionMillis + 120_000UL); // re-adding is a no-op
+        Assert.Equal(2, marks.Count);
+        Assert.False(AppliedMarks.Has(marks, "new2")); // no prefix confusion
+        Assert.False(AppliedMarks.Has(["abc|1"], "ab"));
+    }
+
+    [Fact]
+    public void a_saturated_retention_window_fails_closed_instead_of_dropping_a_live_mark()
+    {
+        var w = Rich();
+        var p = w.Player(World.Alice);
+        var now = w.Clock.Now;
+        for (var i = 0; i < AppliedMarks.MaxLive; i++)
+        {
+            p.Applied.Add($"k{i}|{now / 60_000UL}");
+        }
+
+        w.SetPlayer(World.Alice, p);
+        Assert.Throws<InvalidOperationException>(() => w.Say(Logic(), World.Alice, "!fishbuy bamboo rod"));
+        var after = w.Player(World.Alice);
+        Assert.Equal(1000, after.Gold);
+        Assert.Empty(after.Items);
+        Assert.Equal(AppliedMarks.MaxLive, after.Applied.Count);
+    }
+
+    [Fact]
+    public void settlement_payout_marks_are_capped_by_count_and_drop_the_oldest()
+    {
+        var p = new PlayerState();
+        for (var i = 0; i < PlayerState.MaxPaid + 5; i++)
+        {
+            p.MarkPaid("t" + i);
+        }
+
+        Assert.Equal(PlayerState.MaxPaid, p.Paid.Count);
+        Assert.False(p.HasPaid("t0"));
+        Assert.True(p.HasPaid("t" + (PlayerState.MaxPaid + 4)));
+    }
+
     // ------------------------------------------------------------------ lifetime boards
 
     [Fact]

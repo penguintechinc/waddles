@@ -138,22 +138,34 @@ public sealed class PlayerState
 
     [JsonPropertyName("casts")] public long Casts { get; set; }
 
-    /// <summary>Short keys of the most recent mutating events applied to this player (and settlement payouts): a redelivery applies nothing twice.</summary>
+    /// <summary>
+    /// Replay marks of events applied to this player, as "key|minute" entries pruned by AGE (never by count): a mark must outlive the
+    /// 3600 s outcome record that can replay it, or an evicted mark would let a replay apply twice.
+    /// </summary>
     [JsonPropertyName("applied")] public List<string> Applied { get; set; } = [];
 
-    /// <summary>The most applied-event keys remembered per player.</summary>
-    public const int MaxApplied = 24;
+    /// <summary>Settlement payout marks (one per tournament window and placement); kept by count because settlement is also guarded by the board's settled flag.</summary>
+    [JsonPropertyName("paid")] public List<string> Paid { get; set; } = [];
 
-    /// <summary>True when <paramref name="key"/> was already applied.</summary>
-    public bool HasApplied(string key) => Applied.Contains(key);
+    /// <summary>The most settlement marks remembered per player (oldest dropped).</summary>
+    public const int MaxPaid = 200;
 
-    /// <summary>Remembers <paramref name="key"/> as applied, dropping the oldest beyond <see cref="MaxApplied"/>.</summary>
-    public void MarkApplied(string key)
+    /// <summary>True when <paramref name="key"/> was already applied (and its mark has not aged out).</summary>
+    public bool HasApplied(string key) => AppliedMarks.Has(Applied, key);
+
+    /// <summary>Remembers <paramref name="key"/> as applied at <paramref name="nowMillis"/>; fails closed when the retention window is saturated.</summary>
+    public void MarkApplied(string key, ulong nowMillis) => AppliedMarks.Add(Applied, key, nowMillis);
+
+    /// <summary>True when the settlement payout <paramref name="mark"/> was already granted.</summary>
+    public bool HasPaid(string mark) => Paid.Contains(mark);
+
+    /// <summary>Remembers a granted settlement payout.</summary>
+    public void MarkPaid(string mark)
     {
-        Applied.Add(key);
-        if (Applied.Count > MaxApplied)
+        Paid.Add(mark);
+        if (Paid.Count > MaxPaid)
         {
-            Applied.RemoveRange(0, Applied.Count - MaxApplied);
+            Paid.RemoveRange(0, Paid.Count - MaxPaid);
         }
     }
 }
@@ -216,6 +228,42 @@ public sealed class TournamentAggregate
     [JsonPropertyName("stars")] public int TotalStars { get; set; }
 
     [JsonPropertyName("applied")] public List<string> Applied { get; set; } = [];
+}
+
+/// <summary>
+/// Age-based replay marks shared by the player state and tournament aggregates. A mark is "key|minute"; entries older than
+/// <see cref="RetentionMillis"/> are pruned, never evicted by count, so a mark always outlives the outcome record that could replay it.
+/// If the window is saturated the add throws (fail closed) instead of evicting a live mark.
+/// </summary>
+public static class AppliedMarks
+{
+    /// <summary>Twice the outcome record TTL (3600 s): marks outlive every possible replay.</summary>
+    public const ulong RetentionMillis = 2UL * 3_600_000UL;
+
+    /// <summary>Hard bound on live marks (far above what the cooldowns allow).</summary>
+    public const int MaxLive = 1500;
+
+    /// <summary>True when <paramref name="key"/> has a mark in <paramref name="marks"/>.</summary>
+    public static bool Has(List<string> marks, string key) => marks.Any(m => m.StartsWith(key + "|", StringComparison.Ordinal));
+
+    /// <summary>Prunes aged marks, then records <paramref name="key"/>; throws when the live window is full.</summary>
+    public static void Add(List<string> marks, string key, ulong nowMillis)
+    {
+        var minute = (long)(nowMillis / 60_000UL);
+        var cutoff = minute - (long)(RetentionMillis / 60_000UL);
+        marks.RemoveAll(m => long.TryParse(m[(m.LastIndexOf('|') + 1)..], out var at) && at < cutoff);
+        if (Has(marks, key))
+        {
+            return;
+        }
+
+        if (marks.Count >= MaxLive)
+        {
+            throw new InvalidOperationException("too many recent actions for this player; refusing rather than dropping replay protection");
+        }
+
+        marks.Add($"{key}|{minute}");
+    }
 }
 
 /// <summary>One row of a tournament's bounded standings board (a user and their score under the tournament's rule).</summary>

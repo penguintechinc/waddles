@@ -62,7 +62,7 @@ Deviations (all deliberate):
 ## Replay and money safety
 
 * Every mutating command records its result under `message id + platform + actor + command` **before** writing state and marks
-  the key applied inside the single-value player write (last 24 keys). A redelivery reprints the record; a crash between record
+  the key applied inside the single-value player write (marks pruned by age, 2 h > the 1 h outcome TTL, never by count; a saturated window fails closed). A redelivery reprints the record; a crash between record
   and write is repaired from the recorded seed. A per-player lock (10 s TTL) serializes mutations (kv has no CAS).
 * A blank message id throws (no replay key, no mutation).
 * Tournament aggregates are idempotent per event; boards and leaderboards are monotone/idempotent upserts.
