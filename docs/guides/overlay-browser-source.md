@@ -58,14 +58,12 @@ fallback to the retired `/overlay/<id>/<surface>/push` route or the old
 
 ## Which runtime serves these routes
 
-The Rust svc-presentation is the deployed runtime on alpha, dal2alpha and local
-(`presentation.rust.enabled: true` in `values-alpha.yaml` / `values-dal2alpha.yaml` /
-`values-local.yaml`). The chart renders EITHER `templates/svc-presentation-rust.yaml` OR the
-Python `templates/svc-presentation.yaml` (identical Deployment/Service names), so the two can
-never both serve these routes. Base/beta/gamma/production keep `presentation.rust.enabled: false`
-(Python) until the cutover is approved. With the Rust runtime on, the chart also grants svc-action
-the `presentation.overlay:push` scope, `PRESENTATION_URL`/`SERVICE_JWT_*` env and an egress policy
-to svc-presentation (`waddlebot.svcActionOverlayPush`); with it off, none of that renders.
+The Rust svc-presentation (`templates/svc-presentation-rust.yaml`) is the only presentation
+runtime in every environment: the Python `templates/svc-presentation.yaml` was removed and
+`presentation.rust.enabled` defaults to `true` in base values (inherited by beta/gamma/production).
+With it on, the chart also grants svc-action the `presentation.overlay:push` scope and an egress
+policy to svc-presentation (`waddlebot.svcActionOverlayPush`); setting it `false` renders no
+presentation workload and none of that.
 
 ## What the viewer is guaranteed
 

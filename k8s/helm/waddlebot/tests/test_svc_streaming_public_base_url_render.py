@@ -17,7 +17,6 @@ kubelet `$(NODE_HOST_IP)` env expansion. These tests pin:
 3. with neither set the env var is absent (the service's own default applies), not empty;
 4. asking for the node-IP derivation without the NodePort it needs fails the render loudly
    instead of emitting a half-formed URL;
-5. the Python svc-presentation's PUBLIC_STREAMING_URL follows the same rules.
 
 Zero matching Deployments/containers is a hard failure, never a silent pass
 (critical-rules.md Verification Integrity) -- each helper reports what it examined.
@@ -35,9 +34,6 @@ import yaml
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _STALE_LAN_IP = "192.168.10.75"
-# alpha enables the Rust svc-presentation, which does not read PUBLIC_STREAMING_URL; the
-# Python Deployment (the only consumer of presentation.publicStreamingUrl) needs it off.
-_PYTHON_PRESENTATION = ["presentation.rust.enabled=false"]
 
 
 def _helm_template(
@@ -163,61 +159,3 @@ class TestSvcStreamingPublicBaseUrl:
             "render must fail rather than emit a half-formed URL"
         )
         assert "publicBaseUrlFromNodeIP requires" in result.stderr, result.stderr
-
-
-class TestSvcPresentationPublicStreamingUrl:
-    """presentation.publicStreamingUrl / publicStreamingUrlFromNodeIP (Python presentation)."""
-
-    def test_alpha_derives_the_url_from_the_node_ip(self) -> None:
-        env = _env(_docs(_PYTHON_PRESENTATION), "-svc-presentation", "svc-presentation")
-        names = [e["name"] for e in env]
-        assert names.index("NODE_HOST_IP") < names.index("PUBLIC_STREAMING_URL"), names
-        by_name = _by_name(env)
-        assert (
-            by_name["NODE_HOST_IP"]["valueFrom"]["fieldRef"]["fieldPath"]
-            == "status.hostIP"
-        )
-        assert (
-            by_name["PUBLIC_STREAMING_URL"]["value"] == "http://$(NODE_HOST_IP):31208"
-        )
-        assert _STALE_LAN_IP not in str(by_name["PUBLIC_STREAMING_URL"])
-
-    def test_explicit_url_wins(self) -> None:
-        env = _env(
-            _docs(
-                _PYTHON_PRESENTATION
-                + ["presentation.publicStreamingUrl=https://media.example.com"]
-            ),
-            "-svc-presentation",
-            "svc-presentation",
-        )
-        by_name = _by_name(env)
-        assert by_name["PUBLIC_STREAMING_URL"]["value"] == "https://media.example.com"
-        assert "NODE_HOST_IP" not in by_name
-
-    def test_unset_renders_the_documented_empty_default(self) -> None:
-        env = _env(
-            _docs(
-                _PYTHON_PRESENTATION
-                + ["presentation.publicStreamingUrlFromNodeIP=false"]
-            ),
-            "-svc-presentation",
-            "svc-presentation",
-        )
-        by_name = _by_name(env)
-        assert by_name["PUBLIC_STREAMING_URL"]["value"] == ""
-        assert "NODE_HOST_IP" not in by_name
-
-    def test_node_ip_derivation_without_a_nodeport_fails_the_render(self) -> None:
-        # svc-streaming gets an explicit URL so ITS node-IP guard cannot be the failure
-        # under test -- this must be the presentation template's own guard firing.
-        result = _helm_template(
-            _PYTHON_PRESENTATION
-            + [
-                "pipeline.svcStreaming.nodePort.enabled=false",
-                "pipeline.svcStreaming.publicBaseUrl=https://media.example.com",
-            ],
-            check=False,
-        )
-        assert result.returncode != 0
-        assert "publicStreamingUrlFromNodeIP requires" in result.stderr, result.stderr

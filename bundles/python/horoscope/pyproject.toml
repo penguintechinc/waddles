@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-horoscope"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!horoscope <sign>` -> a generic, clearly-for-fun horoscope for one of the 12 zodiac signs. Static, SFW, stateless."
 requires-python = ">=3.13"
 dependencies = []
