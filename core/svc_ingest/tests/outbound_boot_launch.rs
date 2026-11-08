@@ -60,6 +60,7 @@ fn cli() -> CliConfig {
     c.connector_tools = true;
     c.environment = "alpha".to_string();
     c.hub_api_url = "http://hub-api:8204".to_string();
+    c.hub_api_grpc_endpoint = "https://hub:50204".to_string();
     c.service_jwt_token_endpoint = "http://hub-api:8204/internal/service-token".to_string();
     c.bind_addr = "127.0.0.1".parse().unwrap();
     c

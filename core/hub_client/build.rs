@@ -17,6 +17,9 @@ fn main() {
             &[
                 proto_dir.join("identity.proto"),
                 proto_dir.join("key.proto"),
+                proto_dir.join("provider_connection.proto"),
+                proto_dir.join("distribution.proto"),
+                proto_dir.join("media.proto"),
             ],
             &[proto_root],
         )

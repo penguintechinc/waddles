@@ -157,6 +157,15 @@ spec:
         - name: TWITCH_RESOLVE_TIMEOUT_SECS
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchResolveTimeoutSecs | default 10 | quote }}
         {{- end }}
+        {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        # hub-api internal gRPC (TLS, pinned to the internal CA): IdentityService.ResolvePlatformUser
+        # (scope identity:platform-user:resolve) and the connection resolver's
+        # ProviderConnectionService.ListBindings/ResolveConnection (connections:list /
+        # connections:resolve[:static]) -- intra-cluster calls are gRPC, never REST.
+        - name: HUB_API_GRPC_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+        {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        {{- end }}
         # P6a T6: dedicated outbound pin key (NOT the shared envFrom Secret) -- templates/outbound-pin-secret.yaml.
         - name: OUTBOUND_PIN_KEYS
           valueFrom:
@@ -195,10 +204,6 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: TWITCH_CLIENT_ID
-        # hub-api internal gRPC (IdentityService.ResolvePlatformUser, scope identity:platform-user:resolve).
-        - name: HUB_API_GRPC_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
-        {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
         # svc-ingest's OWN server-only cert/key (dedicated Secret, svc-ingest SAN only) -- never the
         # shared executor/stage host-api-tls material. The client identity is pinned.
         - name: HOST_API_SERVER_CERT_FILE
@@ -346,6 +351,8 @@ spec:
         - name: svc-ingest-host-api-tls
           mountPath: /etc/waddlebot/svc-ingest-host-api-tls
           readOnly: true
+        {{- end }}
+        {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
         {{- end }}
       volumes:
@@ -359,6 +366,8 @@ spec:
         secret:
           secretName: {{ include "waddlebot.svcIngestHostApiTlsSecretName" . }}
           defaultMode: 0440
+      {{- end }}
+      {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
       {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
       {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}

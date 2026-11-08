@@ -415,7 +415,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         if cfg.grpc_enabled and issuer is not None:
             try:
                 app.config["grpc_server"] = await start_internal_grpc_server(
-                    issuer=issuer, async_dal=async_dal
+                    issuer=issuer, async_dal=async_dal, app_config=app.config
                 )
             except Exception as exc:  # noqa: BLE001 - see fail-open/fail-closed note above
                 logger.error(

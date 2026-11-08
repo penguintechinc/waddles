@@ -532,7 +532,7 @@ mod tests {
             list_meta: serde_json::Value,
             resolve_body: serde_json::Value,
         ) -> (
-            MockServer,
+            (MockServer, connection_resolver::test_support::Running),
             ResolverDiscordCredentials<ConnectionResolver>,
             TestSa,
         ) {
@@ -546,28 +546,21 @@ mod tests {
                 )
                 .mount(&server)
                 .await;
-            Mock::given(method("GET"))
-                .and(path("/api/v1/internal/provider-connections"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "success": true,
-                    "items": [{"communityId": 7, "connectionId": 12, "tenantId": 3, "secretVersion": 1, "provider": "discord",
-                               "kind": 1, "metadata": list_meta}],
-                    "nextAfter": null
-                })))
-                .mount(&server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path(
-                    "/api/v1/internal/communities/7/provider-connections/12/resolve",
-                ))
-                .respond_with(ResponseTemplate::new(200).set_body_json(resolve_body))
-                .mount(&server)
-                .await;
+            let list = serde_json::json!({
+                "success": true,
+                "items": [{"communityId": 7, "connectionId": 12, "tenantId": 3, "secretVersion": 1, "provider": "discord",
+                           "kind": 1, "metadata": list_meta}],
+                "nextAfter": null
+            });
+            let running = connection_resolver::test_support::start(
+                &connection_resolver::test_support::json_hub(&list, &resolve_body),
+            )
+            .await;
             let sa = std::env::temp_dir().join(format!("discord-sa-{}", uuid::Uuid::new_v4()));
             std::fs::write(&sa, "synthetic-sa").unwrap();
             let resolver = ConnectionResolver::new(
                 ResolverConfig::new(
-                    server.uri(),
+                    running.endpoint.clone(),
                     "alpha",
                     format!("{}/internal/service-token", server.uri()),
                     sa.to_string_lossy().to_string(),
@@ -576,7 +569,7 @@ mod tests {
             )
             .unwrap();
             (
-                server,
+                (server, running),
                 ResolverDiscordCredentials::new(resolver),
                 TestSa(sa),
             )

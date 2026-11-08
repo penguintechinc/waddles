@@ -110,7 +110,9 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
     """
 
     verifier: ServiceJwtVerifier
-    required_scopes: dict[str, str]
+    #: Method -> one required scope, or a tuple of alternatives of which a token must hold
+    #: ANY one (e.g. `connections:resolve` OR `connections:resolve:static`).
+    required_scopes: dict[str, str | tuple[str, ...]]
 
     async def intercept_service(
         self,
@@ -144,12 +146,20 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             if not auth_header.startswith("Bearer "):
                 await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing bearer token")
             token = auth_header[len("Bearer ") :]
-            try:
-                claims = self.verifier.verify(token, required_scope=required_scope)
-            except (UnknownKeyId, InvalidServiceToken):
+            claims: dict[str, Any] | None = None
+            for candidate in (
+                (required_scope,) if isinstance(required_scope, str) else required_scope
+            ):
+                try:
+                    claims = self.verifier.verify(token, required_scope=candidate)
+                    break
+                except (UnknownKeyId, InvalidServiceToken):
+                    continue
+            if claims is None:
                 # Never distinguish which check failed to the caller
                 # (security.md Service-to-Service Auth / JWT Claims).
                 await context.abort(grpc.StatusCode.UNAUTHENTICATED, "unauthorized")
+                raise AssertionError("unreachable")
             tenant_claim = claims.get("tenant")
             if not isinstance(tenant_claim, str) or not tenant_claim.strip():
                 _tenantless_counter.add(1, {"rpc.method": method})

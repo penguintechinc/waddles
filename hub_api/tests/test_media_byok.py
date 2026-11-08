@@ -17,17 +17,26 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import grpc
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from flask_core.rate_limiter import RateLimiter
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey, spiffe_id
 from quart import Quart
 from quart_schema import QuartSchema
+from waddles.hub.internal.v1 import media_pb2
 
 from blueprints.v1 import media_byok
+from grpc_internal.dataplane_servicers import (
+    RESOLVE_LIMIT,
+    SCOPE_MEDIA_BYOK_RESOLVE,
+    SCOPE_MEDIA_TIER_RESOLVE,
+    MediaServicer,
+)
 from services import media_byok_service as svc
 from services.ai_routing.errors import invalid_byok_key
 from services.schema import _define_audit_log
+from tests._dataplane_grpc import DataplaneClient, serving_dataplane
 from tests.conftest import (
     OTHER_TENANT_SLUG,
     TENANT_SLUG,
@@ -40,7 +49,7 @@ PLAINTEXT = "not-a-real-gemini-key-" + "x" * 20 + "-test"
 PROCESS = spiffe_id("alpha", "svc-process")
 ACTION = spiffe_id("alpha", "svc-action")
 ROGUE = spiffe_id("alpha", "svc-rogue")
-SCOPES = frozenset({media_byok.SCOPE_MEDIA_BYOK_RESOLVE, media_byok.SCOPE_MEDIA_TIER_RESOLVE})
+SCOPES = frozenset({SCOPE_MEDIA_BYOK_RESOLVE, SCOPE_MEDIA_TIER_RESOLVE})
 
 
 @pytest.fixture(autouse=True)
@@ -78,7 +87,6 @@ def app(ai_routing_db: Any, issuer: ServiceJwtIssuer) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     quart_app.register_blueprint(media_byok.media_byok_admin_bp)
-    quart_app.register_blueprint(media_byok.media_byok_internal_bp)
     quart_app.config["dal"] = ai_routing_db.dal
     quart_app.config["async_dal"] = ai_routing_db
     quart_app.config["SERVICE_JWT_ISSUER"] = issuer
@@ -234,16 +242,6 @@ class TestAdminApi:
         assert listed == []
 
 
-async def _resolve(
-    app: Quart, headers: dict[str, str], tenant_id: int, cid: int, provider: str = "gemini"
-) -> Any:
-    return await app.test_client().post(
-        "/api/v1/internal/media/byok/resolve",
-        headers={**headers, "Content-Type": "application/json"},
-        data=json.dumps({"tenant_id": tenant_id, "community_id": cid, "provider": provider}),
-    )
-
-
 async def _store(app: Quart, db: Any, headers: dict[str, str], cid: int) -> None:
     r = await app.test_client().put(
         f"/api/v1/admin/{cid}/media/byok-keys",
@@ -253,16 +251,68 @@ async def _store(app: Quart, db: Any, headers: dict[str, str], cid: int) -> None
     assert r.status_code == 200
 
 
+_BYOK = "/waddles.hub.internal.v1.MediaService/ResolveByok"
+_TIER = "/waddles.hub.internal.v1.MediaService/GetEffectiveTier"
+_TIER_NAMES = {
+    media_pb2.MEDIA_TIER_FREE: "free",
+    media_pb2.MEDIA_TIER_PROFESSIONAL: "professional",
+    media_pb2.MEDIA_TIER_ENTERPRISE: "enterprise",
+}
+
+
+@pytest.fixture
+async def dp(app: Quart, issuer: ServiceJwtIssuer) -> Any:
+    """A `DataplaneClient` over the real interceptor chain + `MediaServicer` (shared app config)."""
+    async with serving_dataplane(app.config, issuer) as address:
+        yield DataplaneClient(address)
+
+
+def _token(
+    issuer: ServiceJwtIssuer, sid: str = PROCESS, scope: str = SCOPE_MEDIA_BYOK_RESOLVE
+) -> str:
+    token, _ = issuer.issue_with_claims(sid, scope)
+    return token
+
+
+async def _resolve(
+    dp: DataplaneClient, token: str | None, tenant_id: int, cid: int, provider: str = "gemini"
+) -> Any:
+    return await dp.call(
+        _BYOK,
+        media_pb2.ResolveByokRequest(tenant_id=tenant_id, community_id=cid, provider=provider),
+        media_pb2.ResolveByokResponse,
+        token=token,
+    )
+
+
+async def _tier_call(dp: DataplaneClient, token: str | None, tid: int, cid: int) -> Any:
+    return await dp.call(
+        _TIER,
+        media_pb2.GetEffectiveTierRequest(tenant_id=tid, community_id=cid),
+        media_pb2.GetEffectiveTierResponse,
+        token=token,
+    )
+
+
+async def _refused(call: Any) -> grpc.aio.AioRpcError:
+    """Await `call` and return the `AioRpcError` it must raise (a clean return fails the test)."""
+    with pytest.raises(grpc.aio.AioRpcError) as caught:
+        await call
+    return caught.value
+
+
 class TestResolver:
     async def test_resolve_ok_and_audited_without_key(
-        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer
+        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
     ) -> None:
         admin, cid = _admin(ai_routing_db)
         await _store(app, ai_routing_db, admin, cid)
-        r = await _resolve(app, _machine(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
-        assert r.status_code == 200
-        assert await r.get_json() == {"status": "ok", "tier": "professional", "api_key": PLAINTEXT}
-        assert r.headers["Cache-Control"] == "no-store"
+        r = await _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
+        assert (r.status, _TIER_NAMES[r.tier], r.api_key) == (
+            media_pb2.BYOK_STATUS_OK,
+            "professional",
+            PLAINTEXT,
+        )
         rows = _audit_rows(ai_routing_db)
         assert len(rows) == 1 and rows[0].created_at is not None
         dumped = json.dumps(rows[0].details) + str(rows[0].action) + str(rows[0].target_id)
@@ -270,117 +320,134 @@ class TestResolver:
         assert rows[0].details["outcome"] == "ok"
 
     async def test_not_configured(
-        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer
+        self, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
     ) -> None:
         _, cid = _admin(ai_routing_db)
-        r = await _resolve(app, _machine(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
-        assert await r.get_json() == {
-            "status": "not_configured",
-            "tier": "professional",
-            "api_key": None,
-        }
+        r = await _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
+        assert (r.status, _TIER_NAMES[r.tier], r.HasField("api_key")) == (
+            media_pb2.BYOK_STATUS_NOT_CONFIGURED,
+            "professional",
+            False,
+        )
 
     async def test_deleted_key_not_configured(
-        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer
+        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
     ) -> None:
         admin, cid = _admin(ai_routing_db)
         await _store(app, ai_routing_db, admin, cid)
         await app.test_client().delete(f"/api/v1/admin/{cid}/media/byok-keys/gemini", headers=admin)
-        r = await _resolve(app, _machine(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
-        assert (await r.get_json())["status"] == "not_configured"
+        r = await _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
+        assert r.status == media_pb2.BYOK_STATUS_NOT_CONFIGURED
 
     async def test_resolve_free_tier_refused(
-        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer
+        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
     ) -> None:
         admin, cid = _admin(ai_routing_db)
         await _store(app, ai_routing_db, admin, cid)
         _set_tier(ai_routing_db, cid, "free")  # downgrade after the key was stored
-        r = await _resolve(app, _machine(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
-        body = await r.get_json()
-        assert body == {"status": "tier_required", "tier": "free", "api_key": None}
-        assert PLAINTEXT not in await r.get_data(as_text=True)
+        r = await _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
+        assert (r.status, _TIER_NAMES[r.tier], r.HasField("api_key")) == (
+            media_pb2.BYOK_STATUS_TIER_REQUIRED,
+            "free",
+            False,
+        )
+        assert PLAINTEXT not in str(r)
 
-    async def test_cross_tenant_resolve_is_404(
-        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer
+    async def test_cross_tenant_resolve_is_not_found(
+        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
     ) -> None:
         admin, cid = _admin(ai_routing_db)
         await _store(app, ai_routing_db, admin, cid)
         other_tenant = _tenant_id(ai_routing_db, OTHER_TENANT_SLUG)
-        r = await _resolve(app, _machine(issuer), other_tenant, cid)
-        assert r.status_code == 404
-        assert PLAINTEXT not in await r.get_data(as_text=True)
+        err = await _refused(_resolve(dp, _token(issuer), other_tenant, cid))
+        assert err.code() == grpc.StatusCode.NOT_FOUND
+        assert PLAINTEXT not in (err.details() or "")
+        (row,) = _audit_rows(ai_routing_db)
+        assert row.details["outcome"] == "scope_mismatch"
 
-    async def test_resolve_non_allowlisted_caller_403(
-        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer
+    async def test_resolve_non_allowlisted_caller_denied(
+        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
     ) -> None:
         admin, cid = _admin(ai_routing_db)
         await _store(app, ai_routing_db, admin, cid)
         tid = _tenant_id(ai_routing_db, TENANT_SLUG)
         for sid in (ACTION, ROGUE):  # valid scope + system tenant, but not the media stage
-            r = await _resolve(app, _machine(issuer, sid), tid, cid)
-            assert r.status_code == 403
-            assert PLAINTEXT not in await r.get_data(as_text=True)
+            err = await _refused(_resolve(dp, _token(issuer, sid), tid, cid))
+            assert err.code() == grpc.StatusCode.PERMISSION_DENIED
+            assert PLAINTEXT not in (err.details() or "")
         assert _audit_rows(ai_routing_db) == []
 
-    async def test_resolve_auth_refusals(
-        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer
-    ) -> None:
-        _, cid = _admin(ai_routing_db)
-        tid = _tenant_id(ai_routing_db, TENANT_SLUG)
-        assert (await _resolve(app, {}, tid, cid)).status_code == 401
-        assert (await _resolve(app, {"Authorization": "Bearer junk"}, tid, cid)).status_code == 401
-        wrong_scope = _machine(issuer, scope=media_byok.SCOPE_MEDIA_TIER_RESOLVE)
-        assert (await _resolve(app, wrong_scope, tid, cid)).status_code == 401
-        user = {"Authorization": f"Bearer {make_user_token(user_id=801)}"}
-        assert (await _resolve(app, user, tid, cid)).status_code == 401
-
-    async def test_unconfigured_verifier_503(self, ai_routing_db: Any) -> None:
-        bare = Quart(__name__)
-        QuartSchema(bare)
-        bare.register_blueprint(media_byok.media_byok_internal_bp)
-        r = await bare.test_client().post(
-            "/api/v1/internal/media/byok/resolve",
-            headers={"Content-Type": "application/json"},
-            data=json.dumps({"tenant_id": 1, "community_id": 1, "provider": "gemini"}),
+    async def test_non_system_tenant_denied(self, app: Quart, ai_routing_db: Any) -> None:
+        """An allow-listed identity bound to a NON-system tenant may not call (cross-tenant RPC)."""
+        priv = Ed25519PrivateKey.generate()
+        tenant_issuer = ServiceJwtIssuer(
+            keys={"k1": SigningKey("k1", priv, priv.public_key())},
+            active_kid="k1",
+            identities={
+                PROCESS: ServiceIdentity(PROCESS, "waddlebot", "svc-process", SCOPES, "acme-corp")
+            },
         )
-        assert r.status_code == 503
+        _, cid = _admin(ai_routing_db)
+        async with serving_dataplane(app.config, tenant_issuer) as address:
+            err = await _refused(
+                _resolve(
+                    DataplaneClient(address),
+                    _token(tenant_issuer),
+                    _tenant_id(ai_routing_db, TENANT_SLUG),
+                    cid,
+                )
+            )
+        assert err.code() == grpc.StatusCode.PERMISSION_DENIED
 
-    async def test_bad_provider_and_ids_400(
-        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer
+    async def test_resolve_auth_refusals(
+        self, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
     ) -> None:
         _, cid = _admin(ai_routing_db)
         tid = _tenant_id(ai_routing_db, TENANT_SLUG)
-        assert (await _resolve(app, _machine(issuer), tid, cid, "openai")).status_code == 400
-        assert (await _resolve(app, _machine(issuer), -1, cid)).status_code == 400
+        wrong_scope = _token(issuer, scope=SCOPE_MEDIA_TIER_RESOLVE)
+        user = make_user_token(user_id=801)
+        for token in (None, "junk", wrong_scope, user):  # none / garbage / wrong scope / HS256 user
+            err = await _refused(_resolve(dp, token, tid, cid))
+            assert err.code() == grpc.StatusCode.UNAUTHENTICATED, token
+
+    async def test_bad_provider_and_ids_invalid_argument(
+        self, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
+    ) -> None:
+        _, cid = _admin(ai_routing_db)
+        tid = _tenant_id(ai_routing_db, TENANT_SLUG)
+        for args in ((tid, cid, "openai"), (-1, cid, "gemini"), (tid, -1, "gemini")):
+            err = await _refused(_resolve(dp, _token(issuer), *args))
+            assert err.code() == grpc.StatusCode.INVALID_ARGUMENT, args
 
     async def test_rate_limited(
-        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer
+        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
     ) -> None:
         _, cid = _admin(ai_routing_db)
         tid = _tenant_id(ai_routing_db, TENANT_SLUG)
         await app.config[
             "rate_limiter"
         ].connect()  # no URL -> in-memory sliding window (as in prod startup)
-        codes = [
-            (await _resolve(app, _machine(issuer), tid, cid)).status_code
-            for _ in range(media_byok.RESOLVE_LIMIT + 2)
-        ]
-        assert codes[: media_byok.RESOLVE_LIMIT] == [200] * media_byok.RESOLVE_LIMIT
-        assert codes[-1] == 429
+        for _ in range(RESOLVE_LIMIT):
+            await _resolve(dp, _token(issuer), tid, cid)
+        err = await _refused(_resolve(dp, _token(issuer), tid, cid))
+        assert err.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
 
-    async def test_no_limiter_fails_closed_503(
-        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer
+    async def test_no_limiter_fails_closed_unavailable(
+        self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
     ) -> None:
         del app.config["rate_limiter"]
         _, cid = _admin(ai_routing_db)
-        r = await _resolve(app, _machine(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
-        assert r.status_code == 503
+        err = await _refused(
+            _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
+        )
+        assert err.code() == grpc.StatusCode.UNAVAILABLE
 
     async def test_audit_failure_withholds_key(
         self,
         app: Quart,
         ai_routing_db: Any,
         issuer: ServiceJwtIssuer,
+        dp: DataplaneClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         admin, cid = _admin(ai_routing_db)
@@ -389,20 +456,15 @@ class TestResolver:
         async def _boom(*a: Any, **k: Any) -> None:
             raise RuntimeError("db down")
 
-        monkeypatch.setattr(media_byok, "_audit", _boom)
-        r = await _resolve(app, _machine(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
-        assert r.status_code == 500
-        assert PLAINTEXT not in await r.get_data(as_text=True)
+        monkeypatch.setattr(MediaServicer, "_audit", _boom)
+        err = await _refused(
+            _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
+        )
+        assert err.code() == grpc.StatusCode.INTERNAL
+        assert PLAINTEXT not in (err.details() or "")
 
 
 class TestEffectiveTier:
-    async def _tier(self, app: Quart, headers: dict[str, str], tid: int, cid: int) -> Any:
-        return await app.test_client().post(
-            "/api/v1/internal/media/effective-tier",
-            headers={**headers, "Content-Type": "application/json"},
-            data=json.dumps({"tenant_id": tid, "community_id": cid}),
-        )
-
     @pytest.mark.parametrize(
         ("tenant_tier", "community_tier", "expected"),
         [
@@ -417,9 +479,9 @@ class TestEffectiveTier:
     )
     async def test_max_of_tenant_and_community(
         self,
-        app: Quart,
         ai_routing_db: Any,
         issuer: ServiceJwtIssuer,
+        dp: DataplaneClient,
         monkeypatch: pytest.MonkeyPatch,
         tenant_tier: str,
         community_tier: str | None,
@@ -430,22 +492,28 @@ class TestEffectiveTier:
 
         monkeypatch.setattr(svc, "get_tier", _t)
         _, cid = _admin(ai_routing_db, tier=community_tier)
-        headers = _machine(issuer, scope=media_byok.SCOPE_MEDIA_TIER_RESOLVE)
-        r = await self._tier(app, headers, _tenant_id(ai_routing_db, TENANT_SLUG), cid)
-        assert r.status_code == 200 and await r.get_json() == {"tier": expected}
+        token = _token(issuer, scope=SCOPE_MEDIA_TIER_RESOLVE)
+        r = await _tier_call(dp, token, _tenant_id(ai_routing_db, TENANT_SLUG), cid)
+        assert _TIER_NAMES[r.tier] == expected
 
-    async def test_refusals(self, app: Quart, ai_routing_db: Any, issuer: ServiceJwtIssuer) -> None:
+    async def test_refusals(
+        self, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
+    ) -> None:
         _, cid = _admin(ai_routing_db)
         tid = _tenant_id(ai_routing_db, TENANT_SLUG)
-        good = _machine(issuer, scope=media_byok.SCOPE_MEDIA_TIER_RESOLVE)
-        assert (await self._tier(app, {}, tid, cid)).status_code == 401
-        assert (await self._tier(app, _machine(issuer), tid, cid)).status_code == 401  # wrong scope
-        rogue = _machine(issuer, ROGUE, media_byok.SCOPE_MEDIA_TIER_RESOLVE)
-        assert (await self._tier(app, rogue, tid, cid)).status_code == 403
-        assert (
-            await self._tier(app, good, _tenant_id(ai_routing_db, OTHER_TENANT_SLUG), cid)
-        ).status_code == 404
-        assert (await self._tier(app, good, tid, -5)).status_code == 400
+        good = _token(issuer, scope=SCOPE_MEDIA_TIER_RESOLVE)
+        rogue = _token(issuer, ROGUE, SCOPE_MEDIA_TIER_RESOLVE)
+        other = _tenant_id(ai_routing_db, OTHER_TENANT_SLUG)
+        cases = [
+            (None, tid, cid, grpc.StatusCode.UNAUTHENTICATED),
+            (_token(issuer), tid, cid, grpc.StatusCode.UNAUTHENTICATED),  # wrong scope
+            (rogue, tid, cid, grpc.StatusCode.PERMISSION_DENIED),  # not allow-listed
+            (good, other, cid, grpc.StatusCode.NOT_FOUND),  # community not in that tenant
+            (good, tid, -5, grpc.StatusCode.INVALID_ARGUMENT),
+        ]
+        for token, t, c, code in cases:
+            err = await _refused(_tier_call(dp, token, t, c))
+            assert err.code() == code, (token, t, c)
 
 
 _REAL_ASYNC_CLIENT = svc.httpx.AsyncClient

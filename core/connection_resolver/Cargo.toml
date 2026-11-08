@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.97.0"
 license = "AGPL-3.0-or-later"
 publish = false
-description = "Shared per-send connection resolver client (edge-reshape Chunk 2). Resolves one (community, connection) to its endpoint + decrypted credential via hub-api's internal REST resolve v2 endpoint using a community-bound machine JWT, and lists data-plane bindings. No credential cache, zeroizing secrets, circuit breaker. The public API is the contract svc-action and svc-ingest build on."
+description = "Shared per-send connection resolver client (edge-reshape Chunk 2). Resolves one (community, connection) to its endpoint + decrypted credential via hub-api's internal gRPC ProviderConnectionService using a community-bound machine JWT, and lists data-plane bindings. No credential cache, zeroizing secrets, circuit breaker. The public API is the contract svc-action and svc-ingest build on."
 
 [lib]
 name = "connection_resolver"
@@ -14,19 +14,36 @@ path = "src/lib.rs"
 # Exact-version pins only (rules/critical-rules.md Dependency Pinning); versions
 # mirror core/service_auth and core/hub_client so one dependency graph resolves one
 # version of each crate.
+[features]
+# Exposes `test_support` (a real in-process tonic hub) to this crate's integration tests and to
+# dependents' tests. Never enabled in a service binary.
+test-support = ["dep:serde_json"]
+
 [dependencies]
 tokio = { version = "=1.53.3", features = ["rt", "sync", "time"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
 tracing = "=0.1.44"
+serde_json = { version = "=1.0.151", optional = true }
 thiserror = "=2.0.20"
 zeroize = "=1.9.0"
 service_auth = { path = "../service_auth", version = "=0.1.0" }
+# hub-api's internal gRPC surface: the generated ProviderConnectionService client plus the
+# shared long-lived channel / machine-JWT metadata helpers (one definition of the wire contract).
+hub_client = { path = "../hub_client", version = "=0.1.0" }
+tonic = "=0.14.6"
 
 [dev-dependencies]
+# Self dev-dependency: turns `test-support` on for this crate's own integration tests.
+connection_resolver = { path = ".", features = ["test-support"] }
 tokio = { version = "=1.53.3", features = ["full", "test-util"] }
+# Fake machine-token endpoint only (the data-plane RPCs are served by a real in-process tonic
+# server); serde_json builds token bodies and loads the golden resolve fixtures.
 wiremock = "=0.6.5"
+serde_json = "=1.0.151"
+# Throwaway PKI for the real-TLS test (no key material is committed) and the live-hub test's
+# admin-API HTTP client (admin routes stay REST: the external/webui surface).
+rcgen = "=0.14.10"
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 
 [profile.release]
 opt-level = 3

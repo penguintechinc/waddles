@@ -24,12 +24,24 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import grpc
 from flask_core.service_jwt import ServiceJwtIssuer
-from waddles.hub.internal.v1 import identity_pb2_grpc, key_pb2_grpc
+from waddles.hub.internal.v1 import (
+    distribution_pb2_grpc,
+    identity_pb2_grpc,
+    key_pb2_grpc,
+    media_pb2_grpc,
+    provider_connection_pb2_grpc,
+)
 
+from grpc_internal.dataplane_servicers import (
+    DistributionServicer,
+    MediaServicer,
+    ProviderConnectionServicer,
+)
 from grpc_internal.interceptors import (
     AuthInterceptor,
     DeadlineInterceptor,
@@ -104,11 +116,18 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
 
 
 async def build_internal_grpc_server(
-    *, issuer: ServiceJwtIssuer, async_dal: Any = None
+    *,
+    issuer: ServiceJwtIssuer,
+    async_dal: Any = None,
+    app_config: Mapping[str, Any] | None = None,
+    service_factory: Callable[[Any], Any] | None = None,
 ) -> grpc.aio.Server:
     """Builds (but does not start) the internal gRPC server.
 
-    Interceptor chain: see :func:`build_interceptor_chain`.
+    Interceptor chain: see :func:`build_interceptor_chain`. `app_config` is the Quart app's
+    `config` mapping (the data-plane servicers read `async_dal`/`dal`/`install_dal`/
+    `rate_limiter` from it -- the same objects the HTTP side uses); `service_factory` builds the
+    shared `ProviderConnectionService` from it (default: the blueprint's own factory).
     """
     server = grpc.aio.server(
         interceptors=build_interceptor_chain(issuer),
@@ -119,6 +138,18 @@ async def build_internal_grpc_server(
     )
     identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(async_dal), server)
     key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(), server)
+    config: Mapping[str, Any] = app_config if app_config is not None else {}
+    if service_factory is None:
+        from blueprints.v1.provider_connections import service_from_config
+
+        service_factory = service_from_config
+    provider_connection_pb2_grpc.add_ProviderConnectionServiceServicer_to_server(
+        ProviderConnectionServicer(config, service_factory), server
+    )
+    distribution_pb2_grpc.add_DistributionServiceServicer_to_server(
+        DistributionServicer(config), server
+    )
+    media_pb2_grpc.add_MediaServiceServicer_to_server(MediaServicer(config), server)
 
     bind_addr = f"0.0.0.0:{os.environ['GRPC_PORT']}"  # noqa: S104 - internal ClusterIP-only listener, see NetworkPolicy
     server.add_secure_port(bind_addr, _load_server_credentials())
@@ -127,10 +158,15 @@ async def build_internal_grpc_server(
 
 
 async def start_internal_grpc_server(
-    *, issuer: ServiceJwtIssuer, async_dal: Any = None
+    *,
+    issuer: ServiceJwtIssuer,
+    async_dal: Any = None,
+    app_config: Mapping[str, Any] | None = None,
 ) -> grpc.aio.Server:
     """Builds and starts the server -- called from `app.py`'s `before_serving`."""
-    server = await build_internal_grpc_server(issuer=issuer, async_dal=async_dal)
+    server = await build_internal_grpc_server(
+        issuer=issuer, async_dal=async_dal, app_config=app_config
+    )
     await server.start()
     logger.info("hub_api.grpc_internal.started")
     return server

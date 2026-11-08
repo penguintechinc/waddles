@@ -53,7 +53,6 @@ from sqlalchemy import (
 from blueprints.v1.provider_connections import (
     SERVICE_CONFIG_KEY,
     provider_connections_bp,
-    provider_connections_internal_bp,
 )
 from config import HubAPIConfig
 from services.provider_connections import PlatformKeyVault, ProviderConnectionService
@@ -72,6 +71,7 @@ from tests.provider_connections.fake_twitch import (
     FakeAccount,
     FakeTwitch,
 )
+from tests.provider_connections.grpc_internal_client import GrpcRoutingClient
 from tests.sso.conftest import Entitlements
 
 #: Valid 256-bit test key -- NEVER a real platform key.
@@ -406,7 +406,6 @@ def pc_app(
     app = Quart(__name__)
     QuartSchema(app)
     app.register_blueprint(provider_connections_bp)
-    app.register_blueprint(provider_connections_internal_bp)
     app.config["dal"] = pc_db.dal
     app.config["async_dal"] = pc_db
     app.config["install_dal"] = pc_db.install_dal
@@ -419,14 +418,14 @@ def pc_app(
 @pytest.fixture
 def client(pc_app: Quart) -> Any:
     """Quart test client over ``pc_app``."""
-    return pc_app.test_client()
+    return GrpcRoutingClient(pc_app.test_client())
 
 
 @pytest.fixture
 def static_client(pc_app: Quart, pc_static_service: ProviderConnectionService) -> Any:
     """Test client whose service also has the three static-secret providers registered."""
     pc_app.config[SERVICE_CONFIG_KEY] = pc_static_service
-    return pc_app.test_client()
+    return GrpcRoutingClient(pc_app.test_client())
 
 
 def admin_headers(

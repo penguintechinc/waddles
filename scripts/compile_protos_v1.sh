@@ -29,7 +29,10 @@ python3 -m grpc_tools.protoc \
   --pyi_out="$OUT_DIR" \
   --grpc_python_out="$OUT_DIR" \
   "$PROTO_DIR/waddles/hub/internal/v1/identity.proto" \
-  "$PROTO_DIR/waddles/hub/internal/v1/key.proto"
+  "$PROTO_DIR/waddles/hub/internal/v1/key.proto" \
+  "$PROTO_DIR/waddles/hub/internal/v1/provider_connection.proto" \
+  "$PROTO_DIR/waddles/hub/internal/v1/distribution.proto" \
+  "$PROTO_DIR/waddles/hub/internal/v1/media.proto"
 
 # Ensure every generated package directory is importable.
 find "$OUT_DIR/waddles" -type d -exec sh -c 'touch "$1/__init__.py"' _ {} \;

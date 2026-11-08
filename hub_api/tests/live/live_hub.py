@@ -1,7 +1,8 @@
 """Live hub-api harness for ``core/connection_resolver/tests/e2e_live_hub.rs``.
 
 Starts a REAL Postgres 17 container migrated to Alembic head, boots the REAL hub-api blueprints
-(provider-connections admin + internal data-plane routes + the machine-token endpoint) over it with
+(provider-connections admin routes + the machine-token endpoint over HTTP, the data-plane reads
+over the internal gRPC `ProviderConnectionService`) on top of it with
 the real vault, the real Ed25519 issuer/verifier and the real ``build_default_registry`` adapters,
 serves them on a loopback port, writes a JSON manifest the Rust test reads, and blocks until
 SIGTERM/SIGINT (then tears the container down).
@@ -34,10 +35,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import grpc
 import yaml
 
 _REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO / "alembic" / "tests"))
+sys.path.insert(0, str(_REPO / "hub_api" / "grpc_internal" / "pb"))  # gRPC stubs
 
 # Strong, per-run, in-memory secrets (never committed, never a real credential).
 os.environ["SECRET_KEY"] = secrets.token_hex(32)
@@ -58,15 +61,18 @@ from pg_docker import migrated_postgres  # type: ignore[import-not-found]  # noq
 from pydal import Field  # noqa: E402
 from quart import Quart  # noqa: E402
 from quart_schema import QuartSchema  # noqa: E402
+from waddles.hub.internal.v1 import provider_connection_pb2_grpc  # noqa: E402
 
 import blueprints.service_jwt_bp as service_jwt_bp_module  # noqa: E402
 from blueprints.service_jwt_bp import service_jwt_bp  # noqa: E402
 from blueprints.v1.provider_connections import (  # noqa: E402
     SERVICE_CONFIG_KEY,
     provider_connections_bp,
-    provider_connections_internal_bp,
+    service_from_config,
 )
 from config import HubAPIConfig  # noqa: E402
+from grpc_internal.dataplane_servicers import ProviderConnectionServicer  # noqa: E402
+from grpc_internal.server import build_interceptor_chain  # noqa: E402
 from services.provider_connections import (  # noqa: E402
     PlatformKeyVault,
     ProviderConnectionService,
@@ -208,7 +214,6 @@ async def _serve(manifest_path: Path) -> None:
         app = Quart(__name__)
         QuartSchema(app)
         app.register_blueprint(provider_connections_bp)
-        app.register_blueprint(provider_connections_internal_bp)
         app.register_blueprint(service_jwt_bp)
         cfg: HubAPIConfig = hub_config()
         app.config.update(
@@ -227,6 +232,13 @@ async def _serve(manifest_path: Path) -> None:
             },
         )
 
+        grpc_server = grpc.aio.server(interceptors=build_interceptor_chain(issuer))
+        provider_connection_pb2_grpc.add_ProviderConnectionServiceServicer_to_server(
+            ProviderConnectionServicer(app.config, service_from_config), grpc_server
+        )
+        grpc_port = grpc_server.add_insecure_port("127.0.0.1:0")
+        await grpc_server.start()
+
         port = _free_port()
         admin_token = create_jwt_token(
             user_id=str(ids["admin_user"]), username="live-admin", email="admin@example.invalid",
@@ -235,6 +247,8 @@ async def _serve(manifest_path: Path) -> None:
         )  # fmt: skip
         manifest: dict[str, Any] = {
             "hub_url": f"http://127.0.0.1:{port}",
+            # Plaintext loopback gRPC (the resolver accepts http:// only in `alpha`).
+            "hub_grpc_endpoint": f"http://127.0.0.1:{grpc_port}",
             "admin_token": admin_token,
             "tenant_id": ids["tenant"],
             "community_a": ids["a"],
@@ -259,6 +273,7 @@ async def _serve(manifest_path: Path) -> None:
         os.chmod(tmp, 0o600)
         tmp.rename(manifest_path)  # atomic: the script polls for this file
         await server
+        await grpc_server.stop(grace=None)
         await install_dal.close()
         entitlement._default_client = previous_client
 

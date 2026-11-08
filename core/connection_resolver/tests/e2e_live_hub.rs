@@ -69,6 +69,8 @@ impl ResolverMetrics for CountingMetrics {
 /// Per-test harness handle: manifest, SA-token files, telemetry counters and the tracing guard.
 struct Live {
     hub_url: String,
+    /// Internal gRPC listener (plaintext loopback; the resolver allows `http://` in alpha).
+    hub_grpc_endpoint: String,
     admin_token: String,
     community_a: i64,
     community_b: i64,
@@ -114,6 +116,10 @@ impl Live {
         });
         Self {
             hub_url: m["hub_url"].as_str().expect("hub_url").to_string(),
+            hub_grpc_endpoint: m["hub_grpc_endpoint"]
+                .as_str()
+                .expect("hub_grpc_endpoint")
+                .to_string(),
             admin_token: m["admin_token"].as_str().expect("admin_token").to_string(),
             community_a: id("community_a"),
             community_b: id("community_b"),
@@ -131,7 +137,7 @@ impl Live {
     /// Resolver authenticating as the given ServiceAccount token file with `scope`.
     fn resolver(&self, sa: &Path, scope: &str) -> ConnectionResolver {
         let mut cfg = ResolverConfig::new(
-            self.hub_url.clone(),
+            self.hub_grpc_endpoint.clone(),
             "alpha",
             format!("{}/internal/service-token", self.hub_url),
             sa.to_string_lossy().to_string(),

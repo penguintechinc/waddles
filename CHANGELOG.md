@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Internal data-plane reads are gRPC, not REST** (mandate: gRPC for all intra-cluster calls). New protos under `proto/waddles/hub/internal/v1/` -- `provider_connection.proto` (`ListBindings`, `ResolveConnection`), `distribution.proto` (`ListBundles`), `media.proto` (`ResolveByok`, `GetEffectiveTier`) -- served by hub-api's internal gRPC server (`hub_api/grpc_internal/dataplane_servicers.py`) with the same scope/tenant/community-binding/allow-list/rate-limit/audit checks as the removed REST routes (`/api/v1/internal/provider-connections`, `.../communities/{id}/provider-connections/{conn}/resolve`, `/api/v1/internal/media/{byok/resolve,effective-tier}`). `core/connection_resolver` and `core/bundle_host_media` now use long-lived TLS-pinned tonic channels (`hub_client::lazy_channel`); `HUB_API_GRPC_ENDPOINT`/`HUB_API_GRPC_CA_FILE` replace `HUB_API_URL` for them. `GET /api/v1/distribution/bundles` stays (legacy Python stage-runners) alongside the new `DistributionService`.
+
 ### Added
 - Wix webhook ingestion as a connector service bundle (`waddles.core.service.wix`, inbound-only, egress `[]`; refs #485): svc-ingest `Scheme::WixJwt` verifies Wix's RS256 app-webhook JWT against the connection's app public key (alg pinned, `iat`/`exp` freshness, signed `instanceId` binding, Valkey replay dedupe on the Wix event id), `WixProfile` plans the route, and the bundle maps verified member / Pricing Plans / Events webhooks to normalized `member.*` / `subscription.*` / `event.*` records with the member id tokenized via `identity.lookup`. Default OFF (`CONNECTOR_WIX_ENABLED`, `waddles.connector-wix`, helm `connectorRuntime.connector.wix`). hub-api `wix` provider connection (public key sealed at rest + `instance_id`), migration `0078_wix_connection_resource`. See `docs/connector-wix.md`.
 

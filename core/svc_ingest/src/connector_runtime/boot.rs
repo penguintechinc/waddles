@@ -725,12 +725,7 @@ pub async fn build_webhook<R: ConnectionResolve + 'static>(
 /// An unusable resolver configuration.
 pub fn build_resolver(cli: &CliConfig) -> anyhow::Result<connection_resolver::ConnectionResolver> {
     connection_resolver::ConnectionResolver::new(
-        connection_resolver::ResolverConfig::new(
-            cli.hub_api_url.clone(),
-            cli.environment.clone(),
-            cli.service_jwt_token_endpoint.clone(),
-            cli.service_jwt_sa_token_path.clone(),
-        ),
+        cli.resolver_config()?,
         Arc::new(crate::twitch_sessions::boot::ResolverTelemetry),
     )
     .map_err(|e| anyhow::anyhow!("connection resolver unavailable: {e}"))
@@ -970,7 +965,13 @@ mod tests {
     }
 
     fn cli_alpha() -> CliConfig {
-        CliConfig::parse_from(["svc-ingest", "--environment", "alpha"])
+        CliConfig::parse_from([
+            "svc-ingest",
+            "--environment",
+            "alpha",
+            "--hub-api-grpc-endpoint",
+            "http://hub-api:50204",
+        ])
     }
 
     fn selector(pairs: &[(&str, &str)]) -> ConnectorSelector {
@@ -1261,9 +1262,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_resolver_builds_from_cli_defaults() {
+    #[tokio::test]
+    async fn the_resolver_builds_from_cli_defaults() {
         assert!(build_resolver(&cli_alpha()).is_ok());
+    }
+
+    /// No REST fallback: without HUB_API_GRPC_ENDPOINT the resolver refuses to build, loudly.
+    #[tokio::test]
+    async fn the_resolver_refuses_to_build_without_the_grpc_endpoint() {
+        let cli = CliConfig::parse_from(["svc-ingest", "--environment", "alpha"]);
+        let err = build_resolver(&cli).unwrap_err().to_string();
+        assert!(err.contains("HUB_API_GRPC_ENDPOINT"), "{err}");
     }
 
     struct EmptyHub(std::sync::atomic::AtomicUsize);
