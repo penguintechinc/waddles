@@ -69,7 +69,7 @@ use bundle_host_db::{
 };
 use bundle_host_economy::{
     pot_account, AdminAdjust, EconomyCaps, EconomyError, EconomyScope, EconomyStore,
-    IdempotencyKey, DEFAULT_MAX_SUPPLY,
+    ElevatedPermission, ElevatedRequest, IdempotencyKey, DEFAULT_MAX_SUPPLY,
 };
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
@@ -584,6 +584,68 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `None` until [`Self::with_tool`] -- every `tool.*` call denies
     /// `not_implemented` in that state (never a silent no-op).
     tool: Option<ToolContext>,
+    /// The bundle that invoked THIS invocation through `tool.invoke` (host-derived
+    /// from the call plan, never guest input); `None` for a top-level invocation.
+    /// The economy service's elevated primitives are checked against THIS app's
+    /// grants, not the service's own.
+    tool_caller: Option<ToolCaller>,
+}
+
+/// One economy call that needs the CALLING app's elevated grant: which
+/// approval, what the audit/caps meter, and who the parties are.
+#[derive(Clone, Debug)]
+struct ElevatedPlan {
+    permission: ElevatedPermission,
+    /// Short audit label (`transfer_from`, `credit`, `debit`, ...); also the
+    /// audit `reason` code of the non-`transfer_from` ops.
+    op: &'static str,
+    /// The member whose funds move (`transfer_from`) or who is credited/set;
+    /// the community pot account for multi-target ops.
+    target: uuid::Uuid,
+    /// The member the gate membership-checks (`None` for the pot bucket).
+    gate_user: Option<uuid::Uuid>,
+    counterparty: Option<uuid::Uuid>,
+    /// What the caps meter (>= 0).
+    amount: i64,
+    reason: String,
+}
+
+impl ElevatedPlan {
+    /// A single-target elevated op whose audit reason is its own label.
+    fn single(permission: ElevatedPermission, op: &'static str, user: uuid::Uuid, amount: i64) -> Self {
+        Self {
+            permission,
+            op,
+            target: user,
+            gate_user: Some(user),
+            counterparty: None,
+            amount,
+            reason: op.to_string(),
+        }
+    }
+
+    /// A multi-target mint-class op, bucketed on the community pot account.
+    fn multi(op: &'static str, bucket: uuid::Uuid, amount: i64) -> Self {
+        Self {
+            permission: ElevatedPermission::AppMint,
+            op,
+            target: bucket,
+            gate_user: None,
+            counterparty: None,
+            amount,
+            reason: op.to_string(),
+        }
+    }
+}
+
+/// The direct caller of a nested `tool.invoke` hop: the calling app and the
+/// platform-installed version whose grants apply to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolCaller {
+    /// The calling bundle's app id (host-derived from the tool call plan).
+    pub app_id: String,
+    /// The calling bundle's active version id (the grant-set pin).
+    pub app_version: i64,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -634,6 +696,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             verified_scope: None,
             stage_metrics: stage_metrics::stage_metrics(),
             tool: None,
+            tool_caller: None,
         }
     }
 
@@ -1415,6 +1478,15 @@ impl<K: KvBackend> StageCapabilities<K> {
                 rate_num: i64,
                 rate_den: i64,
             },
+            // ELEVATED primitive: moves a NON-actor member's funds. Only an
+            // app bundle holding the approved `economy.transfer_from` grant,
+            // calling through the economy service, may use it.
+            TransferFrom {
+                from: uuid::Uuid,
+                to: uuid::Uuid,
+                amount: i64,
+                reason: String,
+            },
         }
 
         /// A mutation's claimed idempotency slot: the mutation kind, the
@@ -1450,6 +1522,24 @@ impl<K: KvBackend> StageCapabilities<K> {
                 }
                 let amount = economy_amount_arg(args, "amount", 1)?;
                 Op::Transfer { from, to, amount }
+            }
+            "economy.transfer_from" => {
+                let from = economy_user_arg(args, "from")?;
+                let to = economy_user_arg(args, "to")?;
+                if from == to {
+                    return Err(denied("invalid_args", "cannot transfer to oneself"));
+                }
+                let reason = args
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| denied("invalid_args", "reason must be a code string"))?;
+                bundle_host_economy::validate_reason(reason).map_err(economy_error_to_host)?;
+                Op::TransferFrom {
+                    from,
+                    to,
+                    amount: economy_amount_arg(args, "amount", 1)?,
+                    reason: reason.to_string(),
+                }
             }
             "economy.credit" => Op::Credit {
                 user: economy_user_arg(args, "user")?,
@@ -1536,12 +1626,127 @@ impl<K: KvBackend> StageCapabilities<K> {
         // account whose funds the call would move (a wager's player, a
         // transfer's sender) -- the one [`Self::bind_actor`] must tie to the
         // invocation's actor.
+        // ELEVATED classification (economy service reached by an APP bundle through
+        // `tool.invoke`): every dangerous primitive additionally needs the CALLING
+        // app's own explicit, admin-approved grant (see `ElevatedPlan`). A debit
+        // of the invocation's own actor stays on the lighter, actor-bound path; a
+        // debit of anyone else is `transfer_from`-class.
+        let scope = EconomyScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        };
+        let non_actor_debit = match (&op, &self.tool_caller) {
+            (Op::Debit { user, .. } | Op::ConditionalDebit { user, .. }, Some(_)) => {
+                !self.actor_is(*user).await?
+            }
+            _ => false,
+        };
+        let via_app = self.tool_caller.is_some();
+        let elevated: Option<ElevatedPlan> = match &op {
+            Op::TransferFrom {
+                from,
+                to,
+                amount,
+                reason,
+            } => {
+                if !via_app {
+                    // No calling app means no grant to check: loud refusal.
+                    return Err(denied(
+                        "elevated_not_granted",
+                        "transfer_from is available only to app bundles calling through the economy service",
+                    ));
+                }
+                Some(ElevatedPlan {
+                    permission: ElevatedPermission::TransferFrom,
+                    op: "transfer_from",
+                    target: *from,
+                    gate_user: Some(*from),
+                    counterparty: Some(*to),
+                    amount: *amount,
+                    reason: reason.clone(),
+                })
+            }
+            Op::Debit { user, amount } if via_app && non_actor_debit => {
+                Some(ElevatedPlan::single(
+                    ElevatedPermission::TransferFrom,
+                    "debit",
+                    *user,
+                    *amount,
+                ))
+            }
+            Op::ConditionalDebit { user, amount, .. } if via_app && non_actor_debit => {
+                Some(ElevatedPlan::single(
+                    ElevatedPermission::TransferFrom,
+                    "cond_debit",
+                    *user,
+                    *amount,
+                ))
+            }
+            Op::Credit { user, amount } if via_app => Some(ElevatedPlan::single(
+                ElevatedPermission::AppMint,
+                "credit",
+                *user,
+                *amount,
+            )),
+            Op::Exchange {
+                user,
+                from_amount,
+                rate_num,
+                rate_den,
+            } if via_app => {
+                // The credited amount (floor(from * num / den)), the quantity the
+                // caps meter; widened so the product cannot overflow.
+                let credited = (i128::from(*from_amount) * i128::from(*rate_num)
+                    / i128::from(*rate_den).max(1))
+                .clamp(0, i128::from(i64::MAX)) as i64;
+                Some(ElevatedPlan::single(
+                    ElevatedPermission::AppMint,
+                    "exchange",
+                    *user,
+                    credited,
+                ))
+            }
+            Op::AdminAdjust { user, adjust } if via_app => {
+                let magnitude = match adjust {
+                    AdminAdjust::Delta(d) => i64::try_from(d.unsigned_abs()).unwrap_or(i64::MAX),
+                    AdminAdjust::Set(v) => *v,
+                };
+                Some(ElevatedPlan::single(
+                    ElevatedPermission::AppMint,
+                    "admin_adjust",
+                    *user,
+                    magnitude,
+                ))
+            }
+            // Multi-target ops are metered against the community pot account as
+            // the per-target bucket (the per-app daily cap still bounds them).
+            Op::BatchCredit(entries) if via_app => Some(ElevatedPlan::multi(
+                "batch_credit",
+                pot_account(&scope),
+                entries.iter().fold(0i64, |t, (_, a)| t.saturating_add(*a)),
+            )),
+            Op::PayPot(winners) if via_app => Some(ElevatedPlan::multi(
+                "pay_pot",
+                pot_account(&scope),
+                winners.iter().fold(0i64, |t, (_, a)| t.saturating_add(*a)),
+            )),
+            _ => None,
+        };
+
         let claim: Option<MutationClaim> = match &op {
             Op::Wager { user, .. } => Some(("wager", Some(*user))),
             Op::Transfer { from, .. } => Some(("transfer", Some(*from))),
-            // Spends and the exchange move the ACTOR's own funds: bound.
-            Op::Debit { user, .. } => Some(("debit", Some(*user))),
-            Op::ConditionalDebit { user, .. } => Some(("conditional_debit", Some(*user))),
+            // Spends and the exchange move the ACTOR's own funds: bound -- except
+            // an elevated debit of a non-actor, authorized by the app's grant.
+            Op::Debit { user, .. } => {
+                Some(("debit", (!non_actor_debit).then_some(*user)))
+            }
+            Op::ConditionalDebit { user, .. } => {
+                Some(("conditional_debit", (!non_actor_debit).then_some(*user)))
+            }
+            // Moves a non-actor's funds under the calling app's elevated grant.
+            Op::TransferFrom { .. } => Some(("transfer_from", None)),
             Op::Exchange { user, .. } => Some(("exchange", Some(*user))),
             // Mints, the admin adjust and the pot payout pay INTO accounts and
             // never pull a member's funds: keyed, gated by their own grant, not
@@ -1615,6 +1820,15 @@ impl<K: KvBackend> StageCapabilities<K> {
                 None,
             ),
             Op::PayPot(_) => (PermissionId::EconomyPotPay, None, None, None, None),
+            // The SERVICE's own grant to expose the primitive (amount-less: the
+            // durable store meters it under the calling app's caps below).
+            Op::TransferFrom { from, to, .. } => (
+                PermissionId::EconomyTransferFrom,
+                None,
+                None,
+                Some(*from),
+                Some(*to),
+            ),
         };
         // The stage's admin guarantee for the store: true ONLY when the gate
         // just authorized the bundle's `economy.admin_adjust` grant for this
@@ -1636,6 +1850,14 @@ impl<K: KvBackend> StageCapabilities<K> {
             )
             .map_err(denied_from_gate)?;
 
+        // The CALLING app's own elevated grant (fast in-memory pre-filter; the
+        // store re-reads the live grant row inside the write transaction). An
+        // absent grant is an explicit denial, never a silent fallback to the
+        // service's own (broader) grants.
+        if let (Some(plan), Some(caller)) = (&elevated, &self.tool_caller) {
+            self.authorize_caller_elevated(plan, caller)?;
+        }
+
         let Some(wiring) = &self.economy else {
             return Err(denied(
                 "not_implemented",
@@ -1649,12 +1871,6 @@ impl<K: KvBackend> StageCapabilities<K> {
                 "economy capability is disabled (waddles.bundle-economy-capability is OFF)",
             ));
         }
-
-        let scope = EconomyScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-            app_id: self.app_id.clone(),
-        };
 
         // Actor binding + idempotency key for the money movers. Neither is
         // optional: with no resolvable actor, or no event to anchor a key to,
@@ -1685,7 +1901,62 @@ impl<K: KvBackend> StageCapabilities<K> {
             reservation = Some((invocation, kind, ordinal));
         }
 
-        let result = match op {
+        // Elevated primitives other than `transfer_from` (which audits inside its
+        // own transaction) are first ADMITTED: the store re-reads the calling
+        // app's live grant, enforces the admin-set caps and writes a reserved
+        // audit row; it is settled after the primitive ran.
+        let is_transfer_from = matches!(op, Op::TransferFrom { .. });
+        let mut reserved: Option<i64> = None;
+        let result = 'run: {
+            if let (Some(plan), Some(caller), false) = (&elevated, &self.tool_caller, is_transfer_from)
+            {
+                let Some(key) = idempotency.as_ref() else {
+                    break 'run Err(EconomyError::Backend(
+                        "elevated mutation has no idempotency key".to_string(),
+                    ));
+                };
+                let req = ElevatedRequest {
+                    caller_app: &caller.app_id,
+                    permission: plan.permission,
+                    op: plan.op,
+                    target: plan.target,
+                    counterparty: plan.counterparty,
+                    amount: plan.amount,
+                    reason: plan.op,
+                    key,
+                };
+                match wiring.store.elevated_reserve(&scope, &req).await {
+                    Ok(id) => reserved = Some(id),
+                    Err(e) => break 'run Err(e),
+                }
+            }
+            match op {
+            Op::TransferFrom {
+                from,
+                to,
+                amount,
+                reason,
+            } => {
+                let (Some(caller), Some(key)) = (&self.tool_caller, idempotency.as_ref()) else {
+                    break 'run Err(EconomyError::ElevatedNotGranted);
+                };
+                let req = ElevatedRequest {
+                    caller_app: &caller.app_id,
+                    permission: ElevatedPermission::TransferFrom,
+                    op: "transfer_from",
+                    target: from,
+                    counterparty: Some(to),
+                    amount,
+                    reason: &reason,
+                    key,
+                };
+                wiring.store.transfer_from(&scope, &req).await.map(|o| {
+                    serde_json::json!({
+                        "from_balance": o.from_balance,
+                        "to_balance": o.to_balance,
+                    })
+                })
+            }
             Op::Balance(user) => wiring
                 .store
                 .balance(&scope, user)
@@ -1864,7 +2135,23 @@ impl<K: KvBackend> StageCapabilities<K> {
                         .collect::<Vec<_>>(),
                 })
             }),
+            }
         };
+        // Settle an elevated reservation: applied/failed are definitive; an
+        // INDETERMINATE backend failure leaves it reserved (still counted
+        // against the caps -- the conservative side).
+        if let Some(audit_id) = reserved {
+            let applied = match &result {
+                Ok(_) => Some(true),
+                Err(EconomyError::Backend(_)) => None,
+                Err(_) => Some(false),
+            };
+            if let Some(applied) = applied {
+                if let Err(e) = wiring.store.elevated_settle(&scope, audit_id, applied).await {
+                    tracing::warn!(audit_id, error = %e, "elevated audit settle failed; the reservation stays counted");
+                }
+            }
+        }
         // A backend failure is INDETERMINATE (it may have committed before the
         // connection died): give the ordinal back so the guest's retry of the
         // same call presents the SAME key and is applied at most once. Every
@@ -1875,6 +2162,61 @@ impl<K: KvBackend> StageCapabilities<K> {
             invocation.release_mutation(kind, ordinal);
         }
         result.map_err(economy_error_to_host)
+    }
+
+    /// `true` iff the invocation's host-resolved actor IS `named`. An actor that
+    /// cannot be resolved because nobody is linked (or the actor is no longer a
+    /// member) is `false` -- the elevated path then needs the calling app's
+    /// grant -- while a resolver outage fails CLOSED (error), never guessing.
+    async fn actor_is(&self, named: uuid::Uuid) -> Result<bool, HostResultError> {
+        let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
+            return Ok(false);
+        };
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        match identity::resolve_actor(wiring, invocation, scope).await {
+            Ok(actor) => Ok(actor == named),
+            Err(IdentityError::NotLinked | IdentityError::NotAMember) => Ok(false),
+            Err(e) => Err(identity_error_to_host(e)),
+        }
+    }
+
+    /// Authorizes an elevated economy call against the CALLING app's own grant
+    /// (its tenant/community/app/version scope, never the service's), through
+    /// the standard gate: explicit `not_granted` when the app was never
+    /// approved, `user_not_in_scope` for a non-member party, rate limiting.
+    fn authorize_caller_elevated(
+        &self,
+        plan: &ElevatedPlan,
+        caller: &ToolCaller,
+    ) -> Result<(), HostResultError> {
+        let scope = HostInvokeScopeBuilder::new()
+            .tenant_id(self.tenant_id)
+            .community_id(self.community_id)
+            .app_id(caller.app_id.clone())
+            .app_version(caller.app_version)
+            .tenant_tier(TenantTier::Free)
+            .build()
+            .map_err(|_| denied("backend", "calling app scope is invalid"))?;
+        let permission = match plan.permission {
+            ElevatedPermission::TransferFrom => PermissionId::EconomyTransferFrom,
+            ElevatedPermission::AppMint => PermissionId::EconomyAppMint,
+        };
+        self.gate
+            .authorize(
+                &scope,
+                permission,
+                ResourceRef::EconomyScoped(EconomyTarget {
+                    target_user: plan.gate_user,
+                    counterparty: plan.counterparty,
+                    amount: None,
+                    payout: None,
+                }),
+            )
+            .map(|_| ())
+            .map_err(denied_from_gate)
     }
 
     /// Binds an economy money mover to the invocation's authenticated actor:

@@ -35,7 +35,7 @@ Verified against `release/v3.0.X` (`1e6b0056`) plus in-flight PRs #741, #749, #7
 | Chat relay | `chat.send:<platform>` | Normal | `relay` (action-stage only) | MERGED (`twitch`, `discord`) |
 | Flags | `flags.read` | Normal | `%flags` | MERGED (`enabled`); `tier` not wired |
 | Reputation | `reputation.read`, `reputation.community.write`, `reputation.tenant.write` | Normal / Dangerous / Dangerous | `reputation` (stage-next) | IN-FLIGHT #741; `reputation.tenant.write` CATALOG-ONLY |
-| Economy | `economy.read`, `economy.wager`, `economy.transfer`, `economy.credit`, `economy.debit`, `economy.admin_adjust`, `economy.pot.pay` | Normal / Dangerous (x6) | `economy` (stage-next) | IN-FLIGHT #751 (stacked on #741) |
+| Economy | `economy.read`, `economy.wager`, `economy.transfer`, `economy.credit`, `economy.debit`, `economy.admin_adjust`, `economy.pot.pay`, `economy.transfer_from`, `economy.app_mint` | Normal / Dangerous (x8) | `economy` (stage-next) | IN-FLIGHT #751 (stacked on #741); the last two are ELEVATED app-caller grants (see *Elevated app-caller primitives* in `bundle-host-imports.md`) |
 | Overlay widgets | `overlay.media` | Dangerous | `overlay` (stage-next) | WIT MERGED; no host handler |
 | Connector PII read | `connector.pii.read` | Dangerous | `identity.lookup` (connector worlds; core-namespace only) | MERGED catalog id; global-approved, never vendor-grantable |
 | Streaming hooks | `streaming.lifecycle.subscribe` | Normal | `streaming-lifecycle` export (stage-next) | WIT MERGED; host registration deferred |

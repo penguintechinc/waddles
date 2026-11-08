@@ -55,6 +55,22 @@ fn decode_balance(value: serde_json::Value) -> Result<i64, economy::Error> {
         .map_err(malformed)
 }
 
+/// Wire shape of a successful `economy.transfer_from` host-result.
+#[derive(Debug, serde::Deserialize)]
+struct TransferResultWire {
+    from_balance: i64,
+    to_balance: i64,
+}
+
+fn decode_transfer_result(value: serde_json::Value) -> Result<economy::TransferResult, economy::Error> {
+    serde_json::from_value::<TransferResultWire>(value)
+        .map(|w| economy::TransferResult {
+            from_balance: w.from_balance,
+            to_balance: w.to_balance,
+        })
+        .map_err(malformed)
+}
+
 fn decode_max_bet(value: serde_json::Value) -> Result<i64, economy::Error> {
     serde_json::from_value::<MaxBetWire>(value)
         .map(|w| w.max_bet)
@@ -228,6 +244,25 @@ impl economy::Host for ExecState {
         let args = serde_json::json!({ "winners": entries_json(&winners) });
         match call(self, CapabilityKind::Db, "economy.pay_pot", args).await {
             Ok(_) => Ok(()),
+            Err(e) => Err(economy_error_from(e)),
+        }
+    }
+
+    async fn transfer_from(
+        &mut self,
+        from_user: String,
+        to_user: String,
+        amount: u64,
+        reason: String,
+    ) -> Result<economy::TransferResult, economy::Error> {
+        let args = serde_json::json!({
+            "from": from_user,
+            "to": to_user,
+            "amount": amount,
+            "reason": reason,
+        });
+        match call(self, CapabilityKind::Db, "economy.transfer_from", args).await {
+            Ok(value) => decode_transfer_result(value),
             Err(e) => Err(economy_error_from(e)),
         }
     }

@@ -671,6 +671,16 @@ _ECONOMY_BOUND_PARAM = {
     "economy.credit": "max_amount",
     "economy.debit": "max_amount",
 }
+#: Elevated app-caller economy permissions and the admin-tunable host caps their
+#: grant `params` may carry (`core/bundle_host_economy`'s `ElevatedCaps`): the
+#: per-call maximum, the per-app daily total and the per-target-member daily
+#: total. Ceilings mirror `bundle_host_economy::ELEVATED_*_CEILING`.
+_ECONOMY_ELEVATED_IDS = ("economy.transfer_from", "economy.app_mint")
+_ECONOMY_ELEVATED_CAP_PARAMS = {
+    "max_per_op": 10_000,
+    "max_per_day": 100_000,
+    "max_per_target_per_day": 50_000,
+}
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_.]*$")
 
 
@@ -796,6 +806,25 @@ def parse_permission_declarations(
                 f"{permission_id!r} requires params.{bound_param} as an integer in "
                 f"1..={_MAX_ECONOMY_AMOUNT}, got {declared!r}",
             )
+        if permission_id in _ECONOMY_ELEVATED_IDS:
+            unknown = set(params) - set(_ECONOMY_ELEVATED_CAP_PARAMS)
+            _require(
+                not unknown,
+                "invalid_economy_bound",
+                f"{permission_id!r} params may only be {sorted(_ECONOMY_ELEVATED_CAP_PARAMS)}, "
+                f"got {sorted(unknown)}",
+            )
+            for cap_param, ceiling in _ECONOMY_ELEVATED_CAP_PARAMS.items():
+                if cap_param in params:
+                    value = params[cap_param]
+                    _require(
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and 1 <= value <= ceiling,
+                        "invalid_economy_bound",
+                        f"{permission_id!r} params.{cap_param} must be an integer in "
+                        f"1..={ceiling}, got {value!r}",
+                    )
         # A bound param is only valid on the permissions that declare it.
         for other_param in set(_ECONOMY_BOUND_PARAM.values()):
             if other_param in params and _ECONOMY_BOUND_PARAM.get(permission_id) != other_param:

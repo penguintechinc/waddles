@@ -290,6 +290,19 @@ pub enum PermissionFamily {
     /// `economy.pot.pay` -- atomic multi-winner payout from the community pot
     /// (P4 Task 1). Moves existing currency; never mints.
     EconomyPotPay,
+    /// `economy.transfer_from` -- ELEVATED, per-app admin-approved: lets an APP
+    /// bundle (via the economy service bundle's tools) move or burn the funds
+    /// of a member who is NOT the invocation's actor (the SuperPenguin
+    /// `!steal` primitive). Recorded with the approving admin; host-side caps
+    /// (`max_per_op` / `max_per_day` / `max_per_target_per_day` in the grant
+    /// params) bound it per community and per app. Caller-checked: the grant
+    /// that matters is the CALLING app's, not the service bundle's.
+    EconomyTransferFrom,
+    /// `economy.app_mint` -- ELEVATED, per-app admin-approved: lets an APP
+    /// bundle create or set currency through the economy service bundle
+    /// (`adjust_balance`, `credit`, `exchange`, `points_*`, `pay_pot`). Same
+    /// approval/caps/audit model as `economy.transfer_from`.
+    EconomyAppMint,
     /// `identity.resolve` -- resolve the invocation's triggering actor (and a
     /// mention target the triggering message carried) to the community
     /// `user_uuid` that `economy.*`/`reputation.*` name their targets by.
@@ -377,6 +390,8 @@ impl PermissionFamily {
         Self::EconomyDebit,
         Self::EconomyAdminAdjust,
         Self::EconomyPotPay,
+        Self::EconomyTransferFrom,
+        Self::EconomyAppMint,
         Self::IdentityResolve,
         Self::ConnectorPiiRead,
         Self::FlagsRead,
@@ -426,6 +441,8 @@ impl PermissionFamily {
             Self::EconomyDebit => "economy.debit",
             Self::EconomyAdminAdjust => "economy.admin_adjust",
             Self::EconomyPotPay => "economy.pot.pay",
+            Self::EconomyTransferFrom => "economy.transfer_from",
+            Self::EconomyAppMint => "economy.app_mint",
             Self::IdentityResolve => "identity.resolve",
             Self::ConnectorPiiRead => "connector.pii.read",
             Self::FlagsRead => "flags.read",
@@ -497,6 +514,8 @@ impl PermissionFamily {
                 | Self::EconomyDebit
                 | Self::EconomyAdminAdjust
                 | Self::EconomyPotPay
+                | Self::EconomyTransferFrom
+                | Self::EconomyAppMint
         )
     }
 
@@ -817,6 +836,26 @@ impl PermissionFamily {
                 },
                 notes: "P4 Task 1; atomic multi-winner payout from the reserved community pot account (explicit amounts, remainder stays in the pot); moves existing currency, never mints",
             },
+            Self::EconomyTransferFrom => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Economy,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(1),
+                },
+                notes: "ELEVATED; an app moving/burning a NON-actor member's funds via the economy service; needs explicit per-app community-admin approval (recorded); durable host caps from the grant params (max_per_op/max_per_day/max_per_target_per_day) + audit row per call",
+            },
+            Self::EconomyAppMint => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Economy,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(1),
+                },
+                notes: "ELEVATED; an app creating/setting currency via the economy service (adjust_balance+, credit, exchange, points_set/adjust, pay_pot); explicit per-app approval (recorded); durable host caps + audit row per call",
+            },
             Self::PlatformTableRead | Self::PlatformTableWrite => CatalogEntry {
                 family: *self,
                 risk: Risk::Dangerous,
@@ -988,6 +1027,8 @@ pub enum PermissionId {
     EconomyDebit,
     EconomyAdminAdjust,
     EconomyPotPay,
+    EconomyTransferFrom,
+    EconomyAppMint,
     IdentityResolve,
     ConnectorPiiRead,
     FlagsRead,
@@ -1076,6 +1117,8 @@ impl PermissionId {
             Self::EconomyDebit => PermissionFamily::EconomyDebit,
             Self::EconomyAdminAdjust => PermissionFamily::EconomyAdminAdjust,
             Self::EconomyPotPay => PermissionFamily::EconomyPotPay,
+            Self::EconomyTransferFrom => PermissionFamily::EconomyTransferFrom,
+            Self::EconomyAppMint => PermissionFamily::EconomyAppMint,
             Self::IdentityResolve => PermissionFamily::IdentityResolve,
             Self::ConnectorPiiRead => PermissionFamily::ConnectorPiiRead,
             Self::FlagsRead => PermissionFamily::FlagsRead,
@@ -1358,6 +1401,8 @@ impl PermissionId {
             "economy.debit" => Ok(Self::EconomyDebit),
             "economy.admin_adjust" => Ok(Self::EconomyAdminAdjust),
             "economy.pot.pay" => Ok(Self::EconomyPotPay),
+            "economy.transfer_from" => Ok(Self::EconomyTransferFrom),
+            "economy.app_mint" => Ok(Self::EconomyAppMint),
             "identity.resolve" => Ok(Self::IdentityResolve),
             "connector.pii.read" => Ok(Self::ConnectorPiiRead),
             "flags.read" => Ok(Self::FlagsRead),

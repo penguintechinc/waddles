@@ -179,6 +179,57 @@ Additive `interface economy` functions (old compiled bundles keep working); each
 
 Multi-row ops derive per-row ledger keys `<key>:m<i>` (rows in uuid order, so a replay is order-insensitive); a replay of the identical set is a no-op, any other set under the key is `idempotency_conflict`. **Daily caps are per COMMUNITY (tenant, community), shared by every app bundle -- never per app** (this applies to `wager` and `transfer` too; the advisory lock that serializes the windows is community-wide). **The supply ceiling holds for every mint path**, including a `wager` whose payout exceeds its stake (`payout - stake` is checked under the supply lock). `batch-credit` / `pay-pot` re-check active membership inside the guarded write itself, so a member who leaves after the preflight is not credited (the whole call rolls back). Per-community alias/rate (e.g. `1000 waddlebucks : 500 points`) is bundle policy and is NOT in the host cap. The pot is funded by a path outside this task (see the economy spec).
 
+### Elevated app-caller primitives (`transfer-from`, app mint, non-actor debit)
+
+The economy SERVICE bundle is an I/O layer; **game rules live in app bundles**. Its
+tools are broad (the service holds `economy.credit`/`debit`/`admin_adjust`/`pot.pay`),
+so an APP bundle that merely holds `tool.call:waddles.core.service.economy:<tool>`
+must NOT be able to mint or pull anyone's funds. When the economy host call is made
+by the service on behalf of an app (`tool.invoke` hop; the host derives the calling
+app from the call plan -- never from args), the stage additionally requires the
+**calling app's own explicit, admin-approved grant**:
+
+| Calling app wants to ... | Needs (caller's grant) | Notes |
+|---|---|---|
+| `transfer_from {from, to, amount, reason}` (result `{from, to, amount, from_balance, to_balance, alias}`) -- move a NON-actor member's funds | `economy.transfer_from` | new primitive, new WIT `transfer-from`, ledger kinds `transfer_from` / `transfer_from_in` |
+| `adjust_balance` with a negative delta (`debit`/`conditional-debit`) on a user who is NOT the invocation's actor | `economy.transfer_from` | debiting the actor's own funds keeps the lighter actor-bound path (no elevated grant) |
+| `adjust_balance` +, `credit`, `batch-credit`, `exchange`, `points_set`/`points_adjust` (`admin-adjust`), `pay_pot` | `economy.app_mint` | |
+
+Both are `dangerous` (bold-red per-app community-admin approval, like table/storage grants).
+`community_permission_grants.granted_by` records the approving admin; alembic
+`0082_economy_elevated` adds a stable numeric `grant_id`. An absent or revoked grant is an
+explicit denial (`not_granted` / `elevated_not_granted`), never a fallback to the service's
+own grants. A top-level invocation (no calling app) can never use `transfer_from`.
+
+**Caps (host-side backstop; the app enforces its own game rules first).** The admin sets them
+in the grant `params`: `max_per_op`, `max_per_day` (per calling app per community, rolling 24h),
+`max_per_target_per_day` (per victim for `transfer_from`, per recipient for mints). Unset ->
+conservative defaults (100 / 1,000 / 500); values above the hard ceilings (10,000 / 100,000 /
+50,000) clamp to them. Over `max_per_op` -> `over-cap(<cap>)`; either daily total ->
+`denied("quota_exceeded")`. Multi-target ops (`batch-credit`, `pay_pot`) meter against the
+per-app day cap with the community pot account as their target bucket.
+
+**`transfer_from` is one transaction**: advisory lock per (community, calling app) -> the
+caller's grant row read inside the transaction (a stale host cache cannot authorize a revoked
+grant) -> idempotency -> caps -> both users verified active members -> guarded
+`balance >= amount` debit + credit + both ledger rows in one statement (`CHECK balance >= 0`
+stays the backstop; concurrent steals can never overdraw the victim) -> the
+`economy_elevated_audit` row in the same transaction. Idempotent per key: same parameters replay
+the prior balances; any different parameter (amount, parties, reason) is
+`denied("idempotency_conflict")`; the same key presented by another app collides on the ledger
+key and is refused too.
+
+**Other elevated ops** are wrapped by `elevated_reserve` (live grant read, caps, a RESERVED audit
+row counted immediately, one transaction under the same lock) and `elevated_settle` (applied /
+failed; a failed row stops counting, an indeterminate backend failure stays counted). A replay
+is counted once.
+
+**Audit** (`economy_elevated_audit`, append-only for the runtime role -- it may only settle the
+status/balance columns): calling app, service app, permission, approving grant id + admin, op,
+target/counterparty UUIDs, amount, `reason`, key, status, resulting balances. UUIDs and ids only;
+`reason` is a code (`[a-z0-9_.-]{1,64}`), never prose. OTel: `waddles_bundle_economy_*` with ops
+`transfer_from`, `elevated_reserve`, `elevated_settle`.
+
 ### Operating the economy store
 
 | Item | Value |
