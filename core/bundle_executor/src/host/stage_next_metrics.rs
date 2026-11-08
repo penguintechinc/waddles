@@ -6,17 +6,22 @@
 //! interface is enforced here, before an instrument or attribute set is ever created:
 //!
 //! * names `^[a-z][a-z0-9_]{0,47}$`, at most [`MAX_NAMES_PER_APP`] per bundle, each bound to one
-//!   instrument kind for the life of the process;
-//! * at most [`MAX_LABELS`] labels, keys `^[a-z][a-z0-9_]{0,31}$`, never `app_id`;
+//!   instrument kind **per bundle** -- every bundle records through its own OTel meter scope, so
+//!   one bundle can never squat, retype or collide with another bundle's metric name;
+//! * at most [`MAX_LABELS`] labels per call, keys `^[a-z][a-z0-9_]{0,31}$` (never `app_id`), and at
+//!   most [`MAX_LABEL_KEYS_PER_NAME`] distinct label keys ever used with one `(bundle, name)`;
 //! * values `^[A-Za-z0-9_.-]{1,32}$` (no free text) and at most [`MAX_VALUES_PER_KEY`] distinct
-//!   values per `(bundle, name, key)` -- later values fold into `other`, so cardinality is bounded
-//!   by construction;
-//! * the `app_id` attribute is stamped by the host from the invocation, never the guest.
+//!   values per `(bundle, name, key)` -- later values fold into `other`;
+//! * a hard per-bundle series budget ([`MAX_SERIES_PER_APP`] distinct `(name, attribute set)`):
+//!   a call that would open a series past it is refused with `limit-exceeded`;
+//! * the `app_id` attribute is stamped by the host from the invocation, never the guest;
+//! * a call that fails ANY check commits nothing (no name, kind, key, value or series is
+//!   recorded), so a rejected call cannot consume a bundle's budgets or poison its state.
 //!
 //! A rejected call returns the typed WIT error to the guest and is counted on
 //! `waddles_executor_bundle_metric_rejects_total{reason}`; nothing is silently dropped.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
@@ -29,8 +34,12 @@ use crate::host::ExecState;
 pub const MAX_NAMES_PER_APP: usize = 32;
 /// Most labels one call may carry.
 pub const MAX_LABELS: usize = 4;
+/// Most distinct label KEYS one `(bundle, name)` may ever use.
+pub const MAX_LABEL_KEYS_PER_NAME: usize = 6;
 /// Most distinct values kept per `(bundle, name, key)` before folding into `other`.
 pub const MAX_VALUES_PER_KEY: usize = 16;
+/// Most distinct series (`name` + attribute set) one bundle may open.
+pub const MAX_SERIES_PER_APP: usize = 512;
 /// Largest single counter increment.
 pub const MAX_COUNTER_DELTA: u64 = 1_000_000;
 const OVERFLOW_VALUE: &str = "other";
@@ -48,22 +57,24 @@ enum Instrument {
     Gauge(Gauge<f64>),
 }
 
-#[derive(Default)]
-struct State {
-    /// metric name -> kind, process-wide (an OTel name can hold one instrument type).
+/// Everything one bundle has registered; owned by exactly one `app_id`.
+struct AppState {
+    meter: Meter,
     kinds: HashMap<String, Kind>,
-    /// app -> names used.
-    names: HashMap<String, HashSet<String>>,
-    /// (app, name, key) -> admitted values.
-    values: HashMap<(String, String, String), HashSet<String>>,
     instruments: HashMap<String, Arc<Instrument>>,
+    label_keys: HashMap<String, HashSet<String>>,
+    values: HashMap<(String, String), HashSet<String>>,
+    series: HashSet<(String, BTreeMap<String, String>)>,
 }
+
+/// Supplies the OTel meter a bundle records through (one scope per `app_id`).
+type MeterFor = Box<dyn Fn(&str) -> Meter + Send + Sync>;
 
 /// The enforcing front for bundle metrics.
 pub struct BundleMetrics {
-    meter: Meter,
+    meter_for: MeterFor,
     rejects: Counter<u64>,
-    state: Mutex<State>,
+    apps: Mutex<HashMap<String, AppState>>,
 }
 
 fn valid_name(s: &str) -> bool {
@@ -87,16 +98,18 @@ fn valid_value(s: &str) -> bool {
 }
 
 impl BundleMetrics {
-    /// Builds the front over `meter`.
+    /// Builds the front; `rejects` and every bundle's instruments come from `meter_for(app_id)`
+    /// (`""` for the host's own reject counter).
     #[must_use]
-    pub fn new(meter: &Meter) -> Self {
+    pub fn new(meter_for: impl Fn(&str) -> Meter + Send + Sync + 'static) -> Self {
+        let rejects = meter_for("")
+            .u64_counter("waddles_executor_bundle_metric_rejects")
+            .with_description("Bundle metric calls the host refused, by reason")
+            .build();
         Self {
-            meter: meter.clone(),
-            rejects: meter
-                .u64_counter("waddles_executor_bundle_metric_rejects")
-                .with_description("Bundle metric calls the host refused, by reason")
-                .build(),
-            state: Mutex::new(State::default()),
+            meter_for: Box::new(meter_for),
+            rejects,
+            apps: Mutex::new(HashMap::new()),
         }
     }
 
@@ -105,78 +118,8 @@ impl BundleMetrics {
         e
     }
 
-    /// Validates `labels` and returns the attribute set (admitting values within the cap).
-    fn attributes(
-        &self,
-        st: &mut State,
-        app_id: &str,
-        name: &str,
-        labels: &[metrics::Label],
-    ) -> Result<Vec<KeyValue>, metrics::Error> {
-        if labels.len() > MAX_LABELS {
-            return Err(self.reject("too_many_labels", metrics::Error::InvalidLabel));
-        }
-        let mut out = vec![KeyValue::new("app_id", app_id.to_owned())];
-        let mut seen = HashSet::new();
-        for l in labels {
-            if !valid_key(&l.key) || !seen.insert(l.key.clone()) {
-                return Err(self.reject("bad_label_key", metrics::Error::InvalidLabel));
-            }
-            if !valid_value(&l.value) {
-                return Err(self.reject("bad_label_value", metrics::Error::InvalidLabel));
-            }
-            let admitted = st
-                .values
-                .entry((app_id.to_owned(), name.to_owned(), l.key.clone()))
-                .or_default();
-            let value = if admitted.contains(&l.value) {
-                l.value.clone()
-            } else if admitted.len() < MAX_VALUES_PER_KEY {
-                admitted.insert(l.value.clone());
-                l.value.clone()
-            } else {
-                OVERFLOW_VALUE.to_owned()
-            };
-            out.push(KeyValue::new(l.key.clone(), value));
-        }
-        Ok(out)
-    }
-
-    fn instrument(
-        &self,
-        st: &mut State,
-        app_id: &str,
-        name: &str,
-        kind: Kind,
-    ) -> Result<Arc<Instrument>, metrics::Error> {
-        if !valid_name(name) {
-            return Err(self.reject("bad_name", metrics::Error::InvalidName));
-        }
-        match st.kinds.get(name) {
-            Some(k) if *k != kind => {
-                return Err(self.reject("kind_conflict", metrics::Error::InvalidName))
-            }
-            _ => {}
-        }
-        let used = st.names.entry(app_id.to_owned()).or_default();
-        if !used.contains(name) {
-            if used.len() >= MAX_NAMES_PER_APP {
-                return Err(self.reject("too_many_names", metrics::Error::LimitExceeded));
-            }
-            used.insert(name.to_owned());
-        }
-        st.kinds.insert(name.to_owned(), kind);
-        let full = format!("waddles_bundle_{name}");
-        let inst = st.instruments.entry(full.clone()).or_insert_with(|| {
-            Arc::new(match kind {
-                Kind::Counter => Instrument::Counter(self.meter.u64_counter(full).build()),
-                Kind::Histogram => Instrument::Histogram(self.meter.f64_histogram(full).build()),
-                Kind::Gauge => Instrument::Gauge(self.meter.f64_gauge(full).build()),
-            })
-        });
-        Ok(Arc::clone(inst))
-    }
-
+    /// Validates the whole call against `app`'s CURRENT state without mutating it, then commits
+    /// every registration at once. Any refusal returns before a single write.
     fn prepare(
         &self,
         app_id: &str,
@@ -184,11 +127,93 @@ impl BundleMetrics {
         kind: Kind,
         labels: &[metrics::Label],
     ) -> Result<(Arc<Instrument>, Vec<KeyValue>), metrics::Error> {
-        // Never held across an await: the whole method is synchronous.
-        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let inst = self.instrument(&mut st, app_id, name, kind)?;
-        let attrs = self.attributes(&mut st, app_id, name, labels)?;
-        Ok((inst, attrs))
+        if !valid_name(name) {
+            return Err(self.reject("bad_name", metrics::Error::InvalidName));
+        }
+        if labels.len() > MAX_LABELS {
+            return Err(self.reject("too_many_labels", metrics::Error::InvalidLabel));
+        }
+        let mut seen = HashSet::new();
+        for l in labels {
+            if !valid_key(&l.key) || !seen.insert(l.key.as_str()) {
+                return Err(self.reject("bad_label_key", metrics::Error::InvalidLabel));
+            }
+            if !valid_value(&l.value) {
+                return Err(self.reject("bad_label_value", metrics::Error::InvalidLabel));
+            }
+        }
+        // Never held across an await: this whole method is synchronous.
+        let mut apps = self.apps.lock().unwrap_or_else(|p| p.into_inner());
+        let empty_meter = || (self.meter_for)(app_id);
+        let st = apps.entry(app_id.to_owned()).or_insert_with(|| AppState {
+            meter: empty_meter(),
+            kinds: HashMap::new(),
+            instruments: HashMap::new(),
+            label_keys: HashMap::new(),
+            values: HashMap::new(),
+            series: HashSet::new(),
+        });
+
+        // ---- validate (read-only) ----
+        match st.kinds.get(name) {
+            Some(k) if *k != kind => {
+                return Err(self.reject("kind_conflict", metrics::Error::InvalidName))
+            }
+            None if st.kinds.len() >= MAX_NAMES_PER_APP => {
+                return Err(self.reject("too_many_names", metrics::Error::LimitExceeded))
+            }
+            _ => {}
+        }
+        let known_keys = st.label_keys.get(name);
+        let new_keys = labels
+            .iter()
+            .filter(|l| !known_keys.is_some_and(|k| k.contains(&l.key)))
+            .count();
+        if known_keys.map_or(0, HashSet::len) + new_keys > MAX_LABEL_KEYS_PER_NAME {
+            return Err(self.reject("too_many_label_keys", metrics::Error::LimitExceeded));
+        }
+        let mut attrs: Vec<KeyValue> = vec![KeyValue::new("app_id", app_id.to_owned())];
+        let mut fingerprint = BTreeMap::new();
+        let mut admit: Vec<(String, String)> = Vec::new();
+        for l in labels {
+            let admitted = st.values.get(&(name.to_owned(), l.key.clone()));
+            let value = if admitted.is_some_and(|v| v.contains(&l.value)) {
+                l.value.clone()
+            } else if admitted.map_or(0, HashSet::len) < MAX_VALUES_PER_KEY {
+                admit.push((l.key.clone(), l.value.clone()));
+                l.value.clone()
+            } else {
+                OVERFLOW_VALUE.to_owned()
+            };
+            fingerprint.insert(l.key.clone(), value.clone());
+            attrs.push(KeyValue::new(l.key.clone(), value));
+        }
+        let series_key = (name.to_owned(), fingerprint);
+        if !st.series.contains(&series_key) && st.series.len() >= MAX_SERIES_PER_APP {
+            return Err(self.reject("series_budget", metrics::Error::LimitExceeded));
+        }
+
+        // ---- commit (only reached when every check passed) ----
+        st.kinds.insert(name.to_owned(), kind);
+        let keys = st.label_keys.entry(name.to_owned()).or_default();
+        for l in labels {
+            keys.insert(l.key.clone());
+        }
+        for (k, v) in admit {
+            st.values.entry((name.to_owned(), k)).or_default().insert(v);
+        }
+        st.series.insert(series_key);
+        let full = format!("waddles_bundle_{name}");
+        let key = format!("{full}/{kind:?}");
+        let meter = st.meter.clone();
+        let inst = st.instruments.entry(key).or_insert_with(|| {
+            Arc::new(match kind {
+                Kind::Counter => Instrument::Counter(meter.u64_counter(full).build()),
+                Kind::Histogram => Instrument::Histogram(meter.f64_histogram(full).build()),
+                Kind::Gauge => Instrument::Gauge(meter.f64_gauge(full).build()),
+            })
+        });
+        Ok((Arc::clone(inst), attrs))
     }
 
     /// `counter-add`.
@@ -258,7 +283,9 @@ impl BundleMetrics {
 /// The process-wide front, bound to the global meter provider [`crate::telemetry`] installs.
 pub fn bundle_metrics() -> Arc<BundleMetrics> {
     static GLOBAL: OnceLock<Arc<BundleMetrics>> = OnceLock::new();
-    Arc::clone(GLOBAL.get_or_init(|| Arc::new(BundleMetrics::new(&crate::metrics::bundle_meter()))))
+    Arc::clone(
+        GLOBAL.get_or_init(|| Arc::new(BundleMetrics::new(crate::metrics::bundle_meter_for))),
+    )
 }
 
 impl metrics::Host for ExecState {
@@ -305,11 +332,128 @@ mod tests {
 
     fn fresh() -> (Harness, BundleMetrics) {
         let h = Harness::new();
-        let m = BundleMetrics::new(&h.meter());
+        let m = BundleMetrics::new(h.meter_for_app_fn());
         (h, m)
     }
 
     const APP: &str = "waddles.test.app";
+    const OTHER: &str = "waddles.test.other";
+
+    fn limit(r: Result<(), metrics::Error>) -> bool {
+        matches!(r, Err(metrics::Error::LimitExceeded))
+    }
+
+    // regression: distinct label KEYS per (app, name) are capped (unbounded keys = unbounded series)
+    #[test]
+    fn distinct_label_keys_per_name_are_capped() {
+        let (_h, m) = fresh();
+        for i in 0..MAX_LABEL_KEYS_PER_NAME {
+            m.counter_add(APP, "keys", 1, &[l(&format!("k{i}"), "v")])
+                .unwrap();
+        }
+        assert!(limit(m.counter_add(APP, "keys", 1, &[l("k_extra", "v")])));
+        // Existing keys keep working, and another name has its own key budget.
+        m.counter_add(APP, "keys", 1, &[l("k0", "other")]).unwrap();
+        m.counter_add(APP, "keys2", 1, &[l("k_extra", "v")])
+            .unwrap();
+    }
+
+    // regression: a per-bundle series budget refuses the excess instead of growing without bound
+    #[test]
+    fn series_budget_refuses_the_excess() {
+        let (_h, m) = fresh();
+        let mut opened = 0usize;
+        'outer: for n in 0..MAX_NAMES_PER_APP {
+            let name = format!("series_{n}");
+            for a in 0..=MAX_VALUES_PER_KEY {
+                for b in 0..=MAX_VALUES_PER_KEY {
+                    let r = m.counter_add(
+                        APP,
+                        &name,
+                        1,
+                        &[l("a", &format!("a{a}")), l("b", &format!("b{b}"))],
+                    );
+                    match r {
+                        Ok(()) => opened += 1,
+                        Err(metrics::Error::LimitExceeded) => break 'outer,
+                        Err(_) => panic!("only the series budget may refuse here"),
+                    }
+                }
+            }
+        }
+        // Folded `other` values reuse series, so distinct series == accepted distinct tuples;
+        // the budget was reached and enforced exactly.
+        assert!(opened >= MAX_SERIES_PER_APP, "calls accepted: {opened}");
+        // An existing series still records; a different bundle is unaffected.
+        m.counter_add(APP, "series_0", 1, &[l("a", "a0"), l("b", "b0")])
+            .unwrap();
+        m.counter_add(OTHER, "series_0", 1, &[l("a", "a0")])
+            .unwrap();
+    }
+
+    // regression: one bundle can neither squat nor retype another bundle's metric name
+    #[test]
+    fn a_metric_name_is_namespaced_per_bundle() {
+        let (h, m) = fresh();
+        m.gauge_set(APP, "shared", 1.0, &[]).unwrap();
+        // Another bundle uses the same name as a different kind: allowed, independent.
+        m.counter_add(OTHER, "shared", 4, &[]).unwrap();
+        // ...and the first bundle is still bound to its own kind.
+        assert!(matches!(
+            m.counter_add(APP, "shared", 1, &[]),
+            Err(metrics::Error::InvalidName)
+        ));
+        let pts = h.points();
+        let counter = pts
+            .iter()
+            .find(|p| p.name == "waddles_bundle_shared" && p.attrs["app_id"] == OTHER)
+            .expect("other bundle's counter");
+        assert_eq!(counter.value, 4.0);
+        let gauge = pts
+            .iter()
+            .find(|p| p.name == "waddles_bundle_shared" && p.attrs["app_id"] == APP)
+            .expect("first bundle's gauge");
+        assert_eq!(gauge.value, 1.0);
+        // The name budget is per bundle too.
+        for i in 0..MAX_NAMES_PER_APP - 1 {
+            m.counter_add(OTHER, &format!("n{i}"), 1, &[]).unwrap();
+        }
+        m.counter_add(APP, "fresh_name", 1, &[]).unwrap();
+    }
+
+    // regression: a call refused by ANY check commits nothing (no name/key/value/series)
+    #[test]
+    fn a_refused_call_commits_no_state() {
+        let (_h, m) = fresh();
+        // Valid name but a bad label: refused. Do it more times than the name budget allows.
+        for i in 0..MAX_NAMES_PER_APP + 8 {
+            assert!(matches!(
+                m.counter_add(APP, &format!("ghost_{i}"), 1, &[l("k", "has space")]),
+                Err(metrics::Error::InvalidLabel)
+            ));
+        }
+        // None of those consumed the name budget: a full set of real names still fits.
+        for i in 0..MAX_NAMES_PER_APP {
+            m.counter_add(APP, &format!("real_{i}"), 1, &[]).unwrap();
+        }
+        // A key-budget refusal does not admit the refused call's value or key.
+        for i in 0..MAX_LABEL_KEYS_PER_NAME {
+            m.counter_add(APP, "real_0", 1, &[l(&format!("k{i}"), "v")])
+                .unwrap();
+        }
+        assert!(limit(m.counter_add(
+            APP,
+            "real_0",
+            1,
+            &[l("k0", "v"), l("zzz", "v")]
+        )));
+        let apps = m.apps.lock().unwrap();
+        let st = &apps[APP];
+        assert!(!st.label_keys["real_0"].contains("zzz"));
+        assert!(!st
+            .values
+            .contains_key(&("real_0".to_owned(), "zzz".to_owned())));
+    }
 
     #[test]
     fn counter_histogram_and_gauge_reach_the_sink_with_host_stamped_app_id() {

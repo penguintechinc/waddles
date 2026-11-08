@@ -56,6 +56,7 @@ pub mod license;
 pub mod media;
 pub mod metrics_facade;
 pub mod pii_tokenize;
+pub mod scope_names;
 pub mod source_supervisor;
 pub mod spine;
 pub mod stage_metrics;

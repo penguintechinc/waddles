@@ -552,16 +552,21 @@ pub fn executor_metrics() -> Arc<ExecutorMetrics> {
     }))
 }
 
-/// The meter bundle-authored metrics (`host::stage_next_metrics`) record into: the same global
-/// provider as [`executor_metrics`], so one OTLP exporter carries both.
-pub fn bundle_meter() -> Meter {
+/// The meter `app_id`'s bundle-authored metrics (`host::stage_next_metrics`) record through: the
+/// same global provider as [`executor_metrics`] (one OTLP exporter carries both), but a distinct
+/// instrumentation scope per bundle (`app_id` scope attribute; `""` = the host itself), so one
+/// bundle's instruments can never collide with another's.
+pub fn bundle_meter_for(app_id: &str) -> Meter {
     #[cfg(test)]
     {
-        test_support::shared().meter()
+        test_support::shared().meter_for_app(app_id)
     }
     #[cfg(not(test))]
     {
-        opentelemetry::global::meter(SCOPE)
+        let scope = opentelemetry::InstrumentationScope::builder(SCOPE)
+            .with_attributes([opentelemetry::KeyValue::new("app_id", app_id.to_owned())])
+            .build();
+        opentelemetry::global::meter_with_scope(scope)
     }
 }
 
@@ -612,6 +617,25 @@ pub(crate) mod test_support {
         /// A meter on this harness's provider.
         pub fn meter(&self) -> Meter {
             self.provider.meter("test")
+        }
+
+        /// A meter in its own scope for `app_id` (what production does per bundle).
+        pub fn meter_for_app(&self, app_id: &str) -> Meter {
+            let scope = opentelemetry::InstrumentationScope::builder("test")
+                .with_attributes([opentelemetry::KeyValue::new("app_id", app_id.to_owned())])
+                .build();
+            self.provider.meter_with_scope(scope)
+        }
+
+        /// `BundleMetrics::new`'s meter supplier over this harness's provider.
+        pub fn meter_for_app_fn(&self) -> impl Fn(&str) -> Meter + Send + Sync + 'static {
+            let provider = self.provider.clone();
+            move |app_id: &str| {
+                let scope = opentelemetry::InstrumentationScope::builder("test")
+                    .with_attributes([opentelemetry::KeyValue::new("app_id", app_id.to_owned())])
+                    .build();
+                provider.meter_with_scope(scope)
+            }
         }
 
         /// Flushes and returns every data point exported so far across all
