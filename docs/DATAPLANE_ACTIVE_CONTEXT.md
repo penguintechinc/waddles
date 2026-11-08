@@ -36,7 +36,7 @@ field set is pinned by a regression test.
 ## Logic and storage
 
 The choice itself is owned by `services/app_command_registry.py` (`get_active_context` /
-`set_active_context`, table `user_active_context` from migration `0082_user_active_context`): the
+`set_active_context`, table `user_active_context` from migration `0084_user_active_context`): the
 switchable set is the source's paired communities in registration order, a stored choice that has
 left the set yields to the default (`explicit=false`), and a source paired across tenants is
 refused. The gRPC adapter only adds the numeric id (resolved from the same paired set) and the
