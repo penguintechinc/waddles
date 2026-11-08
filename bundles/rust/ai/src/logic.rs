@@ -245,10 +245,11 @@ impl Config {
         if !(1..=60).contains(&rpm) || !(1..=100_000).contains(&daily) {
             return Err(bad());
         }
+        // An absent blocklist is a valid configuration: no extra blocked terms.
         let blocklist: Vec<String> = raw
             .blocklist
-            .unwrap_or_default()
             .into_iter()
+            .flatten()
             .map(|t| canonical(t.trim()))
             .collect();
         if blocklist.len() > 100 || blocklist.iter().any(|t| t.is_empty() || t.len() > 64) {
@@ -581,9 +582,11 @@ impl AiService {
         }
         let raw = self.run(&cfg, &inputs, &prompt, &opts)?;
         let (label, confidence, reason) = parse_classification(&raw, &a.labels)?;
-        let reason = sanitize_output(&reason, false)
-            .map(|r| r.chars().take(MAX_REASON_CHARS).collect::<String>())
-            .unwrap_or_default();
+        // A filtered reason fails the whole call loudly (`content_filtered`).
+        let reason: String = sanitize_output(&reason, false)?
+            .chars()
+            .take(MAX_REASON_CHARS)
+            .collect();
         Self::final_check(&cfg, &reason)?;
         Ok(json!({ "label": label, "confidence": confidence, "reason": reason }))
     }
@@ -651,11 +654,11 @@ fn parse_classification(raw: &str, labels: &[String]) -> Result<(String, f64, St
     if !(confidence.is_finite() && (0.0..=1.0).contains(&confidence)) {
         return Err(bad());
     }
-    let reason = v
-        .get("reason")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_default();
+    // `reason` is optional in the model contract; absent means no explanation.
+    let reason = match v.get("reason").and_then(Value::as_str) {
+        Some(r) => r.to_string(),
+        None => String::new(),
+    };
     Ok((label.to_string(), confidence, reason))
 }
 
