@@ -65,16 +65,22 @@ fn meta_from(key: &str, size: u64, a: &Attributes) -> Result<ObjectMeta, Storage
             )));
         }
     };
-    let tags = a
-        .get(&Attribute::Metadata(TAGS_ATTR.into()))
-        .map(|v| {
-            v.as_ref()
-                .split(',')
-                .filter(|t| !t.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    // `attrs` always writes the tags attribute (possibly empty); absence means the
+    // stored metadata is corrupt, so fail loudly rather than inventing "no tags".
+    let tags: Vec<String> = match a.get(&Attribute::Metadata(TAGS_ATTR.into())) {
+        Some(v) => v
+            .as_ref()
+            .split(',')
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => {
+            tracing::error!(key, "stored object has no tags attribute");
+            return Err(StorageError::Backend(format!(
+                "object {key} has no tags attribute"
+            )));
+        }
+    };
     Ok(ObjectMeta {
         key: key.into(),
         size,
