@@ -995,7 +995,12 @@ fn pin_channel(
             ..
         }) => {
             let origin = origin_channel.as_deref();
-            if channel.is_none() && origin.is_some_and(|o| role_guild_scope(o).is_some()) {
+            // A `guild:` scope names no channel, so it can never satisfy a kind that
+            // requires a pinned channel: that falls through and is refused below.
+            if !requires_pin
+                && channel.is_none()
+                && origin.is_some_and(|o| role_guild_scope(o).is_some())
+            {
                 return Ok(None);
             }
             match (channel.as_deref(), origin) {
@@ -1012,16 +1017,13 @@ fn pin_channel(
         OutboundAction::EventOp { .. } if !uses_stamp => return Ok(None),
         OutboundAction::EventOp { .. } => return Err(ExecError::BadAction),
     };
-    if !matches!(platform, "twitch" | "discord" | "youtube") {
-        return if uses_stamp {
-            Err(ExecError::Pin(PinError::UnsupportedPlatform))
-        } else {
-            Ok(None)
-        };
+    match crate::outbound_pin::pin_target(platform, channel, origin) {
+        Ok(p) => Ok(Some(p)),
+        // FAIL CLOSED: a platform without a pin implementation may only run a kind that needs
+        // no pin; a pinned kind (`requires_pin` / stamp slot) there is refused, never unpinned.
+        Err(PinError::UnsupportedPlatform) if !uses_stamp && !requires_pin => Ok(None),
+        Err(e) => Err(ExecError::Pin(e)),
     }
-    crate::outbound_pin::pin_target(platform, channel, origin)
-        .map(Some)
-        .map_err(ExecError::Pin)
 }
 
 /// Parses a role op's guild-scope wire form: `guild:-` -> `Some(None)` (no assertion, pin from
@@ -1078,6 +1080,8 @@ fn default_payload(kind: &KindPolicy, action: &OutboundAction) -> Result<String,
 
 #[cfg(test)]
 mod discord_tests;
+#[cfg(test)]
+mod pin_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
