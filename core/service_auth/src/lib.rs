@@ -2851,7 +2851,7 @@ mod grpc_path_tests {
         MockHub::builder()
             .mint(vec![MintReply::With(Arc::new(sign))])
             .jwks(vec![JwksReply::ed25519("k1", &b64url(KEY_A_PUB_RAW))])
-            .serve(
+            .spawn(
                 listener,
                 addr,
                 Some(
@@ -2859,7 +2859,6 @@ mod grpc_path_tests {
                         .identity(Identity::from_pem(&pki.leaf_cert, &pki.leaf_key)),
                 ),
             )
-            .await
     }
 
     fn pinned(endpoint: &str, ca: &std::path::Path) -> HubChannel {

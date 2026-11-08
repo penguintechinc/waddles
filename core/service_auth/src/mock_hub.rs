@@ -223,12 +223,27 @@ impl MockHubBuilder {
         let addr = listener
             .local_addr()
             .unwrap_or_else(|e| panic!("MockHub: local_addr: {e}"));
-        self.serve(listener, addr, None).await
+        self.spawn(listener, addr, None)
     }
 
-    /// Start serving on an already-bound listener, optionally over TLS (tests supply the
-    /// server config).
-    pub async fn serve(
+    /// As [`MockHubBuilder::start`] for synchronous fixtures: binds with `std` and registers the
+    /// socket with the *current* tokio runtime, so it must be called from within one.
+    pub fn start_sync(self) -> MockHub {
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|e| panic!("MockHub: bind: {e}"));
+        std_listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|e| panic!("MockHub: set_nonblocking: {e}"));
+        let addr = std_listener
+            .local_addr()
+            .unwrap_or_else(|e| panic!("MockHub: local_addr: {e}"));
+        let listener = tokio::net::TcpListener::from_std(std_listener)
+            .unwrap_or_else(|e| panic!("MockHub: from_std (needs a tokio runtime): {e}"));
+        self.spawn(listener, addr, None)
+    }
+
+    /// Serve on an already-bound listener, optionally over TLS (tests supply the server config).
+    pub fn spawn(
         self,
         listener: tokio::net::TcpListener,
         addr: SocketAddr,
