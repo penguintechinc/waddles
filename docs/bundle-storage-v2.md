@@ -122,16 +122,43 @@ already exists; `migrate_schema` only alters tables the registry says belong to 
 in `bundle_host_db::v2::wire` tests and `stage_next_storage_v2` tests. Both stages call one
 function: `bundle_host_db::v2::wire::handle(...)` (db) and `KvHost::{get_versioned,cas,delete_if,list}` (kv).
 
-## Provisioning status (read this)
+## Provisioning and stage wiring
 
-The v1 table pipeline (`bundle_data_schema` -> `bundle_data_ddl`) was a library that approval
-never called, and `svc_process`'s `db` schema/grant caches were never populated, so `db` was
-not live for any bundle. v2 closes the data-plane half: `svc_process` loads
-`bundle_data.table_registry` at startup and every 30 s, and `bundle_data_v2.provision_schema` /
-`migrate_schema` / `teardown_schema` create/upgrade/drop tables + registry rows atomically in the
-caller's transaction. **Not yet done (follow-up, outside this PR's owned files):** calling
-`provision_schema` from the bundle approval/upgrade/uninstall transaction, and `svc_action`
-dispatch (see PR "Needs from host seams").
+Both stages serve v2: `svc_process` and `svc_action` route `db2.*` through
+`bundle_host_db::v2::wire::handle` and the four kv v2 ops through `KvHost`. Each loads
+`bundle_data.table_registry` at startup and every 30 s. The action stage builds its `db` wiring
+exactly like the process stage: `BUNDLE_DB_HOST|PORT|NAME|USER` + `BUNDLE_DB_PASSWORD`
+(role `waddles_bundle_runtime`), gated by the `waddles.bundle-db-capability` flag. Password unset =>
+INFO and every `db`/`db2.*` call denies `not_implemented`; password set but connect fails => ERROR,
+same denial (a misconfiguration, not an opt-out).
+
+Tables follow the **global install lifecycle** in hub-api (`bundle_approval_service`), via
+`services/bundle_data_provisioner.py`, **fail closed**:
+
+| Event | Call | Failure |
+|---|---|---|
+| `install_version_globally`, no live install | `provision_schema` | install not recorded, error propagates |
+| `install_version_globally`, live install exists (upgrade) | `migrate_schema(old, new)` (additive only) | destructive change => 409 `bundle_data_migration_refused`, install not recorded |
+| `uninstall_globally` | `teardown_schema` (only registry-proven owned tables) | uninstall not recorded, nothing dropped |
+
+Only manifests declaring `data.schema` are touched; a manifest without it provisions nothing and
+never opens a migrator connection. An invalid `data.schema` is a 422 `invalid_data_schema`. The DDL
+runs as `waddles_bundle_migrator` on a dedicated psycopg2 connection (host/port/db/options from
+`DATABASE_URL`, role from `BUNDLE_MIGRATOR_USER`, password from `BUNDLE_MIGRATOR_PASSWORD`; unset
+password => 503 `bundle_data_provisioning_unavailable`, approval refused). The table provider
+(`builtin` -> `app_core`, else `thirdparty` -> `app_community`) is derived from the app-id namespace
+(`waddles.core.` prefix), never from the manifest's own claim.
+
+Atomicity: the migrator transaction commits only after the install-state write committed, and rolls
+back if either step fails. One residual window is reported loudly rather than hidden: the migrator
+commit failing after the state write committed raises 500 `bundle_data_commit_failed`. For an
+install, re-approving recovers (the tables did not commit); for an uninstall, drop the app's tables
+by hand with `teardown_schema`.
+
+Real-path tests: `hub_api/tests/test_bundle_data_lifecycle.py` (approval provisions, upgrade
+migrates, destructive upgrade refused, uninstall drops only owned tables, provisioning failure aborts
+approval; real Postgres) and `core/svc_action/tests/storage_v2_real_path.rs` (action-stage
+`db2.*` + kv v2 round trip against real Postgres and Valkey containers).
 
 ## Migration guides
 
