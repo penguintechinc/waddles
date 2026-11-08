@@ -115,6 +115,15 @@ exported_tools:
     additionalProperties: false
   output_schema:
     type: object
+  host_op:
+    platform: twitch
+    op: mod.ban
+    user: user
+    text_object:
+      reason: reason
+    required:
+    - user
+    origin: channel
 - name: twitch.moderation.timeout
   access: write
   risk: dangerous
@@ -138,6 +147,17 @@ exported_tools:
     additionalProperties: false
   output_schema:
     type: object
+  host_op:
+    platform: twitch
+    op: mod.timeout
+    user: user
+    text_object:
+      duration: duration
+      reason: reason
+    required:
+    - user
+    - duration
+    origin: channel
 - name: twitch.moderation.unban
   access: write
   risk: dangerous
@@ -153,6 +173,13 @@ exported_tools:
     additionalProperties: false
   output_schema:
     type: object
+  host_op:
+    platform: twitch
+    op: mod.unban
+    user: user
+    required:
+    - user
+    origin: channel
 - name: twitch.moderation.delete_message
   access: write
   risk: dangerous
@@ -168,6 +195,13 @@ exported_tools:
     additionalProperties: false
   output_schema:
     type: object
+  host_op:
+    platform: twitch
+    op: chat.delete
+    message_id: message_id
+    required:
+    - message_id
+    origin: channel
 author: PenguinTech/waddles
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/twitch

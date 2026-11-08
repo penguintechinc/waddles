@@ -1,0 +1,85 @@
+[
+  {
+    "access": "read",
+    "name": "get_chatters",
+    "risk": "normal"
+  },
+  {
+    "access": "read",
+    "name": "get_followers",
+    "risk": "normal"
+  },
+  {
+    "access": "read",
+    "name": "get_subscriptions",
+    "risk": "normal"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "mod.ban",
+      "origin": "channel",
+      "platform": "twitch",
+      "required": [
+        "user"
+      ],
+      "textObject": {
+        "reason": "reason"
+      },
+      "user": "user"
+    },
+    "name": "twitch.moderation.ban",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "messageId": "message_id",
+      "op": "chat.delete",
+      "origin": "channel",
+      "platform": "twitch",
+      "required": [
+        "message_id"
+      ]
+    },
+    "name": "twitch.moderation.delete_message",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "mod.timeout",
+      "origin": "channel",
+      "platform": "twitch",
+      "required": [
+        "duration",
+        "user"
+      ],
+      "textObject": {
+        "duration": "duration",
+        "reason": "reason"
+      },
+      "user": "user"
+    },
+    "name": "twitch.moderation.timeout",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "mod.unban",
+      "origin": "channel",
+      "platform": "twitch",
+      "required": [
+        "user"
+      ],
+      "user": "user"
+    },
+    "name": "twitch.moderation.unban",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  }
+]

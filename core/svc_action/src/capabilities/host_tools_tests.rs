@@ -25,6 +25,9 @@ use crate::actor::{ActorDirectory, ActorError, BoxFuture as ActorFuture};
 use crate::host_api::ConnectionRegistry;
 use crate::platform_user::{BoxFuture as UserFuture, PlatformUserResolver, ResolveError};
 
+#[path = "host_tools_twitch_manifest_tests.rs"]
+mod twitch_manifest_tests;
+
 const APP: &str = "waddles.test.app.caller";
 const TWITCH_SVC: &str = "waddles.core.service.twitch";
 const DISCORD_SVC: &str = super::super::event_sync::DISCORD_SERVICE_APP_ID;
@@ -97,6 +100,28 @@ fn exported(name: &str, scope: Option<&str>, host_op: Option<HostOpDecl>) -> Exp
         required_scope: scope.map(str::to_string),
         host_op,
     }
+}
+
+/// The host-op tools of a platform bundle's REAL manifest, loaded from the consent summary the
+/// hub approval pipeline derives from it (`scripts/host_tool_summary.py` regenerates the
+/// fixture; a Python test fails when it drifts). Zero tools is a failure, never an empty pass.
+fn manifest_tools(platform: &str) -> Vec<ExportedToolInfo> {
+    let path = format!(
+        "{}/tests/fixtures/host_tools/{platform}.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let exported: Value = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let info = ToolManifestInfo::from_summary(
+        &json!({"capabilities": ["mcp.tools"], "exportedTools": exported}),
+    );
+    let tools: Vec<ExportedToolInfo> = info
+        .exported
+        .into_iter()
+        .filter(|t| t.host_op.is_some())
+        .collect();
+    assert!(!tools.is_empty(), "{path}: no host-op tools parsed");
+    tools
 }
 
 fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
