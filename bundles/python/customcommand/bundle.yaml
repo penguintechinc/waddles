@@ -2,11 +2,11 @@ schema_version: 2
 app_id: waddles.core.example.customcommand
 name: Custom Command Bundle (Python)
 # 1.0.0: new bundle -- see src/app.py's module docstring. Activation-gated only (no feature flag).
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/customcommand
 language: python
@@ -56,6 +56,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.1"
+  min_version: "1.0.1"
   max_version: null

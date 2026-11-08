@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.integrations.superpenguin.roll
 name: Roll (SuperPenguinTV PastyGames)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.integrations.superpenguin
 module: integrations
 provider: thirdparty
@@ -13,7 +13,8 @@ is_default: false
 # First bundle to carry these fields: a third-party port credited to its
 # original author (permission granted -- see task context), listed under the
 # "alternatives" category rather than as a Waddles-native feature.
-author: "superpenguintv (Psychoboy)"
+author: github/psychoboy
+collection: superpenguintv
 license: MIT
 category: alternatives
 source_url: https://github.com/Psychoboy/PenguinTwitchBot
@@ -82,6 +83,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.1"
+  min_version: "1.0.1"
   max_version: null
