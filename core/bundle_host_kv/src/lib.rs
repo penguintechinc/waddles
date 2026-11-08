@@ -39,9 +39,12 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 
 pub use authorize::CapabilitySnapshot;
-pub use backend::{BoxFuture, KvBackend, QuotaOutcome, ReconcileOutcome};
+pub use backend::{
+    BoxFuture, CasDelete, CasOutcome, KvBackend, QuotaOutcome, ReconcileOutcome, VERSION_SCHEME,
+};
 pub use limits::{
-    MAX_GUEST_KEY_LEN, MAX_KEYS_PER_APP, MAX_OPS_PER_INVOKE, MAX_TTL_SECONDS, MAX_VALUE_BYTES,
+    MAX_BYTES_PER_INVOKE, MAX_GUEST_KEY_LEN, MAX_KEYS_PER_APP, MAX_LIST_LIMIT, MAX_OPS_PER_INVOKE,
+    MAX_TTL_SECONDS, MAX_VALUE_BYTES,
 };
 pub use scope::KvScope;
 
@@ -288,6 +291,35 @@ impl<B: KvBackend> KvHost<B> {
         Ok(())
     }
 
+    /// Charges `bytes` (key + value bytes moved) against this invocation's
+    /// byte budget; over [`limits::MAX_BYTES_PER_INVOKE`] is `RateLimited`.
+    /// Together with the op ceiling this is the per-invocation brake: a flat
+    /// op count alone either starves legitimate many-small-op bundles or lets a
+    /// few huge ops through.
+    async fn charge_bytes(
+        &self,
+        scope: &KvScope,
+        call_id: u64,
+        bytes: usize,
+    ) -> Result<(), KvError> {
+        let total = self
+            .backend
+            .add_budget(
+                &scope.budget_key(call_id),
+                limits::RATE_LIMIT_WINDOW_SECONDS,
+                bytes as u64,
+            )
+            .await
+            .map_err(KvError::Backend)?;
+        if total > limits::MAX_BYTES_PER_INVOKE {
+            return Err(KvError::RateLimited(format!(
+                "invocation exceeded {} kv bytes",
+                limits::MAX_BYTES_PER_INVOKE
+            )));
+        }
+        Ok(())
+    }
+
     /// `stage.wit` `kv.get`.
     pub async fn get(
         &self,
@@ -311,10 +343,16 @@ impl<B: KvBackend> KvHost<B> {
             .map_err(|d| KvError::NotGranted(d.message))?;
         validate_key(key)?;
         self.check_rate(scope, call_id).await?;
-        self.backend
+        self.charge_bytes(scope, call_id, key.len()).await?;
+        let value = self
+            .backend
             .get(&scope.data_key(key))
             .await
-            .map_err(KvError::Backend)
+            .map_err(KvError::Backend)?;
+        if let Some(v) = &value {
+            self.charge_bytes(scope, call_id, v.len()).await?;
+        }
+        Ok(value)
     }
 
     /// `stage.wit` `kv.set`. `ttl_seconds` of `0` means no expiry; a value
@@ -351,6 +389,8 @@ impl<B: KvBackend> KvHost<B> {
             return Err(KvError::TooLarge(value.len() as u64));
         }
         self.check_rate(scope, call_id).await?;
+        self.charge_bytes(scope, call_id, key.len() + value.len())
+            .await?;
         self.ensure_count_reconciled(scope).await?;
         let ttl = limits::clamp_ttl_seconds(ttl_seconds);
         match self
@@ -388,6 +428,7 @@ impl<B: KvBackend> KvHost<B> {
             .map_err(|d| KvError::NotGranted(d.message))?;
         validate_key(key)?;
         self.check_rate(scope, call_id).await?;
+        self.charge_bytes(scope, call_id, key.len()).await?;
         self.backend
             .delete(
                 &scope.data_key(key),
@@ -430,6 +471,7 @@ impl<B: KvBackend> KvHost<B> {
             .map_err(|d| KvError::NotGranted(d.message))?;
         validate_key(key)?;
         self.check_rate(scope, call_id).await?;
+        self.charge_bytes(scope, call_id, key.len()).await?;
         self.ensure_count_reconciled(scope).await?;
         let ttl = limits::clamp_ttl_seconds(ttl_seconds);
         match self
@@ -451,6 +493,266 @@ impl<B: KvBackend> KvHost<B> {
                 limits::MAX_KEYS_PER_APP
             ))),
         }
+    }
+}
+
+/// One page of a `list` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvListPage {
+    /// Guest keys under the prefix, lexicographic.
+    pub keys: Vec<String>,
+    /// Pass back as `cursor` for the next page; `None` when exhausted.
+    pub next_cursor: Option<String>,
+}
+
+/// Result of a v2 compare-and-swap (a version conflict is an expected,
+/// retryable outcome, not an error).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvCasResult {
+    /// Written; the key's new version.
+    Swapped(u64),
+    /// Not written; the key's current version (`0` = absent).
+    Conflict(u64),
+}
+
+/// Result of a v2 conditional delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvDeleteIfResult {
+    Deleted,
+    /// Not deleted; the key's current version (`0` = absent).
+    Conflict(u64),
+}
+
+impl<B: KvBackend> KvHost<B> {
+    /// kv v2 `get-versioned`: the value plus its version token.
+    pub async fn get_versioned(
+        &self,
+        scope: &KvScope,
+        call_id: u64,
+        key: &str,
+    ) -> Result<Option<(Vec<u8>, u64)>, KvError> {
+        let start = Instant::now();
+        let result = self.get_versioned_inner(scope, call_id, key).await;
+        finish(
+            "get_versioned",
+            scope,
+            &key_hash(key),
+            start.elapsed(),
+            &result,
+        );
+        result
+    }
+
+    async fn get_versioned_inner(
+        &self,
+        scope: &KvScope,
+        call_id: u64,
+        key: &str,
+    ) -> Result<Option<(Vec<u8>, u64)>, KvError> {
+        authorize::authorize_kv(scope, &self.capabilities)
+            .map_err(|d| KvError::NotGranted(d.message))?;
+        validate_key(key)?;
+        self.check_rate(scope, call_id).await?;
+        self.charge_bytes(scope, call_id, key.len()).await?;
+        let found = self
+            .backend
+            .get_versioned(&scope.data_key(key))
+            .await
+            .map_err(KvError::Backend)?;
+        if let Some((v, _)) = &found {
+            self.charge_bytes(scope, call_id, v.len()).await?;
+        }
+        Ok(found)
+    }
+
+    /// kv v2 `cas`: write `value` iff the key's version is `expected_version`
+    /// (`0` = create only if absent). Atomic inside Valkey.
+    pub async fn cas(
+        &self,
+        scope: &KvScope,
+        call_id: u64,
+        key: &str,
+        expected_version: u64,
+        value: &[u8],
+        ttl_seconds: u32,
+    ) -> Result<KvCasResult, KvError> {
+        let start = Instant::now();
+        let result = self
+            .cas_inner(scope, call_id, key, expected_version, value, ttl_seconds)
+            .await;
+        finish("cas", scope, &key_hash(key), start.elapsed(), &result);
+        result
+    }
+
+    async fn cas_inner(
+        &self,
+        scope: &KvScope,
+        call_id: u64,
+        key: &str,
+        expected_version: u64,
+        value: &[u8],
+        ttl_seconds: u32,
+    ) -> Result<KvCasResult, KvError> {
+        authorize::authorize_kv(scope, &self.capabilities)
+            .map_err(|d| KvError::NotGranted(d.message))?;
+        validate_key(key)?;
+        if value.len() > limits::MAX_VALUE_BYTES {
+            return Err(KvError::TooLarge(value.len() as u64));
+        }
+        self.check_rate(scope, call_id).await?;
+        self.charge_bytes(scope, call_id, key.len() + value.len())
+            .await?;
+        self.ensure_count_reconciled(scope).await?;
+        let ttl = limits::clamp_ttl_seconds(ttl_seconds);
+        match self
+            .backend
+            .cas_with_quota(
+                &scope.data_key(key),
+                &scope.live_key(),
+                &scope.legacy_count_key(),
+                expected_version,
+                value,
+                ttl,
+                limits::MAX_KEYS_PER_APP,
+            )
+            .await
+            .map_err(KvError::Backend)?
+        {
+            CasOutcome::Swapped(v) => Ok(KvCasResult::Swapped(v)),
+            CasOutcome::Conflict(v) => Ok(KvCasResult::Conflict(v)),
+            CasOutcome::QuotaExceeded => Err(KvError::QuotaExceeded(format!(
+                "app already holds the maximum {} live keys",
+                limits::MAX_KEYS_PER_APP
+            ))),
+        }
+    }
+
+    /// kv v2 `delete-if`: delete iff the key's version is `expected_version`.
+    pub async fn delete_if(
+        &self,
+        scope: &KvScope,
+        call_id: u64,
+        key: &str,
+        expected_version: u64,
+    ) -> Result<KvDeleteIfResult, KvError> {
+        let start = Instant::now();
+        let result = self
+            .delete_if_inner(scope, call_id, key, expected_version)
+            .await;
+        finish("delete_if", scope, &key_hash(key), start.elapsed(), &result);
+        result
+    }
+
+    async fn delete_if_inner(
+        &self,
+        scope: &KvScope,
+        call_id: u64,
+        key: &str,
+        expected_version: u64,
+    ) -> Result<KvDeleteIfResult, KvError> {
+        authorize::authorize_kv(scope, &self.capabilities)
+            .map_err(|d| KvError::NotGranted(d.message))?;
+        validate_key(key)?;
+        if expected_version == 0 {
+            return Err(KvError::InvalidKey(
+                "delete-if needs a real version (>= 1)".to_string(),
+            ));
+        }
+        self.check_rate(scope, call_id).await?;
+        self.charge_bytes(scope, call_id, key.len()).await?;
+        Ok(
+            match self
+                .backend
+                .delete_if(
+                    &scope.data_key(key),
+                    &scope.live_key(),
+                    &scope.legacy_count_key(),
+                    expected_version,
+                )
+                .await
+                .map_err(KvError::Backend)?
+            {
+                CasDelete::Deleted => KvDeleteIfResult::Deleted,
+                CasDelete::Conflict(v) => KvDeleteIfResult::Conflict(v),
+            },
+        )
+    }
+
+    /// kv v2 `list`: keys under `prefix` (may be empty = all), lexicographic,
+    /// strictly after `cursor` (a guest key returned by the previous page),
+    /// at most `limit` (1..=[`MAX_LIST_LIMIT`]). Only keys are returned (use
+    /// `get` for values) so a page's byte cost is bounded by key sizes.
+    pub async fn list(
+        &self,
+        scope: &KvScope,
+        call_id: u64,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<KvListPage, KvError> {
+        let start = Instant::now();
+        let result = self.list_inner(scope, call_id, prefix, cursor, limit).await;
+        finish("list", scope, &key_hash(prefix), start.elapsed(), &result);
+        result
+    }
+
+    async fn list_inner(
+        &self,
+        scope: &KvScope,
+        call_id: u64,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<KvListPage, KvError> {
+        authorize::authorize_kv(scope, &self.capabilities)
+            .map_err(|d| KvError::NotGranted(d.message))?;
+        if !prefix.is_empty() {
+            validate_key(prefix)?;
+        }
+        if limit == 0 || limit > limits::MAX_LIST_LIMIT {
+            return Err(KvError::InvalidKey(format!(
+                "list limit must be 1..={}",
+                limits::MAX_LIST_LIMIT
+            )));
+        }
+        let after = match cursor {
+            Some(c) => {
+                validate_key(c)?;
+                if !c.starts_with(prefix) {
+                    return Err(KvError::InvalidKey(
+                        "cursor does not belong to this prefix".to_string(),
+                    ));
+                }
+                scope.data_key(c)
+            }
+            None => String::new(),
+        };
+        self.check_rate(scope, call_id).await?;
+        self.charge_bytes(scope, call_id, prefix.len()).await?;
+        self.ensure_count_reconciled(scope).await?;
+        // One extra to learn whether another page follows.
+        let mut keys = self
+            .backend
+            .list_keys(
+                &scope.live_key(),
+                &scope.data_prefix(prefix),
+                &after,
+                limit + 1,
+            )
+            .await
+            .map_err(KvError::Backend)?
+            .iter()
+            .filter_map(|k| scope.guest_key_of(k).map(str::to_string))
+            .collect::<Vec<_>>();
+        let next_cursor = if keys.len() > limit as usize {
+            keys.truncate(limit as usize);
+            keys.last().cloned()
+        } else {
+            None
+        };
+        self.charge_bytes(scope, call_id, keys.iter().map(String::len).sum())
+            .await?;
+        Ok(KvListPage { keys, next_cursor })
     }
 }
 
@@ -1113,5 +1415,258 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), "quota_exceeded");
+    }
+}
+
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+    use backend::fake::FakeBackend;
+
+    fn scope() -> KvScope {
+        KvScope::new("acme", Some("main".to_string()), "waddles.bot.a")
+    }
+
+    fn host() -> KvHost<FakeBackend> {
+        let caps = Arc::new(CapabilitySnapshot::new());
+        caps.update("waddles.bot.a", [authorize::KV_PERMISSION_ID.to_string()]);
+        KvHost::new(FakeBackend::new(), caps)
+    }
+
+    #[tokio::test]
+    async fn cas_creates_only_if_absent_then_detects_conflicts() {
+        let h = host();
+        let s = scope();
+        let KvCasResult::Swapped(v1) = h.cas(&s, 1, "k", 0, b"one", 0).await.unwrap() else {
+            panic!("create must swap")
+        };
+        // a second create-if-absent conflicts and reports the live version
+        assert_eq!(
+            h.cas(&s, 1, "k", 0, b"x", 0).await.unwrap(),
+            KvCasResult::Conflict(v1)
+        );
+        let (val, ver) = h.get_versioned(&s, 1, "k").await.unwrap().unwrap();
+        assert_eq!((val.as_slice(), ver), (&b"one"[..], v1));
+        let KvCasResult::Swapped(v2) = h.cas(&s, 1, "k", v1, b"two", 0).await.unwrap() else {
+            panic!("matching version must swap")
+        };
+        assert_ne!(v1, v2);
+        // stale token loses
+        assert_eq!(
+            h.cas(&s, 1, "k", v1, b"lost", 0).await.unwrap(),
+            KvCasResult::Conflict(v2)
+        );
+        assert_eq!(h.get(&s, 1, "k").await.unwrap().unwrap(), b"two");
+    }
+
+    #[tokio::test]
+    async fn a_v1_write_invalidates_a_v2_version_so_mixed_use_is_safe() {
+        let h = host();
+        let s = scope();
+        let KvCasResult::Swapped(v1) = h.cas(&s, 1, "k", 0, b"a", 0).await.unwrap() else {
+            panic!()
+        };
+        h.set(&s, 1, "k", b"b", 0).await.unwrap();
+        assert!(matches!(
+            h.cas(&s, 1, "k", v1, b"c", 0).await.unwrap(),
+            KvCasResult::Conflict(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_if_honours_the_version_and_rejects_zero() {
+        let h = host();
+        let s = scope();
+        let KvCasResult::Swapped(v) = h.cas(&s, 1, "k", 0, b"a", 0).await.unwrap() else {
+            panic!()
+        };
+        assert!(matches!(
+            h.delete_if(&s, 1, "k", v + 1).await.unwrap(),
+            KvDeleteIfResult::Conflict(_)
+        ));
+        assert_eq!(
+            h.delete_if(&s, 1, "k", v).await.unwrap(),
+            KvDeleteIfResult::Deleted
+        );
+        assert!(h.get(&s, 1, "k").await.unwrap().is_none());
+        assert!(matches!(
+            h.delete_if(&s, 1, "k", 0).await,
+            Err(KvError::InvalidKey(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_is_prefix_scoped_sorted_and_paginated() {
+        let h = host();
+        let s = scope();
+        for k in ["ev.03", "ev.01", "ev.02", "ev.05", "ev.04", "other.1"] {
+            h.set(&s, 1, k, b"x", 0).await.unwrap();
+        }
+        let p1 = h.list(&s, 2, "ev.", None, 2).await.unwrap();
+        assert_eq!(p1.keys, ["ev.01", "ev.02"]);
+        let p2 = h
+            .list(&s, 2, "ev.", p1.next_cursor.as_deref(), 2)
+            .await
+            .unwrap();
+        assert_eq!(p2.keys, ["ev.03", "ev.04"]);
+        let p3 = h
+            .list(&s, 2, "ev.", p2.next_cursor.as_deref(), 2)
+            .await
+            .unwrap();
+        assert_eq!(p3.keys, ["ev.05"]);
+        assert!(p3.next_cursor.is_none());
+        let all = h.list(&s, 2, "", None, 200).await.unwrap();
+        assert_eq!(all.keys.len(), 6);
+        // a foreign cursor / bad limits / bad prefix are explicit errors
+        assert!(h.list(&s, 2, "ev.", Some("other.1"), 2).await.is_err());
+        assert!(h.list(&s, 2, "ev.", None, 0).await.is_err());
+        assert!(h
+            .list(&s, 2, "ev.", None, MAX_LIST_LIMIT + 1)
+            .await
+            .is_err());
+        assert!(h.list(&s, 2, "a:b", None, 5).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_and_cas_never_cross_apps_or_communities() {
+        let h = host();
+        let s = scope();
+        h.set(&s, 1, "ev.1", b"x", 0).await.unwrap();
+        let other_comm = KvScope::new("acme", Some("other".to_string()), "waddles.bot.a");
+        assert!(h
+            .list(&other_comm, 2, "", None, 10)
+            .await
+            .unwrap()
+            .keys
+            .is_empty());
+        let other_tenant = KvScope::new("globex", Some("main".to_string()), "waddles.bot.a");
+        assert!(h
+            .list(&other_tenant, 3, "", None, 10)
+            .await
+            .unwrap()
+            .keys
+            .is_empty());
+        assert_eq!(
+            h.cas(&other_comm, 4, "ev.1", 0, b"mine", 0).await.unwrap(),
+            KvCasResult::Swapped(
+                h.get_versioned(&other_comm, 4, "ev.1")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .1
+            ),
+            "same key name in another community is a different, absent key"
+        );
+    }
+
+    #[tokio::test]
+    async fn ops_beyond_64_are_now_allowed_but_the_byte_budget_still_brakes() {
+        let h = host();
+        let s = scope();
+        // 200 small ops in one invocation: fine (old cap was 64)
+        for i in 0..200 {
+            h.set(&s, 9, &format!("k{i}"), b"v", 0).await.unwrap();
+        }
+        // ops ceiling still applies
+        let over_ops = {
+            let mut last = Ok(());
+            for i in 0..100 {
+                last = h.set(&s, 9, &format!("m{i}"), b"v", 0).await;
+                if last.is_err() {
+                    break;
+                }
+            }
+            last
+        };
+        assert!(matches!(over_ops, Err(KvError::RateLimited(m)) if m.contains("kv ops")));
+        // byte budget: a few big values exhaust 1 MiB well before 256 ops
+        let big = vec![0u8; 60 * 1024];
+        let mut hit = None;
+        for i in 0..40 {
+            if let Err(e) = h.set(&s, 10, &format!("big{i}"), &big, 0).await {
+                hit = Some((i, e));
+                break;
+            }
+        }
+        let (i, e) = hit.expect("byte budget must trip");
+        assert!(
+            i < 20 && matches!(&e, KvError::RateLimited(m) if m.contains("bytes")),
+            "{i} {e:?}"
+        );
+        // a fresh invocation (new call_id) starts with a fresh budget
+        h.set(&s, 11, "big-again", &big, 0).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_calls_on_a_v1_only_backend_fail_loud() {
+        // A backend that never implemented v2 must error, not pretend.
+        struct V1Only;
+        impl KvBackend for V1Only {
+            fn get<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+                Box::pin(async { Ok(None) })
+            }
+            fn set_with_quota<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a str,
+                _: &'a str,
+                _: &'a [u8],
+                _: u32,
+                _: u64,
+            ) -> BoxFuture<'a, Result<QuotaOutcome<()>, String>> {
+                Box::pin(async { Ok(QuotaOutcome::Admitted(())) })
+            }
+            fn delete<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<bool, String>> {
+                Box::pin(async { Ok(false) })
+            }
+            fn increment_with_quota<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a str,
+                _: &'a str,
+                _: i64,
+                _: u32,
+                _: u64,
+            ) -> BoxFuture<'a, Result<QuotaOutcome<i64>, String>> {
+                Box::pin(async { Ok(QuotaOutcome::Admitted(0)) })
+            }
+            fn increment_rate<'a>(
+                &'a self,
+                _: &'a str,
+                _: u64,
+            ) -> BoxFuture<'a, Result<u64, String>> {
+                Box::pin(async { Ok(1) })
+            }
+            fn reconcile_count_if_missing<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a str,
+                _: &'a str,
+                _: u64,
+                _: u64,
+            ) -> BoxFuture<'a, Result<ReconcileOutcome, String>> {
+                Box::pin(async { Ok(ReconcileOutcome::AlreadyPresent) })
+            }
+        }
+        let caps = Arc::new(CapabilitySnapshot::new());
+        caps.update("waddles.bot.a", [authorize::KV_PERMISSION_ID.to_string()]);
+        let h = KvHost::new(V1Only, caps);
+        let s = scope();
+        assert!(
+            matches!(h.cas(&s, 1, "k", 0, b"x", 0).await, Err(KvError::Backend(m)) if m.contains("not supported"))
+        );
+        assert!(matches!(
+            h.get_versioned(&s, 1, "k").await,
+            Err(KvError::Backend(_))
+        ));
+        assert!(matches!(
+            h.list(&s, 1, "", None, 5).await,
+            Err(KvError::Backend(_))
+        ));
     }
 }

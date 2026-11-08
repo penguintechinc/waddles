@@ -1148,3 +1148,207 @@ async fn legacy_counter_write_through_is_exact_and_can_never_fail_a_write() {
     host.delete(&scope, 16, "e").await.unwrap();
     assert_eq!(legacy_counter(&mut probe, &scope).await, None);
 }
+
+// ---- kv v2: compare-and-swap, listing, byte budget (real Lua scripts) ------
+
+#[tokio::test]
+async fn v2_cas_is_atomic_under_contention_in_real_valkey() {
+    let (_container, url) = start().await;
+    let host = Arc::new(KvHost::new(
+        connect(&url).await,
+        granting(&["waddles.bot.a"]),
+    ));
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+
+    // create-if-absent: exactly one of 16 racers creates the key
+    let mut set = JoinSet::new();
+    for i in 0..16u64 {
+        let (h, s) = (host.clone(), scope.clone());
+        set.spawn(async move {
+            h.cas(&s, 100 + i, "lock", 0, format!("owner{i}").as_bytes(), 0)
+                .await
+                .unwrap()
+        });
+    }
+    let mut swapped = 0;
+    while let Some(r) = set.join_next().await {
+        if matches!(r.unwrap(), bundle_host_kv::KvCasResult::Swapped(_)) {
+            swapped += 1;
+        }
+    }
+    assert_eq!(swapped, 1, "exactly one creator wins");
+
+    // read-modify-write loop: 16 concurrent incrementers via CAS never lose an update
+    host.set(&scope, 1, "ctr", b"0", 0).await.unwrap();
+    let mut set = JoinSet::new();
+    for i in 0..16u64 {
+        let (h, s) = (host.clone(), scope.clone());
+        set.spawn(async move {
+            let call = 1000 + i * 1000;
+            for attempt in 0..200u64 {
+                let (cur, ver) = h
+                    .get_versioned(&s, call + attempt, "ctr")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let n: u64 = String::from_utf8(cur).unwrap().parse().unwrap();
+                let next = (n + 1).to_string();
+                if let bundle_host_kv::KvCasResult::Swapped(_) = h
+                    .cas(&s, call + attempt, "ctr", ver, next.as_bytes(), 0)
+                    .await
+                    .unwrap()
+                {
+                    return;
+                }
+            }
+            panic!("never won a CAS in 200 attempts");
+        });
+    }
+    while let Some(r) = set.join_next().await {
+        r.unwrap();
+    }
+    assert_eq!(
+        host.get(&scope, 9_999_999, "ctr").await.unwrap().unwrap(),
+        b"16"
+    );
+}
+
+#[tokio::test]
+async fn v2_versions_track_content_and_v1_writes_invalidate_them() {
+    let (_container, url) = start().await;
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+
+    assert!(host.get_versioned(&scope, 1, "k").await.unwrap().is_none());
+    let bundle_host_kv::KvCasResult::Swapped(v1) =
+        host.cas(&scope, 1, "k", 0, b"a", 0).await.unwrap()
+    else {
+        panic!()
+    };
+    let (_, seen) = host.get_versioned(&scope, 1, "k").await.unwrap().unwrap();
+    assert_eq!(
+        seen, v1,
+        "the version returned by cas equals the one get reports"
+    );
+    assert!(v1 >= 1);
+    host.set(&scope, 1, "k", b"b", 0).await.unwrap();
+    assert!(matches!(
+        host.cas(&scope, 1, "k", v1, b"c", 0).await.unwrap(),
+        bundle_host_kv::KvCasResult::Conflict(cur) if cur != v1
+    ));
+    let (_, v2) = host.get_versioned(&scope, 1, "k").await.unwrap().unwrap();
+    assert_eq!(
+        host.delete_if(&scope, 1, "k", v2 + 1).await.unwrap(),
+        bundle_host_kv::KvDeleteIfResult::Conflict(v2)
+    );
+    assert_eq!(
+        host.delete_if(&scope, 1, "k", v2).await.unwrap(),
+        bundle_host_kv::KvDeleteIfResult::Deleted
+    );
+    assert!(host.get(&scope, 1, "k").await.unwrap().is_none());
+    // ttl is honoured by cas
+    host.cas(&scope, 2, "t", 0, b"x", 1).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    assert!(host.get(&scope, 2, "t").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn v2_cas_creation_counts_against_the_key_quota() {
+    let (_container, url) = start().await;
+    let mut seed_conn = connect(&url).await;
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+    seed_live_index(&mut seed_conn, &scope, MAX_KEYS_PER_APP).await;
+    let err = host.cas(&scope, 1, "new", 0, b"x", 0).await.unwrap_err();
+    assert_eq!(err.code(), "quota_exceeded");
+}
+
+#[tokio::test]
+async fn v2_list_is_sorted_prefix_scoped_paginated_and_isolated_in_real_valkey() {
+    let (_container, url) = start().await;
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["waddles.bot.a", "waddles.bot.b"]),
+    );
+    let a = scope("acme", Some("main"), "waddles.bot.a");
+    let b = scope("acme", Some("main"), "waddles.bot.b");
+    let other_comm = scope("acme", Some("other"), "waddles.bot.a");
+    for i in (0..25).rev() {
+        host.set(&a, 1 + i as u64, &format!("ev.{i:02}"), b"x", 0)
+            .await
+            .unwrap();
+    }
+    host.set(&a, 100, "zz.1", b"x", 0).await.unwrap();
+    host.set(&b, 101, "ev.99", b"x", 0).await.unwrap();
+    host.set(&other_comm, 102, "ev.77", b"x", 0).await.unwrap();
+
+    let mut got = Vec::new();
+    let mut cursor: Option<String> = None;
+    for call in 200..210u64 {
+        let page = host
+            .list(&a, call, "ev.", cursor.as_deref(), 10)
+            .await
+            .unwrap();
+        got.extend(page.keys);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let want: Vec<String> = (0..25).map(|i| format!("ev.{i:02}")).collect();
+    assert_eq!(
+        got, want,
+        "sorted, complete, no foreign keys, no duplicates"
+    );
+    assert_eq!(
+        host.list(&a, 300, "", None, 200).await.unwrap().keys.len(),
+        26
+    );
+    assert_eq!(
+        host.list(&b, 301, "ev.", None, 50).await.unwrap().keys,
+        ["ev.99"]
+    );
+    assert_eq!(
+        host.list(&other_comm, 302, "ev.", None, 50)
+            .await
+            .unwrap()
+            .keys,
+        ["ev.77"]
+    );
+
+    // a lapsed TTL key is not listed
+    host.set(&a, 400, "ev.ttl", b"x", 1).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    assert!(!host
+        .list(&a, 401, "ev.", None, 200)
+        .await
+        .unwrap()
+        .keys
+        .contains(&"ev.ttl".to_string()));
+}
+
+#[tokio::test]
+async fn v2_byte_budget_is_enforced_per_invocation_in_real_valkey() {
+    let (_container, url) = start().await;
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+    // 150 small ops in one invocation succeed (the old flat cap was 64)
+    for i in 0..150 {
+        host.set(&scope, 7, &format!("k{i}"), b"v", 0)
+            .await
+            .unwrap();
+    }
+    // a few 60 KiB values exhaust the 1 MiB budget
+    let big = vec![1u8; 60 * 1024];
+    let mut tripped = false;
+    for i in 0..30 {
+        if let Err(e) = host.set(&scope, 8, &format!("b{i}"), &big, 0).await {
+            assert_eq!(e.code(), "rate_limited");
+            tripped = true;
+            break;
+        }
+    }
+    assert!(tripped, "byte budget must trip before 30 x 60 KiB");
+    // a new invocation has a fresh budget
+    host.set(&scope, 9, "b-new", &big, 0).await.unwrap();
+}

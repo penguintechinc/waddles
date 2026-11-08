@@ -35,7 +35,15 @@ pub const MAX_KEYS_PER_APP: u64 = 10_000;
 /// identically whether the capability set is constructed fresh per invoke
 /// (`core/svc_process`) or shared across a connection's many invokes
 /// (`core/svc_action`).
-pub const MAX_OPS_PER_INVOKE: u32 = 64;
+pub const MAX_OPS_PER_INVOKE: u32 = 256;
+
+/// Per-invocation byte budget: total key + value bytes moved (read or written)
+/// by one invocation across all `kv` ops. The real brake now: many small ops
+/// are cheap, a few huge ones are not.
+pub const MAX_BYTES_PER_INVOKE: u64 = 1024 * 1024;
+
+/// Most keys one `list` call returns.
+pub const MAX_LIST_LIMIT: u32 = 200;
 
 /// How long a per-invocation op-rate-limit key lives before Valkey expires
 /// it on its own (`crate::backend::check_and_increment_rate`). Generous
