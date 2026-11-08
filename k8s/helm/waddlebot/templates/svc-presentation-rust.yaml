@@ -1,9 +1,7 @@
 # chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (core/svc_presentation,
-# Dockerfile.rust: overlay surfaces + image upload/render) Deployment + Service. Renders
-# INSTEAD of templates/svc-presentation.yaml (Python) when presentation.rust.enabled is
-# true -- the two are mutually exclusive and share the same Deployment/Service names, so
-# enabling this is an in-place swap (Service + NodePort unchanged). Full Python decommission
-# is a later step.
+# Dockerfile.rust: overlay surfaces + image upload/render) Deployment + Service. The legacy
+# Python templates/svc-presentation.yaml was removed; this is the only presentation workload
+# (renders unless presentation.rust.enabled is explicitly set false).
 #
 # Config surface (core/svc_presentation/src/config.rs):
 #   - DB_HOST/PORT/NAME : non-secret from the shared ConfigMap (envFrom); DB_USER/DB_PASSWORD :
