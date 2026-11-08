@@ -188,7 +188,8 @@ def build_pc_metadata() -> MetaData:
         CheckConstraint("status IN ('active', 'revoked', 'expired')"),
         CheckConstraint(
             "resource_type IN ('discord_guild', 'twitch_channel', 'fake_room', "
-            "'external_http', 'aws_lambda', 'gcp_function', 'youtube_channel', 'spectrum_community')"
+            "'external_http', 'aws_lambda', 'gcp_function', 'youtube_channel', 'spectrum_community', "
+            "'kick_channel')"
         ),
         CheckConstraint("connection_kind BETWEEN 1 AND 4"),
         CheckConstraint(

@@ -229,6 +229,7 @@ class ProviderConnectionService:
                 # Same answer for "no such community" and "someone else's": no existence oracle,
                 # and no provider call is spent on a community the caller cannot touch.
                 raise ConnectionNotFound("community not found")
+            await self._assert_under_community_cap(spec, community_id)
 
             account = await adapter.validate_credentials(credentials)
             resource = await adapter.resolve_resource(credentials, account, clean_metadata)
@@ -281,6 +282,24 @@ class ProviderConnectionService:
                 enabled,
             )
             return self._view(binding)
+
+    async def _assert_under_community_cap(self, spec: AdapterSpec, community_id: int) -> None:
+        """Refuse (409) a connection beyond the provider's per-community cap, before any call.
+
+        The count is advisory under concurrency; the database trigger is the authority, and its
+        violation surfaces as the same :class:`ConnectionConflict` from the store.
+        """
+        cap = spec.max_connections_per_community
+        if cap is None:
+            return
+        held = await store.count_community_connections(
+            self._db, community_id=community_id, platform=spec.platform
+        )
+        if held >= cap:
+            raise ConnectionConflict(
+                f"this community already has the maximum number of {spec.display_name} "
+                f"connections ({cap})"
+            )
 
     async def create_static(
         self,
