@@ -104,9 +104,9 @@ impl StageModel {
             }),
         };
         match (capability, op) {
-            // Optional sub-feature flags (fishing tournaments) are modelled OFF; the app flag below is the one under test.
+            // Optional sub-feature flags (fishing tournaments/overlay) are modelled OFF; the app flag below is the one under test.
             (CapabilityKind::Flags, "enabled")
-                if args["key"].as_str().is_some_and(|k| k.ends_with("-tournaments")) =>
+                if args["key"].as_str().is_some_and(|k| k.ends_with("-tournaments") || k.ends_with("-overlay")) =>
             {
                 assert_eq!(args["default_value"], false, "sub-feature flags must default OFF");
                 ok(serde_json::json!({ "enabled": false }))

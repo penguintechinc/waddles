@@ -225,8 +225,9 @@ public sealed class World
     public Exception? ActorFailure { get; set; }
     public int Seq { get; private set; }
 
-    public World(bool tournaments = false)
+    public World(bool tournaments = false, bool overlay = false)
     {
+        Flags.Overrides[FishingLogic.OverlayFlagKey] = overlay;
         Flags.Overrides[FishingLogic.FlagKey] = true;
         Flags.Overrides[FishingLogic.TournamentFlagKey] = tournaments;
     }

@@ -31,7 +31,7 @@ namespace WaddleBundleSuperpenguinFishing;
 /// record, or (record present, mark absent after a crash) re-applies with the recorded seed. Tournament aggregates, boards and
 /// leaderboards are idempotent upserts. A per-player lock serializes mutations because kv has no compare-and-swap.</para>
 ///
-/// <para><b>Flags.</b> The game is behind <see cref="FlagKey"/> and tournaments (including their minted rewards) additionally behind
+/// <para><b>Flags.</b> The overlay alert is opt-in (<see cref="OverlayFlagKey"/>, default OFF; a refused push is reported in the reply). The game is behind <see cref="FlagKey"/> and tournaments (including their minted rewards) additionally behind
 /// <see cref="TournamentFlagKey"/>; both default OFF and are checked after the command match.</para>
 /// </summary>
 public sealed class FishingLogic : WaddleProcessStageNext
@@ -39,6 +39,7 @@ public sealed class FishingLogic : WaddleProcessStageNext
     internal const string CommandPrefix = "!";
     internal const string FlagKey = "waddles.command-superpenguin-fishing";
     internal const string TournamentFlagKey = "waddles.superpenguin-fishing-tournaments";
+    internal const string OverlayFlagKey = "waddles.superpenguin-fishing-overlay";
     internal const uint CastCooldownSeconds = 20;
     internal const uint OutcomeTtlSeconds = 3600;
     internal const int MaxCasts = 10;
@@ -245,12 +246,15 @@ public sealed class FishingLogic : WaddleProcessStageNext
             .With("replay", replay)
             .Build());
 
-        if (freshlyApplied)
+        // Opt-in (default OFF). When enabled but the host cannot take the push, the refusal is shown in the reply: never silent.
+        string? overlayNote = null;
+        if (freshlyApplied && host.Flags.Enabled(OverlayFlagKey, false))
         {
-            PushOverlay(host, fs, actor, outcome.Results);
+            overlayNote = PushOverlay(host, fs, actor, outcome.Results);
         }
 
-        return tournamentNote is null ? outcome.Text : outcome.Text + " " + tournamentNote;
+        var reply = tournamentNote is null ? outcome.Text : outcome.Text + " " + tournamentNote;
+        return overlayNote is null ? reply : reply + " " + overlayNote;
     }
 
     private string Compose(string actor, IReadOnlyList<CastResult> results, PlayerState state)
@@ -720,7 +724,7 @@ public sealed class FishingLogic : WaddleProcessStageNext
 
     // ------------------------------------------------------------------ overlay
 
-    private void PushOverlay(IWaddleHostNext host, KvFishingStore fs, string actor, CastResult[] results)
+    private string? PushOverlay(IWaddleHostNext host, KvFishingStore fs, string actor, CastResult[] results)
     {
         // Headline: the first accident, else the most valuable catch. Cosmetic only: a dead overlay never fails the cast.
         var headline = results.FirstOrDefault(r => r.Kind != CastKind.Caught) ?? results.OrderByDescending(r => r.Gold).First();
@@ -750,10 +754,13 @@ public sealed class FishingLogic : WaddleProcessStageNext
             }
 
             host.Overlay.Push(WidgetId, OverlaySurface.AlertBox, JsonSerializer.Serialize(alert, FishingJsonContext.Default.OverlayAlert));
+            return null;
         }
         catch (WaddleTransportException ex)
         {
-            host.Log.Warn("fishing.overlay_failed", new LogFields().With("code", ex.Error.Code).Build());
+            // The cast is already committed and must not be retried (that would only replay it); tell the player and the operator.
+            host.Log.Error("fishing.overlay_failed", new LogFields().With("code", ex.Error.Code).Build());
+            return $"[overlay unavailable ({ex.Error.Code}): the overlay is enabled but the host refused the alert; ask an admin to turn off {OverlayFlagKey} or fix overlay.media]";
         }
     }
 

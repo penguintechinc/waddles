@@ -80,16 +80,19 @@ Deviations (all deliberate):
   process-stage/action-stage/streaming-lifecycle verified. Real-executor run (`SUPERPENGUIN_ONLY=fishing`, flag-off + `!fish 3` +
   replay) passed in 186 s wall on a *debug* wasmtime build, almost all of it one-time component compile/instantiate - the
   per-replica cold start is the risk against the 2 s per-invocation budget (see `docs/sdk-cs.md`); warm invocations are a handful
-  of kv ops. The host `overlay` import is `not_implemented` in `core/bundle_executor` today, so the alert push is logged and skipped.
+  of kv ops. The host `overlay` import is `not_implemented` in `core/bundle_executor` today, hence the overlay flag stays OFF.
 
-## Overlay
+## Overlay (opt-in, default OFF)
 
-On every fresh cast the bundle registers (once a day) and pushes one declarative `alert_box` widget
-`waddles.integrations.superpenguin.fishing.catch` through the `overlay` import (permission `overlay.media`): title = fish or
-accident, body = stars/weight/gold, `alert.user` = tokenized user uuid (never a name), `alert.amount` = gold. Add it in the
-overlay designer palette ("Fishing catch") or use the community's `alert_box` browser-source URL
-(`/overlay/<community>/alert_box`) in OBS. A dead or not-yet-implemented overlay never fails a cast (warn log
-`fishing.overlay_failed`).
+Flag `waddles.superpenguin-fishing-overlay` (default OFF) turns the alert on. When on, every fresh cast registers (once a day) and
+pushes one declarative `alert_box` widget `waddles.integrations.superpenguin.fishing.catch` through the `overlay` import (permission
+`overlay.media`): title = fish or accident, body = stars/weight/gold, `alert.user` = tokenized user uuid (never a name),
+`alert.amount` = gold. Use the "Fishing catch" palette widget or the community's `alert_box` browser-source URL
+(`/overlay/<community>/alert_box`) in OBS.
+
+**Fail loud:** if the flag is on and the host refuses the push (today `core/bundle_executor` answers `not_implemented`), the cast
+stays committed (retrying would only replay it) but the reply carries `[overlay unavailable (<code>): ...]` and an error log
+`fishing.overlay_failed` is written. Leave the flag off until the host overlay import is wired.
 
 **Upstream overlay assets.** Reviewed `wwwroot` at the pinned revision: the fishing overlay is `fishing.html`, `js/fishing.js`,
 `js/fishingSignalR.js`, `fishing-tournaments.html`, `js/fishing-tournaments-overlay.js` (all MIT, repository license). They are

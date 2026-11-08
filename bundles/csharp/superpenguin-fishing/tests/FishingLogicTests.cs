@@ -834,7 +834,7 @@ public class FishingLogicTests
     [Fact]
     public void a_fresh_cast_pushes_one_tokenized_alert_and_registers_the_widget_once()
     {
-        var w = new World();
+        var w = new World(overlay: true);
         var logic = Logic(Cat.Of());
         w.Say(logic, World.Alice, "!fish");
         Cool(w, World.Alice);
@@ -858,7 +858,7 @@ public class FishingLogicTests
     [Fact]
     public void the_overlay_headlines_an_accident_and_the_best_catch_of_a_multi_cast()
     {
-        var w = new World();
+        var w = new World(overlay: true);
         var rod = Cat.Gear("rod", EquipmentSlot.Rod);
         w.SetPlayer(World.Alice, new PlayerState { Items = [new OwnedItem { Id = 1, ShopId = "rod", Equipped = true }] });
         w.Say(Logic(Cat.Of(Cat.Calm(rod: 1), [rod])), World.Alice, "!fish");
@@ -867,13 +867,13 @@ public class FishingLogicTests
         Assert.Equal("RodSnapped", doc.RootElement.GetProperty("title").GetString());
         Assert.Contains("lost rod", doc.RootElement.GetProperty("body").GetString());
 
-        var w2 = new World();
+        var w2 = new World(overlay: true);
         w2.SetPlayer(World.Alice, new PlayerState());
         w2.Say(Logic(Cat.Of(Cat.Calm(line: 1))), World.Alice, "!fish");
         using var empty = JsonDocument.Parse(w2.Overlay.Pushes[0].Payload);
         Assert.Equal("nothing equipped was lost", empty.RootElement.GetProperty("body").GetString());
 
-        var w3 = new World();
+        var w3 = new World(overlay: true);
         w3.Say(Logic(), World.Alice, "!fish 6");
         Assert.Single(w3.Overlay.Pushes);
     }
@@ -881,7 +881,7 @@ public class FishingLogicTests
     [Fact]
     public void a_replayed_cast_does_not_push_the_overlay_again()
     {
-        var w = new World();
+        var w = new World(overlay: true);
         var logic = Logic();
         w.Send(logic, World.Alice, "!fish", "evt-1");
         w.Send(logic, World.Alice, "!fish", "evt-1");
@@ -889,16 +889,30 @@ public class FishingLogicTests
     }
 
     [Fact]
-    public void a_dead_overlay_never_fails_the_cast_and_is_logged()
+    public void the_overlay_is_opt_in_and_silent_when_off()
     {
         var w = new World();
+        var text = w.Say(Logic(Cat.Of()), World.Alice, "!fish")!;
+        Assert.DoesNotContain("overlay", text);
+        Assert.Empty(w.Overlay.Pushes);
+        Assert.Empty(w.Overlay.Registered);
+        Assert.Contains(w.Flags.Calls, c => c.Key == FishingLogic.OverlayFlagKey && c.DefaultValue == false);
+    }
+
+    [Fact]
+    public void an_enabled_overlay_that_the_host_refuses_is_reported_in_the_reply_and_logged_as_an_error_but_the_cast_stands()
+    {
+        var w = new World(overlay: true);
         w.Overlay.Failure = new WaddleTransportException(TransportErrorInfo.RetryableError("denied", "no overlay.media grant"));
 
         var text = w.Say(Logic(Cat.Of()), World.Alice, "!fish");
 
         Assert.Contains("lb)", text);
+        Assert.Contains("[overlay unavailable (denied)", text);
+        Assert.Contains(FishingLogic.OverlayFlagKey, text);
         Assert.Equal(1, w.Player(World.Alice).Casts);
-        Assert.Contains(w.Log.Writes, l => l.Message == "fishing.overlay_failed" && l.FieldsJson.Contains("denied"));
+        Assert.Contains(w.Log.Writes, l => l.Level == WaddleSdk.Log.WaddleLogLevel.Error && l.Message == "fishing.overlay_failed" && l.FieldsJson.Contains("denied"));
+
     }
 
     // ------------------------------------------------------------------ limits, hygiene
