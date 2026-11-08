@@ -108,15 +108,13 @@ class TestSingletons:
         assert result.returncode != 0, "replicas=2 must fail the render (in-process fan-out)"
         assert "sharedFanout" in result.stderr + result.stdout
 
-    @pytest.mark.parametrize("rust", ["true", "false"])
-    def test_presentation_multi_replica_needs_shared_fanout(self, rust: str) -> None:
-        """Both the Rust and Python svc-presentation templates carry the guard."""
-        refused = _helm("values-alpha.yaml", ["pipeline.svcPresentation.replicas=2", f"presentation.rust.enabled={rust}"])
+    def test_presentation_multi_replica_needs_shared_fanout(self) -> None:
+        """The Rust svc-presentation template carries the guard."""
+        refused = _helm("values-alpha.yaml", ["pipeline.svcPresentation.replicas=2"])
         assert refused.returncode != 0
         ok = _helm(
             "values-alpha.yaml",
-            ["pipeline.svcPresentation.replicas=2", "pipeline.svcPresentation.sharedFanout.enabled=true",
-             f"presentation.rust.enabled={rust}"],
+            ["pipeline.svcPresentation.replicas=2", "pipeline.svcPresentation.sharedFanout.enabled=true"],
         )
         assert ok.returncode == 0, ok.stderr
 

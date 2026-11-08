@@ -437,6 +437,29 @@ components:
       - displayName
       title: AuthProviderDTO
       type: object
+    AuthorDTO:
+      description: Author of a marketplace entry; `profileUrl`/`githubHandle` are
+        set for GitHub authors.
+      properties:
+        display:
+          title: Display
+          type: string
+        githubHandle:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Githubhandle
+        profileUrl:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Profileurl
+      required:
+      - display
+      - githubHandle
+      - profileUrl
+      title: AuthorDTO
+      type: object
     AvailabilityDTO:
       description: 'Response DTO: one `app_tenant_availability` row, joined to its
         `app_catalog` metadata.'
@@ -549,14 +572,18 @@ components:
           type: string
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         category:
           anyOf:
           - type: string
           - type: 'null'
           title: Category
+        collection:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Collection
         compatibleWith:
           items:
             type: string
@@ -642,6 +669,7 @@ components:
       - homepageUrl
       - notice
       - category
+      - collection
       title: BundleDTO
       type: object
     BundleVersionSummaryDTO:
@@ -725,9 +753,8 @@ components:
       properties:
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         avgRating:
           title: Avgrating
           type: string
@@ -992,6 +1019,21 @@ components:
       - message_type
       - created_at
       title: ChatMessage
+      type: object
+    CollectionEntryDTO:
+      description: One distinct bundle collection (publisher designation) + its bundle
+        count.
+      properties:
+        collection:
+          title: Collection
+          type: string
+        count:
+          title: Count
+          type: integer
+      required:
+      - collection
+      - count
+      title: CollectionEntryDTO
       type: object
     CommandDTO:
       description: Commands reference DTO -- snake_case verbatim, matching Node's
@@ -3150,9 +3192,8 @@ components:
       properties:
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         avgRating:
           title: Avgrating
           type: string
@@ -3241,9 +3282,8 @@ components:
       properties:
         author:
           anyOf:
-          - type: string
+          - $ref: '#/components/schemas/AuthorDTO'
           - type: 'null'
-          title: Author
         avgRating:
           title: Avgrating
           type: string
@@ -18825,6 +18865,12 @@ paths:
                   - type: 'null'
                   default: null
                   title: Category
+                collection:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Collection
                 compatibleWith:
                   items:
                     type: string
@@ -18913,6 +18959,34 @@ paths:
                 type: object
           description: Response DTO for message-only endpoints.
       summary: Install a bundle into the global catalog.
+  /api/v1/marketplace/bundles/collections:
+    get:
+      description: ''
+      operationId: get_list_bundle_collections
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /bundles/collections`.
+                properties:
+                  collections:
+                    items:
+                      $ref: '#/components/schemas/CollectionEntryDTO'
+                    title: Collections
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - collections
+                title: CollectionsResponse
+                type: object
+          description: Response DTO for `GET /bundles/collections`.
+      summary: List distinct bundle collections (e.g. `superpenguintv`) with counts
+        -- any tenant member.
   /api/v1/marketplace/bundles/{app_id}:
     delete:
       description: ''

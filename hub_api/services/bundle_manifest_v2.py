@@ -24,12 +24,15 @@ from urllib.parse import quote
 from flask_core.app_manifest import KNOWN_MODULES
 from flask_core.bundle_attribution import (
     MARKETPLACE_CATEGORIES,
+    collection_attribution_problem,
     is_https_url,
     is_known_spdx,
     license_requires_review,
     valid_alternative_to_entry,
+    valid_collection_slug,
     valid_notice,
 )
+from flask_core.bundle_author import AuthorError, canonical_author
 
 from services.bundle_access_grants import is_access_grant_id
 from services.bundle_permission_catalog import (
@@ -242,6 +245,9 @@ class BundleManifestV2:
     homepage_url: str | None = None
     notice: str | None = None
     category: str | None = None
+    # Publisher/collection designation (e.g. "superpenguintv") so ported bundles list apart
+    # from internal ones. Optional closed set; defaulted for hand-built fixtures.
+    collection: str | None = None
     # spec Sec2.1 -- the structured permission-catalog block, replacing the
     # dead `permissions: []` string-list parsing above. Defaulted so every
     # pre-existing direct `BundleManifestV2(...)` construction site (test
@@ -1054,12 +1060,12 @@ def parse_bundle_manifest_v2(
     # bundle, per house supply-chain policy: a vendor port must be
     # credited and its license terms known before it is ever onboarded).
     is_vendor_bundle = raw["provider"] == "thirdparty"
-    author = raw.get("author")
-    _require(
-        bool(author) or not is_vendor_bundle,
-        "vendor_author_required",
-        "author is required for provider: thirdparty (vendor) bundles",
-    )
+    # `author` is required for EVERY bundle (not just vendor ones) and is normalized to its
+    # canonical form (`github:<handle>` or a plain name); see flask_core.bundle_author.
+    try:
+        author = canonical_author(raw.get("author"))
+    except AuthorError as exc:
+        raise ManifestV2Error(exc.code, str(exc)) from exc
     license_id = raw.get("license")
     _require(
         bool(license_id) or not is_vendor_bundle,
@@ -1108,6 +1114,16 @@ def parse_bundle_manifest_v2(
             "invalid_category",
             f"{category!r} is not one of {sorted(MARKETPLACE_CATEGORIES)}",
         )
+
+    collection = raw.get("collection")
+    if collection is not None:
+        _require(
+            isinstance(collection, str) and valid_collection_slug(collection),
+            "invalid_collection",
+            f"{collection!r} is not a lowercase kebab-case slug",
+        )
+    problem = collection_attribution_problem(collection, license_id, raw.get("notice"))
+    _require(problem is None, "collection_attribution_required", problem or "")
 
     stages = raw["stages"]
     _require(bool(stages), "no_stages_declared", "stages must be non-empty")
@@ -1287,6 +1303,7 @@ def parse_bundle_manifest_v2(
         homepage_url=homepage_url,
         notice=notice,
         category=category,
+        collection=collection,
         supported_platforms=supported_platforms,
         command_declarations=command_declarations,
         kind=kind,

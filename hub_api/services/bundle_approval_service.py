@@ -101,6 +101,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from flask_core.bundle_attribution import license_requires_review
+from flask_core.bundle_author import canonical_author
 from penguin_dal import AsyncDB
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
@@ -229,7 +230,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         permission_declarations=permission_declarations,
         routes_to=tuple(raw.get("routes_to") or ()),
         consumes=consumes,
-        author=raw.get("author"),
+        author=canonical_author(raw["author"]) if raw.get("author") else None,
         license=raw.get("license"),
         license_requires_review=(
             license_requires_review(raw["license"]) if raw.get("license") else False
@@ -239,6 +240,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         homepage_url=raw.get("homepage_url"),
         notice=raw.get("notice"),
         category=raw.get("category"),
+        collection=raw.get("collection"),
         supported_platforms=supported_platforms,
         command_declarations=command_declarations,
         kind=raw.get("kind") or _infer_kind(raw["app_id"], raw["module"]),

@@ -67,12 +67,6 @@ pipeline:
     enabled: true
   coreBundleSeeder:
     enabled: true
-  svcIngest:
-    enabled: false   # legacy Python connector superseded by svcIngestRust above
-  svcProcess:
-    enabled: false
-  svcAction:
-    enabled: false
   # Not in the workflow's 6-image kind-load list -- correct keys are
   # pipeline.svcPresentation/svcStreaming/hubWebui, NOT the top-level
   # "presentation:"/"streaming:" this file previously set (those paths don't

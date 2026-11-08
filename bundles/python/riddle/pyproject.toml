@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-riddle"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!riddle` -> a random riddle from a static list; `!riddle answer <n>` reveals riddle n's answer. Stateless."
 requires-python = ">=3.13"
 dependencies = []

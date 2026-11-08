@@ -11,10 +11,11 @@
 schema_version: 2
 app_id: waddles.core.example.quote
 name: Quote Book Bundle (Python)
-version: 1.0.5
+version: 1.0.6
 feature: waddles.core.example
 module: core
 provider: builtin
+author: github:penguintechinc
 language: python
 artifact: prebuilt
 execution_model: native

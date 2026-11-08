@@ -172,28 +172,6 @@ def test_tls_on_disables_plaintext_listener_and_url():
     )
 
 
-def test_python_stage_clients_use_rediss():
-    docs = _docs("values-beta.yaml", ("infrastructure.redis.tls.enabled=true",))
-    seen = 0
-    for d in docs:
-        if d["kind"] == "Deployment" and d["metadata"]["name"].endswith(
-            ("-svc-ingest", "-svc-process", "-svc-action")
-        ):
-            keys = [
-                e["valueFrom"]["secretKeyRef"]["key"]
-                for c in d["spec"]["template"]["spec"]["containers"]
-                for e in c.get("env", [])
-                if e["name"] == "VALKEY_URL" and "valueFrom" in e
-            ]
-            assert keys == ["VALKEY_DURABLE_URL_TLS_AUTH"], d["metadata"]["name"]
-            assert any(
-                v["name"] == "valkey-ca"
-                for v in d["spec"]["template"]["spec"]["volumes"]
-            )
-            seen += 1
-    assert seen == 3, f"examined {seen} python stage clients"
-
-
 def _default_acl(cmd):
     line = [ln for ln in cmd.splitlines() if "--user default" in ln]
     assert len(line) == 1, "expected exactly one default-user ACL line"
