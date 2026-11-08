@@ -305,13 +305,19 @@ pub fn assert_status(response: &axum::response::Response, expected: StatusCode) 
     );
 }
 
+/// Deterministic WHEP boot nonce used by [`whep_with_auth`] so tests can mint tokens.
+pub const TEST_BOOT: u64 = 0x5EED5;
+
+/// The pipeline epoch of a never-revoked pipeline under [`TEST_BOOT`].
+pub const TEST_EPOCH0: u64 = TEST_BOOT << svc_streaming::egress::whep::EPOCH_COUNTER_BITS;
+
 /// Test signing secret shared by every WHEP viewer-token test (>= 32 bytes).
 pub const VIEWER_SECRET: &str = "0123456789abcdef0123456789abcdef";
 
 /// A signed WHEP viewer token for `community`/`pipeline` valid for `ttl` seconds
 /// (negative = already expired), with the given `scope`.
 pub fn viewer_token(community: &str, pipeline: Uuid, ttl: i64, scope: &str, sub: Uuid) -> String {
-    viewer_token_epoch(community, pipeline, ttl, scope, sub, 0)
+    viewer_token_epoch(community, pipeline, ttl, scope, sub, TEST_EPOCH0)
 }
 
 /// [`viewer_token`] for a specific pipeline token epoch.
@@ -375,5 +381,6 @@ pub fn whep_with_auth(
     max_viewers: usize,
 ) -> svc_streaming::egress::whep::WhepState {
     svc_streaming::egress::whep::WhepState::new(factory, metrics, max_viewers)
+        .with_boot_id(TEST_BOOT)
         .with_viewer_auth(svc_streaming::rooms::token::TokenKeys::new(VIEWER_SECRET).unwrap())
 }

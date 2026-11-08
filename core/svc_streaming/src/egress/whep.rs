@@ -74,7 +74,18 @@ struct WhepViewerSession {
     participant: String,
     /// Token expiry: the session may not outlive the credential that opened it.
     expires_at: i64,
+    /// Pipeline token epoch (incl. boot nonce) the session was admitted under.
+    epoch: u64,
     pc: Arc<dyn PeerConnection>,
+}
+
+/// Bits of the per-pipeline revocation counter inside an epoch; the boot nonce
+/// occupies the bits above.
+pub const EPOCH_COUNTER_BITS: u32 = 24;
+
+/// A fresh 40-bit boot nonce (so `boot << EPOCH_COUNTER_BITS` fits a u64).
+fn random_boot() -> u64 {
+    (Uuid::new_v4().as_u128() >> 88) as u64
 }
 
 /// Shared state for every WHEP viewer session in the process.
@@ -96,6 +107,9 @@ pub struct WhepState {
     /// token (and its sessions) dies at once. Never reset, so a re-registered
     /// pipeline cannot resurrect an old token.
     epochs: RwLock<HashMap<PipelineId, u64>>,
+    /// Random per-process nonce folded into every epoch: epochs are in-memory, so a
+    /// restart must not let a pre-restart (revoked) token match a fresh counter.
+    boot: u64,
     sessions: RwLock<HashMap<Uuid, WhepViewerSession>>,
 }
 
@@ -113,6 +127,7 @@ impl WhepState {
             owners: RwLock::new(HashMap::new()),
             viewer_keys: None,
             epochs: RwLock::new(HashMap::new()),
+            boot: random_boot(),
             sessions: RwLock::new(HashMap::new()),
         }
     }
@@ -140,14 +155,23 @@ impl WhepState {
         self
     }
 
-    /// Current token epoch of a pipeline (0 until first revoked/unregistered).
+    /// Current token epoch of a pipeline: boot nonce | revocation counter. A token
+    /// minted by another process incarnation never matches.
     pub async fn epoch_of(&self, pipeline_id: PipelineId) -> u64 {
-        self.epochs
+        let counter = self
+            .epochs
             .read()
             .await
             .get(&pipeline_id)
             .copied()
-            .unwrap_or(0)
+            .unwrap_or(0);
+        (self.boot << EPOCH_COUNTER_BITS) | counter
+    }
+
+    /// Test/operator override of the boot nonce (truncated to 40 bits).
+    pub fn with_boot_id(mut self, boot: u64) -> Self {
+        self.boot = boot & ((1u64 << 40) - 1);
+        self
     }
 
     /// Invalidates every viewer token of `pipeline_id` (epoch bump) and closes
@@ -156,8 +180,8 @@ impl WhepState {
         let epoch = {
             let mut e = self.epochs.write().await;
             let v = e.entry(pipeline_id).or_insert(0);
-            *v += 1;
-            *v
+            *v = (*v + 1).min((1u64 << EPOCH_COUNTER_BITS) - 1);
+            (self.boot << EPOCH_COUNTER_BITS) | *v
         };
         let dead: Vec<Arc<dyn PeerConnection>> = {
             let mut sessions = self.sessions.write().await;
@@ -183,11 +207,24 @@ impl WhepState {
     /// Closes sessions whose token has expired as of `at` (unix seconds); returns
     /// how many. A session never outlives the credential that opened it.
     pub async fn sweep_at(&self, at: i64) -> usize {
+        // Snapshot current epochs first (never hold two locks across an await).
+        let current: HashMap<PipelineId, u64> = {
+            let e = self.epochs.read().await;
+            e.iter()
+                .map(|(k, v)| (*k, (self.boot << EPOCH_COUNTER_BITS) | *v))
+                .collect()
+        };
         let dead: Vec<Arc<dyn PeerConnection>> = {
             let mut sessions = self.sessions.write().await;
             let ids: Vec<Uuid> = sessions
                 .iter()
-                .filter(|(_, s)| s.expires_at <= at)
+                .filter(|(_, s)| {
+                    let want = current
+                        .get(&s.pipeline_id)
+                        .copied()
+                        .unwrap_or(self.boot << EPOCH_COUNTER_BITS);
+                    s.expires_at <= at || s.epoch != want
+                })
                 .map(|(k, _)| *k)
                 .collect();
             ids.iter()
@@ -228,6 +265,37 @@ impl WhepState {
     /// The community that owns `pipeline_id`'s registered source, if any.
     pub async fn owner_of(&self, pipeline_id: PipelineId) -> Option<String> {
         self.owners.read().await.get(&pipeline_id).cloned()
+    }
+
+    /// Atomically admits a negotiated session: under the sessions write lock,
+    /// refuses (`Err`) if the pipeline is no longer registered or its epoch moved
+    /// since the token was verified; otherwise replaces any same-participant
+    /// session and returns the displaced peers for the caller to close.
+    /// `revoke_viewers` bumps the epoch BEFORE removing sessions, so either this
+    /// check sees the bump or the removal sees this insert -- never neither.
+    async fn commit_session(
+        &self,
+        session_id: Uuid,
+        session: WhepViewerSession,
+    ) -> Result<Vec<Arc<dyn PeerConnection>>, ()> {
+        let mut sessions = self.sessions.write().await;
+        let registered = self.fanouts.read().await.contains_key(&session.pipeline_id);
+        if !registered || session.epoch != self.epoch_of(session.pipeline_id).await {
+            return Err(());
+        }
+        let old: Vec<Uuid> = sessions
+            .iter()
+            .filter(|(_, s)| {
+                s.pipeline_id == session.pipeline_id && s.participant == session.participant
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        let stale = old
+            .iter()
+            .filter_map(|k| sessions.remove(k).map(|s| s.pc))
+            .collect();
+        sessions.insert(session_id, session);
+        Ok(stale)
     }
 
     /// Verifies a viewer bearer token for `pipeline_id`/`community_id` (path values).
@@ -553,29 +621,29 @@ async fn create_session(
     };
 
     let session_id = Uuid::new_v4();
-    // One active session per (pipeline, participant): a new one replaces and closes
-    // the old, so a single token can never accumulate sessions.
-    let stale: Vec<Arc<dyn PeerConnection>> = {
-        let mut sessions = state.sessions.write().await;
-        let old: Vec<Uuid> = sessions
-            .iter()
-            .filter(|(_, s)| s.pipeline_id == pipeline_id && s.participant == claims.sub)
-            .map(|(k, _)| *k)
-            .collect();
-        let stale = old
-            .iter()
-            .filter_map(|k| sessions.remove(k).map(|s| s.pc))
-            .collect();
-        sessions.insert(
+    // Re-check admission under the sessions write lock: SDP negotiation and ICE
+    // gathering took time, during which the stream may have been revoked or
+    // unregistered. A stale-epoch session is refused and its peer closed.
+    let admitted = state
+        .commit_session(
             session_id,
             WhepViewerSession {
                 pipeline_id,
                 participant: claims.sub.clone(),
                 expires_at: claims.exp,
-                pc,
+                epoch: claims.epoch,
+                pc: Arc::clone(&pc),
             },
-        );
-        stale
+        )
+        .await;
+    let stale = match admitted {
+        Ok(stale) => stale,
+        Err(()) => {
+            let _ = pc.close().await;
+            return Err(ApiError::Unauthorized(
+                "viewer token was revoked while connecting".into(),
+            ));
+        }
     };
     for old in stale {
         state
@@ -737,5 +805,113 @@ mod tests {
 
         state.unregister_fanout(pipeline_id).await;
         assert!(state.fanouts.read().await.get(&pipeline_id).is_none());
+    }
+
+    struct NoopHandler;
+    #[async_trait]
+    impl PeerConnectionEventHandler for NoopHandler {}
+
+    async fn test_state() -> (Arc<WhepState>, Arc<PeerConnectionFactory>) {
+        let metrics = RtcMetrics::register(&prometheus::Registry::new()).unwrap();
+        let factory = Arc::new(
+            PeerConnectionFactory::new(crate::rtc::config::RtcConfig {
+                bind_ip: "127.0.0.1".parse().unwrap(),
+                udp_port_range: (41440, 41460),
+                nat_1to1_ip: None,
+            })
+            .unwrap(),
+        );
+        (
+            Arc::new(WhepState::new(factory.clone(), metrics, 10)),
+            factory,
+        )
+    }
+
+    async fn session(
+        factory: &PeerConnectionFactory,
+        pipeline_id: PipelineId,
+        epoch: u64,
+    ) -> WhepViewerSession {
+        WhepViewerSession {
+            pipeline_id,
+            participant: "p".into(),
+            expires_at: i64::MAX,
+            epoch,
+            pc: factory.build(Arc::new(NoopHandler)).await.unwrap(),
+        }
+    }
+
+    /// Regression: a session negotiated under epoch N must not be admitted once the
+    /// stream was revoked (epoch moved) or unregistered while it was connecting.
+    #[tokio::test]
+    async fn commit_refuses_a_session_whose_epoch_moved_or_stream_vanished() {
+        let (state, factory) = test_state().await;
+        let pid = Uuid::new_v4();
+        // Not registered: refused.
+        let e = state.epoch_of(pid).await;
+        assert!(state
+            .commit_session(Uuid::new_v4(), session(&factory, pid, e).await)
+            .await
+            .is_err());
+        state.register_fanout(pid, "7", MediaFanouts::new()).await;
+        let e0 = state.epoch_of(pid).await;
+        // Current epoch: admitted.
+        assert!(state
+            .commit_session(Uuid::new_v4(), session(&factory, pid, e0).await)
+            .await
+            .is_ok());
+        // Revoked while "connecting": the old-epoch session is refused, not inserted.
+        state.revoke_viewers(pid).await;
+        assert!(state
+            .commit_session(Uuid::new_v4(), session(&factory, pid, e0).await)
+            .await
+            .is_err());
+        assert_eq!(state.viewer_count(pid).await, 0);
+        // Unregistered while connecting: refused even at the current epoch.
+        let e1 = state.epoch_of(pid).await;
+        state.unregister_fanout(pid).await;
+        let e2 = state.epoch_of(pid).await;
+        assert!(e2 > e1);
+        assert!(state
+            .commit_session(Uuid::new_v4(), session(&factory, pid, e2).await)
+            .await
+            .is_err());
+    }
+
+    /// Regression: the sweeper closes any session whose epoch is stale (a missed
+    /// revoke must not leave it alive).
+    #[tokio::test]
+    async fn sweep_closes_sessions_with_a_stale_epoch() {
+        let (state, factory) = test_state().await;
+        let pid = Uuid::new_v4();
+        state.register_fanout(pid, "7", MediaFanouts::new()).await;
+        let e = state.epoch_of(pid).await;
+        state
+            .commit_session(Uuid::new_v4(), session(&factory, pid, e).await)
+            .await
+            .unwrap();
+        assert_eq!(state.sweep().await, 0);
+        // Simulate a revoke that bumped the epoch but failed to close sessions.
+        state.epochs.write().await.insert(pid, 5);
+        assert_eq!(state.sweep().await, 1);
+        assert_eq!(state.viewer_count(pid).await, 0);
+    }
+
+    /// Regression: epochs are in-memory, so a restart (new boot nonce) must not
+    /// revive a token minted before it, even for a never-revoked pipeline.
+    #[tokio::test]
+    async fn a_new_process_boot_never_accepts_an_old_boots_epoch() {
+        let (a, _) = test_state().await;
+        let (b, _) = test_state().await;
+        let b = Arc::new(Arc::try_unwrap(b).ok().unwrap().with_boot_id(0xABCDE));
+        let a = Arc::new(Arc::try_unwrap(a).ok().unwrap().with_boot_id(0x12345));
+        let pid = Uuid::new_v4();
+        assert_ne!(a.epoch_of(pid).await, b.epoch_of(pid).await);
+        // Even after the new boot's counter reaches the old counter value.
+        assert_ne!(
+            a.revoke_viewers(pid).await,
+            b.revoke_viewers(pid).await,
+            "same counter, different boot"
+        );
     }
 }

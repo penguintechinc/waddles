@@ -81,7 +81,11 @@ async fn whep_session_never_outlives_its_token_or_epoch() {
 
     // Revocation: bumping the epoch kills live sessions AND old tokens.
     let epoch = whep.revoke_viewers(pipeline).await;
-    assert_eq!(epoch, 1);
+    assert_eq!(
+        epoch,
+        TEST_EPOCH0 + 1,
+        "counter bumped under the same boot nonce"
+    );
     assert_eq!(
         whep.viewer_count(pipeline).await,
         0,
@@ -282,4 +286,38 @@ async fn community_subscriber_cap_is_enforced_below_the_global_cap() {
     // The first participant may still replace its own session at the cap.
     let (st, _pa2) = sub(a["token"].as_str().unwrap().to_string()).await;
     assert_eq!(st, StatusCode::CREATED);
+}
+
+/// Epochs are in-memory: after a restart (fresh boot nonce) a token minted before
+/// it must be refused even though the pipeline was never revoked.
+#[tokio::test]
+async fn whep_tokens_from_a_previous_boot_are_refused_after_restart() {
+    let keys = TokenKeys::new(VIEWER_SECRET).unwrap();
+    let viewers = PeerConnectionFactory::new(loopback_rtc_config((42400, 42419))).unwrap();
+    let pipeline = Uuid::new_v4();
+    let old_token = viewer_token("7", pipeline, 120, "pipeline", Uuid::new_v4());
+
+    // "Before restart": the token works.
+    let before = Arc::new(whep_with_auth(factory((42420, 42429)), metrics(), 5));
+    before
+        .register_fanout(pipeline, "7", MediaFanouts::new())
+        .await;
+    let path = format!("/whep/7/{pipeline}");
+    let (st, _, _p) = whep_join(&whep::router(before), &viewers, &path, &old_token).await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    // "After restart": same keys, same pipeline, new process => random boot nonce.
+    let after = Arc::new(
+        svc_streaming::egress::whep::WhepState::new(factory((42430, 42439)), metrics(), 5)
+            .with_viewer_auth(keys),
+    );
+    after
+        .register_fanout(pipeline, "7", MediaFanouts::new())
+        .await;
+    let (st, _, _p) = whep_join(&whep::router(after), &viewers, &path, &old_token).await;
+    assert_eq!(
+        st,
+        StatusCode::UNAUTHORIZED,
+        "pre-restart token must not revive"
+    );
 }
