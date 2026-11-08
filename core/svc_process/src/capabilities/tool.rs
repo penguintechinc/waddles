@@ -147,6 +147,8 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             economy: self.economy.clone(),
             platform_table: self.platform_table.clone(),
             object_storage: self.object_storage.clone(),
+            gameserver_net: self.gameserver_net.clone(),
+            gs_sessions: Arc::new(super::gameserver_net::SessionTable::default()),
             identity: self.identity.clone(),
             ai: self.ai.clone(),
             media: self.media.clone(),

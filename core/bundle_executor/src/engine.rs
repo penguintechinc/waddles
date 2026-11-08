@@ -165,6 +165,10 @@ pub mod stage_tools_world {
 fn link_stage_tools_imports(linker: &mut Linker<ExecState>) -> Result<(), ExecutorError> {
     use stage_tools_world::waddle::bundle::tool;
     tool::add_to_linker::<_, HasExecState>(linker, |s| s)?;
+    stage_tools_world::waddle::bundle::gameserver_net::add_to_linker::<_, HasExecState>(
+        linker,
+        |s| s,
+    )?;
     Ok(())
 }
 

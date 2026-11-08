@@ -345,6 +345,11 @@ pub enum PermissionFamily {
     StorageList,
     StorageWrite,
     StorageDelete,
+    /// `gameserver.net` -- host-mediated TCP/UDP to admin-registered game-server
+    /// connections (RCON, query). `Dangerous`, global-admin approved, first-party
+    /// core only. The guest names a connection by UUID; address and RCON password
+    /// stay host-side.
+    GameserverNet,
 }
 
 /// One row of the catalog table (spec SS1).
@@ -408,6 +413,7 @@ impl PermissionFamily {
         Self::StorageList,
         Self::StorageWrite,
         Self::StorageDelete,
+        Self::GameserverNet,
     ];
 
     /// The static catalog id prefix -- for a parameterized family
@@ -462,6 +468,7 @@ impl PermissionFamily {
             Self::StorageList => "storage.list",
             Self::StorageWrite => "storage.write",
             Self::StorageDelete => "storage.delete",
+            Self::GameserverNet => "gameserver.net",
         }
     }
 
@@ -924,6 +931,20 @@ impl PermissionFamily {
                     notes: "cross-prefix object-storage access (2026-11-06 spec); owner app_id encoded in the id; never auto-granted; host additionally tag-filters every op",
                 }
             }
+            Self::GameserverNet => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Db,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(1),
+                },
+                notes: "host-mediated game-server network access (rcon/tcp/udp-exchange); \
+                        connection id resolved host-side to an admin-registered, \
+                        tenant+community-scoped connection; SSRF-guarded on the resolved IP; \
+                        RCON password never enters the guest; never auto-granted, first-party \
+                        core only",
+            },
             Self::ToolCall => CatalogEntry {
                 family: *self,
                 risk: Risk::Dangerous,
@@ -1095,6 +1116,8 @@ pub enum PermissionId {
         op: StorageOp,
         owner: String,
     },
+    /// `gameserver.net` (unparameterized).
+    GameserverNet,
 }
 
 /// Platforms compiled into this build's relay/moderation providers (spec
@@ -1147,6 +1170,7 @@ impl PermissionId {
             Self::OverlayMedia => PermissionFamily::OverlayMedia,
             Self::AiGenerate => PermissionFamily::AiGenerate,
             Self::MediaGenerate => PermissionFamily::MediaGenerate,
+            Self::GameserverNet => PermissionFamily::GameserverNet,
             Self::UsersProfileRead => PermissionFamily::UsersProfileRead,
             Self::TelemetryLogs => PermissionFamily::TelemetryLogs,
             Self::TelemetryMetrics => PermissionFamily::TelemetryMetrics,
@@ -1466,6 +1490,7 @@ impl PermissionId {
             "overlay.media" => Ok(Self::OverlayMedia),
             "ai.generate" => Ok(Self::AiGenerate),
             "media.generate" => Ok(Self::MediaGenerate),
+            "gameserver.net" => Ok(Self::GameserverNet),
             "users.profile.read" => Ok(Self::UsersProfileRead),
             "telemetry.logs" => Ok(Self::TelemetryLogs),
             "telemetry.metrics" => Ok(Self::TelemetryMetrics),

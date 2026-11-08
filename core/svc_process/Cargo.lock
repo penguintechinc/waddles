@@ -674,6 +674,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-gameserver-net"
+version = "0.1.0"
+dependencies = [
+ "bundle-host-http",
+ "connection_resolver",
+ "opentelemetry",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "bundle-host-http"
 version = "0.1.0"
 dependencies = [
@@ -931,6 +945,20 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "connection_resolver"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -4230,6 +4258,7 @@ dependencies = [
  "bundle-capability-gate",
  "bundle-host-db",
  "bundle-host-economy",
+ "bundle-host-gameserver-net",
  "bundle-host-http",
  "bundle-host-kv",
  "bundle-host-media",
@@ -4240,6 +4269,7 @@ dependencies = [
  "chrono",
  "circuit-breaker",
  "clap",
+ "connection_resolver",
  "futures-util",
  "governor",
  "hkdf 0.12.4",

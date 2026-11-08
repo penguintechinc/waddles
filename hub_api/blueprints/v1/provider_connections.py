@@ -91,6 +91,11 @@ SCOPE_CONNECTIONS_RESOLVE = "connections:resolve"
 SCOPE_CONNECTIONS_RESOLVE_STATIC = "connections:resolve:static"
 #: Machine-JWT scope for enumerating what to run (unbound, never returns a secret).
 SCOPE_CONNECTIONS_LIST = "connections:list"
+#: Least-privilege variants for the `gameserver-net` host capability: honoured ONLY for provider
+#: `gameserver` (resolve: any other provider is a 404; list: any other provider is a 403).
+SCOPE_CONNECTIONS_RESOLVE_GAMESERVER = "connections:resolve:gameserver"
+SCOPE_CONNECTIONS_LIST_GAMESERVER = "connections:list:gameserver"
+_GAMESERVER_PROVIDER = "gameserver"
 #: Two-gate feature (PostHog flag default OFF AND Professional tier) -- see
 #: ``libs/core_platform_module/features.py`` ``integrations.provider_connections``.
 FEATURE_PROVIDER_CONNECTIONS = "waddles.integrations.provider_connections"
@@ -778,7 +783,11 @@ async def delete_provider_connection(community_id: int, connection_id: int) -> D
 #: Requires a valid machine JWT with ``connections:resolve`` from the operator-plane tenant; the
 #: fail-closed ladder lives in :func:`services.machine_auth.machine_authenticated`.
 _resolve_authenticated = machine_authenticated(
-    (SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC),
+    (
+        SCOPE_CONNECTIONS_RESOLVE,
+        SCOPE_CONNECTIONS_RESOLVE_STATIC,
+        SCOPE_CONNECTIONS_RESOLVE_GAMESERVER,
+    ),
     bind_community=True,
     unconfigured_event="provider_connections.service_auth_unconfigured",
     rejected_event="provider_connections.service_auth_rejected",
@@ -786,7 +795,7 @@ _resolve_authenticated = machine_authenticated(
 )
 #: The list is deliberately unbound (it enumerates every community) and carries no secret.
 _list_authenticated = machine_authenticated(
-    SCOPE_CONNECTIONS_LIST,
+    (SCOPE_CONNECTIONS_LIST, SCOPE_CONNECTIONS_LIST_GAMESERVER),
     unconfigured_event="provider_connections.service_auth_unconfigured",
     rejected_event="provider_connections.service_auth_rejected",
     wrong_tenant_event="provider_connections.service_auth_wrong_tenant",
@@ -823,6 +832,12 @@ async def internal_list() -> DataPlaneListResponse:
     provider = request.args.get("provider", "")
     if not provider:
         raise bad_request("provider is required")
+    if (
+        SCOPE_CONNECTIONS_LIST not in getattr(g, "machine_scopes", frozenset())
+        and provider != _GAMESERVER_PROVIDER
+    ):
+        # A caller holding only the gameserver-scoped list token may enumerate nothing else.
+        raise forbidden("this credential may list gameserver connections only")
     capability = request.args.get("capability") or None
     after = _int_arg("after", default=0, minimum=0, maximum=2**62)
     limit = _int_arg("limit", default=_DEFAULT_DATAPLANE_PAGE, minimum=1, maximum=MAX_PAGE_SIZE)
@@ -848,11 +863,17 @@ async def internal_resolve(community_id: int, connection_id: int) -> ResolvedCre
     ``endpoint`` + structured ``secret``. Not found or not granted to this community is a 404 (never
     a 403: no existence oracle).
     """
+    held = getattr(g, "machine_scopes", frozenset())
     resolved = await _service().resolve(
         community_id=community_id,
         connection_id=connection_id,
-        static_allowed=SCOPE_CONNECTIONS_RESOLVE_STATIC
-        in getattr(g, "machine_scopes", frozenset()),
+        static_allowed=SCOPE_CONNECTIONS_RESOLVE_STATIC in held,
+        # Gameserver-only credential: any other provider is a 404, checked BEFORE any refresh.
+        only_provider=(
+            None
+            if held & {SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC}
+            else _GAMESERVER_PROVIDER
+        ),
     )
     return _resolved_dto(resolved)
 

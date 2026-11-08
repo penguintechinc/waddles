@@ -197,6 +197,10 @@ bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 # same-repo path-dependency rationale as `bundle-host-db` above.
 bundle-host-reputation = { path = "../bundle_host_reputation", version = "=0.1.0" }
 bundle-host-platform-table = { path = "../bundle_host_platform_table", version = "=0.1.0" }
+# `gameserver-net` host capability (guarded RCON/TCP/UDP to admin-registered game servers) and the
+# connection resolver its directory uses -- same-repo path dependencies.
+bundle-host-gameserver-net = { path = "../bundle_host_gameserver_net", version = "=0.1.0" }
+connection_resolver = { path = "../connection_resolver", version = "=0.1.0" }
 # Host-mediated bundle object storage (`object-storage` WIT import, spec
 # 2026-11-06-bundle-object-storage): prefix grants, tag filter, durable audit.
 bundle-host-storage = { path = "../bundle_host_storage", version = "=0.1.0" }
@@ -276,6 +280,9 @@ rcgen = "=0.14.10"
 # `core/svc_action`'s own dev-dependencies enable for its equivalent
 # `db`-module tests.
 sea-orm = { version = "=2.0.2", default-features = false, features = ["mock"] }
+# TEST ONLY: loopback RCON fixture for the gameserver-net real-path tests. The feature does not
+# exist in any release build (dev-dependency features never unify into `cargo build --release`).
+bundle-host-gameserver-net = { path = "../bundle_host_gameserver_net", version = "=0.1.0", features = ["test-loopback"] }
 
 [profile.release]
 opt-level = 3

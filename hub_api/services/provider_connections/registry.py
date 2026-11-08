@@ -11,6 +11,7 @@ import httpx
 
 from services.provider_connections.adapter import AdapterRegistry
 from services.provider_connections.discord import DiscordAdapter
+from services.provider_connections.gameserver import GameServerAdapter
 from services.provider_connections.spectrum import SpectrumAdapter
 from services.provider_connections.static_secret import (
     AwsLambdaAdapter,
@@ -39,6 +40,7 @@ def build_default_registry(
     registry.register(YoutubeAdapter(transport=transport, app_credentials=youtube_app_credentials))
     registry.register(SpectrumAdapter(transport=transport))
     registry.register(WixAdapter())
+    registry.register(GameServerAdapter())
     registry.register(ExternalHttpAdapter())
     registry.register(AwsLambdaAdapter())
     registry.register(GcpFunctionAdapter())

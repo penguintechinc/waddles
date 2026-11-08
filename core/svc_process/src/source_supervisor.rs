@@ -192,6 +192,10 @@ pub struct SupervisorDeps {
     pub economy_wiring: Option<crate::capabilities::EconomyWiring>,
     /// See `crate::spine::ProcessDeps::platform_table_wiring`'s doc.
     pub platform_table_wiring: Option<crate::capabilities::PlatformTableWiring>,
+    /// The `gameserver-net` host capability's production wiring (`crate::lib::
+    /// try_build_gameserver_net_wiring`). `None` when the connection-resolver endpoints are
+    /// unconfigured (every `gameserver_net.*` call then denies `not_implemented`).
+    pub gameserver_net_wiring: Option<crate::capabilities::GameServerNetWiring>,
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::identity_wiring`'s doc.
     pub identity_wiring: Option<crate::identity::IdentityWiring>,
@@ -354,6 +358,7 @@ async fn run_binding_consumer(
             reputation_wiring: deps.reputation_wiring.clone(),
             economy_wiring: deps.economy_wiring.clone(),
             platform_table_wiring: deps.platform_table_wiring.clone(),
+            gameserver_net_wiring: deps.gameserver_net_wiring.clone(),
             identity_wiring: deps.identity_wiring.clone(),
             ai_wiring: deps.ai_wiring.clone(),
             media_wiring: deps.media_wiring.clone(),

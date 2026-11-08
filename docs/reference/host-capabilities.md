@@ -42,6 +42,7 @@ Verified against `release/v3.0.X` (`1e6b0056`) plus in-flight PRs #741, #749, #7
 | Moderation | `moderation.<platform>` | Dangerous | none | CATALOG-ONLY |
 | AI generation | `ai.generate` | Dangerous | `ai` (stage-next) | NOT PRODUCTION-READY -- do not enable `waddles.bundle-ai-capability` in any environment until issue #858 is resolved (`svc_process` only; self-hosted model) |
 | Object storage | `storage.objects` | Normal | none | CATALOG-ONLY |
+| Game-server network | `gameserver.net` | Dangerous | `gameserver-net` (stage-tools world only; `core/bundle_host_gameserver_net`) | host-mediated RCON/TCP/UDP to admin-registered connections; first-party core only; flag `waddles.bundle-gameserver-net`, default OFF |
 | User profile read | `users.profile.read` | Normal | none | CATALOG-ONLY |
 | Telemetry | `telemetry.logs`, `telemetry.metrics` | Normal | none | CATALOG-ONLY |
 | Raw PII in interaction inputs | `interaction.pii.receive` | Dangerous | none | CATALOG-ONLY (default NO) |

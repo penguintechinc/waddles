@@ -19,6 +19,11 @@ pub const SCOPE_CONNECTIONS_RESOLVE: &str = "connections:resolve";
 pub const SCOPE_CONNECTIONS_RESOLVE_STATIC: &str = "connections:resolve:static";
 /// Scope for the unbound data-plane binding list.
 pub const SCOPE_CONNECTIONS_LIST: &str = "connections:list";
+/// Least-privilege resolve scope for the `gameserver` provider only (hub-api refuses it for any
+/// other provider).
+pub const SCOPE_CONNECTIONS_RESOLVE_GAMESERVER: &str = "connections:resolve:gameserver";
+/// Least-privilege binding-list scope for the `gameserver` provider only.
+pub const SCOPE_CONNECTIONS_LIST_GAMESERVER: &str = "connections:list:gameserver";
 
 /// Static configuration of a [`ConnectionResolver`].
 #[derive(Clone, Debug)]
@@ -34,6 +39,9 @@ pub struct ResolverConfig {
     /// Scope requested for resolve tokens: [`SCOPE_CONNECTIONS_RESOLVE`] or
     /// [`SCOPE_CONNECTIONS_RESOLVE_STATIC`] (the latter only for callers allow-listed for it).
     pub resolve_scope: String,
+    /// Scope requested for the unbound binding list: [`SCOPE_CONNECTIONS_LIST`] (default) or
+    /// [`SCOPE_CONNECTIONS_LIST_GAMESERVER`].
+    pub list_scope: String,
     /// Total per-request timeout (default 3s).
     pub request_timeout: Duration,
     /// Connect timeout (default 2s).
@@ -58,6 +66,7 @@ impl ResolverConfig {
             token_endpoint: token_endpoint.into(),
             sa_token_path: sa_token_path.into(),
             resolve_scope: SCOPE_CONNECTIONS_RESOLVE.to_string(),
+            list_scope: SCOPE_CONNECTIONS_LIST.to_string(),
             request_timeout: Duration::from_secs(3),
             connect_timeout: Duration::from_secs(2),
             breaker_threshold: 5,
@@ -218,7 +227,7 @@ impl ConnectionResolver {
         let list_jwt = service_auth::MachineJwtClient::with_timeouts(
             cfg.token_endpoint,
             cfg.sa_token_path,
-            SCOPE_CONNECTIONS_LIST,
+            cfg.list_scope,
             timeouts,
         )
         .map_err(|_| ResolveError::Malformed("cannot build token client"))?;

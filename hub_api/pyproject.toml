@@ -49,6 +49,10 @@ convention = "google"
 # repeated once per handler.
 "blueprints/v1/bot.py" = ["N815", "S101"]
 "services/bot_shoutout.py" = ["N815"]
+# gameserver gateway: camelCase wire DTOs (same /api/v1 JSON convention as provider_connections);
+# docstrings carry the security model on long lines.
+"blueprints/v1/gameserver_connections.py" = ["N815", "E501"]
+"services/provider_connections/gameserver.py" = ["E501"]
 "services/bot_ai_knowledge.py" = ["N815"]
 "services/access_grant_dto.py" = ["N815"]  # wire DTOs are camelCase by API contract
 # M1 Core Identity/Auth group -- postcondition asserts, same rationale as

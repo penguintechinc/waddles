@@ -685,7 +685,12 @@ class ProviderConnectionService:
             return DataPlanePage(items=items, next_after=next_after)
 
     async def resolve(
-        self, *, community_id: int, connection_id: int, static_allowed: bool = False
+        self,
+        *,
+        community_id: int,
+        connection_id: int,
+        static_allowed: bool = False,
+        only_provider: str | None = None,
     ) -> ResolvedCredentials:
         """Hand the data plane a fresh access token for one usable binding (refresh if stale).
 
@@ -697,6 +702,10 @@ class ProviderConnectionService:
             self._db, community_id=community_id, connection_id=connection_id
         )
         if state is None:
+            raise ConnectionNotFound("connection not found")
+        if only_provider is not None and state.connection.platform != only_provider:
+            # Provider-restricted credential: same answer as "no such connection" (no oracle),
+            # and nothing is refreshed or opened for a provider it may not touch.
             raise ConnectionNotFound("connection not found")
         provider = state.connection.platform
         adapter = self._registry.get(provider)

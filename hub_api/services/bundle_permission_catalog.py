@@ -167,6 +167,12 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "platform.context": "normal",
     "platform.clock": "normal",
     "platform.log": "normal",
+    #: Host-mediated game-server network access (`gameserver-net` WIT
+    #: interface: rcon-open / tcp-open / udp-exchange). `dangerous`, global-admin
+    #: approved, first-party-core only. The guest names an admin-registered
+    #: connection by UUID; the host resolves address + RCON password, runs the
+    #: SSRF guard on the resolved IP, and never returns either to the guest.
+    "gameserver.net": "dangerous",
 }
 
 #: Compiled-in relay providers `chat.send:<platform>`/`moderation.<platform>`
