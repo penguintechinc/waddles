@@ -22,6 +22,7 @@ fails closed (503) when the limiter is not wired.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -38,6 +39,8 @@ from services.community_authz import CommunityMembership, authorize_community
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 from services.rate_limiting import RATE_LIMITER_CONFIG_KEY
+
+logger = logging.getLogger(__name__)
 
 bundle_admin_gateway_bp = Blueprint(
     "v1_bundle_admin_gateway",
@@ -219,6 +222,9 @@ async def get_descriptor(community_id: int, app_id: str) -> DescriptorResponse |
             return _err(ApiError("community:moderate required", 403, "FORBIDDEN"))
         d = svc.describe(gate.bundle, gate.membership)
     except ApiError as exc:
+        logger.warning(
+            "bundle_admin_refused op=%s status=%s code=%s", "descriptor", exc.status_code, exc.code
+        )
         return _err(exc)
     return DescriptorResponse(
         success=True,
@@ -244,6 +250,9 @@ async def get_config(community_id: int, app_id: str) -> ConfigResponse | tuple[A
             community_id=community_id,
         )
     except ApiError as exc:
+        logger.warning(
+            "bundle_admin_refused op=%s status=%s code=%s", "get_config", exc.status_code, exc.code
+        )
         return _err(exc)
     return _config_dto(app_id, snap)
 
@@ -269,6 +278,9 @@ async def put_config(
             expected_version=data.expectedVersion,
         )
     except ApiError as exc:
+        logger.warning(
+            "bundle_admin_refused op=%s status=%s code=%s", "put_config", exc.status_code, exc.code
+        )
         return _err(exc)
     return _config_dto(app_id, snap)
 
@@ -283,6 +295,7 @@ async def get_config_history(
     try:
         limit = int(request.args.get("limit", str(svc.DEFAULT_PAGE_LIMIT)))
     except ValueError:
+        logger.warning("bundle_admin_bad_limit op=config_history")
         return _err(ApiError("limit must be an integer", 400, "BAD_REQUEST"))
     try:
         gate = await _gate(community_id, app_id, name="_config_history", limit=READ_RATE_PER_MIN)
@@ -295,6 +308,12 @@ async def get_config_history(
             limit=limit,
         )
     except ApiError as exc:
+        logger.warning(
+            "bundle_admin_refused op=%s status=%s code=%s",
+            "config_history",
+            exc.status_code,
+            exc.code,
+        )
         return _err(exc)
     return ConfigHistoryResponse(
         success=True,
@@ -327,6 +346,12 @@ async def invoke_action(
             args=data.args,
         )
     except ApiError as exc:
+        logger.warning(
+            "bundle_admin_refused op=%s status=%s code=%s",
+            "admin_action",
+            exc.status_code,
+            exc.code,
+        )
         return _err(exc)
     return ToolResponse(success=True, result=out.result)
 
@@ -368,6 +393,9 @@ async def read_view(
             cursor=request.args.get("cursor"),
         )
     except ApiError as exc:
+        logger.warning(
+            "bundle_admin_refused op=%s status=%s code=%s", "data_view", exc.status_code, exc.code
+        )
         return _err(exc)
     return ToolResponse(
         success=True, result=out.result, limit=out.limit, nextCursor=out.next_cursor
