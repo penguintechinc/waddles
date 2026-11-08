@@ -109,9 +109,11 @@ handlers:
     targets:
       - {kind: bundle, path: bundles/python/poll/hub-manifest.yaml, contains: '"!poll"'}
   - handler: core/svc_process/builtin_handlers/community_reputation_process.py
-    status: pending
-    gap: "`!reputation`/`!rep` lookup has no bundle (bundles/python/rank is `!rank` only)"
-    tracking: "#840"
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: bundle, path: bundles/python/rank/hub-manifest.yaml, contains: '"!rep"'}
+      - {kind: bundle, path: bundles/rust/reputation/hub-manifest.yaml, contains: "name: rep"}
   - handler: core/svc_process/builtin_handlers/echo_process.py
     status: covered
     parity: unverified

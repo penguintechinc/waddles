@@ -9,7 +9,7 @@ name: Saved Announcements Bundle (Python)
 # owner to resolve, not silently papered over.
 # 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
 # 1.0.4: activation-gated only -- removed the in-bundle waddles.command-announce feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.5
+version: 1.0.6
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -21,7 +21,7 @@ provider: builtin
 # MARKETPLACE_CATEGORIES (libs/flask_core/flask_core/bundle_attribution.py) currently allows only
 # "alternatives", which does not fit first-party original content -- same documented gap as
 # fish/music's own bundle.yaml.
-author: "superpenguintv (Psychoboy)"
+author: github:penguintechinc
 license: Apache-2.0
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/announce
 notice: |
@@ -76,6 +76,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.5"
-  min_version: "1.0.5"
+  tested_with: "1.0.6"
+  min_version: "1.0.6"
   max_version: null

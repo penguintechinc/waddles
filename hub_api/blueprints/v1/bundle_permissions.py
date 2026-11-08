@@ -183,6 +183,7 @@ async def get_version_access_grants(
             _install_dal(), app_id=app_id, version=version
         )
     except ApiError as exc:
+        logger.warning("%s refused: %s: %s", request.path, type(exc).__name__, exc.message)
         return _err(exc)
     return access_grants_response(blocks, requested, approved, dangerous)
 
@@ -206,6 +207,7 @@ async def get_community_access_grants(
             _install_dal(), app_id=app_id, version=version
         )
     except ApiError as exc:
+        logger.warning("%s refused: %s: %s", request.path, type(exc).__name__, exc.message)
         return _err(exc)
     return access_grants_response(blocks, requested, approved, dangerous)
 

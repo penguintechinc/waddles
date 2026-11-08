@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-jackpot"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!jackpot <stake>` -- accumulating community jackpot pot (economy-SDK stake, kv.increment pot, win resets to base). Ideas/design inspired by PenguinTwitchBot by SuperPenguinTV (with permission) -- no code copied."
 requires-python = ">=3.13"
 dependencies = []
