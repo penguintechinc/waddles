@@ -1,4 +1,4 @@
-"""Tests for 0082_economy_elevated: chain, single head, kinds, audit table, grant id.
+"""Tests for 0088_economy_elevated: chain, single head, kinds, audit table, grant id.
 
 Static checks pin the chain; the real-Postgres tests (docker, skipped where the CLI is
 absent) run the actual chain to ``head`` and prove the new ledger kinds are admitted (and
@@ -28,12 +28,12 @@ requires_docker = pytest.mark.skipif(
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
-_MIGRATION_PATH = _ROOT / "alembic" / "versions" / "0082_economy_elevated.py"
+_MIGRATION_PATH = _ROOT / "alembic" / "versions" / "0088_economy_elevated.py"
 _USER = "11111111-2222-4333-8444-555555555555"
 
 
 def _load() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("migration_0082", _MIGRATION_PATH)
+    spec = importlib.util.spec_from_file_location("migration_0088", _MIGRATION_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -42,16 +42,16 @@ def _load() -> ModuleType:
 
 def test_chain_and_id_length() -> None:
     module = _load()
-    assert module.down_revision == "0081_spectrum_conn_resource"
+    assert module.down_revision == "0087_bundle_data_v2"
     assert len(module.revision) <= 32
 
 
-def test_history_has_exactly_one_head_and_0082_is_in_it() -> None:
+def test_history_has_exactly_one_head_and_0088_is_in_it() -> None:
     cfg = Config(str(_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
     script = ScriptDirectory.from_config(cfg)
     assert len(script.get_heads()) == 1
-    assert "0082_economy_elevated" in {r.revision for r in script.walk_revisions()}
+    assert "0088_economy_elevated" in {r.revision for r in script.walk_revisions()}
 
 
 def test_ddl_declares_the_kinds_within_the_column_width() -> None:
@@ -65,7 +65,7 @@ def test_ddl_declares_the_kinds_within_the_column_width() -> None:
 def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0082-economy-elevated") as db:
+    with migrated_postgres("0088-economy-elevated") as db:
         yield db
 
 

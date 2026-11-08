@@ -1,6 +1,6 @@
 -- Bundle economy ELEVATED app-caller primitives (`transfer_from`, app mint) --
 -- the single source of truth read by BOTH
--- `alembic/versions/0082_economy_elevated.py` (production schema) and the Rust
+-- `alembic/versions/0088_economy_elevated.py` (production schema) and the Rust
 -- integration tests (`include_str!`, applied after
 -- `bundle_economy_ledger_kinds.sql`), so the store's SQL is always tested
 -- against the exact DDL that ships. Idempotent.

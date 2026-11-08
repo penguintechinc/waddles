@@ -9,11 +9,11 @@ economy runtime role needs (read the caller's grant, append/settle audit rows).
 Idempotent. The DDL lives in `scripts/db/bundle_economy_elevated.sql` so the
 shipped schema and the Rust-tested schema cannot drift.
 
-Chained off the single head `0081_spectrum_conn_resource`; if another open PR
-also adds 0082, renumber this file and its `down_revision` on merge.
+Chained off the single head `0087_bundle_data_v2`; if another open PR
+also adds 0088, renumber this file and its `down_revision` on merge.
 
-Revision ID: 0082_economy_elevated
-Revises: 0081_spectrum_conn_resource
+Revision ID: 0088_economy_elevated
+Revises: 0087_bundle_data_v2
 Create Date: 2026-11-07
 """
 
@@ -23,8 +23,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0082_economy_elevated"
-down_revision = "0081_spectrum_conn_resource"
+revision = "0088_economy_elevated"
+down_revision = "0087_bundle_data_v2"
 branch_labels = None
 depends_on = None
 

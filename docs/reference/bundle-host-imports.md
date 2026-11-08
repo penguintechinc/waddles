@@ -197,7 +197,7 @@ app from the call plan -- never from args), the stage additionally requires the
 
 Both are `dangerous` (bold-red per-app community-admin approval, like table/storage grants).
 `community_permission_grants.granted_by` records the approving admin; alembic
-`0082_economy_elevated` adds a stable numeric `grant_id`. An absent or revoked grant is an
+`0088_economy_elevated` adds a stable numeric `grant_id`. An absent or revoked grant is an
 explicit denial (`not_granted` / `elevated_not_granted`), never a fallback to the service's
 own grants. A top-level invocation (no calling app) can never use `transfer_from`.
 
