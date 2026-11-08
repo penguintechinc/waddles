@@ -914,7 +914,7 @@ grants:
     table: app_commands
     privileges: [SELECT, INSERT, UPDATE, DELETE]
 
-  # 0082_user_active_context: per-user active community for slash routing. Hub-api only;
+  # 0084_user_active_context: per-user active community for slash routing. Hub-api only;
   # explicit empty rows for every other role keep the equality check honest.
   - role: hub_api
     table: user_active_context

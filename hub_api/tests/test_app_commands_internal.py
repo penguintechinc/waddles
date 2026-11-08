@@ -1,4 +1,4 @@
-"""Slash-command desired state + active context: real blueprint, real machine-JWT verifier.
+"""Slash-command desired state (REST) + active-context service semantics: real blueprint + verifier.
 
 Everything between the HTTP request and the (file-backed sqlite) database is real -- guard, Ed25519
 issuer/verifier, registry service, SQLAlchemy Core queries. Postgres-only constraints are covered in
@@ -19,18 +19,19 @@ from quart_schema import QuartSchema
 from sqlalchemy import insert
 
 from blueprints.v1.app_commands_internal import (
-    SCOPE_ACTIVE_CONTEXT,
     SCOPE_APP_COMMANDS,
     app_commands_internal_bp,
 )
 from services import app_command_registry as registry
-from services.dataplane_scope import InvalidSourceError, ScopeNotFoundError
+from services.dataplane_scope import AmbiguousScopeError, InvalidSourceError, ScopeNotFoundError
 
 INGEST = "spiffe://penguintech.io/alpha/svc-ingest"
 TENANT_SCOPED = "spiffe://penguintech.io/alpha/svc-tenant"
 NO_SCOPE = "spiffe://penguintech.io/alpha/svc-action"
 GUILD = "474965105759748096"
 BASE = "/api/v1/internal/dataplane"
+# A scope the issuer may mint but the (now only) REST routes do not accept: wrong-scope probe.
+OTHER_SCOPE = "dataplane:active-context"
 T0 = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 
 
@@ -49,7 +50,7 @@ def issuer() -> ServiceJwtIssuer:
     """Real issuer: svc-ingest (both scopes), a non-system tenant identity, a scope-less one."""
     private = Ed25519PrivateKey.generate()
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
-    both = {SCOPE_APP_COMMANDS, SCOPE_ACTIVE_CONTEXT}
+    both = {SCOPE_APP_COMMANDS, OTHER_SCOPE}
     return ServiceJwtIssuer(
         keys={"k1": key},
         active_kid="k1",
@@ -418,107 +419,67 @@ class TestSources:
         assert response.status_code == 400
 
 
-class TestActiveContext:
-    def _url(self, user: str, extra: str = "") -> str:
-        return f"{BASE}/active-context?platform=discord&source_id={GUILD}&user={user}{extra}"
+class TestActiveContextService:
+    """Active-context semantics at the service layer (served to the data plane over gRPC)."""
 
-    async def test_default_set_switch_clear_roundtrip(
-        self, app: Quart, issuer: ServiceJwtIssuer, world: World
-    ) -> None:
-        client = app.test_client()
-        headers = _auth(issuer, SCOPE_ACTIVE_CONTEXT)
+    async def test_default_set_switch_clear_roundtrip(self, install_dal: Any, world: World) -> None:
         user = str(uuid.uuid4())
-        default = await (await client.get(self._url(user), headers=headers)).get_json()
-        assert default["communityPublicId"] == PUB["communities", world.first]
-        assert default["explicit"] is False
-        assert [c["publicId"] for c in default["communities"]] == [
+        default = await registry.get_active_context(install_dal, "discord", GUILD, user)
+        assert default.community_public_id == PUB["communities", world.first]
+        assert default.explicit is False
+        assert [c.public_id for c in default.communities] == [
             PUB["communities", world.first],
             PUB["communities", world.second],
         ]
-        assert [c["displayName"] for c in default["communities"]] == ["Alpha Crew", "Beta Crew"]
+        assert [c.name for c in default.communities] == ["Alpha Crew", "Beta Crew"]
         second, first = PUB["communities", world.second], PUB["communities", world.first]
-        body = {"platform": "discord", "sourceId": GUILD, "user": user, "community": second}
-        put = await client.put(f"{BASE}/active-context", json=body, headers=headers)
-        assert put.status_code == 200
-        assert (await put.get_json())["communityPublicId"] == second
-        got = await (await client.get(self._url(user), headers=headers)).get_json()
-        assert got["communityPublicId"] == second and got["explicit"] is True
-        by_id = await client.put(
-            f"{BASE}/active-context", json={**body, "community": first.upper()}, headers=headers
+        switched = await registry.set_active_context(install_dal, "discord", GUILD, user, second)
+        assert switched.community_public_id == second
+        got = await registry.get_active_context(install_dal, "discord", GUILD, user)
+        assert got.community_public_id == second and got.explicit is True
+        by_id = await registry.set_active_context(
+            install_dal, "discord", GUILD, user, first.upper()
         )
-        assert (await by_id.get_json())["communityPublicId"] == first  # upsert, not duplicate
-        cleared = await client.delete(self._url(user), headers=headers)
-        assert (await cleared.get_json()) == {"success": True, "cleared": True}
-        again = await client.delete(self._url(user), headers=headers)
-        assert (await again.get_json())["cleared"] is False
-        final = await (await client.get(self._url(user), headers=headers)).get_json()
-        assert final["explicit"] is False
+        assert by_id.community_public_id == first  # upsert, not duplicate
+        assert await registry.clear_active_context(install_dal, "discord", GUILD, user) is True
+        assert await registry.clear_active_context(install_dal, "discord", GUILD, user) is False
+        final = await registry.get_active_context(install_dal, "discord", GUILD, user)
+        assert final.explicit is False
 
-    async def test_users_are_isolated(
-        self, app: Quart, issuer: ServiceJwtIssuer, world: World
-    ) -> None:
-        client = app.test_client()
-        headers = _auth(issuer, SCOPE_ACTIVE_CONTEXT)
+    async def test_users_are_isolated(self, install_dal: Any, world: World) -> None:
         a, b = str(uuid.uuid4()), str(uuid.uuid4())
-        await client.put(
-            f"{BASE}/active-context",
-            json={
-                "platform": "discord",
-                "sourceId": GUILD,
-                "user": a,
-                "community": PUB["communities", world.second],
-            },
-            headers=headers,
+        await registry.set_active_context(
+            install_dal, "discord", GUILD, a, PUB["communities", world.second]
         )
-        other = await (await client.get(self._url(b), headers=headers)).get_json()
-        assert other["communityPublicId"] == PUB["communities", world.first]
-        assert other["explicit"] is False
+        other = await registry.get_active_context(install_dal, "discord", GUILD, b)
+        assert other.community_public_id == PUB["communities", world.first]
+        assert other.explicit is False
 
-    async def _put(self, app: Quart, issuer: ServiceJwtIssuer, community: str) -> Any:
-        return await app.test_client().put(
-            f"{BASE}/active-context",
-            json={
-                "platform": "discord",
-                "sourceId": GUILD,
-                "user": str(uuid.uuid4()),
-                "community": community,
-            },
-            headers=_auth(issuer, SCOPE_ACTIVE_CONTEXT),
-        )
-
-    async def test_unpaired_or_foreign_community_uuid_is_404(
-        self, app: Quart, install_dal: Any, issuer: ServiceJwtIssuer, world: World
+    async def test_unpaired_or_foreign_community_uuid_refused(
+        self, install_dal: Any, world: World
     ) -> None:
-        assert (await self._put(app, issuer, str(uuid.uuid4()))).status_code == 404
+        user = str(uuid.uuid4())
+        with pytest.raises(registry.ContextNotFoundError):
+            await registry.set_active_context(
+                install_dal, "discord", GUILD, user, str(uuid.uuid4())
+            )
         other = await _tenant(install_dal, "ctx-foreign")
         foreign = await _community(install_dal, other, "Foreign")
-        response = await self._put(app, issuer, PUB["communities", foreign])
-        assert response.status_code == 404
+        with pytest.raises(registry.ContextNotFoundError):
+            await registry.set_active_context(
+                install_dal, "discord", GUILD, user, PUB["communities", foreign]
+            )
 
     @pytest.mark.parametrize(
         "community", ["Alpha Crew", "alpha crew", "1", "999999", "", "x" * 300, "not-a-uuid"]
     )
     async def test_names_and_numeric_ids_never_resolve(
-        self, app: Quart, issuer: ServiceJwtIssuer, world: World, community: str
+        self, install_dal: Any, world: World, community: str
     ) -> None:
-        assert (await self._put(app, issuer, community)).status_code == 400
-
-    async def test_responses_carry_no_numeric_ids(
-        self, app: Quart, issuer: ServiceJwtIssuer, world: World
-    ) -> None:
-        response = await app.test_client().get(
-            self._url(str(uuid.uuid4())), headers=_auth(issuer, SCOPE_ACTIVE_CONTEXT)
-        )
-        body = await response.get_json()
-        assert set(body) == {
-            "success",
-            "tenantPublicId",
-            "communityPublicId",
-            "communityName",
-            "explicit",
-            "communities",
-        }
-        assert set(body["communities"][0]) == {"publicId", "displayName", "position"}
+        with pytest.raises(InvalidSourceError):
+            await registry.set_active_context(
+                install_dal, "discord", GUILD, str(uuid.uuid4()), community
+            )
 
     async def test_stale_choice_falls_back_to_default(self, install_dal: Any, world: World) -> None:
         user = str(uuid.uuid4())
@@ -537,58 +498,27 @@ class TestActiveContext:
         assert ctx.explicit is False
 
     @pytest.mark.parametrize("user", ["", "not-a-uuid", "12345"])
-    async def test_invalid_user_400(
-        self, app: Quart, issuer: ServiceJwtIssuer, world: World, user: str
-    ) -> None:
-        response = await app.test_client().get(
-            self._url(user), headers=_auth(issuer, SCOPE_ACTIVE_CONTEXT)
-        )
-        assert response.status_code == 400
-        delete = await app.test_client().delete(
-            self._url(user), headers=_auth(issuer, SCOPE_ACTIVE_CONTEXT)
-        )
-        assert delete.status_code == 400
+    async def test_invalid_user_refused(self, install_dal: Any, world: World, user: str) -> None:
+        with pytest.raises(InvalidSourceError):
+            await registry.get_active_context(install_dal, "discord", GUILD, user)
+        with pytest.raises(InvalidSourceError):
+            await registry.clear_active_context(install_dal, "discord", GUILD, user)
 
-    async def test_unknown_source_404(
-        self, app: Quart, issuer: ServiceJwtIssuer, world: World
-    ) -> None:
-        response = await app.test_client().get(
-            f"{BASE}/active-context?platform=discord&source_id=1&user={uuid.uuid4()}",
-            headers=_auth(issuer, SCOPE_ACTIVE_CONTEXT),
-        )
-        assert response.status_code == 404
+    async def test_unknown_source_refused(self, install_dal: Any, world: World) -> None:
+        with pytest.raises(ScopeNotFoundError):
+            await registry.get_active_context(install_dal, "discord", "1", str(uuid.uuid4()))
 
-    async def test_put_schema_rejects_missing_fields(
-        self, app: Quart, issuer: ServiceJwtIssuer, world: World
-    ) -> None:
-        response = await app.test_client().put(
-            f"{BASE}/active-context",
-            json={"platform": "discord"},
-            headers=_auth(issuer, SCOPE_ACTIVE_CONTEXT),
-        )
-        assert response.status_code == 400
-
-    async def test_cross_tenant_source_409(
-        self, app: Quart, install_dal: Any, issuer: ServiceJwtIssuer, world: World
-    ) -> None:
+    async def test_cross_tenant_source_refused(self, install_dal: Any, world: World) -> None:
         other = await _tenant(install_dal, "ctx-x")
         await _link(install_dal, await _community(install_dal, other, "Rogue"))
-        response = await app.test_client().get(
-            self._url(str(uuid.uuid4())), headers=_auth(issuer, SCOPE_ACTIVE_CONTEXT)
-        )
-        assert response.status_code == 409
+        with pytest.raises(AmbiguousScopeError):
+            await registry.get_active_context(install_dal, "discord", GUILD, str(uuid.uuid4()))
 
 
 class TestAuth:
     ROUTES = [
         ("get", f"{BASE}/app-commands/sources?platform=discord", SCOPE_APP_COMMANDS),
         ("get", f"{BASE}/app-commands/desired?platform=discord&source_id=1", SCOPE_APP_COMMANDS),
-        ("get", f"{BASE}/active-context?platform=discord&source_id=1&user=x", SCOPE_ACTIVE_CONTEXT),
-        (
-            "delete",
-            f"{BASE}/active-context?platform=discord&source_id=1&user=x",
-            SCOPE_ACTIVE_CONTEXT,
-        ),
     ]
 
     @pytest.mark.parametrize(("method", "url", "scope"), ROUTES)
@@ -599,7 +529,7 @@ class TestAuth:
     async def test_wrong_scope_401(
         self, app: Quart, issuer: ServiceJwtIssuer, method: str, url: str, scope: str
     ) -> None:
-        other = SCOPE_ACTIVE_CONTEXT if scope == SCOPE_APP_COMMANDS else SCOPE_APP_COMMANDS
+        other = OTHER_SCOPE
         response = await getattr(app.test_client(), method)(url, headers=_auth(issuer, other))
         assert response.status_code == 401
 
