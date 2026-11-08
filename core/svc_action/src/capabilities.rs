@@ -2259,8 +2259,24 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 Ok(Some(raw)) => {
                     return match parse_ack(&raw) {
                         Ok(AckOutcome::Confirmed) => {
-                            let v: serde_json::Value =
-                                serde_json::from_str(&raw).unwrap_or_default();
+                            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        provider,
+                                        op = op.as_str(),
+                                        error = %e,
+                                        "platform op ack was confirmed but its payload is unreadable"
+                                    );
+                                    return Err(denied(
+                                        "relay_unconfirmed",
+                                        format!(
+                                            "{provider} {} result payload was unreadable; the op is unconfirmed",
+                                            op.as_str()
+                                        ),
+                                    ));
+                                }
+                            };
                             Ok(v.get("data").or_else(|| v.get("id")).cloned())
                         }
                         Ok(AckOutcome::Refused(failure)) => {
