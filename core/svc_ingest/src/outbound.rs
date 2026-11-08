@@ -641,6 +641,50 @@ pub async fn run_youtube_exec<X: ActionExecutor>(
     Ok(())
 }
 
+/// The queue key the Kick outbound drain reads: the same
+/// `waddles:transport:irc:{provider}:outbound` shape
+/// `svc_action::capabilities::outbound_relay_queue_key("kick")` produces (duplicated, not
+/// imported: separate crates). Kick has NO legacy sender; this drain exists only in executor mode.
+pub const KICK_OUTBOUND_QUEUE_KEY: &str = "waddles:transport:irc:kick:outbound";
+
+/// The Kick drain: same stamp gate, single-use claim and generic executor as [`run_exec`],
+/// reading [`KICK_OUTBOUND_QUEUE_KEY`]. There is no legacy Kick path to fall back to, so it is
+/// only started with the executor.
+///
+/// # Errors
+/// [`redis::RedisError`] if the Valkey connect fails.
+pub async fn run_kick_exec<X: ActionExecutor>(
+    spine_cfg: &penguin_spine::SpineConfig,
+    exec: &X,
+    pin: Option<PinKeys>,
+    shutdown: oneshot::Receiver<()>,
+) -> Result<(), redis::RedisError> {
+    let client = build_redis_client(spine_cfg)?;
+    let queue = ListQueue {
+        conn: connect_with_response_timeout(&client, BLOCKING_CONN_RESPONSE_TIMEOUT).await?,
+        key: KICK_OUTBOUND_QUEUE_KEY,
+    };
+    let guard = ValkeyReplayGuard::new(
+        connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
+    );
+    let ctl = ValkeyDrainControl::new(
+        connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
+    );
+    drain_platform_loop_acked(
+        "kick",
+        queue,
+        &NoIrc,
+        Some(exec),
+        &guard,
+        Some(&ctl),
+        pin.as_ref(),
+        Backoff::new(Duration::from_secs(30)),
+        shutdown,
+    )
+    .await;
+    Ok(())
+}
+
 /// The [`IrcOutbound`] of an executor-backed drain: never consulted (the
 /// executor replaces the legacy sender); if it ever were, it fails loud.
 struct NoIrc;

@@ -29,9 +29,10 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use super::feed::WebhookPlan;
+use crate::connector::kick_keys::{HttpKickKeyFetch, KickKeyCache, KickKeySecrets};
 use crate::connector::webhook::{
     ConnectionResolverSecrets, RateLimit, RedisWebhookDedup, RegistryError, WebhookIngress,
-    WebhookRoute, WebhookTransport, HARD_MAX_BODY_BYTES,
+    WebhookRoute, WebhookSecretSource, WebhookTransport, HARD_MAX_BODY_BYTES,
 };
 use crate::connector::webhook_verify::{
     Ed25519Spec, Encoding, Scheme, SignedTemplate, TimestampFormat,
@@ -50,7 +51,7 @@ pub const REPLAY_WINDOW: Duration = Duration::from_secs(300);
 pub const VALKEY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Platforms that have a webhook scheme in this host.
-const SUPPORTED: [&str; 3] = ["discord", "twitch", "wix"];
+const SUPPORTED: [&str; 4] = ["discord", "twitch", "wix", "kick"];
 
 /// Webhook boot / activation failures (names the item, never a value).
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +77,9 @@ pub enum BootError {
     /// Registry refused the registration/binding.
     #[error("webhook registry: {0}")]
     Registry(#[from] RegistryError),
+    /// The Kick public-key fetcher could not be constructed.
+    #[error("kick public key fetcher unavailable")]
+    KickKeys,
     /// A scheme template failed to build (programming error, surfaced loudly).
     #[error("webhook scheme invalid: {0}")]
     Scheme(String),
@@ -193,8 +197,21 @@ pub async fn build_ingress<R: ConnectionResolve + 'static>(
         .get_multiplexed_async_connection_with_config(&cfg)
         .await
         .map_err(|e| BootError::ValkeyConnect(format!("{:?}", e.kind())))?;
+    // Kick's verification key is Kick's own published key (fetched, TTL-cached, rotation-aware),
+    // not a community secret: its routes get it from `KickKeySecrets`; every other scheme keeps
+    // the community-bound resolver secret.
+    let base = ConnectionResolverSecrets(deps.resolver);
+    let secrets: Arc<dyn WebhookSecretSource> = if deps.env.enabled("kick") {
+        let fetch = HttpKickKeyFetch::new().map_err(|_| BootError::KickKeys)?;
+        Arc::new(KickKeySecrets::new(
+            base,
+            Arc::new(KickKeyCache::new(fetch)),
+        ))
+    } else {
+        Arc::new(base)
+    };
     let ingress = WebhookIngress::new(
-        Arc::new(ConnectionResolverSecrets(deps.resolver)),
+        secrets,
         Arc::new(RedisWebhookDedup::new(conn, DEDUP_TTL)),
         Some(deps.registry),
     );
@@ -224,6 +241,8 @@ pub fn scheme_for(platform: &str) -> Result<Scheme, BootError> {
     match platform {
         "discord" => discord_scheme(),
         "twitch" => Ok(Scheme::twitch_eventsub()),
+        // Kick: RSA signature with Kick's published (rotating) key, see `connector::kick_keys`.
+        "kick" => Ok(Scheme::kick()),
         // Wix routes are bound to a per-connection instance id: their scheme
         // is built by `profiles::wix`, never from a platform constant.
         "wix" => Err(BootError::Scheme(

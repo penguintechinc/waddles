@@ -16,9 +16,8 @@
 //! consumes (`{"type","version","message_id","timestamp","body"}`), because the event type
 //! lives only in a header.
 //!
-//! Wiring status: this module is self-contained and fully tested; registering it as a
-//! `Scheme` variant on a webhook route belongs to `webhook_verify.rs` (see the PR body,
-//! "Needs from host seams").
+//! Wiring: [`super::webhook_verify::Scheme::Kick`] drives [`prepare`] / [`Prepared::verify_any`]
+//! / [`Prepared::envelope`]; the key itself comes from [`super::kick_keys`] (cached, TTL, rotation).
 
 use axum::http::{HeaderMap, HeaderName};
 use base64::Engine as _;
@@ -139,6 +138,30 @@ impl Prepared {
         ring::signature::UnparsedPublicKey::new(&ring::signature::RSA_PKCS1_2048_8192_SHA256, &key)
             .verify(&self.signed, &self.signature)
             .map_err(|_| VerifyError::BadSignature)
+    }
+
+    /// [`Prepared::verify`] against EVERY PEM block in `pems` (current key first, then the
+    /// previous one during a rotation overlap); the first match wins. An input with no usable
+    /// key fails closed as [`VerifyError::BadKey`]; usable keys that all mismatch are
+    /// [`VerifyError::BadSignature`].
+    ///
+    /// # Errors
+    /// As [`Prepared::verify`].
+    pub fn verify_any(&self, pems: &str) -> Result<(), VerifyError> {
+        const END: &str = "-----END PUBLIC KEY-----";
+        let mut usable = false;
+        for block in pems.split_inclusive(END).filter(|b| b.contains(END)) {
+            match self.verify(block) {
+                Ok(()) => return Ok(()),
+                Err(VerifyError::BadKey) => {}
+                Err(_) => usable = true,
+            }
+        }
+        if usable {
+            Err(VerifyError::BadSignature)
+        } else {
+            Err(VerifyError::BadKey)
+        }
     }
 
     /// The verified event type from the `Kick-Event-Type` header.

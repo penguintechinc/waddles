@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 use super::metrics::{saturating_u32, RuntimeMetrics, SkipReason};
 use super::plan::{ConnectorProfile, RuntimeEnv};
+use super::self_echo::{parse_ids, SelfEchoRegistry};
 use crate::connector::spectrum::SpectrumSpec;
 use crate::connector::webhook::WebhookRoute;
 use crate::connector::{PollConfig, WsConfig};
@@ -210,6 +211,7 @@ pub struct HubBindingFeed<R: ConnectionResolve, P: ConnectorProfile> {
     env: RuntimeEnv,
     call_timeout: Duration,
     metrics: Option<RuntimeMetrics>,
+    self_echo: Option<SelfEchoRegistry>,
 }
 
 impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
@@ -221,7 +223,16 @@ impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
             env,
             call_timeout,
             metrics: None,
+            self_echo: None,
         }
+    }
+
+    /// Keeps `registry` current with each COMPLETE discovery: the bot identity (`self_user_id`)
+    /// of every planned connection, so the sink can drop the bot's own echoed chat.
+    #[must_use]
+    pub fn with_self_echo(mut self, registry: SelfEchoRegistry) -> Self {
+        self.self_echo = Some(registry);
+        self
     }
 
     /// Counts skipped bindings on `metrics` (bounded labels only).
@@ -235,6 +246,7 @@ impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
     async fn collect(&self) -> Result<(Vec<DesiredConnection>, u32), FeedError> {
         let platform = self.profile.platform();
         let mut planned = Vec::new();
+        let mut echo_entries = Vec::new();
         let mut malformed = 0u32;
         let mut after = 0i64;
         let mut pages = 0u32;
@@ -274,6 +286,19 @@ impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
                                 malformed += 1;
                                 continue;
                             }
+                            if self.self_echo.is_some() {
+                                let (ids, skipped) = parse_ids(&item.metadata);
+                                if skipped > 0 {
+                                    tracing::warn!(
+                                        platform,
+                                        community_id = item.community_id,
+                                        connection_id = item.connection_id,
+                                        skipped,
+                                        "ignored invalid self_user_id entries"
+                                    );
+                                }
+                                echo_entries.push((d.key.clone(), ids));
+                            }
                             planned.push(d);
                         }
                     }
@@ -294,6 +319,10 @@ impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
                 Some(next) => after = next,
                 None => break,
             }
+        }
+        // Only a complete discovery replaces the table (a failed page returned earlier).
+        if let Some(registry) = &self.self_echo {
+            registry.replace_platform(platform, echo_entries);
         }
         Ok((planned, malformed))
     }

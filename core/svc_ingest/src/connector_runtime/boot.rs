@@ -34,6 +34,7 @@ use super::plan::{ConnectorProfile, RuntimeEnv};
 use super::profiles::{discord, kick, spectrum, twitch, wix, youtube};
 use super::scoped::{ConnectionSink, ScopeLookup, ScopeTenantResolve, ScopedSinkFactory};
 use super::selector::{BootError, ConnectorSelector, IDENTIFY_BUDGET_READY};
+use super::self_echo::SelfEchoRegistry;
 use super::supervisor::{
     ConnectionActivator, ConnectorRuntime, HandshakeGateFactory, ResolverSecrets, RuntimeConfig,
     RuntimeDeps, RuntimeError, SecretsWrapper, WebhookAttach,
@@ -477,12 +478,14 @@ fn feed_for<R: ConnectionResolve + 'static>(
     env: &RuntimeEnv,
     metrics: &RuntimeMetrics,
     route_keys: Option<&webhook_boot::RouteKeyDeriver>,
+    self_echo: &SelfEchoRegistry,
 ) -> Option<Arc<dyn DynFeed>> {
     fn make<R: ConnectionResolve + 'static, P: ConnectorProfile + 'static>(
         resolver: &Arc<R>,
         profile: P,
         env: &RuntimeEnv,
         metrics: &RuntimeMetrics,
+        self_echo: &SelfEchoRegistry,
     ) -> Arc<dyn DynFeed> {
         Arc::new(
             HubBindingFeed::new(
@@ -491,7 +494,8 @@ fn feed_for<R: ConnectionResolve + 'static>(
                 env.clone(),
                 FEED_CALL_TIMEOUT,
             )
-            .with_metrics(metrics.clone()),
+            .with_metrics(metrics.clone())
+            .with_self_echo(self_echo.clone()),
         )
     }
     match platform {
@@ -500,26 +504,42 @@ fn feed_for<R: ConnectionResolve + 'static>(
             twitch::TwitchProfile::from_feed(),
             env,
             metrics,
+            self_echo,
         )),
         "discord" => Some(make(
             resolver,
             discord::DiscordProfile::new().with_budget_ready(IDENTIFY_BUDGET_READY),
             env,
             metrics,
+            self_echo,
         )),
-        "youtube" => Some(make(resolver, youtube::YoutubeProfile::new(), env, metrics)),
-        "kick" => Some(make(resolver, kick::KickProfile::from_feed(), env, metrics)),
+        "youtube" => Some(make(
+            resolver,
+            youtube::YoutubeProfile::new(),
+            env,
+            metrics,
+            self_echo,
+        )),
+        "kick" => Some(make(
+            resolver,
+            kick::KickProfile::from_feed(),
+            env,
+            metrics,
+            self_echo,
+        )),
         "spectrum" => Some(make(
             resolver,
             spectrum::SpectrumProfile::new(),
             env,
             metrics,
+            self_echo,
         )),
         "wix" => Some(make(
             resolver,
             wix::WixProfile::new(route_keys.cloned()),
             env,
             metrics,
+            self_echo,
         )),
         _ => None,
     }
@@ -545,6 +565,8 @@ where
         .map_err(|_| BootError::Malformed("connector metrics"))?;
     let frame_metrics = FrameRuleMetrics::register(&deps.registry)
         .map_err(|_| BootError::Malformed("frame rule metrics"))?;
+    super::self_echo::register_metrics(&deps.registry)
+        .map_err(|_| BootError::Malformed("self-echo metrics"))?;
 
     let gates: Option<Arc<dyn HandshakeGateFactory>> = if settings.platforms.contains(&"discord") {
         let backend = deps
@@ -561,6 +583,7 @@ where
         None
     };
     let env = settings.runtime_env();
+    let self_echo = SelfEchoRegistry::new();
     let mut feeds = FeedSet::new();
     let mut providers = BTreeMap::new();
     let route_keys = deps
@@ -568,8 +591,15 @@ where
         .as_ref()
         .and_then(|(_, e)| e.deriver().cloned());
     for p in &settings.platforms {
-        let feed = feed_for(p, &deps.resolver, &env, &metrics, route_keys.as_ref())
-            .ok_or(BootError::Malformed("platform"))?;
+        let feed = feed_for(
+            p,
+            &deps.resolver,
+            &env,
+            &metrics,
+            route_keys.as_ref(),
+            &self_echo,
+        )
+        .ok_or(BootError::Malformed("platform"))?;
         let feed = match &deps.seams.feed_wrap {
             Some(wrap) => wrap(p, feed),
             None => feed,
@@ -595,7 +625,8 @@ where
         deps.dek,
         deps.identity_metrics,
         Arc::clone(&deps.scope),
-    );
+    )
+    .with_self_echo(self_echo.clone());
     let webhook = deps
         .webhook
         .map(|(ingress, env)| Arc::new(IngressAttach::new(ingress, env)) as Arc<dyn WebhookAttach>);
