@@ -674,8 +674,8 @@ def _guard_transition(row: Any, rep: Report, status: SubStatus) -> None:
         raise _reject("no_outstanding_action")
     try:
         supplied = uuid.UUID(rep.nonce or "")
-    except ValueError as exc:
-        raise _reject("bad_nonce") from exc
+    except ValueError:
+        raise _reject("bad_nonce") from None
     if supplied != row.issued_nonce:
         raise _reject("nonce_mismatch")
     issued = Action(row.issued_action)
@@ -695,8 +695,8 @@ async def _apply(conn: Any, rep: Report, now: datetime) -> None:
     """Apply one report to its row (locked), enforcing the allowed transitions."""
     try:
         pid = uuid.UUID(rep.public_id)
-    except ValueError as exc:
-        raise InvalidReportError("subscription id is not a uuid") from exc
+    except ValueError:
+        raise InvalidReportError("subscription id is not a uuid") from None
     row = (
         await conn.execute(
             text(
@@ -770,7 +770,7 @@ async def secret_for_callback_key(install_dal: AsyncDB, callback_key: str) -> st
     must still verify.
     """
     if not _CALLBACK_KEY_RE.fullmatch(callback_key):
-        raise UnknownSubscriptionError("unknown callback key")
+        raise UnknownSubscriptionError("unknown callback key") from None
     async with install_dal.engine.connect() as conn:
         row = (
             await conn.execute(
@@ -780,6 +780,6 @@ async def secret_for_callback_key(install_dal: AsyncDB, callback_key: str) -> st
         ).first()
     if row is None:
         _ops.add(1, {"op": "secret", "outcome": "not_found"})
-        raise UnknownSubscriptionError("unknown callback key")
+        raise UnknownSubscriptionError("unknown callback key") from None
     _ops.add(1, {"op": "secret", "outcome": "ok"})
     return decrypt_value(row.secret_enc, aad=_aad(row.public_id))

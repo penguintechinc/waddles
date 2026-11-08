@@ -152,14 +152,20 @@ def _base_url() -> str:
     return str(current_app.config["HUB_API_CONFIG"].eventsub_callback_base_url)
 
 
-def _refusal(exc: es.EventSubError) -> tuple[dict[str, object], int]:
-    """Map a service refusal to the fixed JSON error envelope."""
+def _refusal(exc: es.EventSubError, op: str) -> tuple[dict[str, object], int]:
+    """Map a service refusal to the fixed JSON error envelope.
+
+    Logs only the static op, exception class and stable code -- never ``exc_info``, so no
+    traceback or chained cause can carry secret/key/payload material into the logs.
+    """
     if isinstance(exc, es.NotConfiguredError):
         status, code, message = 503, "NOT_CONFIGURED", "eventsub callback url is not configured"
     elif isinstance(exc, es.UnknownSubscriptionError):
         status, code, message = 404, "NOT_FOUND", "unknown subscription"
     else:
         status, code, message = 400, "BAD_REQUEST", "invalid report"
+    logger.warning("eventsub_refused op=%s type=%s code=%s", op, type(exc).__name__, code)
+    logger.debug("eventsub_refused_detail op=%s status=%d", op, status)
     return cast(tuple[dict[str, object], int], error_response(message, status, code))
 
 
@@ -179,10 +185,7 @@ async def reconcile_route(data: ReconcileRequest) -> Any:
             limit=data.limit,
         )
     except es.EventSubError as exc:
-        logger.warning(
-            "eventsub_refused op=%s type=%s", "reconcile", type(exc).__name__, exc_info=True
-        )
-        return _refusal(exc)
+        return _refusal(exc, "reconcile")
     return ReconcileResponse(
         success=True,
         sweep=SweepDTO(
@@ -239,16 +242,17 @@ async def results_route(data: ResultsRequest) -> Any:
             )
             for r in data.results
         ]
-    except ValueError:
-        logger.warning("eventsub_bad_results op=results", exc_info=True)
+    except ValueError as exc:
+        logger.warning(
+            "eventsub_bad_results op=results type=%s code=BAD_REQUEST count=%d",
+            type(exc).__name__,
+            len(data.results),
+        )
         return error_response("unknown outcome or failure reason", 400, "BAD_REQUEST")
     try:
         applied = await es.report_results(_dal(), reports)
     except es.EventSubError as exc:
-        logger.warning(
-            "eventsub_refused op=%s type=%s", "results", type(exc).__name__, exc_info=True
-        )
-        return _refusal(exc)
+        return _refusal(exc, "results")
     return ResultsResponse(success=True, applied=applied)
 
 
@@ -262,10 +266,7 @@ async def secret_route(callback_key: str) -> Any:
             success=True, secret=await es.secret_for_callback_key(_dal(), callback_key)
         )
     except es.EventSubError as exc:
-        logger.warning(
-            "eventsub_refused op=%s type=%s", "secret", type(exc).__name__, exc_info=True
-        )
-        return _refusal(exc)
+        return _refusal(exc, "secret")
 
 
 BLUEPRINTS = [eventsub_internal_bp]
