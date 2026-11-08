@@ -64,7 +64,7 @@ async fn legacy_policy_on_accepts_plaintext_in_an_unmarked_scope() {
 }
 
 #[tokio::test]
-async fn counters_stay_readable_even_with_policy_off() {
+async fn sealed_counters_are_readable_with_policy_off_but_legacy_integers_are_not() {
     let r = rig(FakeBackend::new(), false);
     let s = scope(1, 2);
     r.host
@@ -73,6 +73,34 @@ async fn counters_stay_readable_even_with_policy_off() {
         .unwrap_or_else(|e| panic!("{e}"));
     let got = r.host.get(&s, 2, "hits").await;
     assert_eq!(got.ok().flatten().as_deref(), Some(&b"5"[..]));
+    // A pre-sealing plaintext integer is a legacy value: refused once the
+    // operator turns legacy reads OFF.
+    plant(&r, "old-counter", b"9");
+    let err = r.host.get(&s, 3, "old-counter").await;
+    assert!(matches!(err, Err(KvError::Integrity(_))), "{err:?}");
+}
+
+#[tokio::test]
+async fn legacy_plaintext_counter_is_migrated_to_sealed_by_the_next_increment() {
+    let r = rig(FakeBackend::new(), true);
+    let s = scope(1, 2);
+    plant(&r, "old-counter", b"9");
+    let v = r
+        .host
+        .increment(&s, 1, "old-counter", 1, 0)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(v, 10);
+    let raw = crate::KvBackend::get(&r.host.backend, &s.data_key("old-counter"))
+        .await
+        .unwrap_or_default()
+        .unwrap_or_default();
+    assert!(
+        bundle_host_crypto::is_envelope(&raw),
+        "counter must now be sealed"
+    );
+    let got = r.host.get(&s, 2, "old-counter").await;
+    assert_eq!(got.ok().flatten().as_deref(), Some(&b"10"[..]));
 }
 
 // (b) sealed-since marker

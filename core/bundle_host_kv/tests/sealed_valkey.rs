@@ -280,10 +280,18 @@ async fn sealed_kv_end_to_end_against_real_valkey() {
     let planted = h.get(&legacy, 14, "planted").await;
     assert!(matches!(planted, Err(KvError::Integrity(_))), "{planted:?}");
 
-    // 6. Counters stay plaintext integers (INCRBY) and remain readable.
+    // 6. Counters are sealed too (CAS increment), readable via get.
     h.increment(&acme, 15, "hits", 7, 0)
         .await
         .unwrap_or_else(|e| panic!("{e}"));
+    let hits_raw = raw_get(&mut raw, &acme.data_key("hits"))
+        .await
+        .unwrap_or_default();
+    assert!(
+        hits_raw.starts_with(&MAGIC),
+        "counter must be sealed at rest"
+    );
+    assert_ne!(hits_raw, b"7");
     let hits = h
         .get(&acme, 16, "hits")
         .await
@@ -305,4 +313,58 @@ async fn sealed_kv_end_to_end_against_real_valkey() {
         .await
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(still.as_deref(), Some(&b"top-secret-token"[..]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_sealed_increments_against_real_valkey_lose_no_updates() {
+    const TASKS: usize = 16;
+    const PER_TASK: usize = 25;
+    let container = start_container(
+        VALKEY_IMAGE,
+        6379,
+        &[],
+        &["valkey-cli", "ping"],
+        Duration::from_secs(120),
+    )
+    .await;
+    let url = format!("redis://{}:{}/", container.host(), container.port());
+    let mut raw = connect(&url).await;
+    let keys = Keys::new();
+    keys.add("1", 1, 0x11);
+    let seal_on = Arc::new(AtomicBool::new(true));
+    // Two hosts over separate connections: two "pods" contending on one key.
+    let hosts = [
+        Arc::new(host(connect(&url).await, &keys, &seal_on)),
+        Arc::new(host(connect(&url).await, &keys, &seal_on)),
+    ];
+    let s = scope("acme", 1, "main", 10);
+
+    let mut joins = Vec::new();
+    for t in 0..TASKS {
+        let h = hosts[t % 2].clone();
+        let s = s.clone();
+        joins.push(tokio::spawn(async move {
+            for i in 0..PER_TASK {
+                let call_id = (t * PER_TASK + i) as u64;
+                h.increment(&s, call_id, "shared", 1, 0)
+                    .await
+                    .unwrap_or_else(|e| panic!("increment: {e}"));
+            }
+        }));
+    }
+    for j in joins {
+        j.await.unwrap_or_else(|e| panic!("join: {e}"));
+    }
+
+    let total = (TASKS * PER_TASK).to_string();
+    let got = hosts[0]
+        .get(&s, 1_000_000, "shared")
+        .await
+        .unwrap_or_else(|e| panic!("get: {e}"));
+    assert_eq!(got.as_deref(), Some(total.as_bytes()), "no lost updates");
+    let stored = raw_get(&mut raw, &s.data_key("shared"))
+        .await
+        .unwrap_or_default();
+    assert!(stored.starts_with(&MAGIC), "counter sealed at rest");
+    assert!(!contains(&stored, total.as_bytes()));
 }

@@ -24,9 +24,11 @@
 //!   operator kill-switch is ON (emergency plaintext rollback) plaintext is
 //!   by definition in use, so reads accept it.
 //! - A value that *is* an envelope but fails to open is an integrity error.
-//! - `increment` counters are plaintext integers (`INCRBY` cannot operate on
-//!   ciphertext), so a canonical decimal integer is always readable;
-//!   documented limitation in `docs/tenant-at-rest-encryption.md`.
+//! - `increment` counters are sealed too: a Lua compare-and-set loop reads,
+//!   opens, adds and re-seals (see `KvHost::sealed_increment`). A canonical
+//!   plaintext integer (a pre-sealing `INCRBY` counter) is tolerated only
+//!   while `legacy_plaintext_reads_allowed` is ON and is replaced by a sealed
+//!   value on the next increment.
 //! - The CAS digest (`#1139`: `sha1` of the stored value) is computed by the
 //!   Lua scripts over whatever is stored, i.e. the ciphertext, so no
 //!   plaintext hash is ever exposed and no script change is needed.
@@ -162,7 +164,17 @@ impl Sealing {
                 .await
                 .map_err(map_err);
         }
-        if is_counter_value(&stored) {
+        if self.legacy_plaintext_reads_allowed && is_counter_value(&stored) {
+            // A pre-sealing plaintext `INCRBY` counter: tolerated while the
+            // operator allows legacy reads (no marker check, so counters
+            // written before the scope's first sealed write stay readable)
+            // and migrated to a sealed value by the next `increment`.
+            crypto_metrics::record_legacy_plaintext_read(SURFACE);
+            tracing::warn!(
+                app_id = %scope.app_id,
+                key_hash = %crate::key_hash(key),
+                "kv read returned a LEGACY PLAINTEXT counter (not sealed)"
+            );
             return Ok(stored);
         }
         self.admit_legacy_plaintext(backend, scope, key).await?;
@@ -173,6 +185,28 @@ impl Sealing {
             "kv read returned a LEGACY PLAINTEXT value (not sealed)"
         );
         Ok(stored)
+    }
+
+    /// The current integer value of a counter for a sealed `increment`:
+    /// absent = 0; a sealed value is opened; a legacy plaintext integer is
+    /// accepted under the same policy as reads. Anything that is not a
+    /// decimal `i64` is a (loud) backend error, like `INCRBY` on a
+    /// non-integer.
+    pub(crate) async fn read_counter<B: KvBackend>(
+        &self,
+        backend: &B,
+        scope: &KvScope,
+        key: &str,
+        stored: Option<Vec<u8>>,
+    ) -> Result<i64, KvError> {
+        let Some(raw) = stored else {
+            return Ok(0);
+        };
+        let plain = self.open_for_read(backend, scope, key, raw).await?;
+        std::str::from_utf8(&plain)
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .ok_or_else(|| KvError::Backend("value is not an integer or out of range".to_string()))
     }
 
     /// Decides whether a non-envelope value may be returned as legacy

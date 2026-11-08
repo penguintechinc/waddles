@@ -175,6 +175,18 @@ pub enum QuotaOutcome<T> {
     QuotaExceeded,
 }
 
+/// Outcome of [`KvBackend::compare_and_set_with_quota`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CasOutcome {
+    /// The stored value matched `expected` and the new value was written.
+    Written,
+    /// A new key was refused: the app already holds the maximum live keys.
+    QuotaExceeded,
+    /// The stored value no longer equals `expected` (a concurrent writer won);
+    /// nothing was written and the caller must re-read and retry.
+    Conflict,
+}
+
 /// Outcome of [`KvBackend::reconcile_count_if_missing`] (self-heal, low-
 /// severity fix on PR #425's security review: the live index has no TTL,
 /// but an `allkeys-*` `maxmemory-policy` -- see `crate::policy` -- can still
@@ -215,6 +227,37 @@ pub trait KvBackend: Send + Sync {
         let _ = marker_key;
         Box::pin(async {
             Err("this kv backend cannot persist the sealed-since marker".to_string())
+        })
+    }
+
+    /// Atomically: only if the stored value of `data_key` is byte-for-byte
+    /// `expected` (`None` = the key must be absent), performs exactly what
+    /// [`Self::set_with_quota`] does. This is the compare-and-swap that keeps
+    /// sealed `increment` (read, decrypt, add, re-seal) atomic: a concurrent
+    /// writer makes it return [`CasOutcome::Conflict`] instead of losing an
+    /// update. The default fails loud for backends that cannot do it.
+    #[allow(clippy::too_many_arguments)]
+    fn compare_and_set_with_quota<'a>(
+        &'a self,
+        data_key: &'a str,
+        live_key: &'a str,
+        legacy_count_key: &'a str,
+        expected: Option<&'a [u8]>,
+        value: &'a [u8],
+        ttl_seconds: u32,
+        max_keys: u64,
+    ) -> BoxFuture<'a, Result<CasOutcome, String>> {
+        let _ = (
+            data_key,
+            live_key,
+            legacy_count_key,
+            expected,
+            value,
+            ttl_seconds,
+            max_keys,
+        );
+        Box::pin(async {
+            Err("this kv backend cannot compare-and-set (sealed increment)".to_string())
         })
     }
 
@@ -318,6 +361,48 @@ const SET_WITH_QUOTA_SCRIPT: &str = concat!(
     lua_legacy_counter!(),
     r#"
 trim(KEYS[2])
+local existed = redis.call('EXISTS', KEYS[1])
+if not redis.call('ZSCORE', KEYS[2], KEYS[1]) then
+  if live_count(KEYS[2]) >= tonumber(ARGV[3]) then
+    return 1
+  end
+end
+local ttl = tonumber(ARGV[2])
+if ttl > 0 then
+  redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+else
+  redis.call('SET', KEYS[1], ARGV[1])
+end
+redis.call('ZADD', KEYS[2], expiry_score(ttl), KEYS[1])
+if existed == 0 then
+  legacy_incr(KEYS[3])
+end
+return 0
+"#
+);
+
+/// Compare-and-set variant of [`SET_WITH_QUOTA_SCRIPT`].
+/// `KEYS` as there; `ARGV[1]` = value, `ARGV[2]` = ttl_seconds, `ARGV[3]` =
+/// max_keys, `ARGV[4]` = `'1'` if a value is expected (else the key must be
+/// absent), `ARGV[5]` = the expected stored bytes. Returns `2` on a
+/// mismatch (nothing written), `1` if quota-exceeded, `0` if written. The
+/// whole script is atomic, so the compare and the write cannot interleave
+/// with another writer.
+const CAS_SET_WITH_QUOTA_SCRIPT: &str = concat!(
+    lua_prelude!(),
+    lua_legacy_counter!(),
+    r#"
+trim(KEYS[2])
+local current = redis.call('GET', KEYS[1])
+if ARGV[4] == '1' then
+  if current ~= ARGV[5] then
+    return 2
+  end
+else
+  if current then
+    return 2
+  end
+end
 local existed = redis.call('EXISTS', KEYS[1])
 if not redis.call('ZSCORE', KEYS[2], KEYS[1]) then
   if live_count(KEYS[2]) >= tonumber(ARGV[3]) then
@@ -504,6 +589,38 @@ impl KvBackend for redis::aio::MultiplexedConnection {
                 QuotaOutcome::QuotaExceeded
             } else {
                 QuotaOutcome::Admitted(())
+            })
+        })
+    }
+
+    fn compare_and_set_with_quota<'a>(
+        &'a self,
+        data_key: &'a str,
+        live_key: &'a str,
+        legacy_count_key: &'a str,
+        expected: Option<&'a [u8]>,
+        value: &'a [u8],
+        ttl_seconds: u32,
+        max_keys: u64,
+    ) -> BoxFuture<'a, Result<CasOutcome, String>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            let status: i64 = redis::Script::new(CAS_SET_WITH_QUOTA_SCRIPT)
+                .key(data_key)
+                .key(live_key)
+                .key(legacy_count_key)
+                .arg(value)
+                .arg(ttl_seconds)
+                .arg(max_keys)
+                .arg(if expected.is_some() { "1" } else { "0" })
+                .arg(expected.unwrap_or(&[]))
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(match status {
+                0 => CasOutcome::Written,
+                1 => CasOutcome::QuotaExceeded,
+                _ => CasOutcome::Conflict,
             })
         })
     }
@@ -922,6 +1039,44 @@ pub(crate) mod fake {
                 st.legacy_incr(legacy_count_key);
             }
             Box::pin(async move { Ok(QuotaOutcome::Admitted(())) })
+        }
+
+        fn compare_and_set_with_quota<'a>(
+            &'a self,
+            data_key: &'a str,
+            live_key: &'a str,
+            legacy_count_key: &'a str,
+            expected: Option<&'a [u8]>,
+            value: &'a [u8],
+            ttl_seconds: u32,
+            max_keys: u64,
+        ) -> BoxFuture<'a, Result<CasOutcome, String>> {
+            let mut st = self.state.lock().unwrap();
+            st.trim(live_key);
+            let current = st.live_value(data_key).map(|e| e.value.clone());
+            if current.as_deref() != expected {
+                return Box::pin(async move { Ok(CasOutcome::Conflict) });
+            }
+            let existed = current.is_some();
+            if !st.is_indexed(live_key, data_key) && st.live_count(live_key) >= max_keys {
+                return Box::pin(async move { Ok(CasOutcome::QuotaExceeded) });
+            }
+            let expires_at_ms = st.expiry_for(ttl_seconds);
+            st.data.insert(
+                data_key.to_string(),
+                Entry {
+                    value: value.to_vec(),
+                    expires_at_ms,
+                },
+            );
+            st.live
+                .entry(live_key.to_string())
+                .or_default()
+                .insert(data_key.to_string(), expires_at_ms);
+            if !existed {
+                st.legacy_incr(legacy_count_key);
+            }
+            Box::pin(async move { Ok(CasOutcome::Written) })
         }
 
         fn delete<'a>(

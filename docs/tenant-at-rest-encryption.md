@@ -22,7 +22,7 @@ Valkey  bundlekv:{tenant}:{community}:{app}:data:{key} = magic|alg|dek_version|n
 |---|---|---|
 | `kv.set` / `kv.get` values | yes | AAD binds numeric tenant + community + app + guest key, so a ciphertext moved to another key, app, community or tenant fails to open (`KvError::Integrity`) |
 | guest keys | no | charset-restricted and PII-free by rule; they drive the live index and quotas |
-| `kv.increment` counters | no | `INCRBY` cannot operate on ciphertext; canonical decimal integers stay readable by `kv.get` even when plaintext is otherwise refused. Do not store sensitive data in counters |
+| `kv.increment` counters | yes | read, open, add, re-seal under an atomic Lua compare-and-set (stored bytes must be unchanged, else re-read and retry with jittered backoff, up to 64 rounds then a loud `backend` error), so concurrent increments lose no update. Same AAD as `set`; `get` of a counter returns its decimal digits. A pre-sealing plaintext integer counter is tolerated while `KV_LEGACY_PLAINTEXT_READS_ALLOWED` is `true` and becomes sealed on the next increment |
 | CAS digest (#1139) | n/a | the Lua scripts hash whatever is stored, i.e. the ciphertext: no plaintext hash is exposed and the version is opaque. Rewriting the same plaintext yields a new version (random nonce); do not rely on versions for "unchanged" detection |
 
 Key namespace today is name-keyed (`bundlekv:{tenant slug}:{community name}:...`);
@@ -90,7 +90,8 @@ wedge the stage. Caller identity: `sub` must be `svc-process` / `svc-action`.
 | rotate a tenant DEK | rotate in hub-api; `dek-rotated` invalidation evicts caches; old ciphertext reads via the version in its header |
 | revoke a tenant | revoke in hub-api: broker returns `UNAVAILABLE`/`NOT_FOUND`, stages evict on the invalidation signal; sealed values become unreadable (crypto-shred) |
 | flip legacy reads OFF | when `bundle_crypto_legacy_plaintext_reads_total` has been flat for a full TTL window, set `KV_LEGACY_PLAINTEXT_READS_ALLOWED=false` and roll the stages |
-| a counter key reads back an integrity error | it holds non-integer plaintext in a sealed scope: it was written by a bundle build that wrote plaintext, or planted; rewrite it via `kv.set` |
+| `increment` fails with `increment contention` | more than 64 concurrent writers lost the compare-and-set race on one hot key; shard the counter key. No update is ever lost silently |
+| a counter key reads back an integrity error | it holds plaintext in a sealed scope (legacy reads OFF, or planted); delete or rewrite it via `kv.set`/`kv.delete` |
 
 ## Tests
 
