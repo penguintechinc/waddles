@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-pat"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!pat [@user]` -> a flavor-text reply, relayed back. Stateless relay, no kv/db."
 requires-python = ">=3.13"
 dependencies = []

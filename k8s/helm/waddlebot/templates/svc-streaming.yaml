@@ -282,7 +282,7 @@ spec:
 {{- if .Values.pipeline.svcStreaming.nodePort.enabled }}
 ---
 # Alpha-only direct media ingest exposure (RTMP push + SRT push + the control HTTP port),
-# mirroring how svc-presentation.yaml templates presentation.service.type/nodePort today.
+# mirroring how svc-presentation-rust.yaml templates presentation.rust.nodePort.
 # A second, separate Service rather than switching the ClusterIP Service above to NodePort,
 # since only 3 of its 3 ports need node-reachability here and fixed nodePorts (not
 # Helm/K8s-assigned) keep a local dev's OBS/ffmpeg RTMP target and PUBLIC_BASE_URL stable
