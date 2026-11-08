@@ -121,8 +121,18 @@ impl TwitchAppSource for TwApp {
 /// hub-api secret-route double.
 struct HookSecrets;
 impl EventSubSecretSource for HookSecrets {
-    async fn secret(&self, callback_key: &str) -> Result<SecretString, SlotError> {
-        if callback_key == CALLBACK_KEY {
+    async fn owns_subscription(&self, community_id: i64, id: &str) -> Result<(), SlotError> {
+        // Ledger: `mine-sub` / `unknown-sub` are registered to this community; `theirs-sub`
+        // belongs to another one (a lookup could show the same broadcaster).
+        if community_id == COMMUNITY && matches!(id, "mine-sub" | "unknown-sub") {
+            Ok(())
+        } else {
+            Err(SlotError::Refused("subscription_not_owned"))
+        }
+    }
+
+    async fn secret(&self, community_id: i64, callback_key: &str) -> Result<SecretString, SlotError> {
+        if community_id == COMMUNITY && callback_key == CALLBACK_KEY {
             Ok(SecretString::new(HOOK_SECRET.to_string()))
         } else {
             Err(SlotError::Refused("secret_unavailable"))

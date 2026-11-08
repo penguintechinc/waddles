@@ -275,10 +275,26 @@ impl<C: TwitchCredentialSource, A: TwitchAppSource> SlotSource for TwitchSlots<C
 /// `GET /api/v1/internal/eventsub/secret/<callback_key>`, scope `eventsub:secret-read`, held by
 /// the svc-ingest identity ONLY, never the bundle's). The value is injected into
 /// `transport.secret` host-side and never enters guest memory.
+///
+/// Both lookups are bound to the invoking COMMUNITY (the producer-supplied `callbackKey` and
+/// subscription id are never trusted on their own): an implementation backed by the hub-api
+/// subscription ledger MUST refuse a key / subscription not registered under that
+/// `(tenant, community)`, so one community can never obtain another's secret or callback or
+/// delete another's subscription.
 #[allow(async_fn_in_trait)] // service-binary-internal, see outbound.rs::IrcOutbound
 pub trait EventSubSecretSource: Send + Sync {
-    /// The webhook secret for `callback_key`.
-    async fn secret(&self, callback_key: &str) -> Result<SecretString, SlotError>;
+    /// The webhook secret for `callback_key`, refused unless the key is registered to
+    /// `community_id`.
+    async fn secret(&self, community_id: i64, callback_key: &str)
+        -> Result<SecretString, SlotError>;
+
+    /// `Ok` only when Twitch subscription `twitch_subscription_id` is registered in the ledger
+    /// under `community_id` (`Refused("subscription_not_owned")` otherwise).
+    async fn owns_subscription(
+        &self,
+        community_id: i64,
+        twitch_subscription_id: &str,
+    ) -> Result<(), SlotError>;
 }
 
 /// Kinds [`TwitchDuties`] claims.
@@ -440,6 +456,12 @@ impl<S: EventSubSecretSource, A: TwitchAppSource> TwitchDuties<S, A> {
         let community = cx
             .community_id
             .ok_or(ExecError::Slot(SlotError::Refused("no_community_scope")))?;
+        // Ledger binding first: the subscription must be registered under THIS community
+        // (broadcaster ids are not unique across communities, so they cannot be the authority).
+        self.secrets
+            .owns_subscription(community, id)
+            .await
+            .map_err(ExecError::Slot)?;
         let broadcaster = self
             .app
             .broadcaster_id(community)
@@ -497,9 +519,24 @@ impl<S: EventSubSecretSource, A: TwitchAppSource> DutyHook for TwitchDuties<S, A
         if cx.community_id.is_none() {
             return Err(ExecError::Slot(SlotError::Refused("no_community_scope")));
         }
-        if policy_op(cx)?.op == "eventsub.delete" {
-            let id = Self::delete_id(cx)?;
-            self.check_owned(cx, id).await?;
+        match policy_op(cx)?.op {
+            "eventsub.delete" => {
+                let id = Self::delete_id(cx)?;
+                self.check_owned(cx, id).await?;
+            }
+            // The callback key is producer text: prove it is registered to this community
+            // before anything is built (the secret lookup refuses a foreign key).
+            "eventsub.create" => {
+                let key = Self::callback_key(cx)?;
+                let community = cx
+                    .community_id
+                    .ok_or(ExecError::Slot(SlotError::Refused("no_community_scope")))?;
+                self.secrets
+                    .secret(community, &key)
+                    .await
+                    .map_err(ExecError::Slot)?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -555,6 +592,15 @@ impl<S: EventSubSecretSource, A: TwitchAppSource> DutyHook for TwitchDuties<S, A
         match slot {
             "TWITCH_EVENTSUB_CALLBACK" => {
                 let key = Self::callback_key(cx)?;
+                // Binding re-proven at the point of use: a callback is never built for a key
+                // the community does not own.
+                let community = cx
+                    .community_id
+                    .ok_or(ExecError::Slot(SlotError::Refused("no_community_scope")))?;
+                self.secrets
+                    .secret(community, &key)
+                    .await
+                    .map_err(ExecError::Slot)?;
                 Ok(SlotValue::new(format!(
                     "{}/eventsub/twitch/webhook/{key}",
                     self.callback_base
@@ -562,7 +608,14 @@ impl<S: EventSubSecretSource, A: TwitchAppSource> DutyHook for TwitchDuties<S, A
             }
             "TWITCH_EVENTSUB_SECRET" => {
                 let key = Self::callback_key(cx)?;
-                let secret = self.secrets.secret(&key).await.map_err(ExecError::Slot)?;
+                let community = cx
+                    .community_id
+                    .ok_or(ExecError::Slot(SlotError::Refused("no_community_scope")))?;
+                let secret = self
+                    .secrets
+                    .secret(community, &key)
+                    .await
+                    .map_err(ExecError::Slot)?;
                 Ok(SlotValue::new(secret.expose().to_owned()))
             }
             "TWITCH_SEGMENT_ID" => {
@@ -972,8 +1025,21 @@ mod tests {
 
     struct Secrets;
     impl EventSubSecretSource for Secrets {
-        async fn secret(&self, key: &str) -> Result<SecretString, SlotError> {
-            if key == "key-abcdefgh" {
+        async fn owns_subscription(&self, community_id: i64, id: &str) -> Result<(), SlotError> {
+            // Ledger: community 7 owns `mine`/`raid`/`nocond`; community 9 owns `theirs`.
+            let ok = matches!(
+                (community_id, id),
+                (7, "mine" | "raid" | "nocond" | "absent") | (9, "theirs" | "shared")
+            );
+            if ok {
+                Ok(())
+            } else {
+                Err(SlotError::Refused("subscription_not_owned"))
+            }
+        }
+
+        async fn secret(&self, community_id: i64, key: &str) -> Result<SecretString, SlotError> {
+            if community_id == 7 && key == "key-abcdefgh" {
                 Ok(SecretString::new("whsec".to_string()))
             } else {
                 Err(SlotError::Refused("secret_unavailable"))
@@ -1136,6 +1202,33 @@ mod tests {
         );
     }
 
+    // regression: callbackKey is producer text. A key registered to another community must not
+    // yield that community's callback or secret, nor pass the create gate.
+    #[tokio::test]
+    async fn a_callback_key_of_another_community_is_refused_everywhere() {
+        let t = r#"{"type":"stream.online","version":1,"callbackKey":"key-abcdefgh"}"#;
+        let action = policy_action("eventsub.create", Some(t));
+        let c = client();
+        let cx_for = |community: i64| DutyCx {
+            platform: "twitch",
+            action: &action,
+            community_id: Some(community),
+            pinned_channel: None,
+            client: &c,
+        };
+        let foreign = cx_for(9);
+        let refused = ExecError::Slot(SlotError::Refused("secret_unavailable"));
+        assert_eq!(duties().gate(&foreign).await.unwrap_err(), refused);
+        for slot in ["TWITCH_EVENTSUB_CALLBACK", "TWITCH_EVENTSUB_SECRET"] {
+            assert_eq!(
+                duties().dynamic_slot(&foreign, slot, &c).await.unwrap_err(),
+                refused,
+                "{slot}"
+            );
+        }
+        assert_eq!(duties().gate(&cx_for(7)).await, Ok(()));
+    }
+
     #[tokio::test]
     async fn gate_needs_a_community_scope() {
         let action = policy_action("eventsub.create", None);
@@ -1236,10 +1329,18 @@ mod tests {
                 "{id}"
             );
         }
-        // Community 8 has no connection (the app source refuses): nothing is looked up or passed.
+        // regression: broadcaster ids are not unique across communities. `shared` names the
+        // SAME broadcaster (111) but is registered to community 9: community 7 is refused by the
+        // ledger even though the broadcaster matches.
+        mount_sub(&server, "shared", serde_json::json!({"broadcaster_user_id": "111"})).await;
+        assert_eq!(
+            gate_delete(&d, Some(7), "shared").await.unwrap_err(),
+            ExecError::Slot(SlotError::Refused("subscription_not_owned"))
+        );
+        // Community 8 owns nothing in the ledger: refused before any lookup.
         assert_eq!(
             gate_delete(&d, Some(8), "mine").await.unwrap_err(),
-            ExecError::Slot(SlotError::Refused("no_connection"))
+            ExecError::Slot(SlotError::Refused("subscription_not_owned"))
         );
         assert_eq!(
             gate_delete(&d, None, "mine").await.unwrap_err(),
