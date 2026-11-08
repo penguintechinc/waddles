@@ -16,6 +16,7 @@ pub const RELAY_OPS: &[(&str, &[&str])] = &[
         &[
             "chat.send",
             "chat.delete",
+            "chat.clear",
             "dm.send",
             "mod.ban",
             "mod.timeout",
@@ -37,6 +38,8 @@ pub const RELAY_OPS: &[(&str, &[&str])] = &[
             "mod.timeout",
             "message.edit",
             "reaction.add",
+            "message.embed",
+            "webhook.create",
             "commands.register",
             "commands.register.guild",
             "interaction.callback",
@@ -85,7 +88,9 @@ pub fn permission_for(platform: &str, op: &str) -> Option<PermissionId> {
     let p = platform.to_string();
     Some(match op {
         "chat.send" => PermissionId::ChatSend(p),
-        "chat.delete" => PermissionId::ChatDelete(p),
+        "chat.delete" | "chat.clear" => PermissionId::ChatDelete(p),
+        "message.embed" => PermissionId::ChatSend(p),
+        "webhook.create" => PermissionId::Moderation(p),
         "dm.send" => PermissionId::DmSend(p),
         "message.edit" => PermissionId::MessageEdit(p),
         "reaction.add" => PermissionId::MessageReaction(p),
@@ -150,7 +155,7 @@ mod tests {
                 n += 1;
             }
         }
-        assert_eq!(n, 9 + 13 + 6);
+        assert_eq!(n, 10 + 15 + 6);
     }
 
     #[test]

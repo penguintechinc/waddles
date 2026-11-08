@@ -257,6 +257,7 @@ mod tests {
                 name: "t".to_string(),
                 write: false,
                 required_scope: None,
+                host_op: None,
             }],
             requested: Vec::new(),
         };

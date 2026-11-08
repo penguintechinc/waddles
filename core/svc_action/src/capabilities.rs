@@ -64,11 +64,37 @@ use crate::pin_sig::{PinFields, PinKeys};
 use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
-mod discord_role_tools;
+mod host_tools;
 mod event_sync;
 pub use event_sync::{run_event_sync_consumer, EVENT_SYNC_REQUEST_QUEUE, EVENT_SYNC_RESULT_PREFIX};
 mod tool;
 pub use tool::ToolWiring;
+
+/// A raw platform account id held host-side. A newtype so the id can never reach a log line or
+/// metric label through a derived `Debug` of the scope that carries it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ActorId(String);
+
+impl ActorId {
+    /// Wraps a platform account id; `None` for an empty / oversized / control-bearing value.
+    #[must_use]
+    pub fn new(raw: &str) -> Option<Self> {
+        (!raw.is_empty() && raw.len() <= 128 && !raw.chars().any(char::is_control))
+            .then(|| Self(raw.to_string()))
+    }
+
+    /// The raw id (host-side use only).
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ActorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ActorId(<redacted>)")
+    }
+}
 
 /// The `(tenant, community, app_id)` an in-flight `invoke` belongs to,
 /// resolved from the delivered envelope (spec §5.11: "Tenant and community
@@ -99,6 +125,10 @@ pub struct InvokeScope {
     /// non-Discord (e.g. Wix) event. Used only to ASSERT the source guild equals the community's
     /// own paired guild for channel-less role ops -- it is never a destination.
     pub origin_guild_id: Option<String>,
+    /// The raw platform account id of the delivered event's author (`payload.user_id` /
+    /// `author_id`), host-derived from the verified envelope. The ONLY input of host-side actor
+    /// resolution ([`crate::actor`]); never guest-supplied, never logged (redacted `Debug`).
+    pub origin_user_id: Option<ActorId>,
     /// Numeric `tenants.id`/`communities.id` (spec
     /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     /// SS5.1/SS4 `GrantScopeKey`) -- resolved by `crate::dispatch::
@@ -441,7 +471,15 @@ impl RelayOp {
             Self::ChatSend | Self::ChatDelete | Self::DmSend => true,
             Self::RoleAdd | Self::RoleRemove => false,
             Self::Registered(op) => {
-                op.starts_with("mod.") || matches!(op, "message.edit" | "reaction.add")
+                op.starts_with("mod.")
+                    || matches!(
+                        op,
+                        "message.edit"
+                            | "reaction.add"
+                            | "message.embed"
+                            | "webhook.create"
+                            | "chat.clear"
+                    )
             }
         }
     }
@@ -648,6 +686,9 @@ enum AckFailure {
     Unsupported,
     /// The community has several paired guilds / usable bindings: never guessed.
     AmbiguousPairedGuild,
+    /// The platform API quota is spent (e.g. the YouTube Data API daily quota): not a
+    /// caller fault and not retryable until the quota window resets.
+    QuotaExhausted,
     Failed,
 }
 
@@ -663,6 +704,7 @@ fn parse_ack(raw: &str) -> Result<AckOutcome, String> {
                 Some("not_in_community") => AckFailure::NotInCommunity,
                 Some("unsupported") => AckFailure::Unsupported,
                 Some("ambiguous_paired_guild") => AckFailure::AmbiguousPairedGuild,
+                Some("quota_exhausted") => AckFailure::QuotaExhausted,
                 _ => AckFailure::Failed,
             },
         )),
@@ -1086,6 +1128,12 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// Verify-only ring for hub-api's signed event-sync requests
     /// (`EVENT_SYNC_REQUEST_KEYS`); `None` drops every request unanswered.
     event_sync_keys: Option<Arc<PinKeys>>,
+    /// Host-verified actor directory ([`crate::actor`]); `None` until
+    /// [`Self::with_actor_directory`] -- scope-restricted tools are then refused (fail closed).
+    actor_directory: Option<Arc<dyn crate::actor::ActorDirectory>>,
+    /// Producer-side user detokenizer ([`crate::platform_user`]); `None` until
+    /// [`Self::with_platform_users`] -- host tools naming a user are then refused.
+    platform_users: Option<Arc<dyn crate::platform_user::PlatformUserResolver>>,
 }
 
 /// The outbound PII-detokenization dependency: a live resolver over
@@ -1133,7 +1181,26 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             tool: None,
             pin_keys: None,
             event_sync_keys: None,
+            actor_directory: None,
+            platform_users: None,
         }
+    }
+
+    /// Wires the host-verified actor directory used to resolve a scope-restricted tool's caller.
+    #[must_use]
+    pub fn with_actor_directory(mut self, dir: Arc<dyn crate::actor::ActorDirectory>) -> Self {
+        self.actor_directory = Some(dir);
+        self
+    }
+
+    /// Wires the producer-side user detokenizer used by host-executed platform tools.
+    #[must_use]
+    pub fn with_platform_users(
+        mut self,
+        resolver: Arc<dyn crate::platform_user::PlatformUserResolver>,
+    ) -> Self {
+        self.platform_users = Some(resolver);
+        self
     }
 
     /// Wires the signing keys (`ENVELOPE_BINDING_KEYS` + active kid) used to
@@ -1806,6 +1873,10 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                                         op.as_str()
                                     ),
                                 ),
+                                AckFailure::QuotaExhausted => denied(
+                                    "quota_exhausted",
+                                    format!("discord {} refused: platform quota exhausted", op.as_str()),
+                                ),
                                 AckFailure::Failed => denied(
                                     "relay_failed",
                                     format!("discord {} failed at the platform", op.as_str()),
@@ -1900,23 +1971,6 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         op: RelayOp,
         message: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
-        self.handle_discord_queued_op_scoped(scope, op, message, false)
-            .await
-    }
-
-    /// [`Self::handle_discord_queued_op`] with `guild_scoped`: when `true` (the
-    /// `tool.invoke` role tools ONLY) a role op whose triggering event has no Discord channel
-    /// (a gateway member event, or an external Wix-style event) is queued with the wire scope
-    /// `guild:<source guild>` / `guild:-` instead of being refused. The host pins the target
-    /// guild to the community's OWN binding guild; the scope is only an assertion that a
-    /// gateway event's source guild equals it. Never taken from the call's args.
-    pub(crate) async fn handle_discord_queued_op_scoped(
-        &self,
-        scope: &InvokeScope,
-        op: RelayOp,
-        message: &serde_json::Value,
-        guild_scoped: bool,
-    ) -> Result<serde_json::Value, HostResultError> {
         let str_field = |name: &str| {
             message
                 .get(name)
@@ -1969,7 +2023,6 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 role_key: &'a str,
             },
         }
-        let role_scope: String;
         let pending = match op {
             RelayOp::ChatDelete => {
                 let channel_id = origin("chat.delete")?;
@@ -2028,12 +2081,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             }
             RelayOp::RoleAdd | RelayOp::RoleRemove => {
                 let what = op.as_str();
-                let origin_channel: &str = if guild_scoped {
-                    role_scope = discord_role_tools::tool_origin_scope(scope, what)?;
-                    &role_scope
-                } else {
-                    origin(what)?
-                };
+                // `relay.push` role ops stay channel-pinned; guild-scoped (channel-less) role
+                // ops are served only by the generic host tool path (`host_tools`).
+                let origin_channel: &str = origin(what)?;
                 // The bundle names a tokenized user and a managed-role KEY --
                 // never a role snowflake, never a guild (the drain maps the key
                 // through the community's binding allowlist and pins the guild
@@ -2275,6 +2325,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                                 AckFailure::NotInCommunity => "target_not_in_community",
                                 AckFailure::Unsupported => "unsupported_op",
                                 AckFailure::AmbiguousPairedGuild => "ambiguous_paired_guild",
+                                AckFailure::QuotaExhausted => "quota_exhausted",
                                 AckFailure::Failed => "relay_failed",
                             };
                             Err(denied(
@@ -3912,6 +3963,7 @@ mod tests {
             origin_channel_id: None,
             origin_platform: None,
             origin_guild_id: None,
+            origin_user_id: None,
             tenant_id: 7,
             community_id: 3,
             app_version: 1,
@@ -3937,6 +3989,7 @@ mod tests {
             origin_channel_id: Some("somechannel".to_string()),
             origin_platform: Some("twitch".to_string()),
             origin_guild_id: None,
+            origin_user_id: None,
             ..scope()
         }
     }
@@ -3949,6 +4002,7 @@ mod tests {
             origin_channel_id: Some("123456789012345678".to_string()),
             origin_platform: Some("discord".to_string()),
             origin_guild_id: None,
+            origin_user_id: None,
             ..scope()
         }
     }
@@ -4296,6 +4350,7 @@ mod tests {
             let sc = InvokeScope {
                 origin_platform: platform.map(str::to_string),
                 origin_guild_id: None,
+                origin_user_id: None,
                 origin_channel_id: origin.map(str::to_string),
                 ..scope()
             };
@@ -4325,6 +4380,7 @@ mod tests {
         let sc = InvokeScope {
             origin_platform: Some("twitch".to_string()),
             origin_guild_id: None,
+            origin_user_id: None,
             ..discord_scope()
         };
         let err = c
@@ -4468,6 +4524,7 @@ mod tests {
                 origin_channel_id: origin,
                 origin_platform: Some("twitch".to_string()),
                 origin_guild_id: None,
+                origin_user_id: None,
                 ..scope()
             };
             let err = caps
@@ -5418,6 +5475,7 @@ mod tests {
             origin_channel_id: Some("not-a-snowflake".to_string()),
             origin_platform: Some("discord".to_string()),
             origin_guild_id: None,
+            origin_user_id: None,
             ..scope()
         };
         let cases = [
@@ -5780,6 +5838,10 @@ mod tests {
         assert_eq!(
             parse_ack(r#"{"ok":false,"code":"ambiguous_paired_guild"}"#),
             Ok(AckOutcome::Refused(AckFailure::AmbiguousPairedGuild))
+        );
+        assert_eq!(
+            parse_ack(r#"{"ok":false,"code":"quota_exhausted"}"#),
+            Ok(AckOutcome::Refused(AckFailure::QuotaExhausted))
         );
         assert_eq!(
             parse_ack(r#"{"ok":false,"code":"anything-else"}"#),
@@ -6453,6 +6515,7 @@ mod tests {
             origin_channel_id: Some("not-a-snowflake".to_string()),
             origin_platform: Some("discord".to_string()),
             origin_guild_id: None,
+            origin_user_id: None,
             ..scope()
         };
         let err = caps

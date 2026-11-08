@@ -508,6 +508,7 @@ pub async fn invoke_dispatch(
         origin_channel_id: env.event.source.as_ref().and_then(|s| s.channel_id.clone()),
         origin_platform: env.event.source.as_ref().map(|s| s.platform.clone()),
         origin_guild_id: discord_event_guild(env),
+        origin_user_id: event_actor_id(env),
         tenant_id,
         community_id,
         // Resolved once at startup from the active-set row that loaded
@@ -555,6 +556,16 @@ pub async fn invoke_dispatch(
             detail: None,
         }),
     }
+}
+
+/// The platform account id of the delivered event's author (`payload.user_id`, else
+/// `author_id` -- the same two keys `svc_process`'s identity derivation reads); `None` when the
+/// event names no usable author. The only input of host-side actor resolution.
+fn event_actor_id(env: &penguin_spine::StageEnvelope) -> Option<crate::capabilities::ActorId> {
+    ["user_id", "author_id"]
+        .iter()
+        .find_map(|k| env.event.payload.get(*k).and_then(|v| v.as_str()))
+        .and_then(crate::capabilities::ActorId::new)
 }
 
 /// The guild snowflake a Discord gateway event came from (`payload.guild_id` of a `discord`

@@ -178,6 +178,10 @@ class ExportedTool:
     # gate before dispatch; see `bundle_tool_call::scopes_for_role`). `None` =
     # unrestricted. Must be one of `TOOL_REQUIRED_SCOPES`.
     required_scope: str | None = None
+    # Host-side execution declaration (platform service bundles): tool name -> registered
+    # producer op + argument mapping, normalized to the consent-summary (`hostOp`) shape. `None`
+    # = an ordinary guest-served tool. See `parse_host_op`.
+    host_op: dict[str, Any] | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -451,6 +455,128 @@ TOOL_REQUIRED_SCOPES = frozenset(
     }
 )
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
+_HOST_OP_PLATFORMS = frozenset({"twitch", "discord", "youtube", "kick"})
+_HOST_OP_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){1,2}$")
+_HOST_OP_ARG_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_HOST_OP_ORIGINS = frozenset({"channel", "guild_scope", "none"})
+_HOST_OP_USER_WIRES = frozenset({"platform_id", "placeholder"})
+_HOST_OP_KEYS = frozenset(
+    {
+        "platform",
+        "op",
+        "user",
+        "user_wire",
+        "message_id",
+        "text",
+        "text_object",
+        "text_list",
+        "required",
+        "origin",
+        "returns",
+    }
+)
+
+
+def parse_host_op(raw: Any, *, tool: str) -> dict[str, Any] | None:
+    """Validate an exported tool's optional `host_op:` block into its consent-summary shape.
+
+    `host_op` declares that the HOST (not the guest) executes the tool by translating the call
+    into a registered platform producer op (`platform` + `op`, checked against the host op
+    table at execution time -- an unregistered op fails loud there). Argument mapping keys:
+    `user` (tokenized-UUID arg -> wire user id), `message_id`, `text` or `text_object`
+    (json key -> arg), `required` args, `origin` (channel | guild_scope | none), `user_wire`
+    (platform_id | placeholder) and `returns` (response keys surfaced to the caller). Every
+    argument name is a plain identifier; unknown keys are rejected (fail closed). Output keys
+    are camelCase to match the rest of the summary.
+    """
+    if raw is None:
+        return None
+    where = f"tool {tool!r}: host_op"
+    _require(isinstance(raw, dict), "invalid_tool_host_op", f"{where} must be a mapping")
+    unknown = sorted(set(raw) - _HOST_OP_KEYS)
+    _require(not unknown, "invalid_tool_host_op", f"{where} has unknown keys {unknown}")
+    platform, op = raw.get("platform"), raw.get("op")
+    _require(
+        platform in _HOST_OP_PLATFORMS,
+        "invalid_tool_host_op",
+        f"{where}.platform must be one of {sorted(_HOST_OP_PLATFORMS)}",
+    )
+    _require(
+        isinstance(op, str) and bool(_HOST_OP_NAME_RE.fullmatch(op)),
+        "invalid_tool_host_op",
+        f"{where}.op must be a dotted op name such as mod.ban",
+    )
+
+    def arg(key: str) -> str | None:
+        value = raw.get(key)
+        if value is None:
+            return None
+        _require(
+            isinstance(value, str) and bool(_HOST_OP_ARG_RE.fullmatch(value)),
+            "invalid_tool_host_op",
+            f"{where}.{key} must be a tool argument name",
+        )
+        return value
+
+    out: dict[str, Any] = {"platform": platform, "op": op}
+    for key, summary_key in (
+        ("user", "user"),
+        ("message_id", "messageId"),
+        ("text", "text"),
+        ("text_list", "textList"),
+    ):
+        value = arg(key)
+        if value is not None:
+            out[summary_key] = value
+    _require(
+        not ("text" in out and "textList" in out),
+        "invalid_tool_host_op",
+        f"{where}: text, text_list and text_object are mutually exclusive",
+    )
+    for key, summary_key, vocab in (
+        ("user_wire", "userWire", _HOST_OP_USER_WIRES),
+        ("origin", "origin", _HOST_OP_ORIGINS),
+    ):
+        value = raw.get(key)
+        if value is not None:
+            _require(
+                value in vocab,
+                "invalid_tool_host_op",
+                f"{where}.{key} must be one of {sorted(vocab)}",
+            )
+            out[summary_key] = value
+    for key in ("required", "returns"):
+        names = raw.get(key)
+        if names is not None:
+            _require(
+                isinstance(names, list)
+                and all(isinstance(n, str) and _HOST_OP_ARG_RE.fullmatch(n) for n in names),
+                "invalid_tool_host_op",
+                f"{where}.{key} must be a list of argument names",
+            )
+            out[key] = sorted(set(names))
+    text_object = raw.get("text_object")
+    if text_object is not None:
+        _require(
+            isinstance(text_object, dict)
+            and bool(text_object)
+            and all(
+                isinstance(k, str)
+                and isinstance(v, str)
+                and _HOST_OP_ARG_RE.fullmatch(k)
+                and _HOST_OP_ARG_RE.fullmatch(v)
+                for k, v in text_object.items()
+            ),
+            "invalid_tool_host_op",
+            f"{where}.text_object must map json keys to argument names",
+        )
+        _require(
+            "text" not in out and "textList" not in out,
+            "invalid_tool_host_op",
+            f"{where}: text, text_list and text_object are mutually exclusive",
+        )
+        out["textObject"] = dict(sorted(text_object.items()))
+    return out
 
 
 def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
@@ -519,6 +645,7 @@ def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
                 access=access,
                 risk=risk,
                 required_scope=required_scope,
+                host_op=parse_host_op(entry.get("host_op"), tool=name),
             )
         )
     return tuple(tools)
