@@ -98,6 +98,8 @@ def _refusal(exc: ctx.ActiveContextError) -> tuple[dict[str, object], int]:
     """Map a refusal to the JSON error envelope (fixed, application-authored text)."""
     if isinstance(exc, ctx.InvalidContextRequestError):
         status, code, message = 400, "BAD_REQUEST", "platform, source_id, user or community invalid"
+    elif isinstance(exc, ctx.AmbiguousSourceError):
+        status, code, message = 409, "SCOPE_AMBIGUOUS", "source maps to more than one tenant"
     elif isinstance(exc, ctx.NotSwitchableError):
         status, code, message = 404, "COMMUNITY_NOT_SWITCHABLE", "community is not switchable here"
     else:

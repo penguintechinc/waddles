@@ -35,12 +35,15 @@ from blueprints.v1.dataplane_active_context import (  # noqa: E402
     SCOPE_DATAPLANE_ACTIVE_CONTEXT,
     dataplane_active_context_bp,
 )
+from services.schema import bind_admin_tables, bind_auth_tables  # noqa: E402
 
 INGEST_ID = "spiffe://penguintech.io/alpha/svc-ingest"
 OTHER_ID = "spiffe://penguintech.io/alpha/svc-action"
 TENANT_SCOPED_ID = "spiffe://penguintech.io/alpha/svc-tenant"
 AUDIENCE = "waddlebot-internal"
 GUILD = "474965105759748096"
+OTHER_GUILD = "555000111222333444"
+LEGACY_GUILD = "666000111222333444"
 USER = "7d9f1c52-3b8e-4f6a-9a4d-0c2b6e1f8a11"
 URL = "/api/v1/internal/dataplane/active-context"
 RESPONSE_FIELDS = {"communityPublicId", "communityId", "communityName", "explicit", "communities"}
@@ -128,7 +131,7 @@ async def db(pg_db: PgTestDatabase) -> AsyncIterator[AsyncDAL]:
     tenant = int(await _one(adal, "INSERT INTO tenants (slug) VALUES ('t1') RETURNING id", []))
     other = int(await _one(adal, "INSERT INTO tenants (slug) VALUES ('t2') RETURNING id", []))
 
-    async def community(name: str, tenant_id: int, active: bool = True) -> int:
+    async def community(name: str, tenant_id: int, active: bool = True, guild: str = GUILD) -> int:
         cid = int(
             await _one(
                 adal,
@@ -140,17 +143,20 @@ async def db(pg_db: PgTestDatabase) -> AsyncIterator[AsyncDAL]:
         await adal.executesql_async(
             "INSERT INTO community_servers (community_id, platform, platform_server_id, status) "
             "VALUES (%s, 'discord', %s, 'approved')",
-            [cid, GUILD],
+            [cid, guild],
         )
         return cid
 
     seed.first = await community("Alpha Squad", tenant)
     seed.second = await community("Beta Squad", tenant)
     seed.inactive = await community("Dormant", tenant, active=False)
-    seed.foreign = await community("Foreign", other)
+    seed.foreign = await community("Foreign", other, guild=OTHER_GUILD)
     for attr, cid in (("first", seed.first), ("second", seed.second), ("foreign", seed.foreign)):
         public = await _one(adal, "SELECT public_id::text FROM communities WHERE id = %s", [cid])
         setattr(seed, f"{attr}_public", str(public))
+    # As create_app() does at startup: bind the pydal models the shared resolver reads (no DDL).
+    bind_auth_tables(adal.dal)
+    bind_admin_tables(adal.dal)
     adal.seed = seed  # type: ignore[attr-defined]
     yield adal
 
@@ -178,6 +184,14 @@ def _get_url(user: str = USER, source: str = GUILD) -> str:
 
 def _put_body(community: str, user: str = USER) -> dict[str, str]:
     return {"platform": "discord", "sourceId": GUILD, "user": user, "community": community}
+
+
+async def _link(db: Any, community_id: int, guild: str) -> None:
+    await db.executesql_async(
+        "INSERT INTO community_servers (community_id, platform, platform_server_id, status) "
+        "VALUES (%s, 'discord', %s, 'approved')",
+        [community_id, guild],
+    )
 
 
 async def _count(db: Any) -> int:
@@ -289,6 +303,57 @@ class TestActiveContext:
         assert bad.status_code == 400
         missing = await client.put(URL, json={"platform": "discord"}, headers=_auth(issuer))
         assert missing.status_code >= 400
+
+
+class TestSharedCandidateRule:
+    """Same fail-closed rule as dataplane/resolve-scope (``resolve_claimants``)."""
+
+    async def test_source_spanning_tenants_is_refused_never_pinned(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        await _link(db, db.seed.foreign, GUILD)  # second tenant now also claims the guild
+        client = app.test_client()
+        got = await client.get(_get_url(), headers=_auth(issuer))
+        assert got.status_code == 409
+        assert "tenant" in str(await got.get_json())
+        put = await client.put(URL, json=_put_body(db.seed.first_public), headers=_auth(issuer))
+        assert put.status_code == 409
+        assert await _count(db) == 0
+
+    async def test_cross_tenant_claim_by_an_inactive_community_still_refuses(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        # Judged on the PRE-filter claimants: deactivating the other tenant's community must not
+        # turn a contested source into a silently-pinned one.
+        await _link(db, db.seed.foreign, GUILD)
+        await db.executesql_async(
+            "UPDATE communities SET is_active = FALSE WHERE id = %s", [db.seed.foreign]
+        )
+        response = await app.test_client().get(_get_url(), headers=_auth(issuer))
+        assert response.status_code == 409
+
+    async def test_inactive_verified_claimant_never_falls_back_to_legacy(
+        self, app: Quart, db: Any, issuer: ServiceJwtIssuer
+    ) -> None:
+        verified = int(
+            await _one(
+                db,
+                "INSERT INTO communities (name, tenant_id, is_active) "
+                "VALUES ('Verified', (SELECT tenant_id FROM communities WHERE id = %s), FALSE) "
+                "RETURNING id",
+                [db.seed.first],
+            )
+        )
+        await _link(db, verified, LEGACY_GUILD)
+        await db.executesql_async(
+            "INSERT INTO communities (name, tenant_id, platform, platform_server_id) "
+            "VALUES ('Squatter', (SELECT tenant_id FROM communities WHERE id = %s), "
+            "'discord', %s)",
+            [db.seed.first, LEGACY_GUILD],
+        )
+        response = await app.test_client().get(_get_url(source=LEGACY_GUILD), headers=_auth(issuer))
+        assert response.status_code == 404
+        assert await _count(db) == 0
 
 
 class TestScopeRefusal:

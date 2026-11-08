@@ -37,16 +37,19 @@ ownership check compares (numeric-id rule). It is required by svc-ingest — an 
 |---|---|
 | 400 | `platform`, `source_id`, `user` or `community` not in canonical form (`platform=community` is not a source) |
 | 401 / 403 / 503 | missing/wrong-scope credential / non-`system` tenant / verifier unconfigured |
-| 404 `SCOPE_NOT_FOUND` | no usable community is linked to the source |
+| 404 `SCOPE_NOT_FOUND` | no usable community is linked to the source (an inactive verified claimant never falls back to a legacy claim) |
+| 409 `SCOPE_AMBIGUOUS` | the source is claimed by more than one tenant (judged before the activity filter) |
 | 404 `COMMUNITY_NOT_SWITCHABLE` | PUT target is not in the source's switchable set |
 
 ## Switchable set
 
-Resolved like `dataplane/resolve-scope` (an approved `community_servers` link beats a legacy
-`communities.platform_server_id`), ordered by first-registered link, then pinned to **one tenant**
-(that of the first-registered community) so a guild shared across tenants never lists or switches
-into another tenant's community. Inactive, deleted, tenant-less and inactive-tenant communities are
-never members. A stored choice that has left the set yields to the default (`explicit=false`).
+Resolved by the ONE shared rule `dataplane_scope.resolve_claimants`, also used by
+`dataplane/resolve-scope`: an approved `community_servers` link beats a legacy
+`communities.platform_server_id`; an inactive verified claimant refuses (404) with no legacy
+fallback; a source claimed across tenants is refused (409) on the pre-filter claimants, never pinned
+to one tenant. Ordered by first-registered link. Inactive, deleted, tenant-less and inactive-tenant
+communities are never members. A stored choice that has left the set yields to the default
+(`explicit=false`).
 
 ## Storage
 

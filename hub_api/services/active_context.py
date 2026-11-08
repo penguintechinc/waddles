@@ -7,10 +7,10 @@ first-registered community of the source. svc-ingest (no database) asks hub-api 
 returned here (data-plane numeric-id rule); communities are addressed to the caller by immutable
 ``public_id`` UUID, never by name.
 
-Switchable set = the source's communities, resolved exactly like :mod:`services.dataplane_scope`
-(an approved ``community_servers`` link beats a legacy ``communities.platform_server_id``)
-and then pinned to ONE tenant -- the tenant of the first-registered community -- so a guild shared
-across tenants never lists (or lets a user switch into) another tenant's community. Inactive,
+Switchable set = the source's communities, resolved by the one shared rule
+:func:`services.dataplane_scope.resolve_claimants` (an approved ``community_servers`` link beats a
+legacy ``communities.platform_server_id``; an inactive verified claimant refuses with no legacy
+fallback; a source claimed across tenants is refused outright, never pinned to a tenant). Inactive,
 deleted, tenant-less or inactive-tenant communities are never members. A stored choice that has
 since left the set silently yields to the default (``explicit=false``); it is never honoured.
 
@@ -39,6 +39,10 @@ class InvalidContextRequestError(ActiveContextError):
 
 class NoCommunityError(ActiveContextError):
     """No usable community is linked to the source (404)."""
+
+
+class AmbiguousSourceError(ActiveContextError):
+    """The source is claimed across tenants; nothing is pinned or guessed (409)."""
 
 
 class NotSwitchableError(ActiveContextError):
@@ -86,49 +90,34 @@ def _source(platform: str, source_id: str) -> tuple[str, str]:
     return plat, src
 
 
-async def _ordered_candidate_ids(async_dal: Any, plat: str, src: str) -> list[int]:
-    """Community ids claiming the source, first-registered first (verified claims only if any)."""
-    links = await async_dal.executesql_async(
-        "SELECT community_id, MIN(id) FROM community_servers "
-        "WHERE platform = %s AND platform_server_id = %s AND status = 'approved' "
-        "GROUP BY community_id ORDER BY MIN(id), community_id",
-        [plat, src],
-    )
-    if links:
-        return [int(row[0]) for row in links]
-    legacy = await async_dal.executesql_async(
-        "SELECT id FROM communities WHERE platform = %s AND platform_server_id = %s ORDER BY id",
-        [plat, src],
-    )
-    return [int(row[0]) for row in legacy]
-
-
 async def switchable(async_dal: Any, platform: str, source_id: str) -> tuple[CommunityChoice, ...]:
-    """The ordered switchable set for a source (position 0 = first-registered default)."""
+    """The ordered switchable set for a source (position 0 = first-registered default).
+
+    Candidate resolution is :func:`services.dataplane_scope.resolve_claimants` -- the SAME rule
+    the scope resolver applies, so a cross-tenant source (409) or an inactive verified claimant
+    (404, no legacy fallback) refuses here exactly as it does there.
+    """
     plat, src = _source(platform, source_id)
-    ordered = await _ordered_candidate_ids(async_dal, plat, src)
-    if not ordered:
-        raise NoCommunityError("no community is linked to this source")
+    try:
+        claimants = await scopes.resolve_claimants(async_dal, async_dal.dal, plat, src)
+    except scopes.AmbiguousScopeError as exc:
+        raise AmbiguousSourceError("source is claimed by more than one tenant") from exc
+    except scopes.ScopeNotFoundError as exc:
+        raise NoCommunityError("no usable community is linked to this source") from exc
+    ordered = list(claimants.ordered)
     rows = await async_dal.executesql_async(
-        "SELECT c.id, c.public_id::text, COALESCE(NULLIF(c.display_name, ''), c.name, ''), "
-        "c.tenant_id FROM communities c JOIN tenants t ON t.id = c.tenant_id "
-        "WHERE c.id = ANY(%s) AND c.deleted_at IS NULL AND c.is_active IS NOT FALSE "
-        "AND t.is_active IS NOT FALSE",
+        "SELECT c.id, c.public_id::text, COALESCE(NULLIF(c.display_name, ''), c.name, '') "
+        "FROM communities c JOIN tenants t ON t.id = c.tenant_id "
+        "WHERE c.id = ANY(%s) AND c.deleted_at IS NULL AND t.is_active IS NOT FALSE",
         [ordered],
     )
     by_id = {int(r[0]): r for r in rows}
     usable = [cid for cid in ordered if cid in by_id]
     if not usable:
         raise NoCommunityError("no active community is linked to this source")
-    tenant = int(by_id[usable[0]][3])
-    pinned = [cid for cid in usable if int(by_id[cid][3]) == tenant]
-    if len(pinned) != len(usable):
-        logger.warning(
-            "active_context.cross_tenant_source_pinned dropped=%d", len(usable) - len(pinned)
-        )
     return tuple(
         CommunityChoice(cid, str(by_id[cid][1]), str(by_id[cid][2]), position)
-        for position, cid in enumerate(pinned)
+        for position, cid in enumerate(usable)
     )
 
 
