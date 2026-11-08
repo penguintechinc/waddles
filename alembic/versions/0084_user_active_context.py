@@ -21,8 +21,8 @@ Identity & Typing). Added nullable -> backfilled -> default + NOT NULL, never a 
 Hub-api-only privileges (explicit empty rows for every other role in
 `config/postgres/rbac-matrix.yaml`); the data plane reads/writes through hub-api's internal API.
 
-Revision ID: 0082_user_active_context
-Revises: 0081_spectrum_conn_resource
+Revision ID: 0084_user_active_context
+Revises: 0083_eventsub_desired_state
 Create Date: 2026-11-07
 """
 
@@ -35,8 +35,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0082_user_active_context"
-down_revision = "0081_spectrum_conn_resource"
+revision = "0084_user_active_context"
+down_revision = "0083_eventsub_desired_state"
 branch_labels = None
 depends_on = None
 
@@ -47,9 +47,9 @@ _PUBLIC_ID_TABLES = ("tenants", "communities", "app_catalog")
 
 def _load_matrix_module():  # type: ignore[no-untyped-def]
     """Load `scripts/db/rbac_matrix.py` by path (it is not an importable package)."""
-    spec = importlib.util.spec_from_file_location("waddles_rbac_matrix_0082", _MATRIX_MODULE_PATH)
+    spec = importlib.util.spec_from_file_location("waddles_rbac_matrix_0084", _MATRIX_MODULE_PATH)
     module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    sys.modules["waddles_rbac_matrix_0082"] = module
+    sys.modules["waddles_rbac_matrix_0084"] = module
     spec.loader.exec_module(module)  # type: ignore[union-attr]
     return module
 

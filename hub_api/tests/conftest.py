@@ -1663,7 +1663,7 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("is_primary", Boolean, server_default="0"),
     )
     # user_active_context (migration 0082) -- sqlite mirror; the real constraints are proven on
-    # Postgres in alembic/tests/test_0082_user_active_context.py.
+    # Postgres in alembic/tests/test_0084_user_active_context.py.
     Table(
         "user_active_context",
         metadata,

@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0082_user_active_context (per-user slash-command active community).
+"""Real-Postgres tests for 0084_user_active_context (per-user slash-command active community).
 
 Proves the migration lands on a real Postgres 17 (`pg_docker.migrated_postgres`, which replays
 0020 through head), round-trips upgrade -> downgrade -> upgrade, and enforces what the routing relies
@@ -23,7 +23,7 @@ requires_docker = pytest.mark.skipif(
 )
 
 #: The revision this migration chains off -- the round-trip downgrades to exactly it.
-PREVIOUS_REVISION = "0081_spectrum_conn_resource"
+PREVIOUS_REVISION = "0083_eventsub_desired_state"
 
 EXPECTED_COLUMNS = sorted(
     ["id", "tenant_id", "user_uuid", "platform", "source_id", "community_id", "updated_at"]
@@ -69,7 +69,7 @@ def db() -> Iterator[PgTestDatabase]:
     """One real Postgres 17 container migrated to head, shared by the non-round-trip tests."""
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0082-user-active-context") as database:
+    with migrated_postgres("0084-user-active-context") as database:
         yield database
 
 
@@ -225,7 +225,7 @@ def test_public_ids_are_generated_distinct_and_unique(db: PgTestDatabase) -> Non
 
 @requires_docker
 def test_round_trip_downgrade_upgrade() -> None:
-    with migrated_postgres("0082-user-active-context-roundtrip") as database:
+    with migrated_postgres("0084-user-active-context-roundtrip") as database:
         alembic_cli("downgrade", PREVIOUS_REVISION, dsn=database.dsn)
         conn = _connect(database)
         try:
