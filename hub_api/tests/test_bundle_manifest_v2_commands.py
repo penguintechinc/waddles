@@ -23,6 +23,7 @@ _BASE: dict[str, Any] = {
     "feature": "waddles.socials.music",
     "module": "socials",
     "provider": "builtin",
+    "author": "github:penguintechinc",
     "language": "python",
     "artifact": "source",
     "stages": {

@@ -1,15 +1,13 @@
 # feature/e2e-helm-rust-dataplane -- Rust svc-ingest (core/svc_ingest, full receiver stack
 # implemented; INERT unless the PostHog flag waddles.core.rust-data-plane is ON -- see
-# pipeline.rustDataPlane in values.yaml) Deployment, ADDITIVE to templates/svc-ingest.yaml's Python Deployment -- never
-# replaces it. Gated on the top-level pipeline.rustDataPlane.enabled flag (default false)
+# pipeline.rustDataPlane in values.yaml) Deployment (the legacy Python svc-ingest template was removed). Gated on the top-level pipeline.rustDataPlane.enabled flag (default false)
 # plus this stage's own .enabled sub-flag, so flipping the parent flag alone doesn't force
 # every stage on.
 #
-# fix/helm-alpha-self-provisioning -- Resource name carries a `-rust` suffix (see
-# pipeline.rustDataPlane's values.yaml comment for why), AND the image repository below
-# (waddlebot.legacyModuleImage, module rustDataPlane.svcIngest.imageRepository, default
-# "svc-ingest-rust") is now a DISTINCT repository from templates/svc-ingest.yaml's Python
-# Deployment (module "svc-ingest") -- previously both resolved to the identical
+# fix/helm-alpha-self-provisioning -- Resource name carries a `-rust` suffix, and the image
+# repository below (waddlebot.legacyModuleImage, module rustDataPlane.svcIngest.imageRepository,
+# default "svc-ingest-rust") was made DISTINCT from the (now removed) Python svc-ingest
+# Deployment's -- previously both resolved to the identical
 # repository:tag, which broke the documented alpha COEXISTENCE state (both Deployments
 # enabled simultaneously, see pipeline.rustDataPlane's values-alpha.yaml comment): whichever
 # image was pushed to that shared tag last silently became what BOTH Deployments ran.
@@ -220,7 +218,7 @@ spec:
         {{- if include "waddlebot.connectorRuntimeActive" . }}
         {{- $cr := .Values.pipeline.rustDataPlane.svcIngest.connectorRuntime }}
         # PR-H connector runtime (spec SS1.3). CONNECTOR_<P>_ENABLED come from the SAME helm value
-        # the Python svc-ingest deployment reads (templates/svc-ingest.yaml).
+        # the (removed) Python svc-ingest deployment used to read.
         - name: CONNECTOR_RUNTIME_ENABLED
           value: "true"
         {{- include "waddlebot.connectorPlatformEnv" . | nindent 8 }}
@@ -247,7 +245,7 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid | quote }}
         {{- end }}
         # Valkey and receiver credentials consumed by core/svc_ingest (see file header) --
-        # same Secret keys the Python svc-ingest Deployment already reads (templates/svc-ingest.yaml).
+        # same Secret keys the (removed) Python svc-ingest Deployment used to read.
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # fix/valkey-tls-alpha -- see templates/svc-process-rust.yaml's comment on this same
         # override block for the full rationale (identical here). Stays a secretKeyRef
