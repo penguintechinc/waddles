@@ -6,8 +6,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use bundle_host_crypto::grpc::{GrpcDekProvider, HubKeyEndpoint};
 use bundle_host_crypto::grpc::tenant_crypto_over_grpc;
+pub use bundle_host_crypto::grpc::{GrpcDekProvider, HubKeyEndpoint};
 use bundle_host_crypto::{run_dek_invalidation_listener, BUNDLE_DATA_PURPOSE};
 
 use crate::seal::{Sealing, SealingGate};

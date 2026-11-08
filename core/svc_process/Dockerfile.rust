@@ -51,6 +51,7 @@ COPY svc_process/Cargo.toml svc_process/Cargo.lock ./svc_process/
 COPY svc_process/src ./svc_process/src
 COPY bundle_active_set ./bundle_active_set
 COPY bundle_host_kv ./bundle_host_kv
+COPY bundle_host_crypto ./bundle_host_crypto
 COPY bundle_host_db ./bundle_host_db
 COPY bundle_host_reputation ./bundle_host_reputation
 COPY bundle_host_economy ./bundle_host_economy

@@ -53,6 +53,7 @@ COPY svc_action/Cargo.toml svc_action/Cargo.lock ./svc_action/
 COPY svc_action/src ./svc_action/src
 COPY bundle_active_set ./bundle_active_set
 COPY bundle_host_kv ./bundle_host_kv
+COPY bundle_host_crypto ./bundle_host_crypto
 COPY bundle_host_db ./bundle_host_db
 COPY bundle_host_http ./bundle_host_http
 COPY bundle_capability_gate ./bundle_capability_gate
