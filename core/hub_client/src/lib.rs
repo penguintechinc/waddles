@@ -37,6 +37,8 @@
 //! connection(s) internally, so `HubClient` is cheaply `Clone` (an
 //! `Arc`-backed handle) rather than opening a new connection per call.
 
+pub mod bundle_schedule;
+
 pub mod pb {
     //! Generated from `proto/waddles/hub/internal/v1/*.proto` (`build.rs`).
     tonic::include_proto!("waddles.hub.internal.v1");

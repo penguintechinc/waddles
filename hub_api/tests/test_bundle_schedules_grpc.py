@@ -1,10 +1,13 @@
-"""`GET /api/v1/internal/bundle-schedules` -- real machine JWTs, real activation path, real DBs.
+"""`BundleScheduleService.ListBundleSchedules` -- real gRPC server, real machine JWTs, real DBs.
 
-Real: Ed25519 service JWTs through `machine_authenticated`, `activate_*_with_warnings` (so the
-AUTO-BIND `app_source_bindings` row is written by production code, not seeded by the test), the
-service's SQL joins. sqlite (`install_dal`) covers scope/filters/exclusions fast; the Postgres
-class below re-runs the listing against the real migrated schema (FKs, composite PKs, JSONB).
-A SKIP of the Postgres tests means docker is absent -- treat that as a gate FAILURE.
+Real: a `grpc.aio` server built with the production interceptor chain
+(`server.build_interceptor_chain`: deadline -> EdDSA machine-JWT auth -> rate limit -> OTel),
+Ed25519 service JWTs, `activate_*_with_warnings` (so the AUTO-BIND `app_source_bindings` row is
+written by production code, not seeded by the test), the service's SQL joins. sqlite
+(`install_dal`) covers scope/filters/exclusions fast; the Postgres tests below re-run the listing
+against the real migrated schema (FKs, composite PKs, JSONB); one test dials the production TLS
+listener (`start_internal_grpc_server`). A SKIP of the Postgres tests means docker is absent --
+treat that as a gate FAILURE.
 """
 
 # ruff: noqa: F811  -- imported pytest fixtures (`pg_db`/`pg_dal`) are re-bound as test params
@@ -13,17 +16,28 @@ from __future__ import annotations
 
 import itertools
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs
 
+import grpc
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey, spiffe_id
-from quart import Quart
-from quart_schema import QuartSchema
 from sqlalchemy import delete, select, text
+from waddles.hub.internal.v1 import bundle_schedule_pb2, bundle_schedule_pb2_grpc
 
-from blueprints.v1 import bundle_schedules
+from grpc_internal import bundle_schedule_servicer as sched_servicer
+from grpc_internal.server import (
+    ALL_REQUIRED_SCOPES,
+    build_interceptor_chain,
+    start_internal_grpc_server,
+    stop_internal_grpc_server,
+)
 from services.bundle_approval_service import (
     activate_for_community_with_warnings,
     activate_tenant_wide_with_warnings,
@@ -32,17 +46,18 @@ from services.bundle_manifest_v2 import app_id_slug
 from services.tenant_app_availability_service import set_available
 from tests.test_bundle_activation_commands import _manifest
 from tests.test_bundle_activation_service import _install_and_make_available
+from tests.test_grpc_internal_tls import _free_port, _generate_self_signed_cert
 from tests.test_seed_core_bundles_pg_integration import (  # noqa: F401  # fixtures
     pg_dal,
     pg_db,
 )
 
-SCOPE = bundle_schedules.SCOPE_BUNDLE_SCHEDULES_READ
+SCOPE = sched_servicer.SCOPE_BUNDLE_SCHEDULES_READ
 INGEST = spiffe_id("alpha", "svc-ingest")
 ROGUE = spiffe_id("alpha", "svc-rogue")
 NO_SCOPE = spiffe_id("alpha", "svc-other")
 TENANTED = spiffe_id("alpha", "svc-tenanted")
-URL = "/api/v1/internal/bundle-schedules"
+METHOD = "/waddles.hub.internal.v1.BundleScheduleService/ListBundleSchedules"
 FIELDS = {
     "tenant_id",
     "community_id",
@@ -76,19 +91,89 @@ def issuer() -> ServiceJwtIssuer:
     )
 
 
-def _app(install_dal: Any, issuer: ServiceJwtIssuer) -> Quart:
-    app = Quart(__name__)
-    QuartSchema(app)
-    app.register_blueprint(bundle_schedules.bundle_schedules_internal_bp)
-    app.config["install_dal"] = install_dal
-    app.config["SERVICE_JWT_ISSUER"] = issuer
-    app.config["SERVICE_JWT_VERIFIER"] = issuer.as_verifier()
-    return app
+@dataclass(slots=True, frozen=True)
+class _Hub:
+    """What a test needs to start the production-chain gRPC server over `install_dal`."""
+
+    install_dal: Any
+    issuer: ServiceJwtIssuer
 
 
-def _hdr(issuer: ServiceJwtIssuer, service: str = INGEST, scope: str = SCOPE) -> dict[str, str]:
+def _app(install_dal: Any, issuer: ServiceJwtIssuer) -> _Hub:
+    return _Hub(install_dal, issuer)
+
+
+@asynccontextmanager
+async def _serve(hub: _Hub) -> AsyncIterator[str]:
+    """A real `grpc.aio` server on loopback with the production interceptor chain."""
+    server = grpc.aio.server(interceptors=build_interceptor_chain(hub.issuer))
+    bundle_schedule_pb2_grpc.add_BundleScheduleServiceServicer_to_server(
+        sched_servicer.BundleScheduleServicer(hub.install_dal), server
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    try:
+        yield f"127.0.0.1:{port}"
+    finally:
+        await server.stop(grace=None)
+
+
+def _metadata(
+    issuer: ServiceJwtIssuer, service: str = INGEST, scope: str = SCOPE
+) -> tuple[tuple[str, str], ...]:
     token, _ = issuer.issue_with_claims(service, scope, ttl_seconds=300, extra_claims=None)
-    return {"Authorization": f"Bearer {token}"}
+    return (("authorization", f"Bearer {token}"),)
+
+
+def _request(query: str) -> bundle_schedule_pb2.ListBundleSchedulesRequest:
+    """Build a request from a `?tenant_id=1&app_id=x` style filter string."""
+    q = {k: v[0] for k, v in parse_qs(query.lstrip("?")).items()}
+    request = bundle_schedule_pb2.ListBundleSchedulesRequest()
+    if "tenant_id" in q:
+        request.tenant_id = int(q["tenant_id"])
+    if "community_id" in q:
+        request.community_id = int(q["community_id"])
+    if "app_id" in q:
+        request.app_id = q["app_id"]
+    return request
+
+
+def _row(t: bundle_schedule_pb2.BundleScheduleTarget) -> dict[str, Any]:
+    """A target as a plain dict (unset optional `community_name` -> None)."""
+    return {
+        "tenant_id": t.tenant_id,
+        "community_id": t.community_id,
+        "tenant_slug": t.tenant_slug,
+        "community_name": t.community_name if t.HasField("community_name") else None,
+        "app_id": t.app_id,
+        "interval_s": t.interval_s,
+        "jitter": t.jitter,
+    }
+
+
+async def _call(
+    hub: _Hub,
+    query: str = "",
+    *,
+    service: str = INGEST,
+    scope: str = SCOPE,
+    metadata: tuple[tuple[str, str], ...] | None = None,
+    timeout: float | None = 3.0,  # noqa: ASYNC109 - gRPC call deadline, not an asyncio timeout
+) -> bundle_schedule_pb2.ListBundleSchedulesResponse:
+    async with (
+        _serve(hub) as addr,
+        grpc.aio.insecure_channel(addr) as channel,
+    ):
+        stub = bundle_schedule_pb2_grpc.BundleScheduleServiceStub(channel)
+        md = _metadata(hub.issuer, service, scope) if metadata is None else metadata
+        return await stub.ListBundleSchedules(_request(query), metadata=md, timeout=timeout)
+
+
+async def _refused(hub: _Hub, query: str = "", **kwargs: Any) -> grpc.StatusCode:
+    """The gRPC status a refused call fails with (the call must fail)."""
+    with pytest.raises(grpc.aio.AioRpcError) as exc_info:
+        await _call(hub, query, **kwargs)
+    return exc_info.value.code()
 
 
 def _scheduled(app_id: str, *, interval_s: int = 90, jitter: float | None = 0.25) -> dict[str, Any]:
@@ -103,9 +188,11 @@ def _scheduled(app_id: str, *, interval_s: int = 90, jitter: float | None = 0.25
     return manifest
 
 
-async def _get(app: Quart, issuer: ServiceJwtIssuer, query: str = "") -> tuple[int, Any]:
-    resp = await app.test_client().get(f"{URL}{query}", headers=_hdr(issuer))
-    return resp.status_code, await resp.get_json()
+async def _get(hub: _Hub, issuer: ServiceJwtIssuer, query: str = "") -> tuple[int, Any]:
+    """`(200, {"targets": [...]})` for a successful listing; a refusal raises (use `_refused`)."""
+    del issuer  # the hub carries it
+    resp = await _call(hub, query)
+    return 200, {"targets": [_row(t) for t in resp.targets]}
 
 
 # ----------------------------------------------------------------------------- sqlite (fast)
@@ -130,39 +217,102 @@ async def _publish_and_activate(
         )
 
 
-async def test_missing_token_is_401(install_dal: Any, issuer: ServiceJwtIssuer) -> None:
-    resp = await _app(install_dal, issuer).test_client().get(URL)
-    assert resp.status_code == 401
+async def test_missing_token_is_unauthenticated(install_dal: Any, issuer: ServiceJwtIssuer) -> None:
+    hub = _app(install_dal, issuer)
+    assert await _refused(hub, metadata=()) == grpc.StatusCode.UNAUTHENTICATED
+
+
+async def test_forged_token_is_unauthenticated(install_dal: Any, issuer: ServiceJwtIssuer) -> None:
+    """A token signed by a key the server never trusted never lists."""
+    other = Ed25519PrivateKey.generate()
+    forged = ServiceJwtIssuer(
+        keys={"k1": SigningKey("k1", other, other.public_key())},
+        active_kid="k1",
+        identities=issuer.identities,
+    )
+    hub = _app(install_dal, issuer)
+    code = await _refused(hub, metadata=_metadata(forged))
+    assert code == grpc.StatusCode.UNAUTHENTICATED
+
+
+async def test_missing_deadline_is_refused(install_dal: Any, issuer: ServiceJwtIssuer) -> None:
+    """An unbounded call is refused by the deadline interceptor (INVALID_ARGUMENT)."""
+    hub = _app(install_dal, issuer)
+    assert await _refused(hub, timeout=None) == grpc.StatusCode.INVALID_ARGUMENT
 
 
 async def test_wrong_scope_is_refused(install_dal: Any, issuer: ServiceJwtIssuer) -> None:
     """Scope refusal: a valid service token without `bundle-schedules:read` never lists."""
-    app = _app(install_dal, issuer)
-    resp = await app.test_client().get(URL, headers=_hdr(issuer, NO_SCOPE, "connections:list"))
-    assert resp.status_code == 401
-    assert "targets" not in (await resp.get_json())
+    hub = _app(install_dal, issuer)
+    code = await _refused(hub, service=NO_SCOPE, scope="connections:list")
+    assert code == grpc.StatusCode.UNAUTHENTICATED
 
 
-async def test_non_system_tenant_is_403(install_dal: Any, issuer: ServiceJwtIssuer) -> None:
-    app = _app(install_dal, issuer)
-    resp = await app.test_client().get(URL, headers=_hdr(issuer, TENANTED))
-    assert resp.status_code == 403
+def test_method_scope_is_registered() -> None:
+    """The scope table the chain enforces names this RPC (an unlisted method fails closed)."""
+    assert ALL_REQUIRED_SCOPES[METHOD] == SCOPE
 
 
-async def test_non_allowlisted_caller_is_403(install_dal: Any, issuer: ServiceJwtIssuer) -> None:
-    app = _app(install_dal, issuer)
-    resp = await app.test_client().get(URL, headers=_hdr(issuer, ROGUE))
-    assert resp.status_code == 403
-    assert await resp.get_json() == {"error": "forbidden"}
-
-
-async def test_unconfigured_verifier_fails_closed_503(
+async def test_non_system_tenant_is_permission_denied(
     install_dal: Any, issuer: ServiceJwtIssuer
 ) -> None:
-    app = _app(install_dal, issuer)
-    app.config.pop("SERVICE_JWT_VERIFIER")
-    resp = await app.test_client().get(URL, headers=_hdr(issuer))
-    assert resp.status_code == 503
+    hub = _app(install_dal, issuer)
+    assert await _refused(hub, service=TENANTED) == grpc.StatusCode.PERMISSION_DENIED
+
+
+async def test_non_allowlisted_caller_is_permission_denied(
+    install_dal: Any, issuer: ServiceJwtIssuer
+) -> None:
+    hub = _app(install_dal, issuer)
+    with pytest.raises(grpc.aio.AioRpcError) as exc_info:
+        await _call(hub, service=ROGUE)
+    assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+    assert exc_info.value.details() == "forbidden"
+
+
+async def test_allowlist_env_overrides_default(
+    install_dal: Any, issuer: ServiceJwtIssuer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BUNDLE_SCHEDULES_ALLOWED_SERVICES", "svc-rogue")
+    hub = _app(install_dal, issuer)
+    assert (await _call(hub, service=ROGUE)).targets == []
+    assert await _refused(hub, service=INGEST) == grpc.StatusCode.PERMISSION_DENIED
+
+
+async def test_unconfigured_install_store_is_unavailable(issuer: ServiceJwtIssuer) -> None:
+    """No install DAL bound -> UNAVAILABLE, never a silent empty listing."""
+    hub = _app(None, issuer)
+    assert await _refused(hub) == grpc.StatusCode.UNAVAILABLE
+
+
+async def test_tls_listener_serves_the_listing_end_to_end(
+    install_dal: Any,
+    issuer: ServiceJwtIssuer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production TLS listener (`start_internal_grpc_server`) serves a real listing."""
+    cert_path, key_path, cert_pem = _generate_self_signed_cert(tmp_path)
+    port = _free_port()
+    monkeypatch.setenv("GRPC_TLS_CERT_PATH", str(cert_path))
+    monkeypatch.setenv("GRPC_TLS_KEY_PATH", str(key_path))
+    monkeypatch.setenv("GRPC_PORT", str(port))
+    monkeypatch.delenv("GRPC_TLS_CLIENT_CA_PATH", raising=False)
+    community = await install_dal.communities.async_insert(tenant_id=1, name="tls-community")
+    app_id = "waddles.socials.tls.default"
+    await _publish_and_activate(install_dal, app_id, _scheduled(app_id), community)
+
+    server = await start_internal_grpc_server(issuer=issuer, install_dal=install_dal)
+    try:
+        creds = grpc.ssl_channel_credentials(root_certificates=cert_pem)
+        async with grpc.aio.secure_channel(f"127.0.0.1:{port}", creds) as channel:
+            stub = bundle_schedule_pb2_grpc.BundleScheduleServiceStub(channel)
+            resp = await stub.ListBundleSchedules(
+                _request(""), metadata=_metadata(issuer), timeout=3.0
+            )
+    finally:
+        await stop_internal_grpc_server(server)
+    assert [(t.app_id, t.community_id) for t in resp.targets] == [(app_id, community)]
 
 
 async def test_empty_list_when_nothing_is_scheduled(
@@ -268,11 +418,11 @@ async def test_filters_narrow_and_empty_results(install_dal: Any, issuer: Servic
     "query",
     ["?tenant_id=0", "?tenant_id=-4", f"?community_id={2**31}", "?app_id=Bad%20Id", "?app_id=-x"],
 )
-async def test_invalid_filter_is_400(
+async def test_invalid_filter_is_invalid_argument(
     install_dal: Any, issuer: ServiceJwtIssuer, query: str
 ) -> None:
-    status, _ = await _get(_app(install_dal, issuer), issuer, query)
-    assert status == 400
+    code = await _refused(_app(install_dal, issuer), query)
+    assert code == grpc.StatusCode.INVALID_ARGUMENT
 
 
 async def test_missing_binding_is_excluded_loudly(

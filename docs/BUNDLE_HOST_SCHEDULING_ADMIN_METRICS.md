@@ -19,11 +19,13 @@ svc-ingest replica B --/   SET NX PX 0.9*interval
 * `core/svc_ingest/src/connector/bundle_schedule.rs`: `ScheduleRunner` (lease + single-flight +
   backoff), `SpineReconcileSink` (schema-v3 envelope via `publish_event_scoped`, source id =
   `app_id_slug(app_id)`), `run_manager` (one loop per target, diffed against the listing),
-  `HubScheduleSource` (`GET /api/v1/internal/bundle-schedules`, machine JWT scope
-  `bundle-schedules:read`).
-* **hub-api side** (`hub_api/blueprints/v1/bundle_schedules.py`, `hub_api/services/bundle_schedule_service.py`):
-  `GET /api/v1/internal/bundle-schedules[?tenant_id=&community_id=&app_id=]` -> `{"targets":[{tenant_id,
-  community_id, tenant_slug, community_name, app_id, interval_s, jitter}]}` (numeric ids, the data plane
+  `HubScheduleSource` (gRPC `BundleScheduleService.ListBundleSchedules` on hub-api's internal
+  TLS listener via `hub_client::bundle_schedule`, one long-lived channel, machine JWT scope
+  `bundle-schedules:read`; endpoint `HUB_API_GRPC_ENDPOINT`, CA `HUB_API_GRPC_CA_FILE`).
+* **hub-api side** (`proto/waddles/hub/internal/v1/bundle_schedule.proto`, `hub_api/grpc_internal/bundle_schedule_servicer.py`,
+  `hub_api/services/bundle_schedule_service.py`):
+  `ListBundleSchedules(tenant_id?, community_id?, app_id?)` -> `targets[{tenant_id,
+  community_id, tenant_slug, community_name?, app_id, interval_s, jitter}]` (numeric ids, the data plane
   never keys on slugs; `community_id` 0 = tenant-wide, `community_name` null). Machine JWT scope
   `bundle-schedules:read` from the `system` tenant (chart: svc-ingest identity only) plus a caller-name
   allow-list (`BUNDLE_SCHEDULES_ALLOWED_SERVICES`, default `svc-ingest`). Lists only active, available,

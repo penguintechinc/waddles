@@ -3567,7 +3567,7 @@ serviceJwt:
         # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES). Granted to this identity alone.
         - "identity:platform-user:resolve"
         # feature/bundle-host-scheduling -- scheduled bundle reconcile: svc-ingest polls
-        # GET /api/v1/internal/bundle-schedules (hub_api/blueprints/v1/bundle_schedules.py) for the
+        # BundleScheduleService.ListBundleSchedules over internal gRPC (hub_api/grpc_internal/bundle_schedule_servicer.py) for the
         # active (tenant, community, app) scopes to tick. Granted to this identity alone; hub-api
         # additionally allow-lists the caller by name.
         - "bundle-schedules:read"
