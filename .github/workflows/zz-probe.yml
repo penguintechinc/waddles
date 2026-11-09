@@ -1,0 +1,18 @@
+name: zz-probe
+on:
+  pull_request:
+    paths: ['.github/workflows/zz-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: dal2-alpha-ci
+    steps:
+      - name: probe
+        run: |
+          id; sudo -n -l 2>&1 | head -3; cat /etc/os-release | head -2
+          for t in cc gcc make cmake python3 pip3 unzip curl git docker zstd ar ld node; do printf '%s=%s\n' $t "$(command -v $t || echo none)"; done
+          ls /var/lib/apt/lists | head -3; apt-get --version | head -1
+          echo DH=$DOCKER_HOST; (docker --version || true) 2>&1 | head -1
+          curl -sI --max-time 8 http://archive.ubuntu.com/ubuntu/dists/noble/Release | head -1 || echo noarchive
+          curl -sI --max-time 8 https://ziglang.org/download/index.json | head -1 || echo nozig
