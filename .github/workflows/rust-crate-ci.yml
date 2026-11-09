@@ -65,11 +65,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup build deps (${{ inputs.extra_apt_reason }})
-        if: inputs.extra_apt_packages != ''
+      # build-essential is always required (cc linker for build scripts); a
+      # no-op on hosted runners, installed on the bare dal2-alpha-ci image.
+      - name: Setup build deps (C toolchain ${{ inputs.extra_apt_reason }})
         uses: ./.github/actions/setup-build-deps
         with:
-          packages: ${{ inputs.extra_apt_packages }}
+          packages: build-essential ${{ inputs.extra_apt_packages }}
       - name: Install Rust 1.97.1 (rustfmt, clippy, llvm-tools-preview)
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
         with:
