@@ -84,7 +84,8 @@ jobs:
 
   no-stubs-gate:
     name: No stubs / no silent fallbacks (check-no-stubs)
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    # bare dal2-alpha-ci image has no `make` (and sudo is blocked): stays on hosted ubuntu-latest until a custom runner image bakes it in
+    runs-on: ubuntu-latest
     # Scope correction (user decision, devops.md Branch Backups): this gate
     # enforces ONLY on merges landing on release/* or main -- feature/fix/
     # chore/docs/etc. branches are exempt so WIP backup-pushes with a TODO
@@ -1025,7 +1026,8 @@ jobs:
     name: OpenAPI spec drift (openapi/v1.yaml matches generated)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.python == 'true') }}
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    # bare dal2-alpha-ci image has no `make` (and sudo is blocked): stays on hosted ubuntu-latest until a custom runner image bakes it in
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
