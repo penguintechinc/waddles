@@ -70,6 +70,13 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             scripts/ci
+            .github/actions/setup-ci-tools
+
+      # dal2-alpha-ci runner image has no gh CLI (durable fix: custom runner image).
+      - name: Setup CI tools (gh)
+        uses: ./.github/actions/setup-ci-tools
+        with:
+          docker: 'false'
 
       - name: Wait for all other checks on this commit
         env:
