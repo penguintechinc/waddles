@@ -54,7 +54,8 @@ permissions:
 jobs:
   lint-test:
     name: "${{ inputs.crate_name }}: fmt + clippy + deny + coverage"
-    runs-on: ${{ (inputs.valkey || inputs.extra_security_scanners) && 'ubuntu-latest' || ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    # bare dal2-alpha-ci image has no cc/cmake/libatomic and sudo is blocked (no-new-privileges): C-toolchain / node jobs stay on hosted ubuntu-latest until a custom runner image bakes them in
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     defaults:
       run:
@@ -65,12 +66,11 @@ jobs:
         with:
           persist-credentials: false
 
-      # build-essential is always required (cc linker for build scripts); a
-      # no-op on hosted runners, installed on the bare dal2-alpha-ci image.
-      - name: Setup build deps (C toolchain ${{ inputs.extra_apt_reason }})
+      - name: Setup build deps (${{ inputs.extra_apt_reason }})
+        if: inputs.extra_apt_packages != ''
         uses: ./.github/actions/setup-build-deps
         with:
-          packages: build-essential ${{ inputs.extra_apt_packages }}
+          packages: ${{ inputs.extra_apt_packages }}
       - name: Install Rust 1.97.1 (rustfmt, clippy, llvm-tools-preview)
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
         with:

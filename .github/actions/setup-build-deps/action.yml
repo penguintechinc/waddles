@@ -1,19 +1,15 @@
-name: Setup build deps (verify, apt-install only if missing)
+name: Setup build deps (no apt)
 description: >-
-  Verifies the C/C++ toolchain + cmake (needed by ring / aws-lc-sys) and
-  optionally installs a sha256-pinned protoc (needed by hub_client's build.rs).
-  GitHub-hosted ubuntu runners preinstall the toolchain, so nothing is
-  installed there. The bare self-hosted dal2-alpha-ci ARC image ships none of
-  it, so any missing tool is installed once via `sudo apt-get` (distro-signed
-  repo; exact versions float with the distro security channel). The step then
-  re-verifies and fails loudly if a tool is still missing.
+  Verifies the C/C++ toolchain + cmake already preinstalled on GitHub-hosted
+  ubuntu runners (needed by ring / aws-lc-sys) and optionally installs a
+  sha256-pinned protoc (needed by hub_client's build.rs). Replaces the old
+  apt-get install steps, which flaked on mirror timeouts. Fails loudly.
 
 inputs:
   packages:
     description: >-
-      Space-separated apt package names. Known: cmake, build-essential,
-      protobuf-compiler, pkg-config, libssl-dev, libatomic1 (node), unzip;
-      any other name FAILS the step (never ignored).
+      Space-separated legacy apt package names. Only cmake, build-essential and
+      protobuf-compiler are known; any other name FAILS the step (never ignored).
     required: false
     default: 'cmake build-essential protobuf-compiler'
 
@@ -28,39 +24,16 @@ runs:
       run: |
         set -euo pipefail
         tools=""
-        apt=""
         protoc=false
         for p in $PACKAGES; do
           case "$p" in
-            cmake) tools="$tools cmake"; apt="$apt cmake" ;;
-            build-essential) tools="$tools gcc g++ make"; apt="$apt build-essential" ;;
-            pkg-config) tools="$tools pkg-config"; apt="$apt pkg-config" ;;
-            unzip) tools="$tools unzip"; apt="$apt unzip" ;;
-            libssl-dev) tools="$tools openssl"; apt="$apt libssl-dev openssl" ;;
-            libatomic1) apt="$apt libatomic1" ;;
-            protobuf-compiler) protoc=true; apt="$apt unzip"; tools="$tools unzip" ;;
+            cmake) tools="$tools cmake" ;;
+            build-essential) tools="$tools gcc g++ make" ;;
+            protobuf-compiler) protoc=true ;;
             *) echo "setup-build-deps: unknown package '$p' -- add explicit support (verified preinstalled tool or sha256-pinned download); refusing to ignore it" >&2; exit 1 ;;
           esac
         done
         echo "protoc=$protoc" >> "$GITHUB_OUTPUT"
-        # Install only what is absent (no-op on hosted runners).
-        need=0
-        for t in $tools; do command -v "$t" >/dev/null 2>&1 || need=1; done
-        for a in $apt; do
-          case "$a" in
-            libatomic1) [ -e /usr/lib/x86_64-linux-gnu/libatomic.so.1 ] || [ -e /usr/lib/aarch64-linux-gnu/libatomic.so.1 ] || need=1 ;;
-            libssl-dev) [ -e /usr/include/openssl/ssl.h ] || need=1 ;;
-          esac
-        done
-        if [ "$need" = 1 ]; then
-          SUDO=""
-          if [ "$(id -u)" != 0 ]; then
-            sudo -n true || { echo "::error::tools missing and passwordless sudo unavailable" >&2; exit 1; }
-            SUDO="sudo -n"
-          fi
-          $SUDO apt-get update -o Acquire::Retries=5
-          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Acquire::Retries=5 $apt
-        fi
         missing=0
         for t in $tools; do
           if command -v "$t" >/dev/null 2>&1; then

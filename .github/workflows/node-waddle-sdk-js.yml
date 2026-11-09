@@ -53,7 +53,8 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
     name: typecheck + lint + test + conformance
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    # bare dal2-alpha-ci image has no cc/cmake/libatomic and sudo is blocked (no-new-privileges): C-toolchain / node jobs stay on hosted ubuntu-latest until a custom runner image bakes them in
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: sdk/waddle-sdk-js
@@ -69,11 +70,6 @@ jobs:
       # trigger is a cache-poisoning vector (flagged `high` by zizmor) --
       # rust-svc-process.yml's equivalent job avoids it the same way by not
       # opting into toolchain caching.
-      - name: Setup node runtime libs (libatomic1)
-        uses: ./.github/actions/setup-build-deps
-        with:
-          packages: 'libatomic1'
-
       - name: Set up Node.js 26
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
