@@ -28,7 +28,7 @@ jobs:
   # here means "not affected"; main PRs / pushes / dispatch run everything.
   changes:
     name: Detect changed areas
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha' || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -75,6 +75,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
     name: twitch sessions live e2e (real hub-api)
+    # Starts Docker containers: GitHub-hosted only (no Docker socket / node creds on the ARC runner).
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
