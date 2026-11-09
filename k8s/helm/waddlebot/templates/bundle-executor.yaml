@@ -104,6 +104,7 @@ spec:
     spec:
       {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
       automountServiceAccountToken: false
+      {{- include "waddlebot.executorKataPodSpec" . | nindent 6 }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -255,7 +256,7 @@ spec:
           timeoutSeconds: 5
           failureThreshold: 3
         resources:
-          {{- toYaml .Values.pipeline.rustDataPlane.bundleExecutor.resources | nindent 10 }}
+          {{- include "waddlebot.executorResources" (dict "root" $ "default" .Values.pipeline.rustDataPlane.bundleExecutor.resources) | nindent 10 }}
         volumeMounts:
         - name: tmp
           mountPath: /tmp

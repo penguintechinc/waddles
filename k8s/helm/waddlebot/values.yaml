@@ -2000,6 +2000,24 @@ bundleExecutor:
   image:
     repository: "bundle-executor"
     tag: ""
+  # Optional Kata Containers isolation for BOTH executor Deployments (bundle-executor and
+  # bundle-executor-action) -- the untrusted-WASM sandbox hosts. Default OFF. Only the
+  # executors ever get runtimeClassName; the rest of the data plane stays on standard
+  # containers guarded by Tetragon (see README "Kata isolation for bundle executors").
+  runtimeClass:
+    enabled: false
+    # RuntimeClass that must already exist in the cluster; empty + enabled fails the render.
+    name: "kata"
+    # Applied INSTEAD of the per-environment executor resources when enabled and non-empty.
+    # Sizes the workload inside the guest VM; the RuntimeClass `overhead` (VM/agent cost) is
+    # added by Kubernetes to the pod request automatically -- do not add it here.
+    resources:
+      requests: { cpu: "250m", memory: "512Mi" }
+      limits: { cpu: "1000m", memory: "1Gi" }
+  # Scheduling for KVM-capable nodes (applies to both executors, only when runtimeClass is
+  # enabled). Default empty. Example: { katacontainers.io/kata-runtime: "true" }
+  nodeSelector: {}
+  affinity: {}
 
 # Reputation service (Issue #310, core/reputation_module) -- standalone internal
 # HTTP+gRPC API, not a pipeline stage-runner. Own image (core/reputation_module/

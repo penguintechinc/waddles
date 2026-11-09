@@ -984,3 +984,26 @@ The executor boot-pins `connectors/<p>/<digest>.wasm` plus a signed sidecar
   needs `BUNDLE_SIGNING_KEY_FILE` (0600 file with the base64 seed -- user-held), `BUNDLE_SIGNING_KEY_ID`,
   `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
 - Digests are build outputs and are not committed per environment. Verify with `make test-connector-publish`.
+
+## Kata isolation for bundle executors (`bundleExecutor.runtimeClass`, default OFF)
+
+The two executor Deployments (`bundle-executor`, `bundle-executor-action`) run untrusted WASM
+bundles and can optionally run inside Kata Containers micro-VMs. Every other data-plane pod
+stays on standard containers with enforced Tetragon exec allowlists (unchanged).
+
+```yaml
+bundleExecutor:
+  runtimeClass: { enabled: true, name: kata }
+  nodeSelector: { katacontainers.io/kata-runtime: "true" }   # KVM-capable nodes
+```
+
+- Renders `runtimeClassName` only when enabled; enabled with an empty `name` fails the render.
+- `nodeSelector` / `affinity` apply to the executors only, and only when enabled (default empty).
+- `runtimeClass.resources` replaces the per-environment executor resources when enabled. The
+  RuntimeClass `overhead` (guest kernel + agent) is added to the pod request by Kubernetes
+  automatically; size resources for the workload only.
+- Tetragon limitation: inside a Kata guest the host's Tetragon sees only the shim, not the
+  executor's `execve` calls, so the executor's TracingPolicy no longer observes in-guest
+  execs. The micro-VM boundary is the isolation control for these pods instead; the policy is
+  still rendered. Policies on all other data-plane pods are untouched.
+- Prerequisite: the `RuntimeClass` and KVM nodes are cluster-admin managed (not by this chart).

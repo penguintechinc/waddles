@@ -482,6 +482,13 @@ bundleExecutor:
   image:
     repository: "ghcr.io/penguintechinc/waddles/bundle-executor"
     tag: ""
+  # Kata isolation stays OFF until the admin Kata PR (RuntimeClass + node labels) is applied
+  # on dal2alpha. To enable afterwards:
+  # runtimeClass:
+  #   enabled: true
+  #   name: "kata"
+  # nodeSelector:
+  #   katacontainers.io/kata-runtime: "true"
 
 # Reputation service (Issue #310) -- built locally, pushed to the local
 # registry (no CI image for it yet), same as every other alpha module.
