@@ -1594,6 +1594,21 @@ bundles:
     source_dir: rust/twitch-clips
     manifest_path: twitch-clips.manifest.yaml
     artifact_path: twitch-clips.wasm
+  # Calendar APP bundle (Rust, `stage-next-tools`): community events, RSVP, approvals, `!calendar`
+  # commands, and event sync to Discord scheduled events by CALLING `discord.scheduled_event.*`
+  # (sync OFF until a community admin enables it). Built by rust-bundle-builder; the world comes
+  # from the crate's Cargo.toml. The Python `!event` bundle stays until parity is proven.
+  - app_id: waddles.core.app.calendar
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/calendar
+    manifest_path: calendar.manifest.yaml
+    artifact_path: calendar.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
   # DJ app bundle (Rust, `stage-next-tools`): playlists, !sr song requests, mod queue controls,
   # deterministic song policy + optional AI DJ. Flag waddles.command-dj defaults OFF.
   - app_id: waddles.core.example.dj
