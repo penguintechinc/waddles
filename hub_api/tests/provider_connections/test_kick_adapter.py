@@ -54,6 +54,7 @@ CONNECTION_FIELDS = {
     "capabilities",
     "createdAt",
     "enabled",
+    "hasApiCredential",
     "expiresAt",
     "hasRefreshToken",
     "id",
