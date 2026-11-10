@@ -631,6 +631,15 @@ where
     } else {
         None
     };
+    // The Discord interaction intake (token capture, dedupe, 3 s ack) shares the lease
+    // Valkey connection; a runtime without discord has no tap.
+    let frame_tap: Option<Arc<dyn crate::interaction_tap::FrameTap>> =
+        settings.platforms.contains(&"discord").then(|| {
+            Arc::new(crate::interaction_tap::GatewayTap::new(
+                crate::interaction_store::InteractionStore::new(deps.lease_conn.clone()),
+                Arc::new(crate::interaction_tap::InteractionAcker::new()),
+            )) as Arc<dyn crate::interaction_tap::FrameTap>
+        });
     let env = settings.runtime_env();
     let self_echo = SelfEchoRegistry::new();
     let mut feeds = FeedSet::new();
@@ -720,6 +729,7 @@ where
             None => Arc::new(secrets),
         },
         gates,
+        frame_tap,
         tenants: Arc::new(ScopeTenantResolve::new(deps.scope)),
         executor: Arc::clone(&deps.bridge.link) as _,
         connector_metrics,
@@ -1042,6 +1052,16 @@ pub async fn start_connector_with<R: ConnectionResolve + 'static>(
     )
     .await?;
     state.webhook = ingress.clone();
+    crate::interaction_tap::register_metrics(&registry)
+        .map_err(|_| anyhow::anyhow!("interaction intake metrics could not be registered"))?;
+    state.interactions = Some(crate::interaction_store::InteractionStore::new(
+        redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("interaction store: valkey connect failed ({:?})", e.kind())
+            })?,
+    ));
     let (tls, addr) = crate::outbound_boot::host_api_from_lookup(cli, deps.lookup)?;
     let (bridge, _) = start_bridge_with(
         &tls,
