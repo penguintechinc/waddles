@@ -584,8 +584,12 @@ modules:
       requests: { cpu: "50m", memory: "96Mi" }
       limits: { cpu: "300m", memory: "384Mi" }
   # gh-894 -- hosts the consolidated analytics (/api/v1/analytics/*) hub-api proxies to.
+  # DISABLED on dal2alpha: no workflow builds ghcr.io/penguintechinc/waddles/core-data on the alpha
+  # deploy path, so the pods would ImagePullBackOff and the deploy smoke test (all Deployments
+  # ready) could never pass. Until the image is built, /api/v1/{analytics,engagement,reputation,labels}
+  # return 503. hub-api omits ANALYTICS_CORE_API_URL automatically when this is off. Follow-up tracked separately.
   coreData:
-    enabled: true
+    enabled: false
     replicas: 1
     resources:
       requests: { cpu: "50m", memory: "96Mi" }
