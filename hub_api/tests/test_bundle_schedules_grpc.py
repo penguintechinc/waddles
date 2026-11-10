@@ -2,7 +2,7 @@
 
 Real: a `grpc.aio` server built with the production interceptor chain
 (`server.build_interceptor_chain`: deadline -> EdDSA machine-JWT auth -> rate limit -> OTel),
-Ed25519 service JWTs, `activate_*_with_warnings` (so the AUTO-BIND `app_source_bindings` row is
+ES256 service JWTs, `activate_*_with_warnings` (so the AUTO-BIND `app_source_bindings` row is
 written by production code, not seeded by the test), the service's SQL joins. sqlite
 (`install_dal`) covers scope/filters/exclusions fast; the Postgres tests below re-run the listing
 against the real migrated schema (FKs, composite PKs, JSONB); one test dials the production TLS
@@ -26,7 +26,7 @@ from urllib.parse import parse_qs
 
 import grpc
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey, spiffe_id
 from sqlalchemy import delete, select, text
 from waddles.hub.internal.v1 import bundle_schedule_pb2, bundle_schedule_pb2_grpc
@@ -77,7 +77,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def issuer() -> ServiceJwtIssuer:
-    priv = Ed25519PrivateKey.generate()
+    priv = ec.generate_private_key(ec.SECP256R1())
     ids = {
         INGEST: ServiceIdentity(INGEST, "waddlebot", "svc-ingest", frozenset({SCOPE}), "system"),
         ROGUE: ServiceIdentity(ROGUE, "waddlebot", "svc-rogue", frozenset({SCOPE}), "system"),
@@ -224,7 +224,7 @@ async def test_missing_token_is_unauthenticated(install_dal: Any, issuer: Servic
 
 async def test_forged_token_is_unauthenticated(install_dal: Any, issuer: ServiceJwtIssuer) -> None:
     """A token signed by a key the server never trusted never lists."""
-    other = Ed25519PrivateKey.generate()
+    other = ec.generate_private_key(ec.SECP256R1())
     forged = ServiceJwtIssuer(
         keys={"k1": SigningKey("k1", other, other.public_key())},
         active_kid="k1",
