@@ -92,9 +92,8 @@
 # /bin/bash and this script must run there unmodified.
 #
 # fix/alpha-deploy-executor-and-failfast -- two independent bugs fixed:
-#   1. bundle-executor (core/bundle_executor/Dockerfile.rust) was never in
-#      SERVICES -- both bundle-executor Deployments (bundle-executor,
-#      bundle-executor-action) ran a stale, hand-pushed mutable `:alpha` tag
+#   1. svc-bundles-executor (core/bundle_executor/Dockerfile.rust) was never in
+#      SERVICES -- the executor Deployment(s) ran a stale, hand-pushed mutable `:alpha` tag
 #      forever. Now built+pushed every run, SHA8-tagged like every other
 #      live image (values-alpha.yaml's bundleExecutor.image.tag is left
 #      unset so it falls through to global.imageTag).
@@ -250,14 +249,14 @@ info "Deploying release SHA ${SHA} (tag ${SHA8}) to context ${KUBE_CONTEXT}, nam
 # than the per-commit SHA8 (same pattern as bundleExecutor's own comment:
 # "built locally + pushed to the local registry ... same as every other
 # alpha-only module image") -- see service_image_tag below.
-readonly SERVICES="hub-api hub-webui migrations svc-ingest svc-process svc-action egress-proxy core-bundle-seeder reputation-module svc-presentation svc-streaming bundle-executor"
+readonly SERVICES="hub-api hub-webui migrations svc-ingest svc-process svc-action egress-proxy seeder reputation-module svc-presentation svc-streaming svc-bundles-executor"
 
 service_dockerfile() {
     case "$1" in
         hub-api) echo "hub_api/Dockerfile" ;;
         hub-webui) echo "admin/hub_module/Dockerfile.webui" ;;
         migrations) echo "migrations/Dockerfile" ;;
-        core-bundle-seeder) echo "bundles/Dockerfile.core-bundles" ;;
+        seeder) echo "bundles/Dockerfile.core-bundles" ;;
         svc-ingest) echo "core/svc_ingest/Dockerfile.rust" ;;
         svc-process) echo "core/svc_process/Dockerfile.rust" ;;
         svc-action) echo "core/svc_action/Dockerfile.rust" ;;
@@ -268,34 +267,29 @@ service_dockerfile() {
         svc-presentation) echo "core/svc_presentation/Dockerfile.rust" ;;
         svc-streaming) echo "core/svc_streaming/Dockerfile.rust" ;;
         # fix/alpha-deploy-executor-and-failfast -- core/bundle_executor/Dockerfile.rust
-        # now exists; this crate backs BOTH the bundle-executor and bundle-executor-action
-        # Deployments (same image, dialed at two different stages via env only -- see
-        # k8s/helm/waddlebot/templates/bundle-executor-action.yaml's own header comment).
-        bundle-executor) echo "core/bundle_executor/Dockerfile.rust" ;;
+        # now exists; this crate backs the single svc-bundles-executor Deployment (it dials
+        # every stage plus the connector link -- see
+        # k8s/helm/waddlebot/templates/svc-bundles-executor.yaml's header comment).
+        svc-bundles-executor) echo "core/bundle_executor/Dockerfile.rust" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac
 }
 
 service_context() {
     case "$1" in
-        # bundle-executor's Dockerfile COPYs core/bundle_executor AND wit/ from the repo
+        # svc-bundles-executor's Dockerfile COPYs core/bundle_executor AND wit/ from the repo
         # root (see its own header comment) -- same "." context as hub-api et al.
-        hub-api|hub-webui|migrations|core-bundle-seeder|reputation-module|bundle-executor) echo "." ;;
+        hub-api|hub-webui|migrations|seeder|reputation-module|svc-bundles-executor) echo "." ;;
         svc-ingest|svc-process|svc-action|egress-proxy|svc-presentation) echo "core" ;;
         svc-streaming) echo "core/svc_streaming" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac
 }
 
-# Image repository name (differs from the service name for the 3 Rust
-# stages -- see the comment above; egress-proxy pushes under its
-# own name, matching egressProxy.image in values.yaml).
+# Image repository name (== the service name for every service now that the Rust
+# stages dropped their `-rust` suffix; kept as a function so a future rename stays one edit).
 service_image_repo() {
     case "$1" in
-        svc-ingest) echo "svc-ingest-rust" ;;
-        svc-process) echo "svc-process-rust" ;;
-        svc-action) echo "svc-action-rust" ;;
-        svc-presentation) echo "svc-presentation-rust" ;;
         *) echo "$1" ;;
     esac
 }
@@ -303,7 +297,7 @@ service_image_repo() {
 # Image tag: every service tags with this run's commit SHA8 except the
 # alpha-only local modules values-alpha.yaml pins to a static "alpha" tag
 # (reputation-module, svc-presentation, svc-streaming). fix/alpha-deploy-
-# executor-and-failfast: bundle-executor is deliberately NOT in this list --
+# executor-and-failfast: svc-bundles-executor is deliberately NOT in this list --
 # it now gets the same per-commit SHA8 tag as every other live data-plane
 # image (values-alpha.yaml's bundleExecutor.image.tag is unset), closing the
 # stale-mutable-`:alpha`-tag bug this fix addresses.

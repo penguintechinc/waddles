@@ -666,7 +666,7 @@ fn the_policy_table_matches_the_relay_op_parity_fixture() {
     }
     assert_eq!(
         checked,
-        9 + 11 + 6,
+        10 + 13 + 6,
         "denominator: ops compared with the fixture"
     );
 }

@@ -2,6 +2,7 @@
   "twitch": [
     "chat.send",
     "chat.delete",
+    "chat.clear",
     "dm.send",
     "mod.ban",
     "mod.timeout",
@@ -20,6 +21,8 @@
     "mod.timeout",
     "message.edit",
     "reaction.add",
+    "message.embed",
+    "webhook.create",
     "interaction.callback",
     "interaction.followup"
   ],

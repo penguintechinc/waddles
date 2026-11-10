@@ -97,6 +97,35 @@ async def get_access_grants(
 GRANT_INVALIDATION_STREAM = "bundle:grants:invalidate"
 
 _SYSTEM_APPROVAL_SOURCE = "system:core-seeder"
+
+#: ELEVATED app-caller economy permissions (`core/bundle_capability_gate`'s
+#: `economy.transfer_from` / `economy.app_mint`). Like `platform.table.*` they are
+#: NEVER auto-granted by the core seeder to an APP bundle: a human admin must
+#: approve each app explicitly (recorded `granted_by`, admin-set cap params).
+ECONOMY_ELEVATED_IDS = frozenset({"economy.transfer_from", "economy.app_mint"})
+#: The economy SERVICE bundle itself holds `economy.transfer_from` as the host's
+#: own gate for exposing the primitive (the grant that matters is the CALLING
+#: app's); it is the only bundle the seeder may grant an elevated id.
+ECONOMY_SERVICE_APP_ID = "waddles.core.service.economy"
+_ECONOMY_SERVICE_SELF_GRANTS = frozenset({"economy.transfer_from"})
+
+
+def never_auto_granted(app_id: str, permission_id: str) -> bool:
+    """`True` when the core seeder must neither approve nor grant `permission_id` for `app_id`.
+
+    Resource-access grant ids (`platform.table.*`, ...) are never auto-granted; neither are
+    the elevated economy ids -- except the economy service bundle's own
+    `economy.transfer_from` (see [`ECONOMY_SERVICE_APP_ID`]).
+    """
+    if is_access_grant_id(permission_id):
+        return True
+    if permission_id in ECONOMY_ELEVATED_IDS:
+        return not (
+            app_id == ECONOMY_SERVICE_APP_ID and permission_id in _ECONOMY_SERVICE_SELF_GRANTS
+        )
+    return False
+
+
 _HUMAN_APPROVAL_SOURCE = "human"
 
 
@@ -324,15 +353,18 @@ async def seed_core_permission_requests(
     EXCEPTION: `platform.table.*` ids (platform-table access, spec
     2026-11-06-bundle-table-access-grants Sec3) are NEVER auto-granted, not even
     to a core bundle -- they are filtered out here and need a human global-admin
-    approval like any vendor bundle. Existing blanket grants (e.g.
-    `connector.pii.read`) are unchanged and deliberately not extended.
+    approval like any vendor bundle. The same holds for the elevated economy ids
+    (`economy.transfer_from`, `economy.app_mint`) for every bundle except the
+    economy service's own `economy.transfer_from` (see `never_auto_granted`).
+    Existing blanket grants (e.g. `connector.pii.read`) are unchanged and
+    deliberately not extended.
     """
     await record_permission_requests(
         install_dal,
         app_id=app_id,
         version=version,
         declarations=tuple(
-            d for d in manifest.permission_declarations if not is_access_grant_id(d.id)
+            d for d in manifest.permission_declarations if not never_auto_granted(app_id, d.id)
         ),
         approved_by=None,
         approval_source=_SYSTEM_APPROVAL_SOURCE,

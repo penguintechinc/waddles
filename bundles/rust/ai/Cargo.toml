@@ -1,0 +1,31 @@
+[package]
+name = "waddle-bundle-ai-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "AI SERVICE bundle: an always-on `kind: service` bundle on the `stage-tools` world that exports `tool-provider` and wraps the host `ai.generate` capability behind guarded, quota-limited tools: ai.complete, ai.classify, ai.rag.query, ai.rag.ingest."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+# Sibling-crate path dependency (same repo, moves together) -- the real
+# `tool` registry/dispatch lives in the SDK; see
+# core/bundle_executor/tests/fixtures/tool-provider-fixture-src for the
+# adapter pattern this bundle follows.
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+unicode-normalization = "=0.1.24"
+
+[package.metadata.component]
+package = "waddle:bundle-ai-service"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage-tools"
+
+[package.metadata.component.dependencies]

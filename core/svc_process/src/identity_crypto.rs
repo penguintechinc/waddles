@@ -377,7 +377,7 @@ impl<D: DekProvider> DekProvider for TtlCachedDekProvider<D> {
     }
 }
 
-/// Mints the short-lived EdDSA machine JWT this provider authenticates
+/// Mints the short-lived ES256 machine JWT this provider authenticates
 /// hub-api calls with -- see `core/svc_ingest`'s identical trait doc
 /// comment (PR #438, `feature/eddsa-machine-jwt`, unmerged as of this
 /// writing).
@@ -393,7 +393,7 @@ pub struct UnimplementedMachineJwtProvider;
 impl MachineJwtProvider for UnimplementedMachineJwtProvider {
     fn mint(&self) -> Result<String, String> {
         Err(
-            "core/service_auth EdDSA machine JWT minting is not yet available \
+            "core/service_auth ES256 machine JWT minting is not yet available \
              (PR #438 / feature/eddsa-machine-jwt is unmerged)"
                 .to_string(),
         )

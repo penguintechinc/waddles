@@ -238,7 +238,7 @@ mod tests {
     use connection_resolver::{
         ConnectionKind, ConnectionResolver, ResolverConfig, ResolverMetrics,
     };
-    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::connector::poll::{PollAuth, PollConfig, PollTransport};
@@ -346,7 +346,7 @@ mod tests {
     }
 
     /// Removes the synthetic projected service-account token on every exit path.
-    struct TestSa(PathBuf);
+    struct TestSa(PathBuf, service_auth::test_support::MockHub);
     impl Drop for TestSa {
         fn drop(&mut self) {
             if let Err(error) = std::fs::remove_file(&self.0) {
@@ -358,13 +358,14 @@ mod tests {
     /// Starts the real resolver against a loopback hub HTTP contract server.
     /// The synthetic projected token lives until its test guard is dropped.
     async fn resolver(server: &MockServer) -> (ConnectionResolver, TestSa) {
-        Mock::given(method("POST"))
-            .and(path("/internal/service-token"))
-            .and(body_partial_json(serde_json::json!({"community_id": 7})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"token": "synthetic-machine-token", "expires_in": 3600}),
-            ))
-            .mount(server)
+        // The mint is gRPC: a real in-process `ServiceAuthService` answers only community 7.
+        let hub = service_auth::test_support::MockHub::builder()
+            .mint(vec![service_auth::test_support::MintReply::when(
+                |call| call.community_id == Some(7),
+                "synthetic-machine-token",
+                3600,
+            )])
+            .start()
             .await;
         let sa = std::env::temp_dir().join(format!("transport-sa-{}", uuid::Uuid::new_v4()));
         std::fs::write(&sa, "synthetic-service-account").unwrap();
@@ -372,13 +373,13 @@ mod tests {
             ResolverConfig::new(
                 server.uri(),
                 "alpha",
-                format!("{}/internal/service-token", server.uri()),
+                hub.endpoint.clone(),
                 sa.to_string_lossy().to_string(),
             ),
             Arc::new(NoMetrics),
         )
         .unwrap();
-        (resolver, TestSa(sa))
+        (resolver, TestSa(sa, hub))
     }
 
     /// Each request returns the selected credential, as the real hub does.
@@ -455,13 +456,7 @@ mod tests {
                 .count(),
             2
         );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|r| r.url.path() == "/internal/service-token")
-                .count(),
-            1
-        );
+        assert_eq!(_sa.1.mint_hits(), 1);
     }
 
     /// Authentication tokens are expanded only in the transport-owned buffer;

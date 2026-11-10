@@ -1,0 +1,90 @@
+# game-servers APP bundle. Pure orchestration over the gameserver SERVICE bundle's tools (app->service only);
+# holds no address, no secret, no socket. Server registration / allowlists / audit are service tools reached by the
+# generic bundle-admin gateway under the admin's verified scope (see README "Admin path").
+schema_version: 2
+app_id: waddles.core.example.game-servers
+name: Game Servers (Rust)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/game-servers
+language: rust
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: waddle:bundle/process-stage#transform
+    consumes:
+    - platform: twitch
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!server'
+        - '!rcon'
+    - platform: discord
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!server'
+        - '!rcon'
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: waddle:bundle/action-stage#dispatch
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 8000
+  memory_mb: 64
+  egress_rps: 10
+permissions: []
+requested_tools:
+- tool: gameserver.server.list
+  access: read
+  target_app_id: waddles.core.service.gameserver
+- tool: gameserver.status.query
+  access: read
+  target_app_id: waddles.core.service.gameserver
+- tool: gameserver.rcon.exec
+  access: write
+  target_app_id: waddles.core.service.gameserver
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    status_post_enabled:
+      type: boolean
+      default: false
+      description: Post periodic server status to a channel
+    status_post_platform:
+      enum:
+      - twitch
+      - discord
+    status_post_channel_id:
+      type: string
+      maxLength: 64
+    status_post_servers:
+      type: array
+      maxItems: 5
+      items:
+        type: string
+        maxLength: 64
+      description: Server aliases to include (empty = all enabled)
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: 1.0.0
+  min_version: 1.0.0
+  max_version: null

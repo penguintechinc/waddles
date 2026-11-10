@@ -990,7 +990,13 @@ mod tests {
     }
 
     fn cli_alpha() -> CliConfig {
-        CliConfig::parse_from(["svc-ingest", "--environment", "alpha"])
+        CliConfig::parse_from([
+            "svc-ingest",
+            "--environment",
+            "alpha",
+            "--service-jwt-token-endpoint",
+            "http://127.0.0.1:50204",
+        ])
     }
 
     fn selector(pairs: &[(&str, &str)]) -> ConnectorSelector {
