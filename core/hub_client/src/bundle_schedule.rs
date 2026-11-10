@@ -152,7 +152,6 @@ mod tests {
     };
     use crate::pb::ListBundleSchedulesResponse;
     use std::sync::Mutex;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tonic::{Request, Status};
 
@@ -214,26 +213,16 @@ mod tests {
         tonic::transport::server::TcpIncoming::from(listener)
     }
 
-    /// Local HTTP token endpoint answering every request with a machine JWT.
+    /// Real in-process gRPC `ServiceAuthService` answering every mint with a machine JWT. The mock
+    /// is leaked on purpose (it must outlive the returned URL string) and ends with the runtime.
     async fn token_server() -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut sock, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 8192];
-                    let _ = sock.read(&mut buf).await;
-                    let body = r#"{"token":"jwt-abc","expires_in":900}"#;
-                    let resp = format!(
-                        "HTTP/1.1 200 X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = sock.write_all(resp.as_bytes()).await;
-                    let _ = sock.shutdown().await;
-                });
-            }
-        });
-        format!("http://{addr}")
+        let mock = service_auth::test_support::MockHub::builder()
+            .mint(vec![service_auth::test_support::MintReply::token("jwt-abc", 900)])
+            .start()
+            .await;
+        let endpoint = mock.endpoint.clone();
+        std::mem::forget(mock);
+        endpoint
     }
 
     fn sa_file(label: &str) -> String {
