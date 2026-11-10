@@ -65,15 +65,6 @@ global:
   initialAdmin:
     email: "admin@waddles-alpha.penguintech.cloud"
 
-# Monday-demo: pin ONLY the hub-api image family (hub-api Deployment + role-sync / event-sync /
-# odoo-sync / bundle-signing CronJobs) to the sync-worker DAL fix, rebuilt as
-# ghcr.io/penguintechinc/waddles/hub-api:demo-881ac8dd-syncfix
-# (sha256:0b018eb209f49de03b68088b7576cb51d4a6cbeb8c37aa53547a5da050629954). Every other workload
-# (svc-*-rust, seeder, migrations, ...) stays on global.imageTag above --
-# those images only exist at demo-881ac8dd. Replace with a digest pin for production.
-hubApi:
-  imageTag: "demo-881ac8dd-syncfix"
-
 # fix/helm-platform-credentials -- the Discord bot token / Twitch IRC OAuth
 # token placeholders that used to live here are REMOVED, not just blanked:
 # this is exactly the field (`oauth.discord.botToken`) whose
@@ -172,7 +163,7 @@ pipeline:
     schedule: "*/1 * * * *"
     demoteBaselineRole: "member"
   # Monday-demo: Discord event-sync reconcile CronJob ON (was base-default false, so it was NOT
-  # deployed). The hub-api image pinned by hubApi.imageTag above carries the sync-worker DAL fix.
+  # deployed). The hub-api image follows global.imageTag (sync-worker DAL fix, PR #878, is in release).
   # Still double-gated by the waddles.calendar.event_discord_sync PostHog flag (default OFF).
   eventSync:
     enabled: true
