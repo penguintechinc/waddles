@@ -4,7 +4,7 @@
 # image + standalone-entrypoint shape as templates/role-sync-cronjob.yaml (which remains the
 # periodic correctness backstop). Needs the Discord bot's privileged "Server Members Intent"
 # enabled in the Discord developer portal. Disabled by default (pipeline.roleSync.inbound.enabled);
-# the per-tenant FEATURE_BAR_CITIZEN_ROLE_SYNC PostHog flag remains the runtime gate.
+# the per-tenant FEATURE_ROLE_SYNC PostHog flag remains the runtime gate.
 {{- if and .Values.pipeline.roleSync.enabled .Values.pipeline.roleSync.inbound.enabled }}
 apiVersion: batch/v1
 kind: CronJob
@@ -60,7 +60,7 @@ spec:
                 name: {{ include "waddlebot.fullname" . }}-secrets
             # feature/alpha-localized-posthog -- POSTHOG_API_KEY/POSTHOG_KEY auto-provisioned
             # once posthog.enabled=true (alpha); this worker's own `_flag_enabled()` resolves
-            # FEATURE_BAR_CITIZEN_ROLE_SYNC through the same entitlement client hub-api uses.
+            # FEATURE_ROLE_SYNC through the same entitlement client hub-api uses.
             # `optional: true`: safe before the bootstrap Job has run, or when disabled.
             - secretRef:
                 name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
@@ -79,6 +79,7 @@ spec:
             # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
             # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 12 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 12 }}
             # services/platform_integrations_crypto.py::_get_key() -- decrypts per-tenant
             # tenant_platform_apps/platform_connections rows this worker's credential
             # resolver reads for every non-global-tenant pairing. Explicit secretKeyRef
@@ -107,9 +108,13 @@ spec:
             resources:
               {{- toYaml .Values.pipeline.roleSync.resources | nindent 14 }}
             volumeMounts:
+            {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 12 }}
+            {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 12 }}
             - name: tmp
               mountPath: /tmp
           volumes:
+          {{- include "waddlebot.transitTls.caVolume" . | nindent 10 }}
+          {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 10 }}
           - name: tmp
             emptyDir: {}
 {{- end }}

@@ -47,6 +47,7 @@
 pub mod bindings_glue;
 
 pub mod clock;
+pub mod command;
 pub mod context;
 pub mod db;
 pub mod error;

@@ -290,6 +290,17 @@ pub async fn run_tick(
     for row in &active {
         kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
     }
+    // The approved manifest egress feeds the bundle http guard (no other
+    // production writer exists for its catalog): THIS scope's rows are
+    // replaced wholesale every tick, so a deactivated bundle drops out and no
+    // other scope's rows are ever touched or merged.
+    bundle_host_http::grants::ActiveEgressSnapshot::global().replace_scope(
+        i64::from(tenant_id),
+        i64::from(community_id),
+        active
+            .iter()
+            .map(|r| (r.app_id.clone(), r.egress.clone(), r.egress_rps)),
+    );
     // Wholesale-replace the shared `app_version` snapshot from this SAME
     // read, before the load/unload decision below -- `crate::spine`/
     // `crate::source_supervisor`'s per-invocation resolution (spec SS4/
@@ -408,6 +419,8 @@ mod tests {
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
             declared_capabilities: Vec::new(),
+            egress: Vec::new(),
+            egress_rps: None,
             tools: Default::default(),
         }
     }

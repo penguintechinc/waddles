@@ -27,8 +27,8 @@ Like its v1 siblings this module only builds validated dataclasses and
 ``sql.Literal``) -- no string-formatted SQL. :func:`provision_schema` applies it
 (run as ``waddles_bundle_migrator``) and writes ``bundle_data.table_registry``,
 the metadata the data plane reads to resolve a guest's *logical* table name to
-the physical table. Wiring it into the approval transaction is the same
-follow-up as v1's (see ``docs/bundle-storage-v2.md``).
+the physical table. :mod:`bundle_data_provisioner` calls it from the global
+install / upgrade / uninstall flow (see ``docs/bundle-storage-v2.md``).
 """
 
 from __future__ import annotations

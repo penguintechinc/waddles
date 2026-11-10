@@ -49,6 +49,7 @@ mod lifecycle_tests;
 pub mod metrics;
 pub mod poll;
 pub(crate) mod ratelimit;
+pub mod reconcile_hook;
 pub mod rediscover;
 pub mod registry;
 pub mod secrets;
