@@ -658,10 +658,23 @@ pipeline:
 
 # chore/presentation-beta-slice -- local/MicroK8s runs the Rust svc-presentation (the overlay
 # beta path), exactly like alpha/dal2alpha. templates/svc-presentation-rust.yaml is the only
-# presentation template (the Python one was removed). Image: svc-presentation-rust:<global.imageTag>.
+# presentation template (the Python one was removed). Image: svc-presentation:<global.imageTag>.
 presentation:
   rust:
     enabled: true
     nodePort:
       enabled: true
       port: 31032
+
+# svc-bundles-executor scales horizontally: every replica dials every stage + the connector
+# link and each listener round-robins work across the replicas (see values.yaml
+# pipeline.rustDataPlane.bundleExecutor). HPA on CPU + memory; the PDB (minAvailable 1) renders
+# automatically once the effective replica floor is >1.
+autoscaling:
+  services:
+    bundleExecutor:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80

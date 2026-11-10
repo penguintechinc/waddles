@@ -28,6 +28,10 @@ VERBS: frozenset[str] = frozenset(
     {"set", "add", "sub", "enable", "disable", "remove", "delete", "list", "reset"}
 )
 
+#: Maximum accepted command text length in characters -- identical to the Rust
+#: port's `MAX_COMMAND_CHARS` (shared golden vectors enforce parity).
+MAX_COMMAND_CHARS = 4096
+
 _TOGGLE_VERBS: frozenset[str] = frozenset({"enable", "disable"})
 
 _PLACEHOLDER_RE = re.compile(r"\$\((\w+)\)")
@@ -88,6 +92,8 @@ def parse_command(text: str, spec: CommandSpec) -> ParsedCommand:
     sub-module, or a malformed toggle; it never returns a best-guess
     partial parse.
     """
+    if len(text) > MAX_COMMAND_CHARS:
+        raise CommandUsageError(f"command text exceeds {MAX_COMMAND_CHARS} characters")
     stripped = text.strip()
     if not stripped:
         raise CommandUsageError("empty command text")
@@ -220,6 +226,9 @@ def parse_cli_command(text: str, spec: CliCommandSpec) -> ParsedCliCommand:
     """
     import argparse
     import shlex
+
+    if len(text) > MAX_COMMAND_CHARS:
+        raise CommandUsageError(f"command text exceeds {MAX_COMMAND_CHARS} characters")
 
     class Parser(argparse.ArgumentParser):
         """Convert argparse process exits into the SDK's typed usage exception."""

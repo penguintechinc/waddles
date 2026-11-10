@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 import yaml
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import (
     BootstrapRejected,
     ServiceIdentity,
@@ -108,8 +108,8 @@ def chart_identities(
 
 @pytest.fixture
 def service_issuer(chart_identities: dict[str, ServiceIdentity]) -> ServiceJwtIssuer:
-    """Override the shared hand-built issuer: a real Ed25519 issuer over the CHART's allow-list."""
-    private = Ed25519PrivateKey.generate()
+    """Override the shared hand-built issuer: a real ES256 issuer over the CHART's allow-list."""
+    private = ec.generate_private_key(ec.SECP256R1())
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
     identities = dict(chart_identities)
     return ServiceJwtIssuer(

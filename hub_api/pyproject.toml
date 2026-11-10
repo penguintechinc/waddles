@@ -48,6 +48,7 @@ convention = "google"
 # the same tenant_middleware postcondition assert as platform.py above,
 # repeated once per handler.
 "blueprints/v1/bot.py" = ["N815", "S101"]
+"blueprints/v1/eventsub_reconcile.py" = ["N815"]
 "services/bot_shoutout.py" = ["N815"]
 "services/bot_ai_knowledge.py" = ["N815"]
 "services/access_grant_dto.py" = ["N815"]  # wire DTOs are camelCase by API contract
@@ -282,6 +283,7 @@ convention = "google"
 # bundle_approvals.py above -- no tenant_middleware assert here (this
 # endpoint is deliberately cross-tenant), so only N815 is needed.
 "blueprints/v1/bundle_admin.py" = ["N815"]
+"blueprints/v1/bundle_admin_gateway.py" = ["N815", "S101"]  # wire DTOs are camelCase by API contract
 # Enterprise external KMS / BYOK (services/envelope/) -- camelCase DTO fields
 # (keyRef, externalId, dekVersion, ...) follow the v1 wire contract every other
 # blueprint's DTOs use; S101 is the same tenant_middleware postcondition assert
@@ -307,7 +309,7 @@ exclude = ["^\\.venv/", "^tests/"]
 # this is a boundary override for an external-to-this-service import, not
 # a relaxation of hub-api's own typing bar.
 [[tool.mypy.overrides]]
-module = ["flask_core.*", "pydal.*"]
+module = ["flask_core.*", "pydal.*", "jsonschema.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
 

@@ -268,6 +268,41 @@ impl PlatformPolicy {
                         ]),
                     )
                 },
+                // https://discord.com/developers/docs/resources/message#create-message
+                // (embed-bearing send): the pinned origin channel only; the reply's new
+                // message snowflake is returned to the producer.
+                KindPolicy {
+                    slots: vec!["target.channel_id"],
+                    header_creds: vec![BOT],
+                    max_body: Some(16_384),
+                    body_keys: vec!["content", "embeds", "allowed_mentions"],
+                    text_key: "content",
+                    requires_pin: true,
+                    result: ResultMode::CreatedSnowflake,
+                    ..KindPolicy::new("message.embed", "POST", channel_messages(vec![]))
+                },
+                // https://discord.com/developers/docs/resources/webhook#create-webhook
+                // (MANAGE_WEBHOOKS): the reply carries the webhook TOKEN, a secret -- the
+                // producer (svc_action) reads the body host-side and never returns it to a
+                // guest.
+                KindPolicy {
+                    slots: vec!["target.channel_id"],
+                    header_creds: vec![BOT],
+                    max_body: Some(1024),
+                    body_keys: vec!["name"],
+                    text_key: "name",
+                    requires_pin: true,
+                    result: ResultMode::Body,
+                    ..KindPolicy::new(
+                        "webhook.create",
+                        "POST",
+                        v10(vec![
+                            PathSeg::Lit("channels"),
+                            PathSeg::Slot("target.channel_id"),
+                            PathSeg::Lit("webhooks"),
+                        ]),
+                    )
+                },
                 // https://discord.com/developers/docs/interactions/application-commands#bulk-overwrite-global-application-commands
                 KindPolicy {
                     slots: vec!["app.application_id"],
@@ -342,5 +377,71 @@ impl PlatformPolicy {
             allowed_headers: vec!["content-type", "accept", "user-agent", "x-audit-log-reason"],
             allow_http: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod embed_webhook_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::connector::sender_exec::verify::{verify, TemplateError};
+    use crate::connector::sender_exec::RequestTpl;
+
+    fn tpl(method: &str, url: &str, body: Option<serde_json::Value>) -> RequestTpl {
+        let owned = |p: &[(&str, &str)]| {
+            p.iter()
+                .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+                .collect::<Vec<_>>()
+        };
+        RequestTpl {
+            method: method.into(),
+            url: url.into(),
+            headers: owned(&[("Content-Type", "application/json")]),
+            body: body.map(|b| b.to_string().into_bytes()),
+            secret_refs: owned(&[("Authorization", "discord-bot")]),
+        }
+    }
+
+    fn check(kind: &str, t: &RequestTpl) -> Result<(), TemplateError> {
+        let p = PlatformPolicy::discord();
+        verify(&p, p.kind(kind).expect("kind exists"), t).map(|_| ())
+    }
+
+    #[test]
+    fn message_embed_posts_to_the_pinned_channel_and_returns_the_message_snowflake() {
+        let url = "https://discord.com/api/v10/channels/{target.channel_id}/messages";
+        let good = tpl("POST", url, Some(serde_json::json!({"content": "x", "embeds": [{"title": "t"}]})));
+        assert_eq!(check("message.embed", &good), Ok(()));
+        let k = PlatformPolicy::discord().kind("message.embed").unwrap().clone();
+        assert!(k.requires_pin);
+        assert_eq!(k.result, ResultMode::CreatedSnowflake);
+        let bad_key = tpl("POST", url, Some(serde_json::json!({"content": "x", "attachments": []})));
+        assert_eq!(check("message.embed", &bad_key), Err(TemplateError::BodyKeyNotAllowed));
+        let lit = tpl(
+            "POST",
+            "https://discord.com/api/v10/channels/42/messages",
+            Some(serde_json::json!({"content": "x"})),
+        );
+        assert_eq!(check("message.embed", &lit), Err(TemplateError::PathMismatch));
+    }
+
+    #[test]
+    fn webhook_create_is_pinned_to_the_channel_and_reads_its_reply_body_host_side() {
+        let url = "https://discord.com/api/v10/channels/{target.channel_id}/webhooks";
+        let good = tpl("POST", url, Some(serde_json::json!({"name": "bridge"})));
+        assert_eq!(check("webhook.create", &good), Ok(()));
+        let k = PlatformPolicy::discord().kind("webhook.create").unwrap().clone();
+        assert!(k.requires_pin);
+        // The reply carries the webhook token: Body mode keeps it host-side (the producer
+        // drops every key the manifest did not allowlist).
+        assert_eq!(k.result, ResultMode::Body);
+        let extra = tpl("POST", url, Some(serde_json::json!({"name": "b", "avatar": "x"})));
+        assert_eq!(check("webhook.create", &extra), Err(TemplateError::BodyKeyNotAllowed));
+        let lit = tpl(
+            "POST",
+            "https://discord.com/api/v10/channels/42/webhooks",
+            Some(serde_json::json!({"name": "b"})),
+        );
+        assert_eq!(check("webhook.create", &lit), Err(TemplateError::PathMismatch));
     }
 }

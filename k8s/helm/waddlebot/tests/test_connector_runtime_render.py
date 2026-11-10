@@ -87,7 +87,7 @@ def test_all_off_renders_nothing_new(values: str) -> None:
 
 def test_youtube_on_renders_env_on_the_ingest_deployment_from_one_value() -> None:
     docs = _docs(_yt())
-    rust, ex = (_dep(docs, "-svc-ingest-rust"), _dep(docs, "-bundle-executor"))
+    rust, ex = (_dep(docs, "-svc-ingest-rust"), _dep(docs, "-svc-bundles-executor"))
     for dep in (rust,):
         env = _env(dep)
         assert env["CONNECTOR_YOUTUBE_ENABLED"]["value"] == "true"
@@ -109,7 +109,7 @@ def test_youtube_on_renders_env_on_the_ingest_deployment_from_one_value() -> Non
 
 def test_executor_env_and_distinct_client_secret_mounted_only_there() -> None:
     docs = _docs(_yt())
-    ex = _dep(docs, "-bundle-executor")
+    ex = _dep(docs, "-svc-bundles-executor")
     env = _env(ex)
     assert env["CONNECTOR_HOST_API_ADDR"]["value"].endswith("-svc-ingest-rust:8301")
     assert env["CONNECTOR_HOST_API_IDENTITY"]["value"].endswith("-svc-ingest-rust")
@@ -237,13 +237,13 @@ def test_network_policies_are_cilium_and_scoped() -> None:
     assert cnp["kind"] == "CiliumNetworkPolicy"
     rules = cnp["spec"]["ingress"]
     assert len(rules) == 1
-    assert rules[0]["fromEndpoints"][0]["matchLabels"]["app.kubernetes.io/component"] == "bundle-executor"
+    assert rules[0]["fromEndpoints"][0]["matchLabels"]["app.kubernetes.io/component"] == "svc-bundles-executor"
     assert rules[0]["toPorts"][0]["ports"] == [{"port": "8301", "protocol": "TCP"}]
     # Only these two CNPs (ingest ingress-from-executor, executor egress) mention 8301.
     opens = sorted(d["metadata"]["name"] for d in docs
                    if d["kind"] == "CiliumNetworkPolicy" and '"8301"' in yaml.safe_dump(d["spec"]).replace("'", '"'))
-    assert len(opens) == 2 and opens[0].endswith("-bundle-executor") and opens[1].endswith("-svc-ingest-host-api"), opens
-    ex = next(d for d in docs if d["kind"] == "CiliumNetworkPolicy" and d["metadata"]["name"].endswith("-bundle-executor"))
+    assert len(opens) == 2 and opens[0].endswith("-svc-bundles-executor") and opens[1].endswith("-svc-ingest-host-api"), opens
+    ex = next(d for d in docs if d["kind"] == "CiliumNetworkPolicy" and d["metadata"]["name"].endswith("-svc-bundles-executor"))
     hits = [r for r in ex["spec"]["egress"]
             if r.get("toEndpoints", [{}])[0].get("matchLabels", {}).get("app.kubernetes.io/component") == "svc-ingest-rust"]
     assert len(hits) == 1 and hits[0]["toPorts"][0]["ports"] == [{"port": "8301", "protocol": "TCP"}]
@@ -255,7 +255,7 @@ def test_security_context_unchanged_and_no_literal_secrets() -> None:
     res = _render(*_yt())
     assert res.returncode == 0
     docs = [d for d in yaml.safe_load_all(res.stdout) if d]
-    for suffix in ("-svc-ingest-rust", "-bundle-executor"):
+    for suffix in ("-svc-ingest-rust", "-svc-bundles-executor"):
         c = _dep(docs, suffix)["spec"]["template"]["spec"]["containers"][0]
         assert c["securityContext"]["runAsNonRoot"] is True
         assert c["securityContext"]["allowPrivilegeEscalation"] is False
@@ -314,7 +314,7 @@ def test_alpha_connector_certs_use_a_separate_ca_and_executor_trusts_both() -> N
     pems = bundle["stringData"]["ca.crt"].split("-----END CERTIFICATE-----")
     certs = [crypto.load_pem_x509_certificate((p + "-----END CERTIFICATE-----").encode()) for p in pems if "BEGIN" in p]
     assert {fp(c) for c in certs} == {fp(stage), fp(srv_ca)}
-    ex = _dep(docs, "-bundle-executor")
+    ex = _dep(docs, "-svc-bundles-executor")
     mounts = ex["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     m = next(m for m in mounts if m["name"] == "executor-ca-bundle")
     assert m["mountPath"] == _env(ex)["HOST_API_CA_FILE"]["value"] and m["subPath"] == "ca.crt"
@@ -327,7 +327,7 @@ def test_external_connector_secrets_require_executor_ca_bundle_secret() -> None:
     ok = _render(*_yt(*ext, "--set", f"{_CT}.hostApiTls.executorCaBundleSecretName=my-bundle"))
     assert ok.returncode == 0, ok.stderr[-600:]
     docs = [d for d in yaml.safe_load_all(ok.stdout) if d]
-    vols = _dep(docs, "-bundle-executor")["spec"]["template"]["spec"]["volumes"]
+    vols = _dep(docs, "-svc-bundles-executor")["spec"]["template"]["spec"]["volumes"]
     assert next(v for v in vols if v["name"] == "executor-ca-bundle")["secret"]["secretName"] == "my-bundle"
 
 
@@ -358,7 +358,7 @@ def _spectrum(*extra: str) -> list[str]:
 
 def test_spectrum_on_renders_env_digest_and_pin_from_one_value() -> None:
     docs = _docs(_spectrum())
-    rust, ex = (_dep(docs, "-svc-ingest-rust"), _dep(docs, "-bundle-executor"))
+    rust, ex = (_dep(docs, "-svc-ingest-rust"), _dep(docs, "-svc-bundles-executor"))
     for dep in (rust,):
         env = _env(dep)
         assert env["CONNECTOR_SPECTRUM_ENABLED"]["value"] == "true"
@@ -375,7 +375,7 @@ def test_spectrum_off_is_the_default_and_renders_no_spectrum_digest() -> None:
     for dep in (rust,):
         assert _env(dep)["CONNECTOR_SPECTRUM_ENABLED"]["value"] == "false"
     assert "SENDER_EXEC_DIGEST_SPECTRUM" not in _env(rust)
-    assert "CONNECTOR_PIN_DIGEST_SPECTRUM" not in _env(_dep(docs, "-bundle-executor"))
+    assert "CONNECTOR_PIN_DIGEST_SPECTRUM" not in _env(_dep(docs, "-svc-bundles-executor"))
 
 
 @pytest.mark.parametrize("values", ["values.yaml", "values-alpha.yaml", "values-dal2alpha.yaml", "values-local.yaml"])

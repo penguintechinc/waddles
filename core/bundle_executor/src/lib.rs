@@ -107,7 +107,7 @@ impl ShutdownSignals {
 async fn serve_until_shutdown<S, Sv, Sd>(
     serve: Sv,
     shutdown: Sd,
-    executor: &Executor<S>,
+    executors: &[Arc<Executor<S>>],
     drain_deadline: Duration,
 ) -> DrainOutcome
 where
@@ -127,7 +127,7 @@ where
     );
     let outcome = tokio::select! {
         _ = &mut serve => DrainOutcome::Drained,
-        outcome = executor.drain(drain_deadline) => outcome,
+        outcome = drain_all(executors, drain_deadline) => outcome,
     };
     match outcome {
         DrainOutcome::Drained => info!("drain complete; exiting"),
@@ -140,6 +140,42 @@ where
         ),
     }
     outcome
+}
+
+/// Drains every per-stage executor within ONE shared `deadline`: all are
+/// flipped to refuse new work first (so no stage keeps accepting while another
+/// drains), then each is awaited against the time that is left. The result is
+/// `Drained` only if every executor drained; otherwise the in-flight counts are
+/// summed across the executors that timed out.
+async fn drain_all<S: ComponentSource>(
+    executors: &[Arc<Executor<S>>],
+    deadline: Duration,
+) -> DrainOutcome {
+    for executor in executors {
+        executor.begin_drain();
+    }
+    let started = Instant::now();
+    let (mut calls, mut compiles, mut timed_out) = (0u32, 0u32, false);
+    for executor in executors {
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if let DrainOutcome::TimedOut {
+            in_flight_calls,
+            in_flight_compiles,
+        } = executor.drain(remaining).await
+        {
+            timed_out = true;
+            calls = calls.saturating_add(in_flight_calls);
+            compiles = compiles.saturating_add(in_flight_compiles);
+        }
+    }
+    if timed_out {
+        DrainOutcome::TimedOut {
+            in_flight_calls: calls,
+            in_flight_compiles: compiles,
+        }
+    } else {
+        DrainOutcome::Drained
+    }
 }
 
 /// A tiny, dependency-free xorshift64* PRNG for jittering `crate::run`'s
@@ -245,8 +281,32 @@ pub async fn run() -> Result<(), ExecutorError> {
     }
 
     let mut signals = ShutdownSignals::install()?;
-    let source = BucketComponentSource::from_cli(&cfg)?;
-    let executor = Arc::new(Executor::new(&cfg, source)?);
+    // One Executor (own wasmtime engine, bundle registry, call limiter) PER
+    // configured stage. A stage's disconnect wipes only its own registry
+    // (`Executor::on_disconnect`), and a scope loaded by one stage can never be
+    // invoked through another, so the stages stay isolated although they share
+    // this process. The first stage's executor also hosts the connector link
+    // and the pinned connector bundles (kept out of every stage registry).
+    let stage_cfgs: Vec<CliConfig> = cfg
+        .stage_targets()
+        .iter()
+        .map(|t| cfg.for_stage(t))
+        .collect();
+    let mut executors: Vec<Arc<Executor<BucketComponentSource>>> =
+        Vec::with_capacity(stage_cfgs.len());
+    for stage_cfg in &stage_cfgs {
+        let source = BucketComponentSource::from_cli(stage_cfg)?;
+        executors.push(Arc::new(Executor::new(stage_cfg, source)?));
+    }
+    let Some(executor) = executors.first().cloned() else {
+        return Err(ExecutorError::Config(
+            "STAGE_HOST_API_ADDR names no stage".to_string(),
+        ));
+    };
+    info!(
+        stages = ?stage_cfgs.iter().map(CliConfig::stage_label).collect::<Vec<_>>(),
+        "bundle executor serving stages"
+    );
     // Pin the configured connector service bundles BEFORE any link is dialed. Any
     // failure (missing object, digest mismatch, bad signature, malformed
     // digest) aborts startup loudly, naming the platform.
@@ -265,26 +325,57 @@ pub async fn run() -> Result<(), ExecutorError> {
         "host-api session liveness configured"
     );
 
-    // The stage link always runs; the connector link only when
-    // `CONNECTOR_HOST_API_ADDR` is configured (unset = no dial).
-    let serve = async {
-        let stage = dial_loop(&cfg, &executor, Link::Stage, heartbeat_cfg);
-        let connector = async {
-            if cfg.connector_dial_addr().is_some() {
-                dial_loop(&cfg, &executor, Link::Connector, heartbeat_cfg).await;
-            } else {
-                std::future::pending::<()>().await;
+    // One independent dial loop per stage (own reconnect/backoff, so one stage
+    // being down never delays another), plus the connector link only when
+    // `CONNECTOR_HOST_API_ADDR` is configured (unset = no dial). These loops
+    // never end on their own: one finishing means its task panicked, which is
+    // surfaced as an error below rather than leaving a stage silently dead.
+    let ended_unexpectedly = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let serve = {
+        let ended = Arc::clone(&ended_unexpectedly);
+        let connector_cfg = cfg.clone();
+        let connector_executor = Arc::clone(&executor);
+        let stage_loops: Vec<(CliConfig, Arc<Executor<BucketComponentSource>>)> = stage_cfgs
+            .iter()
+            .cloned()
+            .zip(executors.iter().cloned())
+            .collect();
+        async move {
+            let mut loops = tokio::task::JoinSet::new();
+            for (stage_cfg, stage_executor) in stage_loops {
+                loops.spawn(async move {
+                    dial_loop(&stage_cfg, &stage_executor, Link::Stage, heartbeat_cfg).await;
+                });
             }
-        };
-        tokio::join!(stage, connector);
+            if connector_cfg.connector_dial_addr().is_some() {
+                loops.spawn(async move {
+                    dial_loop(
+                        &connector_cfg,
+                        &connector_executor,
+                        Link::Connector,
+                        heartbeat_cfg,
+                    )
+                    .await;
+                });
+            }
+            if let Some(result) = loops.join_next().await {
+                error!(result = ?result, "a host-api dial loop ended unexpectedly");
+                ended.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
     };
     serve_until_shutdown(
         serve,
         signals.recv(),
-        &executor,
+        &executors,
         Duration::from_secs(cfg.executor_shutdown_drain_secs),
     )
     .await;
+    if ended_unexpectedly.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(ExecutorError::Io(std::io::Error::other(
+            "a host-api dial loop terminated unexpectedly",
+        )));
+    }
     Ok(())
 }
 
@@ -407,6 +498,12 @@ async fn connect_and_serve<S: ComponentSource>(
     disconnected_at: Option<Instant>,
 ) -> Result<(), ExecutorError> {
     let metrics = metrics::executor_metrics();
+    // Metrics `stage` label: the stage this (single-stage) config dials, or
+    // `connector` for the svc-ingest link.
+    let stage_label = match link {
+        Link::Stage => cfg.stage_label(),
+        Link::Connector => "connector".to_string(),
+    };
     let (ok_label, fail_label) = match link {
         Link::Stage => ("connected", "failed"),
         Link::Connector => ("connector_connected", "connector_failed"),
@@ -418,7 +515,7 @@ async fn connect_and_serve<S: ComponentSource>(
     let io = match dialed {
         Ok(io) => io,
         Err(err) => {
-            metrics.record_connection_attempt(fail_label);
+            metrics.record_connection_attempt(fail_label, &stage_label);
             return Err(err);
         }
     };
@@ -427,7 +524,7 @@ async fn connect_and_serve<S: ComponentSource>(
     let peer = match io.get_ref().0.peer_addr() {
         Ok(a) => a.to_string(),
         Err(e) => {
-            metrics.record_connection_attempt(fail_label);
+            metrics.record_connection_attempt(fail_label, &stage_label);
             return Err(ExecutorError::Io(e));
         }
     };
@@ -442,6 +539,7 @@ async fn connect_and_serve<S: ComponentSource>(
         Link::Connector => connector_probe_file(&cfg.executor_probe_file),
     };
     let on_connected_peer = peer.clone();
+    let on_connected_stage = stage_label.clone();
     // Set once, when the hello/hello-ok handshake completes: distinguishes a
     // session that was established (and has a length) from a dial that never
     // got that far (a failed attempt).
@@ -455,14 +553,14 @@ async fn connect_and_serve<S: ComponentSource>(
         probe_file: probe_file.clone(),
         probe_grace: std::time::Duration::from_secs(cfg.executor_grace_secs),
         on_connected: Some(Box::new(move || {
-            on_connected_metrics.record_connection_attempt(ok_label);
+            on_connected_metrics.record_connection_attempt(ok_label, &on_connected_stage);
             if link == Link::Stage {
-                on_connected_metrics.set_connection_up(true);
+                on_connected_metrics.set_connection_up(true, &on_connected_stage);
             }
             let _ = on_connected_at.set(Instant::now());
             if let Some(since) = disconnected_at {
                 if link == Link::Stage {
-                    on_connected_metrics.record_outage(since.elapsed());
+                    on_connected_metrics.record_outage(since.elapsed(), &on_connected_stage);
                 }
                 info!(
                     link = link.label(),
@@ -487,16 +585,16 @@ async fn connect_and_serve<S: ComponentSource>(
         }
     };
     if link == Link::Stage {
-        metrics.set_connection_up(false);
+        metrics.set_connection_up(false, &stage_label);
     }
     match connected_at.get() {
         Some(connected) => {
             if link == Link::Stage {
-                metrics.record_session(connected.elapsed());
+                metrics.record_session(connected.elapsed(), &stage_label);
             }
         }
         // The dial succeeded but the handshake never completed.
-        None => metrics.record_connection_attempt(fail_label),
+        None => metrics.record_connection_attempt(fail_label, &stage_label),
     }
     outcome
 }
@@ -627,7 +725,7 @@ mod tests {
     /// returns `Ok` and the process exits 0) only once it has.
     #[tokio::test]
     async fn shutdown_signal_drains_in_flight_calls_before_returning() {
-        let executor = shutdown_test_executor();
+        let executor = Arc::new(shutdown_test_executor());
         let in_flight = executor.test_hold_call_slot();
         let serve = std::future::pending::<()>();
         let shutdown = async { "SIGTERM" };
@@ -635,7 +733,7 @@ mod tests {
         let mut outcome = Box::pin(serve_until_shutdown(
             serve,
             shutdown,
-            &executor,
+            std::slice::from_ref(&executor),
             Duration::from_secs(10),
         ));
         assert!(
@@ -652,12 +750,12 @@ mod tests {
     /// loop returns anyway, reporting what was abandoned.
     #[tokio::test]
     async fn shutdown_signal_gives_up_at_the_drain_deadline() {
-        let executor = shutdown_test_executor();
+        let executor = Arc::new(shutdown_test_executor());
         let _stuck = executor.test_hold_call_slot();
         let outcome = serve_until_shutdown(
             std::future::pending::<()>(),
             async { "SIGTERM" },
-            &executor,
+            std::slice::from_ref(&executor),
             Duration::from_millis(100),
         )
         .await;
@@ -674,7 +772,7 @@ mod tests {
     /// get delivered) until the signal arrives.
     #[tokio::test]
     async fn serve_keeps_running_until_the_shutdown_signal() {
-        let executor = shutdown_test_executor();
+        let executor = Arc::new(shutdown_test_executor());
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let shutdown = async move {
             let _ = rx.await;
@@ -683,7 +781,7 @@ mod tests {
         let mut fut = Box::pin(serve_until_shutdown(
             std::future::pending::<()>(),
             shutdown,
-            &executor,
+            std::slice::from_ref(&executor),
             Duration::from_secs(1),
         ));
         assert!(
@@ -852,6 +950,255 @@ mod tests {
         stage_task.await?;
         let _ = std::fs::remove_file(&ca_path);
         Ok(())
+    }
+
+    /// A fake stage: a real local TLS listener that completes the `hello` /
+    /// `hello-ok` handshake with every connection it accepts, counts the
+    /// handshakes, and holds each connection open. Returns its address, the
+    /// shared handshake counter and the CA PEM path the executor must trust.
+    async fn spawn_handshaking_stage(
+        ca_path: &std::path::Path,
+        tag: &str,
+    ) -> Result<(std::net::SocketAddr, Arc<std::sync::atomic::AtomicU32>), Box<dyn std::error::Error>>
+    {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloLimits, HelloOkBody, Message,
+        };
+        let ca_key = rcgen::KeyPair::generate()?;
+        let ca_params = rcgen::CertificateParams::new(vec![format!("{tag}-ca")])?;
+        let ca_cert = ca_params.self_signed(&ca_key)?;
+        let issuer = rcgen::Issuer::from_params(&ca_params, ca_key);
+        let server_key = rcgen::KeyPair::generate()?;
+        let server_params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()])?;
+        let server_cert = server_params.signed_by(&server_key, &issuer)?;
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls_pki_types::CertificateDer::from(
+                    server_cert.der().to_vec(),
+                )],
+                rustls_pki_types::PrivateKeyDer::try_from(server_key.serialize_der())
+                    .map_err(|e| e.to_string())?,
+            )?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        std::fs::write(ca_path, ca_cert.pem())?;
+        let handshakes = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter = Arc::clone(&handshakes);
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                let counter = Arc::clone(&counter);
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let Ok(hello) = read_frame(&mut tls).await else {
+                        return;
+                    };
+                    let ok = Frame::new(
+                        hello.id,
+                        Message::HelloOk(HelloOkBody {
+                            stage: "svc-test".to_string(),
+                            protocol_version: 1,
+                            limits: HelloLimits {
+                                call_timeout_ms: 2000,
+                                memory_mb: 64,
+                                max_concurrent_calls: 32,
+                            },
+                        }),
+                    );
+                    if write_frame(&mut tls, &ok).await.is_err() {
+                        return;
+                    }
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    // Hold the session open until the executor drops it.
+                    while read_frame(&mut tls).await.is_ok() {}
+                });
+            }
+        });
+        Ok((addr, handshakes))
+    }
+
+    /// Waits (bounded) until `counter` reaches `want`.
+    async fn wait_for_handshakes(counter: &std::sync::atomic::AtomicU32, want: u32) -> bool {
+        for _ in 0..100 {
+            if counter.load(std::sync::atomic::Ordering::SeqCst) >= want {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// A multi-stage list yields one target per entry, in order, each labelled
+    /// by its host, and `for_stage` rebinds a config to exactly that stage.
+    #[test]
+    fn stage_targets_split_a_comma_separated_list_and_bind_one_stage_each() {
+        let mut cfg = test_config_for("127.0.0.1:1".parse().expect("addr"));
+        cfg.stage_host_api_addr = "svc-process:8301, svc-action:8302".to_string();
+        cfg.validate().expect("two distinct stages are valid");
+        let targets = cfg.stage_targets();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].label, "svc-process");
+        assert_eq!(targets[1].addr, "svc-action:8302");
+        let action = cfg.for_stage(&targets[1]);
+        assert_eq!(action.stage_host_api_addr, "svc-action:8302");
+        assert_eq!(action.stage_label(), "svc-action");
+        assert_eq!(action.stage_targets().len(), 1);
+    }
+
+    /// A blank entry or a duplicated stage is refused at config load, never
+    /// silently dropped (two dial loops on one listener would fight).
+    #[test]
+    fn a_blank_or_duplicate_stage_entry_is_refused() {
+        let mut cfg = test_config_for("127.0.0.1:1".parse().expect("addr"));
+        cfg.stage_host_api_addr = "svc-process:8301,,svc-action:8302".to_string();
+        assert!(cfg.validate().is_err(), "blank entry must be refused");
+        cfg.stage_host_api_addr = "svc-process:8301,svc-process:8301".to_string();
+        assert!(cfg.validate().is_err(), "duplicate entry must be refused");
+    }
+
+    /// Real-path isolation: one process, two stages, per-stage executors and
+    /// dial loops (exactly what `run` builds). Stage B is unreachable; stage A
+    /// must still complete its handshake, and B must keep failing on its own
+    /// without ever disturbing A.
+    #[tokio::test]
+    async fn one_stage_being_down_does_not_block_the_other_stage(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let ca_path = std::env::temp_dir().join(format!(
+            "bundle-executor-test-{}-multistage-isolation-ca.pem",
+            std::process::id()
+        ));
+        let (live_addr, handshakes) = spawn_handshaking_stage(&ca_path, "isolation").await?;
+        // A port nothing listens on: bind then drop to get a refused address.
+        let dead_addr = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0")?;
+            l.local_addr()?
+        };
+        let mut cfg = test_config_for(live_addr);
+        cfg.stage_host_api_addr = format!("{dead_addr},{live_addr}");
+        cfg.host_api_ca_file = Some(ca_path.clone());
+        cfg.validate()?;
+        let targets = cfg.stage_targets();
+        assert_eq!(targets.len(), 2);
+
+        let mut loops = tokio::task::JoinSet::new();
+        for target in &targets {
+            let stage_cfg = cfg.for_stage(target);
+            let executor = Arc::new(Executor::new(&stage_cfg, UnimplementedBucketSource)?);
+            loops.spawn(async move {
+                dial_loop(
+                    &stage_cfg,
+                    &executor,
+                    Link::Stage,
+                    crate::heartbeat::HeartbeatConfig::disabled(),
+                )
+                .await;
+            });
+        }
+        assert!(
+            wait_for_handshakes(&handshakes, 1).await,
+            "the live stage must complete its handshake although the other stage is down"
+        );
+        assert!(
+            loops.try_join_next().is_none(),
+            "no dial loop may end because a sibling stage is unreachable"
+        );
+        loops.abort_all();
+        let _ = std::fs::remove_file(&ca_path);
+        Ok(())
+    }
+
+    /// Both stages reachable: every stage's loop connects concurrently (one
+    /// session per stage, each on its own executor).
+    #[tokio::test]
+    async fn every_configured_stage_gets_its_own_live_session(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let ca_a = std::env::temp_dir().join(format!(
+            "bundle-executor-test-{}-multistage-a-ca.pem",
+            std::process::id()
+        ));
+        let (addr_a, hs_a) = spawn_handshaking_stage(&ca_a, "stage-a").await?;
+        let ca_b = std::env::temp_dir().join(format!(
+            "bundle-executor-test-{}-multistage-b-ca.pem",
+            std::process::id()
+        ));
+        let (addr_b, hs_b) = spawn_handshaking_stage(&ca_b, "stage-b").await?;
+        // One CA bundle trusting both fake stages' CAs, as the chart mounts.
+        let bundle = std::env::temp_dir().join(format!(
+            "bundle-executor-test-{}-multistage-bundle-ca.pem",
+            std::process::id()
+        ));
+        std::fs::write(
+            &bundle,
+            format!(
+                "{}\n{}",
+                std::fs::read_to_string(&ca_a)?,
+                std::fs::read_to_string(&ca_b)?
+            ),
+        )?;
+        let mut cfg = test_config_for(addr_a);
+        cfg.stage_host_api_addr = format!("{addr_a},{addr_b}");
+        cfg.host_api_ca_file = Some(bundle.clone());
+        cfg.validate()?;
+
+        let mut loops = tokio::task::JoinSet::new();
+        for target in cfg.stage_targets() {
+            let stage_cfg = cfg.for_stage(&target);
+            let executor = Arc::new(Executor::new(&stage_cfg, UnimplementedBucketSource)?);
+            loops.spawn(async move {
+                dial_loop(
+                    &stage_cfg,
+                    &executor,
+                    Link::Stage,
+                    crate::heartbeat::HeartbeatConfig::disabled(),
+                )
+                .await;
+            });
+        }
+        assert!(
+            wait_for_handshakes(&hs_a, 1).await,
+            "stage A never connected"
+        );
+        assert!(
+            wait_for_handshakes(&hs_b, 1).await,
+            "stage B never connected"
+        );
+        loops.abort_all();
+        for p in [&ca_a, &ca_b, &bundle] {
+            let _ = std::fs::remove_file(p);
+        }
+        Ok(())
+    }
+
+    /// `drain_all` flips every executor to refuse work before waiting on any,
+    /// and reports `Drained` only when all of them drained.
+    #[tokio::test]
+    async fn drain_all_refuses_work_on_every_stage_and_sums_timeouts() {
+        let a = Arc::new(shutdown_test_executor());
+        let b = Arc::new(shutdown_test_executor());
+        let _stuck_a = a.test_hold_call_slot();
+        let _stuck_b = b.test_hold_call_slot();
+        let outcome = drain_all(
+            &[Arc::clone(&a), Arc::clone(&b)],
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            DrainOutcome::TimedOut {
+                in_flight_calls: 2,
+                in_flight_compiles: 0
+            }
+        );
+        let clean = drain_all(
+            &[Arc::new(shutdown_test_executor())],
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(clean, DrainOutcome::Drained);
     }
 
     /// The OTel series this module's connect tests touch are label-light and

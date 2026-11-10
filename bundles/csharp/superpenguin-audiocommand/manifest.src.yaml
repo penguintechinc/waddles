@@ -1,0 +1,33 @@
+slug: audiocommand
+title: Audio Commands (SuperPenguinTV AudioCommand)
+version: 1.0.0
+upstream:
+  - AudioCommand/AudioCommands.cs
+  - AudioCommand/RunAudioCommandHandler.cs
+consumes:
+  - platform: twitch
+    event_types: [chat.message]
+    filters:
+      command_prefix: ['!sfx']
+  - platform: discord
+    event_types: [chat.message]
+    filters:
+      command_prefix: ['!sfx']
+permissions:
+  - id: storage.kv
+    justification: sound registry, per-user and global cooldown claims and the per-event play record that makes a redelivered event re-push the same play
+  - id: identity.resolve
+    justification: resolve the invoking actor to a community user uuid (uuid-only, no names) for the per-user cooldown and replay key
+  - id: chat.send:discord
+    justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)
+  - id: chat.send:twitch
+    justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)
+  - id: overlay.media
+    justification: pushes sound-play messages (alert-box surface, superpenguin.audiocommand.play) to the community browser-source overlay that plays the audio
+    params:
+      allowed_hosts: [overlay.penguincloud.io]
+      max_duration_seconds: 15
+requested_tools: []
+overlay_origins:
+  index.html: original
+  audio-overlay.js: original

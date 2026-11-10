@@ -215,6 +215,18 @@ pub async fn serve(
                         continue;
                     }
                 };
+                // Several executor replicas stay attached at once and this link
+                // no longer replaces a stale session on reconnect, so a replica
+                // that vanished without a FIN/RST must be reaped by the OS: dead
+                // peer detected in roughly 10s + 5s * 3, never left in rotation.
+                if let Err(e) = socket2::SockRef::from(&tcp).set_tcp_keepalive(
+                    &socket2::TcpKeepalive::new()
+                        .with_time(std::time::Duration::from_secs(10))
+                        .with_interval(std::time::Duration::from_secs(5))
+                        .with_retries(3),
+                ) {
+                    tracing::warn!(error = %e, "host-api: failed to set TCP keepalive on accepted socket");
+                }
                 let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
                     tracing::warn!("host-api connection dropped: too many pending handshakes");
                     continue;

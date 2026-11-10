@@ -819,3 +819,58 @@ def test_requested_tools_survive_reparse_trusted() -> None:
 
     raw = {**_VALID_MANIFEST, "requested_tools": [_rt()]}
     assert [r.tool for r in _reparse_trusted(raw).requested_tools] == ["balance"]
+
+
+def test_exported_tool_host_op_parses_to_the_summary_shape() -> None:
+    manifest = _parse_trusted(
+        {
+            "kind": "service",
+            "exported_tools": [
+                _tool("plain"),
+                _tool(
+                    "twitch.moderation.timeout",
+                    access="write",
+                    risk="dangerous",
+                    host_op={
+                        "platform": "twitch",
+                        "op": "mod.timeout",
+                        "user": "user",
+                        "text_object": {"duration": "duration_seconds", "reason": "reason"},
+                        "required": ["user", "duration_seconds"],
+                        "returns": ["id"],
+                    },
+                ),
+            ],
+        }
+    )
+    plain, hosted = manifest.exported_tools  # type: ignore[attr-defined]
+    assert plain.host_op is None
+    assert hosted.host_op == {
+        "platform": "twitch",
+        "op": "mod.timeout",
+        "user": "user",
+        "textObject": {"duration": "duration_seconds", "reason": "reason"},
+        "required": ["duration_seconds", "user"],
+        "returns": ["id"],
+    }
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "mod.ban",
+        {"platform": "slack", "op": "mod.ban"},
+        {"platform": "twitch", "op": "ban"},
+        {"platform": "twitch", "op": "mod.ban", "extra": 1},
+        {"platform": "twitch", "op": "mod.ban", "user": "User"},
+        {"platform": "twitch", "op": "mod.ban", "origin": "anywhere"},
+        {"platform": "twitch", "op": "mod.ban", "user_wire": "raw"},
+        {"platform": "twitch", "op": "mod.ban", "required": "user"},
+        {"platform": "twitch", "op": "mod.ban", "text": "a", "text_object": {"k": "a"}},
+        {"platform": "twitch", "op": "mod.ban", "text_object": {}},
+    ],
+)
+def test_exported_tool_host_op_malformed_is_rejected(bad: object) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse_trusted({"kind": "service", "exported_tools": [_tool(host_op=bad)]})
+    assert exc.value.reason == "invalid_tool_host_op"

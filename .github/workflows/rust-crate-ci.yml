@@ -54,6 +54,7 @@ permissions:
 jobs:
   lint-test:
     name: "${{ inputs.crate_name }}: fmt + clippy + deny + coverage"
+    # bare dal2-alpha-ci image has no cc/cmake/libatomic and sudo is blocked (no-new-privileges): C-toolchain / node jobs stay on hosted ubuntu-latest until a custom runner image bakes them in
     runs-on: ubuntu-latest
     timeout-minutes: 90
     defaults:
