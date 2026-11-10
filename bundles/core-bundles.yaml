@@ -1595,3 +1595,18 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+
+  # Music YouTube SERVICE bundle (Rust `kind: service`, world stage-tools): common music tool
+  # contract music.youtube.{search,track,playlist.get,resolve} over the YouTube Data API v3.
+  # Built by rust-bundle-builder; credentials are host-side secret refs.
+  - app_id: waddles.core.service.music-youtube
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/music-youtube
+    manifest_path: music-youtube.manifest.yaml
+    artifact_path: music-youtube.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
