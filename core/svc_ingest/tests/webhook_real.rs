@@ -122,6 +122,14 @@ async fn rig(valkey: &str, owner_community: i64) -> Rig {
         registry.clone(),
     );
     state.webhook = Some(ingress);
+    // The Discord door stores every verified (non-PING) interaction's reply token host-side
+    // before acking; without a store it answers 503, so the rig runs the real Valkey-backed one.
+    state.interactions = Some(svc_ingest::interaction_store::InteractionStore::new(
+        client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("valkey connection for the interaction store"),
+    ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
@@ -136,6 +144,19 @@ async fn rig(valkey: &str, owner_community: i64) -> Rig {
         client: reqwest::Client::new(),
         _server: server,
     }
+}
+
+/// A full interaction body (the shape Discord posts: snowflake id, application id and reply
+/// token) so the door's host-side token store accepts it. `n` + the clock make the id unique
+/// per run, since the interaction store and the dedup both persist in the real Valkey.
+fn interaction(n: u64) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    format!(
+        r#"{{"type":2,"id":"{n}{nanos}","application_id":"42","token":"webTOKEN-secret.1","guild_id":"111"}}"#
+    )
 }
 
 fn now() -> i64 {
@@ -186,7 +207,7 @@ async fn valid_signature_reaches_the_transport_and_ping_is_answered() {
     let mut rig = rig(&valkey_url(), COMMUNITY).await;
     let (s, b) = rig.post(now(), r#"{"type":1}"#, false).await;
     assert_eq!((s, b.as_str()), (200, r#"{"type":1}"#));
-    let cmd = r#"{"type":2,"id":"c1"}"#;
+    let cmd = &interaction(1);
     let (s, b) = rig.post(now(), cmd, false).await;
     assert_eq!((s, b.as_str()), (200, r#"{"type":5}"#));
     assert_eq!(rig.delivered().await.expect("ping frame"), br#"{"type":1}"#);
@@ -217,7 +238,7 @@ async fn stale_timestamp_is_refused() {
 async fn replay_is_deduped_in_valkey() {
     let mut rig = rig(&valkey_url(), COMMUNITY).await;
     let ts = now();
-    let body = r#"{"type":2,"id":"rep"}"#;
+    let body = &interaction(2);
     assert_eq!(rig.post(ts, body, false).await.0, 200);
     assert_eq!(rig.post(ts, body, false).await.0, 200);
     assert_eq!(rig.delivered().await.expect("first"), body.as_bytes());
@@ -352,14 +373,11 @@ async fn valkey_outage_fails_closed_and_delivers_nothing() {
     let mut rig = rig(&format!("redis://{}", proxy.addr), COMMUNITY).await;
 
     // Healthy through the proxy first (so the later failure is the outage).
-    assert_eq!(
-        rig.post(now(), r#"{"type":2,"id":"ok"}"#, false).await.0,
-        200
-    );
+    assert_eq!(rig.post(now(), &interaction(3), false).await.0, 200);
     assert!(rig.delivered().await.is_some());
 
     proxy.kill();
-    let (s, _) = rig.post(now(), r#"{"type":2,"id":"down"}"#, false).await;
+    let (s, _) = rig.post(now(), &interaction(4), false).await;
     assert_eq!(s, 503, "dedup outage must not accept");
     assert!(
         rig.delivered().await.is_none(),
