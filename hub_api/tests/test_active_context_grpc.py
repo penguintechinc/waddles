@@ -2,7 +2,7 @@
 
 Real: a `grpc.aio` server built with the production interceptor chain
 (`server.build_interceptor_chain`: deadline -> EdDSA machine-JWT auth -> rate limit -> OTel), real
-Ed25519 service JWTs, the migrated schema (`user_active_context`, `public_id` columns from
+ES256 service JWTs, the migrated schema (`user_active_context`, `public_id` columns from
 migration 0082), and `services.app_command_registry` doing the real SQL. Only the transport is new:
 this replaces the REST hop `GET|PUT /api/v1/internal/dataplane/active-context`. One test dials the
 production TLS listener (`start_internal_grpc_server`). Contract consumer:
@@ -23,7 +23,7 @@ from typing import Any
 
 import grpc
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey
 from sqlalchemy import text
 from waddles.hub.internal.v1 import active_context_pb2, active_context_pb2_grpc
@@ -83,7 +83,7 @@ def _identity(service_id: str, scopes: set[str], tenant: str) -> ServiceIdentity
 @pytest.fixture
 def issuer() -> ServiceJwtIssuer:
     """svc-ingest (holds the scope), svc-action (does not), a non-system tenant."""
-    private = Ed25519PrivateKey.generate()
+    private = ec.generate_private_key(ec.SECP256R1())
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
     return ServiceJwtIssuer(
         keys={"k1": key},
