@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-commands"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!commands` -> lists the commands currently available in the community (curated catalog filtered by per-command flag kill-switches)."
 requires-python = ">=3.13"
 dependencies = []

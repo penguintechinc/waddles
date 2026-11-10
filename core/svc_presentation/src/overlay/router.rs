@@ -461,8 +461,8 @@ mod tests {
             // Port 0 on loopback is never listening -- a connection attempt
             // fails immediately (no DNS lookup, no timeout wait), unlike the
             // production default hostname.
-            "--push-jwks-url",
-            "http://127.0.0.1:0/.well-known/jwks.json",
+            "--push-jwks-endpoint",
+            "http://127.0.0.1:0",
         ]);
         let config = Config {
             cli,

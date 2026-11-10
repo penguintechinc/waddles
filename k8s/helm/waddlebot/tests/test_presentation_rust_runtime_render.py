@@ -1,10 +1,9 @@
-"""Helm-template assertions: the Rust svc-presentation is THE overlay runtime where enabled.
+"""Helm-template assertions: the Rust svc-presentation is THE (only) overlay runtime.
 
-alpha / dal2alpha / local flip `presentation.rust.enabled` on; base (== production/beta/gamma,
-which inherit the default) keeps the Python svc-presentation. The two templates share Deployment
-and Service names and are mutually exclusive, so the two can never serve the same routes. When the
-Rust runtime is on, svc-action additionally gets the overlay PUSH grant (identity scope, env,
-egress policy); when off, none of that renders. Zero rendered documents is a hard failure; a
+The legacy Python svc-presentation template was removed; `presentation.rust.enabled` defaults to
+true in every environment (base, so production/beta/gamma inherit it). When on, svc-action
+additionally gets the overlay PUSH grant (identity scope, egress policy); setting it false
+renders no presentation workload and none of that grant. Zero rendered documents is a hard failure; a
 missing helm is a skip locally but a FAILURE in CI. Set HELM_BIN=helm3 where the default is v4.
 """
 
@@ -41,32 +40,28 @@ def _render(*args: str) -> list[dict[str, Any]]:
 
 @pytest.fixture(scope="module", params=_RUST_ENVS)
 def rust_docs(request: pytest.FixtureRequest) -> list[dict[str, Any]]:
+    # rustDataPlane on so the Rust svc-action Deployment renders under `local` too.
     return _render(
-        "-f", str(_CHART / f"values-{request.param}.yaml"), "--set", "pipeline.svcAction.enabled=true"
+        "-f", str(_CHART / f"values-{request.param}.yaml"), "--set", "pipeline.rustDataPlane.enabled=true"
     )
 
 
 @pytest.fixture(scope="module")
 def default_docs() -> list[dict[str, Any]]:
-    """Alpha render with `presentation.rust.enabled` at the chart default (false).
-
-    Equivalent to what beta/gamma/production inherit for this switch (their own required secrets
-    make a bare production render impractical in a unit test).
-    """
+    """Alpha render with `presentation.rust.enabled` explicitly switched off."""
     return _render(
         "-f", str(_CHART / "values-alpha.yaml"),
         "--set", "presentation.rust.enabled=false",
-        "--set", "pipeline.svcAction.enabled=true",
     )
 
 
-def test_production_style_values_never_enable_rust() -> None:
-    """No production/beta/gamma values file flips the switch; the chart default stays false."""
+def test_production_style_values_inherit_rust_default() -> None:
+    """Chart default is true and no production/beta/gamma values file switches it off."""
     base = yaml.safe_load((_CHART / "values.yaml").read_text())
-    assert base["presentation"]["rust"]["enabled"] is False
+    assert base["presentation"]["rust"]["enabled"] is True
     for env in ("production", "beta", "gamma"):
         values = yaml.safe_load((_CHART / f"values-{env}.yaml").read_text()) or {}
-        assert not values.get("presentation", {}).get("rust", {}).get("enabled", False), env
+        assert values.get("presentation", {}).get("rust", {}).get("enabled", True) is True, env
 
 
 def _by_name(docs: list[dict[str, Any]], kind: str, suffix: str) -> list[dict[str, Any]]:
@@ -93,21 +88,22 @@ def _action_identity(docs: list[dict[str, Any]]) -> dict[str, Any]:
 
 def test_rust_runtime_is_the_only_presentation_deployment(rust_docs: list[dict[str, Any]]) -> None:
     deployments = _by_name(rust_docs, "Deployment", "-svc-presentation")
-    assert len(deployments) == 1, "Python and Rust svc-presentation must never both render"
+    assert len(deployments) == 1
     services = _by_name(rust_docs, "Service", "-svc-presentation")
     assert len(services) == 1
     container = deployments[0]["spec"]["template"]["spec"]["containers"][0]
     assert "svc-presentation-rust" in container["image"]
-    assert "PUSH_JWKS_URL" in _env(deployments[0])  # Rust-only config surface
+    assert "PUSH_JWKS_ENDPOINT" in _env(deployments[0])  # Rust-only config surface
 
 
 def test_svc_action_can_push_overlays_when_rust_is_on(rust_docs: list[dict[str, Any]]) -> None:
     assert "presentation.overlay:push" in _action_identity(rust_docs)["allowed_scopes"]
-    action = _by_name(rust_docs, "Deployment", "-svc-action")
+    action = _by_name(rust_docs, "Deployment", "-svc-action-rust")
     assert len(action) == 1
     env = _env(action[0])
-    assert env["PRESENTATION_URL"].endswith("-svc-presentation:8207")
-    assert env["SERVICE_JWT_TOKEN_ENDPOINT"].endswith("/internal/service-token")
+    # The mint is gRPC now: hub-api's internal gRPC port over TLS, never the REST port/path.
+    assert env["SERVICE_JWT_TOKEN_ENDPOINT"].startswith("https://")
+    assert "/internal/service-token" not in env["SERVICE_JWT_TOKEN_ENDPOINT"]
     assert env["SERVICE_JWT_SA_TOKEN_PATH"]
     policies = _by_name(rust_docs, "CiliumNetworkPolicy", "-svc-action-presentation-egress")
     assert len(policies) == 1
@@ -115,15 +111,12 @@ def test_svc_action_can_push_overlays_when_rust_is_on(rust_docs: list[dict[str, 
     assert peer["app.kubernetes.io/component"] == "svc-presentation"
 
 
-def test_defaults_keep_python_presentation_and_render_no_push_grant(
+def test_rust_disabled_renders_no_presentation_and_no_push_grant(
     default_docs: list[dict[str, Any]],
 ) -> None:
-    deployments = _by_name(default_docs, "Deployment", "-svc-presentation")
-    assert len(deployments) == 1
-    assert "svc-presentation-rust" not in deployments[0]["spec"]["template"]["spec"]["containers"][0]["image"]
-    assert "PUSH_JWKS_URL" not in _env(deployments[0])
+    assert not _by_name(default_docs, "Deployment", "-svc-presentation")
+    assert not _by_name(default_docs, "Service", "-svc-presentation")
     assert "presentation.overlay:push" not in _action_identity(default_docs)["allowed_scopes"]
-    assert "PRESENTATION_URL" not in _env(_by_name(default_docs, "Deployment", "-svc-action")[0])
     assert not _by_name(default_docs, "CiliumNetworkPolicy", "-svc-action-presentation-egress")
 
 
@@ -131,7 +124,6 @@ def test_presentation_off_renders_no_push_grant_even_with_rust_on() -> None:
     docs = _render(
         "-f", str(_CHART / "values-alpha.yaml"),
         "--set", "pipeline.svcPresentation.enabled=false",
-        "--set", "pipeline.svcAction.enabled=true",
     )
     assert not _by_name(docs, "Deployment", "-svc-presentation")
     assert "presentation.overlay:push" not in _action_identity(docs)["allowed_scopes"]

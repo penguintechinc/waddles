@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 import app
+import moderation
 
 BUNDLE_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BUNDLE_DIR.parents[2]
@@ -25,6 +26,22 @@ EXPECTED_PERMISSIONS = {
     "chat.delete:discord",
     "chat.send:discord",
     "chat.send:twitch",
+    "chat.send:youtube",
+    *{
+        f"tool.call:{app}:{name}"
+        for app, name in (
+            ("waddles.core.service.twitch", "twitch.moderation.ban"),
+            ("waddles.core.service.twitch", "twitch.moderation.timeout"),
+            ("waddles.core.service.twitch", "twitch.moderation.unban"),
+            ("waddles.core.service.discord", "discord.moderation.kick"),
+            ("waddles.core.service.discord", "discord.moderation.ban"),
+            ("waddles.core.service.discord", "discord.moderation.unban"),
+            ("waddles.core.service.discord", "discord.moderation.timeout"),
+            ("waddles.core.service.discord", "discord.moderation.untimeout"),
+            ("waddles.core.service.youtube", "youtube.chat.ban"),
+            ("waddles.core.service.youtube", "youtube.chat.unban"),
+        )
+    },
 }
 
 
@@ -49,9 +66,26 @@ def test_permissions_are_exactly_the_least_privilege_set(manifest: str) -> None:
 
 @pytest.mark.parametrize("manifest", MANIFESTS)
 def test_no_invented_moderation_capability(manifest: str) -> None:
+    """Moderation goes ONLY through approved `tool.call` grants, never a relay import."""
     for perm_id in _permission_ids(manifest):
+        if perm_id.startswith("tool.call:"):
+            continue
         assert "timeout" not in perm_id and "ban" not in perm_id
         assert not perm_id.startswith(("moderation.", "dm.send", "economy."))
+
+
+@pytest.mark.parametrize("manifest", MANIFESTS)
+def test_requested_tools_match_the_tool_call_grants(manifest: str) -> None:
+    raw = _load(manifest)
+    requested = {(r["target_app_id"], r["tool"]) for r in raw["requested_tools"]}  # type: ignore[index, union-attr]
+    granted = {
+        tuple(i.removeprefix("tool.call:").split(":", 1))
+        for i in _permission_ids(manifest)
+        if i.startswith("tool.call:")
+    }
+    assert requested == granted and len(requested) == 10
+    for entry in raw["requested_tools"]:  # type: ignore[union-attr]
+        assert entry["access"] == "write"
 
 
 @pytest.mark.parametrize("manifest", MANIFESTS)
@@ -61,7 +95,7 @@ def test_delete_permissions_match_the_code(manifest: str) -> None:
     }
     assert declared == set(app.DELETE_PLATFORMS)
     sends = {i.partition(":")[2] for i in _permission_ids(manifest) if i.startswith("chat.send:")}
-    assert sends == {"discord", "twitch"}
+    assert sends == {"discord", "twitch", "youtube"}
 
 
 @pytest.mark.parametrize("manifest", MANIFESTS)
@@ -95,10 +129,13 @@ def test_every_chat_line_is_consumed_on_both_platforms_with_no_prefix_filter(
     stages = _load(manifest)["stages"]
     assert isinstance(stages, dict)
     consumes = stages["process"]["consumes"]
-    assert {c["platform"] for c in consumes} == {"twitch", "discord"}
+    assert {c["platform"] for c in consumes} == {"twitch", "discord", "youtube"}
     for c in consumes:
         assert c["event_types"] == ["chat.message"]
-        assert "filters" not in c  # ordinary chat lines must reach the filters
+        if c["platform"] == "youtube":  # no chat filters there (no delete op): commands only
+            assert set(c["filters"]["command_prefix"]) == set(moderation.MOD_COMMANDS)
+        else:
+            assert "filters" not in c  # ordinary chat lines must reach the filters
 
 
 @pytest.mark.parametrize("manifest", MANIFESTS)
@@ -114,15 +151,15 @@ def _read(relative: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_host_relay_ops_are_exactly_send_delete_dm() -> None:
-    """No `chat.timeout` relay op exists -- if one appears, wire it and delete this tripwire."""
+def test_host_relay_ops_are_exactly_the_known_set() -> None:
+    """Pin the exact relay-op set; a new op (e.g. ban/timeout) must be reviewed here."""
     source = _read("core/svc_action/src/capabilities.rs")
     enum = re.search(r"enum RelayOp \{(?P<body>.*?)\n\}", source, re.DOTALL)
     assert enum is not None, "RelayOp enum moved -- re-verify chatguard's moderation capabilities"
     variants = set(re.findall(r"^\s+(\w+),", enum.group("body"), re.MULTILINE))
-    assert variants == {"ChatSend", "ChatDelete", "DmSend"}, (
-        f"the host relay ops changed to {sorted(variants)}: chatguard can now use a timeout/"
-        "ban op (add it, its permission and tests) -- see the module docstring's capability note"
+    assert variants == {"ChatSend", "ChatDelete", "DmSend", "RoleAdd", "RoleRemove"}, (
+        f"the host relay ops changed to {sorted(variants)}: if a ban/timeout/kick relay op "
+        "appeared, chatguard's moderation goes through tool.call grants -- re-evaluate"
     )
 
 

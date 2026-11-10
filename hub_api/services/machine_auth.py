@@ -3,7 +3,7 @@
 One implementation of "valid service identity, exact scope, operator-plane ``system`` tenant" so
 every internal route family fails closed identically. Two mechanisms, no static shared secret:
 
-* **JWT** -- a short-lived Ed25519 machine JWT (``Authorization: Bearer``). With
+* **JWT** -- a short-lived ES256 machine JWT (``Authorization: Bearer``). With
   ``bind_community=True`` the token must carry a ``community`` claim (and ``conn`` when it names one
   connection) equal to the route's ``community_id`` / ``connection_id``, so a token minted for
   community A can never act on community B.

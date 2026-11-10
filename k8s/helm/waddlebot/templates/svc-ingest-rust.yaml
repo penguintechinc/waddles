@@ -1,15 +1,13 @@
 # feature/e2e-helm-rust-dataplane -- Rust svc-ingest (core/svc_ingest, full receiver stack
 # implemented; INERT unless the PostHog flag waddles.core.rust-data-plane is ON -- see
-# pipeline.rustDataPlane in values.yaml) Deployment, ADDITIVE to templates/svc-ingest.yaml's Python Deployment -- never
-# replaces it. Gated on the top-level pipeline.rustDataPlane.enabled flag (default false)
+# pipeline.rustDataPlane in values.yaml) Deployment (the legacy Python svc-ingest template was removed). Gated on the top-level pipeline.rustDataPlane.enabled flag (default false)
 # plus this stage's own .enabled sub-flag, so flipping the parent flag alone doesn't force
 # every stage on.
 #
-# fix/helm-alpha-self-provisioning -- Resource name carries a `-rust` suffix (see
-# pipeline.rustDataPlane's values.yaml comment for why), AND the image repository below
-# (waddlebot.legacyModuleImage, module rustDataPlane.svcIngest.imageRepository, default
-# "svc-ingest-rust") is now a DISTINCT repository from templates/svc-ingest.yaml's Python
-# Deployment (module "svc-ingest") -- previously both resolved to the identical
+# fix/helm-alpha-self-provisioning -- Resource name carries a `-rust` suffix, and the image
+# repository below (waddlebot.legacyModuleImage, module rustDataPlane.svcIngest.imageRepository,
+# default "svc-ingest-rust") was made DISTINCT from the (now removed) Python svc-ingest
+# Deployment's -- previously both resolved to the identical
 # repository:tag, which broke the documented alpha COEXISTENCE state (both Deployments
 # enabled simultaneously, see pipeline.rustDataPlane's values-alpha.yaml comment): whichever
 # image was pushed to that shared tag last silently became what BOTH Deployments ran.
@@ -127,6 +125,7 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_ingest") | nindent 8 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.port | quote }}
         - name: METRICS_PORT
@@ -141,9 +140,14 @@ spec:
         # The audience-scoped projected token is mounted below -- NOT the generic k8s SA token
         # path (wrong audience; hub-api's TokenReview would reject it).
         - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_SA_TOKEN_PATH
           value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        {{- if not $ct.enabled }}
+        # The machine-JWT mint is gRPC (TLS 1.3, pinned CA): trust hub-api's gRPC CA. (With
+        # connectorTools on, the same CA env is declared in that block below -- once, never twice.)
+        {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        {{- end }}
         # waddles.ingest-dynamic-connections env baseline: svc-ingest resolves each event's
         # guild/channel to a numeric scope via hub-api and stamps schema-v3 envelopes (an
         # unresolvable source is dropped, never defaulted). Rendered only with the grant above.
@@ -220,7 +224,7 @@ spec:
         {{- if include "waddlebot.connectorRuntimeActive" . }}
         {{- $cr := .Values.pipeline.rustDataPlane.svcIngest.connectorRuntime }}
         # PR-H connector runtime (spec SS1.3). CONNECTOR_<P>_ENABLED come from the SAME helm value
-        # the Python svc-ingest deployment reads (templates/svc-ingest.yaml).
+        # the (removed) Python svc-ingest deployment used to read.
         - name: CONNECTOR_RUNTIME_ENABLED
           value: "true"
         {{- include "waddlebot.connectorPlatformEnv" . | nindent 8 }}
@@ -247,7 +251,7 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid | quote }}
         {{- end }}
         # Valkey and receiver credentials consumed by core/svc_ingest (see file header) --
-        # same Secret keys the Python svc-ingest Deployment already reads (templates/svc-ingest.yaml).
+        # same Secret keys the (removed) Python svc-ingest Deployment used to read.
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # fix/valkey-tls-alpha -- see templates/svc-process-rust.yaml's comment on this same
         # override block for the full rationale (identical here). Stays a secretKeyRef
@@ -341,6 +345,7 @@ spec:
         resources:
           {{- toYaml .Values.pipeline.rustDataPlane.svcIngest.resources | nindent 10 }}
         volumeMounts:
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         - name: tmp
           mountPath: /tmp
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
@@ -348,6 +353,9 @@ spec:
         {{- end }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
+        {{- if not $ct.enabled }}
+        {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
+        {{- end }}
         {{- end }}
         {{- if $ct.enabled }}
         - name: svc-ingest-host-api-tls
@@ -356,10 +364,14 @@ spec:
         {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
         {{- end }}
       volumes:
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       - name: tmp
         emptyDir: {}
       {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
+      {{- if not $ct.enabled }}
+      {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
+      {{- end }}
       {{- end }}
       {{- if $ct.enabled }}
       - name: svc-ingest-host-api-tls

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-top"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!top [N]` -> the community's top-N members by economy balance (read-only), relayed back to the caller's origin platform. Display names via the egress detokenizer, never in bundle code."
 requires-python = ">=3.13"
 dependencies = []

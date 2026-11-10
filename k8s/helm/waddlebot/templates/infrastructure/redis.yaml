@@ -1,4 +1,9 @@
 {{- if .Values.infrastructure.redis.enabled }}
+{{- /* feature/transit-tls-core (F2) -- the cache Valkey is TLS-only. No plaintext listener exists any more, so a
+render with TLS off would leave every client unable to connect (or tempt a plaintext fallback): fail loudly instead. */}}
+{{- if not .Values.infrastructure.redis.tls.enabled }}
+{{- fail "infrastructure.redis.enabled=true requires infrastructure.redis.tls.enabled=true: the cache Valkey serves TLS only (plaintext 6379 was removed, feature/transit-tls-core F2). Disable infrastructure.redis.enabled instead if you do not want an in-cluster cache." }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -93,14 +98,25 @@ spec:
         - {{ .Values.infrastructure.redis.maxMemory | quote }}
         - --maxmemory-policy
         - {{ .Values.infrastructure.redis.maxMemoryPolicy | quote }}
-        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
-        # fix/valkey-tls-alpha -- dual-listener: this TLS port runs ALONGSIDE the plaintext
-        # `--port 6379` above (never replacing it), so hub-api/Python services already on
-        # plaintext VALKEY_URL/REDIS_URL are undisturbed. tls-auth-clients no: server-auth
-        # only (see global.valkeyTls's values.yaml comment) -- clients verify this cert via
-        # the CA, requirepass above still gates every connection regardless of transport.
+        # feature/transit-tls-core (F2) -- TLS ONLY: `--port 0` disables the plaintext listener (same as valkey-kv /
+        # valkey-durable), so neither the password nor any data crosses the wire in clear. tls-auth-clients no:
+        # server-auth only (see global.valkeyTls's values.yaml comment) -- clients verify this cert via the CA,
+        # requirepass above still gates every connection.
+        # Negotiation bar: TLS 1.2 minimum / 1.3 preferred; AEAD-only AES-128-GCM / ChaCha20-Poly1305 (ECDSA and RSA
+        # variants so a kept pre-ECDSA server cert keeps working until it is re-minted); session resumption on; clients
+        # hold pooled keep-alive connections (redis-py ConnectionPool, redis-rs ConnectionManager).
+        - --port
+        - "0"
         - --tls-port
         - {{ .Values.infrastructure.redis.tls.port | quote }}
+        - --tls-ciphers
+        - "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
+        - --tls-ciphersuites
+        - "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256"
+        - --tls-session-caching
+        - "yes"
+        - --tls-session-cache-timeout
+        - "300"
         - --tls-cert-file
         - /etc/valkey/tls/tls.crt
         - --tls-key-file
@@ -111,16 +127,10 @@ spec:
         - "no"
         - --tls-protocols
         - "TLSv1.2 TLSv1.3"
-        {{- end }}
         ports:
-        - name: redis
-          containerPort: 6379
-          protocol: TCP
-        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         - name: valkey-tls
           containerPort: {{ .Values.infrastructure.redis.tls.port }}
           protocol: TCP
-        {{- end }}
         env:
         - name: REDIS_PASSWORD
           valueFrom:
@@ -130,9 +140,7 @@ spec:
         volumeMounts:
         - name: redis-data
           mountPath: /data
-        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsServerVolumeMount" . | nindent 8 }}
-        {{- end }}
         resources:
           requests:
             memory: {{ .Values.infrastructure.redis.resources.requests.memory }}
@@ -140,13 +148,14 @@ spec:
           limits:
             memory: {{ .Values.infrastructure.redis.resources.limits.memory }}
             cpu: {{ .Values.infrastructure.redis.resources.limits.cpu }}
+        # Loopback probe over TLS (the plaintext listener is off); --insecure only skips chain/hostname verification of
+        # the pod's own 127.0.0.1 connection, exactly as valkey-kv does.
         livenessProbe:
           exec:
             command:
-            - redis-cli
-            - -a
-            - $(REDIS_PASSWORD)
-            - ping
+            - sh
+            - -c
+            - redis-cli --tls --insecure -p {{ .Values.infrastructure.redis.tls.port }} -a "$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
@@ -154,10 +163,9 @@ spec:
         readinessProbe:
           exec:
             command:
-            - redis-cli
-            - -a
-            - $(REDIS_PASSWORD)
-            - ping
+            - sh
+            - -c
+            - redis-cli --tls --insecure -p {{ .Values.infrastructure.redis.tls.port }} -a "$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG
           initialDelaySeconds: 5
           periodSeconds: 10
           timeoutSeconds: 5
@@ -170,9 +178,7 @@ spec:
         {{- else }}
         emptyDir: {}
         {{- end }}
-      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsServerVolume" . | nindent 6 }}
-      {{- end }}
 ---
 {{- if .Values.infrastructure.redis.persistence.enabled }}
 apiVersion: v1
@@ -209,21 +215,15 @@ metadata:
 spec:
   type: {{ .Values.infrastructure.redis.service.type }}
   ports:
-  - port: {{ .Values.infrastructure.redis.service.port }}
-    targetPort: redis
-    protocol: TCP
-    name: redis
-  {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+  # TLS port only -- there is no plaintext Service port (feature/transit-tls-core F2).
   - port: {{ .Values.infrastructure.redis.tls.port }}
     targetPort: valkey-tls
     protocol: TCP
     name: valkey-tls
-  {{- end }}
   selector:
     app.kubernetes.io/name: redis
     app.kubernetes.io/instance: {{ .Release.Name }}
 # R5 posture: ingress scoped to declared ports, default-deny egress (third-party image: no Tetragon allowlist).
-{{- $redisPorts := list 6379 }}
-{{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}{{- $redisPorts = append $redisPorts $.Values.infrastructure.redis.tls.port }}{{- end }}
+{{- $redisPorts := list .Values.infrastructure.redis.tls.port }}
 {{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "cache" "name" "redis" "selector" (dict "app.kubernetes.io/name" "redis" "app.kubernetes.io/instance" $.Release.Name) "ports" $redisPorts "egress" "internal" "tetragon" false) }}
 {{- end }}

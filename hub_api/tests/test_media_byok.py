@@ -1,7 +1,7 @@
 """Media (Gemini) BYOK admin API + internal resolver/tier endpoints -- real pydal DB, real JWTs.
 
 Real: sqlite-backed `ai_routing_db` (tenants/communities/members/ai_byok_keys/audit_log), real
-AES-256-GCM, real Ed25519 machine JWTs through `machine_authenticated`, real rate limiter
+AES-256-GCM, real ES256 machine JWTs through `machine_authenticated`, real rate limiter
 (in-memory fallback). Stubbed only: the outbound Gemini `models` validation call and the license
 gate (`get_tier`), both external services.
 
@@ -18,7 +18,7 @@ import json
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.rate_limiter import RateLimiter
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey, spiffe_id
 from quart import Quart
@@ -61,7 +61,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def issuer() -> ServiceJwtIssuer:
-    priv = Ed25519PrivateKey.generate()
+    priv = ec.generate_private_key(ec.SECP256R1())
     ids = {
         sid: ServiceIdentity(sid, "waddlebot", name, SCOPES, "system")
         for sid, name in ((PROCESS, "svc-process"), (ACTION, "svc-action"), (ROGUE, "svc-rogue"))
