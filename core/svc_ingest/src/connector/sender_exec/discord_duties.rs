@@ -130,6 +130,17 @@ pub trait PlatformUserResolver: Send + Sync {
     ) -> Result<SlotValue, UserResolveError>;
 }
 
+impl<T: PlatformUserResolver + ?Sized> PlatformUserResolver for std::sync::Arc<T> {
+    async fn resolve(
+        &self,
+        tenant_id: i64,
+        community_id: i64,
+        user_uuid: &str,
+    ) -> Result<SlotValue, UserResolveError> {
+        (**self).resolve(tenant_id, community_id, user_uuid).await
+    }
+}
+
 /// The default resolver: no tokenization service is wired, so every user
 /// reference is refused loudly (never a guess, never a raw-id passthrough).
 #[derive(Clone, Copy, Debug, Default)]

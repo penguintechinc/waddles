@@ -1532,7 +1532,7 @@ bundles:
   # bundle-MCP-tools P6b: youtube platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-youtube defaults OFF.
   - app_id: waddles.core.service.youtube
-    version: "1.0.2"
+    version: "1.1.0"
     language: rust
     wit_world: connector-tools
     kind: service

@@ -31,6 +31,8 @@ use crate::platform_user::{BoxFuture as UserFuture, PlatformUserResolver, Resolv
 mod discord_manifest_tests;
 #[path = "host_tools_twitch_manifest_tests.rs"]
 mod twitch_manifest_tests;
+#[path = "host_tools_youtube_manifest_tests.rs"]
+mod youtube_manifest_tests;
 
 const APP: &str = "waddles.test.app.caller";
 const TWITCH_SVC: &str = "waddles.core.service.twitch";
@@ -1617,9 +1619,7 @@ async fn role_and_event_host_ops_require_the_service_bundles_moderation_grant() 
 }
 
 #[tokio::test]
-async fn a_placeholder_user_wire_cannot_smuggle_a_destructive_op_past_the_protected_check() {
-    // A placeholder wire is allowed for moderation ops (the consumer resolves it), but the
-    // protected-target check still runs host-side against the detokenized user.
+async fn a_placeholder_user_wire_still_clears_the_protected_check_before_a_destructive_op() {
     let tools = vec![exported(
         "twitch.moderation.ban",
         None,
@@ -1629,7 +1629,7 @@ async fn a_placeholder_user_wire_cannot_smuggle_a_destructive_op_past_the_protec
         }))),
     )];
     let c = build(Rig::default(), tools, FakeRelayQueue::with_live_drain());
-    // UUID_C is an admin: refused even though the wire would carry only the placeholder.
+    // UUID_C is an admin: the placeholder wire must not skip the host-side check.
     let err = c
         .handle(
             &twitch_event(Some("500")),
@@ -1640,6 +1640,20 @@ async fn a_placeholder_user_wire_cannot_smuggle_a_destructive_op_past_the_protec
     assert_eq!(err.code, "forbidden");
     assert!(err.message.contains("protected_target"), "{}", err.message);
     assert!(c.relay_queue.envelopes().is_empty());
+    // A non-protected target passes the check and rides the wire as the placeholder only.
+    c.handle(
+        &twitch_event(Some("500")),
+        invoke("twitch.moderation.ban", json!({"user": UUID_B})),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message));
+    let envs = c.relay_queue.envelopes();
+    assert_eq!(envs.len(), 1);
+    assert_eq!(envs[0]["user_id"], format!("{{user:{UUID_B}}}"));
+    assert!(
+        !envs[0].to_string().contains("999000111"),
+        "raw id never queued"
+    );
 }
 
 #[tokio::test]

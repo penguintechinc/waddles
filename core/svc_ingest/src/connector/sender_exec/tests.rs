@@ -337,7 +337,13 @@ async fn youtube_chat_send_is_stamp_pinned_and_fills_the_live_chat_id_in_the_bod
         ("youtube.oauth", TOKEN),
         ("youtube.live_chat_id", "Cg0KC-live_ID"),
     ]);
-    let r = rig(PlatformPolicy::youtube(), youtube_send(), slots, true).await;
+    // The quota duty (`youtube_duties`) is covered in its own real-path tests; this one proves the
+    // template/pin/slot path with a duty-free executor.
+    let mut policy = PlatformPolicy::youtube();
+    for k in &mut policy.kinds {
+        k.needs_duty = false;
+    }
+    let r = rig(policy, youtube_send(), slots, true).await;
     let a = chat_send("Cg0KC-live_ID", Some("Cg0KC-live_ID"), "yo");
     r.exec.execute(&req("youtube", &a, Some(9))).await.unwrap();
     // No stamp -> refused before anything is resolved.

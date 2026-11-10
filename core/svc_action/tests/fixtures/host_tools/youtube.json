@@ -1,0 +1,116 @@
+[
+  {
+    "access": "read",
+    "name": "build_send_chat_request",
+    "risk": "normal"
+  },
+  {
+    "access": "read",
+    "name": "classify_error",
+    "risk": "normal"
+  },
+  {
+    "access": "read",
+    "name": "discovery_parse",
+    "risk": "normal"
+  },
+  {
+    "access": "read",
+    "name": "discovery_request",
+    "risk": "normal"
+  },
+  {
+    "access": "read",
+    "name": "poll_plan",
+    "risk": "normal"
+  },
+  {
+    "access": "read",
+    "name": "poll_request",
+    "risk": "normal"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "mod.add",
+      "origin": "channel",
+      "platform": "youtube",
+      "required": [
+        "user"
+      ],
+      "returns": [
+        "id"
+      ],
+      "user": "user",
+      "userWire": "placeholder"
+    },
+    "name": "youtube.chat.add_moderator",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "op": "mod.ban",
+      "origin": "channel",
+      "platform": "youtube",
+      "required": [
+        "user"
+      ],
+      "returns": [
+        "id"
+      ],
+      "text": "duration_seconds",
+      "user": "user",
+      "userWire": "placeholder"
+    },
+    "name": "youtube.chat.ban",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "messageId": "message_id",
+      "op": "chat.delete",
+      "origin": "channel",
+      "platform": "youtube",
+      "required": [
+        "message_id"
+      ]
+    },
+    "name": "youtube.chat.delete_message",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "messageId": "moderator_id",
+      "op": "mod.remove",
+      "origin": "channel",
+      "platform": "youtube",
+      "required": [
+        "moderator_id"
+      ]
+    },
+    "name": "youtube.chat.remove_moderator",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
+      "messageId": "ban_id",
+      "op": "mod.unban",
+      "origin": "channel",
+      "platform": "youtube",
+      "required": [
+        "ban_id"
+      ]
+    },
+    "name": "youtube.chat.unban",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  }
+]

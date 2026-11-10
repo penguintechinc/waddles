@@ -131,14 +131,18 @@ mod component {
     }
 
     impl SenderGuest for Component {
-        /// `chat.send` -> `liveChatMessages.insert`; the host pins the target and
+        /// `chat.send` -> `liveChatMessages.insert`; moderation kinds -> `moderation::build`; the host pins the target and
         /// substitutes the credential for the returned secret-ref slot.
         fn build_request(action: Action) -> Result<HttpRequestTpl, FrameError> {
-            let t = logic::build_chat_send(
-                &action.kind,
-                &action.target_source_id,
-                &action.payload_json,
-            )
+            let t = if super::moderation::KINDS.contains(&action.kind.as_str()) {
+                super::moderation::build(&action.kind, &action.payload_json)
+            } else {
+                logic::build_chat_send(
+                    &action.kind,
+                    &action.target_source_id,
+                    &action.payload_json,
+                )
+            }
             .map_err(frame_err)?;
             Ok(HttpRequestTpl {
                 method: t.method,

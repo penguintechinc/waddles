@@ -429,6 +429,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         let user_wire = match (&wire.user_uuid, decl.user_wire) {
             (None, _) => None,
             (Some(u), HostOpUserWire::Placeholder) => {
+                // The consumer re-resolves the placeholder (the raw id never rides the wire),
+                // but a destructive op must still clear the protected-target check here: the
+                // id is resolved ONLY for that check, host-side, and is never queued or logged.
                 if is_destructive_moderation(what) {
                     let id = self.detokenize_user(scope, &decl.platform, u).await?;
                     self.refuse_protected_target(scope, &decl.platform, what, &id)
