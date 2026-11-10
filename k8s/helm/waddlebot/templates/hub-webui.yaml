@@ -65,13 +65,21 @@ spec:
         # In-cluster hub-api-v3 Service -- never the server's localhost dev
         # default (see server.js). Same pattern as svc-ingest/svc-action/etc.
         - name: HUB_API_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+          value: {{ include "waddlebot.hubApiBaseUrl" . | quote }}
+        # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        # F4 -- webui serves HTTPS itself (server.js reads TLS_CERT_FILE/TLS_KEY_FILE) so the
+        # Gateway re-encrypts to it (BackendTLSPolicy, templates/httproute.yaml).
+        {{- include "waddlebot.transitServerEnv" . | nindent 8 }}
+        {{- end }}
         livenessProbe:
           # LOCAL only -- /health never calls out to hub-api, so a slow/down
           # upstream never kills this pod via liveness.
           httpGet:
             path: /health
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 3
@@ -80,6 +88,7 @@ spec:
           httpGet:
             path: /health
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 5
           periodSeconds: 5
           timeoutSeconds: 3
@@ -89,9 +98,15 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- include "waddlebot.transitServerVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- if include "waddlebot.transitTlsEnabled" . }}
+      {{- include "waddlebot.transitServerVolume" (dict "root" . "component" "hub-webui") | nindent 6 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

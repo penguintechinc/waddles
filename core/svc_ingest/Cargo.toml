@@ -226,7 +226,7 @@ x25519-dalek = { version = "=2.0.1", features = ["getrandom"] }
 # with the pod's projected SA token, caches/refreshes the hub-api-issued ES256
 # machine JWT. Same-repo path dependency, so the Docker build context is `core/`
 # (see Dockerfile.rust) exactly like core/svc_process.
-service_auth = { path = "../service_auth", version = "=0.1.0" }
+service_auth = { path = "../service_auth", version = "=0.1.0", features = ["rest-tls"] }
 
 # Per-community Twitch inbound (`src/twitch_sessions/`): pages hub-api's
 # data-plane binding list via `ConnectionResolve::list_bindings`. Same-repo

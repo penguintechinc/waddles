@@ -109,10 +109,12 @@ spec:
         # `egress:connect` scope granted in `serviceJwt.identities` (see that
         # block's own comment).
         - name: MACHINE_JWT_JWKS_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         # CA that signed hub-api's internal gRPC server cert: the JWKS is fetched over gRPC
         # (TLS 1.3, this CA only).
         {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         - name: MACHINE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
         - name: MACHINE_JWT_TRUSTED_ISSUERS

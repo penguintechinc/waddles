@@ -158,9 +158,11 @@ spec:
         # key, incl. the KNOWN GAP note on hub-api's TLS wiring + hub_client's CA trust).
         # Field-for-field mirror of svc-process-rust.yaml's identical block.
         - name: HUB_API_GRPC_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+        # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         # Matches the audience-scoped projected token this pod already mounts via
         # waddlebot.serviceJwtBootstrapVolume(Mount) below -- NOT the generic default
         # k8s SA token path (wrong audience, hub-api's TokenReview call would reject

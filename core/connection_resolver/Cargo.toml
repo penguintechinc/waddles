@@ -22,7 +22,7 @@ serde_json = "=1.0.151"
 tracing = "=0.1.44"
 thiserror = "=2.0.20"
 zeroize = "=1.9.0"
-service_auth = { path = "../service_auth", version = "=0.1.0" }
+service_auth = { path = "../service_auth", version = "=0.1.0", features = ["rest-tls"] }
 
 [dev-dependencies]
 tokio = { version = "=1.53.3", features = ["full", "test-util"] }

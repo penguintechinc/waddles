@@ -64,6 +64,20 @@ pub struct CliConfig {
     #[arg(long, env = "MODULE_PORT", default_value_t = 8208)]
     pub http_port: u16,
 
+    /// Optional TLS control-plane port: the same router as the plaintext HTTP port,
+    /// served over rustls (TLS 1.3 preferred, 1.2 floor, HTTP/2 + HTTP/1.1 via ALPN).
+    /// In-cluster callers (hub-api) dial this one; requires `TLS_CERT_FILE`/`TLS_KEY_FILE`.
+    #[arg(long, env = "STREAMING_TLS_PORT")]
+    pub tls_port: Option<u16>,
+
+    /// PEM server certificate chain for the TLS control-plane listener.
+    #[arg(long, env = "TLS_CERT_FILE")]
+    pub tls_cert_file: Option<PathBuf>,
+
+    /// PEM private key (PKCS#8/SEC1) for the TLS control-plane listener.
+    #[arg(long, env = "TLS_KEY_FILE")]
+    pub tls_key_file: Option<PathBuf>,
+
     /// Prometheus `/metrics` exposition port.
     #[arg(long, env = "METRICS_PORT", default_value_t = 9090)]
     pub metrics_port: u16,
@@ -179,6 +193,18 @@ impl CliConfig {
                 field: "http_port/metrics_port",
                 reason: "port 0 is not a valid bind port".to_string(),
             });
+        }
+        match (self.tls_port, &self.tls_cert_file, &self.tls_key_file) {
+            (None, None, None) => {}
+            (Some(port), Some(_), Some(_)) if port != 0 => {}
+            _ => {
+                return Err(ConfigError::InvalidValue {
+                    field: "tls_port/tls_cert_file/tls_key_file",
+                    reason: "STREAMING_TLS_PORT (non-zero), TLS_CERT_FILE and TLS_KEY_FILE must \
+                             be set together or not at all"
+                        .to_string(),
+                });
+            }
         }
         Ok(())
     }
@@ -334,6 +360,32 @@ mod tests {
     #[test]
     fn parse_udp_range_rejects_non_numeric() {
         assert!(parse_udp_range("abc-def").is_err());
+    }
+
+    #[test]
+    fn tls_settings_must_be_all_or_nothing() {
+        let none = CliConfig::parse_from(["svc-streaming"]);
+        assert!(none.validate().is_ok());
+        let port_only = CliConfig::parse_from(["svc-streaming", "--tls-port", "8448"]);
+        assert!(port_only.validate().is_err());
+        let files_only = CliConfig::parse_from([
+            "svc-streaming",
+            "--tls-cert-file",
+            "/c.crt",
+            "--tls-key-file",
+            "/c.key",
+        ]);
+        assert!(files_only.validate().is_err());
+        let all = CliConfig::parse_from([
+            "svc-streaming",
+            "--tls-port",
+            "8448",
+            "--tls-cert-file",
+            "/c.crt",
+            "--tls-key-file",
+            "/c.key",
+        ]);
+        assert!(all.validate().is_ok());
     }
 
     #[test]

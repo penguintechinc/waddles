@@ -122,10 +122,14 @@ pub fn build_media_wiring(
             return None;
         }
     };
-    let http = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
+    let http = match service_auth::internal_tls::InternalTls::from_env()
+        .map_err(|e| e.to_string())
+        .and_then(|tls| {
+            tls.check_url(&cli.hub_api_url).map_err(|e| e.to_string())?;
+            tls.apply(reqwest::Client::builder().timeout(Duration::from_secs(10)))
+                .build()
+                .map_err(|e| e.to_string())
+        }) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "media capability: hub-api HTTP client build failed -- capability unavailable");

@@ -224,7 +224,7 @@ bundle-host-credentials = { path = "../bundle_host_credentials", version = "=0.1
 bundle-host-media = { path = "../bundle_host_media", version = "=0.1.0" }
 # Machine-JWT source for bundle-host-media's hub-api calls (tier + BYOK);
 # already in this crate's lock via core/hub_client.
-service_auth = { path = "../service_auth", version = "=0.1.0" }
+service_auth = { path = "../service_auth", version = "=0.1.0", features = ["rest-tls"] }
 async-trait = "=0.1.89"
 # Per-source circuit breaker for guest faults (connector spec SS0 condition
 # 5) -- a same-repo `path` dependency (NOT `penguin-libs`: purely generic,

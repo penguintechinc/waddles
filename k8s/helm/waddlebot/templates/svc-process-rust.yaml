@@ -157,7 +157,9 @@ spec:
         {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}
         {{- end }}
         - name: HUB_API_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+          value: {{ include "waddlebot.hubApiBaseUrl" . | quote }}
+        # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         # feature/hub-grpc-env-wiring (closes #569's startup seam) -- core/hub_client::
         # HubClient needs hub-api's internal gRPC endpoint (TLS mandatory, see
         # hub_api/grpc_internal/server.py) and its machine-JWT bootstrap endpoint
@@ -166,9 +168,9 @@ spec:
         # requiring a per-environment override (see values.yaml's own comment on this
         # key, incl. the KNOWN GAP note on hub-api's TLS wiring + hub_client's CA trust).
         - name: HUB_API_GRPC_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         # Matches the audience-scoped projected token this pod already mounts via
         # waddlebot.serviceJwtBootstrapVolume(Mount) below -- NOT the generic default
         # k8s SA token path (wrong audience, hub-api's TokenReview call would reject

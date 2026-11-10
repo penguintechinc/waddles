@@ -60,6 +60,22 @@ spec:
         {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        # F3 -- HTTPS-only HTTP listener (the plaintext bind is replaced, not supplemented). hypercorn
+        # floors TLS at 1.2 (1.3 negotiated when offered); ECDSA P-256 cert from the internal CA;
+        # AES-GCM/ChaCha20 suites; HTTP/2 via ALPN (hypercorn h2). A bad cert/key fails startup loud.
+        command:
+        - hypercorn
+        - app:app
+        - --bind
+        - 0.0.0.0:{{ .Values.pipeline.hubApi.port }}
+        - --certfile
+        - /etc/waddlebot/tls/tls.crt
+        - --keyfile
+        - /etc/waddlebot/tls/tls.key
+        - --ciphers
+        - ECDHE+AESGCM:ECDHE+CHACHA20
+        {{- end }}
         ports:
         - name: http
           containerPort: {{ .Values.pipeline.hubApi.port }}
@@ -136,7 +152,12 @@ spec:
         # from the same Service name/port templates/svc-streaming.yaml creates; hub-api has NO
         # in-code default and fails loud on the first proxied call when this is absent.
         - name: STREAMING_RTC_URL
+          {{- if include "waddlebot.transitTlsEnabled" . }}
+          # F6 -- svc-streaming's TLS control-plane listener (STREAMING_TLS_PORT), dialed by FQDN.
+          value: "https://{{ include "waddlebot.svcFqdn" (dict "root" . "name" "svc-streaming") }}:{{ .Values.global.internalTransitTls.streamingTlsPort }}"
+          {{- else }}
           value: "http://{{ include "waddlebot.fullname" . }}-svc-streaming:{{ .Values.pipeline.svcStreaming.port }}"
+          {{- end }}
         {{- end }}
         - name: SERVICE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
@@ -200,11 +221,20 @@ spec:
         # no override is set (proxy then fails loud with a 502, never a masked 500).
         {{- $analyticsUrl := .Values.pipeline.hubApi.analyticsCoreUrl | default "" }}
         {{- if and (not $analyticsUrl) .Values.modules.coreData.enabled }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- /* F6 -- core-data serves HTTPS on its HTTP port; FQDN form matches the cert SAN. */}}
+        {{- $analyticsUrl = printf "https://%s:%v" (include "waddlebot.svcFqdn" (dict "root" . "name" "core-data")) .Values.modules.coreData.service.port }}
+        {{- else }}
         {{- $analyticsUrl = printf "http://%s-core-data.%s.svc:%v" (include "waddlebot.fullname" .) .Values.namespace .Values.modules.coreData.service.port }}
+        {{- end }}
         {{- end }}
         {{- if $analyticsUrl }}
         - name: ANALYTICS_CORE_API_URL
           value: {{ $analyticsUrl | quote }}
+        {{- end }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- include "waddlebot.transitServerEnv" . | nindent 8 }}
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         {{- end }}
         - name: CONNECTIONS_STATE_TTL_S
           value: {{ .Values.pipeline.hubApi.connectionsStateTtlS | quote }}
@@ -307,11 +337,12 @@ spec:
         - name: MODULE_LOAD_MARKETING
           value: "true"
         {{- end }}
-        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/ready" "port" "http") | nindent 8 }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/ready" "port" "http" "scheme" (include "waddlebot.transitProbeScheme" .)) | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
@@ -325,6 +356,7 @@ spec:
           httpGet:
             path: /ready
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 10
           periodSeconds: 5
           timeoutSeconds: 3
@@ -341,6 +373,9 @@ spec:
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
         {{- include "waddlebot.hubApiGrpcTlsVolumeMount" . | nindent 8 }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- include "waddlebot.transitServerVolumeMount" . | nindent 8 }}
+        {{- end }}
         {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
         - name: credential-manager-ca
           mountPath: /etc/waddlebot/credential-manager
@@ -356,6 +391,9 @@ spec:
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
       {{- include "waddlebot.hubApiGrpcTlsVolume" . | nindent 6 }}
+      {{- if include "waddlebot.transitTlsEnabled" . }}
+      {{- include "waddlebot.transitServerVolume" (dict "root" . "component" "hub-api") | nindent 6 }}
+      {{- end }}
       {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
       - name: credential-manager-ca
         secret:

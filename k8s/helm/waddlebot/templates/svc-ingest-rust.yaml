@@ -127,14 +127,16 @@ spec:
         - name: RUNNER_TENANT_SLUG
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+          value: {{ include "waddlebot.hubApiBaseUrl" . | quote }}
+        # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         # Machine-JWT bootstrap for hub-api's internal provider-connections routes. The endpoint
         # defaults to hub-api's own in-cluster Service (same default as svc-action/svc-process).
         # The audience-scoped projected token is mounted below -- NOT the generic k8s SA token
         # path (wrong audience; hub-api's TokenReview would reject it).
         - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_SA_TOKEN_PATH
           value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
         {{- if not $ct.enabled }}
@@ -202,7 +204,7 @@ spec:
               key: TWITCH_CLIENT_ID
         # hub-api internal gRPC (IdentityService.ResolvePlatformUser, scope identity:platform-user:resolve).
         - name: HUB_API_GRPC_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
         # svc-ingest's OWN server-only cert/key (dedicated Secret, svc-ingest SAN only) -- never the
         # shared executor/stage host-api-tls material. The client identity is pinned.

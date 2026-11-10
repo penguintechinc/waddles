@@ -1,0 +1,47 @@
+# F3/F4/F6 (docs/superpowers/specs/2026-11-08-pod-transit-encryption-audit.md) -- cert-manager
+# server certificates for the in-cluster HTTP listeners that terminate TLS themselves: hub-api,
+# hub-webui (Gateway BackendTLSPolicy hop), core-data and svc-streaming. Each cert is ECDSA P-256
+# (SHA-256 signature from the P-256 internal CA), 90d with auto-renewal, SAN = the service FQDN
+# only (the internal CA's nameConstraints permit no other form and no IP SANs). The issuer is the
+# internal-CA ClusterIssuer (global.internalTransitTls.certManager.issuerName, default
+# `waddlebot-internal-ca` -- provisioned by k8s/dal2alpha/internal-ca.yaml / the transit-tls-core PR).
+# Requires cert-manager; with the issuer missing the Secret never appears and the pods stay
+# ContainerCreating (fail loud) -- there is no plaintext fallback.
+{{- if include "waddlebot.transitTlsEnabled" . }}
+{{- $tls := .Values.global.internalTransitTls }}
+{{- if not $tls.certManager.issuerName }}
+{{- fail "global.internalTransitTls.enabled=true requires global.internalTransitTls.certManager.issuerName (the internal-CA Issuer/ClusterIssuer)" }}
+{{- end }}
+{{- $targets := list }}
+{{- if .Values.pipeline.hubApi.enabled }}{{- $targets = append $targets (dict "component" "hub-api" "svc" "hub-api-v3") }}{{- end }}
+{{- if .Values.pipeline.hubWebui.enabled }}{{- $targets = append $targets (dict "component" "hub-webui" "svc" "hub-webui-v3") }}{{- end }}
+{{- if .Values.modules.coreData.enabled }}{{- $targets = append $targets (dict "component" "core-data" "svc" "core-data") }}{{- end }}
+{{- if .Values.pipeline.svcStreaming.enabled }}{{- $targets = append $targets (dict "component" "svc-streaming" "svc" "svc-streaming") }}{{- end }}
+{{- range $t := $targets }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "waddlebot.transitTlsSecretName" (dict "root" $ "component" $t.component) }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: transit-tls
+spec:
+  secretName: {{ include "waddlebot.transitTlsSecretName" (dict "root" $ "component" $t.component) }}
+  duration: {{ $tls.certManager.duration | default "2160h" | quote }}
+  renewBefore: {{ $tls.certManager.renewBefore | default "360h" | quote }}
+  usages:
+    - server auth
+  dnsNames:
+    - {{ include "waddlebot.svcFqdn" (dict "root" $ "name" $t.svc) | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: {{ $tls.certManager.issuerName }}
+    kind: {{ $tls.certManager.issuerKind | default "ClusterIssuer" }}
+    group: cert-manager.io
+{{- end }}
+{{- end }}

@@ -206,9 +206,16 @@ impl ConnectionResolver {
             connect: cfg.connect_timeout,
             request: cfg.request_timeout,
         };
-        let http = reqwest::Client::builder()
-            .connect_timeout(cfg.connect_timeout)
-            .timeout(cfg.request_timeout)
+        let tls = service_auth::internal_tls::InternalTls::from_env()
+            .map_err(|_| ResolveError::Malformed("invalid internal TLS configuration"))?;
+        tls.check_url(&cfg.hub_api_url)
+            .map_err(|_| ResolveError::Malformed("plaintext hub-api URL refused"))?;
+        let http = tls
+            .apply(
+                reqwest::Client::builder()
+                    .connect_timeout(cfg.connect_timeout)
+                    .timeout(cfg.request_timeout),
+            )
             .build()
             .map_err(|_| ResolveError::Malformed("cannot build http client"))?;
         let bound = service_auth::BoundMachineJwtClient::with_timeouts(

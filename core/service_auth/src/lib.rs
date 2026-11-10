@@ -23,6 +23,8 @@
 //! (`svc_process`, `svc_action`) don't change either.
 
 pub mod grpc;
+#[cfg(feature = "rest-tls")]
+pub mod internal_tls;
 pub mod jwt_hardening;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock_hub;

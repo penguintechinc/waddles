@@ -378,7 +378,12 @@ where
         // `ConfiguredDekProvider` is cheaply `Clone` (see its doc comment),
         // so each independently-spawned receiver task gets its own handle
         // onto the same underlying TTL cache / HTTP client.
-        let dek_provider = build_dek_provider(&config, reqwest::Client::new());
+        let dek_provider = build_dek_provider(
+            &config,
+            service_auth::internal_tls::shared_client().map_err(|e| {
+                anyhow::anyhow!("internal TLS policy rejected the hub-api HTTP client: {e}")
+            })?,
+        );
 
         // Connector service bundle runtime (spec 2026-11-05 PR-E): only when an
         // `CONNECTOR_<P>_ENABLED` baseline is ON. It owns the single executor

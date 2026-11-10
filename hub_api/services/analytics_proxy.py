@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from flask_core.internal_tls import InternalTlsPolicy, PooledClient
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,9 @@ class AnalyticsCoreProxyClient:
     def __init__(self, config: AnalyticsProxyConfig | None = None) -> None:
         """Build the client; `config` defaults to `AnalyticsProxyConfig.from_env()`."""
         self._config = config or AnalyticsProxyConfig.from_env()
+        # One pooled HTTP/2 client per loop (TLS+CA per INTERNAL_* policy) -- never a
+        # per-request client, which would pay a TLS handshake on every call.
+        self._pool = PooledClient(timeout_s=self._config.timeout_seconds)
 
     async def get(
         self,
@@ -116,8 +120,8 @@ class AnalyticsCoreProxyClient:
             headers["X-Caller-User-ID"] = str(caller_user_id)
             headers["X-Caller-Role"] = caller_role or "user"
         try:
-            async with httpx.AsyncClient(timeout=self._config.timeout_seconds) as client:
-                response = await client.get(url, params=query, headers=headers)
+            InternalTlsPolicy.from_env().check_url(url)
+            response = await self._pool.get().get(url, params=query, headers=headers)
         except httpx.HTTPError as exc:
             logger.warning(
                 "analytics_proxy_transport_error path=%s error_type=%s",

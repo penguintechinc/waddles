@@ -28,4 +28,44 @@ spec:
         - name: {{ .service }}
           port: {{ .port }}
     {{- end }}
+{{- if include "waddlebot.transitTlsEnabled" . }}
+{{- /*
+F4 -- Gateway -> hub-webui re-encryption. hub-webui serves HTTPS (server.js, cert from
+templates/transit-tls-certificates.yaml); this policy makes the Gateway originate TLS to the
+backend and VERIFY it against the internal CA at the service FQDN (the only SAN the CA permits).
+The CA bundle ConfigMap is rendered from httproute.backendTls.caPem when set, otherwise it must
+pre-exist (operator step in k8s/dal2alpha/APPLY.md); if it is missing the policy is not
+Accepted and the Gateway fails closed (503) -- it never falls back to plaintext to the backend.
+*/}}
+{{- $bt := .Values.httproute.backendTls | default dict }}
+{{- $caName := $bt.caConfigMapName | default (printf "%s-internal-ca-bundle" (include "waddlebot.fullname" .)) }}
+{{- if $bt.caPem }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $caName }}
+  namespace: {{ include "waddlebot.namespace" . }}
+data:
+  ca.crt: |
+    {{- $bt.caPem | nindent 4 }}
+{{- end }}
+---
+apiVersion: {{ $bt.apiVersion | default "gateway.networking.k8s.io/v1alpha3" }}
+kind: BackendTLSPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-hub-webui-backend-tls
+  namespace: {{ include "waddlebot.namespace" . }}
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: {{ include "waddlebot.fullname" . }}-hub-webui-v3
+  validation:
+    hostname: {{ include "waddlebot.svcFqdn" (dict "root" . "name" "hub-webui-v3") | quote }}
+    caCertificateRefs:
+      - group: ""
+        kind: ConfigMap
+        name: {{ $caName }}
+{{- end }}
 {{- end }}
