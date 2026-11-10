@@ -23,12 +23,6 @@ axum = "=0.8.9"
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.1", features = ["trace", "cors"] }
 hyper = { version = "=1.11.1", features = ["full"] }
-# In-cluster TLS control-plane listener (src/tls.rs): rustls (ring) over a hand-rolled accept
-# loop so the existing axum Router is served with ALPN h2/http1.1 -- no new server framework.
-rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12", "ring"] }
-rustls-pki-types = "=1.15.1"
-hyper-util = { version = "=0.1.20", features = ["tokio", "server-auto", "service", "http1", "http2"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tracing = "=0.1.44"
@@ -104,6 +98,14 @@ webrtc = { version = "=0.21.1", default-features = false, features = ["runtime-t
 # than silently expanded; the alternative is code that cannot compile.
 rtc = "=0.21.1"
 async-trait = "=0.1.92"
+# Host-API mTLS listener (`rooms::host_api`): same crates/versions as the stage
+# services' `host_api.rs` (svc_action/svc_process); all already in Cargo.lock.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12", "ring"] }
+rustls-pki-types = "=1.15.1"
+# In-cluster TLS control-plane listener (src/tls.rs) reuses the rustls/tokio-rustls pins above over a
+# hand-rolled accept loop, so the existing axum Router is served with ALPN h2/http1.1 (http1/http2 below).
+hyper-util = { version = "=0.1.20", features = ["server-auto", "tokio", "service", "http1", "http2"] }
 ffmpeg-sidecar = "=2.7.0"
 hls_m3u8 = "=0.7.0"
 object_store = { version = "=0.14.1", features = ["aws"] }
@@ -129,6 +131,8 @@ name = "e2e_real_media"
 required-features = ["real-media-e2e"]
 
 [dev-dependencies]
+# Test-only throwaway CA/certs for the host-API mTLS tests (no key material in git).
+rcgen = "=0.14.10"
 http-body-util = "=0.1.3"
 # `testing` (dev-only feature of the already-declared `opentelemetry_sdk`)
 # unlocks `InMemoryMetricExporter`/`InMemorySpanExporter`, which the

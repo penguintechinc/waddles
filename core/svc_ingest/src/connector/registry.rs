@@ -68,6 +68,9 @@ pub struct PinnedConnector {
     pub max_events_per_frame: usize,
     /// Per-event and per-frame size ceilings; defaults to [`EventLimits::default`].
     pub event_limits: EventLimits,
+    /// The manifest-declared cadence of the bundle's exported `reconcile` hook; `None` = the
+    /// bundle exports none and the host never schedules one.
+    pub reconcile: Option<super::reconcile_hook::ReconcileSpec>,
 }
 
 impl PinnedConnector {
@@ -87,7 +90,15 @@ impl PinnedConnector {
             max_frame_bytes,
             max_events_per_frame: MAX_EVENTS_PER_FRAME,
             event_limits: EventLimits::default(),
+            reconcile: None,
         }
+    }
+
+    /// Declares the bundle's `reconcile` cadence (validated against the host bounds).
+    #[must_use]
+    pub fn with_reconcile(mut self, spec: super::reconcile_hook::ReconcileSpec) -> Self {
+        self.reconcile = Some(spec);
+        self
     }
 }
 
@@ -231,5 +242,16 @@ mod tests {
         bad.event_limits.max_payload_bytes = 0;
         assert!(matches!(r.register(bad), Err(RegistryError::Invalid(_))));
         assert!(r.is_empty(), "no invalid entry may have been inserted");
+    }
+
+    #[test]
+    fn a_reconcile_cadence_is_opt_in_and_bounded() {
+        use super::super::reconcile_hook::ReconcileSpec;
+        use std::time::Duration;
+        assert!(pinned("echo").reconcile.is_none());
+        let spec = ReconcileSpec::new(Duration::from_secs(900)).unwrap();
+        let p = pinned("echo").with_reconcile(spec);
+        assert_eq!(p.reconcile.unwrap().interval(), Duration::from_secs(900));
+        assert!(ReconcileSpec::new(Duration::from_secs(1)).is_err());
     }
 }

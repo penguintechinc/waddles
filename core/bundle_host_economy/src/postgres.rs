@@ -14,11 +14,15 @@ use uuid::Uuid;
 
 use crate::{
     metrics, validate_transfer, validate_wager, AdminAdjust, BoxFuture, EconomyCaps, EconomyError,
-    EconomyScope, EconomyStore, IdempotencyKey, LeaderboardEntry, MAX_LEADERBOARD_LIMIT,
+    EconomyScope, EconomyStore, ElevatedRequest, IdempotencyKey, LeaderboardEntry,
+    TransferFromOutcome, MAX_LEADERBOARD_LIMIT,
 };
 
 #[path = "postgres_ops.rs"]
 mod ops;
+
+#[path = "postgres_elevated.rs"]
+mod elevated;
 
 /// Per-transaction statement timeout, so a stuck row lock can never hold a
 /// bundle invocation (or a pool connection) past the host call deadline.
@@ -962,6 +966,58 @@ impl EconomyStore for PostgresEconomyStore {
                 .await;
             metrics::record_call(
                 "exchange",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn transfer_from<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        req: &'a ElevatedRequest<'a>,
+    ) -> BoxFuture<'a, Result<TransferFromOutcome, EconomyError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.transfer_from_impl(scope, req).await;
+            metrics::record_call(
+                "transfer_from",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn elevated_reserve<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        req: &'a ElevatedRequest<'a>,
+    ) -> BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.elevated_reserve_impl(scope, req).await;
+            metrics::record_call(
+                "elevated_reserve",
+                outcome_of(&result),
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        })
+    }
+
+    fn elevated_settle<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        audit_id: i64,
+        applied: bool,
+    ) -> BoxFuture<'a, Result<(), EconomyError>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.elevated_settle_impl(scope, audit_id, applied).await;
+            metrics::record_call(
+                "elevated_settle",
                 outcome_of(&result),
                 start.elapsed().as_secs_f64(),
             );

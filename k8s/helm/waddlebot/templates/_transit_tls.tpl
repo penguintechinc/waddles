@@ -64,14 +64,14 @@ Usage: {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
 {{- end -}}
 
 {{- define "waddlebot.transitServerVolumeMount" -}}
-- name: transit-tls
+- name: http-tls
   mountPath: /etc/waddlebot/tls
   readOnly: true
 {{- end -}}
 
 {{/* Usage: include "waddlebot.transitServerVolume" (dict "root" . "component" "hub-api") */}}
 {{- define "waddlebot.transitServerVolume" -}}
-- name: transit-tls
+- name: http-tls
   secret:
     secretName: {{ include "waddlebot.transitTlsSecretName" . }}
     items:

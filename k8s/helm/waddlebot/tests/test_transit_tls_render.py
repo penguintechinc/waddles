@@ -21,6 +21,7 @@ import yaml
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _FQDN_SUFFIX = ".waddlebot.svc.cluster.local"
+_FULLNAME = "waddlebot"
 _HUB_API_FQDN = f"waddlebot-hub-api-v3{_FQDN_SUFFIX}"
 
 
@@ -136,28 +137,49 @@ def test_no_plaintext_hub_api_or_internal_http_urls(dal2: list[dict[str, Any]]) 
 
 
 def test_hub_api_urls_use_fqdn_https(dal2: list[dict[str, Any]]) -> None:
-    """HUB_API_URL, token mint and JWKS endpoints are https://<FQDN> (CA nameConstraints form)."""
-    seen: dict[str, int] = {"HUB_API_URL": 0, "token": 0, "jwks": 0}
+    """HUB_API_URL (REST) and the gRPC token-mint/JWKS endpoints are https://<FQDN> (CA nameConstraints form)."""
+    grpc_url = f"https://{_HUB_API_FQDN}:50204"
+    seen: dict[str, int] = {"HUB_API_URL": 0, "token": 0, "grpc": 0, "jwks": 0}
     for _name, c in _containers(dal2):
         for e in c.get("env", []):
             val = e.get("value", "")
             if e["name"] == "HUB_API_URL" and isinstance(val, str):
                 assert val == f"https://{_HUB_API_FQDN}:8204", val
                 seen["HUB_API_URL"] += 1
-            if isinstance(val, str) and val.endswith("/internal/service-token"):
-                assert val == f"https://{_HUB_API_FQDN}:8204/internal/service-token", (
-                    val
-                )
+            if e["name"] == "SERVICE_JWT_TOKEN_ENDPOINT":
+                assert val == grpc_url, val
                 seen["token"] += 1
-            if isinstance(val, str) and val.endswith("/internal/service-jwks.json"):
-                assert (
-                    val == f"https://{_HUB_API_FQDN}:8204/internal/service-jwks.json"
-                ), val
+            if e["name"] == "HUB_API_GRPC_ENDPOINT":
+                assert val == grpc_url, val
+                seen["grpc"] += 1
+            if e["name"] in ("MACHINE_JWT_JWKS_ENDPOINT", "PUSH_JWKS_ENDPOINT"):
+                assert val == grpc_url, val
                 seen["jwks"] += 1
     assert all(n > 0 for n in seen.values()), seen
     assert seen["token"] >= 4, (
-        "svc-ingest/process/action/presentation each mint over https"
+        "svc-ingest/process/action/presentation each mint over https gRPC"
     )
+
+
+def test_grpc_and_https_share_one_trust_root(dal2: list[dict[str, Any]]) -> None:
+    """hub-api's gRPC listener and every gRPC client trust the SAME cert-manager Secret as HTTPS."""
+    secret = f"{_FULLNAME}-hub-api-http-tls"
+    assert not [
+        d
+        for d in dal2
+        if d["kind"] == "Secret"
+        and d["metadata"]["name"] == f"{_FULLNAME}-hub-api-grpc-tls"
+    ], "no separate self-generated gRPC CA under transit TLS"
+    checked = 0
+    for doc in dal2:
+        spec = _pod_spec(doc)
+        if spec is None:
+            continue
+        for vol in spec.get("volumes", []):
+            if vol["name"] in ("hub-api-grpc-ca", "hub-api-grpc-tls"):
+                assert vol["secret"]["secretName"] == secret, vol
+                checked += 1
+    assert checked >= 5, checked
 
 
 def test_every_hub_api_client_has_ca_and_refuses_plaintext(

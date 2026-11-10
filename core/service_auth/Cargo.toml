@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.97.0"
 license = "AGPL-3.0-or-later"
 publish = false
-description = "Client + verifier for hub-api-issued per-service EdDSA machine JWTs (feature/eddsa-machine-jwt). Bootstraps with the pod's projected Kubernetes ServiceAccount token, caches and refreshes the resulting machine JWT, and verifies inbound machine JWTs against a JWKS-shaped trust bundle. SPIFFE/Skauswatch-ready: TrustBundle is a trait so a future JWT-SVID bundle source drops in without touching callers -- see docs comment in src/lib.rs."
+description = "Client + verifier for hub-api-issued per-service ES256 machine JWTs. Bootstraps over gRPC (hub-api ServiceAuthService, TLS 1.3) with the pod's projected Kubernetes ServiceAccount token, caches and refreshes the resulting machine JWT, and verifies inbound machine JWTs against a JWKS-shaped trust bundle. SPIFFE/Skauswatch-ready: TrustBundle is a trait so a future JWT-SVID bundle source drops in without touching callers -- see docs comment in src/lib.rs."
 
 [lib]
 name = "service_auth"
@@ -16,20 +16,32 @@ path = "src/lib.rs"
 # same crate is already pinned there, to avoid a second pin of the same
 # dependency once these crates share a workspace.
 [dependencies]
-tokio = { version = "=1.53.3", features = ["sync", "time", "rt", "fs"] }
-# =0.12.28 (not =0.12.12, the version first pinned here) -- 0.12.12's
-# rustls-tls chain unconditionally pulls the unmaintained `rustls-pemfile`
-# (RUSTSEC-2025-0134); reqwest >=0.12.13 reads PEM via `rustls-pki-types`
-# directly instead. Matches core/svc_process/Cargo.toml's existing pin.
-reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls", "http2"] }
+tokio = { version = "=1.53.3", features = ["sync", "time", "rt", "fs", "net"] }
+# gRPC to hub-api's internal `ServiceAuthService` (machine-JWT mint + JWKS) -- replaces the old
+# reqwest/REST bootstrap, so reqwest (and its TLS stack) is no longer a dependency of this crate.
+# `transport` = tonic's channel/server; `tls-ring` is what hub_client already resolves (one rustls).
+tonic = { version = "=0.14.6", features = ["transport", "tls-ring"] }
+tonic-prost = "=0.14.6"
+prost = "=0.14.4"
+# Custom TLS-1.3-only connector (tonic's own ClientTlsConfig cannot pin the protocol version).
+# Pins mirror core/hub_client, core/svc_action and core/egress_proxy so one graph resolves one copy.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "=0.26.5", default-features = false }
+rustls-pki-types = "=1.15.1"
+hyper-util = { version = "=0.1.19", default-features = false, features = ["tokio"] }
+tower = { version = "=0.5.3", default-features = false, features = ["util"] }
+# `internal_tls` (feature `rest-tls`; REST clients of core/connection_resolver, svc_ingest, svc_process) builds a pinned-CA
+# reqwest client. =0.12.28 (not 0.12.12): 0.12.12's rustls-tls chain pulls the unmaintained
+# `rustls-pemfile` (RUSTSEC-2025-0134). The hub-api machine-JWT bootstrap itself is gRPC (`grpc`).
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls", "http2"], optional = true }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 # "aws_lc_rs" (not jsonwebtoken's "rust_crypto" feature) -- security review
 # finding: `rust_crypto` bundles ed25519-dalek/hmac/p256/p384/rand/rsa/sha2
-# as one all-or-nothing bucket, so verifying only EdDSA still pulled in the
+# as one all-or-nothing bucket, so verifying only one alg still pulled in the
 # RustSec-flagged `rsa` crate (Marvin-attack timing sidechannel, no safe
 # upgrade -- see deny.toml's `bans.deny` entry for `rsa`). `aws_lc_rs`
-# implements EdDSA (and every other alg jsonwebtoken supports) against
+# implements ES256 + EdDSA (and every other alg jsonwebtoken supports) against
 # AWS-LC directly, with no `rsa` crate anywhere in the dependency graph.
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs"] }
 # =2.0.20 (not =2.0.21) -- core/egress_proxy (feature/egress-proxy-service)
@@ -58,13 +70,25 @@ opentelemetry = { version = "=0.32.0", default-features = false, features = ["me
 # never part of a service binary.
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics"], optional = true }
 
+[build-dependencies]
+tonic-prost-build = "=0.14.6"
+
 [features]
 default = []
-# Exposes `service_auth::test_support::Capture` to dependents' tests.
+# Exposes `service_auth::test_support::{Capture, MockHub}` to dependents' tests (`MockHub` is a
+# real in-process tonic `ServiceAuthService` on loopback, replacing the old wiremock REST stubs).
 test-support = ["dep:opentelemetry_sdk"]
+# In-cluster HTTPS policy for REST clients (`service_auth::internal_tls`): pinned CA, TLS>=1.2,
+# plaintext refused. Opt-in so crates that only mint/verify machine JWTs over gRPC never link
+# reqwest. Enabled by connection_resolver, svc_ingest and svc_process.
+rest-tls = ["dep:reqwest"]
 
 [dev-dependencies]
+# Self dev-dependency: `cargo test` always exercises `internal_tls` (feature `rest-tls`).
+service_auth = { path = ".", features = ["rest-tls"] }
 tokio = { version = "=1.53.3", features = ["full", "test-util"] }
+# Real-TLS tests: a throwaway ECDSA P-256 (rcgen's default) CA + server cert generated per run.
+rcgen = "=0.14.10"
 # Test-only: the capturing exporter proves the counter/histogram carry the
 # exact `waddles_jwt_verifications_total{verifier,alg,outcome}` label set the
 # Python verifiers emit. Never linked into a service binary.

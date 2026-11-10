@@ -26,8 +26,9 @@ refused, malformed JSON) degrades to `None`, logged at WARNING with
 raises into a caller's request-handling path.
 
 Auth (HIGH-2 -- NO static shared secret): `Authorization: Bearer <community-bound machine
-JWT>`. `_mint_community_jwt` bootstraps one against hub-api's `POST /internal/service-token`
-(`SERVICE_JWT_TOKEN_ENDPOINT`, default `{hub_api_url}/internal/service-token`) with the pod's own
+JWT>`. `_mint_community_jwt` bootstraps one over gRPC against hub-api's
+`ServiceAuthService/MintServiceToken` (`SERVICE_JWT_TOKEN_ENDPOINT`, hub-api's internal gRPC
+endpoint; required) with the pod's own
 projected ServiceAccount token (`SERVICE_JWT_SA_TOKEN_PATH`) -- the Python equivalent of
 `service_auth::MachineJwtClient` -- requesting scope `connections:resolve` bound to this
 `community_id` (<=300s lifetime), and caches it per community until 30s before expiry. A token
@@ -67,7 +68,6 @@ caller needing an uncached read (a test, or one that just called
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import time
@@ -76,6 +76,8 @@ from datetime import datetime
 from typing import Literal
 
 import httpx
+
+from .service_jwt_client import ServiceTokenError, mint_service_token
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +104,6 @@ _DEFAULT_TIMEOUT_S = 3.0
 _TOKEN_PATH = "/api/v1/internal/communities/{community_id}/connections/{provider}/token"  # noqa: S105
 #: Machine-JWT bootstrap: path template (relative to the hub-api base URL), scope, and the
 #: projected-ServiceAccount-token file the pod already carries for `service_auth`.
-_MINT_PATH = "/internal/service-token"  # noqa: S105 -- URL path, not a secret value
 _MINT_SCOPE = "connections:resolve"
 _DEFAULT_SA_TOKEN_PATH = "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"  # noqa: S105 -- path
 #: Re-mint this many seconds before the JWT's own expiry.
@@ -198,68 +199,39 @@ def _parse_expires_at(raw: object, *, provider: str, community_id: int) -> datet
 _jwt_cache: dict[int, tuple[float, str]] = {}
 
 
-def _mint_endpoint(base_url: str) -> str:
-    """`SERVICE_JWT_TOKEN_ENDPOINT` if set, else `{base_url}/internal/service-token`."""
-    return os.environ.get("SERVICE_JWT_TOKEN_ENDPOINT") or f"{base_url}{_MINT_PATH}"
-
-
-async def _mint_community_jwt(
-    client: httpx.AsyncClient, community_id: int, base_url: str
-) -> str | None:
+async def _mint_community_jwt(community_id: int) -> str | None:
     """Return a community-bound `connections:resolve` machine JWT, minting one if needed.
 
-    Cached per community until `_JWT_SKEW_S` before expiry. Returns `None` (logged WARNING, ids
-    only -- never a token) when the projected SA token is unreadable or hub-api refuses the
-    bootstrap; an `httpx.HTTPError` from the mint call propagates to the caller's handler.
+    Mints over gRPC (`service_jwt_client`, `SERVICE_JWT_TOKEN_ENDPOINT` = hub-api's internal gRPC
+    endpoint) and caches per community until `_JWT_SKEW_S` before expiry. Returns `None` (logged
+    WARNING, ids and error class only -- never a token) when the endpoint is unset, the projected
+    SA token is unreadable, or hub-api refuses the bootstrap.
     """
     cached = _jwt_cache.get(community_id)
     if cached is not None and time.monotonic() < cached[0]:
         return cached[1]
 
-    sa_path = os.environ.get("SERVICE_JWT_SA_TOKEN_PATH") or _DEFAULT_SA_TOKEN_PATH
+    endpoint = os.environ.get("SERVICE_JWT_TOKEN_ENDPOINT", "").strip()
+    if not endpoint:
+        logger.warning("community_credentials.mint_no_endpoint community_id=%s", community_id)
+        return None
     try:
-        sa_token = (await asyncio.to_thread(_read_text, sa_path)).strip()
-    except OSError as exc:
+        minted = await mint_service_token(
+            endpoint=endpoint,
+            scope=_MINT_SCOPE,
+            community_id=community_id,
+            sa_token_path=os.environ.get("SERVICE_JWT_SA_TOKEN_PATH") or _DEFAULT_SA_TOKEN_PATH,
+        )
+    except ServiceTokenError as exc:
         logger.warning(
-            "community_credentials.mint_no_sa_token community_id=%s error=%s",
-            community_id,
-            type(exc).__name__,
+            "community_credentials.mint_failed community_id=%s error=%s", community_id, exc
         )
         return None
-    if not sa_token:
-        logger.warning("community_credentials.mint_empty_sa_token community_id=%s", community_id)
-        return None
-
-    response = await client.post(
-        _mint_endpoint(base_url),
-        headers={"Authorization": f"Bearer {sa_token}"},
-        json={"scope": _MINT_SCOPE, "community_id": community_id},
+    _jwt_cache[community_id] = (
+        time.monotonic() + max(minted.expires_in - _JWT_SKEW_S, 0.0),
+        minted.token,
     )
-    if response.status_code != 200:
-        logger.warning(
-            "community_credentials.mint_rejected community_id=%s status=%s",
-            community_id,
-            response.status_code,
-        )
-        return None
-    try:
-        body = response.json()
-        token = body["token"]
-        expires_in = float(body["expires_in"])
-    except (ValueError, KeyError, TypeError):
-        logger.warning("community_credentials.mint_malformed community_id=%s", community_id)
-        return None
-    if not isinstance(token, str) or not token or expires_in <= 0:
-        logger.warning("community_credentials.mint_malformed community_id=%s", community_id)
-        return None
-    _jwt_cache[community_id] = (time.monotonic() + max(expires_in - _JWT_SKEW_S, 0.0), token)
-    return token
-
-
-def _read_text(path: str) -> str:
-    """Read a small text file (run via `asyncio.to_thread` so the loop never blocks on disk)."""
-    with open(path, encoding="utf-8") as handle:
-        return handle.read()
+    return minted.token
 
 
 async def fetch_community_tokens(
@@ -284,7 +256,7 @@ async def fetch_community_tokens(
 
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
-            bearer = await _mint_community_jwt(client, community_id, base_url)
+            bearer = await _mint_community_jwt(community_id)
             if bearer is None:
                 return None
             response = await client.get(url, headers={"Authorization": f"Bearer {bearer}"})

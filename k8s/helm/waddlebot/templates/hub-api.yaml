@@ -138,6 +138,7 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         # `flask_core.service_jwt.load_issuer_from_env` also reads
         # SERVICE_JWT_PUBLIC_KEY_<kid> for every still-valid-for-verification
         # rotation key -- these are public keys, safe to render directly
@@ -162,7 +163,8 @@ spec:
           value: {{ .Values.serviceJwt.audience | quote }}
         - name: SERVICE_JWT_BOOTSTRAP_AUDIENCE
           value: {{ .Values.serviceJwt.bootstrapAudience | quote }}
-        # `blueprints/service_jwt_bp.py`'s allow-list -- see
+        {{- include "waddlebot.serviceJwtAcceptLegacyEnv" . | nindent 8 }}
+        # `grpc_internal/service_auth_servicer.py`'s allow-list -- see
         # templates/_service_jwt.tpl::waddlebot.serviceJwtIdentitiesJson.
         - name: SERVICE_JWT_IDENTITIES
           value: {{ include "waddlebot.serviceJwtIdentitiesJson" . | quote }}
@@ -362,6 +364,7 @@ spec:
         resources:
           {{- toYaml .Values.pipeline.hubApi.resources | nindent 10 }}
         volumeMounts:
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         - name: logs
           mountPath: /var/log/waddlebotlog
         - name: tmp
@@ -379,6 +382,7 @@ spec:
           readOnly: true
         {{- end }}
       volumes:
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       - name: logs
         emptyDir: {}
       - name: tmp

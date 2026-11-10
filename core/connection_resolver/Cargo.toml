@@ -22,11 +22,14 @@ serde_json = "=1.0.151"
 tracing = "=0.1.44"
 thiserror = "=2.0.20"
 zeroize = "=1.9.0"
-service_auth = { path = "../service_auth", version = "=0.1.0" }
+service_auth = { path = "../service_auth", version = "=0.1.0", features = ["rest-tls"] }
 
 [dev-dependencies]
 tokio = { version = "=1.53.3", features = ["full", "test-util"] }
 wiremock = "=0.6.5"
+# The mint is gRPC: tests serve it from a real in-process `ServiceAuthService` (`MockHub`).
+service_auth = { path = "../service_auth", version = "=0.1.0", features = ["test-support"] }
+tonic = { version = "=0.14.6", default-features = false }
 
 [profile.release]
 opt-level = 3

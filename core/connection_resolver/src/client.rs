@@ -27,7 +27,9 @@ pub struct ResolverConfig {
     pub hub_api_url: String,
     /// Deployment environment name (`alpha`/`beta`/...), used for the transport policy.
     pub environment: String,
-    /// hub-api machine-token endpoint (`.../internal/service-token`).
+    /// hub-api's internal gRPC endpoint serving the machine-JWT mint
+    /// (`ServiceAuthService.MintServiceToken`), e.g. `https://hub-api:50204`; the CA comes
+    /// from `HUB_API_GRPC_CA_FILE`.
     pub token_endpoint: String,
     /// Path of the projected ServiceAccount token used to bootstrap machine JWTs.
     pub sa_token_path: String,
@@ -187,9 +189,9 @@ fn map_auth_error(e: &service_auth::ServiceAuthError) -> ResolveError {
     use service_auth::ServiceAuthError as E;
     match e {
         E::BootstrapRejected(_) | E::InvalidToken(_) | E::UnknownKeyId(_) => ResolveError::Auth,
-        E::Http(_) => ResolveError::Transient("token endpoint unreachable"),
+        E::Grpc(_) => ResolveError::Transient("token endpoint unreachable"),
+        E::Config(_) => ResolveError::Malformed("token endpoint misconfigured"),
         E::Io(_) => ResolveError::Transient("service account token unreadable"),
-        E::InternalTls(_) => ResolveError::Malformed("invalid internal TLS configuration"),
     }
 }
 
@@ -401,9 +403,106 @@ pub(crate) mod test_support {
     //! Fake-hub helpers shared by this crate's unit and contract tests.
 
     use super::*;
+    use service_auth::test_support::{MintCall, MintReply, MockHub};
     use std::sync::Mutex;
-    use wiremock::matchers::{body_partial_json, header, method, path};
+    use std::sync::OnceLock;
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// One scripted mint: answers a request whose scope/binding match (`None` = any).
+    struct MintEntry {
+        scope: Option<String>,
+        community: Option<i64>,
+        conn: Option<i64>,
+        token: String,
+    }
+
+    /// The mint a test's fake hub-api serves over gRPC (a real `MockHub`), scripted per
+    /// wiremock server the way the old `/internal/service-token` stubs were. Unmatched requests
+    /// are refused like an unknown caller.
+    pub(crate) struct MintBook {
+        entries: Mutex<Vec<MintEntry>>,
+        reject_all: Mutex<bool>,
+        hub: OnceLock<MockHub>,
+    }
+
+    /// A wiremock REST fake of hub-api plus the gRPC mint book that goes with it. Derefs to the
+    /// `MockServer` so REST stubs mount exactly as before; the mint is scripted on `book`.
+    pub(crate) struct Fx {
+        server: MockServer,
+        pub(crate) book: Arc<MintBook>,
+    }
+
+    impl Fx {
+        /// Start the REST fake with an empty mint book.
+        pub(crate) async fn start() -> Self {
+            Self {
+                server: MockServer::start().await,
+                book: Arc::new(MintBook {
+                    entries: Mutex::new(Vec::new()),
+                    reject_all: Mutex::new(false),
+                    hub: OnceLock::new(),
+                }),
+            }
+        }
+    }
+
+    impl std::ops::Deref for Fx {
+        type Target = MockServer;
+        fn deref(&self) -> &MockServer {
+            &self.server
+        }
+    }
+
+    impl MintBook {
+        /// The gRPC endpoint of this book's hub, starting it on first use (inside a tokio runtime).
+        pub(crate) fn endpoint(self: &Arc<Self>) -> String {
+            self.hub
+                .get_or_init(|| {
+                    let book = self.clone();
+                    let answer = move |call: &MintCall| {
+                        if *book.reject_all.lock().unwrap() {
+                            return Err(tonic::Status::unauthenticated("rejected"));
+                        }
+                        let entries = book.entries.lock().unwrap();
+                        let hit = entries.iter().find(|e| {
+                            e.scope.as_deref().is_none_or(|s| s == call.scope)
+                                && e.community.is_none_or(|c| Some(c) == call.community_id)
+                                && e.conn.is_none_or(|c| Some(c) == call.connection_id)
+                        });
+                        match hit {
+                            Some(e) => Ok((e.token.clone(), 3600)),
+                            None => Err(tonic::Status::not_found("no matching mint scripted")),
+                        }
+                    };
+                    MockHub::builder()
+                        .mint(vec![MintReply::With(Arc::new(answer))])
+                        .start_sync()
+                })
+                .endpoint
+                .clone()
+        }
+
+        /// Every mint request the hub received.
+        pub(crate) fn calls(&self) -> Vec<MintCall> {
+            self.hub.get().map(MockHub::mint_calls).unwrap_or_default()
+        }
+    }
+
+    /// Refuse every mint (a hub-api that rejects the bootstrap).
+    pub(crate) fn mount_token_rejected(server: &Fx) {
+        *server.book.reject_all.lock().unwrap() = true;
+    }
+
+    /// Mint `token` for any request with `scope` (any binding).
+    pub(crate) fn mount_scope_token(server: &Fx, scope: Option<&str>, token: &str) {
+        server.book.entries.lock().unwrap().push(MintEntry {
+            scope: scope.map(str::to_owned),
+            community: None,
+            conn: None,
+            token: token.to_owned(),
+        });
+    }
 
     /// Metrics sink recording every call as `kind:outcome` strings.
     #[derive(Default)]
@@ -430,7 +529,7 @@ pub(crate) mod test_support {
     }
 
     /// Resolver config pointed at `server`, with a throwaway SA token file.
-    pub(crate) fn cfg(server: &MockServer) -> ResolverConfig {
+    pub(crate) fn cfg(server: &Fx) -> ResolverConfig {
         let sa = std::env::temp_dir().join(format!(
             "conn-resolver-sa-{}-{}",
             std::process::id(),
@@ -440,7 +539,7 @@ pub(crate) mod test_support {
         let mut c = ResolverConfig::new(
             server.uri(),
             "alpha",
-            format!("{}/internal/service-token", server.uri()),
+            server.book.endpoint(),
             sa.to_string_lossy().to_string(),
         );
         c.request_timeout = Duration::from_millis(500);
@@ -448,31 +547,19 @@ pub(crate) mod test_support {
         c
     }
 
-    /// Mount a token mint answering only for the exact bound request, with `token`.
-    pub(crate) async fn mount_bound_token(
-        server: &MockServer,
-        community: i64,
-        conn: i64,
-        token: &str,
-    ) {
-        Mock::given(method("POST"))
-            .and(path("/internal/service-token"))
-            .and(body_partial_json(serde_json::json!({
-                "scope": SCOPE_CONNECTIONS_RESOLVE,
-                "community_id": community,
-                "connection_id": conn,
-            })))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"token": token, "expires_in": 3600})),
-            )
-            .mount(server)
-            .await;
+    /// Script a mint answering only for the exact bound request, with `token`.
+    pub(crate) async fn mount_bound_token(server: &Fx, community: i64, conn: i64, token: &str) {
+        server.book.entries.lock().unwrap().push(MintEntry {
+            scope: Some(SCOPE_CONNECTIONS_RESOLVE.to_owned()),
+            community: Some(community),
+            conn: Some(conn),
+            token: token.to_owned(),
+        });
     }
 
     /// Mount a resolve answering only when the bearer is `token`.
     pub(crate) async fn mount_resolve(
-        server: &MockServer,
+        server: &Fx,
         community: i64,
         conn: i64,
         token: &str,
@@ -516,14 +603,14 @@ mod tests {
     use super::*;
     use crate::types::ConnectionSecret;
     use std::sync::Mutex;
-    use wiremock::matchers::{body_partial_json, method, path, query_param};
-    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, Request, Respond, ResponseTemplate};
 
     fn ok_oauth() -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_raw(OAUTH_BODY, "application/json")
     }
 
-    async fn resolver(server: &MockServer) -> (ConnectionResolver, Arc<Rec>) {
+    async fn resolver(server: &Fx) -> (ConnectionResolver, Arc<Rec>) {
         let rec = Arc::new(Rec::default());
         let r = ConnectionResolver::new(cfg(server), rec.clone()).unwrap();
         (r, rec)
@@ -545,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_resolves_make_two_hub_calls() {
-        let server = MockServer::start().await;
+        let server = Fx::start().await;
         mount_bound_token(&server, 7, 12, "tok-7-12").await;
         mount_resolve(&server, 7, 12, "tok-7-12", ok_oauth()).await;
         let (r, _) = resolver(&server).await;
@@ -559,16 +646,12 @@ mod tests {
             }
         }
         assert_eq!(hits(&server, "/resolve").await, 2, "no credential cache");
-        assert_eq!(
-            hits(&server, "/service-token").await,
-            1,
-            "only the bearer is cached"
-        );
+        assert_eq!(server.book.calls().len(), 1, "only the bearer is cached");
     }
 
     #[tokio::test]
     async fn resolve_sends_bound_bearer_for_that_community() {
-        let server = MockServer::start().await;
+        let server = Fx::start().await;
         mount_bound_token(&server, 7, 12, "tok-7-12").await;
         mount_bound_token(&server, 8, 13, "tok-8-13").await;
         // Each resolve only answers 200 to its own community's bearer (default is 404).
@@ -657,7 +740,7 @@ mod tests {
             ),
         ];
         for (status, body, want) in table {
-            let server = MockServer::start().await;
+            let server = Fx::start().await;
             mount_bound_token(&server, 7, 12, "t").await;
             mount_resolve(
                 &server,
@@ -678,7 +761,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_and_unreachable_hub_are_transient() {
-        let server = MockServer::start().await;
+        let server = Fx::start().await;
         mount_bound_token(&server, 7, 12, "t").await;
         mount_resolve(
             &server,
@@ -706,12 +789,8 @@ mod tests {
     #[tokio::test]
     async fn token_failures_map_to_auth_or_transient() {
         // Token endpoint rejects the bootstrap -> Auth.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/internal/service-token"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&server)
-            .await;
+        let server = Fx::start().await;
+        mount_token_rejected(&server);
         let (r, _) = resolver(&server).await;
         assert_eq!(r.resolve(R).await.unwrap_err(), ResolveError::Auth);
         assert_eq!(
@@ -721,7 +800,7 @@ mod tests {
 
         // Token endpoint unreachable -> Transient.
         let mut c = cfg(&server);
-        c.token_endpoint = "http://127.0.0.1:1/internal/service-token".to_string();
+        c.token_endpoint = "http://127.0.0.1:1".to_string();
         let r2 = ConnectionResolver::new(c, Arc::new(Rec::default())).unwrap();
         assert_eq!(
             r2.resolve(R).await.unwrap_err(),
@@ -741,7 +820,7 @@ mod tests {
     #[tokio::test]
     async fn auth_and_notfound_are_not_transient() {
         for status in [401u16, 404] {
-            let server = MockServer::start().await;
+            let server = Fx::start().await;
             mount_bound_token(&server, 7, 12, "t").await;
             mount_resolve(&server, 7, 12, "t", ResponseTemplate::new(status)).await;
             let mut c = cfg(&server);
@@ -758,7 +837,7 @@ mod tests {
 
     #[tokio::test]
     async fn breaker_sheds_after_threshold_without_hitting_hub() {
-        let server = MockServer::start().await;
+        let server = Fx::start().await;
         mount_bound_token(&server, 7, 12, "t").await;
         mount_resolve(&server, 7, 12, "t", ResponseTemplate::new(500)).await;
         let mut c = cfg(&server);
@@ -794,7 +873,7 @@ mod tests {
     #[test]
     fn plaintext_http_hub_url_refused_outside_alpha() {
         let mk = |url: &str, env: &str| {
-            let mut c = ResolverConfig::new(url, env, "http://t/internal/service-token", "/sa");
+            let mut c = ResolverConfig::new(url, env, "http://127.0.0.1:1", "/sa");
             c.breaker_threshold = 5;
             ConnectionResolver::new(c, Arc::new(Rec::default()))
         };
@@ -810,18 +889,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_bindings_uses_unbound_list_scope_and_paginates() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/internal/service-token"))
-            .and(body_partial_json(
-                serde_json::json!({"scope": SCOPE_CONNECTIONS_LIST}),
-            ))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"token": "list-tok", "expires_in": 3600})),
-            )
-            .mount(&server)
-            .await;
+        let server = Fx::start().await;
+        mount_scope_token(&server, Some(SCOPE_CONNECTIONS_LIST), "list-tok");
         let page = |after: &'static str, items: &str, next: &str| {
             let body = format!(r#"{{"success":true,"items":[{items}],"nextAfter":{next}}}"#);
             Mock::given(method("GET"))
@@ -860,18 +929,13 @@ mod tests {
             .unwrap();
         assert_eq!(p2.next_after, None);
         // The list token request carried no binding fields (unbound scope).
-        let mints: Vec<_> = server
-            .received_requests()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|q| q.url.path().ends_with("/service-token"))
-            .collect();
+        let mints = server.book.calls();
         assert_eq!(mints.len(), 1);
-        let body = String::from_utf8_lossy(&mints[0].body).to_string();
+        assert_eq!(mints[0].scope, SCOPE_CONNECTIONS_LIST);
         assert!(
-            !body.contains("community_id") && !body.contains("connection_id"),
-            "{body}"
+            mints[0].community_id.is_none() && mints[0].connection_id.is_none(),
+            "{:?}",
+            mints[0]
         );
         assert_eq!(
             rec.calls
@@ -886,15 +950,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_bindings_maps_errors_without_capability() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/internal/service-token"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"token":"t","expires_in":3600})),
-            )
-            .mount(&server)
-            .await;
+        let server = Fx::start().await;
+        mount_scope_token(&server, None, "t");
         Mock::given(method("GET"))
             .and(path("/api/v1/internal/provider-connections"))
             .respond_with(ResponseTemplate::new(200).set_body_raw("{", "application/json"))
@@ -918,7 +975,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_error_never_contains_response_body() {
-        let server = MockServer::start().await;
+        let server = Fx::start().await;
         mount_bound_token(&server, 7, 12, "t").await;
         for status in [500u16, 400, 409] {
             server.reset().await;
@@ -946,7 +1003,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_emitted_once_per_resolve_without_secret_labels() {
-        let server = MockServer::start().await;
+        let server = Fx::start().await;
         mount_bound_token(&server, 7, 12, "t").await;
         mount_resolve(&server, 7, 12, "t", ok_oauth()).await;
         mount_bound_token(&server, 7, 13, "t2").await;
@@ -980,7 +1037,7 @@ mod tests {
                 t.list_bindings("p", None, 0, 1).await.is_err(),
             )
         }
-        let server = MockServer::start().await;
+        let server = Fx::start().await;
         mount_bound_token(&server, 7, 12, "t").await;
         mount_resolve(&server, 7, 12, "t", ok_oauth()).await;
         let (r, _) = resolver(&server).await;
@@ -998,7 +1055,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_resolve_hits_hub_even_concurrently() {
-        let server = MockServer::start().await;
+        let server = Fx::start().await;
         mount_bound_token(&server, 7, 12, "t").await;
         Mock::given(method("POST"))
             .and(path(

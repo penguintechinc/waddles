@@ -71,7 +71,6 @@ from penguin_dal import AsyncDB
 from config import HubAPIConfig
 from services import app_command_backfill, connector_publish_service, vendor_bundle_authz
 from services.app_source_binding_service import TENANT_WIDE_COMMUNITY_SENTINEL
-from services.bundle_access_grants import is_access_grant_id
 from services.bundle_approval_service import (
     activate_for_community,
     activate_tenant_wide,
@@ -82,8 +81,9 @@ from services.bundle_approval_service import (
 from services.bundle_install_dal import build_install_dal, raw_sql_rows, raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, parse_bundle_manifest_v2
 from services.bundle_permission_service import (
-    get_community_granted_ids,
+    ECONOMY_ELEVATED_IDS,
     grant_community_permissions,
+    never_auto_granted,
     seed_core_permission_requests,
 )
 from services.bundle_telemetry import get_meter
@@ -840,7 +840,13 @@ async def seed_platform_connection(
     return ConnectionResult(platform=connection.platform, source_id=ingest_id, outcome=outcome)
 
 
-_AGREEMENT_KEYS = ("kind", "exported_tools", "requested_tools")
+_AGREEMENT_KEYS = (
+    "kind",
+    "exported_tools",
+    "requested_tools",
+    "community_config_schema",
+    "admin_tools",
+)
 
 
 def _assert_manifest_files_agree(
@@ -1220,21 +1226,34 @@ async def _grant_core_bundle_permissions(
     """
     # `platform.table.*` is never auto-granted (spec 2026-11-06 Sec3): a human
     # global admin must approve it, so the seeder neither approves nor grants it.
+    # Likewise the elevated economy ids (`economy.transfer_from` / `economy.app_mint`):
+    # a human admin must approve each app (recorded approver + admin-set cap params);
+    # only the economy service's own `economy.transfer_from` is auto-granted.
     required = frozenset(
-        d.id for d in manifest.permission_declarations if not is_access_grant_id(d.id)
+        d.id for d in manifest.permission_declarations if not never_auto_granted(app_id, d.id)
     )
     if not required:
         return
     try:
         if community_id == TENANT_WIDE_COMMUNITY_SENTINEL:
             await _ensure_sentinel_community(install_dal, tenant_id=tenant_id)
-        held_table_access = frozenset(
-            pid
-            for pid in await get_community_granted_ids(
-                install_dal, community_id=community_id, app_id=app_id
-            )
-            if is_access_grant_id(pid)
-        )
+        grants_t = install_dal.community_permission_grants
+        held_rows = [
+            r
+            for r in await install_dal(
+                (grants_t.community_id == community_id)
+                & (grants_t.app_id == app_id)
+                & (grants_t.revoked_at == None)  # noqa: E711
+            ).select()
+            if never_auto_granted(app_id, r.permission_id)
+        ]
+        held_human = frozenset(r.permission_id for r in held_rows)
+        # An elevated grant a human admin made carries admin-set cap params: re-assert
+        # them (a DELETE-then-INSERT with `{}` would silently reset the caps to defaults).
+        params_by_id = _declared_bound_params(manifest)
+        for r in held_rows:
+            if r.permission_id in ECONOMY_ELEVATED_IDS and r.params_json:
+                params_by_id[r.permission_id] = dict(r.params_json)
         await grant_community_permissions(
             install_dal,
             tenant_id=tenant_id,
@@ -1242,13 +1261,33 @@ async def _grant_core_bundle_permissions(
             app_id=app_id,
             version=version,
             manifest=manifest,
-            # Re-assert (never create) table-access grants a human admin already
-            # made, so this idempotent DELETE-then-INSERT cannot wipe them.
-            granted_permission_ids=required | held_table_access,
-            params_by_id=_declared_bound_params(manifest) or None,
+            # Re-assert (never create) table-access / elevated grants a human admin
+            # already made, so this idempotent DELETE-then-INSERT cannot wipe them.
+            granted_permission_ids=required | held_human,
+            params_by_id=params_by_id or None,
             granted_by=None,
             valkey_client=valkey_client,
         )
+        # ...and give the re-asserted elevated rows back their approving admin + time:
+        # the audit trail must name the human who approved, never the SYSTEM actor.
+        restore = [
+            r
+            for r in held_rows
+            if r.permission_id in ECONOMY_ELEVATED_IDS and r.granted_by is not None
+        ]
+        if restore:
+            grants_table = install_dal.metadata.tables["community_permission_grants"]
+            async with install_dal.engine.begin() as conn:
+                for r in restore:
+                    await conn.execute(
+                        grants_table.update()
+                        .where(
+                            (grants_table.c.community_id == community_id)
+                            & (grants_table.c.app_id == app_id)
+                            & (grants_table.c.permission_id == r.permission_id)
+                        )
+                        .values(granted_by=r.granted_by, granted_at=r.granted_at)
+                    )
     except ApiError:
         logger.exception(
             "core bundle permission auto-grant failed -- every non-platform host call for "

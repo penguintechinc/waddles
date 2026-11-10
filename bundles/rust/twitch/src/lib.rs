@@ -2,9 +2,12 @@
 //! world. Pure, host-testable logic lives in the modules below; the wasm
 //! component glue at the bottom only maps it onto the generated WIT types.
 //! The connector holds no secret, no raw target and no transport code.
+pub mod channel_ops;
 pub mod common;
 pub mod eventsub;
+pub mod eventsub_sub;
 pub mod irc;
+pub mod moderation;
 pub mod sender;
 pub mod tools;
 
