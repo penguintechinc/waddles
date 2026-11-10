@@ -246,10 +246,42 @@ def test_dataplane_resolve_scope_is_not_rendered_when_dynamic_connections_is_off
 _PLATFORM_USER_SCOPE = "identity:platform-user:resolve"
 
 
-def test_platform_user_scope_is_granted_to_svc_ingest_alone(docs: list[dict[str, Any]]) -> None:
+def test_platform_user_scope_is_granted_to_svc_ingest_alone(
+    docs: list[dict[str, Any]],
+) -> None:
     identities = _identities(docs)
     assert _PLATFORM_USER_SCOPE in identities["svc-ingest"]["allowed_scopes"]
-    assert len(identities) >= 3, identities.keys()  # denominator: the others were examined
+    assert len(identities) >= 3, (
+        identities.keys()
+    )  # denominator: the others were examined
     for name, entry in identities.items():
         if name != "svc-ingest":
             assert _PLATFORM_USER_SCOPE not in entry["allowed_scopes"], name
+
+
+def test_dynamic_connections_alone_wires_the_hub_api_grpc_endpoint_and_ca(
+    docs: list[dict[str, Any]],
+) -> None:
+    """The scope resolver dials hub-api gRPC (TLS, CA-pinned) -- no connector-tools needed.
+
+    Regression: the endpoint/CA env and CA mount used to render only under connectorTools, so a
+    deployment with dynamicConnections on and connectorTools off had no gRPC endpoint and the
+    resolver (now gRPC-only) could not start.
+    """
+    deployment = _svc_ingest_deployment(docs)
+    spec = deployment["spec"]["template"]["spec"]
+    container = spec["containers"][0]
+    env = {e["name"]: e for e in container["env"]}
+    assert env["HUB_API_GRPC_ENDPOINT"]["value"].startswith("https://")
+    assert env["HUB_API_GRPC_CA_FILE"]["value"].endswith("/ca.crt")
+    assert any(m["name"] == "hub-api-grpc-ca" for m in container["volumeMounts"])
+    assert any(v["name"] == "hub-api-grpc-ca" for v in spec["volumes"])
+
+
+def test_disabled_dynamic_connections_renders_no_hub_api_grpc_env(
+    disabled_docs: list[dict[str, Any]],
+) -> None:
+    deployment = _svc_ingest_deployment(disabled_docs)
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    names = {e["name"] for e in container["env"]}
+    assert "HUB_API_GRPC_ENDPOINT" not in names

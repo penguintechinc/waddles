@@ -23,6 +23,7 @@ pub mod profiles;
 pub mod ready;
 pub mod scoped;
 pub mod selector;
+pub mod self_echo;
 pub mod supervisor;
 pub mod tenant;
 #[cfg(test)]

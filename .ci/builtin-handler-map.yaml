@@ -57,12 +57,14 @@ handlers:
     tracking: "#840"
   - handler: core/svc_ingest/builtin_handlers/kick_ingest.py
     status: pending
-    gap: "no Rust Kick Pusher receiver/normalizer/webhook intake or connector bundle; corpus slot corpus/kick"
+    gap: "Pusher chat is covered (bundles/rust/kick pusher.rs + profiles/kick.rs, parity in bundles/rust/kick/tests/parity.rs vs corpus/kick); the signed-webhook intake (kick_webhook.rs verifier is built + tested) is not yet registered as a webhook Scheme/route in webhook_verify.rs, so webhook events (follow/sub/stream lifecycle) are not live; remove this entry once that seam lands"
     tracking: "#840"
   - handler: core/svc_ingest/builtin_handlers/kick_gateway_manifest.py
-    status: pending
-    gap: "no Rust Kick receiver registration (see kick_ingest)"
-    tracking: "#840"
+    status: covered
+    parity: unverified
+    targets:
+      - {kind: rust-path, path: core/svc_ingest/src/connector_runtime/profiles/kick.rs, contains: "pub struct KickProfile"}
+      - {kind: rust-path, path: core/svc_ingest/src/connector_runtime/boot.rs, contains: "KickProfile::from_feed"}
   - handler: core/svc_ingest/builtin_handlers/youtube_live_ingest.py
     status: pending
     gap: "no Rust YouTube Live poll receiver/normalizer or connector bundle; corpus slot corpus/youtube"
@@ -171,7 +173,7 @@ handlers:
     tracking: "#840"
   - handler: core/svc_action/builtin_handlers/kick_send_action.py
     status: pending
-    gap: "svc_action Kick sender is SenderStatus::PendingSeam (senders.rs)"
+    gap: "svc_action Kick sender is SenderStatus::PendingSeam (senders.rs); the bundle side (bundles/rust/kick sender.rs chat.send/chat.delete + policy/kick.rs) is built and e2e-tested, but needs the KickSlots slot source + queue drain + senders.rs arm (host seams)"
     tracking: "#840"
   - handler: core/svc_action/builtin_handlers/youtube_send_action.py
     status: pending

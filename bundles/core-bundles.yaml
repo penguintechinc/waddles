@@ -1504,7 +1504,7 @@ bundles:
   # bundle-MCP-tools P6b: twitch platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-twitch defaults OFF.
   - app_id: waddles.core.service.twitch
-    version: "1.1.0"
+    version: "1.3.0"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1539,6 +1539,21 @@ bundles:
     source_dir: rust/youtube
     manifest_path: youtube.manifest.yaml
     artifact_path: youtube.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+
+  # Kick platform service bundle (`kind: service`, `connector-tools` world): Pusher chat + signed
+  # webhook normalization, chat send/delete templates, `kick.live.channels`. Cutover flag
+  # waddles.connector-kick defaults OFF.
+  - app_id: waddles.core.service.kick
+    version: "1.0.0"
+    language: rust
+    wit_world: connector-tools
+    kind: service
+    source_dir: rust/kick
+    manifest_path: kick.manifest.yaml
+    artifact_path: kick.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null

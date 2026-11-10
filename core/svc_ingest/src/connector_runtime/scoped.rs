@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use penguin_spine::{KeyRing, SpineMetrics};
 
-use super::feed::DesiredConnection;
+use super::feed::{ConnKey, DesiredConnection};
+use super::self_echo::SelfEchoRegistry;
 use super::supervisor::{SinkBuildError, SinkFactory};
 use super::tenant::{source_key_of, tenant_from_scope, TenantError, TenantResolve};
 use crate::connector::webhook::BoxFut;
@@ -71,14 +72,17 @@ pub const COMMUNITY_PLATFORM: &str = "community";
 /// What to ask the scope authority for `desired`: the upstream resource for
 /// twitch/discord, else (youtube/spectrum, whose sources have no `community_servers`
 /// link) the connection's own numeric community from the server-derived feed.
-/// Never read from binding metadata. `None` for a webhook plan or an unknown platform.
+/// Never read from binding metadata. The community-scoped platforms resolve for ANY plan kind
+/// (including a webhook lane, which has no source key); `None` for a twitch/discord webhook
+/// plan or an unknown platform.
 #[must_use]
 pub fn lookup_target(desired: &DesiredConnection) -> Option<(&'static str, String)> {
     let platform = desired.key.platform;
-    let key = source_key_of(desired)?;
     match platform {
-        "twitch" | "discord" => scope_source(platform, key).map(|s| (platform, s)),
-        "youtube" | "spectrum" | "wix" => {
+        "twitch" | "discord" => {
+            scope_source(platform, source_key_of(desired)?).map(|s| (platform, s))
+        }
+        "youtube" | "spectrum" | "wix" | "kick" => {
             Some((COMMUNITY_PLATFORM, desired.key.community_id.to_string()))
         }
         _ => None,
@@ -134,6 +138,7 @@ pub struct ScopedSinkFactory<A: EventAppender, D: DekProvider> {
     dek_provider: Arc<D>,
     identity_metrics: prometheus::IntCounterVec,
     lookup: Arc<dyn ScopeLookup>,
+    self_echo: Option<SelfEchoRegistry>,
 }
 
 impl<A: EventAppender, D: DekProvider> ScopedSinkFactory<A, D> {
@@ -157,7 +162,16 @@ impl<A: EventAppender, D: DekProvider> ScopedSinkFactory<A, D> {
             dek_provider,
             identity_metrics,
             lookup,
+            self_echo: None,
         }
+    }
+
+    /// Drops each connection's own bot messages before publish, per the registry the binding
+    /// feed keeps current (see [`super::self_echo`]).
+    #[must_use]
+    pub fn with_self_echo(mut self, registry: SelfEchoRegistry) -> Self {
+        self.self_echo = Some(registry);
+        self
     }
 }
 
@@ -193,6 +207,10 @@ impl<A: EventAppender + 'static, D: DekProvider + 'static> SinkFactory<Connectio
                 active_kid: self.active_kid.clone(),
                 dek_provider: Arc::clone(&self.dek_provider),
                 identity_metrics: self.identity_metrics.clone(),
+                self_echo: self
+                    .self_echo
+                    .clone()
+                    .map(|registry| (registry, desired.key.clone())),
             })
         })
     }
@@ -208,10 +226,17 @@ pub struct ConnectionSink<A: EventAppender, D: DekProvider> {
     active_kid: String,
     dek_provider: Arc<D>,
     identity_metrics: prometheus::IntCounterVec,
+    self_echo: Option<(SelfEchoRegistry, ConnKey)>,
 }
 
 impl<A: EventAppender, D: DekProvider> EventSink for ConnectionSink<A, D> {
     async fn publish(&self, ctx: &ConnectionCtx, event: ConnectorEvent) -> Result<(), SinkError> {
+        // The bot's own echoed chat never re-enters the pipeline (not an error: nothing to retry).
+        if let Some((registry, key)) = &self.self_echo {
+            if registry.is_self_echo(key, &event) {
+                return Ok(());
+            }
+        }
         let platform_event = to_platform_event(ctx, event)?;
         let workstream_id = deterministic_workstream_id(&ctx.source_id);
         publish_event_scoped(

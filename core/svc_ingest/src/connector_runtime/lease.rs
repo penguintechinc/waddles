@@ -10,20 +10,26 @@
 
 use std::time::Duration;
 
-use super::feed::ConnKey;
+use super::feed::{ConnKey, Lane};
 use crate::twitch_sessions::lease::{LeaseError, SessionLease, RESPONSE_TIMEOUT};
 
 /// Key prefix for connector leases.
 const KEY_PREFIX: &str = "waddles:ingest:connector:";
 
 /// `(slug, namespace)` for every platform the runtime may supervise.
-const PLATFORMS: [(&str, i64); 5] = [
+const PLATFORMS: [(&str, i64); 6] = [
     ("twitch", 1),
     ("discord", 2),
     ("youtube", 3),
     ("wix", 4),
     ("spectrum", 5),
+    ("kick", 6),
 ];
+
+/// Added to a platform namespace for a binding's [`Lane::Webhook`] transport, so the webhook
+/// receiver of a connection holds its OWN lease (`<platform>-webhook:<id>`), never contending
+/// with the same connection's primary transport.
+const WEBHOOK_LANE_OFFSET: i64 = 100;
 
 const RENEW_LUA: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then \
 return redis.call('PEXPIRE', KEYS[1], ARGV[2]) else return 0 end";
@@ -43,16 +49,25 @@ pub fn platform_ns(platform: &str) -> Option<i64> {
 /// The `SessionLease` tuple for a connection, or `None` for an unsupported platform.
 #[must_use]
 pub fn lease_tuple(key: &ConnKey) -> Option<(i64, i64)> {
-    platform_ns(key.platform).map(|ns| (ns, key.connection_id))
+    let lane_offset = match key.lane {
+        Lane::Primary => 0,
+        Lane::Webhook => WEBHOOK_LANE_OFFSET,
+    };
+    platform_ns(key.platform).map(|ns| (ns + lane_offset, key.connection_id))
 }
 
 /// The Valkey key for a lease tuple built by [`lease_tuple`].
 fn valkey_key(t: (i64, i64)) -> Result<String, LeaseError> {
+    let (base, suffix) = if t.0 > WEBHOOK_LANE_OFFSET {
+        (t.0 - WEBHOOK_LANE_OFFSET, "-webhook")
+    } else {
+        (t.0, "")
+    };
     let (slug, _) = PLATFORMS
         .iter()
-        .find(|(_, ns)| *ns == t.0)
+        .find(|(_, ns)| *ns == base)
         .ok_or_else(|| LeaseError("unknown connector platform namespace".to_owned()))?;
-    Ok(format!("{KEY_PREFIX}{slug}:{}", t.1))
+    Ok(format!("{KEY_PREFIX}{slug}{suffix}:{}", t.1))
 }
 
 fn ttl_ms(ttl: Duration) -> Result<u64, LeaseError> {
@@ -158,6 +173,7 @@ mod tests {
             platform: "discord",
             community_id: 7,
             connection_id: 42,
+            lane: Default::default(),
         };
         let t = lease_tuple(&k).expect("known platform");
         assert_eq!(
@@ -169,15 +185,38 @@ mod tests {
     }
 
     #[test]
+    fn kick_has_a_lease_and_its_webhook_lane_has_a_distinct_one() {
+        let primary = ConnKey {
+            platform: "kick",
+            community_id: 7,
+            connection_id: 42,
+            lane: Lane::Primary,
+        };
+        let hook = ConnKey {
+            lane: Lane::Webhook,
+            ..primary.clone()
+        };
+        let (p, h) = (lease_tuple(&primary).unwrap(), lease_tuple(&hook).unwrap());
+        assert_ne!(p, h);
+        assert_eq!(valkey_key(p).unwrap(), format!("{KEY_PREFIX}kick:42"));
+        assert_eq!(
+            valkey_key(h).unwrap(),
+            format!("{KEY_PREFIX}kick-webhook:42")
+        );
+    }
+
+    #[test]
     fn unknown_platform_has_no_lease_tuple_and_unknown_ns_is_an_error() {
         let k = ConnKey {
             platform: "slack",
             community_id: 1,
             connection_id: 2,
+            lane: Default::default(),
         };
         assert!(lease_tuple(&k).is_none());
         assert!(platform_ns("twitch").is_some());
         assert!(valkey_key((99, 1)).is_err());
+        assert!(valkey_key((199, 1)).is_err());
     }
 
     #[test]
