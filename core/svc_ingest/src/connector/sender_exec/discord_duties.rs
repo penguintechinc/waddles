@@ -44,7 +44,7 @@ use crate::discord_rest::{classify_membership, is_snowflake, Membership};
 use crate::interaction_store::{InteractionRecord, InteractionStore, StoreError};
 use crate::outbound_creds::CredError;
 use crate::outbound_creds_discord::{is_role_key, DiscordBinding, DiscordCredentialSource};
-use crate::outbound_ops::{EventKind, OutboundAction, RoleBulkKind};
+use crate::outbound_ops::{EventKind, OutboundAction, PolicyOp, RoleBulkKind};
 
 use super::twitch_slots::map_cred;
 
@@ -82,7 +82,8 @@ static DUTY_REFUSED: LazyLock<prometheus::IntCounterVec> = LazyLock::new(|| {
 /// # Errors
 /// Propagates a duplicate-registration error from `prometheus`.
 pub fn register_metrics(registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
-    registry.register(Box::new(DUTY_REFUSED.clone()))
+    registry.register(Box::new(DUTY_REFUSED.clone()))?;
+    registry.register(Box::new(MOD_ACTIONS.clone()))
 }
 
 /// Count of one refusal (test/observability helper).
@@ -155,6 +156,10 @@ fn deny(kind: &str, e: ExecError) -> ExecError {
         "event.update" => "event.update",
         "event.cancel" => "event.cancel",
         "event.delete" => "event.delete",
+        "mod.kick" => "mod.kick",
+        "mod.ban" => "mod.ban",
+        "mod.unban" => "mod.unban",
+        "mod.timeout" => "mod.timeout",
         "interaction.callback" => "interaction.callback",
         "interaction.followup" => "interaction.followup",
         "commands.register.guild" => "commands.register.guild",
@@ -184,7 +189,13 @@ fn user_uuid(action: &OutboundAction) -> Result<String, ExecError> {
         OutboundAction::RoleBulk {
             user_id: Some(user_id),
             ..
-        } => user_id,
+        }
+        | OutboundAction::PolicyOp(PolicyOp {
+            user_id: Some(user_id),
+            ..
+        }) => user_id,
+        // A moderation op without a target user is a producer bug, never a guess.
+        OutboundAction::PolicyOp(_) => return Err(refused("user_not_tokenized")),
         _ => return Err(ExecError::BadAction),
     };
     let inner = raw
@@ -377,7 +388,8 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
         let tenant = match action {
             OutboundAction::DmSend { tenant_id, .. }
             | OutboundAction::RoleOp { tenant_id, .. }
-            | OutboundAction::RoleBulk { tenant_id, .. } => tenant_id.filter(|t| *t > 0),
+            | OutboundAction::RoleBulk { tenant_id, .. }
+            | OutboundAction::PolicyOp(PolicyOp { tenant_id, .. }) => tenant_id.filter(|t| *t > 0),
             _ => None,
         }
         .ok_or_else(|| refused("no_tenant_scope"))?;
@@ -445,6 +457,7 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
         let guild_scope = match cx.action {
             OutboundAction::RoleOp { origin_channel, .. }
             | OutboundAction::RoleBulk { origin_channel, .. } => role_guild_scope(origin_channel),
+            OutboundAction::PolicyOp(p) => p.origin_channel.as_deref().and_then(role_guild_scope),
             _ => None,
         };
         match (cx.pinned_channel, guild_scope) {
@@ -706,6 +719,144 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
         );
     }
 
+    /// Moderation gate (`mod.kick|ban|unban|timeout`): the community has a binding, the stamp
+    /// carries its tenant, the origin proves the community (channel in the binding guild, or an
+    /// asserted `guild:` equal to it), the target is one of the community's tokenized identities,
+    /// and -- from live guild facts -- the bot outranks the target in the role hierarchy, the
+    /// target is neither the owner nor the bot, and the bot holds the needed permission. Every
+    /// failure is an explicit fixed reason code; nothing is sent. On success one PII-free audit
+    /// event (op, community, tenant, target UUID) is emitted.
+    async fn mod_gate(&self, cx: &DutyCx<'_>, p: &PolicyOp) -> Result<(), ExecError> {
+        let (community, binding) = self.binding(cx).await?;
+        if p.tenant_id.filter(|t| *t > 0).is_none() {
+            return Err(refused("no_tenant_scope"));
+        }
+        let rest = Rest {
+            client: cx.client,
+            base: &self.api_base,
+            token: binding.bot_token.expose(),
+        };
+        self.check_role_origin(&rest, &binding, cx).await?;
+        // Validate the arguments (and the timeout bound) before any platform read.
+        mod_payload(p, chrono::Utc::now())?;
+        let target = self.raw_user(community, cx.action).await?;
+        if p.op != "mod.unban" {
+            let facts = self
+                .guild_facts(&rest, &binding.guild_id, target.expose())
+                .await?;
+            check_hierarchy(p.op, &facts).map_err(refused)?;
+        }
+        let uuid = user_uuid(cx.action)?;
+        MOD_ACTIONS
+            .with_label_values(&[mod_label(p.op), "authorized"])
+            .inc();
+        tracing::info!(
+            target: "audit",
+            audit = true,
+            event = "discord.moderation",
+            op = p.op,
+            community_id = community,
+            tenant_id = p.tenant_id.unwrap_or_default(),
+            target_user = %uuid,
+            outcome = "authorized",
+            "discord moderation authorized by host gate"
+        );
+        Ok(())
+    }
+
+    /// Live guild facts for the hierarchy check: owner, the bot's id/roles, every role's
+    /// position + permissions and (when a member) the target's roles. Never cached.
+    async fn guild_facts(
+        &self,
+        rest: &Rest<'_>,
+        guild: &str,
+        target: &str,
+    ) -> Result<GuildFacts, ExecError> {
+        let lookup = || ExecError::Slot(SlotError::Unavailable("moderation_lookup_failed"));
+        let get = |path: String| async move {
+            let resp = rest
+                .call(reqwest::Method::GET, &path, None)
+                .await
+                .map_err(ExecError::Slot)?;
+            Ok::<_, ExecError>(resp)
+        };
+        let json_of = |resp: &bundle_host_http::guarded::GuardedResponse| {
+            serde_json::from_slice::<serde_json::Value>(&resp.body).map_err(|_| lookup())
+        };
+        let g = get(format!("/guilds/{guild}")).await?;
+        if !(200..300).contains(&g.status) {
+            return Err(lookup());
+        }
+        let owner_id = json_of(&g)?
+            .get("owner_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| is_snowflake(s))
+            .ok_or_else(lookup)?
+            .to_string();
+        let me = get("/users/@me".to_string()).await?;
+        if !(200..300).contains(&me.status) {
+            return Err(lookup());
+        }
+        let bot_id = json_of(&me)?
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| is_snowflake(s))
+            .ok_or_else(lookup)?
+            .to_string();
+        let rl = get(format!("/guilds/{guild}/roles")).await?;
+        if !(200..300).contains(&rl.status) {
+            return Err(lookup());
+        }
+        let mut roles = HashMap::new();
+        for r in json_of(&rl)?.as_array().ok_or_else(lookup)? {
+            let id = r.get("id").and_then(serde_json::Value::as_str);
+            let pos = r.get("position").and_then(serde_json::Value::as_i64);
+            let perms = match r.get("permissions") {
+                Some(serde_json::Value::String(s)) => s.parse::<u64>().ok(),
+                Some(serde_json::Value::Number(n)) => n.as_u64(),
+                _ => None,
+            };
+            match (id, pos, perms) {
+                (Some(id), Some(pos), Some(perms)) if is_snowflake(id) => {
+                    roles.insert(id.to_string(), (pos, perms));
+                }
+                _ => return Err(lookup()),
+            }
+        }
+        let member_roles = |resp: &bundle_host_http::guarded::GuardedResponse| {
+            let v = json_of(resp)?;
+            let arr = v
+                .get("roles")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(lookup)?;
+            Ok::<_, ExecError>(
+                arr.iter()
+                    .filter_map(|r| r.as_str().map(str::to_string))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let bm = get(format!("/guilds/{guild}/members/{bot_id}")).await?;
+        if !(200..300).contains(&bm.status) {
+            return Err(lookup());
+        }
+        let bot_roles = member_roles(&bm)?;
+        let tm = get(format!("/guilds/{guild}/members/{target}")).await?;
+        let target_roles = match classify_membership(tm.status, &tm.body) {
+            Membership::Member => Some(member_roles(&tm)?),
+            Membership::NotMember => None,
+            Membership::Unknown => return Err(lookup()),
+        };
+        Ok(GuildFacts {
+            guild_id: guild.to_string(),
+            owner_id,
+            bot_id,
+            target_id: target.to_string(),
+            roles,
+            bot_roles,
+            target_roles,
+        })
+    }
+
     /// Opens the DM channel for the recipient; returns the `id` of Discord's
     /// reply, which is the ONLY source of `{dm.channel_id}`.
     async fn open_dm(
@@ -737,6 +888,173 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DiscordDuties<C, U> {
     }
 }
 
+/// The moderation kinds this hook owns.
+const MOD_KINDS: &[&str] = &["mod.kick", "mod.ban", "mod.unban", "mod.timeout"];
+/// `KICK_MEMBERS`.
+const PERM_KICK_MEMBERS: u64 = 1 << 1;
+/// `BAN_MEMBERS`.
+const PERM_BAN_MEMBERS: u64 = 1 << 2;
+/// `MODERATE_MEMBERS` (timeouts).
+const PERM_MODERATE_MEMBERS: u64 = 1 << 40;
+/// Discord's cap on a timeout, enforced here against the host clock.
+pub const MAX_TIMEOUT_SECONDS: u64 = 28 * 24 * 60 * 60;
+/// Discord's cap on `delete_message_seconds`.
+pub const MAX_DELETE_MESSAGE_SECONDS: u64 = 604_800;
+
+static MOD_ACTIONS: LazyLock<prometheus::IntCounterVec> = LazyLock::new(|| {
+    // The definition is a compile-time constant; construction cannot fail.
+    #[allow(clippy::expect_used)]
+    prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_discord_moderation_total",
+            "Discord moderation actions that passed the host gate, by op and outcome",
+        ),
+        &["op", "outcome"],
+    )
+    .expect("valid metric definition")
+});
+
+/// Count of authorized moderation actions for `op` (test/observability helper).
+#[must_use]
+pub fn moderation_count(op: &str, outcome: &str) -> u64 {
+    MOD_ACTIONS
+        .with_label_values(&[mod_label(op), outcome])
+        .get()
+}
+
+/// Fixed metric label for a moderation op.
+fn mod_label(op: &str) -> &'static str {
+    MOD_KINDS
+        .iter()
+        .copied()
+        .find(|k| *k == op)
+        .unwrap_or("other")
+}
+
+/// Live guild state the hierarchy check decides from.
+#[derive(Debug)]
+pub(crate) struct GuildFacts {
+    pub(crate) guild_id: String,
+    pub(crate) owner_id: String,
+    pub(crate) bot_id: String,
+    pub(crate) target_id: String,
+    /// role id -> (position, permissions); includes `@everyone` (id == guild id).
+    pub(crate) roles: HashMap<String, (i64, u64)>,
+    pub(crate) bot_roles: Vec<String>,
+    /// `None` = the target is not a guild member.
+    pub(crate) target_roles: Option<Vec<String>>,
+}
+
+impl GuildFacts {
+    /// `(highest position, OR of permissions)` over `member_roles` + `@everyone`; `None` when a
+    /// held role is missing from the guild's role list (fail closed).
+    fn standing(&self, member_roles: &[String]) -> Option<(i64, u64)> {
+        let mut pos = 0;
+        let mut perms = 0;
+        let everyone = self.roles.get(&self.guild_id).copied().unwrap_or((0, 0));
+        pos = pos.max(everyone.0);
+        perms |= everyone.1;
+        for r in member_roles {
+            let (p, bits) = self.roles.get(r).copied()?;
+            pos = pos.max(p);
+            perms |= bits;
+        }
+        Some((pos, perms))
+    }
+}
+
+/// The role-hierarchy decision: `Err(reason)` is a fixed refusal code.
+pub(crate) fn check_hierarchy(op: &str, f: &GuildFacts) -> Result<(), &'static str> {
+    if f.target_id == f.bot_id {
+        return Err("target_is_self");
+    }
+    if f.target_id == f.owner_id {
+        return Err("target_is_owner");
+    }
+    let (bot_pos, bot_perms) = f.standing(&f.bot_roles).ok_or("role_lookup_failed")?;
+    let needed = match op {
+        "mod.kick" => PERM_KICK_MEMBERS,
+        "mod.ban" => PERM_BAN_MEMBERS,
+        "mod.timeout" => PERM_MODERATE_MEMBERS,
+        _ => return Err("not_a_moderation_op"),
+    };
+    if bot_perms & (PERM_ADMINISTRATOR | needed) == 0 {
+        return Err("bot_lacks_permission");
+    }
+    let Some(target_roles) = &f.target_roles else {
+        // A ban of a non-member is allowed (pre-emptive ban); kick/timeout need a member.
+        return if op == "mod.ban" {
+            Ok(())
+        } else {
+            Err("not_in_community")
+        };
+    };
+    let (target_pos, target_perms) = f.standing(target_roles).ok_or("role_lookup_failed")?;
+    if op == "mod.timeout" && target_perms & PERM_ADMINISTRATOR != 0 {
+        return Err("target_is_admin");
+    }
+    // The guild owner outranks every role; otherwise the bot's highest role must be strictly
+    // above the target's.
+    if f.bot_id != f.owner_id && bot_pos <= target_pos {
+        return Err("role_hierarchy");
+    }
+    Ok(())
+}
+
+/// The connector payload for a moderation op: the tokenized target plus ONLY the validated
+/// arguments from the producer's `text` JSON. A timeout's `duration_seconds` becomes the
+/// absolute `until` against the host clock `now` (capped at 28 days); `clear` lifts it.
+pub(crate) fn mod_payload(
+    p: &PolicyOp,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<String, ExecError> {
+    let bad = || ExecError::BadAction;
+    let args: serde_json::Map<String, serde_json::Value> = match p.text.as_deref() {
+        None => serde_json::Map::new(),
+        Some(t) => match serde_json::from_str(t) {
+            Ok(serde_json::Value::Object(m)) => m,
+            _ => return Err(bad()),
+        },
+    };
+    let allowed: &[&str] = match p.op {
+        "mod.kick" | "mod.unban" => &[],
+        "mod.ban" => &["delete_message_seconds"],
+        "mod.timeout" => &["duration_seconds", "clear"],
+        _ => return Err(bad()),
+    };
+    if args.keys().any(|k| !allowed.contains(&k.as_str())) {
+        return Err(bad());
+    }
+    let uuid = user_uuid(&OutboundAction::PolicyOp(p.clone()))?;
+    let mut out = serde_json::json!({ "user_id": placeholder(&uuid) });
+    match p.op {
+        "mod.ban" => {
+            if let Some(v) = args.get("delete_message_seconds") {
+                let n = v
+                    .as_u64()
+                    .filter(|n| *n <= MAX_DELETE_MESSAGE_SECONDS)
+                    .ok_or_else(bad)?;
+                out["delete_message_seconds"] = n.into();
+            }
+        }
+        "mod.timeout" => match (args.get("duration_seconds"), args.get("clear")) {
+            (Some(d), None) => {
+                let secs = d
+                    .as_u64()
+                    .filter(|n| (1..=MAX_TIMEOUT_SECONDS).contains(n))
+                    .ok_or_else(bad)?;
+                let secs = i64::try_from(secs).map_err(|_| bad())?;
+                let until = now + chrono::Duration::seconds(secs);
+                out["until"] = until.format("%Y-%m-%dT%H:%M:%SZ").to_string().into();
+            }
+            (None, Some(serde_json::Value::Bool(true))) => out["clear"] = true.into(),
+            _ => return Err(bad()),
+        },
+        _ => {}
+    }
+    serde_json::to_string(&out).map_err(|_| bad())
+}
+
 impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDuties<C, U> {
     fn claims(&self, platform: &str, kind: &str) -> bool {
         platform == "discord"
@@ -751,6 +1069,10 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
                     | "event.delete"
                     | "role.set"
                     | "role.list"
+                    | "mod.kick"
+                    | "mod.ban"
+                    | "mod.unban"
+                    | "mod.timeout"
                     | "interaction.callback"
                     | "interaction.followup"
                     | "commands.register.guild"
@@ -768,6 +1090,7 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
             OutboundAction::DmSend { .. } => self.dm_gate(cx).await,
             OutboundAction::RoleOp { .. } => self.role_gate(cx).await,
             OutboundAction::EventOp { .. } => self.event_gate(cx).await,
+            OutboundAction::PolicyOp(p) if MOD_KINDS.contains(&p.op) => self.mod_gate(cx, p).await,
             OutboundAction::PolicyOp(_) if kind == "commands.register.guild" => {
                 self.commands_gate(cx).await
             }
@@ -781,11 +1104,11 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
 
     async fn bind_template(&self, cx: &DutyCx<'_>, tpl: &mut RequestTpl) -> Result<(), ExecError> {
         let kind = cx.action.op();
-        // Event and generic-op requests carry no user and no placeholders to normalize.
-        if matches!(
-            cx.action,
-            OutboundAction::EventOp { .. } | OutboundAction::PolicyOp(_)
-        ) {
+        // Event requests and the user-less generic ops (slash-command registration, interaction
+        // replies) carry no user and no placeholders to normalize; only the moderation ops do.
+        if matches!(cx.action, OutboundAction::EventOp { .. })
+            || matches!(cx.action, OutboundAction::PolicyOp(p) if !MOD_KINDS.contains(&p.op))
+        {
             return Ok(());
         }
         let uuid = user_uuid(cx.action).map_err(|e| deny(kind, e))?;
@@ -813,6 +1136,9 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
                     1,
                 );
             }
+            OutboundAction::PolicyOp(_) => {
+                tpl.url = tpl.url.replacen(&me, "{target.user}", 1);
+            }
             _ => return Err(ExecError::BadAction),
         }
         Ok(())
@@ -831,6 +1157,9 @@ impl<C: DiscordCredentialSource, U: PlatformUserResolver> DutyHook for DiscordDu
                 .map_err(|e| deny(kind, e));
         }
         if let OutboundAction::PolicyOp(p) = cx.action {
+            if MOD_KINDS.contains(&p.op) {
+                return mod_payload(p, chrono::Utc::now()).map_err(|e| deny(kind, e));
+            }
             // The connector gets ONLY the text / handle under fixed keys.
             let v = if kind == "commands.register.guild" {
                 let text = p.text.as_deref().ok_or(ExecError::BadAction)?;
@@ -972,3 +1301,7 @@ mod tests {
         assert_eq!(placeholder("x"), "{user:x}");
     }
 }
+
+#[cfg(test)]
+#[path = "discord_mod_tests.rs"]
+mod mod_tests;

@@ -449,6 +449,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
 }
 
 /// The Discord service bundle's app id (the `target` of `tool.invoke`).
+#[cfg(test)]
 pub(crate) const DISCORD_SERVICE_APP_ID: &str = "waddles.core.service.discord";
 /// Tool-name prefix the HOST executes for the Discord service bundle.
 pub(crate) const EVENT_TOOL_PREFIX: &str = "discord.scheduled_event.";

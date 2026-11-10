@@ -58,7 +58,11 @@ a platform bundle's `exported_tools` lives at
 `hub_api/tests/test_platform_host_tool_fixtures.py` fails when either `bundle.yaml` or
 `hub-manifest.yaml` drifts from it. Rust tests load it with `manifest_tools(<platform>)`
 (`host_tools_tests.rs`) and call tools through `StageCapabilities::handle`
-(`tool.invoke`), e.g. `host_tools_twitch_manifest_tests.rs`.
+(`tool.invoke`), e.g. `host_tools_twitch_manifest_tests.rs` and `host_tools_discord_manifest_tests.rs`.
+
+A `user_wire: placeholder` user (`{user:<uuid>}`, resolved by the consumer) is accepted only for the typed role ops
+and `mod.*` ops; for destructive moderation ops the planner still detokenizes the user host-side to run the
+protected-target check before queueing the placeholder.
 
 ## Stable refusal codes
 

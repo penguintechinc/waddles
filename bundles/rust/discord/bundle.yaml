@@ -52,6 +52,10 @@ permissions:
     justification: "The platform reconciler (never an app bundle) bulk-overwrites a guild's slash commands with exactly the hub-api desired set; the application id is a host app-scoped slot and the host re-verifies the payload"
   - id: interaction.respond:discord
     justification: "Answer interactions through host-held interaction slots; no credential in the template"
+  - id: chat.send:discord
+    justification: "Post embed-bearing messages in the host-pinned channel (discord.message.embed); body keys are host-restricted"
+  - id: webhook.manage:discord
+    justification: "Create a webhook in the host-pinned channel (discord.webhook.create); the webhook token is a secret the host keeps and never returns"
   - id: connector.pii.read
     justification: "gates identity.lookup, used to tokenize the actor to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw-handle fallback: a failed lookup fails the frame)"
   - id: platform.log
@@ -117,6 +121,12 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: discord
+      op: event.create
+      origin: none
+      returns:
+      - id
   - name: discord.scheduled_event.update
     access: write
     risk: dangerous
@@ -152,6 +162,12 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: discord
+      op: event.update
+      origin: none
+      returns:
+      - id
   - name: discord.scheduled_event.cancel
     access: write
     risk: dangerous
@@ -166,6 +182,10 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: discord
+      op: event.cancel
+      origin: none
   - name: discord.scheduled_event.delete
     access: write
     risk: dangerous
@@ -180,6 +200,10 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: discord
+      op: event.delete
+      origin: none
   - name: discord.member.roles.add
     access: write
     risk: dangerous
@@ -198,6 +222,16 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: discord
+      op: role.add
+      user: user
+      user_wire: placeholder
+      text: role_key
+      required:
+      - user
+      - role_key
+      origin: guild_scope
   - name: discord.member.roles.remove
     access: write
     risk: dangerous
@@ -216,6 +250,16 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: discord
+      op: role.remove
+      user: user
+      user_wire: placeholder
+      text: role_key
+      required:
+      - user
+      - role_key
+      origin: guild_scope
   - name: discord.member.roles.set
     access: write
     risk: dangerous
@@ -238,6 +282,16 @@ exported_tools:
       additionalProperties: false
     output_schema:
       type: object
+    host_op:
+      platform: discord
+      op: role.set
+      user: user
+      user_wire: placeholder
+      text_list: role_keys
+      required:
+      - user
+      - role_keys
+      origin: guild_scope
   - name: discord.roles.list
     access: read
     risk: normal
@@ -257,6 +311,282 @@ exported_tools:
                 type: string
               assignable:
                 type: boolean
+    host_op:
+      platform: discord
+      op: role.list
+      origin: guild_scope
+      returns:
+      - roles
+  - name: discord.moderation.kick
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+      required:
+        - user
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+    host_op:
+      platform: discord
+      op: mod.kick
+      user: user
+      user_wire: placeholder
+      required:
+      - user
+      origin: guild_scope
+  - name: discord.moderation.unban
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+      required:
+        - user
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+    host_op:
+      platform: discord
+      op: mod.unban
+      user: user
+      user_wire: placeholder
+      required:
+      - user
+      origin: guild_scope
+  - name: discord.moderation.ban
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+        delete_message_seconds:
+          type: integer
+          minimum: 0
+          maximum: 604800
+      required:
+        - user
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+    host_op:
+      platform: discord
+      op: mod.ban
+      user: user
+      user_wire: placeholder
+      text_object:
+        delete_message_seconds: delete_message_seconds
+      required:
+      - user
+      origin: guild_scope
+  - name: discord.moderation.timeout
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+        duration_seconds:
+          type: integer
+          minimum: 1
+          maximum: 2419200
+      required:
+        - user
+        - duration_seconds
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+    host_op:
+      platform: discord
+      op: mod.timeout
+      user: user
+      user_wire: placeholder
+      text_object:
+        duration_seconds: duration_seconds
+      required:
+      - user
+      - duration_seconds
+      origin: guild_scope
+  - name: discord.moderation.untimeout
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        user:
+          type: string
+          format: uuid
+      required:
+        - user
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+    host_op:
+      platform: discord
+      op: mod.timeout
+      user: user
+      user_wire: placeholder
+      text_object:
+        clear: clear
+      required:
+      - user
+      - clear
+      origin: guild_scope
+  - name: discord.message.edit
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        message_id:
+          type: string
+          pattern: "^[0-9]{1,20}$"
+        content:
+          type: string
+          minLength: 1
+          maxLength: 2000
+      required:
+        - message_id
+        - content
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+    host_op:
+      platform: discord
+      op: message.edit
+      message_id: message_id
+      text: content
+      required:
+      - message_id
+      - content
+      origin: channel
+  - name: discord.message.react
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        message_id:
+          type: string
+          pattern: "^[0-9]{1,20}$"
+        emoji:
+          type: string
+          minLength: 1
+          maxLength: 64
+      required:
+        - message_id
+        - emoji
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+    host_op:
+      platform: discord
+      op: reaction.add
+      message_id: message_id
+      text: emoji
+      required:
+      - message_id
+      - emoji
+      origin: channel
+  - name: discord.message.delete
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        message_id:
+          type: string
+          pattern: "^[0-9]{1,20}$"
+      required:
+        - message_id
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+    host_op:
+      platform: discord
+      op: chat.delete
+      message_id: message_id
+      required:
+      - message_id
+      origin: channel
+  - name: discord.message.embed
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        embeds:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: object
+      required:
+        - embeds
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+    host_op:
+      platform: discord
+      op: message.embed
+      text_object:
+        content: content
+        embeds: embeds
+      required:
+      - embeds
+      origin: channel
+      returns:
+      - id
+  - name: discord.webhook.create
+    access: write
+    risk: dangerous
+    input_schema:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+      required:
+        - name
+      additionalProperties: false
+    output_schema:
+      type: object
+    required_scope: community:moderate
+    host_op:
+      platform: discord
+      op: webhook.create
+      text: name
+      required:
+      - name
+      origin: channel
+      returns:
+      - id
 author: github:penguintechinc
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/discord
