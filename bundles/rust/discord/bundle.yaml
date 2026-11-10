@@ -40,6 +40,18 @@ permissions:
     justification: "declares the Gateway WebSocket upgrade host the HOST transport connects to for this connector; the guest never calls it"
     params:
       methods: ["GET"]
+  - id: moderation.discord
+    justification: "Kick, ban, unban and timeout members; the guild is the host-bound binding guild and the target is a tokenized host slot, never bundle input"
+  - id: chat.delete:discord
+    justification: "Delete messages in the host-pinned channel (moderation-class)"
+  - id: message.edit:discord
+    justification: "Edit bot messages in the host-pinned channel; body keys are host-restricted"
+  - id: message.reaction:discord
+    justification: "Add reactions in the host-pinned channel"
+  - id: commands.register:discord
+    justification: "Bulk-overwrite the application's slash commands; the application id is a host app-scoped slot"
+  - id: interaction.respond:discord
+    justification: "Answer interactions through host-held interaction slots; no credential in the template"
   - id: connector.pii.read
     justification: "gates identity.lookup, used to tokenize the actor to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw-handle fallback: a failed lookup fails the frame)"
   - id: platform.log

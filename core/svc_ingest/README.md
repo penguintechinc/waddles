@@ -384,6 +384,29 @@ accepts a `{user:<uuid>}` recipient, the only form this executor's duty accepts.
 provider adapter (see "YouTube slot source"); (2) the executor and `HubPlatformUserResolver::connect` are not wired at boot (T6d-1 status above);
 the default `NoUserResolver` refuses every DM/role op loudly until it is.
 
+## Platform op table (table-driven outbound ops, `sender_exec/policy/`)
+
+The outbound op set is a TABLE, not an enum: one file per platform
+(`policy/{twitch,discord,youtube,kick}.rs`), each kind an exact, fail-closed `KindPolicy`
+(method, path template of `PathSeg` slots, exact query keys, `max_body`, optional top-level body
+key allowlist, `needs_duty`, `requires_pin`, `ResultMode`). A platform bundle only implements
+`build-request` for a kind that already exists; it never widens what the host will send.
+
+| Rule | Where enforced |
+|---|---|
+| Op string must be in the table for the queue's platform, else `UnknownOp` (dropped, never defaulted) | `outbound_ops::parse_outbound_entry` -> `policy::registered_op` |
+| Guild / broadcaster / moderator / live-chat / application ids are host slots, never literals | `verify` (`query_is_host_slot` / `body_is_host_slot`, duty slots) |
+| Body keys outside the kind's allowlist (e.g. roles on a timeout) refused | `verify` (`BodyKeyNotAllowed`) |
+| App-scoped credentials (`app.` handles: EventSub, command registration) never mix with user-scoped slots and need `SlotSource::supports_app_credentials` | `mod.rs` executor (`slot_credential_scope_mixed` / `slot_app_credential_unsupported`) |
+| Kick is declared with NO kinds; its transport placeholder (`UnsupportedTransport`) fails loud | `policy/kick.rs`, `transport.rs` |
+
+The producer twin is `bundle_capability_gate::platform_ops` (op -> permission id); both tables
+are parity-tested against `core/bundle_capability_gate/tests/fixtures/platform_relay_ops.json`.
+The Twitch / YouTube drains settle a waiting producer through the same ack channel as Discord's
+(`drain_platform_loop_acked`). A bundle-exported periodic `reconcile` hook (interval from its
+manifest, jittered, single-flight per community) is scheduled by
+`connector::reconcile_hook::ReconcileScheduler`.
+
 ## Connector host selector (connector runtime)
 
 Env baselines, default OFF, strict booleans, read identically by the Rust and Python svc-ingest (never the PostHog client: the `*.waddles.app` bypass would read every flag ON).
