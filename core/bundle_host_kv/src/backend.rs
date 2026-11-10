@@ -96,6 +96,13 @@ use std::pin::Pin;
 
 use redis::AsyncCommands;
 
+/// The lexicographic index key paired with a live-index key: a sorted set
+/// (all scores 0, members = data keys) that backs prefix `list` via
+/// `ZRANGEBYLEX`. Derived so the stages never need to know it exists.
+pub fn lex_key(live_key: &str) -> String {
+    format!("{live_key}:lex")
+}
+
 /// The live index's reserved never-expiring member (see the module doc).
 /// A macro so the same literal feeds both the Rust constant and the Lua
 /// prelude below via `concat!`. Contains `:`, which
@@ -126,8 +133,17 @@ macro_rules! lua_prelude {
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 local function fmt(n) return string.format('%.0f', n) end
-local function trim(live)
-  redis.call('ZREMRANGEBYSCORE', live, '-inf', '(' .. fmt(now))
+local function trim(live, lex)
+  local lapsed = redis.call('ZRANGEBYSCORE', live, '-inf', '(' .. fmt(now))
+  local n = #lapsed
+  local i = 1
+  while i <= n do
+    local j = math.min(i + 499, n)
+    local chunk = {unpack(lapsed, i, j)}
+    redis.call('ZREM', live, unpack(chunk))
+    redis.call('ZREM', lex, unpack(chunk))
+    i = j + 1
+  end
 end
 local function live_count(live)
   local n = redis.call('ZCARD', live)
@@ -177,7 +193,7 @@ pub enum QuotaOutcome<T> {
 
 /// Outcome of [`KvBackend::compare_and_set_with_quota`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CasOutcome {
+pub enum ByteCasOutcome {
     /// The stored value matched `expected` and the new value was written.
     Written,
     /// A new key was refused: the app already holds the maximum live keys.
@@ -207,6 +223,40 @@ pub enum ReconcileOutcome {
     Locked,
 }
 
+/// Why a v2-only trait method failed on a backend that never implemented it.
+pub const V2_UNSUPPORTED: &str = "kv v2 is not supported by this backend";
+
+/// Outcome of [`KvBackend::cas_with_quota`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CasOutcome {
+    /// Written; carries the new version.
+    Swapped(u64),
+    /// The current version differed; carries it (`0` = key absent).
+    Conflict(u64),
+    /// Creating a new key would exceed the app's key quota.
+    QuotaExceeded,
+}
+
+/// Outcome of [`KvBackend::delete_if`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CasDelete {
+    Deleted,
+    /// The current version differed; carries it (`0` = key absent).
+    Conflict(u64),
+}
+
+/// The version scheme every v2 backend shares: a key's version is
+/// `1 + the first 52 bits of sha1(value)` (`0` = absent), computed inside
+/// Valkey from the stored bytes. Because it is a pure function of the content,
+/// any writer -- including v1 `set`/`increment` -- changes it automatically, so
+/// v1 and v2 can safely share keys; equal content means equal version, which is
+/// correct for read-modify-write loops (the writer derived its new value from
+/// exactly that content). Treat it as an opaque token: compare for equality only.
+pub const VERSION_SCHEME: &str = "1 + first 52 bits of sha1(value); 0 = absent";
+
+/// A stored value together with its version token.
+pub type Versioned = (Vec<u8>, u64);
+
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// The Valkey primitives `crate::KvHost` needs, generic enough to fake.
@@ -234,7 +284,7 @@ pub trait KvBackend: Send + Sync {
     /// `expected` (`None` = the key must be absent), performs exactly what
     /// [`Self::set_with_quota`] does. This is the compare-and-swap that keeps
     /// sealed `increment` (read, decrypt, add, re-seal) atomic: a concurrent
-    /// writer makes it return [`CasOutcome::Conflict`] instead of losing an
+    /// writer makes it return [`ByteCasOutcome::Conflict`] instead of losing an
     /// update. The default fails loud for backends that cannot do it.
     #[allow(clippy::too_many_arguments)]
     fn compare_and_set_with_quota<'a>(
@@ -246,7 +296,7 @@ pub trait KvBackend: Send + Sync {
         value: &'a [u8],
         ttl_seconds: u32,
         max_keys: u64,
-    ) -> BoxFuture<'a, Result<CasOutcome, String>> {
+    ) -> BoxFuture<'a, Result<ByteCasOutcome, String>> {
         let _ = (
             data_key,
             live_key,
@@ -343,6 +393,74 @@ pub trait KvBackend: Send + Sync {
         lock_ttl_ms: u64,
         scan_limit: u64,
     ) -> BoxFuture<'a, Result<ReconcileOutcome, String>>;
+
+    // ---- kv v2 (compare-and-swap, listing, byte budget) -----------------
+    // Provided methods so every pre-existing `KvBackend` implementor (test
+    // fakes in the stages) keeps compiling; only a backend that actually
+    // supports v2 overrides them, and the defaults FAIL LOUD (never a silent
+    // success), so a v2 call against a v1-only backend is an explicit error.
+
+    /// Reads a value together with its version (see [`VERSION_SCHEME`]).
+    fn get_versioned<'a>(
+        &'a self,
+        _data_key: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Versioned>, String>> {
+        Box::pin(async { Err(V2_UNSUPPORTED.to_string()) })
+    }
+
+    /// Atomic compare-and-swap: writes `value` only if the key's current
+    /// version equals `expected_version` (`0` = "must not exist"). Creating a
+    /// new key is quota-checked exactly like `set_with_quota`.
+    #[allow(clippy::too_many_arguments)]
+    fn cas_with_quota<'a>(
+        &'a self,
+        _data_key: &'a str,
+        _live_key: &'a str,
+        _legacy_count_key: &'a str,
+        _expected_version: u64,
+        _value: &'a [u8],
+        _ttl_seconds: u32,
+        _max_keys: u64,
+    ) -> BoxFuture<'a, Result<CasOutcome, String>> {
+        Box::pin(async { Err(V2_UNSUPPORTED.to_string()) })
+    }
+
+    /// Atomic delete-if-version: deletes only when the current version equals
+    /// `expected_version` (>= 1).
+    fn delete_if<'a>(
+        &'a self,
+        _data_key: &'a str,
+        _live_key: &'a str,
+        _legacy_count_key: &'a str,
+        _expected_version: u64,
+    ) -> BoxFuture<'a, Result<CasDelete, String>> {
+        Box::pin(async { Err(V2_UNSUPPORTED.to_string()) })
+    }
+
+    /// Lists live data keys under `data_prefix` (a full data-key prefix),
+    /// strictly after `after` (a full data key) in lexicographic order, at
+    /// most `limit` of them. Returns full data keys.
+    fn list_keys<'a>(
+        &'a self,
+        _live_key: &'a str,
+        _data_prefix: &'a str,
+        _after: &'a str,
+        _limit: u32,
+    ) -> BoxFuture<'a, Result<Vec<String>, String>> {
+        Box::pin(async { Err(V2_UNSUPPORTED.to_string()) })
+    }
+
+    /// Adds `amount` to a fixed-window per-invocation byte budget and returns
+    /// the new total. The default is "unmetered" (`0`) -- reachable only by
+    /// test fakes; the production backend always meters.
+    fn add_budget<'a>(
+        &'a self,
+        _budget_key: &'a str,
+        _window_seconds: u64,
+        _amount: u64,
+    ) -> BoxFuture<'a, Result<u64, String>> {
+        Box::pin(async { Ok(0) })
+    }
 }
 
 /// `KEYS[1]` = data key, `KEYS[2]` = live index key, `KEYS[3]` = legacy
@@ -360,7 +478,7 @@ const SET_WITH_QUOTA_SCRIPT: &str = concat!(
     lua_prelude!(),
     lua_legacy_counter!(),
     r#"
-trim(KEYS[2])
+trim(KEYS[2], KEYS[4])
 local existed = redis.call('EXISTS', KEYS[1])
 if not redis.call('ZSCORE', KEYS[2], KEYS[1]) then
   if live_count(KEYS[2]) >= tonumber(ARGV[3]) then
@@ -374,6 +492,7 @@ else
   redis.call('SET', KEYS[1], ARGV[1])
 end
 redis.call('ZADD', KEYS[2], expiry_score(ttl), KEYS[1])
+redis.call('ZADD', KEYS[4], 0, KEYS[1])
 if existed == 0 then
   legacy_incr(KEYS[3])
 end
@@ -441,6 +560,7 @@ const DELETE_SCRIPT: &str = concat!(
     r#"
 local deleted = redis.call('DEL', KEYS[1])
 redis.call('ZREM', KEYS[2], KEYS[1])
+redis.call('ZREM', KEYS[4], KEYS[1])
 if deleted == 1 then
   legacy_decr(KEYS[3])
 end
@@ -483,6 +603,7 @@ repeat
       local score = '+inf'
       if pttl >= 0 then score = fmt(now + pttl) end
       redis.call('ZADD', KEYS[1], score, k)
+      redis.call('ZADD', KEYS[3], 0, k)
     end
   end
   count = redis.call('ZCARD', KEYS[1])
@@ -492,6 +613,7 @@ repeat
   end
 until cursor == '0'
 redis.call('ZADD', KEYS[1], '+inf', SENTINEL)
+redis.call('ZADD', KEYS[3], 0, SENTINEL)
 redis.call('DEL', KEYS[2])
 return {1, count}
 "#
@@ -510,7 +632,7 @@ const INCREMENT_WITH_QUOTA_SCRIPT: &str = concat!(
     lua_prelude!(),
     lua_legacy_counter!(),
     r#"
-trim(KEYS[2])
+trim(KEYS[2], KEYS[4])
 local existed = redis.call('EXISTS', KEYS[1])
 if not redis.call('ZSCORE', KEYS[2], KEYS[1]) then
   if live_count(KEYS[2]) >= tonumber(ARGV[3]) then
@@ -525,6 +647,7 @@ else
   redis.call('PERSIST', KEYS[1])
 end
 redis.call('ZADD', KEYS[2], expiry_score(ttl), KEYS[1])
+redis.call('ZADD', KEYS[4], 0, KEYS[1])
 if existed == 0 then
   legacy_incr(KEYS[3])
 end
@@ -542,10 +665,270 @@ end
 return count
 "#;
 
+/// Lua helper shared by the v2 scripts: the content version (see
+/// [`VERSION_SCHEME`]). `sha1hex` is built into Valkey's Lua.
+macro_rules! lua_version {
+    () => {
+        r#"
+local function ver(v)
+  return tonumber(string.sub(redis.sha1hex(v), 1, 13), 16) + 1
+end
+"#
+    };
+}
+
+/// `KEYS[1]` = data key. Returns `{}` when absent, else `{value, version}`.
+const GET_VERSIONED_SCRIPT: &str = concat!(
+    lua_version!(),
+    r#"
+local cur = redis.call('GET', KEYS[1])
+if not cur then return {} end
+return {cur, string.format('%.0f', ver(cur))}
+"#
+);
+
+/// `KEYS` = data, live index, legacy counter. `ARGV` = expected version,
+/// value, ttl, max_keys. Returns `{0, new_version}` swapped, `{1, current}`
+/// conflict, `{2, 0}` quota exceeded.
+const CAS_SCRIPT: &str = concat!(
+    lua_prelude!(),
+    lua_legacy_counter!(),
+    lua_version!(),
+    r#"
+trim(KEYS[2], KEYS[4])
+local cur = redis.call('GET', KEYS[1])
+local curver = 0
+if cur then curver = ver(cur) end
+if curver ~= tonumber(ARGV[1]) then
+  return {1, string.format('%.0f', curver)}
+end
+if not redis.call('ZSCORE', KEYS[2], KEYS[1]) then
+  if live_count(KEYS[2]) >= tonumber(ARGV[4]) then
+    return {2, '0'}
+  end
+end
+local ttl = tonumber(ARGV[3])
+if ttl > 0 then
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+else
+  redis.call('SET', KEYS[1], ARGV[2])
+end
+redis.call('ZADD', KEYS[2], expiry_score(ttl), KEYS[1])
+redis.call('ZADD', KEYS[4], 0, KEYS[1])
+if not cur then
+  legacy_incr(KEYS[3])
+end
+return {0, string.format('%.0f', ver(ARGV[2]))}
+"#
+);
+
+/// `KEYS` = data, live index, legacy counter. `ARGV[1]` = expected version.
+/// Returns `{0, 0}` deleted, `{1, current}` conflict.
+const DELETE_IF_SCRIPT: &str = concat!(
+    lua_legacy_counter!(),
+    lua_version!(),
+    r#"
+local cur = redis.call('GET', KEYS[1])
+local curver = 0
+if cur then curver = ver(cur) end
+if curver ~= tonumber(ARGV[1]) then
+  return {1, string.format('%.0f', curver)}
+end
+redis.call('DEL', KEYS[1])
+redis.call('ZREM', KEYS[2], KEYS[1])
+redis.call('ZREM', KEYS[4], KEYS[1])
+legacy_decr(KEYS[3])
+return {0, '0'}
+"#
+);
+
+/// `KEYS[1]` = live index, `KEYS[2]` = lex index (all scores 0, members = data
+/// keys). `ARGV` = data-key prefix, after (full data key or ''), limit, scan cap.
+/// Returns up to `limit` live data keys under the prefix, strictly after
+/// `after`, in lexicographic order.
+///
+/// Cost is bounded by the MATCHING RANGE, never the app's keyspace:
+/// `ZRANGEBYLEX [prefix (prefix\255` visits only members in that range, in
+/// batches, and at most `scan cap` members are examined per call. Lapsed members
+/// are trimmed first (`O(lapsed)`); members whose data key was evicted are
+/// skipped via `EXISTS`. If the lex index is missing (apps that predate it, or
+/// an eviction) it is rebuilt once from the live index, itself capped at
+/// `MAX_KEYS_PER_APP` members.
+const LIST_KEYS_SCRIPT: &str = concat!(
+    lua_prelude!(),
+    r#"
+if redis.call('EXISTS', KEYS[2]) == 0 then
+  for _, m in ipairs(redis.call('ZRANGE', KEYS[1], 0, -1)) do
+    if m ~= SENTINEL then redis.call('ZADD', KEYS[2], 0, m) end
+  end
+  redis.call('ZADD', KEYS[2], 0, SENTINEL)
+end
+trim(KEYS[1], KEYS[2])
+local prefix = ARGV[1]
+local after = ARGV[2]
+local limit = tonumber(ARGV[3])
+local cap = tonumber(ARGV[4])
+local lo = '[' .. prefix
+if after ~= '' then lo = '(' .. after end
+local hi = '[' .. prefix .. '\255'
+local out = {}
+local examined = 0
+local cursor = lo
+while #out < limit and examined < cap do
+  local batch = math.min(limit - #out + 8, cap - examined)
+  local members = redis.call('ZRANGEBYLEX', KEYS[2], cursor, hi, 'LIMIT', 0, batch)
+  if #members == 0 then break end
+  for _, m in ipairs(members) do
+    examined = examined + 1
+    if redis.call('EXISTS', m) == 1 then
+      out[#out + 1] = m
+      if #out >= limit then break end
+    end
+  end
+  cursor = '(' .. members[#members]
+end
+return out
+"#
+);
+
+/// `KEYS[1]` = budget key. `ARGV` = window seconds, amount. Returns the new total.
+const ADD_BUDGET_SCRIPT: &str = r#"
+local total = redis.call('INCRBY', KEYS[1], ARGV[2])
+if total == tonumber(ARGV[2]) then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return total
+"#;
+
 /// Production [`KvBackend`] over the same connection type
 /// `core/svc_action::usage::connect`/`core/svc_action::capabilities`
 /// already use for `relay`/usage metering.
 impl KvBackend for redis::aio::MultiplexedConnection {
+    fn get_versioned<'a>(
+        &'a self,
+        data_key: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Versioned>, String>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            let reply: Vec<redis::Value> = redis::Script::new(GET_VERSIONED_SCRIPT)
+                .key(data_key)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            if reply.is_empty() {
+                return Ok(None);
+            }
+            let value: Vec<u8> =
+                redis::from_redis_value(reply[0].clone()).map_err(|e| e.to_string())?;
+            let version: String =
+                redis::from_redis_value(reply[1].clone()).map_err(|e| e.to_string())?;
+            Ok(Some((
+                value,
+                version.parse::<u64>().map_err(|e| e.to_string())?,
+            )))
+        })
+    }
+
+    fn cas_with_quota<'a>(
+        &'a self,
+        data_key: &'a str,
+        live_key: &'a str,
+        legacy_count_key: &'a str,
+        expected_version: u64,
+        value: &'a [u8],
+        ttl_seconds: u32,
+        max_keys: u64,
+    ) -> BoxFuture<'a, Result<CasOutcome, String>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            let (status, version): (i64, String) = redis::Script::new(CAS_SCRIPT)
+                .key(data_key)
+                .key(live_key)
+                .key(legacy_count_key)
+                .key(lex_key(live_key))
+                .arg(expected_version)
+                .arg(value)
+                .arg(ttl_seconds)
+                .arg(max_keys)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            let version = version.parse::<u64>().map_err(|e| e.to_string())?;
+            Ok(match status {
+                0 => CasOutcome::Swapped(version),
+                1 => CasOutcome::Conflict(version),
+                _ => CasOutcome::QuotaExceeded,
+            })
+        })
+    }
+
+    fn delete_if<'a>(
+        &'a self,
+        data_key: &'a str,
+        live_key: &'a str,
+        legacy_count_key: &'a str,
+        expected_version: u64,
+    ) -> BoxFuture<'a, Result<CasDelete, String>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            let (status, version): (i64, String) = redis::Script::new(DELETE_IF_SCRIPT)
+                .key(data_key)
+                .key(live_key)
+                .key(legacy_count_key)
+                .key(lex_key(live_key))
+                .arg(expected_version)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(if status == 0 {
+                CasDelete::Deleted
+            } else {
+                CasDelete::Conflict(version.parse::<u64>().map_err(|e| e.to_string())?)
+            })
+        })
+    }
+
+    fn list_keys<'a>(
+        &'a self,
+        live_key: &'a str,
+        data_prefix: &'a str,
+        after: &'a str,
+        limit: u32,
+    ) -> BoxFuture<'a, Result<Vec<String>, String>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            redis::Script::new(LIST_KEYS_SCRIPT)
+                .key(live_key)
+                .key(lex_key(live_key))
+                .arg(data_prefix)
+                .arg(after)
+                .arg(limit)
+                .arg(crate::limits::LIST_SCAN_CAP)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn add_budget<'a>(
+        &'a self,
+        budget_key: &'a str,
+        window_seconds: u64,
+        amount: u64,
+    ) -> BoxFuture<'a, Result<u64, String>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            let total: i64 = redis::Script::new(ADD_BUDGET_SCRIPT)
+                .key(budget_key)
+                .arg(window_seconds)
+                .arg(amount)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(total.max(0) as u64)
+        })
+    }
+
     fn get<'a>(&'a self, data_key: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
         let mut conn = self.clone();
         Box::pin(async move {
@@ -579,6 +962,7 @@ impl KvBackend for redis::aio::MultiplexedConnection {
                 .key(data_key)
                 .key(live_key)
                 .key(legacy_count_key)
+                .key(lex_key(live_key))
                 .arg(value)
                 .arg(ttl_seconds)
                 .arg(max_keys)
@@ -602,7 +986,7 @@ impl KvBackend for redis::aio::MultiplexedConnection {
         value: &'a [u8],
         ttl_seconds: u32,
         max_keys: u64,
-    ) -> BoxFuture<'a, Result<CasOutcome, String>> {
+    ) -> BoxFuture<'a, Result<ByteCasOutcome, String>> {
         let mut conn = self.clone();
         Box::pin(async move {
             let status: i64 = redis::Script::new(CAS_SET_WITH_QUOTA_SCRIPT)
@@ -618,9 +1002,9 @@ impl KvBackend for redis::aio::MultiplexedConnection {
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(match status {
-                0 => CasOutcome::Written,
-                1 => CasOutcome::QuotaExceeded,
-                _ => CasOutcome::Conflict,
+                0 => ByteCasOutcome::Written,
+                1 => ByteCasOutcome::QuotaExceeded,
+                _ => ByteCasOutcome::Conflict,
             })
         })
     }
@@ -637,6 +1021,7 @@ impl KvBackend for redis::aio::MultiplexedConnection {
                 .key(data_key)
                 .key(live_key)
                 .key(legacy_count_key)
+                .key(lex_key(live_key))
                 .invoke_async(&mut conn)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -660,6 +1045,7 @@ impl KvBackend for redis::aio::MultiplexedConnection {
                     .key(data_key)
                     .key(live_key)
                     .key(legacy_count_key)
+                    .key(lex_key(live_key))
                     .arg(delta)
                     .arg(ttl_seconds)
                     .arg(max_keys)
@@ -704,6 +1090,7 @@ impl KvBackend for redis::aio::MultiplexedConnection {
             let (status, count): (i64, u64) = redis::Script::new(RECONCILE_SCRIPT)
                 .key(live_key)
                 .key(lock_key)
+                .key(lex_key(live_key))
                 .arg(data_scan_pattern)
                 .arg(lock_ttl_ms)
                 .arg(scan_limit)
@@ -818,6 +1205,14 @@ pub(crate) mod fake {
                 .filter(|(k, e)| k.starts_with(prefix) && !lapsed(e.expires_at_ms, self.now_ms))
                 .count() as u64
         }
+    }
+
+    /// Stand-in for the Lua content version (`1 + sha1-prefix`): any
+    /// deterministic, content-derived, non-zero token behaves identically for
+    /// the host logic under test.
+    fn fake_version(value: &[u8]) -> u64 {
+        let d = <sha2::Sha256 as sha2::Digest>::digest(value);
+        (u64::from_be_bytes(d[..8].try_into().unwrap()) >> 12) + 1
     }
 
     #[derive(Default)]
@@ -993,6 +1388,123 @@ pub(crate) mod fake {
     }
 
     impl KvBackend for FakeBackend {
+        fn get_versioned<'a>(
+            &'a self,
+            data_key: &'a str,
+        ) -> BoxFuture<'a, Result<Option<Versioned>, String>> {
+            let found = self
+                .state
+                .lock()
+                .unwrap()
+                .live_value(data_key)
+                .map(|e| (e.value.clone(), fake_version(&e.value)));
+            Box::pin(async move { Ok(found) })
+        }
+
+        fn cas_with_quota<'a>(
+            &'a self,
+            data_key: &'a str,
+            live_key: &'a str,
+            legacy_count_key: &'a str,
+            expected_version: u64,
+            value: &'a [u8],
+            ttl_seconds: u32,
+            max_keys: u64,
+        ) -> BoxFuture<'a, Result<CasOutcome, String>> {
+            let mut st = self.state.lock().unwrap();
+            st.trim(live_key);
+            let current = st.live_value(data_key).map(|e| e.value.clone());
+            let cur_ver = current.as_deref().map_or(0, fake_version);
+            let out = if cur_ver != expected_version {
+                CasOutcome::Conflict(cur_ver)
+            } else if !st.is_indexed(live_key, data_key) && st.live_count(live_key) >= max_keys {
+                CasOutcome::QuotaExceeded
+            } else {
+                let expires_at_ms = st.expiry_for(ttl_seconds);
+                st.data.insert(
+                    data_key.to_string(),
+                    Entry {
+                        value: value.to_vec(),
+                        expires_at_ms,
+                    },
+                );
+                st.live
+                    .entry(live_key.to_string())
+                    .or_default()
+                    .insert(data_key.to_string(), expires_at_ms);
+                if current.is_none() {
+                    st.legacy_incr(legacy_count_key);
+                }
+                CasOutcome::Swapped(fake_version(value))
+            };
+            Box::pin(async move { Ok(out) })
+        }
+
+        fn delete_if<'a>(
+            &'a self,
+            data_key: &'a str,
+            live_key: &'a str,
+            legacy_count_key: &'a str,
+            expected_version: u64,
+        ) -> BoxFuture<'a, Result<CasDelete, String>> {
+            let mut st = self.state.lock().unwrap();
+            let cur_ver = st
+                .live_value(data_key)
+                .map_or(0, |e| fake_version(&e.value));
+            let out = if cur_ver != expected_version {
+                CasDelete::Conflict(cur_ver)
+            } else {
+                st.data.remove(data_key);
+                if let Some(idx) = st.live.get_mut(live_key) {
+                    idx.remove(data_key);
+                }
+                st.legacy_decr(legacy_count_key);
+                CasDelete::Deleted
+            };
+            Box::pin(async move { Ok(out) })
+        }
+
+        fn list_keys<'a>(
+            &'a self,
+            live_key: &'a str,
+            data_prefix: &'a str,
+            after: &'a str,
+            limit: u32,
+        ) -> BoxFuture<'a, Result<Vec<String>, String>> {
+            let mut st = self.state.lock().unwrap();
+            st.trim(live_key);
+            let mut keys: Vec<String> = st
+                .live
+                .get(live_key)
+                .map(|idx| {
+                    idx.keys()
+                        .filter(|k| {
+                            k.starts_with(data_prefix)
+                                && (after.is_empty() || k.as_str() > after)
+                                && st.live_value(k).is_some()
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            keys.sort();
+            keys.truncate(limit as usize);
+            Box::pin(async move { Ok(keys) })
+        }
+
+        fn add_budget<'a>(
+            &'a self,
+            budget_key: &'a str,
+            _window_seconds: u64,
+            amount: u64,
+        ) -> BoxFuture<'a, Result<u64, String>> {
+            let mut rates = self.rates.lock().unwrap();
+            let total = rates.entry(budget_key.to_string()).or_insert(0);
+            *total += amount;
+            let t = *total;
+            Box::pin(async move { Ok(t) })
+        }
+
         fn get<'a>(&'a self, data_key: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
             let value = self
                 .state
@@ -1050,16 +1562,16 @@ pub(crate) mod fake {
             value: &'a [u8],
             ttl_seconds: u32,
             max_keys: u64,
-        ) -> BoxFuture<'a, Result<CasOutcome, String>> {
+        ) -> BoxFuture<'a, Result<ByteCasOutcome, String>> {
             let mut st = self.state.lock().unwrap();
             st.trim(live_key);
             let current = st.live_value(data_key).map(|e| e.value.clone());
             if current.as_deref() != expected {
-                return Box::pin(async move { Ok(CasOutcome::Conflict) });
+                return Box::pin(async move { Ok(ByteCasOutcome::Conflict) });
             }
             let existed = current.is_some();
             if !st.is_indexed(live_key, data_key) && st.live_count(live_key) >= max_keys {
-                return Box::pin(async move { Ok(CasOutcome::QuotaExceeded) });
+                return Box::pin(async move { Ok(ByteCasOutcome::QuotaExceeded) });
             }
             let expires_at_ms = st.expiry_for(ttl_seconds);
             st.data.insert(
@@ -1076,7 +1588,7 @@ pub(crate) mod fake {
             if !existed {
                 st.legacy_incr(legacy_count_key);
             }
-            Box::pin(async move { Ok(CasOutcome::Written) })
+            Box::pin(async move { Ok(ByteCasOutcome::Written) })
         }
 
         fn delete<'a>(

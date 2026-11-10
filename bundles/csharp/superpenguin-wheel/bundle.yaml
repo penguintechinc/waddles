@@ -1,0 +1,135 @@
+schema_version: 2
+app_id: waddles.integrations.superpenguin.wheel
+name: Wheel Spin (SuperPenguinTV WheelSpin)
+version: 1.0.0
+feature: waddles.integrations.superpenguin
+module: integrations
+provider: thirdparty
+language: csharp
+artifact: component
+execution_model: wasi-component
+is_default: false
+author: github/psychoboy
+license: MIT
+category: alternatives
+source_url: https://github.com/Psychoboy/PenguinTwitchBot
+notice: |
+  Ported from PenguinTwitchBot (WheelSpin/WheelService.cs, WheelSpinNotifications/WheelSpinComplete.cs, wwwroot/wheel.html, wwwroot/js/wheel.js, wwwroot/img/wheel.svg, wwwroot/img/wheelBackground.svg, github.com/Psychoboy/
+  PenguinTwitchBot) by superpenguintv (Psychoboy), used with permission.
+
+  MIT License
+
+  Copyright (c) 2023 Psychoboy
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+stages:
+  process:
+    entry: waddle:bundle/process-stage#transform
+    consumes:
+    - platform: twitch
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!wheel'
+    - platform: discord
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!wheel'
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: waddle:bundle/action-stage#dispatch
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: storage.kv
+  justification: wheel definitions, the wheel on screen, the recorded spin outcome (replay-safe) and the
+    viewer-wheel signup list
+- id: identity.resolve
+  justification: resolve the invoking actor to a community user uuid (uuid-only, no names) for spin replay
+    keys and viewer-wheel entries
+- id: chat.send:discord
+  justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)
+- id: chat.send:twitch
+  justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)
+- id: overlay.media
+  justification: pushes wheel show/spin/hide messages (alert-box surface, superpenguin.wheel.* types)
+    to the community browser-source overlay
+  params:
+    allowed_hosts:
+    - overlay.penguincloud.io
+    max_duration_seconds: 15
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: 1.0.0
+  min_version: 1.0.0
+  max_version: null
+requested_tools: []
+collection: superpenguintv
+overlay_assets:
+- path: img/wheel.svg
+  sha256: cfa1d178f0fbd3ff9837657cb415f27650d6ad91a0e68a26e24b6cc8610b68c2
+  content_type: image/svg+xml
+  origin: PenguinTwitchBot/wwwroot/img/wheel.svg
+  license: MIT
+- path: img/wheelBackground.svg
+  sha256: 68322117101494e71861594ea7ccf79f7c5fde7fb4842e47ce1be24d4953c191
+  content_type: image/svg+xml
+  origin: PenguinTwitchBot/wwwroot/img/wheelBackground.svg
+  license: MIT
+- path: index.html
+  sha256: c8b034583141055e3b1ac2e02f48ddbb971bde229f871024bc90da3037325429
+  content_type: text/html
+  origin: PenguinTwitchBot/wwwroot/wheel.html (adapted)
+  license: MIT
+- path: vendor/spin-wheel-iife.js
+  sha256: f02a1704248a9b069f2624b2770d0d67dcf81a073d43bfb270bd72e3b528706c
+  content_type: text/javascript
+  origin: third-party:spin-wheel@5.0.2 (MIT)
+  license: MIT
+- path: vendor/spin-wheel.LICENSE.txt
+  sha256: 7bdaf7726a7cfc61ea37169deb9e6a4e384a4c010eb48bff1a4ee29fb3b89598
+  content_type: text/plain
+  origin: third-party:spin-wheel@5.0.2 (MIT)
+  license: MIT
+- path: wheel-overlay.js
+  sha256: 93a6b46fc92f5369da02a32aab097302ea9187c5035505a01369e3c58c77597c
+  content_type: text/javascript
+  origin: PenguinTwitchBot/wwwroot/js/wheel.js (adapted)
+  license: MIT
+- path: wheel.css
+  sha256: 21d4ca8242a42583bef1cb3d11d3ab5b3049e87a43601b5d03d6fa0f2bef7b80
+  content_type: text/css
+  origin: original
+  license: MIT

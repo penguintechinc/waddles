@@ -1087,7 +1087,7 @@ async fn try_build_eventsub_state(
 ///
 /// Production posture (`config.ingest_dev_kek` unset): [`identity_crypto::
 /// HubApiDekProvider`], authenticated via [`identity_crypto::
-/// UnimplementedMachineJwtProvider`] until `core/service_auth`'s real EdDSA
+/// UnimplementedMachineJwtProvider`] until `core/service_auth`'s real ES256
 /// machine-JWT minter lands (PR #438) -- every call fails closed with
 /// [`identity_crypto::DekUnavailableError`] until then, the documented gap
 /// this task calls out (not a silent stub). hub-api's own broker endpoint

@@ -296,3 +296,51 @@ async fn concurrent_sealed_increments_lose_no_updates() {
         Some((TASKS * PER_TASK).to_string().as_bytes())
     );
 }
+
+#[tokio::test]
+async fn sealed_versioned_cas_round_trips_plaintext_and_stores_ciphertext() {
+    let r = rig(FakeBackend::new());
+    let s = scope(1, 2);
+    let created = r
+        .host
+        .cas(&s, 1, "k", 0, b"one", 0)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    let crate::KvCasResult::Swapped(v1) = created else {
+        panic!("create-if-absent must swap, got {created:?}");
+    };
+    let raw = crate::KvBackend::get(&r.host.backend, &s.data_key("k"))
+        .await
+        .unwrap_or_default()
+        .unwrap_or_default();
+    assert!(
+        bundle_host_crypto::is_envelope(&raw) && !raw.windows(3).any(|w| w == b"one"),
+        "cas must never store plaintext under sealing"
+    );
+    let (plain, ver) = r
+        .host
+        .get_versioned(&s, 2, "k")
+        .await
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|| panic!("value present"));
+    assert_eq!(plain, b"one");
+    assert_eq!(ver, v1);
+    let next = r
+        .host
+        .cas(&s, 3, "k", ver, b"two", 0)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(matches!(next, crate::KvCasResult::Swapped(_)));
+}
+
+#[tokio::test]
+async fn sealed_cas_refuses_and_writes_nothing_when_the_key_is_unavailable() {
+    let r = rig(FakeBackend::new());
+    let s = scope(1, 2);
+    r.broker_up.store(false, Ordering::SeqCst);
+    assert!(r.host.cas(&s, 1, "k", 0, b"one", 0).await.is_err());
+    assert!(crate::KvBackend::get(&r.host.backend, &s.data_key("k"))
+        .await
+        .unwrap_or_default()
+        .is_none());
+}

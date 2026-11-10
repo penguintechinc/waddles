@@ -54,7 +54,7 @@ use pb::{
     ResolveHandleRequest, ResolveHandleResponse, ResolvePlatformUserRequest,
     ResolvePlatformUserResponse,
 };
-use service_auth::{MachineJwtClient, ServiceAuthError};
+use service_auth::{HttpTimeouts, HubChannel, MachineJwtClient, ServiceAuthError};
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
 use tracing::{debug, warn};
@@ -279,7 +279,15 @@ impl HubClient {
         Ok(Self {
             identity: IdentityServiceClient::new(channel.clone()),
             key: KeyServiceClient::new(channel),
-            token_client: Arc::new(MachineJwtClient::new(token_endpoint, sa_token_path, scope)),
+            token_client: Arc::new(MachineJwtClient::with_channel(
+                HubChannel::lazy(
+                    token_endpoint,
+                    ca_cert_path.map(str::to_owned),
+                    HttpTimeouts::from_env(),
+                ),
+                sa_token_path,
+                scope,
+            )),
             circuits: Circuits::new(5, Duration::from_secs(30)),
             deadline: DEFAULT_RPC_DEADLINE,
             max_retries: 2,
@@ -619,7 +627,7 @@ mod tests {
             identity: IdentityServiceClient::new(channel.clone()),
             key: KeyServiceClient::new(channel),
             token_client: Arc::new(MachineJwtClient::new(
-                "http://127.0.0.1:1/token",
+                "http://127.0.0.1:1",
                 "/nonexistent/sa-token",
                 "identity:handle:resolve",
             )),
@@ -892,32 +900,26 @@ mod tests {
 mod client_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use service_auth::test_support::{MintReply, MockHub};
     use std::sync::atomic::AtomicUsize;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
 
     const DEAD_ENDPOINT: &str = "http://127.0.0.1:1";
 
-    /// Local HTTP server answering every request with the given status/body.
+    /// Real in-process gRPC `ServiceAuthService` answering every mint with the given
+    /// status/body: 200 + `{"token","expires_in"}` -> that token, anything else -> a refusal.
+    /// The mock is leaked on purpose (it must outlive the returned URL string) and ends with
+    /// the test's runtime.
     async fn token_server(status: u16, body: String) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        tokio::spawn(async move {
-            while let Ok((mut sock, _)) = listener.accept().await {
-                let body = body.clone();
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 8192];
-                    let _ = sock.read(&mut buf).await;
-                    let resp = format!(
-                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = sock.write_all(resp.as_bytes()).await;
-                    let _ = sock.shutdown().await;
-                });
-            }
-        });
-        format!("http://{addr}")
+        // `body` is the legacy REST body; only its success/failure shape matters now.
+        let reply = if status == 200 && body.contains("jwt-abc") {
+            MintReply::token("jwt-abc", 900)
+        } else {
+            MintReply::Reject(tonic::Code::Unauthenticated)
+        };
+        let mock = MockHub::builder().mint(vec![reply]).start().await;
+        let endpoint = mock.endpoint.clone();
+        std::mem::forget(mock);
+        endpoint
     }
 
     fn sa_token_file(label: &str) -> String {
@@ -1056,7 +1058,7 @@ mod client_tests {
 
     #[tokio::test]
     async fn rpcs_fail_with_auth_error_when_token_unavailable() {
-        let client = client_with("http://127.0.0.1:1/t", "/nonexistent/sa", 5);
+        let client = client_with("http://127.0.0.1:1", "/nonexistent/sa", 5);
         assert!(matches!(
             client.mint_ephemeral_pseudonyms(vec![]).await,
             Err(HubClientError::Auth(_))

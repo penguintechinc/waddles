@@ -97,4 +97,7 @@ pub use session_sync::{
     pick_session_with_digest, plan_sessions, SessionId, SessionLoaded, SessionSyncPlan,
 };
 pub use snapshot::{ActiveVersionSnapshot, ToolTargetEntry};
-pub use tools::{ExportedToolInfo, RequestedToolInfo, ToolManifestInfo, MCP_TOOLS_CAPABILITY};
+pub use tools::{
+    ExportedToolInfo, HostOpDecl, HostOpOrigin, HostOpUserWire, RequestedToolInfo, ToolManifestInfo,
+    MCP_TOOLS_CAPABILITY,
+};

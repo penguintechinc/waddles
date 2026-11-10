@@ -196,6 +196,28 @@ impl KvScope {
     pub fn rate_key(&self, call_id: u64) -> String {
         format!("{}:opr:{}", self.app_prefix(), call_id)
     }
+
+    /// Per-invocation byte-budget counter (kv v2). `:opb:` cannot collide with
+    /// a data key (`:data:` prefix) or any other reserved key.
+    pub fn budget_key(&self, call_id: u64) -> String {
+        format!("{}:opb:{}", self.app_prefix(), call_id)
+    }
+
+    /// Per-invocation `list` call counter (kv v2).
+    pub fn list_budget_key(&self, call_id: u64) -> String {
+        format!("{}:opl:{}", self.app_prefix(), call_id)
+    }
+
+    /// The full data-key prefix for a guest key prefix (`list`).
+    pub fn data_prefix(&self, guest_prefix: &str) -> String {
+        self.data_key(guest_prefix)
+    }
+
+    /// Recovers the guest key from a full data key of this scope, or `None`
+    /// if `data_key` is not under this scope's data namespace.
+    pub fn guest_key_of<'a>(&self, data_key: &'a str) -> Option<&'a str> {
+        data_key.strip_prefix(&self.data_key(""))
+    }
 }
 
 #[cfg(test)]

@@ -56,6 +56,8 @@ COPY bundle_host_kv ./bundle_host_kv
 COPY bundle_host_crypto ./bundle_host_crypto
 COPY bundle_host_db ./bundle_host_db
 COPY bundle_host_http ./bundle_host_http
+COPY bundle_host_credentials ./bundle_host_credentials
+COPY connection_resolver ./connection_resolver
 COPY bundle_capability_gate ./bundle_capability_gate
 COPY bundle_tool_call ./bundle_tool_call
 COPY circuit_breaker ./circuit_breaker
