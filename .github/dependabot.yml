@@ -86,6 +86,9 @@ updates:
   - /bundles/csharp/superpenguin-duel
   - /bundles/csharp/superpenguin-first
   - /bundles/csharp/superpenguin-roulette
+  - /bundles/csharp/superpenguin-ffa
+  - /bundles/csharp/superpenguin-heist
+  - /bundles/csharp/superpenguin-steal
   - /core/ai_researcher_module
   - /core/analytics_core_module
   - /core/browser_source_core_module

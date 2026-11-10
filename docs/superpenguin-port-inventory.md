@@ -25,8 +25,11 @@ A helper class is folded into its owning app, not published as an extra bundle.
 | TicketGames/Roulette | superpenguin-roulette | economy get_balance, points_view; app owns wagering | Native and WASM validation passed |
 | TicketGames/First | superpenguin-first | economy adjust_balance, points_view | Resumed; UTC-day variant, reset refused |
 | TicketGames/DuelGame | superpenguin-duel | economy get_balance, adjust_balance, points_view | Resumed; refunds/sweeps need per-operation retry keys |
+| PastyGames/FFA | superpenguin-ffa | economy get_balance, adjust_balance, points_view; TickScheduler join window | Native + WASM validated; settles on the next command (no timer) |
+| PastyGames/Heist | superpenguin-heist | economy get_balance, adjust_balance, points_view; TickScheduler join window | Native + WASM validated; story condensed to one reply |
+| PastyGames/Steal | superpenguin-steal | economy get_balance, points_view, **transfer_from** (dangerous grant, contract fixture) | Native + WASM validated; fails loud ("steal not enabled") until the economy tool ships |
 
-The economy service exports remain unchanged. Each C# app owns wagering and
+The economy service exports remain unchanged by these apps (Steal depends on the separate `transfer_from` work). Each C# app owns wagering and
 maximum-bet policy and uses the atomic host ledger primitive for settlement.
 Balance and credit/debit operations reuse existing economy service tools.
 All write tools carry stable retry keys, and missing grants fail loudly.
@@ -58,8 +61,6 @@ not forward app config JSON (constants documented per bundle). Upstream binary m
 
 | Upstream modules | Decision | Service dependencies / remaining work |
 |---|---|---|
-| PastyGames/Heist, FFA | Port C# apps | economy tools; persisted join windows and scheduler |
-| PastyGames/Steal | Port only with safe actor-authorized wager design | Victim debit is forbidden; never impersonate another user |
 | Fishing/* | Port C# game, shop and tournament policy | Shared economy/inventory tools where available; durable state and scheduling |
 | Games/Starship | Port C# story/voting app | Persisted state, scheduling, economy, overlay |
 | Games/Balloon, Parachute, Plinko, Curling, Golf, Racing, UfoClaw | Port C# game logic and matching visual assets | Shared overlay and economy tools; scheduling for join windows |

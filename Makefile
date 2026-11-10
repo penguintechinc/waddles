@@ -472,7 +472,7 @@ gen-ops-cli-vectors:
 	python3 -I scripts/gen_ops_cli_vectors.py
 
 # SuperPenguinTV C# app ports; service-bundle tools own the shared capabilities.
-SUPERPENGUIN_GAMES := slots gamble defuse duel first roulette giveaway bonustickets wheel audiocommand tts channelpoints
+SUPERPENGUIN_GAMES := slots gamble defuse duel first roulette ffa heist steal giveaway bonustickets wheel audiocommand tts channelpoints
 .PHONY: $(addprefix test-superpenguin-,$(SUPERPENGUIN_GAMES)) $(addsuffix -bundle,$(addprefix build-superpenguin-,$(SUPERPENGUIN_GAMES)))
 $(addprefix test-superpenguin-,$(SUPERPENGUIN_GAMES)):
 	bash scripts/test-superpenguin-bundle.sh $(@:test-superpenguin-%=%)
