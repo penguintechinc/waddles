@@ -47,11 +47,12 @@ import, an unrelated namespace -- is rejected. Narrowing this list to
 only Rust's WASI subset (as a naive reading of `stage.wit` alone would
 suggest) would reject every legitimate Python component; do not do that.
 
-Exports are checked strictly: the component MUST export exactly
-`waddle:bundle/process-stage` and `waddle:bundle/action-stage` (the
-`stage` world's required export set), optionally also
-`waddle:bundle/streaming-lifecycle` from `stage-next-tools`. Other named
-exports remain rejected. There is one additional, narrowly-matched exception:
+Exports are checked strictly: the non-WASI export set must EXACTLY equal one of
+`ALLOWED_EXPORT_SETS` -- `process-stage`+`action-stage` (optionally +
+`streaming-lifecycle`) for chat/event bundles, `tool-provider` alone for
+`stage-tools` services, and `waddle:connector/{receiver,sender}` (optionally
++ `tool-provider`) for connectors. Any other (including mixed) export set is
+rejected. There is one additional, narrowly-matched exception:
 `componentize-py` 0.25.1
 unconditionally links an anonymous, un-namespaced reflection export
 (package `root:component`, no interface name, a single `init` function)
@@ -110,6 +111,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 WADDLE_BUNDLE_NAMESPACE = "waddle:bundle"
+#: The connector WIT package (`wit/waddle-connector/connector.wit`): the `connector` and
+#: `connector-tools` worlds import its `identity` interface and export `receiver`/`sender`.
+WADDLE_CONNECTOR_NAMESPACE = "waddle:connector"
 
 #: WASI-p2 namespaces `core/bundle_executor/src/engine.rs::build_linker` links
 #: for every component (Rust or Python built) -- see module docstring.
@@ -117,10 +121,29 @@ ALLOWED_WASI_NAMESPACES = frozenset(
     {"wasi:cli", "wasi:clocks", "wasi:filesystem", "wasi:io", "wasi:random", "wasi:sockets"}
 )
 
-#: All app worlds require both stages; stage-next-tools also exports the
-#: lifecycle hook. This optional export grants no host capabilities.
-REQUIRED_EXPORTS = frozenset({"process-stage", "action-stage"})
-OPTIONAL_EXPORTS = frozenset({"streaming-lifecycle"})
+#: Every export set a first-party/vendor component may legitimately present -- one entry per
+#: WIT world a bundle is built against, matched EXACTLY (never a superset or a subset), as the
+#: fully-qualified `namespace/interface` names:
+#:
+#:   - `stage`, `stage-next`, `stage-next-tools`: `process-stage` + `action-stage`
+#:     (+ the optional `streaming-lifecycle` hook, which grants no host capability).
+#:   - `stage-tools`, `stage-tools-webrtc` (service bundles): `tool-provider` ONLY -- a
+#:     service has no chat/event surface, so it exports neither stage.
+#:   - `connector`: `waddle:connector/{receiver,sender}`; `connector-tools` adds
+#:     `waddle:bundle/tool-provider`.
+_STAGE_EXPORTS = frozenset({"waddle:bundle/process-stage", "waddle:bundle/action-stage"})
+_STREAMING_LIFECYCLE = "waddle:bundle/streaming-lifecycle"
+_TOOL_PROVIDER = "waddle:bundle/tool-provider"
+_CONNECTOR_EXPORTS = frozenset(
+    {f"{WADDLE_CONNECTOR_NAMESPACE}/receiver", f"{WADDLE_CONNECTOR_NAMESPACE}/sender"}
+)
+ALLOWED_EXPORT_SETS: tuple[frozenset[str], ...] = (
+    _STAGE_EXPORTS,
+    _STAGE_EXPORTS | {_STREAMING_LIFECYCLE},
+    frozenset({_TOOL_PROVIDER}),
+    _CONNECTOR_EXPORTS,
+    _CONNECTOR_EXPORTS | {_TOOL_PROVIDER},
+)
 
 #: `componentize-py`'s synthetic reflection export always reports this exact
 #: package name and no interface name (see module docstring).
@@ -439,7 +462,10 @@ def _classify_world_items(
         iface_name = iface.get("name")
         qualified = f"{namespace}/{iface_name if iface_name is not None else '<anonymous>'}"
         names.append(qualified)
-        allowed = namespace == WADDLE_BUNDLE_NAMESPACE or namespace in ALLOWED_WASI_NAMESPACES
+        allowed = (
+            namespace in (WADDLE_BUNDLE_NAMESPACE, WADDLE_CONNECTOR_NAMESPACE)
+            or namespace in ALLOWED_WASI_NAMESPACES
+        )
         if (
             not allowed
             and is_export
@@ -483,16 +509,19 @@ def _validate_document(doc: dict[str, Any]) -> ComponentValidationResult:
             exports=tuple(export_names),
         )
 
-    bundle_prefix = f"{WADDLE_BUNDLE_NAMESPACE}/"
-    exported_interface_names = {
-        name.split("/", 1)[1] for name in export_names if name.startswith(bundle_prefix)
-    }
-    missing = REQUIRED_EXPORTS - exported_interface_names
-    extra = exported_interface_names - (REQUIRED_EXPORTS | OPTIONAL_EXPORTS)
-    if missing or extra:
+    exported = frozenset(
+        name
+        for name in export_names
+        if name.startswith((f"{WADDLE_BUNDLE_NAMESPACE}/", f"{WADDLE_CONNECTOR_NAMESPACE}/"))
+    )
+    if exported not in ALLOWED_EXPORT_SETS:
+        nearest = max(ALLOWED_EXPORT_SETS, key=lambda s: len(s & exported) - len(s ^ exported))
         return ComponentValidationResult(
             ok=False,
-            reason=f"stage_export_mismatch: missing={sorted(missing)} extra={sorted(extra)}",
+            reason=(
+                f"stage_export_mismatch: missing={sorted(nearest - exported)} "
+                f"extra={sorted(exported - nearest)}"
+            ),
             imports=tuple(import_names),
             exports=tuple(export_names),
         )
