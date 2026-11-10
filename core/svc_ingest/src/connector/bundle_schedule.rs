@@ -837,11 +837,11 @@ mod tests {
     }
 
     /// Real tonic `BundleScheduleService` on loopback answering with `reply`; returns a
-    /// [`HubScheduleSource`] wired (real machine-JWT bootstrap against a wiremock token endpoint)
+    /// [`HubScheduleSource`] wired (real machine-JWT bootstrap against an in-process gRPC mint)
     /// to it.
     async fn grpc_source(
         reply: Result<Vec<pb::BundleScheduleTarget>, tonic::Status>,
-    ) -> (HubScheduleSource, wiremock::MockServer) {
+    ) -> (HubScheduleSource, String) {
         use hub_client::pb::bundle_schedule_service_server::{
             BundleScheduleService, BundleScheduleServiceServer,
         };
@@ -864,12 +864,13 @@ mod tests {
                 })
             }
         }
-        let tokens = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"token": "machine.jwt.value", "expires_in": 3600}),
-            ))
-            .mount(&tokens)
+        // The machine-JWT mint is gRPC: a real in-process `ServiceAuthService`.
+        let tokens = service_auth::test_support::MockHub::builder()
+            .mint(vec![service_auth::test_support::MintReply::token(
+                "machine.jwt.value",
+                3600,
+            )])
+            .start_detached()
             .await;
         let sa = std::env::temp_dir().join(format!("svc-ingest-sched-sa-{}", uuid::Uuid::new_v4()));
         std::fs::write(&sa, "projected-sa-token").unwrap();
@@ -890,7 +891,7 @@ mod tests {
         let client = BundleScheduleClient::with_channel(
             channel,
             Arc::new(service_auth::MachineJwtClient::new(
-                format!("{}/token", tokens.uri()),
+                tokens.clone(),
                 sa.to_string_lossy().to_string(),
                 SCHEDULES_JWT_SCOPE,
             )),
