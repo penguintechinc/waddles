@@ -11,7 +11,7 @@ import json
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import (
     BootstrapRejected,
     ServiceIdentity,
@@ -42,7 +42,7 @@ PASSWORD = "Sup3r|Secret-pw"
 @pytest.fixture
 def service_issuer() -> ServiceJwtIssuer:
     """An issuer for an identity holding ONLY the two gameserver-scoped machine scopes."""
-    private = Ed25519PrivateKey.generate()
+    private = ec.generate_private_key(ec.SECP256R1())
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
     identity = ServiceIdentity(
         service_id=SID,
