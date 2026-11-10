@@ -1,9 +1,8 @@
 name: Build svc-ingest
 
-# Publishes the Rust data-plane svc-ingest image (`svc-ingest-rust`) built
-# from `core/svc_ingest/Dockerfile.rust`. Named `-rust` to avoid colliding
-# with the still-deployed Python alpha image (`svc-ingest`, built from the
-# sibling `Dockerfile`) while both coexist -- see
+# Publishes the Rust data-plane svc-ingest image (`svc-ingest`) built
+# from `core/svc_ingest/Dockerfile.rust`. The legacy Python image
+# of the same name is no longer deployed or built -- see
 # k8s/helm/waddlebot/values.yaml rustDataPlane.svcIngest.imageRepository.
 #
 # Self-contained (does not call build-container.yml): that reusable
@@ -65,7 +64,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  MODULE_NAME: svc-ingest-rust
+  MODULE_NAME: svc-ingest
   MODULE_PATH: core/svc_ingest
   BUILD_CONTEXT: core
   # TEMPORARY amd64-only (user-approved 2026-10-03). Re-enable arm64 near
