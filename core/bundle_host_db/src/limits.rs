@@ -54,6 +54,35 @@ pub const STATEMENT_TIMEOUT_MS: u64 = 2_000;
 /// outer deadline before Postgres's own timeout would have fired first.
 pub const CALL_DEADLINE: Duration = Duration::from_secs(5);
 
+/// `db` v2 -- most tables one bundle may declare (each costs a physical table
+/// per bundle, so the count is bounded at approval time and again here).
+pub const MAX_TABLES_PER_BUNDLE: usize = 8;
+
+/// `db` v2 -- most `AND`ed conditions in one filter (query-complexity limit).
+pub const MAX_FILTER_CONDITIONS: usize = 8;
+
+/// `db` v2 -- most values in one `IN` list (query-complexity limit).
+pub const MAX_IN_LIST: usize = 64;
+
+/// `db` v2 -- longest `prefix` operand, in bytes.
+pub const MAX_PREFIX_BYTES: usize = 256;
+
+/// `db` v2 -- most operations in one `transact` batch. A transaction holds the
+/// scope's writer lock for its whole duration, so it is deliberately short.
+pub const MAX_TX_OPS: usize = 16;
+
+/// `db` v2 -- longest opaque pagination cursor accepted, in bytes.
+pub const MAX_CURSOR_BYTES: usize = 1024;
+
+/// `db` v2 quota -- most live rows one bundle may hold per `(tenant,
+/// community)` across ALL of its tables.
+pub const MAX_ROWS_PER_BUNDLE_COMMUNITY: i64 = 100_000;
+
+/// `db` v2 quota -- most bytes one bundle may hold per `(tenant, community)`
+/// across ALL of its tables, measured as the sum of Postgres' own
+/// `pg_column_size(row)` (heap tuple size; index overhead is not counted).
+pub const MAX_BYTES_PER_BUNDLE_COMMUNITY: i64 = 64 * 1024 * 1024;
+
 #[cfg(test)]
 mod tests {
     use super::*;

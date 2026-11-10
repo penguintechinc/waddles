@@ -334,7 +334,7 @@ describe('AdminModules marketplace tab', () => {
     expect(marketplaceApi.browseModules).toHaveBeenCalledWith('7', { search: '', category: '', page: 1, limit: 12 });
     expect(screen.getByText('Free Thing')).toBeInTheDocument();
     expect(screen.getByText('v1.0')).toBeInTheDocument();
-    expect(screen.getByText('by ann')).toBeInTheDocument();
+    expect(screen.getAllByTestId('author-name')[0]).toHaveTextContent('ann');
     expect(screen.getByAltText('Once Thing')).toHaveAttribute('src', 'https://img/x.png');
     expect(screen.getByText('Core Module')).toBeInTheDocument();
   });

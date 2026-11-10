@@ -302,7 +302,7 @@ mod tests {
             "--hub-api-grpc-endpoint",
             &format!("http://{addr}"),
             "--service-jwt-token-endpoint",
-            &format!("http://{addr}/internal/service-token"),
+            &format!("http://{addr}"),
         ]))
         .await
         {
@@ -351,7 +351,7 @@ mod tests {
                 "--hub-api-grpc-endpoint",
                 &format!("http://{addr}"),
                 "--service-jwt-token-endpoint",
-                &format!("http://{addr}/internal/service-token"),
+                &format!("http://{addr}"),
             ]),
         )
         .await

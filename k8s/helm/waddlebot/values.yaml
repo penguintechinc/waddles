@@ -172,6 +172,161 @@ global:
   # global.valkeyTls.ca.crt=... --set-file global.valkeyTls.tls.crt=...
   # --set-file global.valkeyTls.tls.key=...` (or an out-of-git values override /
   # ExternalSecrets/SealedSecrets) before infrastructure.redis.tls.enabled=true.
+  # feature/transit-tls-core -- in-cluster transit TLS for Postgres (F1) and the SeaweedFS S3 gateway (F5).
+  # One chart-owned ECDSA P-256 / SHA-256 CA signs a server leaf for each; clients mount ONLY the CA and
+  # verify (Postgres sslmode=verify-full, S3 https with the CA pinned, system roots disabled). See
+  # templates/_transit_data_tls.tpl for the design, templates/transit-tls-secret.yaml for the provisioning policy.
+  # alpha/local self-generate (lookup-keep); beta/gamma/production REQUIRE material below (never a literal in git)
+  # or externalSecret: true. There is NO plaintext toggle: Postgres and SeaweedFS are TLS-only whenever enabled.
+  # Negotiation: TLS 1.3 preferred / 1.2 minimum, ECDSA P-256, P-256 key exchange, AES-128-GCM or ChaCha20-Poly1305,
+  # session resumption on, pooled keep-alive clients. Customers wanting stronger protection can additionally enable
+  # CNI encryption (e.g. Cilium WireGuard) -- see docs/transit-encryption.md.
+  transitTls:
+    # DEDICATED trust root: when certManager.enabled (dal2alpha/beta/gamma/production) the chart renders a SelfSigned Issuer ->
+    # root CA Certificate -> namespaced CA Issuer, all in the release namespace, and the Postgres, SeaweedFS S3 and Valkey server
+    # certs come from it (FQDN-only SANs, no wildcard). Data-store clients trust ONLY that root, so nothing signed by the
+    # cluster-wide waddlebot-internal-ca (host-API/gRPC/hub-api trust domain) is accepted for a data store. Requires cert-manager
+    # (with the NameConstraints feature gate). enabled=false (local / values-alpha) self-generates the chart-owned CA below.
+    certManager:
+      enabled: false
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
+      duration: "2160h"    # 90d
+      renewBefore: "360h"  # 15d
+    # Static dev/interim CA + identity cert, used when certManager.enabled=false (the
+    # default). OVERRIDE REQUIRED for beta/gamma/production -- NEVER a literal cert/key in
+    # git; populate via --set-file or an out-of-git values override / ExternalSecret.
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+
+  # e2e-helm-rust-dataplane -- mTLS material for the bundle-executor<->stage host-API wire
+  # protocol (core/bundle_executor dialing svc-action's/svc-process's HOST_API_PORT, spec
+  # docs/superpowers/specs/2026-09-14-rust-data-plane-design.md SS6.6). Mirrors global.grpcTls's
+  # two-path shape (static Secret vs cert-manager) but is its OWN CA/cert -- a different wire
+  # protocol on a different port, never conflated with the gRPC identity above.
+  #
+  # UNLIKE global.grpcTls, there is NO insecureDev/plaintext escape hatch here: the Rust
+  # host-API server (core/svc_action/src/host_api.rs build_server_config) and client
+  # (core/bundle_executor/src/tls.rs build_client_config) both fail closed without real
+  # cert/key/CA material -- mTLS is mandatory, not optional, per spec SS6.6 "Both peers
+  # present certificates". A missing/empty Secret here means the executor<->stage host-API
+  # link simply never establishes (svc-action's host-api listener logs a warning and keeps
+  # its HTTP/metrics servers up regardless -- see try_start_host_api's graceful-degradation
+  # comment -- and bundle-executor retries the dial forever with capped exponential backoff,
+  # so neither pod crashloops); only the executor-invoked-bundle path stays inert.
+  #
+  # fix/alpha-host-api-tls -- templates/host-api-tls-secret.yaml now guarantees the
+  # <fullname>-host-api-tls Secret exists (kept, explicitly supplied, generated alpha/local,
+  # or the whole release fails to render) whenever pipeline.rustDataPlane.enabled is true,
+  # exactly mirroring global.valkeyTls's self-provisioning policy -- alpha/local no longer
+  # need real PEM material supplied out of band. beta/gamma/production still REQUIRE real
+  # material (--set-file global.hostApiTls.ca.crt=... --set-file global.hostApiTls.tls.crt=...
+  # --set-file global.hostApiTls.tls.key=...), cert-manager (certManager.enabled=true), or
+  # externalSecret: true delegating to an out-of-band controller -- auto-generation is
+  # alpha/local only, fails closed otherwise.
+  hostApiTls:
+    certManager:
+      enabled: false
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
+      duration: "2160h"    # 90d
+      renewBefore: "360h"  # 15d
+    # Static dev/interim CA + identity cert, used when certManager.enabled=false (the
+    # default). NEVER a literal cert/key in git in any environment; populate via
+    # --set-file or an out-of-git values override / ExternalSecret.
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+    # fix/alpha-host-api-tls -- true delegates provisioning of the <fullname>-host-api-tls
+    # Secret to an out-of-band ExternalSecret/SealedSecret controller instead of failing the
+    # render on beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated
+    # instead, see templates/host-api-tls-secret.yaml).
+    externalSecret: false
+    # fix/chart-host-api-stage-identity -- core/bundle_executor/src/config.rs requires
+    # HOST_API_STAGE_IDENTITY (the stage cert's pinned CN/URI SAN, see
+    # waddlebot.hostApiStageIdentity in _helpers.tpl). Left empty, the chart derives this
+    # itself ONLY when it also mints the cert (alpha/local genSignedCert path, or
+    # certManager.enabled=true). When ca.crt/tls.crt/tls.key are supplied directly, or
+    # externalSecret is true, the chart has no visibility into that cert's actual identity --
+    # set this explicitly to the matching CN/URI SAN, or the render fails closed.
+    stageIdentity: ""
+
+  # fix/hub-grpc-tls-and-ca-trust (PR #570 review blockers 1/2) -- TLS material for
+  # hub-api's internal gRPC listener (hub_api/grpc_internal/server.py, mandatory TLS, no
+  # insecureDev escape hatch). SEPARATE from global.grpcTls (the core-data/core-identity/
+  # interactive-productivity/action-serverless identity) -- hub-api needs its own
+  # alpha/local auto-generate fallback (templates/hub-api-grpc-tls-secret.yaml), which
+  # global.grpcTls's static-only Secret doesn't have. Also the CA core/hub_client::
+  # HubClient::connect trusts via HUB_API_GRPC_CA_FILE (svc-process-rust/svc-action-rust).
+  # NEVER a literal cert/key in git in any environment; populate via --set-file or an
+  # out-of-git values override / ExternalSecret.
+  hubApiGrpcTls:
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+    # true delegates provisioning of the <fullname>-hub-api-grpc-tls Secret to an
+    # out-of-band ExternalSecret/SealedSecret controller instead of failing the render on
+    # beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated instead).
+    externalSecret: false
+
+  # fix/valkey-tls-alpha -- TLS material for the Valkey (infra-redis) cache/streams
+  # listener. `penguin_spine::SpineConfig::validate()` (core/svc_process, core/svc_action,
+  # core/svc_ingest) fails closed when SECURITY_TRANSPORT_TLS=true (the default -- never
+  # weakened to false here, see infrastructure.redis.tls's own comment) and VALKEY_URL is
+  # not rediss://valkeys://. This is SERVER-AUTH-ONLY TLS (redis-rs `TlsCertificates {
+  # client_tls: None, root_cert: Some(ca_pem) }`, per core/svc_action/src/usage.rs and
+  # penguin-spine's own client.rs) -- client pods need only the CA to verify the server,
+  # never their own cert/key, so only global.valkeyTls.ca.crt is mounted into the 3 Rust
+  # data-plane pods (see templates/_helpers.tpl waddlebot.valkeyTlsCaVolume); tls.crt/
+  # tls.key are the Valkey server's own identity, mounted only into templates/
+  # infrastructure/redis.yaml. Static dev/interim CA + identity cert; NEVER a literal
+  # cert/key in git in any environment -- populate via `helm upgrade --set-file
+  # global.valkeyTls.ca.crt=... --set-file global.valkeyTls.tls.crt=...
+  # --set-file global.valkeyTls.tls.key=...` (or an out-of-git values override /
+  # ExternalSecrets/SealedSecrets) before infrastructure.redis.tls.enabled=true.
+  # feature/transit-tls-core -- in-cluster transit TLS for Postgres (F1) and the SeaweedFS S3 gateway (F5).
+  # One chart-owned ECDSA P-256 / SHA-256 CA signs a server leaf for each; clients mount ONLY the CA and
+  # verify (Postgres sslmode=verify-full, S3 https with the CA pinned, system roots disabled). See
+  # templates/_transit_data_tls.tpl for the design, templates/transit-tls-secret.yaml for the provisioning policy.
+  # alpha/local self-generate (lookup-keep); beta/gamma/production REQUIRE material below (never a literal in git)
+  # or externalSecret: true. There is NO plaintext toggle: Postgres and SeaweedFS are TLS-only whenever enabled.
+  # Negotiation: TLS 1.3 preferred / 1.2 minimum, ECDSA P-256, P-256 key exchange, AES-128-GCM or ChaCha20-Poly1305,
+  # session resumption on, pooled keep-alive clients. Customers wanting stronger protection can additionally enable
+  # CNI encryption (e.g. Cilium WireGuard) -- see docs/transit-encryption.md.
+  transitTls:
+    # ONE trust root: when certManager.enabled (dal2alpha/beta/gamma/production) the Postgres, SeaweedFS S3 AND Valkey
+    # server certs are all issued by this ClusterIssuer (the same `waddlebot-internal-ca` the host-API/gRPC mTLS and the
+    # hub-api HTTPS certs use; k8s/dal2alpha/internal-ca.yaml) with FQDN-only SANs (its nameConstraints permit nothing else)
+    # and every client mounts that one CA. enabled=false (local / values-alpha) self-generates the chart-owned CA below.
+    # issuerName is shared with global.internalTransitTls.certManager.issuerName (hub-api HTTPS): if that block exists and
+    # sets an issuerName it wins, so there is a single place to repoint the trust root.
+    certManager:
+      enabled: false
+      duration: "2160h"    # 90d leaf
+      renewBefore: "360h"  # 15d
+      # Dedicated root CA (<release>-transit-ca, self-signed, release namespace only); the namespaced Issuer
+      # <release>-transit signs the leaves, so no other namespace can mint data-store certs.
+      caDuration: "8760h"      # 1y
+      caRenewBefore: "1440h"   # 60d
+    ca:
+      crt: ""
+    postgres:
+      tls:
+        crt: ""
+        key: ""
+    seaweedfs:
+      tls:
+        crt: ""
+        key: ""
+    externalSecret: false
+
   valkeyTls:
     ca:
       crt: ""
@@ -1528,6 +1683,9 @@ pipeline:
     # `disable-pii-detokenization` kill-switches in any environment where this isn't
     # resolved yet, rather than deploying straight into a crash-loop.
     hubApiGrpcEndpoint: ""
+    # Machine-JWT bootstrap (ServiceAuthService.MintServiceToken) is gRPC: this is hub-api's
+    # internal gRPC address, the same one as hubApiGrpcEndpoint (default: hub-api's in-cluster
+    # Service on pipeline.hubApi.grpcPort; TLS 1.3, CA pinned via HUB_API_GRPC_CA_FILE).
     serviceJwtTokenEndpoint: ""
 
     svcIngest:
@@ -3329,7 +3487,7 @@ spire:
     upstreamRoot:
       enabled: false
 
-# Per-service EdDSA machine JWTs (feature/eddsa-machine-jwt) -- replaces
+# Per-service ES256 (ECDSA P-256 / SHA-256) machine JWTs -- replaces
 # the platform-wide HS256 shared SECRET_KEY / static API keys for
 # service-to-service calls, starting with the new internal PII endpoints.
 # SPIFFE-ready by design (see libs/flask_core/flask_core/service_jwt.py
@@ -3344,6 +3502,11 @@ serviceJwt:
   # Safe to commit -- these are public keys. Populated by the "Public key"
   # line `make generate-service-jwt-key` prints after each rotation.
   publicKeys: {}
+  # ES256 cut-over rollout window: when true, verifiers (hub-api, egress-proxy,
+  # svc-presentation, Python flask_core verifiers) ALSO accept legacy EdDSA tokens/keys
+  # (env SERVICE_JWT_ACCEPT_LEGACY_EDDSA). Issuance is ES256 only regardless. Default false
+  # (ES256 only) -- enable only for a bounded rollout window, then set back to false.
+  acceptLegacyEddsa: false
   audience: waddlebot-internal
   # Audience the bootstrap ServiceAccount token projection (below) must
   # request -- hub-api's TokenReview call rejects any other audience.
@@ -3447,6 +3610,12 @@ serviceJwt:
         # to this identity alone and, like the grant above, only rendered while
         # pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled is true.
         - "dataplane:resolve-scope"
+        # feature/hubapi-slash-command-registry -- the Discord connector (svc-ingest) reconciles slash
+        # commands from hub-api's desired-state API (app-commands/sources + /desired), and the ingest
+        # router reads/writes the user's active community (active-context). Two scopes (least
+        # privilege: desired state is read-only, context is read-write), ids/UUIDs only, no secret.
+        - "dataplane:app-commands"
+        - "dataplane:active-context"
         # feature/hubapi-platform-user-and-binding-meta -- the ONE detokenization point: the
         # outbound executor (Discord dm.send / role.add / role.remove) resolves a tokenized
         # user UUID to the raw platform user id through IdentityService.ResolvePlatformUser
@@ -3457,7 +3626,7 @@ serviceJwt:
   # secret distributed to callers. Reusable via the
   # `waddlebot.serviceJwtBootstrapVolume` named template
   # (templates/_service_jwt.tpl) -- add its volume/volumeMount output to
-  # any deployment that calls hub-api's /internal/service-token endpoint.
+  # any deployment that mints machine JWTs from hub-api's gRPC ServiceAuthService.
   bootstrapTokenProjection:
     expirationSeconds: 3600
     path: service-jwt-bootstrap-token
@@ -3471,7 +3640,7 @@ serviceJwt:
 # out-of-band controller owns this Secret name and will populate it before the
 # consuming workload starts) or the Secret was pre-created by an operator. See
 # templates/auto-provisioned-secrets.yaml (symmetric keys, pure Helm template) and
-# templates/auto-provisioned-keys-job.yaml (Ed25519 keys, needs openssl -- Sprig/Helm
+# templates/auto-provisioned-keys-job.yaml (Ed25519/P-256 keys, needs openssl -- Sprig/Helm
 # has no Ed25519-pubkey-from-privkey primitive) + chart README "Self-provisioned
 # platform keys" section.
 autoProvisionedKeys:
@@ -3505,7 +3674,7 @@ autoProvisionedKeys:
     publicKeyConfigMapName: ""  # default: "<fullname>-bundle-signing-public" when empty
     keyId: "waddlebot-1"
     externalSecret: false
-  # feature/eddsa-machine-jwt (PR #438) -- per-service EdDSA machine-JWT signing key.
+  # PR #438 -- per-service ES256 (ECDSA P-256) machine-JWT signing key.
   # Private half: SERVICE_JWT_PRIVATE_KEY_<kid>/SERVICE_JWT_ACTIVE_KID in secretName
   # (hub-api only, the sole issuer). Public half: published to
   # publicKeyConfigMapName for hub-api's own verification path and any other service

@@ -53,6 +53,8 @@ COPY bundle_host_db ./bundle_host_db
 COPY bundle_host_reputation ./bundle_host_reputation
 COPY bundle_host_economy ./bundle_host_economy
 COPY bundle_host_http ./bundle_host_http
+COPY bundle_host_credentials ./bundle_host_credentials
+COPY connection_resolver ./connection_resolver
 COPY bundle_host_media ./bundle_host_media
 COPY bundle_host_platform_table ./bundle_host_platform_table
 COPY bundle_host_storage ./bundle_host_storage

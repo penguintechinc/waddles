@@ -167,6 +167,11 @@ class TestNoSecretIsEverSelectedForAdminReads:
             scrubbed = re.sub(
                 r"platform_connections\.refresh_token IS NOT NULL AS has_refresh_token", "", sql
             )
+            scrubbed = re.sub(
+                r"platform_connections\.sealed_api_credential IS NOT NULL AS has_api_credential",
+                "",
+                scrubbed,
+            )
             assert "access_token" not in scrubbed, sql
             assert "refresh_token" not in scrubbed, sql
             assert "sealed_secret" not in scrubbed, sql

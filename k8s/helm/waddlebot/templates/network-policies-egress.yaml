@@ -276,8 +276,8 @@ spec:
 {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
 # feature/edge-reshape-chunk2-twitch-inbound -- hub-api HTTP egress for svc-ingest-rust ONLY.
 # hub-api's HTTP port carries the internal provider-connections routes (list bindings /
-# resolve token) and /internal/service-token used by svc-ingest's per-community Twitch
-# sessions. Deliberately NOT part of dataplane-egress-deny (which selects every dataplane
+# resolve token) used by svc-ingest's per-community Twitch sessions (the machine-JWT mint
+# itself is gRPC now, on hub-api's gRPC port). Deliberately NOT part of dataplane-egress-deny (which selects every dataplane
 # component): granting it there would hand hub-api HTTP to every dataplane pod. Cilium
 # unions allows across CNPs selecting the same endpoint, so this adds to that baseline.
 # svc-action has its OWN sibling policy below -- never widen this one.
@@ -306,7 +306,7 @@ spec:
 ---
 {{- if or .Values.pipeline.rustDataPlane.svcAction.dynamicConnections.enabled (include "waddlebot.svcActionOverlayPush" .) }}
 # hub-api HTTP egress for svc-action ONLY: its per-send community credential resolution
-# (connections:resolve via /internal/service-token + the provider-connections routes) calls
+# (the provider-connections routes; its connections:resolve token is minted over gRPC) calls
 # hub-api's HTTP port. Own policy, not dataplane-wide -- see the svc-ingest policy above.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy

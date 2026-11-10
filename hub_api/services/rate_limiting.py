@@ -51,13 +51,8 @@ from services.current_user import get_optional_current_user_id
 _AUTH_TIER_PREFIXES: tuple[str, ...] = (
     "/api/v1/auth/",
     "/api/v1/user/passkey/",
-    # Machine-JWT bootstrap (flask_core.service_jwt, security review LOW
-    # finding) -- every call presents a ServiceAccount token and asks for a
-    # signed credential back, the same brute-force-sensitive shape as the
-    # user auth/passkey endpoints above; the loose standard tier would let
-    # a compromised/misbehaving caller hammer the TokenReview API and
-    # hub-api's signing path far harder than any legitimate service needs.
-    "/internal/service-token",
+    # (The machine-JWT bootstrap is gRPC now; its per-peer rate limit lives in
+    # grpc_internal/interceptors.py::RateLimitInterceptor, keyed by peer host.)
 )
 
 #: K8s liveness/readiness probes -- never rate limited, or a busy cluster

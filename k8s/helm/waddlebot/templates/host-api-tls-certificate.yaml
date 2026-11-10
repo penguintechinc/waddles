@@ -32,6 +32,7 @@ spec:
   # genSignedCert path uses, so the cert-manager and alpha/local-generate provisioning
   # paths can never drift apart on SANs either.
   dnsNames:
+    {{- include "waddlebot.assertNoWildcardSan" (dict "what" "global.hostApiTls (host-api-tls Certificate)" "names" (include "waddlebot.hostApiTlsDesiredDnsNames" . | splitList ",")) }}
     {{- range include "waddlebot.hostApiTlsDesiredDnsNames" . | splitList "," }}
     - {{ . | quote }}
     {{- end }}

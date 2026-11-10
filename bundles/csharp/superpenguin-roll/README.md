@@ -40,15 +40,20 @@ viewer> !roll
 `RollLogic.cs`; `!roll` here is distinct from the first-party Python `!roll NdM` bundle -- see
 "Feature flag".)
 
-## Permissions (V2 structured)
+## Economy and permissions (world `stage-next-tools`)
 
-`permissions: []` in `bundle.yaml` -- **none requested**:
+Stakes and pays through the host `economy.wager` (one atomic call per roll), names the player with the host
+`{user:uuid}` placeholder, reads the community currency alias via the economy service's `points_view` tool.
+`!roll [stake|all]` (default stake 10); doubles pay Snake eyes 2x, Hard four 3x, Hard six 4x, Hard eight 6x, Hard ten 8x,
+Boxcars 10x (expected return 33/36 of the stake). Deviation from the original (fixed prizes, no stake) is documented in `RollLogic.cs`.
 
-| Capability | Why not needed |
+| Permission | Why |
 |---|---|
-| `storage.kv` | The cooldown uses the host `kv` capability (via `CooldownGuard`), which degrades gracefully when denied (see "kv availability"); no extra grant is declared. |
-| `db` | Stateless apart from the cooldown (`data.tables: []`). |
-| egress | `egress: []`; the reply goes out over the `relay` host import to the event's own origin platform. |
+| `storage.kv` | per-user cooldown (180 s, per command) + per-event outcome record (idempotent redelivery) |
+| `economy.wager` (`max_bet: 500`) | `wager` and `max-bet` |
+| `identity.resolve` | actor -> community user uuid |
+| `tool.call:waddles.core.service.economy:points_view` | currency alias for display |
+| `chat.send:twitch` / `chat.send:discord` | relay the reply |
 
 ## Platforms
 
@@ -84,13 +89,10 @@ relayed separately (`the_relayed_message_carries_only_the_channel_and_reply_text
 | `superpenguin-roll.csproj` / `nuget.config` / `Dockerfile` | Build (mirrors `bundles/csharp/csping`) |
 | `tests/` | xUnit tests for `RollLogic`/`RollDispatch`, on the host CLR (see that project's own header comment for why it isn't a `ProjectReference` to the bundle itself) |
 
-## kv availability
+## kv
 
-The host `kv` capability is currently hardcoded to deny every call in
-svc-process/svc-action (see `sdk/waddle-sdk-cs/README.md` "kv/db
-availability"). This bundle's cooldown check degrades gracefully in that
-case -- `!roll`/`!dice` still work, just without cooldown enforcement until
-the real `kv` backend lands.
+`kv` is live on the host (dedicated Valkey; needs `storage.kv`). Keys use `.` separators and hashed ids (the host rejects `:`).
+A `kv` failure is NOT swallowed: a money game without a working cooldown/outcome record fails loud. See `docs/sdk-cs.md`.
 
 ## Build
 
@@ -141,23 +143,17 @@ from the unrelated first-party `bundles/python/roll` bundle's
 
 ## Activation (intentionally NOT in `bundles/core-bundles.yaml`)
 
-This is third-party-attributed content (`provider: thirdparty`,
-`app_id: waddles.integrations.superpenguin.roll`), not a
-`waddles.core.*` bundle -- `hub_api/cli/seed_core_bundles.py`'s
-`_guard_core_namespace` HARD-refuses (non-zero exit) any catalog entry
-outside `services.vendor_bundle_authz.CORE_NAMESPACE_PREFIX`
-("waddles.core."), by deliberate design: "vendor bundles must never be
-seedable, no matter what a (compromised or mistaken) catalog file says"
-(that module's own docstring, Justin's 2026-09-27 vendor-separation ruling --
-a vendor SUBMITS, only a GLOBAL ADMIN APPROVES). Adding this `app_id` to
-`bundles/core-bundles.yaml` would either break the core-bundle-seeder Job
-outright or require weakening that guard -- neither is acceptable.
+Third-party-attributed (`provider: thirdparty`, `waddles.integrations.*`), so `hub_api/cli/seed_core_bundles.py`'s
+`_guard_core_namespace` refuses it by design (vendor-separation ruling). It must be published through the vendor path
+(`POST /apps/{app_id}/versions`, then admin approve) -- BUT that path's `bundle_component_validator.py` currently requires
+exactly `process-stage` + `action-stage` exports and rejects the `streaming-lifecycle` export every `stage-next*` world carries
+(`stage_export_mismatch`). Until S0 relaxes the validator (see `docs/sdk-cs.md` "Needs from S0") the 1.1.0 component is
+built and executor-verified (`make test-superpenguin-roll-e2e`) but not installable through the vendor pipeline.
 
-Until a dedicated third-party/vendor-content activation path exists, publish
-and activate this bundle the same way any vendor submission is onboarded:
-`POST /apps/{app_id}/versions` (the standard `bundle_version_service.py` /
-`bundle_component_validator.py` pipeline this bundle's component already
-passes) followed by a `platform:admin`-scoped
-`POST /apps/{app_id}/versions/{version}/approve`. No Helm hook currently
-automates this for `waddles.integrations.*` bundles -- tracked as follow-up
-work, not done here.
+## App/service boundary (2026-11-07)
+
+This port remains C#. Game rules, wagering, and maximum-bet handling belong
+to the app; atomic ledger settlement uses the app's granted host primitive.
+The shared economy service is unchanged. Shared balance/credit/debit operations,
+where used, invoke its existing tools via the C# SDK; no private ledger is created.
+See `docs/superpenguin-port-inventory.md` for the port decisions and remaining work.

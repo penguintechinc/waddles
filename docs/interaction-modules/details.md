@@ -12,7 +12,7 @@ All action modules are deployed as individual Docker containers with Flask/Quart
 
 ## Action Modules (Interactive)
 
-### AI Interaction Module (`action/interactive/ai_interaction_module_flask/`)
+### AI Interaction Module (`action/interactive/ai_interaction_module/`)
 
 **Purpose**: AI-powered chat responses with multi-provider support (Ollama, OpenAI, MCP)
 
@@ -51,7 +51,7 @@ EVENT_RESPONSE_TYPES=subscription,follow,donation
 
 ---
 
-### Alias Interaction Module (`action/interactive/alias_interaction_module_flask/`)
+### Alias Interaction Module (`action/interactive/alias_interaction_module/`)
 
 **Purpose**: Linux-style alias system for custom commands with variable substitution
 

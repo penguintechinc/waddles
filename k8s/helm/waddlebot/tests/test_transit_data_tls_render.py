@@ -1,0 +1,397 @@
+"""Helm-template assertions for in-cluster transit TLS (feature/transit-tls-core: F1 Postgres, F2 cache Valkey, F5 S3, F8 CA).
+
+Pins, per environment values file (alpha + dal2alpha are the deployable ones; every tier is rendered with
+global.deploymentTier=alpha so the self-generated CA material renders):
+  * the transit CA + both server leaves are ECDSA P-256 / ecdsa-with-SHA256, chain-verify, and carry the FQDN SAN;
+  * Postgres serves TLS only (ssl=on + a hostnossl-reject pg_hba) and every DB client dials the FQDN with
+    PGSSLMODE=verify-full + a pinned PGSSLROOTCERT that is actually mounted;
+  * the cache Valkey has no plaintext listener/Service port and every REDIS_URL/VALKEY_URL is rediss:// with the CA pinned;
+  * every S3 client endpoint is https:// with the CA mounted; no plaintext S3/Postgres/cache URL survives anywhere.
+Zero rendered documents / zero matching clients is a hard failure (a gate that cannot fail is not a gate).
+"""
+
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+import pytest
+import yaml
+
+_CHART = Path(__file__).resolve().parent.parent
+_ENVS = (
+    "values-alpha.yaml",
+    "values-dal2alpha.yaml",
+    "values-beta.yaml",
+    "values-gamma.yaml",
+    "values-production.yaml",
+)
+_CA_PATH = "/etc/waddles/transit-ca/ca.crt"
+_WORKLOAD_KINDS = ("Deployment", "StatefulSet", "Job", "CronJob")
+
+
+_STATIC = ("global.transitTls.certManager.enabled=false",)  # force the self-generated-CA fallback
+_CM_ENVS = ("values-dal2alpha.yaml", "values-beta.yaml", "values-gamma.yaml", "values-production.yaml")
+
+
+def _docs(values, extra=()):
+    """Render the chart for one values file and return the parsed documents."""
+    args = [
+        "helm", "template", "w", str(_CHART), "--kube-version", "1.30.0",
+        "--values", str(_CHART / values), "--set", "global.deploymentTier=alpha",
+    ]
+    for kv in extra:
+        args += ["--set", kv]
+    r = subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603
+    assert r.returncode == 0, r.stderr
+    docs = [d for d in yaml.safe_load_all(r.stdout) if d]
+    assert docs, "helm template rendered zero documents"
+    return docs
+
+
+def _svc(docs, selector_name):
+    """Return the Service whose selector targets app.kubernetes.io/name=<selector_name>."""
+    hits = [d for d in docs if d["kind"] == "Service" and d["spec"].get("selector", {}).get("app.kubernetes.io/name") == selector_name]
+    assert len(hits) == 1, (selector_name, len(hits))
+    return hits[0]
+
+
+def _fqdn(docs, selector_name):
+    svc = _svc(docs, selector_name)
+    return f'{svc["metadata"]["name"]}.{svc["metadata"]["namespace"]}.svc.cluster.local'
+
+
+def _secrets_doc(docs):
+    hits = [d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-secrets") and "REDIS_URL" in d.get("stringData", {})]
+    assert len(hits) == 1
+    return hits[0]
+
+
+def _pod_spec(doc):
+    if doc["kind"] == "CronJob":
+        return doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    return doc["spec"]["template"]["spec"]
+
+
+def _containers(docs):
+    """Yield (workload-name, container, pod-spec) for every container incl. init containers."""
+    n = 0
+    for d in docs:
+        if d["kind"] not in _WORKLOAD_KINDS:
+            continue
+        spec = _pod_spec(d)
+        for c in spec.get("containers", []) + spec.get("initContainers", []):
+            n += 1
+            yield d["metadata"]["name"], c, spec
+    assert n, "no workload containers rendered"
+
+
+def _env(c):
+    return {e["name"]: e for e in c.get("env", [])}
+
+
+def _mounts_ca(c, spec):
+    mounts = {m["name"]: m for m in c.get("volumeMounts", [])}
+    vols = {v["name"]: v for v in spec.get("volumes", [])}
+    return (
+        "transit-ca" in mounts
+        and mounts["transit-ca"]["mountPath"] == "/etc/waddles/transit-ca"
+        and vols.get("transit-ca", {}).get("secret", {}).get("items") in (
+            [{"key": "ca.crt", "path": "ca.crt"}],  # self-generated CA Secret
+            [{"key": "tls.crt", "path": "ca.crt"}],  # dedicated cert-manager root: only the certificate is projected, never its key
+        )
+    )
+
+
+def _openssl_text(pem: str) -> str:
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "c.pem"
+        p.write_text(pem)
+        return subprocess.run(  # noqa: S603
+            ["openssl", "x509", "-in", str(p), "-noout", "-text"],  # noqa: S607
+            capture_output=True, text=True, check=True,
+        ).stdout
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_transit_secret_is_ecdsa_p256_sha256_and_chains(values):
+    """Self-generated fallback CA (cert-manager off): every env is forced static here."""
+    docs = _docs(values, _STATIC)
+    secs = [d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls")]
+    assert len(secs) == 1, "exactly one transit-tls Secret expected"
+    data = secs[0]["stringData"]
+    assert sorted(data) == ["ca.crt", "postgres.crt", "postgres.key", "seaweedfs.crt", "seaweedfs.key"]
+    ec_marker = "BEGIN EC " + "PRIVATE" + " KEY"  # split so secret scanners do not flag the test source
+    assert ec_marker in data["postgres.key"] and ec_marker in data["seaweedfs.key"]
+    assert "".join(data.values()).count(ec_marker) == 2, "only the two server keys may be stored (never the CA key)"
+    ca_txt = _openssl_text(data["ca.crt"])
+    assert "CA:TRUE" in ca_txt and "ecdsa-with-SHA256" in ca_txt and "prime256v1" in ca_txt
+    for leaf, fqdn in (("postgres.crt", _fqdn(docs, "postgres")), ("seaweedfs.crt", _fqdn(docs, "seaweedfs"))):
+        txt = _openssl_text(data[leaf])
+        assert "ecdsa-with-SHA256" in txt and "prime256v1" in txt, leaf
+        assert f"DNS:{fqdn}" in txt, (leaf, txt)
+        assert "TLS Web Server Authentication" in txt
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "ca.pem").write_text(data["ca.crt"])
+            (Path(d) / "leaf.pem").write_text(data[leaf])
+            r = subprocess.run(  # noqa: S603
+                ["openssl", "verify", "-CAfile", str(Path(d) / "ca.pem"), str(Path(d) / "leaf.pem")],  # noqa: S607
+                capture_output=True, text=True, check=False,
+            )
+            assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_secret_is_a_pre_hook_so_migration_hooks_can_mount_it(values):
+    sec = next(d for d in _docs(values, _STATIC) if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls"))
+    ann = sec["metadata"]["annotations"]
+    assert ann["helm.sh/hook"] == "pre-install,pre-upgrade"
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_postgres_is_tls_only(values):
+    docs = _docs(values)
+    dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "postgres")
+    args = dep["spec"]["template"]["spec"]["containers"][0]["args"]
+    for want in ("ssl=on", "ssl_cert_file=/etc/postgres-tls/tls.crt", "ssl_key_file=/etc/postgres-tls/tls.key",
+                 "ssl_min_protocol_version=TLSv1.2", "hba_file=/etc/postgres-hba/pg_hba.conf"):
+        assert want in args, want
+    hba = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "postgres-hba")
+    lines = [ln.split() for ln in hba["data"]["pg_hba.conf"].splitlines() if ln.strip()]
+    tcp = [ln for ln in lines if ln[0] != "local"]
+    assert tcp, "no TCP pg_hba rules"
+    assert all(ln[0] in ("hostssl", "hostnossl") for ln in tcp), "a plain `host` rule would accept plaintext"
+    assert all(ln[-1] == "reject" for ln in tcp if ln[0] == "hostnossl")
+    assert not any(ln[0] == "host" for ln in lines)
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_every_db_client_is_verify_full_with_mounted_ca(values):
+    n = 0
+    docs = _docs(values)
+    fqdn = _fqdn(docs, "postgres")
+    for name, c, spec in _containers(docs):
+        env = _env(c)
+        if "DATABASE_URL" not in env and "DB_PASSWORD" not in env:
+            continue
+        n += 1
+        assert env["PGSSLMODE"]["value"] == "verify-full", name
+        assert env["PGSSLROOTCERT"]["value"] == _CA_PATH, name
+        assert _mounts_ca(c, spec), name
+        url = env.get("DATABASE_URL", {}).get("value")
+        if url:
+            assert f"@{fqdn}:" in url, (name, url)
+    assert n >= 8, f"only {n} DB-consuming containers found"
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_no_plaintext_postgres_dsn_or_host_anywhere(values):
+    docs = _docs(values)
+    cfg = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "waddlebot-config")
+    assert cfg["data"]["DB_HOST"].endswith(".svc.cluster.local")
+    assert cfg["data"]["DATABASE_HOST"].endswith(".svc.cluster.local")
+    blob = yaml.dump(docs)
+    short = _svc(docs, "postgres")["metadata"]["name"]
+    assert not re.search(rf"@{re.escape(short)}:", blob), "short-name (SAN-less for the internal CA) Postgres DSN survived"
+    mig = next(d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-db-migrate-secret"))
+    url = mig["stringData"]["DATABASE_URL"]
+    assert "sslmode=verify-full" in url and f"sslrootcert={_CA_PATH}" in url
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_cache_valkey_has_no_plaintext_listener_or_port(values):
+    docs = _docs(values)
+    dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "redis")
+    c = dep["spec"]["template"]["spec"]["containers"][0]
+    cmd = c["command"]
+    assert cmd[cmd.index("--port") + 1] == "0", "plaintext listener must be disabled (--port 0)"
+    assert "--tls-port" in cmd and "--tls-auth-clients" in cmd
+    assert cmd[cmd.index("--tls-protocols") + 1] == "TLSv1.2 TLSv1.3"
+    assert cmd[cmd.index("--tls-session-caching") + 1] == "yes"
+    assert [p["name"] for p in c["ports"]] == ["valkey-tls"], "no plaintext containerPort may be declared"
+    svc = _svc(docs, "redis")
+    assert [p["port"] for p in svc["spec"]["ports"]] == [6380], "cache Service must expose the TLS port only"
+    for probe in ("livenessProbe", "readinessProbe"):
+        assert "--tls" in " ".join(c[probe]["exec"]["command"])
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_every_cache_url_is_rediss_with_ca_pinned(values):
+    docs = _docs(values)
+    sec = _secrets_doc(docs)
+    urls = {k: v for k, v in sec["stringData"].items() if k.startswith(("REDIS_URL", "VALKEY_URL", "VALKEY_DURABLE_URL", "VALKEY_KV_URL"))}
+    assert {"REDIS_URL", "VALKEY_URL"} <= set(urls)
+    for k, v in urls.items():
+        assert v.startswith("rediss://"), (k, "plaintext redis:// URL")
+        host = re.match(r"rediss://(?:[^@]*@)?([^:/]+)", v).group(1)
+        assert host.endswith(".svc.cluster.local"), (k, host, "must dial the FQDN (issuer nameConstraints)")
+        if "@" in v:  # self-contained (Python) URLs must pin the CA and check the hostname
+            assert "ssl_cert_reqs=required" in v and "ssl_ca_certs=/etc/waddles/ca/valkey-ca.crt" in v, k
+            assert "ssl_check_hostname=true" in v, k
+    cfg = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "waddlebot-config")
+    assert cfg["data"]["REDIS_PORT"] == "6380"
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_python_redis_clients_mount_the_valkey_ca(values):
+    n = 0
+    for name, c, spec in _containers(_docs(values)):
+        refs = [r.get("secretRef", {}).get("name") for r in c.get("envFrom", [])]
+        if not any(r and r.endswith("-secrets") for r in refs):
+            continue
+        n += 1
+        vols = {v["name"] for v in spec.get("volumes", [])}
+        mounts = {m["name"] for m in c.get("volumeMounts", [])}
+        assert "valkey-ca" in vols and "valkey-ca" in mounts, f"{name} reads rediss://...ca=/etc/waddles/ca but never mounts it"
+    assert n >= 8
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_every_s3_client_is_https_with_ca(values):
+    docs = _docs(values)
+    cfg = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "waddlebot-config")
+    for k in ("S3_ENDPOINT_URL", "MINIO_ENDPOINT"):
+        assert cfg["data"][k] == f'https://{_fqdn(docs, "seaweedfs")}:8333', k
+    n = 0
+    ep_names = ("BUNDLE_BUCKET_ENDPOINT", "BUNDLE_STORAGE_ENDPOINT", "S3_ENDPOINT", "IMAGE_BUCKET_ENDPOINT")
+    for name, c, spec in _containers(docs):
+        env = _env(c)
+        for ep in ep_names:
+            if ep in env and "seaweedfs" in env[ep].get("value", ""):
+                n += 1
+                assert env[ep]["value"].startswith("https://"), (name, ep, env[ep]["value"])
+                assert _mounts_ca(c, spec), name
+                if ep == "BUNDLE_BUCKET_ENDPOINT":
+                    assert env["BUNDLE_BUCKET_CA_FILE"]["value"] == _CA_PATH, name
+                else:
+                    assert env["S3_CA_FILE"]["value"] == _CA_PATH and env["AWS_CA_BUNDLE"]["value"] == _CA_PATH, name
+    assert n >= 4, f"only {n} S3 client endpoints found"
+    blob = yaml.dump(docs)
+    assert not re.findall(r"http://[^\s\"']*seaweedfs[^\s\"']*:8333", blob), "plaintext S3 URL survived"
+
+
+@pytest.mark.parametrize("values", ("values-alpha.yaml", "values-dal2alpha.yaml"))
+def test_generated_valkey_ca_and_leaf_are_ecdsa_p256(values):
+    docs = _docs(values, _STATIC)
+    sec = next(d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-valkey-tls"))
+    for key in ("ca.crt", "tls.crt"):
+        txt = _openssl_text(sec["stringData"][key])
+        assert "ecdsa-with-SHA256" in txt and "prime256v1" in txt, key
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_seaweedfs_serves_s3_over_tls_and_probes_verify(values):
+    docs = _docs(values)
+    dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "seaweedfs")
+    c = dep["spec"]["template"]["spec"]["containers"][0]
+    script = c["command"][-1]
+    assert "-s3.cert.file=/etc/seaweedfs-tls/tls.crt" in script and "-s3.key.file=/etc/seaweedfs-tls/tls.key" in script
+    for probe in ("livenessProbe", "readinessProbe"):
+        cmd = " ".join(c[probe]["exec"]["command"])
+        assert "https://" in cmd and "--cacert /etc/waddles/transit-ca/ca.crt" in cmd and "http://" not in cmd
+        assert " -k" not in cmd and "--insecure" not in cmd
+    job = next(d for d in docs if d["kind"] == "Job" and d["metadata"]["name"] == "seaweedfs-bucket-init")
+    jc = job["spec"]["template"]["spec"]["containers"][0]
+    assert 'ENDPOINT="https://' in jc["command"][-1]
+    assert _mounts_ca(jc, job["spec"]["template"]["spec"])
+
+
+def _certs(docs):
+    return {d["metadata"]["name"]: d["spec"] for d in docs if d["kind"] == "Certificate"}
+
+
+@pytest.mark.parametrize("values", _CM_ENVS)
+def test_cert_manager_mode_uses_a_dedicated_namespaced_transit_root(values):
+    """dal2alpha/beta/gamma/prod: a self-signed root that exists only in the release namespace signs Postgres/S3/Valkey, and every
+    data-store client trusts ONLY it -- never the cluster-wide internal CA."""
+    docs = _docs(values)
+    names = {d["metadata"]["name"] for d in docs if d["kind"] == "Secret"}
+    assert not any(n.endswith("-transit-tls") for n in names), "self-generated transit CA must not render"
+    assert not any(n.endswith("-valkey-tls") for n in names), "self-generated Valkey CA must not render"
+    certs = _certs(docs)
+    issuers = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Issuer"}
+    assert issuers["w-waddlebot-transit-selfsigned"]["spec"] == {"selfSigned": {}}
+    assert issuers["w-waddlebot-transit"]["spec"] == {"ca": {"secretName": "w-waddlebot-transit-ca"}}
+    assert all(i["metadata"]["namespace"] for i in issuers.values())
+    root = certs["w-waddlebot-transit-ca"]
+    assert root["isCA"] is True
+    assert root["issuerRef"] == {"name": "w-waddlebot-transit-selfsigned", "kind": "Issuer", "group": "cert-manager.io"}
+    assert root["privateKey"]["algorithm"] == "ECDSA" and root["privateKey"]["size"] == 256
+    assert root["nameConstraints"]["critical"] is True
+    permitted = root["nameConstraints"]["permitted"]["dnsDomains"]
+    assert permitted and all(d.endswith(".svc.cluster.local") and "*" not in d for d in permitted)
+    leaf_suffixes = ("-postgres-tls", "-seaweedfs-tls", "-valkey-tls")
+    for suffix in leaf_suffixes:
+        hit = [spec for n, spec in certs.items() if n.endswith(suffix)]
+        assert len(hit) == 1, suffix
+        spec = hit[0]
+        assert spec["issuerRef"] == {"name": "w-waddlebot-transit", "kind": "Issuer", "group": "cert-manager.io"}, suffix
+        assert spec["privateKey"]["algorithm"] == "ECDSA" and spec["privateKey"]["size"] == 256 and spec["usages"] == ["server auth"]
+        assert spec["dnsNames"] and all("*" not in n and n.endswith(".svc.cluster.local") for n in spec["dnsNames"]), spec["dnsNames"]
+        for san in spec["dnsNames"]:
+            assert any(san == d or san.endswith("." + d) for d in permitted), (san, permitted)
+    assert _fqdn(docs, "postgres") in next(s["dnsNames"] for n, s in certs.items() if n.endswith("-postgres-tls"))
+    assert _fqdn(docs, "seaweedfs") in next(s["dnsNames"] for n, s in certs.items() if n.endswith("-seaweedfs-tls"))
+    valkey_sans = next(s["dnsNames"] for n, s in certs.items() if n.endswith("-valkey-tls"))
+    assert sum(1 for n in valkey_sans if n.startswith("valkey-durable-")) >= 1, valkey_sans
+    pg = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "postgres")
+    vol = next(v for v in pg["spec"]["template"]["spec"]["volumes"] if v["name"] == "transit-tls")
+    assert vol["secret"]["secretName"] in certs and [i["key"] for i in vol["secret"]["items"]] == ["tls.crt", "tls.key"]
+
+
+@pytest.mark.parametrize("values", _CM_ENVS)
+def test_data_store_clients_trust_only_the_transit_root_not_the_internal_ca(values):
+    """A leaf signed by the cluster-wide waddlebot-internal-ca (even with a Postgres/Valkey SAN) must be rejected: no data-store
+    client mounts any secret from that trust domain, and the ONLY CA volume source is the dedicated root's certificate."""
+    docs = _docs(values)
+    certs = _certs(docs)
+    internal = {n for n, spec in certs.items() if spec["issuerRef"]["name"] == "waddlebot-internal-ca"}
+    assert internal, "expected the grpc/host-api certs to stay on waddlebot-internal-ca"
+    assert not any(n.endswith(("-postgres-tls", "-seaweedfs-tls", "-valkey-tls", "-transit-ca")) for n in internal)
+    sources, n_pods = set(), 0
+    for d in docs:
+        if d["kind"] not in _WORKLOAD_KINDS:
+            continue
+        for v in _pod_spec(d).get("volumes", []):
+            if v["name"] in ("transit-ca", "valkey-ca"):
+                n_pods += 1
+                assert v["secret"]["items"] == [{"key": "tls.crt", "path": "valkey-ca.crt" if v["name"] == "valkey-ca" else "ca.crt"}]
+                sources.add(v["secret"]["secretName"])
+            if v["name"] in ("transit-ca", "valkey-ca", "transit-tls"):
+                assert v["secret"]["secretName"] not in internal
+    assert n_pods >= 20 and sources == {"w-waddlebot-transit-ca"}, (n_pods, sources)
+    # every client-side CA env/path points at the mounted transit CA only
+    for name, c, spec in _containers(docs):
+        env = _env(c)
+        for var in ("PGSSLROOTCERT", "S3_CA_FILE", "AWS_CA_BUNDLE", "BUNDLE_BUCKET_CA_FILE"):
+            if var in env:
+                assert env[var]["value"] == _CA_PATH, (name, var)
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_no_wildcard_san_on_any_certificate(values):
+    """Security review HIGH: no Certificate this chart renders (grpc-tls, host-api-tls, transit, valkey ...) carries a wildcard
+    SAN -- a wildcard from the shared internal CA lets any holder impersonate Postgres/Valkey/S3."""
+    n = 0
+    for d in _docs(values):
+        if d["kind"] == "Certificate":
+            n += 1
+            assert not [x for x in d["spec"].get("dnsNames", []) if "*" in x], (d["metadata"]["name"], d["spec"]["dnsNames"])
+    if values != "values-alpha.yaml":  # values-alpha has cert-manager off: no Certificate resources exist at all
+        assert n >= 4, f"only {n} Certificates examined"
+
+
+def test_wildcard_san_fails_the_render():
+    """The render-time guard: a wildcard SAN on an internal-CA certificate is refused loudly."""
+    args = ["helm", "template", "w", str(_CHART), "--kube-version", "1.30.0", "--values", str(_CHART / "values-dal2alpha.yaml"),
+            "--set", "global.deploymentTier=alpha", "--set", "infrastructure.postgresql.service.name=*"]
+    r = subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603
+    assert r.returncode != 0 and "wildcard SAN" in r.stderr, r.stderr[-400:]
+
+
+def test_static_fallback_only_when_cert_manager_is_off():
+    """values-alpha (no cert-manager) self-generates one CA; the cert-manager Certificates are absent."""
+    docs = _docs("values-alpha.yaml")
+    assert not [d for d in docs if d["kind"] == "Certificate" and d["metadata"]["name"].endswith(("-postgres-tls", "-seaweedfs-tls", "-valkey-tls"))]
+    assert any(d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls") for d in docs)
+    assert not [d for d in docs if d["kind"] == "Issuer"]

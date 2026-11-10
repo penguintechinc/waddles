@@ -7,6 +7,8 @@ on:
       - 'core/svc_process/**'
       - 'core/test_support/**'
       - 'core/bundle_host_kv/**'
+      - 'core/bundle_host_credentials/**'
+      - 'core/connection_resolver/**'
       - 'core/bundle_capability_gate/**'
       - 'core/bundle_tool_call/**'
       - 'core/circuit_breaker/**'
@@ -36,7 +38,7 @@ jobs:
   # here means "not affected"; main PRs / pushes / dispatch run everything.
   changes:
     name: Detect changed areas
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main') || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha' || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -60,6 +62,8 @@ jobs:
             core/svc_process/**
             core/test_support/**
             core/bundle_host_kv/**
+            core/bundle_host_credentials/**
+            core/connection_resolver/**
             core/bundle_capability_gate/**
             core/bundle_tool_call/**
             core/circuit_breaker/**

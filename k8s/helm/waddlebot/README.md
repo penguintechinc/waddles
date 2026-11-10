@@ -568,7 +568,7 @@ succeeds. Four platform key Secrets are self-provisioned by this chart:
 
 The two symmetric keys (`minioKms`, `tenantKek`) use `lookup` + Helm's own
 cryptographically-secure `randBytes`/`sha256sum` template functions -- no extra
-tooling needed. The two Ed25519 keys (`bundleSigning`, `serviceJwt`) need an
+tooling needed. The two asymmetric keys (`bundleSigning`: Ed25519, `serviceJwt`: ECDSA P-256 / ES256) need an
 `openssl`-equipped hook Job instead: Sprig/Helm has no function to derive an Ed25519
 public key from a private key, which both public-key-flow requirements below need.
 

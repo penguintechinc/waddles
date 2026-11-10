@@ -2446,6 +2446,8 @@ mod tests {
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
             declared_capabilities: Vec::new(),
+            egress: Vec::new(),
+            egress_rps: None,
             tools: Default::default(),
         }]);
         let deps = ProcessDeps {
@@ -3157,6 +3159,8 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
 
@@ -3214,6 +3218,8 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
 
@@ -3319,6 +3325,8 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
 
@@ -3379,6 +3387,8 @@ mod tests {
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
+                egress: Vec::new(),
+                egress_rps: None,
                 tools: Default::default(),
             }]);
 

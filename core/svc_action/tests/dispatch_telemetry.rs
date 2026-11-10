@@ -153,6 +153,7 @@ fn scope() -> InvokeScope {
         origin_channel_id: Some(ORIGIN_CHANNEL.to_string()),
         origin_platform: Some("discord".to_string()),
         origin_guild_id: None,
+        origin_user_id: None,
         tenant_id: 7,
         community_id: 3,
         app_version: 1,

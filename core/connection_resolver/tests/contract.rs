@@ -8,6 +8,7 @@ use connection_resolver::{
     ConnectionKind, ConnectionRef, ConnectionResolver, ConnectionSecret, ResolveError,
     ResolverConfig, ResolverMetrics,
 };
+use service_auth::test_support::{MintReply, MockHub};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -26,13 +27,10 @@ async fn resolve_fixture(
     body: &str,
 ) -> Result<connection_resolver::ResolvedConnection, ResolveError> {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/internal/service-token"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"token": "t", "expires_in": 3600})),
-        )
-        .mount(&server)
+    // The mint is gRPC: a real in-process `ServiceAuthService` hands out the token.
+    let hub = MockHub::builder()
+        .mint(vec![MintReply::token("t", 3600)])
+        .start()
         .await;
     Mock::given(method("POST"))
         .and(path(
@@ -46,7 +44,7 @@ async fn resolve_fixture(
     let cfg = ResolverConfig::new(
         server.uri(),
         "alpha",
-        format!("{}/internal/service-token", server.uri()),
+        hub.endpoint.clone(),
         sa.to_string_lossy().to_string(),
     );
     let r = ConnectionResolver::new(cfg, Arc::new(NoMetrics)).unwrap();

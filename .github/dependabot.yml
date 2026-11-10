@@ -8,6 +8,7 @@ updates:
   - /core/bundle_capability_gate
   - /core/bundle_compiler
   - /core/bundle_executor
+  - /core/bundle_host_credentials
   - /core/bundle_host_db
   - /core/bundle_host_economy
   - /core/bundle_host_http
@@ -79,6 +80,12 @@ updates:
   - /bundles
   - /bundles/csharp/csping
   - /bundles/csharp/superpenguin-roll
+  - /bundles/csharp/superpenguin-slots
+  - /bundles/csharp/superpenguin-gamble
+  - /bundles/csharp/superpenguin-defuse
+  - /bundles/csharp/superpenguin-duel
+  - /bundles/csharp/superpenguin-first
+  - /bundles/csharp/superpenguin-roulette
   - /core/ai_researcher_module
   - /core/analytics_core_module
   - /core/browser_source_core_module
