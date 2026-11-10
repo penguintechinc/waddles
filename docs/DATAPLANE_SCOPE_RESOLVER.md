@@ -4,35 +4,39 @@ Slice A of the numeric-id migration — design: `docs/superpowers/specs/2026-10-
 svc-ingest has no database; it asks hub-api which community a platform source belongs to so the data
 plane keys on numeric `(tenant_id, community_id)` (names/slugs are display-only, never keys).
 
-## Endpoints (machine JWT only)
+## Contract (internal gRPC, machine JWT only)
 
-| Method | Path | Notes |
+`proto/waddles/hub/internal/v1/dataplane_scope.proto` -- `DataplaneScopeService` on hub-api's
+internal TLS gRPC listener (`hub_api/grpc_internal/dataplane_scope_servicer.py`); the svc-ingest
+client is `hub_client::resolve_scope` (one long-lived channel, machine JWT in `authorization`
+metadata, breaker, deadline, tracing span). This replaced the REST hop
+`GET /api/v1/internal/dataplane/resolve-scope` (+ `/batch`): intra-cluster traffic is gRPC only.
+
+| RPC | Notes |
+|---|---|
+| `ResolveScope(platform, source_id)` | one lookup |
+| `ResolveScopeBatch(items[])` | 1..100 items, per-item `status` (`RESOLVED`/`NOT_FOUND`/`AMBIGUOUS`/`INVALID`), order kept |
+
+Answer: `{tenant_id, community_id, tenant_slug, community_name}` -- `tenant_id`/`community_id` are the
+keys. No secret exists in the response.
+
+| gRPC status | Meaning | Caller action |
 |---|---|---|
-| GET | `/api/v1/internal/dataplane/resolve-scope?platform=<p>&source_id=<id>` | one lookup |
-| POST | `/api/v1/internal/dataplane/resolve-scope/batch` | `{"items":[{"platform","sourceId"}]}`, 1..100, per-item `status` (`resolved`/`not_found`/`ambiguous`/`invalid`), order kept |
-
-200 body: `{success, tenantId, communityId, tenantSlug, communityName}` — `tenantId`/`communityId` are the keys.
-No secret exists in the response.
-
-| Status | Meaning | Caller action |
-|---|---|---|
-| 200 | resolved | cache (`Cache-Control: private, max-age=30`) |
-| 400 | platform/source not in canonical form (`^[a-z][a-z0-9_]{0,49}$`, `^[A-Za-z0-9_.:-]{1,255}$`) | bug in caller |
-| 401 | missing/invalid token, or token lacks the scope | re-bootstrap |
-| 403 | valid token but not the operator-plane `system` tenant | config fault |
-| 404 | no active community linked to the source | **fail closed to tenant-wide sentinel `community_id 0`** — never guess |
-| 409 | source claimed by several communities, none the single primary | treat as unresolved; fix the data |
-| 503 | `SERVICE_JWT_VERIFIER` not configured | deployment fault |
-
-Every non-200 is `Cache-Control: no-store`.
+| `OK` | resolved | cache (svc-ingest LRU, 30s) |
+| `INVALID_ARGUMENT` | platform/source not in canonical form (`^[a-z][a-z0-9_]{0,49}$`, `^[A-Za-z0-9_.:-]{1,255}$`), or batch outside 1..100 | bug in caller |
+| `UNAUTHENTICATED` | missing/invalid token, or token lacks the scope | re-bootstrap |
+| `PERMISSION_DENIED` | valid token but not the operator-plane `system` tenant | config fault |
+| `NOT_FOUND` | no active community linked to the source | **fail closed to tenant-wide sentinel `community_id 0`** -- never guess |
+| `FAILED_PRECONDITION` | source claimed by several communities, none the single primary | treat as unresolved; fix the data |
+| `UNAVAILABLE` | scope store not configured | deployment fault |
 
 ## Auth
 
 Scope `dataplane:resolve-scope` (deliberately **not** `connections:resolve`: this one returns ids, never a
 token). Chart grant: `k8s/helm/waddlebot/values.yaml` `serviceJwt.identities.svc-ingest.allowedScopes`;
 rendered only while `pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled` is true (default false;
-alpha on). No other identity holds it. Guard: `hub_api/services/machine_auth.py` (shared with the
-provider-connections internal routes).
+alpha on). No other identity holds it. Guard: the gRPC interceptor chain (`hub_api/grpc_internal/
+interceptors.py`: EdDSA machine-JWT + per-method scope) plus the servicer's `system`-tenant check.
 
 ## Mapping (what is looked up)
 
