@@ -83,6 +83,11 @@ pub const HOST_TOOL_ONLY_OPS: &[(&str, &str)] = &[
     ("youtube", "mod.unban"),
     ("youtube", "mod.add"),
     ("youtube", "mod.remove"),
+    // EventSub create/delete mutate app-wide subscriptions bound to the host callback URL and
+    // secret: only the host reconcile path may create or tear them down. `eventsub.list` is
+    // read-only and stays relay-reachable.
+    ("twitch", "eventsub.create"),
+    ("twitch", "eventsub.delete"),
 ];
 
 /// `true` when `(platform, op)` may only be executed by the host tool path: listed in
@@ -224,7 +229,17 @@ mod tests {
         }
         assert!(!host_tool_only("discord", "chat.clear"));
         assert!(!host_tool_only("twitch", "chat.send"));
-        assert!(!host_tool_only("twitch", "eventsub.create"));
+        assert!(host_tool_only("twitch", "eventsub.create"));
+        assert!(host_tool_only("twitch", "eventsub.delete"));
+        assert!(!host_tool_only("twitch", "eventsub.list"));
+        assert!(!host_tool_only("discord", "eventsub.create"));
+        // Still registered with its permission, so the host reconcile path keeps working.
+        assert_eq!(
+            permission_for("twitch", "eventsub.create")
+                .unwrap()
+                .canonical_id(),
+            "eventsub.manage:twitch"
+        );
         // Every registered moderation op on every platform is host-tool-only, and the explicit
         // list covers them all (so the audit table cannot drift from the structural rule).
         let mut seen = 0;

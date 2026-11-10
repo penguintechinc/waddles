@@ -84,6 +84,8 @@
 //! size/time bounds, class-only typed errors. Services delegate to it and
 //! must never re-mirror its denylist.
 
+pub mod credentials;
 pub mod egress;
+pub mod grants;
 pub mod guarded;
 pub mod redact;
