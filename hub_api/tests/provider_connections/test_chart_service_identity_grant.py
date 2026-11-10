@@ -124,12 +124,14 @@ def test_chart_grants_svc_ingest_exactly_connections_resolve_on_the_system_tenan
     chart_identities: dict[str, ServiceIdentity],
 ) -> None:
     identity = chart_identities[_SVC_INGEST]
-    # Minimum: the data-plane scopes (connections, scope resolver, platform-user detokenizer).
+    # Minimum: the data-plane scopes (connections, scope resolver, platform-user detokenizer,
+    # slash-command registry, per-user active context).
     assert identity.allowed_scopes == frozenset(
         {
             _SCOPE,
             _LIST_SCOPE,
             "dataplane:resolve-scope",
+            "dataplane:app-commands",
             "dataplane:active-context",
             "identity:platform-user:resolve",
         }

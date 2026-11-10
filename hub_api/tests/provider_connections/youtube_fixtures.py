@@ -29,6 +29,7 @@ from tests.provider_connections.fake_google import (
     FakeGoogle,
 )
 from tests.provider_connections.fake_twitch import FakeTwitch
+from tests.provider_connections.grpc_internal_client import GrpcRoutingClient
 
 YT_CHANNEL = FakeChannel("UCabc123_-xyz", "Penguin Plays")
 YT_OTHER_CHANNEL = FakeChannel("UCother456_-qrs", "Other Cast")
@@ -168,5 +169,5 @@ def yt_app(
 
 @pytest.fixture
 def yt_client(yt_app: Quart) -> Any:
-    """Test client over :func:`yt_app`."""
-    return yt_app.test_client()
+    """Test client over :func:`yt_app`; internal data-plane reads go over real gRPC."""
+    return GrpcRoutingClient(yt_app.test_client())

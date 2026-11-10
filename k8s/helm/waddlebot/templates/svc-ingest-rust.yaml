@@ -153,9 +153,12 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchReconcileIntervalSecs | default 60 | quote }}
         - name: TWITCH_RESOLVE_TIMEOUT_SECS
           value: {{ .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.twitchResolveTimeoutSecs | default 10 | quote }}
-        # hub-api internal gRPC (TLS, CA-pinned): DataplaneScopeService.ResolveScope (scope
-        # dataplane:resolve-scope) for the per-event scope resolver, plus IdentityService
-        # (identity:platform-user:resolve) when connector-tools is on. Intra-cluster traffic is gRPC only.
+        {{- end }}
+        {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        # hub-api internal gRPC (TLS, pinned to the internal CA): IdentityService.ResolvePlatformUser
+        # (scope identity:platform-user:resolve) and the connection resolver's
+        # ProviderConnectionService.ListBindings/ResolveConnection (connections:list /
+        # connections:resolve[:static]) -- intra-cluster calls are gRPC, never REST.
         - name: HUB_API_GRPC_ENDPOINT
           value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
@@ -346,12 +349,14 @@ spec:
         {{- end }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
-        {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
         {{- end }}
         {{- if $ct.enabled }}
         - name: svc-ingest-host-api-tls
           mountPath: /etc/waddlebot/svc-ingest-host-api-tls
           readOnly: true
+        {{- end }}
+        {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+        {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
         {{- end }}
       volumes:
       {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
@@ -359,13 +364,15 @@ spec:
         emptyDir: {}
       {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
-      {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
       {{- end }}
       {{- if $ct.enabled }}
       - name: svc-ingest-host-api-tls
         secret:
           secretName: {{ include "waddlebot.svcIngestHostApiTlsSecretName" . }}
           defaultMode: 0440
+      {{- end }}
+      {{- if or $ct.enabled .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
+      {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
       {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}

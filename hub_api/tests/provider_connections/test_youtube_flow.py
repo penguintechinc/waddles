@@ -539,7 +539,6 @@ class TestBinding:
             headers=_bound(service_issuer, yt_db.seed.community_id, connection_id),
         )
         assert resolved.status_code == 200
-        assert resolved.headers["Cache-Control"] == "no-store"
         body = await resolved.get_json()
         # regression: the exact field set -- anything extra is a leak, anything missing breaks Rust
         assert set(body) == {
