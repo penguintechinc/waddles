@@ -111,6 +111,8 @@ fn test_identity_metrics() -> prometheus::IntCounterVec {
 /// Everything one test needs: manifest data, IRC server, metrics registry, HTTP client.
 struct Live {
     hub_url: String,
+    /// The live hub's internal gRPC listener (plaintext loopback; the resolver allows it in alpha).
+    hub_grpc_endpoint: String,
     /// hub-api's internal gRPC endpoint (machine-JWT mint), from the live-hub manifest.
     grpc_url: String,
     admin_token: String,
@@ -163,6 +165,10 @@ impl Live {
         let metrics = Arc::new(register_ingest_metrics(&registry));
         Self {
             hub_url: m["hub_url"].as_str().expect("hub_url").to_string(),
+            hub_grpc_endpoint: m["hub_grpc_endpoint"]
+                .as_str()
+                .expect("hub_grpc_endpoint")
+                .to_string(),
             grpc_url: m["grpc_url"].as_str().expect("grpc_url").to_string(),
             admin_token: m["admin_token"].as_str().expect("admin_token").to_string(),
             community_a: m["community_a"].as_i64().expect("community_a"),
@@ -236,7 +242,7 @@ impl Live {
         let resolver = Arc::new(
             ConnectionResolver::new(
                 ResolverConfig::new(
-                    self.hub_url.clone(),
+                    self.hub_grpc_endpoint.clone(),
                     "alpha",
                     self.grpc_url.clone(),
                     self.sa_path.to_string_lossy().to_string(),
