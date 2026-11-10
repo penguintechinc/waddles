@@ -6,7 +6,7 @@ fix/chart-host-api-stage-identity (#539) pinned the host-api-tls identity cert's
 `waddlebot.hostApiStageIdentity`'s SPIFFE-style string, and fix/no-empty-kept-secrets
 (#540) made the lookup-KEEP branch require a COMPLETE ca.crt/tls.crt/tls.key bundle. Neither
 closed the actual gap: alpha's live `waddlebot-host-api-tls` Secret was minted under the OLD
-`waddlebot` CN, is still COMPLETE, so the KEEP branch kept it forever -- the bundle-executor
+`waddlebot` CN, is still COMPLETE, so the KEEP branch kept it forever -- the svc-bundles-executor
 pods, which now require the new pinned identity, rejected its certificate on every
 connection. The same class of bug applies to ANY future identity/SAN change on this Secret
 (or infrastructure/valkey-tls-secret.yaml's), not just this one incident.
@@ -31,8 +31,8 @@ tests/test_no_empty_kept_secrets_render.py:
 2. `TestAlphaRenderAnnotationsAndChecksum` renders the real chart with values-alpha.yaml and
    asserts the generated host-api-tls/valkey-tls Secrets carry annotations that match their
    own actually-generated certificate content (decoded CN, for host-api-tls), and that all
-   four host-api-tls consumer Deployments (svc-process-rust, svc-action-rust,
-   bundle-executor, bundle-executor-action) carry the SAME `checksum/host-api-tls`
+   three host-api-tls consumer Deployments (svc-process-rust, svc-action-rust,
+   svc-bundles-executor) carry the SAME `checksum/host-api-tls`
    pod-template annotation.
 
 Zero rendered documents, zero matching Deployments/Secrets, or zero probe entries is a hard
@@ -207,10 +207,10 @@ class TestAlphaRenderAnnotationsAndChecksum:
         assert annotations.get("waddlebot.io/cert-identity"), "waddlebot.io/cert-identity missing from valkey-tls Secret"
         assert annotations.get("waddlebot.io/cert-sans-sha256"), "waddlebot.io/cert-sans-sha256 missing from valkey-tls Secret"
 
-    def test_host_api_tls_checksum_consistent_across_all_four_consumers(
+    def test_host_api_tls_checksum_consistent_across_all_three_consumers(
         self, rendered_docs: list[dict[str, Any]]
     ) -> None:
-        suffixes = ("-svc-process-rust", "-svc-action-rust", "-bundle-executor", "-bundle-executor-action")
+        suffixes = ("-svc-process-rust", "-svc-action-rust", "-svc-bundles-executor")
         checksums: dict[str, str] = {}
         for doc in rendered_docs:
             if doc.get("kind") != "Deployment":
@@ -222,7 +222,7 @@ class TestAlphaRenderAnnotationsAndChecksum:
             annotations = doc.get("spec", {}).get("template", {}).get("metadata", {}).get("annotations", {}) or {}
             checksums[matched] = annotations.get("checksum/host-api-tls")
 
-        assert len(checksums) == 4, f"expected all 4 host-api-tls consumer Deployments, found {sorted(checksums)}"
+        assert len(checksums) == 3, f"expected all 3 host-api-tls consumer Deployments, found {sorted(checksums)}"
         for suffix, value in checksums.items():
             assert value, f"{suffix} is missing its checksum/host-api-tls pod-template annotation"
         distinct = set(checksums.values())

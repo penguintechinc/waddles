@@ -3,7 +3,7 @@
 `DataplaneScopeService` replaces the REST hop `GET /api/v1/internal/dataplane/resolve-scope`
 (+ `/batch`). Everything between the gRPC call and the (file-backed sqlite) database is real -- a
 `grpc.aio` server built with the production chain (`server.build_interceptor_chain`: deadline ->
-EdDSA machine-JWT auth -> rate limit -> OTel), the Ed25519 issuer/verifier, the resolver and the
+ES256 machine-JWT auth -> rate limit -> OTel), the ES256 issuer/verifier, the resolver and the
 schema-bound tables. Nothing is mocked. The tests drive it through `_Client`, a thin adapter that
 renders each gRPC status as the equivalent refusal class (NOT_FOUND 404, FAILED_PRECONDITION 409,
 INVALID_ARGUMENT 400, UNAUTHENTICATED 401, PERMISSION_DENIED 403) so every resolution rule keeps
@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import grpc
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.database import AsyncDAL
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey
 from pydal import Field
@@ -63,7 +63,7 @@ def _identity(service_id: str, scopes_: set[str], tenant: str) -> ServiceIdentit
 @pytest.fixture
 def issuer() -> ServiceJwtIssuer:
     """Real issuer: svc-ingest (resolver scope), svc-action (other scope), a non-system tenant."""
-    private = Ed25519PrivateKey.generate()
+    private = ec.generate_private_key(ec.SECP256R1())
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
     return ServiceJwtIssuer(
         keys={"k1": key},

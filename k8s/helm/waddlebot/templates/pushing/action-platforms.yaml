@@ -48,6 +48,7 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_legacy_action_platforms") | nindent 8 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_NAME
           value: "action-platforms"
         - name: MODULE_PORT
@@ -71,11 +72,15 @@ spec:
         resources:
           {{- toYaml .Values.modules.actionPlatforms.resources | nindent 10 }}
         volumeMounts:
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
+        {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         - name: logs
           mountPath: /var/log/waddlebotlog
         - name: tmp
           mountPath: /tmp
       volumes:
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
+      {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       - name: logs
         emptyDir: {}
       - name: tmp

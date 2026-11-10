@@ -27,7 +27,11 @@ spec:
     - {{ include "waddlebot.fullname" . }}-core-identity
     - {{ include "waddlebot.fullname" . }}-interactive-productivity
     - {{ include "waddlebot.fullname" . }}-action-serverless
-    - "*.{{ .Values.namespace }}.svc.cluster.local"
+    {{- /* explicit FQDNs only -- a namespace wildcard would let any holder impersonate other in-cluster services */}}
+    - {{ include "waddlebot.fullname" . }}-core-data.{{ .Values.namespace }}.svc.cluster.local
+    - {{ include "waddlebot.fullname" . }}-core-identity.{{ .Values.namespace }}.svc.cluster.local
+    - {{ include "waddlebot.fullname" . }}-interactive-productivity.{{ .Values.namespace }}.svc.cluster.local
+    - {{ include "waddlebot.fullname" . }}-action-serverless.{{ .Values.namespace }}.svc.cluster.local
   issuerRef:
     name: {{ .Values.global.grpcTls.certManager.issuerName }}
     kind: {{ .Values.global.grpcTls.certManager.issuerKind | default "ClusterIssuer" }}

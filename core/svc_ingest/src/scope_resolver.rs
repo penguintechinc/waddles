@@ -797,8 +797,6 @@ mod tests {
         ResolveScopeBatchRequest, ResolveScopeBatchResponse, ResolveScopeRequest,
         ResolveScopeResponse,
     };
-    use wiremock::matchers::method;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     struct FakeHub {
         calls: Arc<AtomicUsize>,
@@ -832,17 +830,18 @@ mod tests {
         }
     }
 
-    /// Production [`HubScopeSource`] wired (real machine-JWT bootstrap against a wiremock token
+    /// Production [`HubScopeSource`] wired (real gRPC machine-JWT bootstrap against an in-process mint
     /// endpoint) to a real tonic `DataplaneScopeService` answering with `reply`.
     async fn hub_source(
         reply: Result<ResolveScopeResponse, tonic::Status>,
-    ) -> (HubScopeSource, MockServer, Arc<AtomicUsize>) {
-        let tokens = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"token": "machine.jwt.value", "expires_in": 3600}),
-            ))
-            .mount(&tokens)
+    ) -> (HubScopeSource, Arc<AtomicUsize>) {
+        // The mint is gRPC: a real in-process `ServiceAuthService`.
+        let mint_endpoint = service_auth::test_support::MockHub::builder()
+            .mint(vec![service_auth::test_support::MintReply::token(
+                "machine.jwt.value",
+                3600,
+            )])
+            .start_detached()
             .await;
         let sa = std::env::temp_dir().join(format!("svc-ingest-sa-{}", uuid::Uuid::new_v4()));
         std::fs::write(&sa, "projected-sa-token").unwrap();
@@ -868,17 +867,17 @@ mod tests {
         let client = ResolveScopeClient::with_channel(
             channel,
             Arc::new(service_auth::MachineJwtClient::new(
-                format!("{}/token", tokens.uri()),
+                mint_endpoint,
                 sa.to_string_lossy().to_string(),
                 RESOLVE_SCOPE_JWT_SCOPE,
             )),
         );
-        (HubScopeSource::from_client(client), tokens, calls)
+        (HubScopeSource::from_client(client), calls)
     }
 
     #[tokio::test]
     async fn hub_source_calls_hub_with_machine_jwt_and_returns_the_scope() {
-        let (src, _tokens, calls) = hub_source(Ok(ResolveScopeResponse {
+        let (src, calls) = hub_source(Ok(ResolveScopeResponse {
             tenant_id: 2,
             community_id: 9,
             tenant_slug: "acme".into(),
@@ -901,7 +900,7 @@ mod tests {
             (tonic::Code::Internal, FetchError::Transient("status")),
             (tonic::Code::Unavailable, FetchError::Transient("status")),
         ] {
-            let (src, _tokens, _calls) = hub_source(Err(tonic::Status::new(code, "x"))).await;
+            let (src, _calls) = hub_source(Err(tonic::Status::new(code, "x"))).await;
             assert_eq!(src.fetch("discord", "111").await, Err(want), "{code:?}");
         }
     }
@@ -910,7 +909,7 @@ mod tests {
     async fn hub_source_without_a_token_is_transient_not_a_panic() {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
         let jwt = Arc::new(service_auth::MachineJwtClient::new(
-            "http://127.0.0.1:1/token",
+            "http://127.0.0.1:1",
             "/nonexistent/sa-token",
             RESOLVE_SCOPE_JWT_SCOPE,
         ));
@@ -923,7 +922,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_open_breaker_is_transient_never_a_default_scope() {
-        let (src, _tokens, _calls) = hub_source(Err(tonic::Status::unavailable("down"))).await;
+        let (src, _calls) = hub_source(Err(tonic::Status::unavailable("down"))).await;
         for _ in 0..5 {
             let _ = src.fetch("discord", "111").await;
         }

@@ -64,7 +64,7 @@ env:
 jobs:
   determine-version:
     name: Determine Version and Tags
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main') || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha' || 'ubuntu-latest' }}
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     outputs:
       version: ${{ steps.version.outputs.version }}
       suffix: ${{ steps.version.outputs.suffix }}
@@ -219,6 +219,10 @@ jobs:
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
           context: ${{ env.BUILD_CONTEXT }}
+          # `service_auth`'s build.rs compiles the repo-root `proto/` tree (sibling of `core/`),
+          # supplied as a named build context like build-svc-ingest.yml.
+          build-contexts: |
+            proto=proto
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
           push: true
           platforms: ${{ matrix.platform }}
@@ -251,6 +255,10 @@ jobs:
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
           context: ${{ env.BUILD_CONTEXT }}
+          # `service_auth`'s build.rs compiles the repo-root `proto/` tree (sibling of `core/`),
+          # supplied as a named build context like build-svc-ingest.yml.
+          build-contexts: |
+            proto=proto
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
           push: false
           load: true

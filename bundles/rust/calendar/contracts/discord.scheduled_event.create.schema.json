@@ -1,0 +1,35 @@
+{
+  "tool": "discord.scheduled_event.create",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "description": {
+        "type": "string",
+        "maxLength": 1000
+      },
+      "scheduled_start_time": {
+        "type": "string"
+      },
+      "scheduled_end_time": {
+        "type": "string"
+      },
+      "location": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      }
+    },
+    "required": [
+      "name",
+      "scheduled_start_time",
+      "scheduled_end_time",
+      "location"
+    ],
+    "additionalProperties": false
+  }
+}

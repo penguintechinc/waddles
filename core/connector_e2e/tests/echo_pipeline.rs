@@ -506,6 +506,53 @@ async fn a_pinned_connector_survives_an_executor_reconnect() {
     rig.invoker.on_connect("faulty", &ctx).await.unwrap();
 }
 
+/// Scale-out: two REAL executor replicas attached to ONE svc_ingest link. Every
+/// invoke is carried to and answered by exactly one of them (never an error from
+/// a replica that did not get it, never a duplicate), both replicas keep their
+/// pinned connector, and when one replica goes away the survivor keeps serving.
+#[tokio::test]
+async fn two_executor_replicas_share_one_link_and_survive_losing_one() {
+    use svc_ingest::connector::ConnectorInvoker;
+
+    let faulty = || RigConnector {
+        platform: "faulty".to_string(),
+        app_id: "waddles.core.test.faulty".to_string(),
+        wasm: FAULTY_WASM,
+        world: bundle_executor::manifest::WitWorld::Connector,
+    };
+    let rig = faulty_rig("faulty").await;
+    let mut replica = rig.add_replica(&[faulty()]).await;
+    assert_eq!(rig.link.attached_count(), 2, "both replicas stay attached");
+    assert_eq!(rig.executor.pinned_connectors().await, 1);
+    assert_eq!(replica.executor.pinned_connectors().await, 1);
+
+    let ctx = ConnectionCtx {
+        platform: "faulty".to_string(),
+        source_id: "s".to_string(),
+        connection_id: "c".to_string(),
+        session_token: None,
+    };
+    let mut served = 0usize;
+    for _ in 0..8 {
+        rig.invoker.on_connect("faulty", &ctx).await.unwrap();
+        served += 1;
+    }
+    assert_eq!(served, 8, "every invoke is answered by exactly one replica");
+
+    replica.sever();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while rig.link.attached_count() != 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a departed replica stayed in the rotation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    for _ in 0..4 {
+        rig.invoker.on_connect("faulty", &ctx).await.unwrap();
+    }
+}
+
 /// A dead executor is a typed, loud `Unavailable` -- never a silent empty
 /// result -- and recovers on the next attach.
 #[tokio::test]

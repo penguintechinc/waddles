@@ -11,9 +11,9 @@ meets it, and where it deliberately differs. Standard: RFC 8725 (JWT BCP). Minti
 
 | Verifier (`verifier` label) | Algorithm (exactly one) | Token | Code | Used by |
 |---|---|---|---|---|
-| `service_eddsa` | `EdDSA` | per-service machine JWT, hub-api JWKS | `core/service_auth` → `verify` | `svc_presentation` (overlay PUSH via `overlay_auth`), `egress_proxy` (caller auth) |
+| `service_eddsa` | `ES256` (+ legacy `EdDSA` only while `SERVICE_JWT_ACCEPT_LEGACY_EDDSA=true`) | per-service machine JWT, hub-api JWKS | `core/service_auth` → `verify` | `svc_presentation` (overlay PUSH via `overlay_auth`), `egress_proxy` (caller auth) |
 | `platform_hs256` | `HS256` | user/session platform JWT, shared secret | `core/svc_streaming/src/http/auth.rs` | `svc_streaming` `/api/v1/*` |
-| `egress_assertion` | `EdDSA` | single-use egress grant (Rust-only) | `core/egress_assertion` → `verify_with_key`, `core/egress_proxy/src/assertion.rs` | `egress_proxy` |
+| `egress_assertion` | `ES256` (+ legacy `EdDSA` in the same window) | single-use egress grant (Rust-only) | `core/egress_assertion` → `verify_with_key`, `core/egress_proxy/src/assertion.rs` | `egress_proxy` |
 
 `svc_ingest`, `svc_process` and `svc_action` contain **no** JWT verifier (none depends on
 `jsonwebtoken`): they only *mint* a machine JWT (`service_auth::MachineJwtClient`) for outbound
@@ -113,7 +113,7 @@ log output.
 core/service_auth/src/jwt_hardening.rs   canonical Rust implementation (header vetting, vocab,
                                          JwtMetrics, report_outcome); service_eddsa verifier in lib.rs
 core/service_auth/src/test_support.rs    in-memory metric capture (cfg(test) / `test-support` feature)
-core/egress_assertion/src/lib.rs         verify_with_key: pinned EdDSA, claim shape, closed `reason`s
+core/egress_assertion/src/lib.rs         verify_with_key / verify_with_key_policy: pinned ES256, claim shape, closed `reason`s
 core/egress_proxy/src/assertion.rs       header vetting + kid lookup + report (verifier=egress_assertion)
 core/svc_streaming/src/http/auth.rs      platform_hs256 verifier
 core/svc_streaming/src/http/auth/hardening.rs   byte-for-byte MIRROR of jwt_hardening.rs

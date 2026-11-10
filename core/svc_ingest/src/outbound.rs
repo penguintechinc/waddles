@@ -387,10 +387,64 @@ async fn drain_loop_with<Q, S, X, G>(
 #[allow(clippy::too_many_arguments)]
 async fn drain_platform_loop<Q, S, X, G>(
     platform: &'static str,
+    queue: Q,
+    sender: &S,
+    exec: Option<&X>,
+    guard: &G,
+    pin: Option<&PinKeys>,
+    backoff: Backoff,
+    shutdown: oneshot::Receiver<()>,
+) where
+    Q: RelaySource,
+    S: IrcOutbound,
+    X: ActionExecutor,
+    G: ReplayGuard,
+{
+    drain_platform_loop_acked(
+        platform,
+        queue,
+        sender,
+        exec,
+        guard,
+        None::<&NoAck>,
+        pin,
+        backoff,
+        shutdown,
+    )
+    .await;
+}
+
+/// A [`DrainControl`] that answers nobody: the fire-and-forget drains (legacy Twitch IRC)
+/// have no waiting producer to settle.
+struct NoAck;
+
+impl DrainControl for NoAck {
+    async fn mark_ready(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn clear_ready(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn post_ack(&self, _op_id: &str, _payload: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// [`drain_platform_loop`] that also settles a waiting producer: an entry carrying an `op_id`
+/// gets its outcome posted through `ctl` (the same ack channel the Discord drain uses), so the
+/// producer's confirmed-op path works for Twitch / YouTube too. An entry whose stamp does not
+/// verify (including one past its expiry), or that is a replay, is dropped with NO ack (acking
+/// would let an unauthenticated writer settle another producer's `op_id`).
+#[allow(clippy::too_many_arguments)]
+async fn drain_platform_loop_acked<Q, S, X, G, C>(
+    platform: &'static str,
     mut queue: Q,
     sender: &S,
     exec: Option<&X>,
     guard: &G,
+    ctl: Option<&C>,
     pin: Option<&PinKeys>,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
@@ -399,6 +453,7 @@ async fn drain_platform_loop<Q, S, X, G>(
     S: IrcOutbound,
     X: ActionExecutor,
     G: ReplayGuard,
+    C: DrainControl,
 {
     loop {
         tokio::select! {
@@ -407,13 +462,19 @@ async fn drain_platform_loop<Q, S, X, G>(
                 Ok(Some(raw)) => {
                     backoff.reset();
                     match parse_outbound_entry(&raw, platform) {
-                        Ok(OutboundEntry { action, community_id, .. }) => {
+                        Ok(OutboundEntry { action, community_id, op_id, .. }) => {
+                            // `exp_ms` is the stamp expiry here: `check_stamp` refuses (and
+                            // counts) a stamp past it, so no separate deadline check runs.
                             let Ok(stamp) = check_stamp(&raw, platform, action.op(), pin) else {
                                 continue;
                             };
                             // Single-use: claim the stamp BEFORE any send so a
                             // replayed (or unverifiable-by-outage) entry never runs.
-                            let result = match claim_once(guard, platform, action.op(), &stamp).await {
+                            let claim = claim_once(guard, platform, action.op(), &stamp).await;
+                            if matches!(claim, Err(SenderError::Rejected { .. })) {
+                                continue;
+                            }
+                            let result = match claim {
                                 Err(e) => Err(e),
                                 Ok(()) => match exec {
                                     Some(x) => x.execute_action(platform, community_id, &action).await,
@@ -427,13 +488,18 @@ async fn drain_platform_loop<Q, S, X, G>(
                                     }
                                 },
                             };
-                            if let Err(err) = result {
+                            if let Err(err) = &result {
                                 match err {
                                     // A new op with no implementation yet is an
                                     // actionable failure, not degraded service.
                                     SenderError::Unsupported { .. } => tracing::error!(platform, op = action.op(), error = %err, "outbound op unsupported, dropping"),
                                     SenderError::Failed { .. } => tracing::warn!(platform, op = action.op(), error = %err, "outbound relay send failed"),
                                     SenderError::Rejected { .. } => tracing::warn!(platform, op = action.op(), error = %err, "outbound op refused by policy"),
+                                }
+                            }
+                            if let (Some(ctl), Some(op_id)) = (ctl, &op_id) {
+                                if let Err(err) = ctl.post_ack(op_id, &ack_payload(&result)).await {
+                                    tracing::error!(platform, op = action.op(), error = %err, "failed to post outbound op result; the producer will time out");
                                 }
                             }
                         }
@@ -511,12 +577,17 @@ pub async fn run_exec<X: ActionExecutor>(
     let guard = ValkeyReplayGuard::new(
         connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
     );
+    let ctl = ValkeyDrainControl::new(
+        connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
+    );
     let backoff = Backoff::new(Duration::from_secs(30));
-    drain_loop_with(
+    drain_platform_loop_acked(
+        "twitch",
         conn,
         &NoIrc,
         Some(exec),
         &guard,
+        Some(&ctl),
         pin.as_ref(),
         backoff,
         shutdown,
@@ -552,12 +623,16 @@ pub async fn run_youtube_exec<X: ActionExecutor>(
     let guard = ValkeyReplayGuard::new(
         connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
     );
-    drain_platform_loop(
+    let ctl = ValkeyDrainControl::new(
+        connect_with_response_timeout(&client, CONTROL_CONN_RESPONSE_TIMEOUT).await?,
+    );
+    drain_platform_loop_acked(
         "youtube",
         queue,
         &NoIrc,
         Some(exec),
         &guard,
+        Some(&ctl),
         pin.as_ref(),
         Backoff::new(Duration::from_secs(30)),
         shutdown,
@@ -700,7 +775,7 @@ fn ack_payload(result: &Result<Option<String>, SenderError>) -> String {
         // A create-style op's platform id (a snowflake the executor parsed out
         // of Discord's reply): the producer needs it to address later updates.
         // A bulk read's JSON object result (`role.list`): returned to the producer as `data`.
-        Ok(Some(json)) if json.starts_with('{') => {
+        Ok(Some(json)) if json.starts_with('{') || json.starts_with('[') => {
             match serde_json::from_str::<serde_json::Value>(json) {
                 Ok(data) => serde_json::json!({"ok": true, "data": data}),
                 Err(_) => serde_json::json!({"ok": false, "code": "bad_result"}),
@@ -2628,6 +2703,124 @@ mod tests {
             ),
         )
         .await;
+    }
+
+    /// The Twitch / YouTube drains settle a waiting producer exactly like Discord's: an
+    /// authentic entry with an `op_id` gets `{"ok":true}` or the stable refusal code; a forged
+    /// (un-stamped) entry gets NO ack and never reaches the executor.
+    #[tokio::test]
+    async fn twitch_and_youtube_drains_ack_authentic_entries_only() {
+        const BAN: &str = r##"{"v":1,"op":"mod.ban","platform":"twitch","channel":"#c","origin_channel":"#c","user_id":"123","op_id":"u-9","community_id":7}"##;
+        const YT_ADD: &str = r##"{"v":1,"op":"mod.add","platform":"youtube","channel":"lc1","origin_channel":"lc1","user_id":"UCx","op_id":"u-10","community_id":7}"##;
+        for (platform, ok_entry, forged_id) in [("twitch", BAN, "u-9"), ("youtube", YT_ADD, "u-10")]
+        {
+            let exec = ScriptedExec::new(|_, _| Ok(()));
+            let ctl = FakeCtl::default();
+            let forged = ok_entry.replace(forged_id, "forged-1");
+            let queue = FakeQueue {
+                payloads: vec![
+                    Ok(Some(format!("RAW:{forged}"))),
+                    Ok(Some(ok_entry.to_string())),
+                ],
+                idx: AtomicUsize::new(0),
+            };
+            let (_tx, rx) = oneshot::channel();
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                drain_platform_loop_acked(
+                    platform,
+                    queue,
+                    &RecordingSender::default(),
+                    Some(&exec),
+                    &MemoryReplayGuard::default(),
+                    Some(&ctl),
+                    Some(&test_pin_keys()),
+                    Backoff::new(Duration::from_secs(30)),
+                    rx,
+                ),
+            )
+            .await;
+            let op = if platform == "twitch" {
+                "mod.ban"
+            } else {
+                "mod.add"
+            };
+            assert_eq!(
+                exec.calls.lock().unwrap().as_slice(),
+                &[(platform, Some(7), op)],
+                "{platform}: only the stamped entry executes"
+            );
+            assert_eq!(
+                ctl.acks.lock().unwrap().as_slice(),
+                &[(forged_id.to_string(), r#"{"ok":true}"#.to_string())],
+                "{platform}: exactly one ack, for the authentic entry"
+            );
+        }
+    }
+
+    /// A refused op is acked with its stable code so the producer reports failure, not success.
+    #[tokio::test]
+    async fn a_refused_twitch_op_is_acked_with_its_code() {
+        const BAN: &str = r##"{"v":1,"op":"mod.ban","platform":"twitch","channel":"#c","origin_channel":"#c","user_id":"123","op_id":"u-11","community_id":7}"##;
+        let exec = ScriptedExec::new(|p, op| {
+            Err(SenderError::Rejected {
+                platform: if p == "twitch" { "twitch" } else { "other" },
+                op: if op == "mod.ban" { "mod.ban" } else { "other" },
+                reason: "slot_refused",
+            })
+        });
+        let ctl = FakeCtl::default();
+        let queue = FakeQueue {
+            payloads: vec![Ok(Some(BAN.to_string()))],
+            idx: AtomicUsize::new(0),
+        };
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_platform_loop_acked(
+                "twitch",
+                queue,
+                &RecordingSender::default(),
+                Some(&exec),
+                &MemoryReplayGuard::default(),
+                Some(&ctl),
+                Some(&test_pin_keys()),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+        assert_eq!(
+            ctl.acks.lock().unwrap().as_slice(),
+            &[(
+                "u-11".to_string(),
+                r#"{"ok":false,"code":"slot_refused"}"#.to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn ack_payload_returns_objects_and_arrays_as_data_and_ids_as_id() {
+        let ok = |s: &str| -> serde_json::Value {
+            serde_json::from_str(&ack_payload(&Ok(Some(s.to_string())))).unwrap()
+        };
+        assert_eq!(
+            ok(r#"{"data":[1]}"#),
+            serde_json::json!({"ok":true,"data":{"data":[1]}})
+        );
+        assert_eq!(
+            ok(r#"[{"id":"1"}]"#),
+            serde_json::json!({"ok":true,"data":[{"id":"1"}]})
+        );
+        assert_eq!(
+            ok("900000000000000001"),
+            serde_json::json!({"ok":true,"id":"900000000000000001"})
+        );
+        assert_eq!(
+            ok("{not json"),
+            serde_json::json!({"ok":false,"code":"bad_result"})
+        );
+        assert_eq!(ack_payload(&Ok(None)), r#"{"ok":true}"#);
     }
 
     const TW_SEND: &str = r##"{"v":1,"op":"chat.send","platform":"twitch","channel":"#c","text":"hi","origin_channel":"#c","community_id":7}"##;

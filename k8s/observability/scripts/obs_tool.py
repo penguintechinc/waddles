@@ -1567,7 +1567,7 @@ def stage_pipeline_board() -> Board:
     b = Board(
         "waddles-stage-pipeline",
         "Waddles / stage pipeline and executor (OTel)",
-        "The OTel metrics of svc-process, svc-action (scraped from /metrics) and the bundle-executor's own series "
+        "The OTel metrics of svc-process, svc-action (scraped from /metrics) and the svc-bundles-executor's own series "
         "(OTLP push only when OTEL_EXPORTER_OTLP_ENDPOINT is set on the executor - those panels stay empty "
         "otherwise). See docs/observability/data-plane-metrics.md.",
     )
@@ -1716,10 +1716,10 @@ def stage_pipeline_board() -> Board:
         "The gate's audit counters (previously dropped: the metrics-facade had no recorder).",
     )
 
-    b.row("bundle-executor process (own series; OTLP opt-in)")
+    b.row("svc-bundles-executor process (own series; OTLP opt-in)")
     b.stat(
         "Executor session up",
-        "max(waddles_executor_connection_up)",
+        "min(waddles_executor_connection_up)",
         "short",
         "1 while the host-API session is established; an explicit 0 means down (absent = not exporting).",
         [(None, "red"), (1, "green")],

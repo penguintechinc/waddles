@@ -14,7 +14,6 @@ class ScopeStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     SCOPE_STATUS_NOT_FOUND: _ClassVar[ScopeStatus]
     SCOPE_STATUS_AMBIGUOUS: _ClassVar[ScopeStatus]
     SCOPE_STATUS_INVALID: _ClassVar[ScopeStatus]
-
 SCOPE_STATUS_UNSPECIFIED: ScopeStatus
 SCOPE_STATUS_RESOLVED: ScopeStatus
 SCOPE_STATUS_NOT_FOUND: ScopeStatus
@@ -39,21 +38,13 @@ class ResolveScopeResponse(_message.Message):
     community_id: int
     tenant_slug: str
     community_name: str
-    def __init__(
-        self,
-        tenant_id: _Optional[int] = ...,
-        community_id: _Optional[int] = ...,
-        tenant_slug: _Optional[str] = ...,
-        community_name: _Optional[str] = ...,
-    ) -> None: ...
+    def __init__(self, tenant_id: _Optional[int] = ..., community_id: _Optional[int] = ..., tenant_slug: _Optional[str] = ..., community_name: _Optional[str] = ...) -> None: ...
 
 class ResolveScopeBatchRequest(_message.Message):
     __slots__ = ("items",)
     ITEMS_FIELD_NUMBER: _ClassVar[int]
     items: _containers.RepeatedCompositeFieldContainer[ResolveScopeRequest]
-    def __init__(
-        self, items: _Optional[_Iterable[_Union[ResolveScopeRequest, _Mapping]]] = ...
-    ) -> None: ...
+    def __init__(self, items: _Optional[_Iterable[_Union[ResolveScopeRequest, _Mapping]]] = ...) -> None: ...
 
 class ScopeResult(_message.Message):
     __slots__ = ("platform", "source_id", "status", "scope")
@@ -65,18 +56,10 @@ class ScopeResult(_message.Message):
     source_id: str
     status: ScopeStatus
     scope: ResolveScopeResponse
-    def __init__(
-        self,
-        platform: _Optional[str] = ...,
-        source_id: _Optional[str] = ...,
-        status: _Optional[_Union[ScopeStatus, str]] = ...,
-        scope: _Optional[_Union[ResolveScopeResponse, _Mapping]] = ...,
-    ) -> None: ...
+    def __init__(self, platform: _Optional[str] = ..., source_id: _Optional[str] = ..., status: _Optional[_Union[ScopeStatus, str]] = ..., scope: _Optional[_Union[ResolveScopeResponse, _Mapping]] = ...) -> None: ...
 
 class ResolveScopeBatchResponse(_message.Message):
     __slots__ = ("results",)
     RESULTS_FIELD_NUMBER: _ClassVar[int]
     results: _containers.RepeatedCompositeFieldContainer[ScopeResult]
-    def __init__(
-        self, results: _Optional[_Iterable[_Union[ScopeResult, _Mapping]]] = ...
-    ) -> None: ...
+    def __init__(self, results: _Optional[_Iterable[_Union[ScopeResult, _Mapping]]] = ...) -> None: ...

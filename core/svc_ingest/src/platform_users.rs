@@ -257,8 +257,6 @@ mod tests {
         ResolvedPlatformUser,
     };
     use tonic::{Request, Response, Status};
-    use wiremock::matchers::{body_partial_json, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
 
@@ -366,7 +364,7 @@ mod tests {
         resolver: HubPlatformUserResolver,
         calls: Arc<AtomicUsize>,
         seen: Arc<Mutex<Vec<ResolvePlatformUserRequest>>>,
-        _hub: MockServer,
+        _hub: service_auth::test_support::MockHub,
         sa: std::path::PathBuf,
     }
 
@@ -404,17 +402,13 @@ mod tests {
                 .await;
         });
         // the machine-JWT bootstrap must ask for the platform-user scope
-        let hub = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/internal/service-token"))
-            .and(body_partial_json(
-                serde_json::json!({"scope": PLATFORM_USER_SCOPE}),
-            ))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"token": JWT, "expires_in": 3600})),
-            )
-            .mount(&hub)
+        let hub = service_auth::test_support::MockHub::builder()
+            .mint(vec![service_auth::test_support::MintReply::when(
+                |call| call.scope == PLATFORM_USER_SCOPE,
+                JWT,
+                3600,
+            )])
+            .start()
             .await;
         let sa = std::env::temp_dir().join(format!("pu-sa-{}", uuid::Uuid::new_v4()));
         std::fs::write(&sa, "synthetic-sa").unwrap();
@@ -424,7 +418,7 @@ mod tests {
             .connect_lazy();
         let resolver = HubPlatformUserResolver::from_channel(
             channel,
-            format!("{}/internal/service-token", hub.uri()),
+            hub.endpoint.clone(),
             sa.to_string_lossy().to_string(),
         );
         Rig {
@@ -570,15 +564,16 @@ mod tests {
     async fn a_rejected_token_bootstrap_is_denied() {
         let r = rig(Mode::Normal).await;
         // a resolver whose token endpoint refuses the bootstrap
-        let hub = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(403))
-            .mount(&hub)
+        let hub = service_auth::test_support::MockHub::builder()
+            .mint(vec![service_auth::test_support::MintReply::Reject(
+                tonic::Code::PermissionDenied,
+            )])
+            .start()
             .await;
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
         let denied = HubPlatformUserResolver::from_channel(
             channel,
-            format!("{}/internal/service-token", hub.uri()),
+            hub.endpoint.clone(),
             r.sa.to_string_lossy().to_string(),
         );
         assert_eq!(

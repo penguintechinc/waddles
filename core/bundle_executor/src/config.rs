@@ -10,6 +10,14 @@ use clap::Parser;
 
 use crate::error::ExecutorError;
 
+/// One stage host-API listener this executor serves: `label` names the stage
+/// in metrics/logs, `addr` is the `host:port` it dials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageTarget {
+    pub label: String,
+    pub addr: String,
+}
+
 /// CLI/env configuration surface. `clap`'s `env` feature reads the SS12.7
 /// variable of the same name when the flag is not passed explicitly --
 /// this binary is started by its Deployment with env vars only, never
@@ -18,8 +26,13 @@ use crate::error::ExecutorError;
 #[derive(Debug, Parser, Clone)]
 #[command(name = "bundle-executor")]
 pub struct CliConfig {
-    /// The stage's host-API listener this executor dials, e.g.
-    /// `svc-process:8301` or `svc-action:8302` (spec SS6.6/SS7.1).
+    /// The stage host-API listener(s) this executor dials, e.g.
+    /// `svc-process:8301` or `svc-action:8302` (spec SS6.6/SS7.1). A
+    /// comma-separated list (`svc-process:8301,svc-action:8302`) serves every
+    /// listed stage from this one process: each gets its own dial loop,
+    /// reconnect/backoff, bundle registry and metrics `stage` label, so one
+    /// stage failing never blocks another. All stages share the
+    /// `HOST_API_*` mTLS material and `HOST_API_STAGE_IDENTITY`.
     #[arg(long, env = "STAGE_HOST_API_ADDR")]
     pub stage_host_api_addr: String,
 
@@ -327,9 +340,10 @@ pub struct CliConfig {
     #[arg(long, env = "CONNECTOR_HOST_API_CLIENT_KEY_FILE")]
     pub connector_host_api_client_key_file: Option<PathBuf>,
 
-    /// Connections held to the connector listener. MUST be 1: the listener's
-    /// `ExecutorLink::attach` REPLACES the previous session, so a second
-    /// connection would silently kill the first (validated in `validate()`).
+    /// Connections THIS replica holds to the connector listener. Fixed at 1: the
+    /// executor runs exactly one connector dial loop. Scale out by replicas --
+    /// svc-ingest keeps one session per replica and round-robins across them
+    /// (validated in `validate()`).
     #[arg(long, env = "EXECUTOR_CONNECTOR_CONNECTIONS", default_value_t = 1)]
     pub executor_connector_connections: u32,
 
@@ -414,6 +428,7 @@ impl CliConfig {
                 "STAGE_HOST_API_ADDR must not be empty".to_string(),
             ));
         }
+        self.validate_stage_targets()?;
         if self.executor_call_timeout_ms == 0
             || self.executor_call_timeout_ms > self.executor_max_call_timeout_ms
         {
@@ -475,6 +490,63 @@ impl CliConfig {
         self.validate_connector_link()
     }
 
+    /// Every stage host-API listener this executor dials, parsed from
+    /// `STAGE_HOST_API_ADDR` (a single `host:port`, or a comma-separated list
+    /// to serve several stages from ONE process). Blank entries are skipped
+    /// here; [`Self::validate`] rejects them before this is ever used.
+    #[must_use]
+    pub fn stage_targets(&self) -> Vec<StageTarget> {
+        self.stage_host_api_addr
+            .split(',')
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(|addr| StageTarget {
+                label: addr.split(':').next().unwrap_or(addr).to_string(),
+                addr: addr.to_string(),
+            })
+            .collect()
+    }
+
+    /// A copy of this config bound to exactly one stage: its
+    /// `STAGE_HOST_API_ADDR` becomes that stage's address, so every
+    /// single-stage code path (dial, metrics label) works unchanged.
+    #[must_use]
+    pub fn for_stage(&self, target: &StageTarget) -> Self {
+        let mut cfg = self.clone();
+        cfg.stage_host_api_addr = target.addr.clone();
+        cfg
+    }
+
+    /// The metrics/log label of this (single-stage) config's stage: the host
+    /// part of its first address.
+    #[must_use]
+    pub fn stage_label(&self) -> String {
+        self.stage_targets()
+            .into_iter()
+            .next()
+            .map_or_else(|| "unknown".to_string(), |t| t.label)
+    }
+
+    /// Rejects a malformed multi-stage list: a blank entry (`a:1,,b:2`) or the
+    /// same address twice (two dial loops on one listener would fight).
+    fn validate_stage_targets(&self) -> Result<(), ExecutorError> {
+        let mut seen = std::collections::HashSet::new();
+        for raw in self.stage_host_api_addr.split(',') {
+            let addr = raw.trim();
+            if addr.is_empty() {
+                return Err(ExecutorError::Config(
+                    "STAGE_HOST_API_ADDR has a blank entry in its comma-separated list".to_string(),
+                ));
+            }
+            if !seen.insert(addr.to_string()) {
+                return Err(ExecutorError::Config(format!(
+                    "STAGE_HOST_API_ADDR lists {addr:?} more than once"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// The configured connector listener address, `None` when unset/empty
     /// (no connector link is dialed).
     #[must_use]
@@ -491,9 +563,8 @@ impl CliConfig {
     fn validate_connector_link(&self) -> Result<(), ExecutorError> {
         if self.executor_connector_connections != 1 {
             return Err(ExecutorError::Config(format!(
-                "EXECUTOR_CONNECTOR_CONNECTIONS ({}) must be exactly 1: the connector listener \
-                 replaces the previous session on every attach, so a second connection would \
-                 kill the first",
+                "EXECUTOR_CONNECTOR_CONNECTIONS ({}) must be exactly 1: each replica runs one \
+                 connector dial loop (scale out with replicas, not connections per replica)",
                 self.executor_connector_connections
             )));
         }

@@ -7,7 +7,7 @@ from waddles.hub.internal.v1 import (
     dataplane_scope_pb2 as waddles_dot_hub_dot_internal_dot_v1_dot_dataplane__scope__pb2,
 )
 
-GRPC_GENERATED_VERSION = "1.85.1"
+GRPC_GENERATED_VERSION = "1.78.0"
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -28,7 +28,7 @@ if _version_not_supported:
     )
 
 
-class DataplaneScopeServiceStub:
+class DataplaneScopeServiceStub(object):
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -51,7 +51,7 @@ class DataplaneScopeServiceStub:
         )
 
 
-class DataplaneScopeServiceServicer:
+class DataplaneScopeServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def ResolveScope(self, request, context):
@@ -96,7 +96,7 @@ def add_DataplaneScopeServiceServicer_to_server(servicer, server):
 
 
 # This class is part of an EXPERIMENTAL API.
-class DataplaneScopeService:
+class DataplaneScopeService(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
