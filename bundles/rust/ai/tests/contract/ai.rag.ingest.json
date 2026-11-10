@@ -1,0 +1,35 @@
+{
+  "name": "ai.rag.ingest",
+  "access": "write",
+  "risk": "dangerous",
+  "required_scope": "community:admin",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "collection": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,39}$"},
+      "doc_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"},
+      "title": {"type": "string", "maxLength": 200},
+      "text": {"type": "string", "minLength": 1, "maxLength": 100000}
+    },
+    "required": ["collection", "text"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "doc_id": {"type": "string"},
+      "chunks": {"type": "integer", "minimum": 0}
+    },
+    "required": ["doc_id", "chunks"]
+  },
+  "examples_valid": [
+    {"collection": "faq", "text": "Streams run Fridays."},
+    {"collection": "faq", "doc_id": "rules-1", "title": "Rules", "text": "Be kind."}
+  ],
+  "examples_invalid": [
+    {"collection": "faq"},
+    {"text": "t"},
+    {"collection": "faq", "text": ""},
+    {"collection": "faq", "doc_id": "Has Space", "text": "t"}
+  ]
+}

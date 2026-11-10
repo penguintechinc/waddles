@@ -1,0 +1,26 @@
+[package]
+name = "waddle-bundle-webrtc-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "WebRTC SERVICE bundle: an always-on `kind: service` bundle on the `stage-tools-webrtc` world that exports `tool-provider` and holds the `webrtc` host capability, so app bundles reach svc-streaming's rooms/SFU control plane only through gated tool calls. Tools: room.create/get/close, token.issue/revoke, whip.endpoint, whep.endpoint, track.route, recording.start/stop."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-webrtc-service"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage-tools-webrtc"
+
+[package.metadata.component.dependencies]

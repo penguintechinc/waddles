@@ -11,7 +11,7 @@
 schema_version: 2
 app_id: waddles.core.service.youtube
 name: YouTube Platform Connector (Rust)
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -118,7 +118,7 @@ exported_tools:
       required: [target_source_id, payload]
       additionalProperties: false
     output_schema: {type: object}
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/youtube
 config_schema: {}

@@ -26,7 +26,7 @@
 //! | Shape | opaque `?key=` query param | `Authorization: Bearer <machine JWT>` |
 //! | Scoped to | one community (checked at lookup, not just hash match) | one community (`scope` claim, `push::push_scope()`) |
 //! | Rotatable | yes, 5-min grace (`view::ROTATION_GRACE_PERIOD`) | yes -- short-lived JWT, re-minted per call |
-//! | Storage | SHA-256 hash only (`token::hash_token`), never plaintext | none -- `service_auth`'s existing EdDSA verifier |
+//! | Storage | SHA-256 hash only (`token::hash_token`), never plaintext | none -- `service_auth`'s existing ES256 verifier |
 //! | New crypto in this crate | `rand`+`sha2` (opaque token gen/hash) | **none** -- delegates to `service_auth::verify` |
 //!
 //! # Migration

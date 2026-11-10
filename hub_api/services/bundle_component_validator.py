@@ -49,8 +49,10 @@ suggest) would reject every legitimate Python component; do not do that.
 
 Exports are checked strictly: the component MUST export exactly
 `waddle:bundle/process-stage` and `waddle:bundle/action-stage` (the
-`stage` world's own export set) -- neither more nor fewer -- with one
-additional, narrowly-matched exception: `componentize-py` 0.25.1
+`stage` world's required export set), optionally also
+`waddle:bundle/streaming-lifecycle` from `stage-next-tools`. Other named
+exports remain rejected. There is one additional, narrowly-matched exception:
+`componentize-py` 0.25.1
 unconditionally links an anonymous, un-namespaced reflection export
 (package `root:component`, no interface name, a single `init` function)
 into EVERY component it builds -- its own embedded-CPython runtime's
@@ -115,9 +117,10 @@ ALLOWED_WASI_NAMESPACES = frozenset(
     {"wasi:cli", "wasi:clocks", "wasi:filesystem", "wasi:io", "wasi:random", "wasi:sockets"}
 )
 
-#: The `stage` world's own export set (`wit/waddle-bundle/stage.wit`) -- a
-#: conformant component exports exactly these two, never more or fewer.
+#: All app worlds require both stages; stage-next-tools also exports the
+#: lifecycle hook. This optional export grants no host capabilities.
 REQUIRED_EXPORTS = frozenset({"process-stage", "action-stage"})
+OPTIONAL_EXPORTS = frozenset({"streaming-lifecycle"})
 
 #: `componentize-py`'s synthetic reflection export always reports this exact
 #: package name and no interface name (see module docstring).
@@ -484,9 +487,9 @@ def _validate_document(doc: dict[str, Any]) -> ComponentValidationResult:
     exported_interface_names = {
         name.split("/", 1)[1] for name in export_names if name.startswith(bundle_prefix)
     }
-    if exported_interface_names != REQUIRED_EXPORTS:
-        missing = REQUIRED_EXPORTS - exported_interface_names
-        extra = exported_interface_names - REQUIRED_EXPORTS
+    missing = REQUIRED_EXPORTS - exported_interface_names
+    extra = exported_interface_names - (REQUIRED_EXPORTS | OPTIONAL_EXPORTS)
+    if missing or extra:
         return ComponentValidationResult(
             ok=False,
             reason=f"stage_export_mismatch: missing={sorted(missing)} extra={sorted(extra)}",

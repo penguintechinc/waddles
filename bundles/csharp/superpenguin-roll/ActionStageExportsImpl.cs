@@ -6,11 +6,11 @@
 // `RollDispatch` (`waddle-sdk-cs`'s `WaddleActionStage` base class), catching
 // `WaddleTransportException` and re-throwing it as the generated
 // `WitException<Types.TransportError>`.
-namespace StageWorld.wit.Exports.waddle.bundle.v1_0_0;
+namespace StageNextToolsWorld.wit.Exports.waddle.bundle.v1_0_0;
 
 using WaddleBundleSuperpenguinRoll;
 using WaddleSdk.Types;
-using Types = global::StageWorld.wit.Imports.waddle.bundle.v1_0_0.ITypesImports;
+using Types = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.ITypesImports;
 
 public class ActionStageExportsImpl : IActionStageExports
 {
@@ -36,7 +36,7 @@ public class ActionStageExportsImpl : IActionStageExports
         }
         catch (WaddleTransportException ex)
         {
-            throw new global::StageWorld.WitException<Types.TransportError>(
+            throw new global::StageNextToolsWorld.WitException<Types.TransportError>(
                 new Types.TransportError(ex.Error.Retryable, ex.Error.Code, ex.Error.Message, ex.Error.RetryAfterMs), 0);
         }
 

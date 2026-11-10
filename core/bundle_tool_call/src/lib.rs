@@ -422,11 +422,13 @@ pub fn authorize_tool_call(
     // cyclic, or depth-exceeded call never triggers a lookup, and the lookup is
     // not a timing oracle for tools the caller was never granted.
     let required_scope = exported.required_scope.clone();
+    let host_op = exported.host_op.clone();
 
     let mut next_chain = chain.to_vec();
     next_chain.push(req.target.clone());
     Ok(AuthorizedCall {
         required_scope,
+        host_op,
         plan: ToolPlan {
             target_app_id: req.target,
             tool: req.tool,
@@ -511,9 +513,16 @@ pub fn authorize_admin_call(
 pub struct AuthorizedCall {
     plan: ToolPlan,
     required_scope: Option<String>,
+    host_op: Option<bundle_active_set::HostOpDecl>,
 }
 
 impl AuthorizedCall {
+    /// The manifest's host-side execution declaration for the target tool, when it has one
+    /// (the stage then executes it as a pinned producer op instead of a nested guest call).
+    pub fn host_op(&self) -> Option<&bundle_active_set::HostOpDecl> {
+        self.host_op.as_ref()
+    }
+
     /// The scope this tool requires, if any. A write may separately resolve
     /// identity to bind its retry key even when no role scope is required.
     pub fn required_scope(&self) -> Option<&str> {
@@ -532,7 +541,7 @@ impl AuthorizedCall {
         if let Some(required) = &self.required_scope {
             if !actor.has_scope(required) {
                 return Err(ToolRefusal::Forbidden(
-                    "the verified actor lacks the scope this tool requires".to_string(),
+                    "scope_denied: the verified actor lacks the scope this tool requires".to_string(),
                 ));
             }
         }

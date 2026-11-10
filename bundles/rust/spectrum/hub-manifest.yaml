@@ -7,15 +7,20 @@
 schema_version: 2
 app_id: waddles.core.service.spectrum
 name: RSI Spectrum Platform Connector (Rust, inbound-only)
-version: 0.1.0
+version: 0.1.1
 feature: waddles.core.service
 module: core
 provider: builtin
+author: github:penguintechinc
 language: rust
 artifact: prebuilt
 execution_model: native
 is_default: false
 kind: service
+# Inbound-only connector: the host drives `receiver.on-frame` (the poll hot path); no consumes.
+stages:
+  action:
+    entry: waddle:connector/receiver#on-frame
 # Guest egress is EMPTY by design: the RSI poll host allowlist + session credential live in the
 # host-side poll transport config (svc_ingest Spectrum profile), exactly as for YouTube.
 egress: []
@@ -24,7 +29,7 @@ data:
 limits:
   timeout_ms: 2000
   memory_mb: 64
-  egress_rps: 0
+  egress_rps: 1
 permissions:
   - id: connector.pii.read
     justification: "gates identity.lookup, used to tokenize each Spectrum member to its canonical UUID; first-party core only, dangerous, global-admin-approved (no raw member id or handle leaves the connector)"

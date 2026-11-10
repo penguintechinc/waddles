@@ -69,15 +69,15 @@ use bundle_host_db::{
 };
 use bundle_host_economy::{
     pot_account, AdminAdjust, EconomyCaps, EconomyError, EconomyScope, EconomyStore,
-    IdempotencyKey, DEFAULT_MAX_SUPPLY,
+    ElevatedPermission, ElevatedRequest, IdempotencyKey, DEFAULT_MAX_SUPPLY,
 };
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_platform_table::{
     Change as PlatformTableChange, PlatformTableError, PlatformTableScope, PlatformTableStore,
 };
-use bundle_host_storage::{GrantSet as StorageGrantSet, StorageError, StorageHost, StorageScope};
 use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
+use bundle_host_storage::{GrantSet as StorageGrantSet, StorageError, StorageHost, StorageScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
 use crate::ai::{self, AiWiring, BackendError, GenerateRequest, PromptRefusal};
@@ -405,6 +405,19 @@ pub struct DbWiring {
     /// `crate::license::BUNDLE_DB_CAPABILITY_FLAG` gate -- OFF denies every
     /// `db` call `feature_disabled` before any schema/authorize lookup.
     pub flag: Arc<dyn FeatureGate>,
+    /// `db` v2 (multi-table, structured query, transactions, quotas).
+    pub v2: DbV2Wiring,
+}
+
+/// `db` v2 state shared by every invocation: the engine, the registry of
+/// manifest-declared tables (refreshed from `bundle_data.table_registry`), and
+/// the crate-seam grant snapshot (the stage's capability gate is the real
+/// authority; the snapshot is populated only after the gate passes).
+#[derive(Clone)]
+pub struct DbV2Wiring {
+    pub host: Arc<bundle_host_db::v2::DbV2Host>,
+    pub registry: Arc<bundle_host_db::v2::SchemaRegistryV2>,
+    pub capabilities: Arc<DbCapabilitySnapshot>,
 }
 
 /// Live wiring for the `reputation` bundle host capability (issue #726):
@@ -584,6 +597,73 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `None` until [`Self::with_tool`] -- every `tool.*` call denies
     /// `not_implemented` in that state (never a silent no-op).
     tool: Option<ToolContext>,
+    /// The bundle that invoked THIS invocation through `tool.invoke` (host-derived
+    /// from the call plan, never guest input); `None` for a top-level invocation.
+    /// The economy service's elevated primitives are checked against THIS app's
+    /// grants, not the service's own.
+    tool_caller: Option<ToolCaller>,
+}
+
+/// One economy call that needs the CALLING app's elevated grant: which
+/// approval, what the audit/caps meter, and who the parties are.
+#[derive(Clone, Debug)]
+struct ElevatedPlan {
+    permission: ElevatedPermission,
+    /// Short audit label (`transfer_from`, `credit`, `debit`, ...); also the
+    /// audit `reason` code of the non-`transfer_from` ops.
+    op: &'static str,
+    /// The member whose funds move (`transfer_from`) or who is credited/set;
+    /// the community pot account for multi-target ops.
+    target: uuid::Uuid,
+    /// The member the gate membership-checks (`None` for the pot bucket).
+    gate_user: Option<uuid::Uuid>,
+    counterparty: Option<uuid::Uuid>,
+    /// What the caps meter (>= 0).
+    amount: i64,
+    reason: String,
+}
+
+impl ElevatedPlan {
+    /// A single-target elevated op whose audit reason is its own label.
+    fn single(
+        permission: ElevatedPermission,
+        op: &'static str,
+        user: uuid::Uuid,
+        amount: i64,
+    ) -> Self {
+        Self {
+            permission,
+            op,
+            target: user,
+            gate_user: Some(user),
+            counterparty: None,
+            amount,
+            reason: op.to_string(),
+        }
+    }
+
+    /// A multi-target mint-class op, bucketed on the community pot account.
+    fn multi(op: &'static str, bucket: uuid::Uuid, amount: i64) -> Self {
+        Self {
+            permission: ElevatedPermission::AppMint,
+            op,
+            target: bucket,
+            gate_user: None,
+            counterparty: None,
+            amount,
+            reason: op.to_string(),
+        }
+    }
+}
+
+/// The direct caller of a nested `tool.invoke` hop: the calling app and the
+/// platform-installed version whose grants apply to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolCaller {
+    /// The calling bundle's app id (host-derived from the tool call plan).
+    pub app_id: String,
+    /// The calling bundle's active version id (the grant-set pin).
+    pub app_version: i64,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -634,6 +714,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             verified_scope: None,
             stage_metrics: stage_metrics::stage_metrics(),
             tool: None,
+            tool_caller: None,
         }
     }
 
@@ -1415,6 +1496,15 @@ impl<K: KvBackend> StageCapabilities<K> {
                 rate_num: i64,
                 rate_den: i64,
             },
+            // ELEVATED primitive: moves a NON-actor member's funds. Only an
+            // app bundle holding the approved `economy.transfer_from` grant,
+            // calling through the economy service, may use it.
+            TransferFrom {
+                from: uuid::Uuid,
+                to: uuid::Uuid,
+                amount: i64,
+                reason: String,
+            },
         }
 
         /// A mutation's claimed idempotency slot: the mutation kind, the
@@ -1450,6 +1540,24 @@ impl<K: KvBackend> StageCapabilities<K> {
                 }
                 let amount = economy_amount_arg(args, "amount", 1)?;
                 Op::Transfer { from, to, amount }
+            }
+            "economy.transfer_from" => {
+                let from = economy_user_arg(args, "from")?;
+                let to = economy_user_arg(args, "to")?;
+                if from == to {
+                    return Err(denied("invalid_args", "cannot transfer to oneself"));
+                }
+                let reason = args
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| denied("invalid_args", "reason must be a code string"))?;
+                bundle_host_economy::validate_reason(reason).map_err(economy_error_to_host)?;
+                Op::TransferFrom {
+                    from,
+                    to,
+                    amount: economy_amount_arg(args, "amount", 1)?,
+                    reason: reason.to_string(),
+                }
             }
             "economy.credit" => Op::Credit {
                 user: economy_user_arg(args, "user")?,
@@ -1536,12 +1644,123 @@ impl<K: KvBackend> StageCapabilities<K> {
         // account whose funds the call would move (a wager's player, a
         // transfer's sender) -- the one [`Self::bind_actor`] must tie to the
         // invocation's actor.
+        // ELEVATED classification (economy service reached by an APP bundle through
+        // `tool.invoke`): every dangerous primitive additionally needs the CALLING
+        // app's own explicit, admin-approved grant (see `ElevatedPlan`). A debit
+        // of the invocation's own actor stays on the lighter, actor-bound path; a
+        // debit of anyone else is `transfer_from`-class.
+        let scope = EconomyScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        };
+        let non_actor_debit = match (&op, &self.tool_caller) {
+            (Op::Debit { user, .. } | Op::ConditionalDebit { user, .. }, Some(_)) => {
+                !self.actor_is(*user).await?
+            }
+            _ => false,
+        };
+        let via_app = self.tool_caller.is_some();
+        let elevated: Option<ElevatedPlan> = match &op {
+            Op::TransferFrom {
+                from,
+                to,
+                amount,
+                reason,
+            } => {
+                if !via_app {
+                    // No calling app means no grant to check: loud refusal.
+                    return Err(denied(
+                        "elevated_not_granted",
+                        "transfer_from is available only to app bundles calling through the economy service",
+                    ));
+                }
+                Some(ElevatedPlan {
+                    permission: ElevatedPermission::TransferFrom,
+                    op: "transfer_from",
+                    target: *from,
+                    gate_user: Some(*from),
+                    counterparty: Some(*to),
+                    amount: *amount,
+                    reason: reason.clone(),
+                })
+            }
+            Op::Debit { user, amount } if via_app && non_actor_debit => Some(ElevatedPlan::single(
+                ElevatedPermission::TransferFrom,
+                "debit",
+                *user,
+                *amount,
+            )),
+            Op::ConditionalDebit { user, amount, .. } if via_app && non_actor_debit => {
+                Some(ElevatedPlan::single(
+                    ElevatedPermission::TransferFrom,
+                    "cond_debit",
+                    *user,
+                    *amount,
+                ))
+            }
+            Op::Credit { user, amount } if via_app => Some(ElevatedPlan::single(
+                ElevatedPermission::AppMint,
+                "credit",
+                *user,
+                *amount,
+            )),
+            Op::Exchange {
+                user,
+                from_amount,
+                rate_num,
+                rate_den,
+            } if via_app => {
+                // The credited amount (floor(from * num / den)), the quantity the
+                // caps meter; widened so the product cannot overflow.
+                let credited = (i128::from(*from_amount) * i128::from(*rate_num)
+                    / i128::from(*rate_den).max(1))
+                .clamp(0, i128::from(i64::MAX)) as i64;
+                Some(ElevatedPlan::single(
+                    ElevatedPermission::AppMint,
+                    "exchange",
+                    *user,
+                    credited,
+                ))
+            }
+            Op::AdminAdjust { user, adjust } if via_app => {
+                let magnitude = match adjust {
+                    AdminAdjust::Delta(d) => i64::try_from(d.unsigned_abs()).unwrap_or(i64::MAX),
+                    AdminAdjust::Set(v) => *v,
+                };
+                Some(ElevatedPlan::single(
+                    ElevatedPermission::AppMint,
+                    "admin_adjust",
+                    *user,
+                    magnitude,
+                ))
+            }
+            // Multi-target ops are metered against the community pot account as
+            // the per-target bucket (the per-app daily cap still bounds them).
+            Op::BatchCredit(entries) if via_app => Some(ElevatedPlan::multi(
+                "batch_credit",
+                pot_account(&scope),
+                entries.iter().fold(0i64, |t, (_, a)| t.saturating_add(*a)),
+            )),
+            Op::PayPot(winners) if via_app => Some(ElevatedPlan::multi(
+                "pay_pot",
+                pot_account(&scope),
+                winners.iter().fold(0i64, |t, (_, a)| t.saturating_add(*a)),
+            )),
+            _ => None,
+        };
+
         let claim: Option<MutationClaim> = match &op {
             Op::Wager { user, .. } => Some(("wager", Some(*user))),
             Op::Transfer { from, .. } => Some(("transfer", Some(*from))),
-            // Spends and the exchange move the ACTOR's own funds: bound.
-            Op::Debit { user, .. } => Some(("debit", Some(*user))),
-            Op::ConditionalDebit { user, .. } => Some(("conditional_debit", Some(*user))),
+            // Spends and the exchange move the ACTOR's own funds: bound -- except
+            // an elevated debit of a non-actor, authorized by the app's grant.
+            Op::Debit { user, .. } => Some(("debit", (!non_actor_debit).then_some(*user))),
+            Op::ConditionalDebit { user, .. } => {
+                Some(("conditional_debit", (!non_actor_debit).then_some(*user)))
+            }
+            // Moves a non-actor's funds under the calling app's elevated grant.
+            Op::TransferFrom { .. } => Some(("transfer_from", None)),
             Op::Exchange { user, .. } => Some(("exchange", Some(*user))),
             // Mints, the admin adjust and the pot payout pay INTO accounts and
             // never pull a member's funds: keyed, gated by their own grant, not
@@ -1615,6 +1834,15 @@ impl<K: KvBackend> StageCapabilities<K> {
                 None,
             ),
             Op::PayPot(_) => (PermissionId::EconomyPotPay, None, None, None, None),
+            // The SERVICE's own grant to expose the primitive (amount-less: the
+            // durable store meters it under the calling app's caps below).
+            Op::TransferFrom { from, to, .. } => (
+                PermissionId::EconomyTransferFrom,
+                None,
+                None,
+                Some(*from),
+                Some(*to),
+            ),
         };
         // The stage's admin guarantee for the store: true ONLY when the gate
         // just authorized the bundle's `economy.admin_adjust` grant for this
@@ -1636,6 +1864,14 @@ impl<K: KvBackend> StageCapabilities<K> {
             )
             .map_err(denied_from_gate)?;
 
+        // The CALLING app's own elevated grant (fast in-memory pre-filter; the
+        // store re-reads the live grant row inside the write transaction). An
+        // absent grant is an explicit denial, never a silent fallback to the
+        // service's own (broader) grants.
+        if let (Some(plan), Some(caller)) = (&elevated, &self.tool_caller) {
+            self.authorize_caller_elevated(plan, caller)?;
+        }
+
         let Some(wiring) = &self.economy else {
             return Err(denied(
                 "not_implemented",
@@ -1649,12 +1885,6 @@ impl<K: KvBackend> StageCapabilities<K> {
                 "economy capability is disabled (waddles.bundle-economy-capability is OFF)",
             ));
         }
-
-        let scope = EconomyScope {
-            tenant_id: self.tenant_id,
-            community_id: self.community_id,
-            app_id: self.app_id.clone(),
-        };
 
         // Actor binding + idempotency key for the money movers. Neither is
         // optional: with no resolvable actor, or no event to anchor a key to,
@@ -1685,186 +1915,265 @@ impl<K: KvBackend> StageCapabilities<K> {
             reservation = Some((invocation, kind, ordinal));
         }
 
-        let result = match op {
-            Op::Balance(user) => wiring
-                .store
-                .balance(&scope, user)
-                .await
-                .map(|balance| serde_json::json!({ "balance": balance })),
-            Op::MaxBet(user) => {
-                // The cap is the grant's declared `max_bet` clamped to the
-                // catalog ceiling: the exact number the gate enforces on a
-                // wager's stake.
-                let cap = family
-                    .economy_amount_bound(&authorized.params)
-                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
-                wiring
-                    .store
-                    .max_bet(&scope, user, cap)
-                    .await
-                    .map(|max_bet| serde_json::json!({ "max_bet": max_bet }))
+        // Elevated primitives other than `transfer_from` (which audits inside its
+        // own transaction) are first ADMITTED: the store re-reads the calling
+        // app's live grant, enforces the admin-set caps and writes a reserved
+        // audit row; it is settled after the primitive ran.
+        let is_transfer_from = matches!(op, Op::TransferFrom { .. });
+        let mut reserved: Option<i64> = None;
+        let result = 'run: {
+            if let (Some(plan), Some(caller), false) =
+                (&elevated, &self.tool_caller, is_transfer_from)
+            {
+                let Some(key) = idempotency.as_ref() else {
+                    break 'run Err(EconomyError::Backend(
+                        "elevated mutation has no idempotency key".to_string(),
+                    ));
+                };
+                let req = ElevatedRequest {
+                    caller_app: &caller.app_id,
+                    permission: plan.permission,
+                    op: plan.op,
+                    target: plan.target,
+                    counterparty: plan.counterparty,
+                    amount: plan.amount,
+                    reason: &plan.reason,
+                    key,
+                };
+                match wiring.store.elevated_reserve(&scope, &req).await {
+                    Ok(id) => reserved = Some(id),
+                    Err(e) => break 'run Err(e),
+                }
             }
-            Op::Wager {
-                user,
-                stake,
-                payout,
-            } => {
-                let cap = family
-                    .economy_amount_bound(&authorized.params)
-                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                wiring
-                    .store
-                    .wager(
-                        &scope,
-                        user,
-                        stake,
-                        payout,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::Transfer { from, to, amount } => {
-                let cap = family
-                    .economy_amount_bound(&authorized.params)
-                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                wiring
-                    .store
-                    .transfer(&scope, from, to, amount, cap, economy_caps(family), key)
-                    .await
-                    .map(|()| serde_json::json!({}))
-            }
-            Op::Credit { user, amount } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .credit(
-                        &scope,
-                        user,
+            match op {
+                Op::TransferFrom {
+                    from,
+                    to,
+                    amount,
+                    reason,
+                } => {
+                    let (Some(caller), Some(key)) = (&self.tool_caller, idempotency.as_ref())
+                    else {
+                        break 'run Err(EconomyError::ElevatedNotGranted);
+                    };
+                    let req = ElevatedRequest {
+                        caller_app: &caller.app_id,
+                        permission: ElevatedPermission::TransferFrom,
+                        op: "transfer_from",
+                        target: from,
+                        counterparty: Some(to),
                         amount,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
+                        reason: &reason,
                         key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::BatchCredit(entries) => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
+                    };
+                    wiring.store.transfer_from(&scope, &req).await.map(|o| {
+                        serde_json::json!({
+                            "from_balance": o.from_balance,
+                            "to_balance": o.to_balance,
+                        })
+                    })
+                }
+                Op::Balance(user) => wiring
                     .store
-                    .batch_credit(
-                        &scope,
-                        &entries,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
-                        key,
-                    )
+                    .balance(&scope, user)
                     .await
-                    .map(|()| serde_json::json!({}))
+                    .map(|balance| serde_json::json!({ "balance": balance })),
+                Op::MaxBet(user) => {
+                    // The cap is the grant's declared `max_bet` clamped to the
+                    // catalog ceiling: the exact number the gate enforces on a
+                    // wager's stake.
+                    let cap = family
+                        .economy_amount_bound(&authorized.params)
+                        .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                    wiring
+                        .store
+                        .max_bet(&scope, user, cap)
+                        .await
+                        .map(|max_bet| serde_json::json!({ "max_bet": max_bet }))
+                }
+                Op::Wager {
+                    user,
+                    stake,
+                    payout,
+                } => {
+                    let cap = family
+                        .economy_amount_bound(&authorized.params)
+                        .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    wiring
+                        .store
+                        .wager(
+                            &scope,
+                            user,
+                            stake,
+                            payout,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::Transfer { from, to, amount } => {
+                    let cap = family
+                        .economy_amount_bound(&authorized.params)
+                        .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    wiring
+                        .store
+                        .transfer(&scope, from, to, amount, cap, economy_caps(family), key)
+                        .await
+                        .map(|()| serde_json::json!({}))
+                }
+                Op::Credit { user, amount } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .credit(
+                            &scope,
+                            user,
+                            amount,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::BatchCredit(entries) => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .batch_credit(
+                            &scope,
+                            &entries,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|()| serde_json::json!({}))
+                }
+                Op::Debit { user, amount } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .debit(&scope, user, amount, cap, economy_caps(family), key)
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::ConditionalDebit {
+                    user,
+                    amount,
+                    min_balance,
+                } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .conditional_debit(
+                            &scope,
+                            user,
+                            amount,
+                            min_balance,
+                            cap,
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::AdminAdjust { user, adjust } => {
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    wiring
+                        .store
+                        .admin_adjust(
+                            &scope,
+                            user,
+                            adjust,
+                            economy_max_supply(),
+                            admin_gate_passed,
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::PayPot(winners) => {
+                    let key = idempotency.as_ref().ok_or_else(|| {
+                        denied("backend", "economy mutation has no idempotency key")
+                    })?;
+                    // The pot is host-derived (the bundle never names it).
+                    wiring
+                        .store
+                        .pay_pot(&scope, pot_account(&scope), &winners, key)
+                        .await
+                        .map(|()| serde_json::json!({}))
+                }
+                Op::Exchange {
+                    user,
+                    from_amount,
+                    rate_num,
+                    rate_den,
+                } => {
+                    let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
+                    wiring
+                        .store
+                        .exchange(
+                            &scope,
+                            user,
+                            from_amount,
+                            rate_num,
+                            rate_den,
+                            cap,
+                            economy_max_supply(),
+                            economy_caps(family),
+                            key,
+                        )
+                        .await
+                        .map(|balance| serde_json::json!({ "balance": balance }))
+                }
+                Op::Leaderboard(limit) => {
+                    wiring.store.leaderboard(&scope, limit).await.map(|rows| {
+                        serde_json::json!({
+                            "entries": rows
+                                .into_iter()
+                                .map(|r| serde_json::json!({
+                                    "user": r.user.to_string(),
+                                    "balance": r.balance,
+                                }))
+                                .collect::<Vec<_>>(),
+                        })
+                    })
+                }
             }
-            Op::Debit { user, amount } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .debit(&scope, user, amount, cap, economy_caps(family), key)
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::ConditionalDebit {
-                user,
-                amount,
-                min_balance,
-            } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .conditional_debit(
-                        &scope,
-                        user,
-                        amount,
-                        min_balance,
-                        cap,
-                        economy_caps(family),
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::AdminAdjust { user, adjust } => {
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                wiring
-                    .store
-                    .admin_adjust(
-                        &scope,
-                        user,
-                        adjust,
-                        economy_max_supply(),
-                        admin_gate_passed,
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::PayPot(winners) => {
-                let key = idempotency
-                    .as_ref()
-                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
-                // The pot is host-derived (the bundle never names it).
-                wiring
-                    .store
-                    .pay_pot(&scope, pot_account(&scope), &winners, key)
-                    .await
-                    .map(|()| serde_json::json!({}))
-            }
-            Op::Exchange {
-                user,
-                from_amount,
-                rate_num,
-                rate_den,
-            } => {
-                let (cap, key) = economy_cap_and_key(family, &authorized.params, &idempotency)?;
-                wiring
-                    .store
-                    .exchange(
-                        &scope,
-                        user,
-                        from_amount,
-                        rate_num,
-                        rate_den,
-                        cap,
-                        economy_max_supply(),
-                        economy_caps(family),
-                        key,
-                    )
-                    .await
-                    .map(|balance| serde_json::json!({ "balance": balance }))
-            }
-            Op::Leaderboard(limit) => wiring.store.leaderboard(&scope, limit).await.map(|rows| {
-                serde_json::json!({
-                    "entries": rows
-                        .into_iter()
-                        .map(|r| serde_json::json!({
-                            "user": r.user.to_string(),
-                            "balance": r.balance,
-                        }))
-                        .collect::<Vec<_>>(),
-                })
-            }),
         };
+        // Settle an elevated reservation: applied/failed are definitive; an
+        // INDETERMINATE backend failure leaves it reserved (still counted
+        // against the caps -- the conservative side).
+        if let Some(audit_id) = reserved {
+            let applied = match &result {
+                Ok(_) => Some(true),
+                Err(EconomyError::Backend(_)) => None,
+                Err(_) => Some(false),
+            };
+            if let Some(applied) = applied {
+                if let Err(e) = wiring
+                    .store
+                    .elevated_settle(&scope, audit_id, applied)
+                    .await
+                {
+                    tracing::warn!(audit_id, error = %e, "elevated audit settle failed; the reservation stays counted");
+                }
+            }
+        }
         // A backend failure is INDETERMINATE (it may have committed before the
         // connection died): give the ordinal back so the guest's retry of the
         // same call presents the SAME key and is applied at most once. Every
@@ -1875,6 +2184,61 @@ impl<K: KvBackend> StageCapabilities<K> {
             invocation.release_mutation(kind, ordinal);
         }
         result.map_err(economy_error_to_host)
+    }
+
+    /// `true` iff the invocation's host-resolved actor IS `named`. An actor that
+    /// cannot be resolved because nobody is linked (or the actor is no longer a
+    /// member) is `false` -- the elevated path then needs the calling app's
+    /// grant -- while a resolver outage fails CLOSED (error), never guessing.
+    async fn actor_is(&self, named: uuid::Uuid) -> Result<bool, HostResultError> {
+        let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
+            return Ok(false);
+        };
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        match identity::resolve_actor(wiring, invocation, scope).await {
+            Ok(actor) => Ok(actor == named),
+            Err(IdentityError::NotLinked | IdentityError::NotAMember) => Ok(false),
+            Err(e) => Err(identity_error_to_host(e)),
+        }
+    }
+
+    /// Authorizes an elevated economy call against the CALLING app's own grant
+    /// (its tenant/community/app/version scope, never the service's), through
+    /// the standard gate: explicit `not_granted` when the app was never
+    /// approved, `user_not_in_scope` for a non-member party, rate limiting.
+    fn authorize_caller_elevated(
+        &self,
+        plan: &ElevatedPlan,
+        caller: &ToolCaller,
+    ) -> Result<(), HostResultError> {
+        let scope = HostInvokeScopeBuilder::new()
+            .tenant_id(self.tenant_id)
+            .community_id(self.community_id)
+            .app_id(caller.app_id.clone())
+            .app_version(caller.app_version)
+            .tenant_tier(TenantTier::Free)
+            .build()
+            .map_err(|_| denied("backend", "calling app scope is invalid"))?;
+        let permission = match plan.permission {
+            ElevatedPermission::TransferFrom => PermissionId::EconomyTransferFrom,
+            ElevatedPermission::AppMint => PermissionId::EconomyAppMint,
+        };
+        self.gate
+            .authorize(
+                &scope,
+                permission,
+                ResourceRef::EconomyScoped(EconomyTarget {
+                    target_user: plan.gate_user,
+                    counterparty: plan.counterparty,
+                    amount: None,
+                    payout: None,
+                }),
+            )
+            .map(|_| ())
+            .map_err(denied_from_gate)
     }
 
     /// Binds an economy money mover to the invocation's authenticated actor:
@@ -2109,7 +2473,10 @@ impl<K: KvBackend> StageCapabilities<K> {
             match args.get(k) {
                 None | Some(serde_json::Value::Null) => Ok(None),
                 Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
-                Some(_) => Err(denied("invalid_args", format!("{k} must be a string or null"))),
+                Some(_) => Err(denied(
+                    "invalid_args",
+                    format!("{k} must be a string or null"),
+                )),
             }
         };
         let owner = opt_str("owner")?;
@@ -2170,9 +2537,7 @@ impl<K: KvBackend> StageCapabilities<K> {
         };
         let host = &wiring.host;
         let owner_ref = owner.as_deref();
-        let info = |i: &bundle_host_storage::host::ObjectInfo| {
-            serde_json::json!({ "key": i.key, "size": i.size, "content_type": i.content_type })
-        };
+        let info = |i: &bundle_host_storage::host::ObjectInfo| serde_json::json!({ "key": i.key, "size": i.size, "content_type": i.content_type });
         match op {
             "put" => {
                 let body = base64::engine::general_purpose::STANDARD
@@ -2743,7 +3108,18 @@ impl<K: KvBackend> StageCapabilities<K> {
         &self,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
-        self.egress.send(&self.app_id, args).await
+        // The community whose connection a `connection:` secret grant
+        // resolves: the MAC-verified envelope's numeric scope when present
+        // (a tenant-wide activation serves many communities), else the
+        // stage's bound scope. Never a guest-supplied value.
+        let (tenant_id, community_id) = self
+            .verified_scope
+            .unwrap_or((self.tenant_id, self.community_id));
+        let scope = bundle_host_http::credentials::CallScope {
+            tenant_id: i64::from(tenant_id),
+            community_id: i64::from(community_id),
+        };
+        self.egress.send_scoped(&self.app_id, &scope, args).await
     }
 
     fn handle_clock(&self, op: &str) -> Result<serde_json::Value, HostResultError> {
@@ -2797,6 +3173,16 @@ impl<K: KvBackend> StageCapabilities<K> {
             "community": self.community,
             "app_id": self.app_id,
         });
+        // The same signed envelope id survives redelivery. Money-game apps use
+        // it for their persisted outcome/service retry keys. No guest argument
+        // participates; an unanchored invocation still has no message id.
+        if let Some(event_id) = self
+            .invocation_identity
+            .as_ref()
+            .and_then(|identity| identity.event_id())
+        {
+            ctx["message_id"] = serde_json::json!(event_id);
+        }
         // Authoritative numeric scope for `context-v2` guests, from the
         // verified envelope only; v1 guests ignore the extra keys.
         if let Some((tenant_id, community_id)) = self.verified_scope {
@@ -2916,6 +3302,70 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .await
                     .map_err(kv_err_to_host)?;
                 Ok(serde_json::json!({ "value": value }))
+            }
+            "get_versioned" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                let found = kv
+                    .get_versioned(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(match found {
+                    Some((value, version)) => {
+                        serde_json::json!({ "value": value, "version": version })
+                    }
+                    None => serde_json::json!({ "value": null }),
+                })
+            }
+            "cas" => {
+                let args: KvCasArgs = parse_kv_args(&call.args)?;
+                let r = kv
+                    .cas(
+                        &kv_scope,
+                        call.call_id,
+                        &args.key,
+                        args.expected_version,
+                        &args.value,
+                        args.ttl_seconds,
+                    )
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(match r {
+                    bundle_host_kv::KvCasResult::Swapped(v) => {
+                        serde_json::json!({ "swapped": true, "version": v })
+                    }
+                    bundle_host_kv::KvCasResult::Conflict(v) => {
+                        serde_json::json!({ "swapped": false, "version": v })
+                    }
+                })
+            }
+            "delete_if" => {
+                let args: KvDeleteIfArgs = parse_kv_args(&call.args)?;
+                let r = kv
+                    .delete_if(&kv_scope, call.call_id, &args.key, args.expected_version)
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(match r {
+                    bundle_host_kv::KvDeleteIfResult::Deleted => {
+                        serde_json::json!({ "deleted": true, "version": 0 })
+                    }
+                    bundle_host_kv::KvDeleteIfResult::Conflict(v) => {
+                        serde_json::json!({ "deleted": false, "version": v })
+                    }
+                })
+            }
+            "list" => {
+                let args: KvListArgs = parse_kv_args(&call.args)?;
+                let page = kv
+                    .list(
+                        &kv_scope,
+                        call.call_id,
+                        &args.prefix,
+                        args.cursor.as_deref(),
+                        args.limit,
+                    )
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(serde_json::json!({ "keys": page.keys, "next_cursor": page.next_cursor }))
             }
             other => Err(denied(
                 "unknown_op",
@@ -3077,6 +3527,53 @@ impl<K: KvBackend> StageCapabilities<K> {
         result.map(row_to_json).map_err(db_error_to_host_error)
     }
 
+    /// `db` v2 (`db2.*` ops): multi-table, structured query, transactions,
+    /// quotas. Same gate (`storage.tables`) and feature flag as v1; the stage
+    /// injects tenant/community/app from `self`, never from `call`. The wire
+    /// contract and every limit live in `bundle_host_db::v2`.
+    async fn handle_db_v2(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::StorageTables,
+                ResourceRef::AppScoped(AppScopedResource::Table),
+            )
+            .map_err(denied_from_gate)?;
+        let Some(db) = &self.db else {
+            return Err(denied(
+                "not_implemented",
+                "db capability is not wired in this build (BUNDLE_DB_PASSWORD unset)",
+            ));
+        };
+        if !db.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "db capability is disabled (waddles.bundle-db-capability is OFF)",
+            ));
+        }
+        // The gate above is the authority; mirror its grant into the crate-seam
+        // snapshot (idempotent, only written when absent).
+        if !db.v2.capabilities.declares(&self.app_id, "storage.tables") {
+            db.v2
+                .capabilities
+                .update(self.app_id.clone(), ["storage.tables".to_string()]);
+        }
+        let scope = DbScope::new(self.tenant_id, self.community_id, self.app_id.clone());
+        bundle_host_db::v2::wire::handle(
+            &db.v2.host,
+            &scope,
+            &db.v2.registry,
+            &db.v2.capabilities,
+            &call.op,
+            &call.args,
+        )
+        .await
+        .map_err(|e| denied(e.code, e.message))
+    }
+
     /// `enabled` op: `{"key": String, "default_value": bool}` ->
     /// `{"enabled": bool}` -- un-stubs the `flags` WIT capability
     /// (`core/bundle_executor::host::imports::flags::Host::enabled`'s own
@@ -3236,6 +3733,31 @@ struct KvSetArgs {
     ttl_seconds: u32,
 }
 
+/// `kv-v2.cas` args.
+#[derive(serde::Deserialize)]
+struct KvCasArgs {
+    key: String,
+    expected_version: u64,
+    value: Vec<u8>,
+    ttl_seconds: u32,
+}
+
+/// `kv-v2.delete-if` args.
+#[derive(serde::Deserialize)]
+struct KvDeleteIfArgs {
+    key: String,
+    expected_version: u64,
+}
+
+/// `kv-v2.list-keys` args.
+#[derive(serde::Deserialize)]
+struct KvListArgs {
+    prefix: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    limit: u32,
+}
+
 /// `{"key": String, "delta": i64, "ttl_seconds": u32}` -- `kv.increment`'s args.
 #[derive(serde::Deserialize)]
 struct KvIncrementArgs {
@@ -3304,6 +3826,12 @@ fn kv_err_to_host(err: KvError) -> HostResultError {
     denied(err.wire_code(), err.wire_message())
 }
 
+/// kv v2 keeps the fine-grained code (`quota_exceeded`/`rate_limited`/
+/// `invalid_key`/`too_large`) on the wire so the guest can branch on it.
+fn kv_err_to_host_v2(err: KvError) -> HostResultError {
+    denied(err.code(), err.wire_message())
+}
+
 impl<K: KvBackend + 'static> CapabilityHandler for StageCapabilities<K> {
     fn handle<'a>(
         &'a self,
@@ -3366,6 +3894,9 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // path: they carry their own gate permission
             // (`reputation.read`/`reputation.community.write`), never
             // `storage.tables`.
+            CapabilityKind::Db if bundle_host_db::v2::wire::is_v2_op(&call.op) => {
+                self.handle_db_v2(&call).await
+            }
             CapabilityKind::Db if call.op.starts_with("reputation.") => {
                 self.handle_reputation(&call).await
             }
@@ -3594,6 +4125,38 @@ mod tests {
         assert_eq!(ctx["community_id"], 7);
         let without = caps().handle_context().expect("context");
         assert!(without.get("tenant_id").is_none() && without.get("community_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn context_exposes_only_the_verified_retry_identity() {
+        let event = penguin_spine::PlatformEvent {
+            platform: "twitch".into(),
+            event_type: "chat.message".into(),
+            actor: Some("platform-actor".into()),
+            payload: serde_json::json!({"text":"!roll", "message_id":"untrusted"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            occurred_at: "2026-11-07T00:00:00Z".into(),
+            source: None,
+        };
+        let id = "6f1c0a52-9d3e-4b7a-8c10-2e5d7f9a1b34";
+        for _ in 0..2 {
+            let mut handler = caps();
+            handler.invocation_identity = Some(Arc::new(
+                InvocationIdentity::for_untokenized_event(&event).with_event_id(id),
+            ));
+            let ctx = handler
+                .handle(call(
+                    CapabilityKind::Context,
+                    "get",
+                    serde_json::json!({"message_id":"guest-spoof"}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(ctx["message_id"], id);
+        }
+        assert!(caps().handle_context().unwrap().get("message_id").is_none());
     }
 
     fn caps() -> StageCapabilities {
@@ -4070,11 +4633,111 @@ mod tests {
     fn mock_db_wiring(flag_on: bool) -> DbWiring {
         let conn = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
         DbWiring {
+            v2: DbV2Wiring {
+                host: Arc::new(bundle_host_db::v2::DbV2Host::new(
+                    bundle_host_db::v2::PostgresV2Backend::new(conn.clone()),
+                )),
+                registry: Arc::new(bundle_host_db::v2::SchemaRegistryV2::new()),
+                capabilities: Arc::new(DbCapabilitySnapshot::new()),
+            },
             host: Arc::new(DbHost::new(bundle_host_db::PostgresBackend::new(conn))),
             schemas: Arc::new(SchemaCache::new()),
             capabilities: Arc::new(DbCapabilitySnapshot::new()),
             flag: Arc::new(crate::license::test_support::FixedGate(flag_on)),
         }
+    }
+
+    #[tokio::test]
+    async fn db_v2_ops_are_not_implemented_when_unwired_and_disabled_when_flag_off() {
+        let capabilities = caps();
+        let err = capabilities
+            .handle_db_v2(&call(
+                CapabilityKind::Db,
+                "db2.query",
+                serde_json::json!({"table": "events", "limit": 5}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+
+        let off = caps().with_db(mock_db_wiring(false));
+        let err = off
+            .handle_db_v2(&call(
+                CapabilityKind::Db,
+                "db2.query",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "feature_disabled");
+    }
+
+    #[tokio::test]
+    async fn db_v2_dispatch_routes_db2_ops_and_fails_loud_on_bad_ones() {
+        let on = caps().with_db(mock_db_wiring(true));
+        // routed through `dispatch` (not the v1 handler): no v2 tables are
+        // provisioned for this app, so it is an explicit invalid_table -- and it
+        // never touches the (mock) database.
+        let err = on
+            .dispatch(call(
+                CapabilityKind::Db,
+                "db2.get",
+                serde_json::json!({"table": "events", "row_id": "00000000-0000-0000-0000-000000000000"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_table");
+        let err = on
+            .dispatch(call(CapabilityKind::Db, "db2.drop", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+        let err = on
+            .dispatch(call(
+                CapabilityKind::Db,
+                "db2.get",
+                serde_json::json!({"table": 5}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn kv_v2_ops_fail_loud_on_a_backend_without_v2_support() {
+        let c = caps_with_kv();
+        for (op, args) in [
+            ("get_versioned", serde_json::json!({"key": "k"})),
+            (
+                "cas",
+                serde_json::json!({"key": "k", "expected_version": 0, "value": [1], "ttl_seconds": 0}),
+            ),
+            (
+                "delete_if",
+                serde_json::json!({"key": "k", "expected_version": 1}),
+            ),
+            ("list", serde_json::json!({"prefix": "", "limit": 5})),
+        ] {
+            let err = c
+                .handle_kv(&call(CapabilityKind::Kv, op, args))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "backend", "{op}");
+            assert!(
+                err.message.contains("not supported"),
+                "{op}: {}",
+                err.message
+            );
+        }
+        let err = c
+            .handle_kv(&call(
+                CapabilityKind::Kv,
+                "cas",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
     }
 
     #[tokio::test]

@@ -1,0 +1,117 @@
+schema_version: 2
+app_id: waddles.core.example.dj
+name: DJ Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: AGPL-3.0-or-later
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/dj
+language: rust
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: waddle:bundle/process-stage#transform
+    consumes:
+    - platform: twitch
+      event_types:
+      - chat.message
+      filters:
+        command_prefix: &id001
+        - '!sr'
+        - '!songrequest'
+        - '!music'
+        - '!queue'
+        - '!dj'
+    - platform: discord
+      event_types:
+      - chat.message
+      filters:
+        command_prefix: *id001
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: waddle:bundle/action-stage#dispatch
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 5000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: chat.send:discord
+  justification: Reply to the invoking user/channel via relay.push
+- id: chat.send:twitch
+  justification: Reply to the invoking user/channel via relay.push
+- id: identity.resolve
+  justification: Resolve the verified requester to a community user UUID (never store handles)
+- id: storage.kv
+  justification: Community-scoped queue, now-playing, playlists, policy, audit log and public overlay snapshot
+- id: tool.call:waddles.core.service.music-youtube:music.youtube.search
+  justification: Resolve viewer song requests and AI DJ hints against youtube (metadata only)
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-youtube:music.youtube.resolve
+  justification: Resolve a pasted youtube link to track metadata (metadata only)
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-youtube:music.youtube.playlist.get
+  justification: Import a youtube playlist into a static DJ playlist
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-spotify:music.spotify.search
+  justification: Resolve viewer song requests and AI DJ hints against spotify (metadata only)
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-spotify:music.spotify.resolve
+  justification: Resolve a pasted spotify link to track metadata (metadata only)
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-spotify:music.spotify.playlist.get
+  justification: Import a spotify playlist into a static DJ playlist
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-spotify:music.spotify.player.play
+  justification: Hand the now-playing track to the streamer Spotify Connect device (moderator scope enforced host-side)
+  params:
+    write: true
+- id: tool.call:waddles.core.service.music-soundcloud:music.soundcloud.search
+  justification: Resolve viewer song requests and AI DJ hints against soundcloud (metadata only)
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-soundcloud:music.soundcloud.resolve
+  justification: Resolve a pasted soundcloud link to track metadata (metadata only)
+  params:
+    write: false
+- id: tool.call:waddles.core.service.music-soundcloud:music.soundcloud.playlist.get
+  justification: Import a soundcloud playlist into a static DJ playlist
+  params:
+    write: false
+- id: tool.call:waddles.core.service.ai:ai.complete
+  justification: Compile admin instructions into a policy and propose AI DJ songs (admin text only, never viewer text)
+  params:
+    write: false
+- id: tool.call:waddles.core.service.ai:ai.classify
+  justification: Judge track metadata against fuzzy channel rules; fixed labels, untrusted data field
+  params:
+    write: false
+- id: tool.call:waddles.core.service.economy:adjust_balance
+  justification: Optional per-request cost and refund of the actor's own balance (idempotent)
+  params:
+    write: true
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: 1.0.0
+  min_version: 1.0.0
+  max_version: null

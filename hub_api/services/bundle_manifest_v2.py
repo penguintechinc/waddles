@@ -24,12 +24,15 @@ from urllib.parse import quote
 from flask_core.app_manifest import KNOWN_MODULES
 from flask_core.bundle_attribution import (
     MARKETPLACE_CATEGORIES,
+    collection_attribution_problem,
     is_https_url,
     is_known_spdx,
     license_requires_review,
     valid_alternative_to_entry,
+    valid_collection_slug,
     valid_notice,
 )
+from flask_core.bundle_author import AuthorError, canonical_author
 
 from services.bundle_access_grants import is_access_grant_id
 from services.bundle_permission_catalog import (
@@ -178,6 +181,10 @@ class ExportedTool:
     # gate before dispatch; see `bundle_tool_call::scopes_for_role`). `None` =
     # unrestricted. Must be one of `TOOL_REQUIRED_SCOPES`.
     required_scope: str | None = None
+    # Host-side execution declaration (platform service bundles): tool name -> registered
+    # producer op + argument mapping, normalized to the consent-summary (`hostOp`) shape. `None`
+    # = an ordinary guest-served tool. See `parse_host_op`.
+    host_op: dict[str, Any] | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -241,6 +248,23 @@ def parse_schedule(raw: Any) -> ScheduleDeclaration | None:
 
 
 @dataclass(slots=True, frozen=True)
+class AdminTool:
+    """One tool the community admin UI may invoke through the generic bundle-admin gateway.
+
+    `name` is the stable gateway handle (URL segment); `tool` is the exported-tool name on
+    `target_app_id`; `kind` is `action` (any access, audited write path) or `read` (paginated
+    data view, target tool must be `access: read`); `scope` is the community scope the caller
+    must hold (`community:moderate` or `community:admin`).
+    """
+
+    name: str
+    tool: str
+    kind: str
+    scope: str
+    target_app_id: str
+
+
+@dataclass(slots=True, frozen=True)
 class BundleManifestV2:
     """A validated `bundle.yaml` v2 manifest -- the shape every downstream reader consumes."""
 
@@ -276,6 +300,9 @@ class BundleManifestV2:
     homepage_url: str | None = None
     notice: str | None = None
     category: str | None = None
+    # Publisher/collection designation (e.g. "superpenguintv") so ported bundles list apart
+    # from internal ones. Optional closed set; defaulted for hand-built fixtures.
+    collection: str | None = None
     # spec Sec2.1 -- the structured permission-catalog block, replacing the
     # dead `permissions: []` string-list parsing above. Defaulted so every
     # pre-existing direct `BundleManifestV2(...)` construction site (test
@@ -313,6 +340,10 @@ class BundleManifestV2:
     # Periodic host-delivered `hub`/`bundle.reconcile` event (APP and SERVICE bundles); `None`
     # = the host never schedules one. Defaulted last for hand-built fixtures.
     schedule: ScheduleDeclaration | None = None
+    # Generic bundle-admin gateway (docs/BUNDLE_ADMIN_GATEWAY.md): the per-community config JSON
+    # Schema and the tools the admin UI may invoke. Both optional; defaulted last.
+    community_config_schema: dict[str, Any] | None = None
+    admin_tools: tuple[AdminTool, ...] = ()
 
     def supports_platform(self, platform: str) -> bool:
         """Return True when this bundle may run on `platform` (absent field = every platform)."""
@@ -505,6 +536,128 @@ TOOL_REQUIRED_SCOPES = frozenset(
     }
 )
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
+_HOST_OP_PLATFORMS = frozenset({"twitch", "discord", "youtube", "kick"})
+_HOST_OP_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){1,2}$")
+_HOST_OP_ARG_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_HOST_OP_ORIGINS = frozenset({"channel", "guild_scope", "none"})
+_HOST_OP_USER_WIRES = frozenset({"platform_id", "placeholder"})
+_HOST_OP_KEYS = frozenset(
+    {
+        "platform",
+        "op",
+        "user",
+        "user_wire",
+        "message_id",
+        "text",
+        "text_object",
+        "text_list",
+        "required",
+        "origin",
+        "returns",
+    }
+)
+
+
+def parse_host_op(raw: Any, *, tool: str) -> dict[str, Any] | None:
+    """Validate an exported tool's optional `host_op:` block into its consent-summary shape.
+
+    `host_op` declares that the HOST (not the guest) executes the tool by translating the call
+    into a registered platform producer op (`platform` + `op`, checked against the host op
+    table at execution time -- an unregistered op fails loud there). Argument mapping keys:
+    `user` (tokenized-UUID arg -> wire user id), `message_id`, `text` or `text_object`
+    (json key -> arg), `required` args, `origin` (channel | guild_scope | none), `user_wire`
+    (platform_id | placeholder) and `returns` (response keys surfaced to the caller). Every
+    argument name is a plain identifier; unknown keys are rejected (fail closed). Output keys
+    are camelCase to match the rest of the summary.
+    """
+    if raw is None:
+        return None
+    where = f"tool {tool!r}: host_op"
+    _require(isinstance(raw, dict), "invalid_tool_host_op", f"{where} must be a mapping")
+    unknown = sorted(set(raw) - _HOST_OP_KEYS)
+    _require(not unknown, "invalid_tool_host_op", f"{where} has unknown keys {unknown}")
+    platform, op = raw.get("platform"), raw.get("op")
+    _require(
+        platform in _HOST_OP_PLATFORMS,
+        "invalid_tool_host_op",
+        f"{where}.platform must be one of {sorted(_HOST_OP_PLATFORMS)}",
+    )
+    _require(
+        isinstance(op, str) and bool(_HOST_OP_NAME_RE.fullmatch(op)),
+        "invalid_tool_host_op",
+        f"{where}.op must be a dotted op name such as mod.ban",
+    )
+
+    def arg(key: str) -> str | None:
+        value = raw.get(key)
+        if value is None:
+            return None
+        _require(
+            isinstance(value, str) and bool(_HOST_OP_ARG_RE.fullmatch(value)),
+            "invalid_tool_host_op",
+            f"{where}.{key} must be a tool argument name",
+        )
+        return value
+
+    out: dict[str, Any] = {"platform": platform, "op": op}
+    for key, summary_key in (
+        ("user", "user"),
+        ("message_id", "messageId"),
+        ("text", "text"),
+        ("text_list", "textList"),
+    ):
+        value = arg(key)
+        if value is not None:
+            out[summary_key] = value
+    _require(
+        not ("text" in out and "textList" in out),
+        "invalid_tool_host_op",
+        f"{where}: text, text_list and text_object are mutually exclusive",
+    )
+    for key, summary_key, vocab in (
+        ("user_wire", "userWire", _HOST_OP_USER_WIRES),
+        ("origin", "origin", _HOST_OP_ORIGINS),
+    ):
+        value = raw.get(key)
+        if value is not None:
+            _require(
+                value in vocab,
+                "invalid_tool_host_op",
+                f"{where}.{key} must be one of {sorted(vocab)}",
+            )
+            out[summary_key] = value
+    for key in ("required", "returns"):
+        names = raw.get(key)
+        if names is not None:
+            _require(
+                isinstance(names, list)
+                and all(isinstance(n, str) and _HOST_OP_ARG_RE.fullmatch(n) for n in names),
+                "invalid_tool_host_op",
+                f"{where}.{key} must be a list of argument names",
+            )
+            out[key] = sorted(set(names))
+    text_object = raw.get("text_object")
+    if text_object is not None:
+        _require(
+            isinstance(text_object, dict)
+            and bool(text_object)
+            and all(
+                isinstance(k, str)
+                and isinstance(v, str)
+                and _HOST_OP_ARG_RE.fullmatch(k)
+                and _HOST_OP_ARG_RE.fullmatch(v)
+                for k, v in text_object.items()
+            ),
+            "invalid_tool_host_op",
+            f"{where}.text_object must map json keys to argument names",
+        )
+        _require(
+            "text" not in out and "textList" not in out,
+            "invalid_tool_host_op",
+            f"{where}: text, text_list and text_object are mutually exclusive",
+        )
+        out["textObject"] = dict(sorted(text_object.items()))
+    return out
 
 
 def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
@@ -573,6 +726,7 @@ def parse_exported_tools(raw_entries: Any) -> tuple[ExportedTool, ...]:
                 access=access,
                 risk=risk,
                 required_scope=required_scope,
+                host_op=parse_host_op(entry.get("host_op"), tool=name),
             )
         )
     return tuple(tools)
@@ -667,6 +821,142 @@ def requested_tool_declarations(
     return tuple(seen.values())
 
 
+#: Community scopes an `admin_tools` entry may require -- the closed vocabulary the gateway maps
+#: onto the hub-api community role scopes (`community:moderate` -> `community:manage_channels`,
+#: `community:admin` -> `community:manage_members`). `owner`/`member` are deliberately excluded:
+#: an admin surface is never member-callable, and owner-only actions stay platform-side.
+ADMIN_TOOL_SCOPES = frozenset({"community:moderate", "community:admin"})
+_ADMIN_TOOL_KINDS = frozenset({"action", "read"})
+_MAX_CONFIG_SCHEMA_BYTES = 64 * 1024
+
+
+def parse_config_schema(raw: Any) -> dict[str, Any] | None:
+    """Validate the optional `community_config_schema:` block (JSON Schema, per-community config).
+
+    Absent (`None`) parses to `None`. The schema must be a mapping with `type: object`, be a valid
+    JSON Schema (Draft 2020-12) and stay under 64 KiB; anything else raises `ManifestV2Error`
+    (`invalid_config_schema`).
+    """
+    if raw is None:
+        return None
+    import json
+
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import SchemaError
+
+    _require(
+        isinstance(raw, dict), "invalid_config_schema", "community_config_schema must be a mapping"
+    )
+    _require(
+        raw.get("type") == "object",
+        "invalid_config_schema",
+        "community_config_schema must declare type: object",
+    )
+    try:
+        size = len(json.dumps(raw, separators=(",", ":")))
+    except (TypeError, ValueError) as exc:
+        raise ManifestV2Error(
+            "invalid_config_schema", "community_config_schema is not JSON-serialisable"
+        ) from exc
+    _require(
+        size <= _MAX_CONFIG_SCHEMA_BYTES,
+        "invalid_config_schema",
+        f"community_config_schema exceeds {_MAX_CONFIG_SCHEMA_BYTES} bytes",
+    )
+    try:
+        Draft202012Validator.check_schema(raw)
+    except SchemaError as exc:
+        raise ManifestV2Error(
+            "invalid_config_schema", f"not a valid JSON Schema: {exc.message}"
+        ) from exc
+    return dict(raw)
+
+
+def parse_admin_tools(raw_entries: Any, *, own_app_id: str) -> tuple[AdminTool, ...]:
+    """Validate the optional `admin_tools:` list; absent (`None`) parses to none.
+
+    Each entry is `{name, tool, kind, scope[, target_app_id]}`. `target_app_id` defaults to the
+    bundle itself (a service bundle exposing its own tool); `name` must be unique. Raises
+    `ManifestV2Error` (`invalid_admin_tools`) on any violation. Cross-checks against
+    `exported_tools` / `requested_tools` happen in `_check_admin_tools_declared`.
+    """
+    if raw_entries is None:
+        return ()
+    _require(isinstance(raw_entries, list), "invalid_admin_tools", "admin_tools must be a list")
+    out: list[AdminTool] = []
+    seen: set[str] = set()
+    for entry in raw_entries:
+        _require(
+            isinstance(entry, dict),
+            "invalid_admin_tools",
+            "each admin_tools entry must be a mapping",
+        )
+        name = entry.get("name")
+        _require(
+            isinstance(name, str) and bool(_TOOL_NAME_RE.fullmatch(name)),
+            "invalid_admin_tools",
+            "admin tool name must match [a-z][a-z0-9_.]{0,63}",
+        )
+        tool = entry.get("tool")
+        _require(
+            isinstance(tool, str) and bool(_TOOL_NAME_RE.fullmatch(tool)),
+            "invalid_admin_tools",
+            "admin tool `tool` must match [a-z][a-z0-9_.]{0,63}",
+        )
+        assert isinstance(name, str) and isinstance(tool, str)  # narrowed, for mypy
+        _require(name not in seen, "invalid_admin_tools", f"admin tool {name!r} declared twice")
+        seen.add(name)
+        kind = entry.get("kind")
+        _require(
+            kind in _ADMIN_TOOL_KINDS,
+            "invalid_admin_tools",
+            f"admin tool {name!r}: kind must be one of {sorted(_ADMIN_TOOL_KINDS)}",
+        )
+        scope = entry.get("scope")
+        _require(
+            scope in ADMIN_TOOL_SCOPES,
+            "invalid_admin_tools",
+            f"admin tool {name!r}: scope must be one of {sorted(ADMIN_TOOL_SCOPES)}",
+        )
+        target = entry.get("target_app_id", own_app_id)
+        _require(
+            isinstance(target, str) and bool(_APP_ID_RE.fullmatch(target)),
+            "invalid_admin_tools",
+            f"admin tool {name!r}: target_app_id must be a valid app_id",
+        )
+        out.append(AdminTool(name=name, tool=tool, kind=kind, scope=scope, target_app_id=target))
+    return tuple(out)
+
+
+def _check_admin_tools_declared(
+    admin_tools: tuple[AdminTool, ...],
+    *,
+    own_app_id: str,
+    exported: tuple[ExportedTool, ...],
+    requested: tuple[RequestedTool, ...],
+) -> None:
+    """Every admin tool must be a tool this bundle exports, or one it requested (consented).
+
+    An admin tool is never a back door to an un-consented cross-bundle call: a tool on another
+    bundle must also appear in `requested_tools` so it rides the same approval/consent path.
+    """
+    exported_names = {t.name for t in exported}
+    requested_keys = {(r.target_app_id, r.tool) for r in requested}
+    for at in admin_tools:
+        if at.target_app_id == own_app_id:
+            _require(
+                at.tool in exported_names,
+                "admin_tool_undeclared",
+                f"admin tool {at.name!r}: {at.tool!r} is not in this bundle's exported_tools",
+            )
+        else:
+            _require(
+                (at.target_app_id, at.tool) in requested_keys,
+                "admin_tool_undeclared",
+                f"admin tool {at.name!r}: {at.target_app_id}:{at.tool} is not in requested_tools",
+            )
+
+
 def _parse_consumes(
     raw_rules: list[dict[str, Any]],
     *,
@@ -725,6 +1015,16 @@ _ECONOMY_BOUND_PARAM = {
     "economy.credit": "max_amount",
     "economy.debit": "max_amount",
 }
+#: Elevated app-caller economy permissions and the admin-tunable host caps their
+#: grant `params` may carry (`core/bundle_host_economy`'s `ElevatedCaps`): the
+#: per-call maximum, the per-app daily total and the per-target-member daily
+#: total. Ceilings mirror `bundle_host_economy::ELEVATED_*_CEILING`.
+_ECONOMY_ELEVATED_IDS = ("economy.transfer_from", "economy.app_mint")
+_ECONOMY_ELEVATED_CAP_PARAMS = {
+    "max_per_op": 10_000,
+    "max_per_day": 100_000,
+    "max_per_target_per_day": 50_000,
+}
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_.]*$")
 
 
@@ -738,8 +1038,10 @@ def parse_permission_declarations(
     `justification` (Sec2.3); `storage.tables` requires `params.schema` and
     vice versa (Sec2.3's mutual-requirement rule); `overlay.media` requires
     a non-empty `allowed_hosts` and a `max_duration_seconds` within the
-    catalog ceiling; `reputation.*.write` bounds `delta_min`/`delta_max`
-    within `|delta| <= 5` and validates every `reason_codes` entry;
+    catalog ceiling unless it declares `params: {mode: data}` (data-only
+    envelopes, no media -- any other param is then rejected);
+    `reputation.*.write` bounds `delta_min`/`delta_max` within
+    `|delta| <= 5` and validates every `reason_codes` entry;
     `economy.wager`/`economy.transfer` (issue #714) each require their own
     declared per-call bound (`params.max_bet` / `params.max_amount`) as an
     integer in `1..=1000`, and reject the other permission's bound param.
@@ -808,7 +1110,22 @@ def parse_permission_declarations(
                 "params.schema is only valid for storage.tables",
             )
 
-        if permission_id == "overlay.media":
+        if permission_id == "overlay.media" and params.get("mode") == "data":
+            # Data-only mode: the bundle pushes overlay envelopes (overlay/SCHEMA.md
+            # `{extra: envelope}`) and never references external media, so any
+            # media-mode param is a contradiction -- reject loudly.
+            _require(
+                set(params) == {"mode"},
+                "invalid_overlay_data_mode",
+                "overlay.media mode=data forbids params other than mode "
+                f"(got {sorted(set(params) - {'mode'})})",
+            )
+        elif permission_id == "overlay.media":
+            _require(
+                params.get("mode", "media") == "media",
+                "invalid_overlay_mode",
+                f"overlay.media mode must be 'media' or 'data', got {params.get('mode')!r}",
+            )
             allowed_hosts = params.get("allowed_hosts") or []
             _require(
                 bool(allowed_hosts), "invalid_overlay_hosts", "overlay.media requires allowed_hosts"
@@ -850,6 +1167,25 @@ def parse_permission_declarations(
                 f"{permission_id!r} requires params.{bound_param} as an integer in "
                 f"1..={_MAX_ECONOMY_AMOUNT}, got {declared!r}",
             )
+        if permission_id in _ECONOMY_ELEVATED_IDS:
+            unknown = set(params) - set(_ECONOMY_ELEVATED_CAP_PARAMS)
+            _require(
+                not unknown,
+                "invalid_economy_bound",
+                f"{permission_id!r} params may only be {sorted(_ECONOMY_ELEVATED_CAP_PARAMS)}, "
+                f"got {sorted(unknown)}",
+            )
+            for cap_param, ceiling in _ECONOMY_ELEVATED_CAP_PARAMS.items():
+                if cap_param in params:
+                    value = params[cap_param]
+                    _require(
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and 1 <= value <= ceiling,
+                        "invalid_economy_bound",
+                        f"{permission_id!r} params.{cap_param} must be an integer in "
+                        f"1..={ceiling}, got {value!r}",
+                    )
         # A bound param is only valid on the permissions that declare it.
         for other_param in set(_ECONOMY_BOUND_PARAM.values()):
             if other_param in params and _ECONOMY_BOUND_PARAM.get(permission_id) != other_param:
@@ -951,12 +1287,12 @@ def parse_bundle_manifest_v2(
     # bundle, per house supply-chain policy: a vendor port must be
     # credited and its license terms known before it is ever onboarded).
     is_vendor_bundle = raw["provider"] == "thirdparty"
-    author = raw.get("author")
-    _require(
-        bool(author) or not is_vendor_bundle,
-        "vendor_author_required",
-        "author is required for provider: thirdparty (vendor) bundles",
-    )
+    # `author` is required for EVERY bundle (not just vendor ones) and is normalized to its
+    # canonical form (`github:<handle>` or a plain name); see flask_core.bundle_author.
+    try:
+        author = canonical_author(raw.get("author"))
+    except AuthorError as exc:
+        raise ManifestV2Error(exc.code, str(exc)) from exc
     license_id = raw.get("license")
     _require(
         bool(license_id) or not is_vendor_bundle,
@@ -1006,8 +1342,19 @@ def parse_bundle_manifest_v2(
             f"{category!r} is not one of {sorted(MARKETPLACE_CATEGORIES)}",
         )
 
+    collection = raw.get("collection")
+    if collection is not None:
+        _require(
+            isinstance(collection, str) and valid_collection_slug(collection),
+            "invalid_collection",
+            f"{collection!r} is not a lowercase kebab-case slug",
+        )
+    problem = collection_attribution_problem(collection, license_id, raw.get("notice"))
+    _require(problem is None, "collection_attribution_required", problem or "")
+
     stages = raw["stages"]
-    _require(bool(stages), "no_stages_declared", "stages must be non-empty")
+    # An empty `stages` is legal ONLY for a trusted `kind: service` (an inbound-only platform
+    # connector runs no pluggable process/action stage) -- enforced after `kind` is resolved.
     _require(
         "ingest" not in stages, "ingest_not_pluggable", "ingest is fixed code, not bundle-pluggable"
     )
@@ -1100,6 +1447,11 @@ def parse_bundle_manifest_v2(
             "untrusted_service_kind",
             "kind: service may only be declared via a trusted install path",
         )
+    _require(
+        bool(stages) or raw_kind == "service",
+        "no_stages_declared",
+        "stages must be non-empty (only a trusted kind: service may declare none)",
+    )
     kind = raw_kind or _infer_kind(raw["app_id"], raw["module"])
 
     exported_tools = parse_exported_tools(raw.get("exported_tools"))
@@ -1115,6 +1467,11 @@ def parse_bundle_manifest_v2(
     )
 
     requested_tools = parse_requested_tools(raw.get("requested_tools"), own_app_id=raw["app_id"])
+    community_config_schema = parse_config_schema(raw.get("community_config_schema"))
+    admin_tools = parse_admin_tools(raw.get("admin_tools"), own_app_id=raw["app_id"])
+    _check_admin_tools_declared(
+        admin_tools, own_app_id=raw["app_id"], exported=exported_tools, requested=requested_tools
+    )
     declared_ids = {d.id for d in permission_declarations}
     permission_declarations = permission_declarations + tuple(
         d for d in requested_tool_declarations(requested_tools) if d.id not in declared_ids
@@ -1179,6 +1536,7 @@ def parse_bundle_manifest_v2(
         homepage_url=homepage_url,
         notice=notice,
         category=category,
+        collection=collection,
         supported_platforms=supported_platforms,
         command_declarations=command_declarations,
         kind=kind,
@@ -1188,4 +1546,6 @@ def parse_bundle_manifest_v2(
         table_access=table_access,
         storage_access=storage_access,
         schedule=parse_schedule(raw.get("schedule")),
+        community_config_schema=community_config_schema,
+        admin_tools=admin_tools,
     )

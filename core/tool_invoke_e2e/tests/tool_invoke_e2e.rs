@@ -77,6 +77,7 @@ fn tools(
                 name: (*n).to_string(),
                 write: *w,
                 required_scope: None,
+                host_op: None,
             })
             .collect(),
         requested: requests
@@ -102,6 +103,8 @@ fn row(app: &str, version_id: i64, wasm: &[u8], tools: ToolManifestInfo) -> Acti
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
         declared_capabilities: Vec::new(),
+        egress: Vec::new(),
+        egress_rps: None,
         tools,
     }
 }
@@ -816,6 +819,7 @@ async fn admin_world(account: Option<&str>, role: Option<&'static str>) -> World
                 name: "whoami".to_string(),
                 write: false,
                 required_scope: Some("community:admin".to_string()),
+                host_op: None,
             });
         }
         if r.app_id == CALLER {

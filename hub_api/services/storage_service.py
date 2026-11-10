@@ -66,7 +66,7 @@ def _bundle_bucket() -> str:
 
     regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509).
     `_bucket()` (`S3_BUCKET_NAME`, default `waddlebot-assets`) and this bucket diverged once
-    the SeaweedFS migration split identities per-workload: the bundle-executor's Rust
+    the SeaweedFS migration split identities per-workload: the svc-bundles-executor's Rust
     `BucketConfig` reads `BUNDLE_BUCKET_NAME` (Helm `pipeline.rustDataPlane.bundleExecutor.
     bucketName`, `waddles-bundles`), so a component staged to `_bucket()` instead publishes
     successfully but 404s for every executor fetch. Default matches that chart value exactly

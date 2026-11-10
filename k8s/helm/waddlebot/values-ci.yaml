@@ -55,24 +55,15 @@ pipeline:
       replicas: 1
     svcActionRust:
       replicas: 1
-    # bundle-executor is not in helm-chart-e2e.yml's kind-load image list (its
-    # core/bundle_executor/Dockerfile.rust does exist) -- disabling
-    # both here isn't a scope-cut, it's the only image reference that can't be
-    # satisfied at all right now.
+    # svc-bundles-executor is not in helm-chart-e2e.yml's kind-load image list (its
+    # core/bundle_executor/Dockerfile.rust does exist) -- disabling it here isn't a scope-cut,
+    # it's the only image reference that can't be satisfied at all right now.
     bundleExecutor:
-      enabled: false
-    bundleExecutorAction:
       enabled: false
   migrationsJob:
     enabled: true
   coreBundleSeeder:
     enabled: true
-  svcIngest:
-    enabled: false   # legacy Python connector superseded by svcIngestRust above
-  svcProcess:
-    enabled: false
-  svcAction:
-    enabled: false
   # Not in the workflow's 6-image kind-load list -- correct keys are
   # pipeline.svcPresentation/svcStreaming/hubWebui, NOT the top-level
   # "presentation:"/"streaming:" this file previously set (those paths don't
@@ -141,3 +132,16 @@ httproute:
 # this job validates install/upgrade/hook lifecycle, not policy enforcement.
 tetragon:
   enabled: false
+
+# svc-bundles-executor scales horizontally: every replica dials every stage + the connector
+# link and each listener round-robins work across the replicas (see values.yaml
+# pipeline.rustDataPlane.bundleExecutor). HPA on CPU + memory; the PDB (minAvailable 1) renders
+# automatically once the effective replica floor is >1.
+autoscaling:
+  services:
+    bundleExecutor:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80
