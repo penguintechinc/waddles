@@ -15,10 +15,10 @@
 #   3. still builds the live Rust svc-ingest/svc-process/svc-action stages
 #      (core/svc_{ingest,process,action}/Dockerfile.rust) -- this fix must
 #      never regress the actual live data-plane build;
-#   4. builds bundle-executor from core/bundle_executor/Dockerfile.rust with
+#   4. builds svc-bundles-executor from core/bundle_executor/Dockerfile.rust with
 #      the "." (repo-root) context -- fix/alpha-deploy-executor-and-failfast
-#      (#538) added bundle-executor to SERVICES, backing both the
-#      bundle-executor and bundle-executor-action Deployments.
+#      (#538) added svc-bundles-executor to SERVICES, backing the single
+#      svc-bundles-executor Deployment (it serves every stage).
 #
 # docker/helm/kubectl/curl are all stubbed -- no real registry, cluster, or
 # build ever runs. The real SERVICES loop and service_dockerfile/
@@ -141,13 +141,13 @@ assert_built "svc-process (rust)" "core/svc_process/Dockerfile.rust"
 assert_built "svc-action (rust)" "core/svc_action/Dockerfile.rust"
 
 echo ""
-echo "Test: bundle-executor is built from the repo-root context (#538)"
-assert_built "bundle-executor" "core/bundle_executor/Dockerfile.rust"
-if grep -qE "STUB-CALLED docker buildx build .*-t localhost:32000/waddlebot/bundle-executor:" "$LOG_FILE"; then
-    echo "  - tagged under the bundle-executor repo name"
+echo "Test: svc-bundles-executor is built from the repo-root context (#538)"
+assert_built "svc-bundles-executor" "core/bundle_executor/Dockerfile.rust"
+if grep -qE "STUB-CALLED docker buildx build .*-t localhost:32000/waddlebot/svc-bundles-executor:" "$LOG_FILE"; then
+    echo "  - tagged under the svc-bundles-executor repo name"
     cases_passed=$((cases_passed + 1))
 else
-    echo "  x not tagged under localhost:32000/waddlebot/bundle-executor"
+    echo "  x not tagged under localhost:32000/waddlebot/svc-bundles-executor"
     cases_failed=$((cases_failed + 1))
 fi
 

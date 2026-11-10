@@ -20,7 +20,11 @@ mod component {
     /// Maps capability failures to stable tool errors without exposing backend details.
     fn host_err(e: economy::Error) -> ToolError {
         match e {
-            economy::Error::Denied(c) if c == "not_granted" => ToolError::NotGranted,
+            // `elevated_not_granted`: the CALLING app was never approved (or was
+            // revoked) for this dangerous primitive.
+            economy::Error::Denied(c) if c == "not_granted" || c == "elevated_not_granted" => {
+                ToolError::NotGranted
+            }
             economy::Error::Denied(_) => ToolError::Forbidden,
             economy::Error::Unavailable(_) => ToolError::TargetUnavailable,
             economy::Error::Backend(_) => ToolError::TargetUnavailable,
@@ -45,6 +49,17 @@ mod component {
         }
         fn transfer(&self, from: &str, to: &str, amount: u64) -> Result<(), ToolError> {
             economy::transfer(from, to, amount).map_err(host_err)
+        }
+        fn transfer_from(
+            &self,
+            from: &str,
+            to: &str,
+            amount: u64,
+            reason: &str,
+        ) -> Result<(i64, i64), ToolError> {
+            economy::transfer_from(from, to, amount, reason)
+                .map(|r| (r.from_balance, r.to_balance))
+                .map_err(host_err)
         }
         fn admin_set(&self, user: &str, value: u64) -> Result<i64, ToolError> {
             economy::admin_adjust(user, economy::BalanceAdjust::Set(value)).map_err(host_err)

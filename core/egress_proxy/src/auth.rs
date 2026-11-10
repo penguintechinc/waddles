@@ -1,6 +1,6 @@
 //! Inbound caller authentication: every request must carry a valid
 //! hub-api-issued machine JWT (`core/service_auth`, PR #438
-//! feature/eddsa-machine-jwt) naming this proxy as `aud`, scoped
+//! ES256 machine JWTs) naming this proxy as `aud`, scoped
 //! `egress:connect`, and minted for one of the three data-plane callers
 //! (`ALLOWED_CALLER_SERVICES`). Runs before the assertion or destination
 //! is even parsed -- an unauthenticated caller never reaches any egress

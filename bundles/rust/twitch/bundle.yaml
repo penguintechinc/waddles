@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.service.twitch
 name: Twitch Platform Connector (Rust)
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -45,6 +45,9 @@ permissions:
 - id: moderation.twitch
   justification: Chat deletion is a moderation action; admin-approved dangerous grant,
     host-pinned channel and moderator
+- id: eventsub.manage:twitch
+  justification: Template EventSub subscription create/delete/list with the host-held
+    APP credential; the broadcaster, callback and secret are host slots, never bundle input
 - id: connector.pii.read
   justification: Gates identity.lookup, used to resolve the actor to its canonical UUID
     and the read-tool users; first-party core only, dangerous, global-admin-approved
@@ -94,7 +97,7 @@ exported_tools:
     additionalProperties: false
   output_schema:
     type: object
-author: PenguinTech/waddles
+author: github:penguintechinc
 license: AGPL-3.0-or-later
 source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/twitch
 config_schema: {}

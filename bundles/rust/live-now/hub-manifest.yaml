@@ -1,0 +1,98 @@
+# hub-api install-pipeline manifest (bundle_manifest_v2, schema_version 2) for the live-now APP
+# bundle (Rust, world stage-next-tools). Consumes the common <platform>.live.channels tool
+# (bundles/contracts/live-channels-contract.v1.json) from the platform SERVICE bundles through
+# requested_tools; each becomes an admin-approved tool.call:<target>:<tool> grant. No secrets:
+# platform connections resolve host-side inside the platform bundles.
+schema_version: 2
+app_id: waddles.core.app.live-now
+name: Live Now (Rust)
+version: 1.0.0
+feature: waddles.core.app
+module: core
+provider: builtin
+language: rust
+artifact: prebuilt
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!live"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!live"]
+      - platform: youtube
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!live"]
+      - platform: twitch
+        event_types: ["stream.online", "stream.offline"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 10000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: "chat.send:discord"
+    justification: "relays the !live reply and go-live announcements to Discord channels via the relay host import (relay.push -> chat.send:discord)"
+  - id: "chat.send:twitch"
+    justification: "relays the !live reply and go-live announcements to Twitch chat via the relay host import (relay.push -> chat.send:twitch)"
+  - id: "chat.send:youtube"
+    justification: "relays the !live reply and go-live announcements to YouTube live chat via the relay host import (relay.push -> chat.send:youtube)"
+  - id: storage.kv
+    justification: "holds the latest who's-live snapshot (30 s freshness cache), per-stream-session announcement dedupe claims and per-channel cooldown claims, all community-scoped"
+  - id: "tool.call:waddles.core.service.twitch:twitch.live.channels"
+    justification: "reads the community's currently-live Twitch channels (read-only, contract live-channels v1)"
+    params:
+      write: false
+  - id: "tool.call:waddles.core.service.youtube:youtube.live.channels"
+    justification: "reads the community's currently-live YouTube channels (read-only, contract live-channels v1)"
+    params:
+      write: false
+  - id: "tool.call:waddles.core.service.discord:discord.live.channels"
+    justification: "reads members streaming (Go Live) or live stage channels in the community's linked guilds (read-only, contract live-channels v1)"
+    params:
+      write: false
+routes_to: []
+requested_tools:
+  - tool: twitch.live.channels
+    access: read
+    target_app_id: waddles.core.service.twitch
+  - tool: youtube.live.channels
+    access: read
+    target_app_id: waddles.core.service.youtube
+  - tool: discord.live.channels
+    access: read
+    target_app_id: waddles.core.service.discord
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    platforms:
+      type: array
+      items: {type: string, enum: [twitch, youtube, discord, kick]}
+      minItems: 1
+      uniqueItems: true
+    include_linked: {type: boolean}
+    announce_targets:
+      type: array
+      maxItems: 10
+      items:
+        type: object
+        additionalProperties: false
+        required: [platform, channel_id]
+        properties:
+          platform: {type: string, enum: [discord, twitch, youtube]}
+          channel_id: {type: string, minLength: 1, maxLength: 128}
+    template: {type: string, minLength: 1, maxLength: 300}
+    cooldown_seconds: {type: integer, minimum: 60, maximum: 86400}
+    max_age_seconds: {type: integer, minimum: 60, maximum: 3600}

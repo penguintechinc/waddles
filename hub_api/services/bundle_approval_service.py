@@ -102,6 +102,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from flask_core.bundle_attribution import license_requires_review
+from flask_core.bundle_author import canonical_author
 from penguin_dal import AsyncDB
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
@@ -126,7 +127,9 @@ from services.bundle_manifest_v2 import (
     Limits,
     PermissionDeclaration,
     _infer_kind,
+    parse_admin_tools,
     parse_command_declarations,
+    parse_config_schema,
     parse_exported_tools,
     parse_permission_declarations,
     parse_requested_tools,
@@ -233,7 +236,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         permission_declarations=permission_declarations,
         routes_to=tuple(raw.get("routes_to") or ()),
         consumes=consumes,
-        author=raw.get("author"),
+        author=canonical_author(raw["author"]) if raw.get("author") else None,
         license=raw.get("license"),
         license_requires_review=(
             license_requires_review(raw["license"]) if raw.get("license") else False
@@ -243,6 +246,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         homepage_url=raw.get("homepage_url"),
         notice=raw.get("notice"),
         category=raw.get("category"),
+        collection=raw.get("collection"),
         supported_platforms=supported_platforms,
         command_declarations=command_declarations,
         kind=raw.get("kind") or _infer_kind(raw["app_id"], raw["module"]),
@@ -253,6 +257,8 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         trusted_source=True,
         table_access=table_access,
         storage_access=storage_access,
+        community_config_schema=parse_config_schema(raw.get("community_config_schema")),
+        admin_tools=parse_admin_tools(raw.get("admin_tools"), own_app_id=raw["app_id"]),
     )
 
 

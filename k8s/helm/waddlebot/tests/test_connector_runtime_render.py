@@ -22,7 +22,6 @@ _D = "sha256:" + "b" * 64
 _RT = "pipeline.rustDataPlane.svcIngest.connectorRuntime"
 _CT = "pipeline.rustDataPlane.svcIngest.connectorTools"
 _BASE = [
-    "--set", "pipeline.svcIngest.enabled=true",  # the Python svc-ingest (off in alpha) must see the connector env too
     "--set", f"{_CT}.enabled=true",
     "--set", f"pipeline.connectors.digests.twitch={_D}",
     "--set", f"pipeline.connectors.digests.discord={_D}",
@@ -86,17 +85,15 @@ def test_all_off_renders_nothing_new(values: str) -> None:
     assert not [d for d in docs if d["metadata"]["name"].endswith("-svc-ingest-host-api")]
 
 
-def test_youtube_on_renders_env_on_both_ingest_deployments_from_one_value() -> None:
+def test_youtube_on_renders_env_on_the_ingest_deployment_from_one_value() -> None:
     docs = _docs(_yt())
-    rust, py, ex = (_dep(docs, "-svc-ingest-rust"), _dep(docs, "-svc-ingest"), _dep(docs, "-bundle-executor"))
-    for dep in (rust, py):
+    rust, ex = (_dep(docs, "-svc-ingest-rust"), _dep(docs, "-svc-bundles-executor"))
+    for dep in (rust,):
         env = _env(dep)
         assert env["CONNECTOR_YOUTUBE_ENABLED"]["value"] == "true"
         assert env["CONNECTOR_TWITCH_ENABLED"]["value"] == "false"
         assert env["CONNECTOR_DISCORD_ENABLED"]["value"] == "false"
         assert env["CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS"]["value"] == ""
-    penv = _env(py)
-    assert "CONNECTOR_RECONCILE_INTERVAL_SECS" not in penv and "CONNECTOR_ROUTE_KEY_SECRET" not in penv
     renv = _env(rust)
     assert renv["CONNECTOR_RUNTIME_ENABLED"]["value"] == "true"
     assert renv["CONNECTOR_RECONCILE_INTERVAL_SECS"]["value"] == "60"
@@ -112,7 +109,7 @@ def test_youtube_on_renders_env_on_both_ingest_deployments_from_one_value() -> N
 
 def test_executor_env_and_distinct_client_secret_mounted_only_there() -> None:
     docs = _docs(_yt())
-    ex = _dep(docs, "-bundle-executor")
+    ex = _dep(docs, "-svc-bundles-executor")
     env = _env(ex)
     assert env["CONNECTOR_HOST_API_ADDR"]["value"].endswith("-svc-ingest-rust:8301")
     assert env["CONNECTOR_HOST_API_IDENTITY"]["value"].endswith("-svc-ingest-rust")
@@ -156,8 +153,6 @@ def test_twitch_webhook_route_key_comes_from_existing_secret_only() -> None:
         "name": "ops-route-key", "key": "CONNECTOR_ROUTE_KEY_SECRET"}
     assert "value" not in renv["CONNECTOR_ROUTE_KEY_SECRET"]
     assert renv["CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS"]["value"] == "twitch"
-    assert _env(_dep(docs, "-svc-ingest"))["CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS"]["value"] == "twitch"
-    assert "CONNECTOR_ROUTE_KEY_SECRET" not in _env(_dep(docs, "-svc-ingest"))
     assert "ops-route-key" not in "".join(
         e.get("value", "") for dep in docs if dep.get("kind") == "Deployment"
         for c in dep["spec"]["template"]["spec"]["containers"] for e in c.get("env", []))
@@ -168,7 +163,7 @@ def test_wix_on_renders_env_digest_and_route_key_wiring() -> None:
            "--set", f"{_RT}.connector.wix.enabled=true", "--set", f"{_RT}.webhookPlatforms={{wix}}",
            "--set", f"{_RT}.routeKeySecret.existingSecret=ops-route-key"]
     docs = _docs(wix)
-    for suffix in ("-svc-ingest-rust", "-svc-ingest"):
+    for suffix in ("-svc-ingest-rust",):
         env = _env(_dep(docs, suffix))
         assert env["CONNECTOR_WIX_ENABLED"]["value"] == "true"
         assert env["CONNECTOR_RUNTIME_WEBHOOK_PLATFORMS"]["value"] == "wix"
@@ -186,7 +181,7 @@ def test_wix_on_renders_env_digest_and_route_key_wiring() -> None:
     [
         (["--set", f"{_RT}.connector.youtube.enabled=true"], "connectorTools"),
         ([*_BASE, "--set", f"{_RT}.connector.wix.enabled=true"], "digests.wix"),
-        ([*_BASE[:8], "--set", f"{_RT}.connector.youtube.enabled=true"], "digests.youtube"),
+        ([*_BASE[:6], "--set", f"{_RT}.connector.youtube.enabled=true"], "digests.youtube"),
         ([*_BASE, "--set", f"{_RT}.connector.twitch.enabled=true", "--set", f"{_RT}.webhookPlatforms={{twitch}}"],
          "routeKeySecret"),
         ([*_BASE, "--set", f"{_RT}.webhookPlatforms={{slack}}", "--set", f"{_RT}.enabled=true"], "webhookPlatforms"),
@@ -242,13 +237,13 @@ def test_network_policies_are_cilium_and_scoped() -> None:
     assert cnp["kind"] == "CiliumNetworkPolicy"
     rules = cnp["spec"]["ingress"]
     assert len(rules) == 1
-    assert rules[0]["fromEndpoints"][0]["matchLabels"]["app.kubernetes.io/component"] == "bundle-executor"
+    assert rules[0]["fromEndpoints"][0]["matchLabels"]["app.kubernetes.io/component"] == "svc-bundles-executor"
     assert rules[0]["toPorts"][0]["ports"] == [{"port": "8301", "protocol": "TCP"}]
     # Only these two CNPs (ingest ingress-from-executor, executor egress) mention 8301.
     opens = sorted(d["metadata"]["name"] for d in docs
                    if d["kind"] == "CiliumNetworkPolicy" and '"8301"' in yaml.safe_dump(d["spec"]).replace("'", '"'))
-    assert len(opens) == 2 and opens[0].endswith("-bundle-executor") and opens[1].endswith("-svc-ingest-host-api"), opens
-    ex = next(d for d in docs if d["kind"] == "CiliumNetworkPolicy" and d["metadata"]["name"].endswith("-bundle-executor"))
+    assert len(opens) == 2 and opens[0].endswith("-svc-bundles-executor") and opens[1].endswith("-svc-ingest-host-api"), opens
+    ex = next(d for d in docs if d["kind"] == "CiliumNetworkPolicy" and d["metadata"]["name"].endswith("-svc-bundles-executor"))
     hits = [r for r in ex["spec"]["egress"]
             if r.get("toEndpoints", [{}])[0].get("matchLabels", {}).get("app.kubernetes.io/component") == "svc-ingest-rust"]
     assert len(hits) == 1 and hits[0]["toPorts"][0]["ports"] == [{"port": "8301", "protocol": "TCP"}]
@@ -260,7 +255,7 @@ def test_security_context_unchanged_and_no_literal_secrets() -> None:
     res = _render(*_yt())
     assert res.returncode == 0
     docs = [d for d in yaml.safe_load_all(res.stdout) if d]
-    for suffix in ("-svc-ingest-rust", "-bundle-executor", "-svc-ingest"):
+    for suffix in ("-svc-ingest-rust", "-svc-bundles-executor"):
         c = _dep(docs, suffix)["spec"]["template"]["spec"]["containers"][0]
         assert c["securityContext"]["runAsNonRoot"] is True
         assert c["securityContext"]["allowPrivilegeEscalation"] is False
@@ -319,7 +314,7 @@ def test_alpha_connector_certs_use_a_separate_ca_and_executor_trusts_both() -> N
     pems = bundle["stringData"]["ca.crt"].split("-----END CERTIFICATE-----")
     certs = [crypto.load_pem_x509_certificate((p + "-----END CERTIFICATE-----").encode()) for p in pems if "BEGIN" in p]
     assert {fp(c) for c in certs} == {fp(stage), fp(srv_ca)}
-    ex = _dep(docs, "-bundle-executor")
+    ex = _dep(docs, "-svc-bundles-executor")
     mounts = ex["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     m = next(m for m in mounts if m["name"] == "executor-ca-bundle")
     assert m["mountPath"] == _env(ex)["HOST_API_CA_FILE"]["value"] and m["subPath"] == "ca.crt"
@@ -332,7 +327,7 @@ def test_external_connector_secrets_require_executor_ca_bundle_secret() -> None:
     ok = _render(*_yt(*ext, "--set", f"{_CT}.hostApiTls.executorCaBundleSecretName=my-bundle"))
     assert ok.returncode == 0, ok.stderr[-600:]
     docs = [d for d in yaml.safe_load_all(ok.stdout) if d]
-    vols = _dep(docs, "-bundle-executor")["spec"]["template"]["spec"]["volumes"]
+    vols = _dep(docs, "-svc-bundles-executor")["spec"]["template"]["spec"]["volumes"]
     assert next(v for v in vols if v["name"] == "executor-ca-bundle")["secret"]["secretName"] == "my-bundle"
 
 
@@ -363,8 +358,8 @@ def _spectrum(*extra: str) -> list[str]:
 
 def test_spectrum_on_renders_env_digest_and_pin_from_one_value() -> None:
     docs = _docs(_spectrum())
-    rust, py, ex = (_dep(docs, "-svc-ingest-rust"), _dep(docs, "-svc-ingest"), _dep(docs, "-bundle-executor"))
-    for dep in (rust, py):
+    rust, ex = (_dep(docs, "-svc-ingest-rust"), _dep(docs, "-svc-bundles-executor"))
+    for dep in (rust,):
         env = _env(dep)
         assert env["CONNECTOR_SPECTRUM_ENABLED"]["value"] == "true"
         assert env["CONNECTOR_YOUTUBE_ENABLED"]["value"] == "false"
@@ -376,11 +371,11 @@ def test_spectrum_on_renders_env_digest_and_pin_from_one_value() -> None:
 
 def test_spectrum_off_is_the_default_and_renders_no_spectrum_digest() -> None:
     docs = _docs(_yt())
-    rust, py = _dep(docs, "-svc-ingest-rust"), _dep(docs, "-svc-ingest")
-    for dep in (rust, py):
+    rust = _dep(docs, "-svc-ingest-rust")
+    for dep in (rust,):
         assert _env(dep)["CONNECTOR_SPECTRUM_ENABLED"]["value"] == "false"
     assert "SENDER_EXEC_DIGEST_SPECTRUM" not in _env(rust)
-    assert "CONNECTOR_PIN_DIGEST_SPECTRUM" not in _env(_dep(docs, "-bundle-executor"))
+    assert "CONNECTOR_PIN_DIGEST_SPECTRUM" not in _env(_dep(docs, "-svc-bundles-executor"))
 
 
 @pytest.mark.parametrize("values", ["values.yaml", "values-alpha.yaml", "values-dal2alpha.yaml", "values-local.yaml"])

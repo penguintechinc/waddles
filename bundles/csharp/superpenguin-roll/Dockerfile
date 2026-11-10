@@ -24,6 +24,8 @@
 # superpenguin-roll.csproj).
 FROM mcr.microsoft.com/dotnet/sdk:10.0.401-noble@sha256:35d40304542c8689331f8cab17c65926cdf48fe711e289321d71924b230a7d29
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 RUN groupadd --gid 10001 builder \
     && useradd --uid 10001 --gid builder --create-home --home-dir /home/builder \
        --shell /usr/sbin/nologin builder

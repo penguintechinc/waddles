@@ -1,0 +1,198 @@
+{
+  "tools": [
+    {
+      "access": "read",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "exclude_canceled": {
+            "type": "boolean"
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "starts_after": {
+            "description": "RFC 3339 timestamp",
+            "type": "string"
+          },
+          "starts_before": {
+            "description": "RFC 3339 timestamp",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "wix.event.list",
+      "output_schema": {
+        "type": "object"
+      },
+      "risk": "normal"
+    },
+    {
+      "access": "read",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id"
+        ],
+        "type": "object"
+      },
+      "name": "wix.event.get",
+      "output_schema": {
+        "type": "object"
+      },
+      "risk": "normal"
+    },
+    {
+      "access": "write",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "ends_at": {
+            "description": "RFC 3339 timestamp",
+            "type": "string"
+          },
+          "location_name": {
+            "maxLength": 50,
+            "minLength": 1,
+            "type": "string"
+          },
+          "location_type": {
+            "enum": [
+              "VENUE",
+              "ONLINE"
+            ],
+            "type": "string"
+          },
+          "starts_at": {
+            "description": "RFC 3339 timestamp",
+            "type": "string"
+          },
+          "timezone": {
+            "description": "IANA time-zone id",
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "starts_at",
+          "ends_at",
+          "timezone"
+        ],
+        "type": "object"
+      },
+      "name": "wix.event.create",
+      "output_schema": {
+        "type": "object"
+      },
+      "risk": "dangerous"
+    },
+    {
+      "access": "write",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "ends_at": {
+            "description": "RFC 3339 timestamp",
+            "type": "string"
+          },
+          "event_id": {
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "type": "string"
+          },
+          "location_name": {
+            "maxLength": 50,
+            "minLength": 1,
+            "type": "string"
+          },
+          "location_type": {
+            "enum": [
+              "VENUE",
+              "ONLINE"
+            ],
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "starts_at": {
+            "description": "RFC 3339 timestamp",
+            "type": "string"
+          },
+          "timezone": {
+            "description": "IANA time-zone id",
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "name": "wix.event.update",
+      "output_schema": {
+        "type": "object"
+      },
+      "risk": "dangerous"
+    },
+    {
+      "access": "write",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "event_id": {
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id"
+        ],
+        "type": "object"
+      },
+      "name": "wix.event.cancel",
+      "output_schema": {
+        "type": "object"
+      },
+      "risk": "dangerous"
+    }
+  ]
+}

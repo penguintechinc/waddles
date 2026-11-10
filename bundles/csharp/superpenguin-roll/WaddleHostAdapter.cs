@@ -1,49 +1,56 @@
-// Per-project host adapter: implements `WaddleSdk.Stage.IWaddleHost` by
-// delegating to THIS project's own wit-bindgen-generated import bindings
-// (`StageWorld.wit.Imports.waddle.bundle.v1_0_0.*`, generated fresh into
-// `generated/wit/` by `dotnet build` from this project's own `<Wit Include=.../>`
-// item -- see `superpenguin-roll.csproj`). `waddle-sdk-cs` cannot provide this
-// itself: wit-bindgen's C# codegen runs per-project, so the generated types
-// here are a DIFFERENT CLR type from any copy the SDK library might generate
-// -- see `sdk/waddle-sdk-cs/waddle-sdk-cs.csproj`'s header comment. Every C#
-// bundle needs one of these; copy this file and adjust only the namespace-
-// qualified `StageWorld...` references if wit-bindgen's generated shape ever
-// changes -- see `sdk/waddle-sdk-cs/README.md` "Writing a bundle".
+// Per-project host adapter for the `stage-next-tools` world: implements
+// `WaddleSdk.Stage.IWaddleHostNext` by delegating to THIS project's own
+// wit-bindgen-generated import bindings
+// (`StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.*`, generated fresh into
+// `generated/wit/` by `dotnet build` from this project's own `<Wit .../>` item --
+// see the bundle's `.csproj`). `waddle-sdk-cs` cannot provide this itself:
+// wit-bindgen's C# codegen runs per-project, so the generated types here are a
+// DIFFERENT CLR type from any copy the SDK library might generate (see
+// `sdk/waddle-sdk-cs/waddle-sdk-cs.csproj`). Every C# bundle on this world copies
+// this file and changes only the namespace -- see `docs/sdk-cs.md`.
 //
-// kv/db availability (2026-09-28): the host `kv` and `db` capabilities are
-// currently hardcoded to deny every call in svc-process/svc-action while the
-// real backends are implemented. `kv`'s WIT `error` variant has no native
-// `denied` case (only `too-large`/`backend`, `wit/waddle-bundle/stage.wit`),
-// so the current denial surfaces as a `backend` error; this adapter maps a
-// `backend` error whose message signals unavailability onto
-// `KvErrorKind.Denied` so callers (e.g. `CooldownGuard`) can degrade
-// gracefully instead of treating it as a generic backend fault. This
-// heuristic is deliberately narrow and removable: once the real `kv` backend
-// lands, a message that happens to contain "denied" would be a genuine
-// (if confusingly-worded) backend error -- revisit this mapping at that point.
+// kv (live on release since the dedicated-Valkey backend landed): `kv`'s WIT `error`
+// variant has no native `denied` case (only `too-large`/`backend`), so a host refusal
+// (`storage.kv` not declared/approved) arrives as a `backend` error whose message
+// says so; this adapter maps those onto `KvErrorKind.Denied` so callers can tell
+// "not granted" from a genuine backend fault. The match is deliberately narrow.
+using WaddleSdk.Ai;
 using WaddleSdk.Clock;
 using WaddleSdk.Context;
 using WaddleSdk.Db;
 using WaddleSdk.Flags;
+using WaddleSdk.Economy;
 using WaddleSdk.Http;
+using WaddleSdk.Identity;
 using WaddleSdk.Kv;
 using WaddleSdk.Log;
+using WaddleSdk.Media;
+using WaddleSdk.Overlay;
 using WaddleSdk.Relay;
 using WaddleSdk.Stage;
+using WaddleSdk.Tool;
+using WaddleSdk.Types;
 
-using WitContext = global::StageWorld.wit.Imports.waddle.bundle.v1_0_0.IContextImports;
-using WitKv = global::StageWorld.wit.Imports.waddle.bundle.v1_0_0.IKvImports;
-using WitDb = global::StageWorld.wit.Imports.waddle.bundle.v1_0_0.IDbImports;
-using WitRelay = global::StageWorld.wit.Imports.waddle.bundle.v1_0_0.IRelayImports;
-using WitHttp = global::StageWorld.wit.Imports.waddle.bundle.v1_0_0.IHttpImports;
-using WitFlags = global::StageWorld.wit.Imports.waddle.bundle.v1_0_0.IFlagsImports;
-using WitLog = global::StageWorld.wit.Imports.waddle.bundle.v1_0_0.ILogImports;
-using WitClock = global::StageWorld.wit.Imports.waddle.bundle.v1_0_0.IClockImports;
+using WitContext = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IContextImports;
+using WitKv = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IKvImports;
+using WitDb = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IDbImports;
+using WitRelay = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IRelayImports;
+using WitHttp = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IHttpImports;
+using WitFlags = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IFlagsImports;
+using WitLog = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.ILogImports;
+using WitClock = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IClockImports;
+using WitEconomy = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IEconomyImports;
+using WitIdentity = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IIdentityImports;
+using WitTool = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IToolImports;
+using WitOverlay = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IOverlayImports;
+using WitAi = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IAiImports;
+using WitMedia = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.IMediaImports;
+using WitTypes = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.ITypesImports;
 
 namespace WaddleBundleSuperpenguinRoll;
 
-/// <summary>This bundle's <see cref="IWaddleHost"/> implementation over the real WIT host imports.</summary>
-public sealed class WaddleHostAdapter : IWaddleHost
+/// <summary>This bundle's <see cref="IWaddleHostNext"/> implementation over the real WIT host imports.</summary>
+public sealed class WaddleHostAdapter : IWaddleHostNext
 {
     public BundleContextInfo Context
     {
@@ -66,6 +73,12 @@ public sealed class WaddleHostAdapter : IWaddleHost
     public IFlagsClient Flags { get; } = new FlagsAdapter();
     public ILogClient Log { get; } = new LogAdapter();
     public IClockClient Clock { get; } = new ClockAdapter();
+    public IEconomyClient Economy { get; } = new EconomyAdapter();
+    public IIdentityClient Identity { get; } = new IdentityAdapter();
+    public IToolClient Tool { get; } = new ToolAdapter();
+    public IOverlayClient Overlay { get; } = new OverlayAdapter();
+    public IAiClient Ai { get; } = new AiAdapter();
+    public IMediaClient Media { get; } = new MediaAdapter();
 
     private sealed class KvAdapter : IKvClient
     {
@@ -75,7 +88,7 @@ public sealed class WaddleHostAdapter : IWaddleHost
             {
                 return WitKv.Get(key);
             }
-            catch (global::StageWorld.WitException<WitKv.Error> ex)
+            catch (global::StageNextToolsWorld.WitException<WitKv.Error> ex)
             {
                 throw Convert(ex.TypedValue);
             }
@@ -87,7 +100,7 @@ public sealed class WaddleHostAdapter : IWaddleHost
             {
                 WitKv.Set(key, value, ttlSeconds);
             }
-            catch (global::StageWorld.WitException<WitKv.Error> ex)
+            catch (global::StageNextToolsWorld.WitException<WitKv.Error> ex)
             {
                 throw Convert(ex.TypedValue);
             }
@@ -99,7 +112,7 @@ public sealed class WaddleHostAdapter : IWaddleHost
             {
                 WitKv.Delete(key);
             }
-            catch (global::StageWorld.WitException<WitKv.Error> ex)
+            catch (global::StageNextToolsWorld.WitException<WitKv.Error> ex)
             {
                 throw Convert(ex.TypedValue);
             }
@@ -111,7 +124,7 @@ public sealed class WaddleHostAdapter : IWaddleHost
             {
                 return WitKv.Increment(key, delta, ttlSeconds);
             }
-            catch (global::StageWorld.WitException<WitKv.Error> ex)
+            catch (global::StageNextToolsWorld.WitException<WitKv.Error> ex)
             {
                 throw Convert(ex.TypedValue);
             }
@@ -123,7 +136,8 @@ public sealed class WaddleHostAdapter : IWaddleHost
             // See this file's header comment: `kv` has no native `denied` WIT
             // case yet, so the current host-side hardcoded denial arrives as a
             // `backend` error. Detect it here rather than in the shared SDK.
-            _ when error.AsBackend.Contains("denied", StringComparison.OrdinalIgnoreCase) =>
+            _ when error.AsBackend.Contains("denied", StringComparison.OrdinalIgnoreCase)
+                   || error.AsBackend.Contains("not granted", StringComparison.OrdinalIgnoreCase) =>
                 new WaddleKvException(KvErrorKind.Denied, error.AsBackend),
             _ => new WaddleKvException(KvErrorKind.Backend, error.AsBackend),
         };
@@ -137,7 +151,7 @@ public sealed class WaddleHostAdapter : IWaddleHost
             {
                 return FromWit(WitDb.Insert(ToWitColumnValues(columnValues)));
             }
-            catch (global::StageWorld.WitException<WitDb.Error> ex)
+            catch (global::StageNextToolsWorld.WitException<WitDb.Error> ex)
             {
                 throw Convert(ex.TypedValue);
             }
@@ -149,7 +163,7 @@ public sealed class WaddleHostAdapter : IWaddleHost
             {
                 return FromWit(WitDb.Get(rowId));
             }
-            catch (global::StageWorld.WitException<WitDb.Error> ex)
+            catch (global::StageNextToolsWorld.WitException<WitDb.Error> ex)
             {
                 throw Convert(ex.TypedValue);
             }
@@ -168,7 +182,7 @@ public sealed class WaddleHostAdapter : IWaddleHost
 
                 return mapped;
             }
-            catch (global::StageWorld.WitException<WitDb.Error> ex)
+            catch (global::StageNextToolsWorld.WitException<WitDb.Error> ex)
             {
                 throw Convert(ex.TypedValue);
             }
@@ -180,7 +194,7 @@ public sealed class WaddleHostAdapter : IWaddleHost
             {
                 return FromWit(WitDb.Update(rowId, expectedVersion, ToWitColumnValues(columnValues)));
             }
-            catch (global::StageWorld.WitException<WitDb.Error> ex)
+            catch (global::StageNextToolsWorld.WitException<WitDb.Error> ex)
             {
                 throw Convert(ex.TypedValue);
             }
@@ -192,7 +206,7 @@ public sealed class WaddleHostAdapter : IWaddleHost
             {
                 WitDb.Delete(rowId, expectedVersion);
             }
-            catch (global::StageWorld.WitException<WitDb.Error> ex)
+            catch (global::StageNextToolsWorld.WitException<WitDb.Error> ex)
             {
                 throw Convert(ex.TypedValue);
             }
@@ -279,7 +293,7 @@ public sealed class WaddleHostAdapter : IWaddleHost
             {
                 WitRelay.Push(provider, messageJson);
             }
-            catch (global::StageWorld.WitException<WitRelay.Error> ex)
+            catch (global::StageNextToolsWorld.WitException<WitRelay.Error> ex)
             {
                 var detail = ex.TypedValue.Tag switch
                 {
@@ -323,7 +337,7 @@ public sealed class WaddleHostAdapter : IWaddleHost
 
                 return new HttpResponseInfo(response.status, headers, response.body, response.truncated);
             }
-            catch (global::StageWorld.WitException<WitHttp.Error> ex)
+            catch (global::StageNextToolsWorld.WitException<WitHttp.Error> ex)
             {
                 throw ex.TypedValue.Tag switch
                 {
@@ -367,5 +381,231 @@ public sealed class WaddleHostAdapter : IWaddleHost
         public ulong NowMillis() => WitClock.NowMillis();
         public string NowRfc3339() => WitClock.NowRfc3339();
         public ulong MonotonicNanos() => WitClock.MonotonicNanos();
+    }
+
+    private sealed class EconomyAdapter : IEconomyClient
+    {
+        public long Balance(string user) => Call(() => WitEconomy.Balance(user));
+        public long Wager(string user, ulong stake, ulong payout) => Call(() => WitEconomy.Wager(user, stake, payout));
+        public void Transfer(string from, string to, ulong amount) => Call(() => { WitEconomy.Transfer(from, to, amount); return 0; });
+        public long MaxBet(string user) => Call(() => WitEconomy.MaxBet(user));
+
+        public IReadOnlyList<EconomyEntry> Leaderboard(uint limit) => Call(() =>
+        {
+            var rows = WitEconomy.Leaderboard(limit);
+            var mapped = new List<EconomyEntry>(rows.Count);
+            foreach (var row in rows)
+            {
+                mapped.Add(new EconomyEntry(row.user, row.balance));
+            }
+
+            return (IReadOnlyList<EconomyEntry>)mapped;
+        });
+
+        public long Credit(string user, ulong amount) => Call(() => WitEconomy.Credit(user, amount));
+        public void BatchCredit(IReadOnlyList<EconomyCredit> entries) => Call(() => { WitEconomy.BatchCredit(ToWit(entries)); return 0; });
+        public long Debit(string user, ulong amount) => Call(() => WitEconomy.Debit(user, amount));
+        public long ConditionalDebit(string user, ulong amount, ulong minBalance) => Call(() => WitEconomy.ConditionalDebit(user, amount, minBalance));
+        public void PayPot(IReadOnlyList<EconomyCredit> winners) => Call(() => { WitEconomy.PayPot(ToWit(winners)); return 0; });
+
+        private static List<WitEconomy.CreditEntry> ToWit(IReadOnlyList<EconomyCredit> entries)
+        {
+            var wit = new List<WitEconomy.CreditEntry>(entries.Count);
+            foreach (var entry in entries)
+            {
+                wit.Add(new WitEconomy.CreditEntry(entry.User, entry.Amount));
+            }
+
+            return wit;
+        }
+
+        private static T Call<T>(Func<T> call)
+        {
+            try
+            {
+                return call();
+            }
+            catch (global::StageNextToolsWorld.WitException<WitEconomy.Error> ex)
+            {
+                var e = ex.TypedValue;
+                throw e.Tag switch
+                {
+                    WitEconomy.Error.Tags.Denied => new WaddleEconomyException(EconomyErrorKind.Denied, e.AsDenied),
+                    WitEconomy.Error.Tags.InsufficientFunds => new WaddleEconomyException(EconomyErrorKind.InsufficientFunds, "insufficient funds", e.AsInsufficientFunds),
+                    WitEconomy.Error.Tags.OverCap => new WaddleEconomyException(EconomyErrorKind.OverCap, "over cap", e.AsOverCap),
+                    WitEconomy.Error.Tags.NotAMember => new WaddleEconomyException(EconomyErrorKind.NotAMember, "not a member of this community"),
+                    WitEconomy.Error.Tags.Invalid => new WaddleEconomyException(EconomyErrorKind.Invalid, e.AsInvalid),
+                    WitEconomy.Error.Tags.Unavailable => new WaddleEconomyException(EconomyErrorKind.Unavailable, e.AsUnavailable),
+                    _ => new WaddleEconomyException(EconomyErrorKind.Backend, e.AsBackend),
+                };
+            }
+        }
+    }
+
+    private sealed class IdentityAdapter : IIdentityClient
+    {
+        public string ResolveActor() => Call(() => WitIdentity.ResolveActor());
+        public string ResolveMention(string token) => Call(() => WitIdentity.ResolveMention(token));
+
+        private static string Call(Func<string> call)
+        {
+            try
+            {
+                return call();
+            }
+            catch (global::StageNextToolsWorld.WitException<WitIdentity.Error> ex)
+            {
+                var e = ex.TypedValue;
+                throw e.Tag switch
+                {
+                    WitIdentity.Error.Tags.Denied => new WaddleIdentityException(IdentityErrorKind.Denied, e.AsDenied),
+                    WitIdentity.Error.Tags.NotLinked => new WaddleIdentityException(IdentityErrorKind.NotLinked, "identity is not linked to a community user"),
+                    WitIdentity.Error.Tags.NotAMember => new WaddleIdentityException(IdentityErrorKind.NotAMember, "not a member of this community"),
+                    WitIdentity.Error.Tags.NotFound => new WaddleIdentityException(IdentityErrorKind.NotFound, "mention not found"),
+                    WitIdentity.Error.Tags.Ambiguous => new WaddleIdentityException(IdentityErrorKind.Ambiguous, "mention is ambiguous"),
+                    WitIdentity.Error.Tags.Invalid => new WaddleIdentityException(IdentityErrorKind.Invalid, e.AsInvalid),
+                    WitIdentity.Error.Tags.Unavailable => new WaddleIdentityException(IdentityErrorKind.Unavailable, e.AsUnavailable),
+                    _ => new WaddleIdentityException(IdentityErrorKind.Backend, e.AsBackend),
+                };
+            }
+        }
+    }
+
+    private sealed class ToolAdapter : IToolClient
+    {
+        public byte[] Invoke(string target, string tool, byte[] argsJson, string? idempotencyKey)
+        {
+            try
+            {
+                return WitTool.Invoke(target, tool, argsJson, idempotencyKey);
+            }
+            catch (global::StageNextToolsWorld.WitException<WitTool.ToolError> ex)
+            {
+                var e = ex.TypedValue;
+                throw e.Tag switch
+                {
+                    WitTool.ToolError.Tags.NotGranted => new WaddleToolException(ToolErrorKind.NotGranted, $"{target}/{tool}: no approved tool.call grant"),
+                    WitTool.ToolError.Tags.Forbidden => new WaddleToolException(ToolErrorKind.Forbidden, $"{target}/{tool}: forbidden by the kind matrix"),
+                    WitTool.ToolError.Tags.Timeout => new WaddleToolException(ToolErrorKind.Timeout, $"{target}/{tool}: timed out"),
+                    WitTool.ToolError.Tags.DepthExceeded => new WaddleToolException(ToolErrorKind.DepthExceeded, $"{target}/{tool}: nesting depth exceeded"),
+                    WitTool.ToolError.Tags.PoolExhausted => new WaddleToolException(ToolErrorKind.PoolExhausted, $"{target}/{tool}: target pool exhausted"),
+                    WitTool.ToolError.Tags.TargetUnavailable => new WaddleToolException(ToolErrorKind.TargetUnavailable, $"{target}/{tool}: target unavailable"),
+                    _ => new WaddleToolException(ToolErrorKind.InvalidArgs, e.AsInvalidArgs),
+                };
+            }
+        }
+    }
+
+    private sealed class OverlayAdapter : IOverlayClient
+    {
+        public TransportResultInfo RegisterWidget(OverlayWidget widget) =>
+            Call(() => WitOverlay.RegisterWidget(new WitOverlay.WidgetDescriptor(widget.WidgetId, widget.DisplayName, ToWit(widget.Surface), widget.DescriptorJson)));
+
+        public TransportResultInfo Push(string widgetId, OverlaySurface surface, string payloadJson) =>
+            Call(() => WitOverlay.Push(widgetId, ToWit(surface), payloadJson));
+
+        private static TransportResultInfo Call(Func<WitTypes.TransportResult> call)
+        {
+            try
+            {
+                var r = call();
+                return new TransportResultInfo(r.ok, r.status, r.detail, r.providerMessageId);
+            }
+            catch (global::StageNextToolsWorld.WitException<WitTypes.TransportError> ex)
+            {
+                var e = ex.TypedValue;
+                throw new WaddleTransportException(new TransportErrorInfo(e.retryable, e.code, e.message, e.retryAfterMs));
+            }
+        }
+
+        private static WitOverlay.Surface ToWit(OverlaySurface surface) => surface switch
+        {
+            OverlaySurface.FullScreen => WitOverlay.Surface.FULL_SCREEN,
+            OverlaySurface.Media => WitOverlay.Surface.MEDIA,
+            OverlaySurface.Crawler => WitOverlay.Surface.CRAWLER,
+            OverlaySurface.Music => WitOverlay.Surface.MUSIC,
+            OverlaySurface.AlertBox => WitOverlay.Surface.ALERT_BOX,
+            OverlaySurface.Chat => WitOverlay.Surface.CHAT,
+            OverlaySurface.Goals => WitOverlay.Surface.GOALS,
+            OverlaySurface.Ticker => WitOverlay.Surface.TICKER,
+            OverlaySurface.Image => WitOverlay.Surface.IMAGE,
+            OverlaySurface.Caption => WitOverlay.Surface.CAPTION,
+            _ => throw new ArgumentOutOfRangeException(nameof(surface)),
+        };
+    }
+
+    private sealed class AiAdapter : IAiClient
+    {
+        public string Generate(string prompt, AiOptions options)
+        {
+            try
+            {
+                return WitAi.Generate(prompt, new WitAi.Options(options.MaxTokens, options.Temperature, options.Json));
+            }
+            catch (global::StageNextToolsWorld.WitException<WitAi.Error> ex)
+            {
+                var e = ex.TypedValue;
+                throw e.Tag switch
+                {
+                    WitAi.Error.Tags.Denied => new WaddleAiException(AiErrorKind.Denied, e.AsDenied),
+                    WitAi.Error.Tags.TooManyTokens => new WaddleAiException(AiErrorKind.TooManyTokens, "token bound exceeded", e.AsTooManyTokens),
+                    WitAi.Error.Tags.ContentFiltered => new WaddleAiException(AiErrorKind.ContentFiltered, "completion was content-filtered"),
+                    WitAi.Error.Tags.Invalid => new WaddleAiException(AiErrorKind.Invalid, e.AsInvalid),
+                    WitAi.Error.Tags.Unavailable => new WaddleAiException(AiErrorKind.Unavailable, e.AsUnavailable),
+                    _ => new WaddleAiException(AiErrorKind.Backend, e.AsBackend),
+                };
+            }
+        }
+    }
+
+    private sealed class MediaAdapter : IMediaClient
+    {
+        public string GenerateImage(string prompt) => Call(() => WitMedia.GenerateImage(prompt));
+        public string SubmitMusic(string prompt) => Call(() => WitMedia.SubmitMusic(prompt));
+        public string SubmitVideo(string prompt) => Call(() => WitMedia.SubmitVideo(prompt));
+        public string ObjectUrl(string handle) => Call(() => WitMedia.ObjectUrl(handle));
+
+        public MediaJobState JobStatus(string jobId)
+        {
+            var state = Call(() => WitMedia.JobStatus(jobId));
+            return state.Tag switch
+            {
+                WitMedia.JobState.Tags.Pending => MediaJobState.Pending(),
+                WitMedia.JobState.Tags.Done => MediaJobState.Done(state.AsDone),
+                _ => FailedState(state.AsFailed),
+            };
+        }
+
+        private static MediaJobState FailedState(WitMedia.Error error)
+        {
+            var mapped = Convert(error);
+            return MediaJobState.Failed(mapped.Kind, mapped.Message);
+        }
+
+        private static T Call<T>(Func<T> call)
+        {
+            try
+            {
+                return call();
+            }
+            catch (global::StageNextToolsWorld.WitException<WitMedia.Error> ex)
+            {
+                throw Convert(ex.TypedValue);
+            }
+        }
+
+        private static WaddleMediaException Convert(WitMedia.Error e) => e.Tag switch
+        {
+            WitMedia.Error.Tags.TierRequired => new WaddleMediaException(MediaErrorKind.TierRequired, e.AsTierRequired),
+            WitMedia.Error.Tags.ByokMissing => new WaddleMediaException(MediaErrorKind.ByokMissing, e.AsByokMissing),
+            WitMedia.Error.Tags.ProviderRefused => new WaddleMediaException(MediaErrorKind.ProviderRefused, e.AsProviderRefused),
+            WitMedia.Error.Tags.Quota => new WaddleMediaException(MediaErrorKind.Quota, e.AsQuota),
+            WitMedia.Error.Tags.Timeout => new WaddleMediaException(MediaErrorKind.Timeout, "media call timed out"),
+            WitMedia.Error.Tags.Denied => new WaddleMediaException(MediaErrorKind.Denied, e.AsDenied),
+            WitMedia.Error.Tags.Invalid => new WaddleMediaException(MediaErrorKind.Invalid, e.AsInvalid),
+            WitMedia.Error.Tags.Unavailable => new WaddleMediaException(MediaErrorKind.Unavailable, e.AsUnavailable),
+            WitMedia.Error.Tags.NotFound => new WaddleMediaException(MediaErrorKind.NotFound, "media handle or job not found"),
+            _ => new WaddleMediaException(MediaErrorKind.Backend, e.AsBackend),
+        };
     }
 }

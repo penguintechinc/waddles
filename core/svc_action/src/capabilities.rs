@@ -64,11 +64,37 @@ use crate::pin_sig::{PinFields, PinKeys};
 use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
-mod discord_role_tools;
 mod event_sync;
+mod host_tools;
 pub use event_sync::{run_event_sync_consumer, EVENT_SYNC_REQUEST_QUEUE, EVENT_SYNC_RESULT_PREFIX};
 mod tool;
 pub use tool::ToolWiring;
+
+/// A raw platform account id held host-side. A newtype so the id can never reach a log line or
+/// metric label through a derived `Debug` of the scope that carries it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ActorId(String);
+
+impl ActorId {
+    /// Wraps a platform account id; `None` for an empty / oversized / control-bearing value.
+    #[must_use]
+    pub fn new(raw: &str) -> Option<Self> {
+        (!raw.is_empty() && raw.len() <= 128 && !raw.chars().any(char::is_control))
+            .then(|| Self(raw.to_string()))
+    }
+
+    /// The raw id (host-side use only).
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ActorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ActorId(<redacted>)")
+    }
+}
 
 /// The `(tenant, community, app_id)` an in-flight `invoke` belongs to,
 /// resolved from the delivered envelope (spec §5.11: "Tenant and community
@@ -99,6 +125,10 @@ pub struct InvokeScope {
     /// non-Discord (e.g. Wix) event. Used only to ASSERT the source guild equals the community's
     /// own paired guild for channel-less role ops -- it is never a destination.
     pub origin_guild_id: Option<String>,
+    /// The raw platform account id of the delivered event's author (`payload.author_id`,
+    /// `message` events only), host-derived from the verified envelope. The ONLY input of host-side actor
+    /// resolution ([`crate::actor`]); never guest-supplied, never logged (redacted `Debug`).
+    pub origin_user_id: Option<ActorId>,
     /// Numeric `tenants.id`/`communities.id` (spec
     /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     /// SS5.1/SS4 `GrantScopeKey`) -- resolved by `crate::dispatch::
@@ -293,7 +323,7 @@ pub fn outbound_relay_queue_key(provider: &str) -> String {
 /// Adding a provider here without adding its table rows leaves every op
 /// refused `unsupported_op` -- a new provider is unsupported until someone
 /// deliberately opts it in, never auto-supported onto an undrained queue.
-pub(crate) const RELAY_PROVIDERS: &[&str] = &["twitch", "discord"];
+pub(crate) const RELAY_PROVIDERS: &[&str] = &["twitch", "discord", "youtube"];
 
 /// Valkey key the Discord outbound drain (`svc_ingest::outbound::
 /// run_discord`) keeps alive (short TTL, heartbeat-refreshed) while it is
@@ -373,6 +403,12 @@ pub(crate) enum RelayOp {
     RoleAdd,
     /// `role.remove` -- revoke a community-managed role.
     RoleRemove,
+    /// Any other op registered in the shared platform op table
+    /// (`bundle_capability_gate::platform_ops`): moderation, message ops, EventSub, command
+    /// registration, interaction replies. The `&'static` spelling comes FROM the table, so an
+    /// op string not in the table can never become one -- [`RelayOp::parse`] returns `None`
+    /// (an explicit `unknown_op` refusal), never a default.
+    Registered(&'static str),
 }
 
 impl RelayOp {
@@ -385,7 +421,8 @@ impl RelayOp {
             "dm.send" => Some(Self::DmSend),
             "role.add" => Some(Self::RoleAdd),
             "role.remove" => Some(Self::RoleRemove),
-            _ => None,
+            other => bundle_capability_gate::platform_ops::registered_on_any_platform(other)
+                .map(Self::Registered),
         }
     }
 
@@ -397,25 +434,54 @@ impl RelayOp {
             Self::DmSend => "dm.send",
             Self::RoleAdd => "role.add",
             Self::RoleRemove => "role.remove",
+            Self::Registered(op) => op,
         }
     }
 
-    /// The catalog permission id this op requires for `provider`. Role
-    /// grant/revoke is a moderation-class action, so it rides the existing
+    /// The catalog permission id this op requires for `provider`, or `None` when a registered
+    /// op is not registered for that provider (the caller refuses -- there is no fallback
+    /// permission). Role grant/revoke is a moderation-class action, so it rides the existing
     /// dangerous `moderation.<platform>` permission rather than a new family.
-    fn permission(self, provider: &str) -> PermissionId {
-        match self {
+    fn permission(self, provider: &str) -> Option<PermissionId> {
+        Some(match self {
             Self::ChatSend => PermissionId::ChatSend(provider.to_string()),
             Self::ChatDelete => PermissionId::ChatDelete(provider.to_string()),
             Self::DmSend => PermissionId::DmSend(provider.to_string()),
             Self::RoleAdd | Self::RoleRemove => PermissionId::Moderation(provider.to_string()),
-        }
+            Self::Registered(op) => {
+                return bundle_capability_gate::platform_ops::permission_for(provider, op)
+            }
+        })
     }
 
     /// `true` for the ops whose executor-side handling needs the numeric
-    /// tenant (user detokenization): `dm.send` and the role ops.
+    /// tenant (user detokenization): `dm.send`, the role ops and every registered op (they
+    /// may name a tokenized user).
     fn needs_tenant(self) -> bool {
-        matches!(self, Self::DmSend | Self::RoleAdd | Self::RoleRemove)
+        matches!(
+            self,
+            Self::DmSend | Self::RoleAdd | Self::RoleRemove | Self::Registered(_)
+        )
+    }
+
+    /// `true` for ops that act inside the triggering event's own channel / chat and are
+    /// therefore pinned to the verified origin (never a bundle-named destination).
+    fn needs_origin(self) -> bool {
+        match self {
+            Self::ChatSend | Self::ChatDelete | Self::DmSend => true,
+            Self::RoleAdd | Self::RoleRemove => false,
+            Self::Registered(op) => {
+                op.starts_with("mod.")
+                    || matches!(
+                        op,
+                        "message.edit"
+                            | "reaction.add"
+                            | "message.embed"
+                            | "webhook.create"
+                            | "chat.clear"
+                    )
+            }
+        }
     }
 }
 
@@ -427,14 +493,21 @@ impl RelayOp {
 /// `chat.send` (inline bot REST, [`StageCapabilities::handle_discord_relay`])
 /// and Discord `chat.delete`/`dm.send` (bot-token REST sender behind the
 /// confirmation handshake, [`StageCapabilities::handle_discord_queued_op`]).
-/// Twitch `chat.delete`/`dm.send` stay authorized-then-refused
-/// (`unsupported_op`) until the Helix client lands -- never queued into a
-/// consumer that cannot act on them, so the bundle sees the failure instead of
-/// a silent black hole.
+/// Twitch/YouTube `chat.delete` and every registered platform op run through the generic
+/// queued path ([`StageCapabilities::handle_platform_queued_op`]) and are confirmed by the
+/// drain's ack. Twitch `dm.send` stays authorized-then-refused (`unsupported_op`) until its
+/// host duty lands -- never queued into a consumer that cannot act on it, so the bundle sees
+/// the failure instead of a silent black hole.
 pub(crate) fn relay_op_supported(provider: &str, op: RelayOp) -> bool {
+    // A registered op is supported exactly where the shared op table registers it for the
+    // provider (the consumer's policy table is parity-tested against the same fixture).
+    if let RelayOp::Registered(name) = op {
+        return bundle_capability_gate::platform_ops::registered(provider, name).is_some();
+    }
     matches!(
         (provider, op),
-        ("twitch", RelayOp::ChatSend)
+        ("twitch", RelayOp::ChatSend | RelayOp::ChatDelete)
+            | ("youtube", RelayOp::ChatSend | RelayOp::ChatDelete)
             | (
                 "discord",
                 RelayOp::ChatSend
@@ -613,6 +686,9 @@ enum AckFailure {
     Unsupported,
     /// The community has several paired guilds / usable bindings: never guessed.
     AmbiguousPairedGuild,
+    /// The platform API quota is spent (e.g. the YouTube Data API daily quota): not a
+    /// caller fault and not retryable until the quota window resets.
+    QuotaExhausted,
     Failed,
 }
 
@@ -628,6 +704,7 @@ fn parse_ack(raw: &str) -> Result<AckOutcome, String> {
                 Some("not_in_community") => AckFailure::NotInCommunity,
                 Some("unsupported") => AckFailure::Unsupported,
                 Some("ambiguous_paired_guild") => AckFailure::AmbiguousPairedGuild,
+                Some("quota_exhausted") => AckFailure::QuotaExhausted,
                 _ => AckFailure::Failed,
             },
         )),
@@ -1065,6 +1142,12 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// Verify-only ring for hub-api's signed event-sync requests
     /// (`EVENT_SYNC_REQUEST_KEYS`); `None` drops every request unanswered.
     event_sync_keys: Option<Arc<PinKeys>>,
+    /// Host-verified actor directory ([`crate::actor`]); `None` until
+    /// [`Self::with_actor_directory`] -- scope-restricted tools are then refused (fail closed).
+    actor_directory: Option<Arc<dyn crate::actor::ActorDirectory>>,
+    /// Producer-side user detokenizer ([`crate::platform_user`]); `None` until
+    /// [`Self::with_platform_users`] -- host tools naming a user are then refused.
+    platform_users: Option<Arc<dyn crate::platform_user::PlatformUserResolver>>,
 }
 
 /// The outbound PII-detokenization dependency: a live resolver over
@@ -1112,7 +1195,26 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             tool: None,
             pin_keys: None,
             event_sync_keys: None,
+            actor_directory: None,
+            platform_users: None,
         }
+    }
+
+    /// Wires the host-verified actor directory used to resolve a scope-restricted tool's caller.
+    #[must_use]
+    pub fn with_actor_directory(mut self, dir: Arc<dyn crate::actor::ActorDirectory>) -> Self {
+        self.actor_directory = Some(dir);
+        self
+    }
+
+    /// Wires the producer-side user detokenizer used by host-executed platform tools.
+    #[must_use]
+    pub fn with_platform_users(
+        mut self,
+        resolver: Arc<dyn crate::platform_user::PlatformUserResolver>,
+    ) -> Self {
+        self.platform_users = Some(resolver);
+        self
     }
 
     /// Wires the signing keys (`ENVELOPE_BINDING_KEYS` + active kid) used to
@@ -1350,7 +1452,29 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         let op = peek_relay_op(args).map_err(|raw| {
             denied(
                 "unknown_op",
-                format!("relay op {raw:?} is not one of chat.send/chat.delete/dm.send/role.add/role.remove"),
+                format!("relay op {raw:?} is not in the registered platform op table"),
+            )
+        })?;
+        // Ops that exist only behind the host tool path (planner grant + verified actor +
+        // protected-target check, secrets kept host-side) are never reachable by a guest's
+        // `relay.send`, whatever grants the guest holds.
+        if let RelayOp::Registered(name) = op {
+            if bundle_capability_gate::platform_ops::host_tool_only(provider, name) {
+                return Err(denied(
+                    "host_tool_only",
+                    format!(
+                        "relay op {name:?} for provider {provider:?} is only available through a platform service tool"
+                    ),
+                ));
+            }
+        }
+        let permission = op.permission(provider).ok_or_else(|| {
+            denied(
+                "unknown_op",
+                format!(
+                    "relay op {:?} is not registered for provider {provider:?}",
+                    op.as_str()
+                ),
             )
         })?;
         // Gate call FIRST (spec SS5), now that `provider` and `op` are known
@@ -1359,7 +1483,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         self.gate
             .authorize(
                 &scope.gate_scope(),
-                op.permission(provider),
+                permission,
                 ResourceRef::AppScoped(AppScopedResource::None),
             )
             .map_err(denied_from_gate)?;
@@ -1416,6 +1540,16 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         // bot-token REST sender via the outbound queue, behind a
         // confirmation handshake; they do not share the `text`-required
         // shape below (delete has no text).
+        // Registered platform ops (any provider) and the non-Discord queued ops
+        // (Twitch/YouTube `chat.delete`, YouTube `chat.send`) take the generic confirmed path.
+        if matches!(op, RelayOp::Registered(_))
+            || (provider == "youtube")
+            || (provider == "twitch" && op == RelayOp::ChatDelete)
+        {
+            return self
+                .handle_platform_queued_op(scope, provider, op, &message)
+                .await;
+        }
         if provider == "discord" && op != RelayOp::ChatSend {
             return self.handle_discord_queued_op(scope, op, &message).await;
         }
@@ -1766,6 +1900,10 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                                         op.as_str()
                                     ),
                                 ),
+                                AckFailure::QuotaExhausted => denied(
+                                    "quota_exhausted",
+                                    format!("discord {} refused: platform quota exhausted", op.as_str()),
+                                ),
                                 AckFailure::Failed => denied(
                                     "relay_failed",
                                     format!("discord {} failed at the platform", op.as_str()),
@@ -1860,23 +1998,6 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         op: RelayOp,
         message: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
-        self.handle_discord_queued_op_scoped(scope, op, message, false)
-            .await
-    }
-
-    /// [`Self::handle_discord_queued_op`] with `guild_scoped`: when `true` (the
-    /// `tool.invoke` role tools ONLY) a role op whose triggering event has no Discord channel
-    /// (a gateway member event, or an external Wix-style event) is queued with the wire scope
-    /// `guild:<source guild>` / `guild:-` instead of being refused. The host pins the target
-    /// guild to the community's OWN binding guild; the scope is only an assertion that a
-    /// gateway event's source guild equals it. Never taken from the call's args.
-    pub(crate) async fn handle_discord_queued_op_scoped(
-        &self,
-        scope: &InvokeScope,
-        op: RelayOp,
-        message: &serde_json::Value,
-        guild_scoped: bool,
-    ) -> Result<serde_json::Value, HostResultError> {
         let str_field = |name: &str| {
             message
                 .get(name)
@@ -1929,7 +2050,6 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 role_key: &'a str,
             },
         }
-        let role_scope: String;
         let pending = match op {
             RelayOp::ChatDelete => {
                 let channel_id = origin("chat.delete")?;
@@ -1988,12 +2108,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             }
             RelayOp::RoleAdd | RelayOp::RoleRemove => {
                 let what = op.as_str();
-                let origin_channel: &str = if guild_scoped {
-                    role_scope = discord_role_tools::tool_origin_scope(scope, what)?;
-                    &role_scope
-                } else {
-                    origin(what)?
-                };
+                // `relay.push` role ops stay channel-pinned; guild-scoped (channel-less) role
+                // ops are served only by the generic host tool path (`host_tools`).
+                let origin_channel: &str = origin(what)?;
                 // The bundle names a tokenized user and a managed-role KEY --
                 // never a role snowflake, never a guild (the drain maps the key
                 // through the community's binding allowlist and pins the guild
@@ -2019,6 +2136,14 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                     user,
                     role_key,
                 }
+            }
+            // Registered ops take `handle_platform_queued_op`; reaching this typed-Discord
+            // path with one is a routing bug, refused loudly.
+            RelayOp::Registered(name) => {
+                return Err(denied(
+                    "unsupported_op",
+                    format!("discord op {name:?} is not handled by the typed discord path"),
+                ))
             }
         };
         // The numeric tenant is stamped for dm.send / role ops from the
@@ -2151,6 +2276,305 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             "provider": "discord",
             "op": op.as_str(),
         }))
+    }
+
+    /// Throttles a registered/moderation-class op per `(tenant, community, app)` -- the same
+    /// Valkey fixed-window mechanism as the role ops, one counter per op family, so a bundle
+    /// cannot hammer a platform's moderation / registration APIs through the shared credential.
+    async fn throttle_platform_op(
+        &self,
+        scope: &InvokeScope,
+        provider: &str,
+        op: RelayOp,
+    ) -> Result<(), HostResultError> {
+        let key = format!(
+            "waddles:ratelimit:platform.op:{provider}:{}:app:{}:{}:{}",
+            op.as_str(),
+            scope.tenant_id,
+            scope.community_id,
+            scope.app_id
+        );
+        match self
+            .relay_queue
+            .incr_window(&key, DM_SEND_WINDOW_SECS)
+            .await
+        {
+            Ok(count) if count <= ROLE_OP_APP_LIMIT => Ok(()),
+            Ok(_) => Err(denied(
+                "rate_limited",
+                format!(
+                    "{provider} {} rate limit exceeded for this app in this community \
+                     ({ROLE_OP_APP_LIMIT} per {DM_SEND_WINDOW_SECS}s)",
+                    op.as_str()
+                ),
+            )),
+            Err(e) => Err(denied(
+                "relay_unavailable",
+                format!(
+                    "{provider} {} refused: rate limiter unavailable: {e}",
+                    op.as_str()
+                ),
+            )),
+        }
+    }
+
+    /// Waits for the drain's result for `op_id` on `provider`'s queue and returns the platform
+    /// data/id the drain attached (`None` for a plain `{"ok":true}`). Same fail-closed rule as
+    /// [`Self::await_discord_ack`]: only a drain confirmation is success; silence until the
+    /// deadline is `relay_unconfirmed`.
+    async fn await_platform_ack(
+        &self,
+        scope: &InvokeScope,
+        provider: &str,
+        op: RelayOp,
+        op_id: &str,
+    ) -> Result<Option<serde_json::Value>, HostResultError> {
+        let key = format!("{DISCORD_OP_ACK_KEY_PREFIX}{op_id}");
+        let deadline = tokio::time::Instant::now() + self.discord_ack_timeout;
+        loop {
+            match self.relay_queue.take(&key).await {
+                Ok(Some(raw)) => {
+                    return match parse_ack(&raw) {
+                        Ok(AckOutcome::Confirmed) => {
+                            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        provider,
+                                        op = op.as_str(),
+                                        error = %e,
+                                        "platform op ack was confirmed but its payload is unreadable"
+                                    );
+                                    return Err(denied(
+                                        "relay_unconfirmed",
+                                        format!(
+                                            "{provider} {} result payload was unreadable; the op is unconfirmed",
+                                            op.as_str()
+                                        ),
+                                    ));
+                                }
+                            };
+                            Ok(v.get("data").or_else(|| v.get("id")).cloned())
+                        }
+                        Ok(AckOutcome::Refused(failure)) => {
+                            tracing::warn!(
+                                provider,
+                                op = op.as_str(),
+                                app_id = %scope.app_id,
+                                reason = ?failure,
+                                "platform op was not performed"
+                            );
+                            let code = match failure {
+                                AckFailure::NotInCommunity => "target_not_in_community",
+                                AckFailure::Unsupported => "unsupported_op",
+                                AckFailure::AmbiguousPairedGuild => "ambiguous_paired_guild",
+                                AckFailure::QuotaExhausted => "quota_exhausted",
+                                AckFailure::Failed => "relay_failed",
+                            };
+                            Err(denied(
+                                code,
+                                format!("{provider} {} was not performed", op.as_str()),
+                            ))
+                        }
+                        Err(_) => Err(denied(
+                            "relay_unconfirmed",
+                            format!(
+                                "{provider} {} result was unreadable; the op is unconfirmed",
+                                op.as_str()
+                            ),
+                        )),
+                    };
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(denied(
+                        "relay_unavailable",
+                        format!(
+                            "{provider} {} could not be confirmed: result read failed: {e}",
+                            op.as_str()
+                        ),
+                    ));
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::error!(
+                    provider,
+                    op = op.as_str(),
+                    app_id = %scope.app_id,
+                    "platform op accepted but not confirmed in time; reporting failure"
+                );
+                return Err(denied(
+                    "relay_unconfirmed",
+                    format!(
+                        "{provider} {} was queued but not confirmed by the outbound drain in time; treat it as NOT done",
+                        op.as_str()
+                    ),
+                ));
+            }
+            tokio::time::sleep(DISCORD_OP_ACK_POLL).await;
+        }
+    }
+
+    /// The generic confirmed queued op (any registered op; Twitch/YouTube `chat.delete`;
+    /// YouTube `chat.send`): validates the bundle's fields, pins the destination to the
+    /// verified origin for chat-scoped ops (a bundle-named channel is never used), throttles,
+    /// signs the envelope and waits for the drain's confirmation before reporting success.
+    ///
+    /// Everything platform-specific (guild, broadcaster, moderator, credential) is filled by
+    /// the consumer's policy table from host bindings -- this producer only carries the
+    /// bundle's text / target ids, bounded and control-character-free.
+    async fn handle_platform_queued_op(
+        &self,
+        scope: &InvokeScope,
+        provider: &str,
+        op: RelayOp,
+        message: &serde_json::Value,
+    ) -> Result<serde_json::Value, HostResultError> {
+        // Defense in depth behind `handle_relay`'s check: this guest-reachable producer has no
+        // verified actor, scope check or protected-target check, so it must never queue an op
+        // that exists only behind the host tool path (destructive moderation, chat.clear,
+        // webhook.create), even if a future caller forgets the upstream refusal.
+        if let RelayOp::Registered(name) = op {
+            if bundle_capability_gate::platform_ops::host_tool_only(provider, name) {
+                return Err(denied(
+                    "host_tool_only",
+                    format!(
+                        "op {name:?} for provider {provider:?} is only available through a platform service tool"
+                    ),
+                ));
+            }
+        }
+        let id_field = |name: &str| -> Result<Option<&str>, HostResultError> {
+            match message.get(name) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(serde_json::Value::String(v))
+                    if !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control) =>
+                {
+                    Ok(Some(v.as_str()))
+                }
+                Some(_) => Err(denied(
+                    "invalid_args",
+                    format!("{provider} {} field {name:?} is invalid", op.as_str()),
+                )),
+            }
+        };
+        let text = match message.get("text") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(v))
+                if !v.is_empty() && v.len() <= 262_144 && !v.contains('\0') =>
+            {
+                Some(v.as_str())
+            }
+            Some(_) => {
+                return Err(denied(
+                    "invalid_args",
+                    format!("{provider} {} field \"text\" is invalid", op.as_str()),
+                ))
+            }
+        };
+        let (message_id, user_id) = (id_field("message_id")?, id_field("user_id")?);
+        let missing = |f: &str| {
+            denied(
+                "invalid_args",
+                format!("{provider} {} requires {f}", op.as_str()),
+            )
+        };
+        match op {
+            RelayOp::ChatSend if text.is_none() => return Err(missing("non-empty 'text'")),
+            RelayOp::ChatDelete if message_id.is_none() => {
+                return Err(missing("a 'message_id'"));
+            }
+            _ => {}
+        }
+        // Chat-scoped ops act ONLY in the verified origin channel.
+        let channel: Option<String> = if op.needs_origin() {
+            let origin = scope.origin_channel_id.as_deref();
+            if scope.origin_platform.as_deref() != Some(provider) || origin.is_none() {
+                return Err(denied(
+                    "invalid_args",
+                    format!(
+                        "{provider} {} requires an origin channel from a {provider} event",
+                        op.as_str()
+                    ),
+                ));
+            }
+            let valid = match provider {
+                "discord" => origin.is_some_and(is_discord_snowflake),
+                "twitch" => pin_twitch_channel(Some("twitch"), origin, None).is_ok(),
+                _ => origin.is_some_and(|c| {
+                    !c.is_empty()
+                        && c.len() <= 128
+                        && c.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+                }),
+            };
+            if !valid {
+                return Err(denied(
+                    "invalid_args",
+                    format!("{provider} {} origin channel id is not valid", op.as_str()),
+                ));
+            }
+            match provider {
+                "twitch" => pin_twitch_channel(Some("twitch"), origin, None).ok(),
+                _ => origin.map(str::to_string),
+            }
+        } else {
+            None
+        };
+        let tenant_id = tenant_stamp(op, scope)?;
+        let community_id = scope_community(scope);
+        if provider == "discord" {
+            self.require_discord_drain_ready(scope, op).await?;
+        }
+        self.throttle_platform_op(scope, provider, op).await?;
+
+        let mut payload = build_outbound_envelope(
+            op,
+            provider,
+            &EnvelopeFields {
+                channel: channel.as_deref(),
+                text,
+                message_id,
+                user_id,
+                origin_channel: channel.as_deref(),
+                community_id,
+                tenant_id,
+            },
+        );
+        let op_id = uuid::Uuid::new_v4().to_string();
+        let exp_ms = now_epoch_ms().saturating_add(
+            u64::try_from(self.discord_ack_timeout.as_millis()).unwrap_or(u64::MAX),
+        );
+        stamp_handshake(&mut payload, &op_id, exp_ms);
+        // Signed AFTER the handshake so the MAC binds `exp_ms`.
+        self.sign_envelope(&mut payload)?;
+        let payload = payload.to_string();
+        let outbound_bytes = payload.len() as u64;
+        self.relay_queue
+            .lpush(&outbound_relay_queue_key(provider), payload)
+            .await
+            .map_err(|e| denied("relay_unavailable", e))?;
+        let data = self.await_platform_ack(scope, provider, op, &op_id).await?;
+        self.usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_relay_call(
+                &scope.tenant,
+                scope.community.as_deref(),
+                "",
+                &scope.app_id,
+                outbound_bytes,
+            );
+        let mut out = serde_json::json!({
+            "queued": true,
+            "confirmed": true,
+            "provider": provider,
+            "op": op.as_str(),
+        });
+        if let (Some(d), Some(obj)) = (data, out.as_object_mut()) {
+            obj.insert("data".to_string(), d);
+        }
+        Ok(out)
     }
 
     /// Discord relay send: a stateless bot REST `POST
@@ -3063,7 +3487,16 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                         ResourceRef::AppScoped(AppScopedResource::None),
                     )
                     .map_err(denied_from_gate)?;
-                self.egress.send(&scope.app_id, &call.args).await
+                // Host-verified (tenant, community) of THIS invocation: the
+                // community whose connection a `connection:` secret grant
+                // resolves. Never a guest-supplied value.
+                let cred_scope = bundle_host_http::credentials::CallScope {
+                    tenant_id: i64::from(scope.tenant_id),
+                    community_id: i64::from(scope.community_id),
+                };
+                self.egress
+                    .send_scoped(&scope.app_id, &cred_scope, &call.args)
+                    .await
             }
             CapabilityKind::Kv => self.handle_kv(scope, &call).await,
             // `db` is wired below (mirrors svc_process); `handle_db`
@@ -3416,6 +3849,12 @@ mod tests {
                 "dm.send:twitch",
                 "dm.send:discord",
                 "moderation.discord",
+                "moderation.twitch",
+                "moderation.youtube",
+                "chat.send:youtube",
+                "chat.delete:youtube",
+                "eventsub.manage:twitch",
+                "message.edit:discord",
                 "net.http.fqdn:example.com",
                 "storage.tables",
                 "flags.read",
@@ -3737,6 +4176,7 @@ mod tests {
             origin_channel_id: None,
             origin_platform: None,
             origin_guild_id: None,
+            origin_user_id: None,
             tenant_id: 7,
             community_id: 3,
             app_version: 1,
@@ -3762,6 +4202,7 @@ mod tests {
             origin_channel_id: Some("somechannel".to_string()),
             origin_platform: Some("twitch".to_string()),
             origin_guild_id: None,
+            origin_user_id: None,
             ..scope()
         }
     }
@@ -3774,6 +4215,7 @@ mod tests {
             origin_channel_id: Some("123456789012345678".to_string()),
             origin_platform: Some("discord".to_string()),
             origin_guild_id: None,
+            origin_user_id: None,
             ..scope()
         }
     }
@@ -4121,6 +4563,7 @@ mod tests {
             let sc = InvokeScope {
                 origin_platform: platform.map(str::to_string),
                 origin_guild_id: None,
+                origin_user_id: None,
                 origin_channel_id: origin.map(str::to_string),
                 ..scope()
             };
@@ -4150,6 +4593,7 @@ mod tests {
         let sc = InvokeScope {
             origin_platform: Some("twitch".to_string()),
             origin_guild_id: None,
+            origin_user_id: None,
             ..discord_scope()
         };
         let err = c
@@ -4293,6 +4737,7 @@ mod tests {
                 origin_channel_id: origin,
                 origin_platform: Some("twitch".to_string()),
                 origin_guild_id: None,
+                origin_user_id: None,
                 ..scope()
             };
             let err = caps
@@ -4761,7 +5206,7 @@ mod tests {
         }
         assert_eq!(RelayOp::parse("chat.nuke"), None);
         assert!(relay_op_supported("twitch", RelayOp::ChatSend));
-        assert!(!relay_op_supported("twitch", RelayOp::ChatDelete));
+        assert!(relay_op_supported("twitch", RelayOp::ChatDelete));
         assert!(relay_op_supported("discord", RelayOp::ChatSend));
         assert!(relay_op_supported("discord", RelayOp::ChatDelete));
         assert!(relay_op_supported("discord", RelayOp::DmSend));
@@ -4778,8 +5223,9 @@ mod tests {
     fn every_relay_provider_has_an_explicit_support_decision() {
         let expected: &[(&str, [bool; 3])] = &[
             // chat.send, chat.delete, dm.send
-            ("twitch", [true, false, false]),
+            ("twitch", [true, true, false]),
             ("discord", [true, true, true]),
+            ("youtube", [true, true, false]),
         ];
         assert_eq!(
             RELAY_PROVIDERS.len(),
@@ -4796,7 +5242,7 @@ mod tests {
             }
         }
         // A provider with no row is unsupported for every op -- the default.
-        for provider in ["slack", "kick", "youtube", "some-new-provider"] {
+        for provider in ["slack", "kick", "some-new-provider"] {
             for op in [RelayOp::ChatSend, RelayOp::ChatDelete, RelayOp::DmSend] {
                 assert!(!relay_op_supported(provider, op), "{provider} {op:?}");
             }
@@ -5215,11 +5661,11 @@ mod tests {
     #[tokio::test]
     async fn role_ops_require_the_moderation_grant() {
         assert_eq!(
-            RelayOp::RoleAdd.permission("discord"),
+            RelayOp::RoleAdd.permission("discord").unwrap(),
             PermissionId::Moderation("discord".to_string())
         );
         assert_eq!(
-            RelayOp::RoleRemove.permission("discord"),
+            RelayOp::RoleRemove.permission("discord").unwrap(),
             PermissionId::Moderation("discord".to_string())
         );
         let caps: StageCapabilities<FakeRelayQueue> = StageCapabilities::new(
@@ -5354,6 +5800,7 @@ mod tests {
             origin_channel_id: Some("not-a-snowflake".to_string()),
             origin_platform: Some("discord".to_string()),
             origin_guild_id: None,
+            origin_user_id: None,
             ..scope()
         };
         let cases = [
@@ -5718,6 +6165,10 @@ mod tests {
             Ok(AckOutcome::Refused(AckFailure::AmbiguousPairedGuild))
         );
         assert_eq!(
+            parse_ack(r#"{"ok":false,"code":"quota_exhausted"}"#),
+            Ok(AckOutcome::Refused(AckFailure::QuotaExhausted))
+        );
+        assert_eq!(
             parse_ack(r#"{"ok":false,"code":"anything-else"}"#),
             Ok(AckOutcome::Refused(AckFailure::Failed))
         );
@@ -5807,16 +6258,12 @@ mod tests {
 
     #[tokio::test]
     async fn relay_new_ops_fail_loud_unsupported_and_queue_nothing() {
-        for (provider, message) in [
-            (
-                "twitch",
-                serde_json::json!({"op": "chat.delete", "channel": "#somechannel", "message_id": "m1"}),
-            ),
-            (
-                "twitch",
-                serde_json::json!({"op": "dm.send", "user_id": "u1", "text": "hi"}),
-            ),
-        ] {
+        // Twitch `chat.delete` now runs the generic confirmed path; Twitch `dm.send` still
+        // needs its host duty and stays authorized-then-refused.
+        for (provider, message) in [(
+            "twitch",
+            serde_json::json!({"op": "dm.send", "user_id": "u1", "text": "hi"}),
+        )] {
             let caps = caps(FakeRelayQueue::default());
             let err = caps
                 .handle(
@@ -6393,6 +6840,7 @@ mod tests {
             origin_channel_id: Some("not-a-snowflake".to_string()),
             origin_platform: Some("discord".to_string()),
             origin_guild_id: None,
+            origin_user_id: None,
             ..scope()
         };
         let err = caps
@@ -7466,5 +7914,205 @@ mod tests {
             assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
             assert!(transport.requests.lock().unwrap().is_empty());
         }
+    }
+
+    // ---- registered platform ops (table-driven seam) -------------------------------------
+
+    fn relay_call(provider: &str, message: &serde_json::Value) -> HostCallBody {
+        call(
+            CapabilityKind::Relay,
+            "send",
+            serde_json::json!({"provider": provider, "message_json": message.to_string()}),
+        )
+    }
+
+    #[test]
+    fn registered_ops_parse_from_the_shared_table_and_unknown_ops_do_not() {
+        for (op, provider, want) in [
+            ("mod.ban", "twitch", "moderation.twitch"),
+            ("mod.kick", "discord", "moderation.discord"),
+            ("eventsub.create", "twitch", "eventsub.manage:twitch"),
+            ("message.edit", "discord", "message.edit:discord"),
+            ("reaction.add", "discord", "message.reaction:discord"),
+            ("commands.register", "discord", "commands.register:discord"),
+            (
+                "interaction.callback",
+                "discord",
+                "interaction.respond:discord",
+            ),
+            ("mod.add", "youtube", "moderation.youtube"),
+        ] {
+            let parsed = RelayOp::parse(op).unwrap_or_else(|| panic!("{op} must parse"));
+            assert_eq!(parsed, RelayOp::Registered(op));
+            assert_eq!(parsed.as_str(), op);
+            assert_eq!(parsed.permission(provider).unwrap().canonical_id(), want);
+            assert!(relay_op_supported(provider, parsed), "{provider}/{op}");
+        }
+        // Not in the table at all, or not registered for that provider.
+        for op in ["mod.nuke", "", "MOD.BAN", "role.set", "event.create"] {
+            assert_eq!(RelayOp::parse(op), None, "{op:?}");
+        }
+        let kick = RelayOp::parse("mod.kick").unwrap();
+        assert!(kick.permission("twitch").is_none());
+        assert!(!relay_op_supported("twitch", kick));
+        assert!(!relay_op_supported("youtube", kick));
+        // Kick has no ops: nothing registered is supported there.
+        assert!(!relay_op_supported(
+            "kick",
+            RelayOp::parse("mod.ban").unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_op_is_an_explicit_unknown_op_and_queues_nothing() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        for (provider, op) in [
+            ("twitch", "mod.nuke"),
+            ("twitch", "mod.kick"),
+            ("youtube", "eventsub.list"),
+        ] {
+            let err = caps
+                .handle(
+                    &twitch_scope(),
+                    relay_call(provider, &serde_json::json!({"op": op})),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "unknown_op", "{provider}/{op}");
+        }
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    /// A chat-scoped registered op is pinned to the verified origin (a bundle-named channel
+    /// is ignored), stamped with the numeric tenant, signed, queued on the provider's own
+    /// queue and only reported successful after the drain's confirmation.
+    #[tokio::test]
+    async fn a_chat_scoped_registered_op_is_pinned_signed_and_confirmed() {
+        // `message.edit` (a chat-scoped registered op that is NOT host-tool-only; destructive
+        // moderation ops are, and are refused on this guest path -- see the host_tools tests).
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        let msg = serde_json::json!({
+            "op":"message.edit","message_id":"123456789","channel":"999999999999999999","text":"hi"
+        });
+        let out = caps
+            .handle(&discord_scope(), relay_call("discord", &msg))
+            .await
+            .unwrap();
+        assert_eq!(out["confirmed"], true);
+        assert_eq!(out["op"], "message.edit");
+        let env = &caps.relay_queue.envelopes()[0];
+        assert_eq!(env["op"], "message.edit");
+        assert_eq!(env["platform"], "discord");
+        // The bundle-named channel is ignored: pinned to the verified origin.
+        assert_eq!(env["channel"], "123456789012345678");
+        assert_eq!(env["origin_channel"], "123456789012345678");
+        assert_eq!(env["message_id"], "123456789");
+        assert_eq!(env["tenant_id"], 7);
+        assert!(env["pin_sig"].is_string());
+        assert!(env["op_id"].is_string() && env["exp_ms"].is_u64());
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        assert_eq!(pushed[0].0, "waddles:transport:irc:discord:outbound");
+    }
+
+    #[tokio::test]
+    async fn a_chat_scoped_op_without_a_matching_origin_is_refused_before_queueing() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        // No origin channel at all, and an origin on another platform.
+        for sc in [scope(), twitch_scope()] {
+            let err = caps
+                .handle(
+                    &sc,
+                    relay_call(
+                        "discord",
+                        &serde_json::json!({"op":"message.edit","message_id":"1","text":"x"}),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "invalid_args");
+        }
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    /// An app-scoped op (EventSub) needs no channel, and the drain's returned data reaches the
+    /// bundle; an unconfirmed op never reads as success.
+    #[tokio::test]
+    async fn an_app_scoped_op_returns_the_drains_data_and_unconfirmed_is_not_success() {
+        let caps = caps(FakeRelayQueue::with_drain_result(
+            r#"{"ok":true,"data":{"data":[{"id":"s1"}]}}"#,
+        ));
+        let out = caps
+            .handle(
+                &scope(),
+                relay_call("twitch", &serde_json::json!({"op":"eventsub.list"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["data"]["data"][0]["id"], "s1");
+        let env = &caps.relay_queue.envelopes()[0];
+        assert!(env.get("channel").is_none() && env.get("origin_channel").is_none());
+
+        let refused = super::tests::caps(FakeRelayQueue::with_drain_result(
+            r#"{"ok":false,"code":"unsupported"}"#,
+        ));
+        let err = refused
+            .handle(
+                &scope(),
+                relay_call("twitch", &serde_json::json!({"op":"eventsub.list"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unsupported_op");
+    }
+
+    #[tokio::test]
+    async fn twitch_and_youtube_chat_delete_and_youtube_send_use_the_generic_confirmed_path() {
+        let yt_scope = InvokeScope {
+            origin_channel_id: Some("lc1".to_string()),
+            origin_platform: Some("youtube".to_string()),
+            ..scope()
+        };
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        caps.handle(
+            &yt_scope,
+            relay_call(
+                "youtube",
+                &serde_json::json!({"op":"chat.send","text":"hi"}),
+            ),
+        )
+        .await
+        .unwrap();
+        caps.handle(
+            &yt_scope,
+            relay_call(
+                "youtube",
+                &serde_json::json!({"op":"chat.delete","message_id":"m.1"}),
+            ),
+        )
+        .await
+        .unwrap();
+        caps.handle(
+            &twitch_scope(),
+            relay_call(
+                "twitch",
+                &serde_json::json!({"op":"chat.delete","message_id":"abc-1"}),
+            ),
+        )
+        .await
+        .unwrap();
+        let envs = caps.relay_queue.envelopes();
+        assert_eq!(envs.len(), 3);
+        assert_eq!(envs[0]["channel"], "lc1");
+        assert_eq!(envs[2]["channel"], "#somechannel");
+        // chat.delete without a message id is refused up front.
+        let err = caps
+            .handle(
+                &twitch_scope(),
+                relay_call("twitch", &serde_json::json!({"op":"chat.delete"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+        assert_eq!(caps.relay_queue.envelopes().len(), 3);
     }
 }

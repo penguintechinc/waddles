@@ -25,7 +25,7 @@ global:
   imageTag: "latest"
 
   # Image pull policy -- applied to EVERY workload container (hub-api, svc-*-rust,
-  # bundle-executor included; no template hardcodes a policy). IfNotPresent is correct
+  # svc-bundles-executor included; no template hardcodes a policy). IfNotPresent is correct
   # given unique per-deploy global.imageTag values; and mandatory for locally-loaded images
   # (kind e2e, alpha local builds), where Always forces a registry pull the node cannot
   # satisfy. Override to Always per-env only for a mutable tag.
@@ -68,6 +68,125 @@ global:
     insecureDev: false
     # Whether mTLS is enforced server-side (server-role Deployments only).
     requireClientCert: true
+    certManager:
+      enabled: false
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
+      duration: "2160h"    # 90d
+      renewBefore: "360h"  # 15d
+    # Static dev/interim CA + identity cert, used when certManager.enabled=false (the
+    # default). OVERRIDE REQUIRED for beta/gamma/production -- NEVER a literal cert/key in
+    # git; populate via --set-file or an out-of-git values override / ExternalSecret.
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+
+  # e2e-helm-rust-dataplane -- mTLS material for the svc-bundles-executor<->stage host-API wire
+  # protocol (core/bundle_executor dialing svc-action's/svc-process's HOST_API_PORT, spec
+  # docs/superpowers/specs/2026-09-14-rust-data-plane-design.md SS6.6). Mirrors global.grpcTls's
+  # two-path shape (static Secret vs cert-manager) but is its OWN CA/cert -- a different wire
+  # protocol on a different port, never conflated with the gRPC identity above.
+  #
+  # UNLIKE global.grpcTls, there is NO insecureDev/plaintext escape hatch here: the Rust
+  # host-API server (core/svc_action/src/host_api.rs build_server_config) and client
+  # (core/bundle_executor/src/tls.rs build_client_config) both fail closed without real
+  # cert/key/CA material -- mTLS is mandatory, not optional, per spec SS6.6 "Both peers
+  # present certificates". A missing/empty Secret here means the executor<->stage host-API
+  # link simply never establishes (svc-action's host-api listener logs a warning and keeps
+  # its HTTP/metrics servers up regardless -- see try_start_host_api's graceful-degradation
+  # comment -- and svc-bundles-executor retries the dial forever with capped exponential backoff,
+  # so neither pod crashloops); only the executor-invoked-bundle path stays inert.
+  #
+  # fix/alpha-host-api-tls -- templates/host-api-tls-secret.yaml now guarantees the
+  # <fullname>-host-api-tls Secret exists (kept, explicitly supplied, generated alpha/local,
+  # or the whole release fails to render) whenever pipeline.rustDataPlane.enabled is true,
+  # exactly mirroring global.valkeyTls's self-provisioning policy -- alpha/local no longer
+  # need real PEM material supplied out of band. beta/gamma/production still REQUIRE real
+  # material (--set-file global.hostApiTls.ca.crt=... --set-file global.hostApiTls.tls.crt=...
+  # --set-file global.hostApiTls.tls.key=...), cert-manager (certManager.enabled=true), or
+  # externalSecret: true delegating to an out-of-band controller -- auto-generation is
+  # alpha/local only, fails closed otherwise.
+  hostApiTls:
+    certManager:
+      enabled: false
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
+      duration: "2160h"    # 90d
+      renewBefore: "360h"  # 15d
+    # Static dev/interim CA + identity cert, used when certManager.enabled=false (the
+    # default). NEVER a literal cert/key in git in any environment; populate via
+    # --set-file or an out-of-git values override / ExternalSecret.
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+    # fix/alpha-host-api-tls -- true delegates provisioning of the <fullname>-host-api-tls
+    # Secret to an out-of-band ExternalSecret/SealedSecret controller instead of failing the
+    # render on beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated
+    # instead, see templates/host-api-tls-secret.yaml).
+    externalSecret: false
+    # fix/chart-host-api-stage-identity -- core/bundle_executor/src/config.rs requires
+    # HOST_API_STAGE_IDENTITY (the stage cert's pinned CN/URI SAN, see
+    # waddlebot.hostApiStageIdentity in _helpers.tpl). Left empty, the chart derives this
+    # itself ONLY when it also mints the cert (alpha/local genSignedCert path, or
+    # certManager.enabled=true). When ca.crt/tls.crt/tls.key are supplied directly, or
+    # externalSecret is true, the chart has no visibility into that cert's actual identity --
+    # set this explicitly to the matching CN/URI SAN, or the render fails closed.
+    stageIdentity: ""
+
+  # fix/hub-grpc-tls-and-ca-trust (PR #570 review blockers 1/2) -- TLS material for
+  # hub-api's internal gRPC listener (hub_api/grpc_internal/server.py, mandatory TLS, no
+  # insecureDev escape hatch). SEPARATE from global.grpcTls (the core-data/core-identity/
+  # interactive-productivity/action-serverless identity) -- hub-api needs its own
+  # alpha/local auto-generate fallback (templates/hub-api-grpc-tls-secret.yaml), which
+  # global.grpcTls's static-only Secret doesn't have. Also the CA core/hub_client::
+  # HubClient::connect trusts via HUB_API_GRPC_CA_FILE (svc-process-rust/svc-action-rust).
+  # NEVER a literal cert/key in git in any environment; populate via --set-file or an
+  # out-of-git values override / ExternalSecret.
+  hubApiGrpcTls:
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+    # true delegates provisioning of the <fullname>-hub-api-grpc-tls Secret to an
+    # out-of-band ExternalSecret/SealedSecret controller instead of failing the render on
+    # beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated instead).
+    externalSecret: false
+
+  # fix/valkey-tls-alpha -- TLS material for the Valkey (infra-redis) cache/streams
+  # listener. `penguin_spine::SpineConfig::validate()` (core/svc_process, core/svc_action,
+  # core/svc_ingest) fails closed when SECURITY_TRANSPORT_TLS=true (the default -- never
+  # weakened to false here, see infrastructure.redis.tls's own comment) and VALKEY_URL is
+  # not rediss://valkeys://. This is SERVER-AUTH-ONLY TLS (redis-rs `TlsCertificates {
+  # client_tls: None, root_cert: Some(ca_pem) }`, per core/svc_action/src/usage.rs and
+  # penguin-spine's own client.rs) -- client pods need only the CA to verify the server,
+  # never their own cert/key, so only global.valkeyTls.ca.crt is mounted into the 3 Rust
+  # data-plane pods (see templates/_helpers.tpl waddlebot.valkeyTlsCaVolume); tls.crt/
+  # tls.key are the Valkey server's own identity, mounted only into templates/
+  # infrastructure/redis.yaml. Static dev/interim CA + identity cert; NEVER a literal
+  # cert/key in git in any environment -- populate via `helm upgrade --set-file
+  # global.valkeyTls.ca.crt=... --set-file global.valkeyTls.tls.crt=...
+  # --set-file global.valkeyTls.tls.key=...` (or an out-of-git values override /
+  # ExternalSecrets/SealedSecrets) before infrastructure.redis.tls.enabled=true.
+  # feature/transit-tls-core -- in-cluster transit TLS for Postgres (F1) and the SeaweedFS S3 gateway (F5).
+  # One chart-owned ECDSA P-256 / SHA-256 CA signs a server leaf for each; clients mount ONLY the CA and
+  # verify (Postgres sslmode=verify-full, S3 https with the CA pinned, system roots disabled). See
+  # templates/_transit_data_tls.tpl for the design, templates/transit-tls-secret.yaml for the provisioning policy.
+  # alpha/local self-generate (lookup-keep); beta/gamma/production REQUIRE material below (never a literal in git)
+  # or externalSecret: true. There is NO plaintext toggle: Postgres and SeaweedFS are TLS-only whenever enabled.
+  # Negotiation: TLS 1.3 preferred / 1.2 minimum, ECDSA P-256, P-256 key exchange, AES-128-GCM or ChaCha20-Poly1305,
+  # session resumption on, pooled keep-alive clients. Customers wanting stronger protection can additionally enable
+  # CNI encryption (e.g. Cilium WireGuard) -- see docs/transit-encryption.md.
+  transitTls:
+    # DEDICATED trust root: when certManager.enabled (dal2alpha/beta/gamma/production) the chart renders a SelfSigned Issuer ->
+    # root CA Certificate -> namespaced CA Issuer, all in the release namespace, and the Postgres, SeaweedFS S3 and Valkey server
+    # certs come from it (FQDN-only SANs, no wildcard). Data-store clients trust ONLY that root, so nothing signed by the
+    # cluster-wide waddlebot-internal-ca (host-API/gRPC/hub-api trust domain) is accepted for a data store. Requires cert-manager
+    # (with the NameConstraints feature gate). enabled=false (local / values-alpha) self-generates the chart-owned CA below.
     certManager:
       enabled: false
       issuerKind: "ClusterIssuer"
@@ -172,6 +291,42 @@ global:
   # global.valkeyTls.ca.crt=... --set-file global.valkeyTls.tls.crt=...
   # --set-file global.valkeyTls.tls.key=...` (or an out-of-git values override /
   # ExternalSecrets/SealedSecrets) before infrastructure.redis.tls.enabled=true.
+  # feature/transit-tls-core -- in-cluster transit TLS for Postgres (F1) and the SeaweedFS S3 gateway (F5).
+  # One chart-owned ECDSA P-256 / SHA-256 CA signs a server leaf for each; clients mount ONLY the CA and
+  # verify (Postgres sslmode=verify-full, S3 https with the CA pinned, system roots disabled). See
+  # templates/_transit_data_tls.tpl for the design, templates/transit-tls-secret.yaml for the provisioning policy.
+  # alpha/local self-generate (lookup-keep); beta/gamma/production REQUIRE material below (never a literal in git)
+  # or externalSecret: true. There is NO plaintext toggle: Postgres and SeaweedFS are TLS-only whenever enabled.
+  # Negotiation: TLS 1.3 preferred / 1.2 minimum, ECDSA P-256, P-256 key exchange, AES-128-GCM or ChaCha20-Poly1305,
+  # session resumption on, pooled keep-alive clients. Customers wanting stronger protection can additionally enable
+  # CNI encryption (e.g. Cilium WireGuard) -- see docs/transit-encryption.md.
+  transitTls:
+    # ONE trust root: when certManager.enabled (dal2alpha/beta/gamma/production) the Postgres, SeaweedFS S3 AND Valkey
+    # server certs are all issued by this ClusterIssuer (the same `waddlebot-internal-ca` the host-API/gRPC mTLS and the
+    # hub-api HTTPS certs use; k8s/dal2alpha/internal-ca.yaml) with FQDN-only SANs (its nameConstraints permit nothing else)
+    # and every client mounts that one CA. enabled=false (local / values-alpha) self-generates the chart-owned CA below.
+    # issuerName is shared with global.internalTransitTls.certManager.issuerName (hub-api HTTPS): if that block exists and
+    # sets an issuerName it wins, so there is a single place to repoint the trust root.
+    certManager:
+      enabled: false
+      duration: "2160h"    # 90d leaf
+      renewBefore: "360h"  # 15d
+      # Dedicated root CA (<release>-transit-ca, self-signed, release namespace only); the namespaced Issuer
+      # <release>-transit signs the leaves, so no other namespace can mint data-store certs.
+      caDuration: "8760h"      # 1y
+      caRenewBefore: "1440h"   # 60d
+    ca:
+      crt: ""
+    postgres:
+      tls:
+        crt: ""
+        key: ""
+    seaweedfs:
+      tls:
+        crt: ""
+        key: ""
+    externalSecret: false
+
   valkeyTls:
     ca:
       crt: ""
@@ -207,8 +362,8 @@ global:
 # falls back to global.imageTag, so unset = unchanged behavior for every environment.
 # Applies ONLY to workloads pulling the `hub-api` image repository: the hub-api Deployment
 # + role-sync / event-sync-reconcile / odoo-sync / bundle-signing-reconciler CronJobs + the
-# bundle-signing-backfill hook Job. The SEPARATE images (core-bundle-seeder, migrations,
-# svc-*, bundle-executor, hub-webui, ...) are NOT affected -- they stay on global.imageTag.
+# bundle-signing-backfill hook Job. The SEPARATE images (seeder, migrations,
+# svc-*, svc-bundles-executor, hub-webui, ...) are NOT affected -- they stay on global.imageTag.
 # (Distinct from `pipeline.hubApi`, which holds hub-api's port/replicas/resources.)
 hubApi:
   imageTag: ""
@@ -643,13 +798,12 @@ infrastructure:
       # publish/fetch bucket split after SeaweedFS migration (#508/#509) --
       # this identity used to be scoped to bucketName only, so a bundle
       # publish "succeeded" into the wrong bucket and 404'd for every
-      # bundle-executor fetch (that identity, below, is correctly Read/List-
+      # svc-bundles-executor fetch (that identity, below, is correctly Read/List-
       # only on this SAME "waddles-bundles" bucket).
       hubApi:
         accessKey: "REPLACE_ME"
         secretKey: "REPLACE_ME"
-      # core/bundle_executor (templates/bundle-executor.yaml,
-      # bundle-executor-action.yaml) -- the Rust data-plane's one credentialed
+      # core/bundle_executor (templates/svc-bundles-executor.yaml) -- the Rust data-plane's one credentialed
       # egress path (bucket.rs), a single unsigned-body GET of a compiled
       # component + its JSON sidecar. Read/List ONLY, scoped to
       # pipeline.rustDataPlane.bundleExecutor.bucketName ("waddles-bundles") --
@@ -1045,7 +1199,7 @@ pipeline:
 
   # PR-H -- ONE source of truth for the pinned connector component digests
   # (sha256:<64 lowercase hex>; empty = unset). Rendered into svc-ingest
-  # SENDER_EXEC_DIGEST_<P> AND bundle-executor CONNECTOR_PIN_DIGEST_<P>.
+  # SENDER_EXEC_DIGEST_<P> AND svc-bundles-executor CONNECTOR_PIN_DIGEST_<P>.
   connectors:
     # Seeder Job publishes connectors/<p>/<digest>.{wasm,json} (signed with the platform key) from
     # the reproducibly-built wasm in its image and logs the digests to set below. Digests are
@@ -1181,49 +1335,6 @@ pipeline:
         cpu: "500m"
         memory: "512Mi"
   goRuntimeImage: "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587"
-
-  svcIngest:
-    enabled: true
-    port: 8200
-    replicas: 2
-    # T10 (v3 demo) -- sane defaults for svc-ingest's held-socket lease (Discord
-    # gateway / Twitch IRC single-connection ownership via Valkey), see
-    # supervisor/socket_lease.py. Override per-env if lease churn is observed.
-    socketLease:
-      ttlSeconds: 30
-      renewSeconds: 10
-      keyPrefix: "waddlebot:socket-lease"
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-      limits:
-        cpu: "2000m"
-        memory: "2Gi"
-
-  svcProcess:
-    enabled: true
-    port: 8201
-    replicas: 2
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-      limits:
-        cpu: "2000m"
-        memory: "2Gi"
-
-  svcAction:
-    enabled: true
-    port: 8202
-    replicas: 2
-    resources:
-      requests:
-        cpu: "500m"
-        memory: "512Mi"
-      limits:
-        cpu: "2000m"
-        memory: "2Gi"
 
   svcCore:
     enabled: true
@@ -1362,7 +1473,7 @@ pipeline:
 
   # v3.0.x — 8th container / 4th stage-runner. `presentation.enabled` toggle: renders core
   # overlays + Music Station + activated bundles' presentation components. See
-  # templates/svc-presentation.yaml header for the full design-doc trail and why this is
+  # templates/svc-presentation-rust.yaml header for the design trail and why this is
   # NOT gated on any modules.<name>.enabled (generic across all Modules, unlike svc-rtc).
   svcPresentation:
     enabled: true
@@ -1463,11 +1574,10 @@ pipeline:
         memory: "4Gi"
 
   # Rust data-plane Deployments (core/svc_ingest, core/svc_process, core/svc_action,
-  # core/bundle_executor). ADDITIVE, never replaces pipeline.svcIngest/svcProcess/svcAction
-  # above. Gated behind this top-level `enabled` flag (default false) so the Python deploy is
-  # undisturbed until deliberately flipped. Resource names carry a `-rust` suffix
-  # (templates/svc-ingest-rust.yaml et al) so both stacks render side by side with no K8s
-  # object-name collision. Image repositories are distinct `<module>-rust` repos
+  # core/bundle_executor). The legacy Python svc-ingest/svc-process/svc-action Deployments
+  # no longer exist in this chart. Gated behind this top-level `enabled` flag (default
+  # false). Resource names keep their `-rust` suffix (templates/svc-ingest-rust.yaml et al).
+  # Image repositories are distinct `<module>-rust` repos
   # (waddlebot.legacyModuleImage), built by CI / scripts/alpha-deploy.sh.
   #
   # ACTUAL STATE (verified against core/*/src, 2026-10-12):
@@ -1477,8 +1587,8 @@ pipeline:
   #     penguin_spine::SpineConfig::from_env() (VALKEY_URL); receiver tokens come from its
   #     Config. No DB by design (spec S4.1: the stage owns no tables).
   #   - svc_process host-API EXISTS: HOST_API_PORT (default 8301, core/svc_process/src/config.rs,
-  #     server in src/host_api.rs). bundleExecutor.stageTarget below defaults to svc-action-rust;
-  #     point it at svc-process-rust for the PROCESS_BUNDLE_* ping proof (templates/svc-process-rust.yaml).
+  #     server in src/host_api.rs). bundleExecutor.stages below lists both svc-process-rust and svc-action-rust
+  #     (one executor Deployment dials every stage; templates/svc-process-rust.yaml).
   #   - Executor<->stage mTLS (global.hostApiTls) self-provisions on alpha/local (generated under
   #     the same Secret name) and fails closed on beta/gamma/production. No insecureDev escape
   #     hatch is needed; beta/prod require real material (cert-manager or ExternalSecret).
@@ -1530,15 +1640,14 @@ pipeline:
 
     # feature/bundle-artifact-signing -- BUNDLE_SIGNING_PUBLIC_KEYS (core/bundle_executor/
     # src/config.rs, core/bundle_executor/src/signing.rs::PlatformPublicKeys), shared by
-    # both bundleExecutor and bundleExecutorAction below (each executor verifies against
-    # the same platform key set regardless of which stage it dials). Map of
+    # bundleExecutor below (every replica verifies against the same platform key set
+    # regardless of which stage it dials). Map of
     # `key_id -> base64(32-byte Ed25519 public key)` -- NOT secret (public keys), so this
     # is safe to carry directly in values (unlike hubApi.bundleSigning's private-key
     # secretKeyRef above). Rendered into the container env as a JSON object.
     #
     # fix/chart-autogen-bundle-signing-key -- empty by default is now the NORMAL,
-    # zero-manual-step path: templates/bundle-executor.yaml and
-    # bundle-executor-action.yaml fall back to sourcing BUNDLE_SIGNING_PUBLIC_KEYS from
+    # zero-manual-step path: templates/svc-bundles-executor.yaml falls back to sourcing BUNDLE_SIGNING_PUBLIC_KEYS from
     # the `{{ fullname }}-bundle-signing-public` ConfigMap that templates/
     # auto-provisioned-keys-job.yaml's pre-install/pre-upgrade hook keeps in sync with
     # whatever private key lives in autoProvisionedKeys.bundleSigning.secretName, in
@@ -1574,16 +1683,17 @@ pipeline:
     # `disable-pii-detokenization` kill-switches in any environment where this isn't
     # resolved yet, rather than deploying straight into a crash-loop.
     hubApiGrpcEndpoint: ""
+    # Machine-JWT bootstrap (ServiceAuthService.MintServiceToken) is gRPC: this is hub-api's
+    # internal gRPC address, the same one as hubApiGrpcEndpoint (default: hub-api's in-cluster
+    # Service on pipeline.hubApi.grpcPort; TLS 1.3, CA pinned via HUB_API_GRPC_CA_FILE).
     serviceJwtTokenEndpoint: ""
 
     svcIngest:
       enabled: true
-      # fix/helm-alpha-self-provisioning -- distinct image repository from
-      # pipeline.svcIngest's Python Deployment (module "svc-ingest"), so the two
-      # coexisting Deployments never resolve to the same repository:tag and therefore
-      # never race on which binary a shared tag actually points at. Matches
+      # fix/helm-alpha-self-provisioning -- image repository (formerly kept distinct from the
+      # removed Python svc-ingest Deployment's so the two never raced on a shared tag). Matches
       # core/svc_ingest/Dockerfile.rust's build tag.
-      imageRepository: "svc-ingest-rust"
+      imageRepository: "svc-ingest"
       port: 8200
       metricsPort: 9090
       replicas: 1
@@ -1615,7 +1725,7 @@ pipeline:
       # the operator-managed platform-credentials Secret key TWITCH_CLIENT_ID, and the
       # OUTBOUND_PIN_KEYS secret (outboundPin). A half-configured ON fails `helm template`.
       # Rollout order: svc-action first (pin_sig v2), then svc-ingest; rollback = enabled:false.
-      # A bundle-executor must dial this pod's host-api port (see core/svc_ingest/README.md).
+      # A svc-bundles-executor must dial this pod's host-api port (see core/svc_ingest/README.md).
       connectorTools:
         enabled: false
         hostApiPort: 8301
@@ -1696,7 +1806,7 @@ pipeline:
     svcProcess:
       enabled: true
       # fix/helm-alpha-self-provisioning -- see svcIngest.imageRepository's comment above.
-      imageRepository: "svc-process-rust"
+      imageRepository: "svc-process"
       port: 8201
       metricsPort: 9090
       replicas: 1
@@ -1723,9 +1833,8 @@ pipeline:
       processBundleVersion: "1"
       processBundleComponentKey: ""
       processBundleSidecarKey: ""
-      # fix/svc-process-host-api-wiring-alpha -- mTLS host-API listener bundle-executor
-      # dials once pipeline.rustDataPlane.bundleExecutor.stageTarget points here instead
-      # of its svc-action-rust default. Matches HOST_API_PORT's own CliConfig default
+      # fix/svc-process-host-api-wiring-alpha -- mTLS host-API listener svc-bundles-executor
+      # dials (pipeline.rustDataPlane.bundleExecutor.stages lists it by default). Matches HOST_API_PORT's own CliConfig default
       # (core/svc_process/src/config.rs).
       hostApiPort: 8301
       # Multi-tenant, change-log-driven active-bundle loader (core/svc_process/
@@ -1779,7 +1888,7 @@ pipeline:
       enabled: true
       # fix/helm-alpha-self-provisioning -- see rustDataPlane.svcIngest.imageRepository's
       # comment above.
-      imageRepository: "svc-action-rust"
+      imageRepository: "svc-action"
       port: 8202
       metricsPort: 9090
       replicas: 1
@@ -1801,7 +1910,7 @@ pipeline:
       # this pod mints new MACs under. Empty (default) omits the env var entirely; must
       # match a `kid` present in global.envelopeBindingKeys once hop verification is used.
       envelopeBindingActiveKid: ""
-      # fix/svc-action-bundle-executor-alpha-wiring -- ACTION_BUNDLE_* (core/svc_action/
+      # svc-action executor wiring -- ACTION_BUNDLE_* (core/svc_action/
       # src/config.rs, #366) -- interim, env-driven substitute for the digest/keys a real
       # distribution-poll `load` would supply (spec SS6.6), field-for-field mirror of
       # svcProcess.processBundle* above. Empty digest (default) disables the executor
@@ -1837,21 +1946,25 @@ pipeline:
           cpu: "500m"
           memory: "512Mi"
 
-    # D9/D10 -- credential-less sandbox host: no DB, no app secrets, no Valkey: this pod's
-    # ONLY network relationship is the mTLS dial to its stage's host-API port (+ a future
-    # bucket GET once core/bundle_executor/src/invoke.rs's UnimplementedBucketSource lands
-    # real object_store wiring -- templates/bundle-executor-networkpolicy.yaml pre-allows
-    # that egress so no further chart change is needed then either).
+    # D9/D10 -- credential-less sandbox host (svc-bundles-executor): no DB, no app secrets,
+    # no Valkey: this pod's ONLY network relationships are the mTLS dials to the stages'
+    # host-API ports, svc-ingest's connector link, and the bundle bucket
+    # (templates/svc-bundles-executor-networkpolicy.yaml).
+    #
+    # ONE Deployment serves EVERY stage and scales horizontally: each replica dials every
+    # entry of `stages` plus the connector link, and each listener spreads work round-robin
+    # across the replicas connected to it. `replicas` is the floor when no HPA owns the
+    # Deployment; `autoscaling.services.bundleExecutor` (below) turns the HPA + PDB on.
     bundleExecutor:
       enabled: true
       replicas: 1
-      # Which stage's host-API this executor dials -- short Service-name suffix, prefixed
-      # with the release fullname by the template (spec SS6.6/SS7.1 -- "svc-process:8301"
-      # or "svc-action:8302"). "svc-action-rust" (M3, real) is the only server-side
-      # implementation the e2e path uses today -- svc-process's host-API also exists (see the
-      # ACTUAL STATE block above the rustDataPlane key).
-      stageTarget: "svc-action-rust"
-      stagePort: 8302
+      # Stage host-API listeners every replica dials -- `target` is the short Service-name
+      # suffix (prefixed with the release fullname by the template), `port` its host-API
+      # port (spec SS6.6/SS7.1). One independent dial loop, bundle registry and metrics
+      # `stage` label per entry; all share the global.hostApiTls client identity.
+      stages:
+        - { target: "svc-process-rust", port: 8301 }
+        - { target: "svc-action-rust", port: 8302 }
       stageConnections: 4
       callTimeoutMs: 2000
       maxCallTimeoutMs: 10000
@@ -1869,7 +1982,7 @@ pipeline:
       # bucketName/bucketRegion are static across environments; the endpoint is derived in
       # the template from infrastructure.seaweedfs.service.name/s3Port (alpha: in-cluster
       # SeaweedFS, plain http:// -- no BUNDLE_BUCKET_CA_FILE needed) and the access
-      # key/secret come from the dedicated "bundle-executor" (data-plane) S3 identity
+      # key/secret come from the dedicated "svc-bundles-executor" (data-plane) S3 identity
       # (DATAPLANE_S3_ACCESS_KEY_ID/_SECRET_ACCESS_KEY, Read/List only -- see
       # infrastructure.seaweedfs.identities.dataPlane above and templates/secrets.yaml),
       # individually referenced (not envFrom) to keep this pod's credential surface to
@@ -1899,48 +2012,6 @@ pipeline:
           cpu: "1000m"
           memory: "2560Mi"
 
-    # fix/svc-action-bundle-executor-alpha-wiring -- a bundle-executor dials exactly ONE
-    # stage (see STAGE_HOST_API_ADDR above); bundleExecutor above is alpha's proven
-    # process-stage executor (overridden to stageTarget=svc-process-rust there). This is
-    # the SECOND, independent executor deployment/pod (own Deployment, own replica) for
-    # the action stage, so both stages get a live executor connection simultaneously
-    # instead of one dial replacing the other. Shares the same image/binary
-    # (.Values.bundleExecutor.image) and D9/D10 credential-less posture as bundleExecutor
-    # above -- literally the same crate, pointed at a different stage via env only. Reuses
-    # the shared {{ fullname }}-host-api-tls Secret for its mTLS client identity; no new
-    # SAN is required -- host-api-tls-certificate.yaml's dnsNames already lists both
-    # svc-process-rust and svc-action-rust plus a `*.{{ namespace }}.svc.cluster.local`
-    # wildcard, and client-cert verification (WebPkiClientVerifier) only checks the chain,
-    # never a per-client hostname/SAN.
-    bundleExecutorAction:
-      enabled: true
-      replicas: 1
-      stageTarget: "svc-action-rust"
-      stagePort: 8302
-      stageConnections: 4
-      callTimeoutMs: 2000
-      maxCallTimeoutMs: 10000
-      memoryLimitMb: 64
-      maxMemoryLimitMb: 256
-      instancesPerBundle: 4
-      maxConcurrentCalls: 32
-      poolWaitMs: 500
-      precompileDir: "/var/cache/waddles/wasm"
-      wasmCollector: "drc"
-      sandboxGvisor: true
-      bucketName: "waddles-bundles"
-      bucketRegion: "us-east-1"
-      # fix/alpha-deploy-executor-and-failfast -- see bundleExecutor.resources'
-      # identical comment above (same compile workload, same open beta/prod
-      # sizing decision, same alpha override to 1Gi/2560Mi).
-      resources:
-        requests:
-          cpu: "250m"
-          memory: "128Mi"
-        limits:
-          cpu: "1000m"
-          memory: "512Mi"
-
   # fix/pii-tokenization-env-override -- plain env/values off-switch for PII
   # tokenization/detokenization, independent of PostHog
   # (`waddles.core.disable-pii-tokenization`/`disable-pii-detokenization`).
@@ -1964,38 +2035,17 @@ pipeline:
   piiTokenization:
     enabled: true
 
-# v3.0.x — svc-presentation (8th container, 4th stage-runner). Music overlay + per-community
-# OBS browser-source surfaces. Own image placeholder (core/svc_presentation/ builds with
-# CI once Dockerfile is wired). Image repository structure allows alpha local registry +
-# beta/gamma/prod ghcr.io registry -- see templates/svc-presentation.yaml rendering logic.
+# v3.0.x — svc-presentation (Rust; music overlay + per-community OBS browser-source
+# surfaces). Image is presentation.rust.imageRepository -- see templates/svc-presentation-rust.yaml.
 presentation:
-  image:
-    repository: "svc-presentation"
-    tag: ""
-  service:
-    type: ClusterIP
-    nodePort: ""
-  # core/svc_presentation/blueprints/live_stream.py PUBLIC_STREAMING_URL -- externally
-  # reachable svc-streaming base URL rewritten into HLS playback URLs for the browser's
-  # own fetches. Empty by default: that file degrades to "offline" rather than guessing a
-  # public hostname when unset (never a broken/empty player src). Alpha overrides to the
-  # svc-streaming media NodePort's LAN URL -- see values-alpha.yaml.
-  publicStreamingUrl: ""
-  # Same node-IP derivation as pipeline.svcStreaming.publicBaseUrlFromNodeIP: when
-  # publicStreamingUrl is empty, build http://<node hostIP>:<svcStreaming.nodePort.httpPort>
-  # from the downward API instead of a hardcoded LAN IP. Requires
-  # pipeline.svcStreaming.nodePort.enabled.
-  publicStreamingUrlFromNodeIP: false
-  # chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (core/svc_presentation,
-  # Dockerfile.rust) replaces the Python Deployment above WHEN enabled: same Deployment/
-  # Service names (in-place swap, Service/NodePort unchanged), templates/svc-presentation-
-  # rust.yaml renders instead of templates/svc-presentation.yaml. Default false (Python
-  # stays the base/beta/prod path until the overlay PRs land and the cutover is approved);
-  # values-alpha.yaml flips it on. Image repo is a bare name resolved via global.imageRegistry
-  # + global.imageTag (per-commit tag built by scripts/alpha-deploy.sh), like svc-action-rust.
+  # Rust svc-presentation (core/svc_presentation, Dockerfile.rust). The legacy Python
+  # Deployment was removed; this is the only presentation Deployment. Default true in every
+  # environment (setting false renders NO presentation Deployment/Service). Image repo is a
+  # bare name resolved via global.imageRegistry + global.imageTag (per-commit tag built by
+  # scripts/alpha-deploy.sh), like svc-action-rust.
   rust:
-    enabled: false
-    imageRepository: "svc-presentation-rust"
+    enabled: true
+    imageRepository: "svc-presentation"
     # Alpha-only on-host access to the overlay view/SSE port: when true the Service becomes
     # NodePort (presentation.rust.nodePort.port). Base/beta/prod stay ClusterIP
     # (devops-kubernetes.md: no NodePort outside alpha).
@@ -2018,7 +2068,7 @@ presentation:
 
 # v3.0.x — Rust svc-streaming image (Issue #287). Own Dockerfile
 # (core/svc_streaming/Dockerfile.rust), not the shared pipeline.pythonBaseImage
-# placeholder -- mirrors the presentation.image block's shape above.
+# placeholder.
 streaming:
   # svc-streaming image variant for this deploy: cpu | amd | nvidia. The variant is appended to
   # the image tag (<tag>-<variant>); CI publishes all three. Pick per node pool: cpu where no GPU,
@@ -2055,7 +2105,7 @@ streaming:
         operator: Exists
         effect: NoSchedule
 
-# feature/e2e-helm-rust-dataplane -- bundle-executor (M2, core/bundle_executor). Brand-new
+# feature/e2e-helm-rust-dataplane -- svc-bundles-executor (M2, core/bundle_executor). Brand-new
 # module (not a rewrite of an existing Python image), so it needs its own image block same
 # as streaming.image above -- bare repository name here (no global.imageRegistry
 # concatenation, template renders this literally), values-alpha.yaml overrides to the full
@@ -2065,7 +2115,7 @@ streaming:
 # unset so it falls through to global.imageTag) -- this is no longer a KNOWN GAP.
 bundleExecutor:
   image:
-    repository: "bundle-executor"
+    repository: "svc-bundles-executor"
     tag: ""
 
 # Reputation service (Issue #310, core/reputation_module) -- standalone internal
@@ -3061,7 +3111,7 @@ shutdown:
   preStopSleepSeconds: 5
 
 # startupProbe budget (failureThreshold x periodSeconds = 150s by default) for the slow-start
-# workloads: hub-api, the Rust data-plane stages, the Python pipeline stages, svc-streaming and
+# workloads: hub-api, the Rust data-plane stages, svc-streaming and
 # svc-presentation. Liveness/readiness only begin once it passes.
 startupProbe:
   periodSeconds: 5
@@ -3074,7 +3124,7 @@ startupProbe:
 # service's HPA is on, its Deployment omits spec.replicas so `helm upgrade` does not reset the
 # autoscaler. Needs metrics-server and container resource requests. Keys under `services:`:
 # hubApi hubWebui svcCore svcProcess svcAction svcProcessRust svcActionRust bundleExecutor
-# bundleExecutorAction reputation router. A service entry overrides `defaults` field-by-field.
+# reputation router. A service entry overrides `defaults` field-by-field.
 autoscaling:
   defaults:
     enabled: false
@@ -3437,7 +3487,7 @@ spire:
     upstreamRoot:
       enabled: false
 
-# Per-service EdDSA machine JWTs (feature/eddsa-machine-jwt) -- replaces
+# Per-service ES256 (ECDSA P-256 / SHA-256) machine JWTs -- replaces
 # the platform-wide HS256 shared SECRET_KEY / static API keys for
 # service-to-service calls, starting with the new internal PII endpoints.
 # SPIFFE-ready by design (see libs/flask_core/flask_core/service_jwt.py
@@ -3452,6 +3502,11 @@ serviceJwt:
   # Safe to commit -- these are public keys. Populated by the "Public key"
   # line `make generate-service-jwt-key` prints after each rotation.
   publicKeys: {}
+  # ES256 cut-over rollout window: when true, verifiers (hub-api, egress-proxy,
+  # svc-presentation, Python flask_core verifiers) ALSO accept legacy EdDSA tokens/keys
+  # (env SERVICE_JWT_ACCEPT_LEGACY_EDDSA). Issuance is ES256 only regardless. Default false
+  # (ES256 only) -- enable only for a bounded rollout window, then set back to false.
+  acceptLegacyEddsa: false
   audience: waddlebot-internal
   # Audience the bootstrap ServiceAccount token projection (below) must
   # request -- hub-api's TokenReview call rejects any other audience.
@@ -3517,7 +3572,7 @@ serviceJwt:
         # Rust svc-presentation's `POST /{overlay_code}/{surface}/push`, which needs a hub-api-minted
         # PUSH JWT. hub-api stamps the per-community form `presentation.overlay:push:<community_id>`
         # (never wider). Filtered out of the rendered allow-list unless presentation.rust.enabled
-        # (waddlebot.svcActionOverlayPush) -- base/beta/prod keep the Python svc-presentation.
+        # (waddlebot.svcActionOverlayPush); the Python svc-presentation was removed, Rust is the default.
         - "presentation.overlay:push"
     # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
     # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints
@@ -3555,6 +3610,12 @@ serviceJwt:
         # to this identity alone and, like the grant above, only rendered while
         # pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled is true.
         - "dataplane:resolve-scope"
+        # feature/hubapi-slash-command-registry -- the Discord connector (svc-ingest) reconciles slash
+        # commands from hub-api's desired-state API (app-commands/sources + /desired), and the ingest
+        # router reads/writes the user's active community (active-context). Two scopes (least
+        # privilege: desired state is read-only, context is read-write), ids/UUIDs only, no secret.
+        - "dataplane:app-commands"
+        - "dataplane:active-context"
         # feature/hubapi-platform-user-and-binding-meta -- the ONE detokenization point: the
         # outbound executor (Discord dm.send / role.add / role.remove) resolves a tokenized
         # user UUID to the raw platform user id through IdentityService.ResolvePlatformUser
@@ -3565,7 +3626,7 @@ serviceJwt:
   # secret distributed to callers. Reusable via the
   # `waddlebot.serviceJwtBootstrapVolume` named template
   # (templates/_service_jwt.tpl) -- add its volume/volumeMount output to
-  # any deployment that calls hub-api's /internal/service-token endpoint.
+  # any deployment that mints machine JWTs from hub-api's gRPC ServiceAuthService.
   bootstrapTokenProjection:
     expirationSeconds: 3600
     path: service-jwt-bootstrap-token
@@ -3579,7 +3640,7 @@ serviceJwt:
 # out-of-band controller owns this Secret name and will populate it before the
 # consuming workload starts) or the Secret was pre-created by an operator. See
 # templates/auto-provisioned-secrets.yaml (symmetric keys, pure Helm template) and
-# templates/auto-provisioned-keys-job.yaml (Ed25519 keys, needs openssl -- Sprig/Helm
+# templates/auto-provisioned-keys-job.yaml (Ed25519/P-256 keys, needs openssl -- Sprig/Helm
 # has no Ed25519-pubkey-from-privkey primitive) + chart README "Self-provisioned
 # platform keys" section.
 autoProvisionedKeys:
@@ -3606,14 +3667,14 @@ autoProvisionedKeys:
   # feature/bundle-artifact-signing (PR #431) -- platform Ed25519 keypair signing
   # every approved bundle. Private half: BUNDLE_SIGNING_PRIVATE_KEY/
   # BUNDLE_SIGNING_KEY_ID in secretName (hub-api only). Public half: published to
-  # publicKeyConfigMapName for the bundle-executor(s) to mount -- the private key is
+  # publicKeyConfigMapName for the svc-bundles-executor(s) to mount -- the private key is
   # NEVER mounted anywhere but hub-api.
   bundleSigning:
     secretName: ""  # default: "<fullname>-bundle-signing" when empty
     publicKeyConfigMapName: ""  # default: "<fullname>-bundle-signing-public" when empty
     keyId: "waddlebot-1"
     externalSecret: false
-  # feature/eddsa-machine-jwt (PR #438) -- per-service EdDSA machine-JWT signing key.
+  # PR #438 -- per-service ES256 (ECDSA P-256) machine-JWT signing key.
   # Private half: SERVICE_JWT_PRIVATE_KEY_<kid>/SERVICE_JWT_ACTIVE_KID in secretName
   # (hub-api only, the sole issuer). Public half: published to
   # publicKeyConfigMapName for hub-api's own verification path and any other service

@@ -24,11 +24,12 @@ trap 'rm -rf "$RESULTS_DIR"' EXIT
 
 echo "test-superpenguin-roll: running xUnit tests + coverage in ${DOTNET_SDK_IMAGE}"
 docker run --rm \
+  --user "$(id -u):$(id -g)" \
   -v "$(pwd)":/repo -v "$RESULTS_DIR":/covout -w /repo \
   -e HOME=/tmp -e DOTNET_CLI_HOME=/tmp -e NUGET_PACKAGES=/tmp/.nuget \
   -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
   "$DOTNET_SDK_IMAGE" \
-  dotnet test bundles/csharp/superpenguin-roll/tests/SuperpenguinRoll.Tests.csproj -c Release \
+  dotnet test bundles/csharp/superpenguin-roll/tests/SuperpenguinRoll.Tests.csproj --artifacts-path /tmp/build-artifacts -c Release \
     --settings bundles/csharp/superpenguin-roll/tests/coverlet.runsettings \
     --collect:"XPlat Code Coverage" --results-directory /covout
 

@@ -1,20 +1,22 @@
 # feature/e2e-helm-rust-dataplane -- Rust svc-action (core/svc_action, M3 executor
-# integration landed) Deployment, ADDITIVE to templates/svc-action.yaml's Python
-# Deployment -- never replaces it. Gated on the top-level pipeline.rustDataPlane.enabled
+# integration landed) Deployment (the legacy Python svc-action template was removed). Gated on the top-level pipeline.rustDataPlane.enabled
 # flag (default false) plus this stage's own .enabled sub-flag. See
 # templates/svc-ingest-rust.yaml's header for the full `-rust` resource-naming-vs-shared-
 # image-tag rationale (identical here) -- not repeated per file.
 #
 # Serves the executor<->stage host-API mTLS server (core/svc_action/src/host_api.rs). svc-process
 # has its own (core/svc_process/src/host_api.rs, see templates/svc-process-rust.yaml).
-# pipeline.rustDataPlane.bundleExecutor.stageTarget defaults to svc-action-rust; svc-process-rust
-# is the alternative target. The HOST_API_SERVER_CERT_FILE/KEY_FILE/CLIENT_CA_FILE env + volume
+# pipeline.rustDataPlane.bundleExecutor.stages lists svc-action-rust (and svc-process-rust: one
+# executor Deployment dials every stage). The HOST_API_SERVER_CERT_FILE/KEY_FILE/CLIENT_CA_FILE env + volume
 # below render only when waddlebot.hostApiTlsMaterialAvailable is true. global.hostApiTls
 # self-provisions on alpha/local and must be supplied on beta/gamma/production (see its
 # values.yaml comment). Without material host_api.rs's build_server_config fails closed with a
 # "must both be set" error INSIDE its own spawned task (try_start_host_api's graceful-degradation
 # contract), never crashing this pod's HTTP/metrics servers.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcAction.enabled }}
+{{- if and (not .Values.pipeline.rustDataPlane.egressClusterCidrDenylist) (ne .Values.global.deploymentTier "alpha") (ne .Values.global.deploymentTier "local") }}
+{{- fail (printf "pipeline.rustDataPlane.egressClusterCidrDenylist is REQUIRED when global.deploymentTier=%q (outside alpha/local): set this cluster's pod, Service and node CIDRs -- the Rust stage's CliConfig::validate hard-fails startup on an empty list" .Values.global.deploymentTier) }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -70,7 +72,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-action-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcAction.imageRepository | default "svc-action-rust") "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcAction.imageRepository | default "svc-action") "imageTag" .Values.global.imageTag) }}"
         # Values-driven -- see templates/svc-process-rust.yaml's comment on this same line
         # for why the old hardcoded Always was removed (identical here).
         imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
@@ -114,6 +116,7 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_action") | nindent 8 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcAction.port | quote }}
         - name: METRICS_PORT
@@ -127,7 +130,7 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcAction.heartbeatIntervalMs | default 5000 | quote }}
         # regression: readiness gated on executor connection deadlocked
         # rollouts (alpha 2026-10-02) -- NO LONGER wired into `/readyz`/
-        # `/healthz`/`/health` (a bundle-executor dials this service
+        # `/healthz`/`/health` (a svc-bundles-executor dials this service
         # through its ClusterIP Service, which only routes to Ready pods,
         # so gating readiness/liveness on executor presence deadlocked
         # rollouts). Now only the threshold for the periodic zero-executor
@@ -149,7 +152,7 @@ spec:
         # feature/hub-grpc-env-wiring (closes #569's startup seam) -- core/hub_client::
         # HubClient needs hub-api's internal gRPC endpoint (TLS mandatory, see
         # hub_api/grpc_internal/server.py) and its machine-JWT bootstrap endpoint
-        # (hub_api/blueprints/service_jwt_bp.py POST /internal/service-token). Both
+        # (the same gRPC address: ServiceAuthService.MintServiceToken, TLS 1.3 + pinned CA). Both
         # default to hub-api's own in-cluster Service, computed here rather than
         # requiring a per-environment override (see values.yaml's own comment on this
         # key, incl. the KNOWN GAP note on hub-api's TLS wiring + hub_client's CA trust).
@@ -157,7 +160,7 @@ spec:
         - name: HUB_API_GRPC_ENDPOINT
           value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         # Matches the audience-scoped projected token this pod already mounts via
         # waddlebot.serviceJwtBootstrapVolume(Mount) below -- NOT the generic default
         # k8s SA token path (wrong audience, hub-api's TokenReview call would reject
@@ -221,7 +224,7 @@ spec:
 {{- include "waddlebot.bundleDbEnv" . | nindent 8 }}
         {{- end }}
         - name: DB_READER_HOST
-          value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderHost | default .Values.infrastructure.postgresql.service.name | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderHost | default (include "waddlebot.postgres.host" .) | quote }}
         - name: DB_READER_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderPort | default .Values.infrastructure.postgresql.service.port | quote }}
         - name: DB_READER_NAME
@@ -370,6 +373,7 @@ spec:
         resources:
           {{- toYaml .Values.pipeline.rustDataPlane.svcAction.resources | nindent 10 }}
         volumeMounts:
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         - name: tmp
           mountPath: /tmp
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
@@ -383,6 +387,7 @@ spec:
         {{- end }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       - name: tmp
         emptyDir: {}
       {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}

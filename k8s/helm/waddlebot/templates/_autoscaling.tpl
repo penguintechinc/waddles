@@ -7,7 +7,7 @@ a PodDisruptionBudget. Singletons are deliberately absent and must stay absent:
   - svc-presentation -- overlay fan-out is in-process; >1 replica splits frames
   - postgres/redis/qdrant/ollama/seaweedfs -- single-writer stateful stores
   - collectors/svc-rtc -- per-platform connection owners
-`hpa: false` entries get a PDB when multi-replica but never an HPA: svc-ingest* hold
+`hpa: false` entries get a PDB when multi-replica but never an HPA: svc-ingest-rust holds
 single-connection leases (Discord gateway / Twitch IRC) so extra replicas add nothing;
 egress-proxy is fixed-size by design (sized for the egress allowlist, not load).
 */}}
@@ -18,14 +18,10 @@ egress-proxy is fixed-size by design (sized for the egress allowlist, not load).
   (dict "key" "hubApi" "name" "hub-api-v3" "component" "hub-api" "on" (not (not $v.pipeline.hubApi.enabled)) "replicas" (int $v.pipeline.hubApi.replicas) "hpa" true)
   (dict "key" "hubWebui" "name" "hub-webui-v3" "component" "hub-webui-v3" "on" (not (not $v.pipeline.hubWebui.enabled)) "replicas" (int $v.pipeline.hubWebui.replicas) "hpa" true)
   (dict "key" "svcCore" "name" "svc-core" "component" "svc-core" "on" (not (not $v.pipeline.svcCore.enabled)) "replicas" (int $v.pipeline.svcCore.replicas) "hpa" true)
-  (dict "key" "svcProcess" "name" "svc-process" "component" "svc-process" "on" (not (not $v.pipeline.svcProcess.enabled)) "replicas" (int $v.pipeline.svcProcess.replicas) "hpa" true)
-  (dict "key" "svcAction" "name" "svc-action" "component" "svc-action" "on" (not (not $v.pipeline.svcAction.enabled)) "replicas" (int $v.pipeline.svcAction.replicas) "hpa" true)
-  (dict "key" "svcIngest" "name" "svc-ingest" "component" "svc-ingest" "on" (not (not $v.pipeline.svcIngest.enabled)) "replicas" (int $v.pipeline.svcIngest.replicas) "hpa" false)
   (dict "key" "svcProcessRust" "name" "svc-process-rust" "component" "svc-process-rust" "on" (not (not (and $rdp.enabled $rdp.svcProcess.enabled))) "replicas" (int $rdp.svcProcess.replicas) "hpa" true)
   (dict "key" "svcActionRust" "name" "svc-action-rust" "component" "svc-action-rust" "on" (not (not (and $rdp.enabled $rdp.svcAction.enabled))) "replicas" (int $rdp.svcAction.replicas) "hpa" true)
   (dict "key" "svcIngestRust" "name" "svc-ingest-rust" "component" "svc-ingest-rust" "on" (not (not (and $rdp.enabled $rdp.svcIngest.enabled))) "replicas" (int $rdp.svcIngest.replicas) "hpa" false)
-  (dict "key" "bundleExecutor" "name" "bundle-executor" "component" "bundle-executor" "on" (not (not (and $rdp.enabled $rdp.bundleExecutor.enabled))) "replicas" (int $rdp.bundleExecutor.replicas) "hpa" true)
-  (dict "key" "bundleExecutorAction" "name" "bundle-executor-action" "component" "bundle-executor-action" "on" (not (not (and $rdp.enabled $rdp.bundleExecutorAction.enabled))) "replicas" (int $rdp.bundleExecutorAction.replicas) "hpa" true)
+  (dict "key" "bundleExecutor" "name" "svc-bundles-executor" "component" "svc-bundles-executor" "on" (not (not (and $rdp.enabled $rdp.bundleExecutor.enabled))) "replicas" (int $rdp.bundleExecutor.replicas) "hpa" true)
   (dict "key" "reputation" "name" "reputation" "component" "reputation" "on" (not (not $v.reputation.enabled)) "replicas" (int $v.reputation.replicas) "hpa" true)
   (dict "key" "egressProxy" "name" "egress-proxy" "component" "egress-proxy" "on" (not (not $v.egressProxy.enabled)) "replicas" (int $v.egressProxy.replicas) "hpa" false)
   (dict "key" "router" "name" "router" "component" "router" "on" (not (not $v.modules.router.enabled)) "replicas" (int $v.modules.router.replicas) "hpa" true)

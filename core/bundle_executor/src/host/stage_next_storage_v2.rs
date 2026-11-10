@@ -391,6 +391,7 @@ impl db_v2::Host for ExecState {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn cv(c: &str, v: db_v2::Value) -> db_v2::ColumnValue {
@@ -427,7 +428,7 @@ mod tests {
 
     #[test]
     fn transact_ops_encode_to_the_pinned_wire_shape() {
-        let ops = vec![
+        let ops = [
             db_v2::TxOp::Insert(db_v2::InsertOp {
                 table: "t".into(),
                 columns: vec![cv("a", db_v2::Value::IntValue(1))],

@@ -36,8 +36,7 @@ import grpc
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 from flask_core.service_jwt import ServiceJwtError, load_identities_from_env, load_issuer_from_env
 
@@ -95,7 +94,7 @@ def chart_shaped_service_jwt_env(monkeypatch: pytest.MonkeyPatch) -> None:
     Secret via `envFrom.secretRef`) + `SERVICE_JWT_IDENTITIES` (rendered by
     `_service_jwt.tpl`'s `waddlebot.serviceJwtIdentitiesJson`).
     """
-    priv = Ed25519PrivateKey.generate()
+    priv = ec.generate_private_key(ec.SECP256R1())
     pem = priv.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,

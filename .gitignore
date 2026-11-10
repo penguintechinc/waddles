@@ -252,3 +252,12 @@ coverage/
 
 # SDD scratch (agent working notes; never committed)
 .superpowers/
+
+# Native C# bundle / SDK test build outputs (source-only ports).
+/bundles/csharp/**/bin/
+/bundles/csharp/**/obj/
+/bundles/csharp/**/TestResults/
+/sdk/waddle-sdk-cs/**/bin/
+/sdk/waddle-sdk-cs/**/obj/
+/sdk/waddle-sdk-cs/**/TestResults/
+/.validation-target/
