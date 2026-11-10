@@ -21,7 +21,9 @@ use bundle_capability_gate::{
     GrantScopeKey, GrantSet, GrantedPermission, InMemoryGrantSnapshot,
     InMemoryInstancePolicySnapshot, InMemoryMembership, InMemoryQuotaLedger,
 };
-use bundle_host_economy::{EconomyCaps, IdempotencyKey, LeaderboardEntry};
+use bundle_host_economy::{
+    EconomyCaps, ElevatedRequest, IdempotencyKey, LeaderboardEntry, TransferFromOutcome,
+};
 use bundle_host_http::egress::{ReqwestTransport, StaticFlag};
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -30,6 +32,9 @@ const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
 const APP_ID: &str = "waddles.core.test-economy";
 const VERSION: i64 = 1;
+/// The calling app (an APP bundle reaching the economy service via `tool.invoke`).
+const CALLER_APP: &str = "waddles.app.steal-game";
+const CALLER_VERSION: i64 = 5;
 /// The spine event this invocation handles (a UUID v4, as the hop MAC covers).
 const EVENT_ID: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
 /// A different spine event.
@@ -49,6 +54,12 @@ struct RecordingStore {
     next_i64: Mutex<Option<Result<i64, EconomyError>>>,
     next_unit: Mutex<Option<Result<(), EconomyError>>>,
     next_board: Mutex<Option<Result<Vec<LeaderboardEntry>, EconomyError>>>,
+    /// Elevated-path log, in call order: `reserve:<caller>:<perm>:<op>:<amount>`,
+    /// `transfer_from:<caller>:<amount>:<reason>`, `settle:<id>:<applied>`.
+    elevated: Mutex<Vec<String>>,
+    /// Scripted answer of the next `elevated_reserve` / `transfer_from`.
+    next_reserve: Mutex<Option<Result<i64, EconomyError>>>,
+    next_transfer_from: Mutex<Option<Result<TransferFromOutcome, EconomyError>>>,
 }
 
 impl RecordingStore {
@@ -70,6 +81,9 @@ impl RecordingStore {
             .lock()
             .unwrap()
             .push((op.to_string(), scope.clone(), users, nums));
+    }
+    fn elevated_log(&self) -> Vec<String> {
+        self.elevated.lock().unwrap().clone()
     }
     fn take_i64(&self) -> Result<i64, EconomyError> {
         self.next_i64.lock().unwrap().take().unwrap_or(Ok(0))
@@ -334,6 +348,71 @@ impl EconomyStore for RecordingStore {
             self.take_i64()
         })
     }
+    fn transfer_from<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        req: &'a ElevatedRequest<'a>,
+    ) -> bundle_host_economy::BoxFuture<'a, Result<TransferFromOutcome, EconomyError>> {
+        Box::pin(async move {
+            self.keys.lock().unwrap().push(req.key.to_string());
+            self.record(
+                "transfer_from",
+                scope,
+                vec![req.target, req.counterparty.unwrap()],
+                vec![req.amount],
+            );
+            self.elevated.lock().unwrap().push(format!(
+                "transfer_from:{}:{}:{}",
+                req.caller_app, req.amount, req.reason
+            ));
+            self.next_transfer_from
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Ok(TransferFromOutcome {
+                    from_balance: 1,
+                    to_balance: 2,
+                    audit_id: 9,
+                    grant_id: 4,
+                }))
+        })
+    }
+    fn elevated_reserve<'a>(
+        &'a self,
+        scope: &'a EconomyScope,
+        req: &'a ElevatedRequest<'a>,
+    ) -> bundle_host_economy::BoxFuture<'a, Result<i64, EconomyError>> {
+        Box::pin(async move {
+            self.record(
+                "elevated_reserve",
+                scope,
+                vec![req.target],
+                vec![req.amount],
+            );
+            self.elevated.lock().unwrap().push(format!(
+                "reserve:{}:{}:{}:{}",
+                req.caller_app,
+                req.permission.id(),
+                req.op,
+                req.amount
+            ));
+            self.next_reserve.lock().unwrap().take().unwrap_or(Ok(77))
+        })
+    }
+    fn elevated_settle<'a>(
+        &'a self,
+        _scope: &'a EconomyScope,
+        audit_id: i64,
+        applied: bool,
+    ) -> bundle_host_economy::BoxFuture<'a, Result<(), EconomyError>> {
+        Box::pin(async move {
+            self.elevated
+                .lock()
+                .unwrap()
+                .push(format!("settle:{audit_id}:{applied}"));
+            Ok(())
+        })
+    }
     fn leaderboard<'a>(
         &'a self,
         scope: &'a EconomyScope,
@@ -493,7 +572,31 @@ fn fixture_facts(
     community: Option<(&str, i32)>,
     facts: Facts,
 ) -> Fixture {
+    fixture_full(grant_set, flag_on, wired, community, facts, None)
+}
+
+/// [`fixture_facts`] plus an optional second grant scope: the CALLING app's
+/// grants (the elevated primitives are checked against it, not the service's).
+fn fixture_full(
+    grant_set: GrantSet,
+    flag_on: bool,
+    wired: bool,
+    community: Option<(&str, i32)>,
+    facts: Facts,
+    caller_grants: Option<(&str, GrantSet)>,
+) -> Fixture {
     let snapshot = InMemoryGrantSnapshot::new();
+    if let Some((caller_app, set)) = caller_grants {
+        snapshot.set(
+            GrantScopeKey {
+                tenant_id: TENANT_ID,
+                community_id: community.map_or(0, |c| c.1),
+                app_id: caller_app.to_string(),
+                app_version: CALLER_VERSION,
+            },
+            set,
+        );
+    }
     snapshot.set(
         GrantScopeKey {
             tenant_id: TENANT_ID,
@@ -2003,3 +2106,6 @@ fn compound_families_carry_durable_caps_and_the_default_supply() {
     );
     assert_eq!(economy_max_supply(), 1_000_000);
 }
+
+#[path = "capabilities_economy_elevated_tests.rs"]
+mod elevated;
