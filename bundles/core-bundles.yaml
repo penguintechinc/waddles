@@ -1584,6 +1584,16 @@ bundles:
       - tenant_slug: global
         community_id: null
 
+  # Twitch clips APP bundle (Rust, `stage-next-tools` world): `!clip`/`!clips` over the Twitch
+  # service bundle's twitch.clip.{create,get,list} tools. Needs those tools (twitch bundle) to be
+  # ACTIVATED + granted before commands work; until then create fails loud with a viewer notice.
+  - app_id: waddles.core.example.twitch-clips
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/twitch-clips
+    manifest_path: twitch-clips.manifest.yaml
+    artifact_path: twitch-clips.wasm
   # SoundCloud music SERVICE (Rust `kind: service`, world stage-tools): music.soundcloud.{search,
   # track,playlist.get,resolve}. Metadata + license flags only; OAuth token is a host-side secret ref.
   - app_id: waddles.core.service.music-soundcloud
