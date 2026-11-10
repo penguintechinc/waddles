@@ -1235,6 +1235,51 @@ true
 {{- end -}}
 
 {{/*
+Bundle storage v2 (docs/bundle-storage-v2.md): BUNDLE_DB_* env for svc-process-rust / svc-action-rust.
+Off by default (bundleStorageV2.db.enabled=false -> renders nothing, db capability stays
+not_implemented). Enabled -> the password is read by secretKeyRef from an operator-managed
+existingSecret (required; the chart never renders or defaults a value). Host/port/name fall back to the
+chart's own Postgres service. Usage: include "waddlebot.bundleDbEnv" .
+*/}}
+{{- define "waddlebot.bundleDbEnv" -}}
+{{- $v := .Values.bundleStorageV2.db -}}
+{{- if $v.enabled -}}
+- name: BUNDLE_DB_HOST
+  value: {{ $v.host | default .Values.infrastructure.postgresql.service.name | quote }}
+- name: BUNDLE_DB_PORT
+  value: {{ $v.port | default .Values.infrastructure.postgresql.service.port | quote }}
+- name: BUNDLE_DB_NAME
+  value: {{ $v.name | default .Values.infrastructure.postgresql.database | quote }}
+- name: BUNDLE_DB_USER
+  value: {{ $v.user | default "waddles_bundle_runtime" | quote }}
+- name: BUNDLE_DB_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ required "bundleStorageV2.db.existingSecret is required when bundleStorageV2.db.enabled=true" $v.existingSecret }}
+      key: {{ $v.passwordKey | default "BUNDLE_DB_PASSWORD" }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Bundle storage v2: BUNDLE_MIGRATOR_* env for hub-api only (DDL provisioning at install/upgrade/uninstall).
+Off by default; password only ever from an operator-managed existingSecret (required when enabled).
+*/}}
+{{- define "waddlebot.bundleMigratorEnv" -}}
+{{- $v := .Values.bundleStorageV2.migrator -}}
+{{- if $v.enabled -}}
+{{- if $v.user }}
+- name: BUNDLE_MIGRATOR_USER
+  value: {{ $v.user | quote }}
+{{- end }}
+- name: BUNDLE_MIGRATOR_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ required "bundleStorageV2.migrator.existingSecret is required when bundleStorageV2.migrator.enabled=true" $v.existingSecret }}
+      key: {{ $v.passwordKey | default "BUNDLE_MIGRATOR_PASSWORD" }}
+{{- end -}}
+{{- end -}}
+
+{{/*
 svc-bundles-executor stage dial list -- the comma-separated `host:port` value of
 STAGE_HOST_API_ADDR: one entry per `pipeline.rustDataPlane.bundleExecutor.stages` item
 (`<fullname>-<target>:<port>`), in order. The executor runs one independent dial loop per

@@ -3870,3 +3870,23 @@ bundleStorage:
     # security.md: object storage holding sensitive data needs server-side encryption.
     # The operator MUST assert the external bucket has it enabled (render fails otherwise).
     serverSideEncryptionConfirmed: false
+
+# Bundle storage v2 (docs/bundle-storage-v2.md). Everything OFF by default. Passwords are NEVER set
+# here: create the Secret out-of-band (ExternalSecret/SealedSecret/kubectl) and reference it.
+bundleStorageV2:
+  # svc-process-rust + svc-action-rust only: BUNDLE_DB_HOST|PORT|NAME|USER + BUNDLE_DB_PASSWORD
+  # (role waddles_bundle_runtime). host/port/name default to the chart's Postgres service.
+  db:
+    enabled: false
+    existingSecret: ""          # Secret holding passwordKey (required when enabled)
+    passwordKey: BUNDLE_DB_PASSWORD
+    host: ""
+    port: ""
+    name: ""
+    user: ""                    # default waddles_bundle_runtime
+  # hub-api only: BUNDLE_MIGRATOR_PASSWORD (role waddles_bundle_migrator, DDL on app schemas).
+  migrator:
+    enabled: false
+    existingSecret: ""          # Secret holding passwordKey (required when enabled)
+    passwordKey: BUNDLE_MIGRATOR_PASSWORD
+    user: ""                    # unset -> hub-api default

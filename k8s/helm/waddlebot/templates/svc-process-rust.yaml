@@ -303,6 +303,11 @@ spec:
         # already points at (no read replica provisioned yet); DB_READER_PASSWORD comes
         # from the shared secret (empty by default -- the loader stays disabled until a
         # real RO-account password is provisioned, see templates/secrets.yaml).
+        {{- if .Values.bundleStorageV2.db.enabled }}
+        # Bundle storage v2 (docs/bundle-storage-v2.md): db/db2/kv host capability connection.
+        # Password from the operator-managed existingSecret only; off by default.
+{{- include "waddlebot.bundleDbEnv" . | nindent 8 }}
+        {{- end }}
         - name: DB_READER_HOST
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderHost | default (include "waddlebot.postgres.host" .) | quote }}
         - name: DB_READER_PORT
