@@ -349,7 +349,7 @@ async def test_tls_listener_serves_a_real_context_end_to_end(
     monkeypatch.setenv("GRPC_TLS_KEY_PATH", str(key_path))
     monkeypatch.setenv("GRPC_PORT", str(port))
     monkeypatch.delenv("GRPC_TLS_CLIENT_CA_PATH", raising=False)
-    server = await start_internal_grpc_server(issuer=issuer, install_dal=dal)
+    server = await start_internal_grpc_server(issuer=issuer, app_config={"install_dal": dal})
     try:
         creds = grpc.ssl_channel_credentials(root_certificates=cert_pem)
         async with grpc.aio.secure_channel(f"127.0.0.1:{port}", creds) as channel:
