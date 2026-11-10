@@ -193,6 +193,23 @@ class RequestedTool:
 
 
 @dataclass(slots=True, frozen=True)
+class AdminTool:
+    """One tool the community admin UI may invoke through the generic bundle-admin gateway.
+
+    `name` is the stable gateway handle (URL segment); `tool` is the exported-tool name on
+    `target_app_id`; `kind` is `action` (any access, audited write path) or `read` (paginated
+    data view, target tool must be `access: read`); `scope` is the community scope the caller
+    must hold (`community:moderate` or `community:admin`).
+    """
+
+    name: str
+    tool: str
+    kind: str
+    scope: str
+    target_app_id: str
+
+
+@dataclass(slots=True, frozen=True)
 class BundleManifestV2:
     """A validated `bundle.yaml` v2 manifest -- the shape every downstream reader consumes."""
 
@@ -265,6 +282,10 @@ class BundleManifestV2:
     # (op, owner) is ALSO folded into `permission_declarations` as a dangerous
     # `storage.<op>:<owner>` id. Defaulted last for hand-built fixtures.
     storage_access: tuple[StorageAccessRequest, ...] = ()
+    # Generic bundle-admin gateway (docs/BUNDLE_ADMIN_GATEWAY.md): the per-community config JSON
+    # Schema and the tools the admin UI may invoke. Both optional; defaulted last.
+    community_config_schema: dict[str, Any] | None = None
+    admin_tools: tuple[AdminTool, ...] = ()
 
     def supports_platform(self, platform: str) -> bool:
         """Return True when this bundle may run on `platform` (absent field = every platform)."""
@@ -617,6 +638,142 @@ def requested_tool_declarations(
             ),
         )
     return tuple(seen.values())
+
+
+#: Community scopes an `admin_tools` entry may require -- the closed vocabulary the gateway maps
+#: onto the hub-api community role scopes (`community:moderate` -> `community:manage_channels`,
+#: `community:admin` -> `community:manage_members`). `owner`/`member` are deliberately excluded:
+#: an admin surface is never member-callable, and owner-only actions stay platform-side.
+ADMIN_TOOL_SCOPES = frozenset({"community:moderate", "community:admin"})
+_ADMIN_TOOL_KINDS = frozenset({"action", "read"})
+_MAX_CONFIG_SCHEMA_BYTES = 64 * 1024
+
+
+def parse_config_schema(raw: Any) -> dict[str, Any] | None:
+    """Validate the optional `community_config_schema:` block (JSON Schema, per-community config).
+
+    Absent (`None`) parses to `None`. The schema must be a mapping with `type: object`, be a valid
+    JSON Schema (Draft 2020-12) and stay under 64 KiB; anything else raises `ManifestV2Error`
+    (`invalid_config_schema`).
+    """
+    if raw is None:
+        return None
+    import json
+
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import SchemaError
+
+    _require(
+        isinstance(raw, dict), "invalid_config_schema", "community_config_schema must be a mapping"
+    )
+    _require(
+        raw.get("type") == "object",
+        "invalid_config_schema",
+        "community_config_schema must declare type: object",
+    )
+    try:
+        size = len(json.dumps(raw, separators=(",", ":")))
+    except (TypeError, ValueError) as exc:
+        raise ManifestV2Error(
+            "invalid_config_schema", "community_config_schema is not JSON-serialisable"
+        ) from exc
+    _require(
+        size <= _MAX_CONFIG_SCHEMA_BYTES,
+        "invalid_config_schema",
+        f"community_config_schema exceeds {_MAX_CONFIG_SCHEMA_BYTES} bytes",
+    )
+    try:
+        Draft202012Validator.check_schema(raw)
+    except SchemaError as exc:
+        raise ManifestV2Error(
+            "invalid_config_schema", f"not a valid JSON Schema: {exc.message}"
+        ) from exc
+    return dict(raw)
+
+
+def parse_admin_tools(raw_entries: Any, *, own_app_id: str) -> tuple[AdminTool, ...]:
+    """Validate the optional `admin_tools:` list; absent (`None`) parses to none.
+
+    Each entry is `{name, tool, kind, scope[, target_app_id]}`. `target_app_id` defaults to the
+    bundle itself (a service bundle exposing its own tool); `name` must be unique. Raises
+    `ManifestV2Error` (`invalid_admin_tools`) on any violation. Cross-checks against
+    `exported_tools` / `requested_tools` happen in `_check_admin_tools_declared`.
+    """
+    if raw_entries is None:
+        return ()
+    _require(isinstance(raw_entries, list), "invalid_admin_tools", "admin_tools must be a list")
+    out: list[AdminTool] = []
+    seen: set[str] = set()
+    for entry in raw_entries:
+        _require(
+            isinstance(entry, dict),
+            "invalid_admin_tools",
+            "each admin_tools entry must be a mapping",
+        )
+        name = entry.get("name")
+        _require(
+            isinstance(name, str) and bool(_TOOL_NAME_RE.fullmatch(name)),
+            "invalid_admin_tools",
+            "admin tool name must match [a-z][a-z0-9_.]{0,63}",
+        )
+        tool = entry.get("tool")
+        _require(
+            isinstance(tool, str) and bool(_TOOL_NAME_RE.fullmatch(tool)),
+            "invalid_admin_tools",
+            "admin tool `tool` must match [a-z][a-z0-9_.]{0,63}",
+        )
+        assert isinstance(name, str) and isinstance(tool, str)  # narrowed, for mypy
+        _require(name not in seen, "invalid_admin_tools", f"admin tool {name!r} declared twice")
+        seen.add(name)
+        kind = entry.get("kind")
+        _require(
+            kind in _ADMIN_TOOL_KINDS,
+            "invalid_admin_tools",
+            f"admin tool {name!r}: kind must be one of {sorted(_ADMIN_TOOL_KINDS)}",
+        )
+        scope = entry.get("scope")
+        _require(
+            scope in ADMIN_TOOL_SCOPES,
+            "invalid_admin_tools",
+            f"admin tool {name!r}: scope must be one of {sorted(ADMIN_TOOL_SCOPES)}",
+        )
+        target = entry.get("target_app_id", own_app_id)
+        _require(
+            isinstance(target, str) and bool(_APP_ID_RE.fullmatch(target)),
+            "invalid_admin_tools",
+            f"admin tool {name!r}: target_app_id must be a valid app_id",
+        )
+        out.append(AdminTool(name=name, tool=tool, kind=kind, scope=scope, target_app_id=target))
+    return tuple(out)
+
+
+def _check_admin_tools_declared(
+    admin_tools: tuple[AdminTool, ...],
+    *,
+    own_app_id: str,
+    exported: tuple[ExportedTool, ...],
+    requested: tuple[RequestedTool, ...],
+) -> None:
+    """Every admin tool must be a tool this bundle exports, or one it requested (consented).
+
+    An admin tool is never a back door to an un-consented cross-bundle call: a tool on another
+    bundle must also appear in `requested_tools` so it rides the same approval/consent path.
+    """
+    exported_names = {t.name for t in exported}
+    requested_keys = {(r.target_app_id, r.tool) for r in requested}
+    for at in admin_tools:
+        if at.target_app_id == own_app_id:
+            _require(
+                at.tool in exported_names,
+                "admin_tool_undeclared",
+                f"admin tool {at.name!r}: {at.tool!r} is not in this bundle's exported_tools",
+            )
+        else:
+            _require(
+                (at.target_app_id, at.tool) in requested_keys,
+                "admin_tool_undeclared",
+                f"admin tool {at.name!r}: {at.target_app_id}:{at.tool} is not in requested_tools",
+            )
 
 
 def _parse_consumes(
@@ -1083,6 +1240,11 @@ def parse_bundle_manifest_v2(
     )
 
     requested_tools = parse_requested_tools(raw.get("requested_tools"), own_app_id=raw["app_id"])
+    community_config_schema = parse_config_schema(raw.get("community_config_schema"))
+    admin_tools = parse_admin_tools(raw.get("admin_tools"), own_app_id=raw["app_id"])
+    _check_admin_tools_declared(
+        admin_tools, own_app_id=raw["app_id"], exported=exported_tools, requested=requested_tools
+    )
     declared_ids = {d.id for d in permission_declarations}
     permission_declarations = permission_declarations + tuple(
         d for d in requested_tool_declarations(requested_tools) if d.id not in declared_ids
@@ -1156,4 +1318,6 @@ def parse_bundle_manifest_v2(
         trusted_source=trusted_source,
         table_access=table_access,
         storage_access=storage_access,
+        community_config_schema=community_config_schema,
+        admin_tools=admin_tools,
     )
