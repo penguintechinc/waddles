@@ -752,3 +752,53 @@ def test_malformed_tool_call_declaration_is_unknown_permission() -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse([{"id": "tool.call:not-an-app:get_balance", "justification": "x"}])
     assert "unknown_permission" in str(exc.value)
+
+
+@pytest.mark.parametrize("permission_id", ["economy.transfer_from", "economy.app_mint"])
+def test_elevated_economy_permissions_are_dangerous_and_need_justification(
+    permission_id: str,
+) -> None:
+    from services.bundle_permission_catalog import resolve_risk
+
+    assert resolve_risk(permission_id) == "dangerous"
+    manifest = _parse([{"id": permission_id, "justification": "Steal game rules."}])
+    assert manifest.permission_declarations[0].risk == "dangerous"  # type: ignore[attr-defined]
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse([{"id": permission_id}])
+    assert exc.value.reason == "missing_justification"
+
+
+@pytest.mark.parametrize("permission_id", ["economy.transfer_from", "economy.app_mint"])
+def test_elevated_economy_permissions_accept_only_bounded_cap_params(
+    permission_id: str,
+) -> None:
+    manifest = _parse(
+        [
+            {
+                "id": permission_id,
+                "justification": "Game.",
+                "params": {"max_per_op": 50, "max_per_day": 500, "max_per_target_per_day": 100},
+            }
+        ]
+    )
+    assert manifest.permission_declarations[0].params["max_per_op"] == 50  # type: ignore[attr-defined]
+    for bad in (
+        {"max_per_op": 0},
+        {"max_per_op": 10_001},
+        {"max_per_day": True},
+        {"max_amount": 5},
+    ):
+        with pytest.raises(ManifestV2Error) as exc:
+            _parse([{"id": permission_id, "justification": "x", "params": bad}])
+        assert exc.value.reason == "invalid_economy_bound", bad
+
+
+def test_elevated_permission_ids_mirror_the_rust_catalog() -> None:
+    from pathlib import Path
+
+    rust = Path(__file__).resolve().parents[2] / "core/bundle_capability_gate/src/permission.rs"
+    if not rust.exists():
+        pytest.skip("Rust catalog source not present in this checkout")
+    text = rust.read_text()
+    for pid in ("economy.transfer_from", "economy.app_mint"):
+        assert f'=> "{pid}"' in text, pid

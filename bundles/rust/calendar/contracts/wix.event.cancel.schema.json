@@ -1,0 +1,16 @@
+{
+  "tool": "wix.event.cancel",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "event_id": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "required": [
+      "event_id"
+    ],
+    "additionalProperties": false
+  }
+}

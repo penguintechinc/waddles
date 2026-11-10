@@ -1337,20 +1337,19 @@ pub(crate) mod fake {
         ) -> BoxFuture<'a, Result<Vec<String>, String>> {
             let mut st = self.state.lock().unwrap();
             st.trim(live_key);
-            let mut keys: Vec<String> = st
-                .live
-                .get(live_key)
-                .map(|idx| {
-                    idx.keys()
-                        .filter(|k| {
-                            k.starts_with(data_prefix)
-                                && (after.is_empty() || k.as_str() > after)
-                                && st.live_value(k).is_some()
-                        })
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
+            // No live index for this key means no keys (in-memory test double).
+            let mut keys: Vec<String> = match st.live.get(live_key) {
+                Some(idx) => idx
+                    .keys()
+                    .filter(|k| {
+                        k.starts_with(data_prefix)
+                            && (after.is_empty() || k.as_str() > after)
+                            && st.live_value(k).is_some()
+                    })
+                    .cloned()
+                    .collect(),
+                None => Vec::new(),
+            };
             keys.sort();
             keys.truncate(limit as usize);
             Box::pin(async move { Ok(keys) })
