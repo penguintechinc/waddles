@@ -1,0 +1,33 @@
+[package]
+name = "waddle-bundle-music-spotify-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Spotify music SERVICE bundle: an always-on `kind: service` bundle on the `stage-tools` world that exports `tool-provider`. Tools: music.spotify.{search,track,playlist.get,resolve} (metadata, app credentials) and music.spotify.player.{state,play,pause,next,queue_add} (Spotify Connect, the community's connected Premium account). Every credential is a host-resolved secret-ref; no token ever enters the guest."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+# Sibling-crate path dependency (same repo, moves together): the SDK owns the
+# real `tool` registry/dispatch this bundle plugs into.
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[package.metadata.component]
+package = "waddle:bundle-music-spotify-service"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage-tools"
+
+[package.metadata.component.dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
