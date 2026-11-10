@@ -122,9 +122,11 @@ infrastructure:
     # live patch + restart: fast HTTP 403 confirmed, no more OOMKill under
     # the same seed load) rather than carrying a separate, lower alpha tier
     # for this one service.
+    # 2026-11-10: 1Gi also OOMKilled (exit 137) under bundle-seed load during
+    # core-bundle-seeder; raised to 2Gi limit / 512Mi request (alpha only).
     resources:
-      requests: { cpu: "200m", memory: "256Mi" }
-      limits: { cpu: "1000m", memory: "1Gi" }
+      requests: { cpu: "200m", memory: "512Mi" }
+      limits: { cpu: "1000m", memory: "2Gi" }
     # feature/seaweedfs-object-storage -- alpha is exempt from the beta/gamma/production
     # fail guard (templates/infrastructure/seaweedfs.yaml) and may reference this
     # well-known secret name; the Secret itself is never committed -- provision it once
