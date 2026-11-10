@@ -405,6 +405,19 @@ pub struct DbWiring {
     /// `crate::license::BUNDLE_DB_CAPABILITY_FLAG` gate -- OFF denies every
     /// `db` call `feature_disabled` before any schema/authorize lookup.
     pub flag: Arc<dyn FeatureGate>,
+    /// `db` v2 (multi-table, structured query, transactions, quotas).
+    pub v2: DbV2Wiring,
+}
+
+/// `db` v2 state shared by every invocation: the engine, the registry of
+/// manifest-declared tables (refreshed from `bundle_data.table_registry`), and
+/// the crate-seam grant snapshot (the stage's capability gate is the real
+/// authority; the snapshot is populated only after the gate passes).
+#[derive(Clone)]
+pub struct DbV2Wiring {
+    pub host: Arc<bundle_host_db::v2::DbV2Host>,
+    pub registry: Arc<bundle_host_db::v2::SchemaRegistryV2>,
+    pub capabilities: Arc<DbCapabilitySnapshot>,
 }
 
 /// Live wiring for the `reputation` bundle host capability (issue #726):
@@ -2798,6 +2811,16 @@ impl<K: KvBackend> StageCapabilities<K> {
             "community": self.community,
             "app_id": self.app_id,
         });
+        // The same signed envelope id survives redelivery. Money-game apps use
+        // it for their persisted outcome/service retry keys. No guest argument
+        // participates; an unanchored invocation still has no message id.
+        if let Some(event_id) = self
+            .invocation_identity
+            .as_ref()
+            .and_then(|identity| identity.event_id())
+        {
+            ctx["message_id"] = serde_json::json!(event_id);
+        }
         // Authoritative numeric scope for `context-v2` guests, from the
         // verified envelope only; v1 guests ignore the extra keys.
         if let Some((tenant_id, community_id)) = self.verified_scope {
@@ -2917,6 +2940,70 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .await
                     .map_err(kv_err_to_host)?;
                 Ok(serde_json::json!({ "value": value }))
+            }
+            "get_versioned" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                let found = kv
+                    .get_versioned(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(match found {
+                    Some((value, version)) => {
+                        serde_json::json!({ "value": value, "version": version })
+                    }
+                    None => serde_json::json!({ "value": null }),
+                })
+            }
+            "cas" => {
+                let args: KvCasArgs = parse_kv_args(&call.args)?;
+                let r = kv
+                    .cas(
+                        &kv_scope,
+                        call.call_id,
+                        &args.key,
+                        args.expected_version,
+                        &args.value,
+                        args.ttl_seconds,
+                    )
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(match r {
+                    bundle_host_kv::KvCasResult::Swapped(v) => {
+                        serde_json::json!({ "swapped": true, "version": v })
+                    }
+                    bundle_host_kv::KvCasResult::Conflict(v) => {
+                        serde_json::json!({ "swapped": false, "version": v })
+                    }
+                })
+            }
+            "delete_if" => {
+                let args: KvDeleteIfArgs = parse_kv_args(&call.args)?;
+                let r = kv
+                    .delete_if(&kv_scope, call.call_id, &args.key, args.expected_version)
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(match r {
+                    bundle_host_kv::KvDeleteIfResult::Deleted => {
+                        serde_json::json!({ "deleted": true, "version": 0 })
+                    }
+                    bundle_host_kv::KvDeleteIfResult::Conflict(v) => {
+                        serde_json::json!({ "deleted": false, "version": v })
+                    }
+                })
+            }
+            "list" => {
+                let args: KvListArgs = parse_kv_args(&call.args)?;
+                let page = kv
+                    .list(
+                        &kv_scope,
+                        call.call_id,
+                        &args.prefix,
+                        args.cursor.as_deref(),
+                        args.limit,
+                    )
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(serde_json::json!({ "keys": page.keys, "next_cursor": page.next_cursor }))
             }
             other => Err(denied(
                 "unknown_op",
@@ -3078,6 +3165,53 @@ impl<K: KvBackend> StageCapabilities<K> {
         result.map(row_to_json).map_err(db_error_to_host_error)
     }
 
+    /// `db` v2 (`db2.*` ops): multi-table, structured query, transactions,
+    /// quotas. Same gate (`storage.tables`) and feature flag as v1; the stage
+    /// injects tenant/community/app from `self`, never from `call`. The wire
+    /// contract and every limit live in `bundle_host_db::v2`.
+    async fn handle_db_v2(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::StorageTables,
+                ResourceRef::AppScoped(AppScopedResource::Table),
+            )
+            .map_err(denied_from_gate)?;
+        let Some(db) = &self.db else {
+            return Err(denied(
+                "not_implemented",
+                "db capability is not wired in this build (BUNDLE_DB_PASSWORD unset)",
+            ));
+        };
+        if !db.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "db capability is disabled (waddles.bundle-db-capability is OFF)",
+            ));
+        }
+        // The gate above is the authority; mirror its grant into the crate-seam
+        // snapshot (idempotent, only written when absent).
+        if !db.v2.capabilities.declares(&self.app_id, "storage.tables") {
+            db.v2
+                .capabilities
+                .update(self.app_id.clone(), ["storage.tables".to_string()]);
+        }
+        let scope = DbScope::new(self.tenant_id, self.community_id, self.app_id.clone());
+        bundle_host_db::v2::wire::handle(
+            &db.v2.host,
+            &scope,
+            &db.v2.registry,
+            &db.v2.capabilities,
+            &call.op,
+            &call.args,
+        )
+        .await
+        .map_err(|e| denied(e.code, e.message))
+    }
+
     /// `enabled` op: `{"key": String, "default_value": bool}` ->
     /// `{"enabled": bool}` -- un-stubs the `flags` WIT capability
     /// (`core/bundle_executor::host::imports::flags::Host::enabled`'s own
@@ -3237,6 +3371,31 @@ struct KvSetArgs {
     ttl_seconds: u32,
 }
 
+/// `kv-v2.cas` args.
+#[derive(serde::Deserialize)]
+struct KvCasArgs {
+    key: String,
+    expected_version: u64,
+    value: Vec<u8>,
+    ttl_seconds: u32,
+}
+
+/// `kv-v2.delete-if` args.
+#[derive(serde::Deserialize)]
+struct KvDeleteIfArgs {
+    key: String,
+    expected_version: u64,
+}
+
+/// `kv-v2.list-keys` args.
+#[derive(serde::Deserialize)]
+struct KvListArgs {
+    prefix: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    limit: u32,
+}
+
 /// `{"key": String, "delta": i64, "ttl_seconds": u32}` -- `kv.increment`'s args.
 #[derive(serde::Deserialize)]
 struct KvIncrementArgs {
@@ -3305,6 +3464,12 @@ fn kv_err_to_host(err: KvError) -> HostResultError {
     denied(err.wire_code(), err.wire_message())
 }
 
+/// kv v2 keeps the fine-grained code (`quota_exceeded`/`rate_limited`/
+/// `invalid_key`/`too_large`) on the wire so the guest can branch on it.
+fn kv_err_to_host_v2(err: KvError) -> HostResultError {
+    denied(err.code(), err.wire_message())
+}
+
 impl<K: KvBackend + 'static> CapabilityHandler for StageCapabilities<K> {
     fn handle<'a>(
         &'a self,
@@ -3367,6 +3532,9 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // path: they carry their own gate permission
             // (`reputation.read`/`reputation.community.write`), never
             // `storage.tables`.
+            CapabilityKind::Db if bundle_host_db::v2::wire::is_v2_op(&call.op) => {
+                self.handle_db_v2(&call).await
+            }
             CapabilityKind::Db if call.op.starts_with("reputation.") => {
                 self.handle_reputation(&call).await
             }
@@ -3595,6 +3763,38 @@ mod tests {
         assert_eq!(ctx["community_id"], 7);
         let without = caps().handle_context().expect("context");
         assert!(without.get("tenant_id").is_none() && without.get("community_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn context_exposes_only_the_verified_retry_identity() {
+        let event = penguin_spine::PlatformEvent {
+            platform: "twitch".into(),
+            event_type: "chat.message".into(),
+            actor: Some("platform-actor".into()),
+            payload: serde_json::json!({"text":"!roll", "message_id":"untrusted"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+            occurred_at: "2026-11-07T00:00:00Z".into(),
+            source: None,
+        };
+        let id = "6f1c0a52-9d3e-4b7a-8c10-2e5d7f9a1b34";
+        for _ in 0..2 {
+            let mut handler = caps();
+            handler.invocation_identity = Some(Arc::new(
+                InvocationIdentity::for_untokenized_event(&event).with_event_id(id),
+            ));
+            let ctx = handler
+                .handle(call(
+                    CapabilityKind::Context,
+                    "get",
+                    serde_json::json!({"message_id":"guest-spoof"}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(ctx["message_id"], id);
+        }
+        assert!(caps().handle_context().unwrap().get("message_id").is_none());
     }
 
     fn caps() -> StageCapabilities {
@@ -4071,11 +4271,111 @@ mod tests {
     fn mock_db_wiring(flag_on: bool) -> DbWiring {
         let conn = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
         DbWiring {
+            v2: DbV2Wiring {
+                host: Arc::new(bundle_host_db::v2::DbV2Host::new(
+                    bundle_host_db::v2::PostgresV2Backend::new(conn.clone()),
+                )),
+                registry: Arc::new(bundle_host_db::v2::SchemaRegistryV2::new()),
+                capabilities: Arc::new(DbCapabilitySnapshot::new()),
+            },
             host: Arc::new(DbHost::new(bundle_host_db::PostgresBackend::new(conn))),
             schemas: Arc::new(SchemaCache::new()),
             capabilities: Arc::new(DbCapabilitySnapshot::new()),
             flag: Arc::new(crate::license::test_support::FixedGate(flag_on)),
         }
+    }
+
+    #[tokio::test]
+    async fn db_v2_ops_are_not_implemented_when_unwired_and_disabled_when_flag_off() {
+        let capabilities = caps();
+        let err = capabilities
+            .handle_db_v2(&call(
+                CapabilityKind::Db,
+                "db2.query",
+                serde_json::json!({"table": "events", "limit": 5}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+
+        let off = caps().with_db(mock_db_wiring(false));
+        let err = off
+            .handle_db_v2(&call(
+                CapabilityKind::Db,
+                "db2.query",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "feature_disabled");
+    }
+
+    #[tokio::test]
+    async fn db_v2_dispatch_routes_db2_ops_and_fails_loud_on_bad_ones() {
+        let on = caps().with_db(mock_db_wiring(true));
+        // routed through `dispatch` (not the v1 handler): no v2 tables are
+        // provisioned for this app, so it is an explicit invalid_table -- and it
+        // never touches the (mock) database.
+        let err = on
+            .dispatch(call(
+                CapabilityKind::Db,
+                "db2.get",
+                serde_json::json!({"table": "events", "row_id": "00000000-0000-0000-0000-000000000000"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_table");
+        let err = on
+            .dispatch(call(CapabilityKind::Db, "db2.drop", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+        let err = on
+            .dispatch(call(
+                CapabilityKind::Db,
+                "db2.get",
+                serde_json::json!({"table": 5}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn kv_v2_ops_fail_loud_on_a_backend_without_v2_support() {
+        let c = caps_with_kv();
+        for (op, args) in [
+            ("get_versioned", serde_json::json!({"key": "k"})),
+            (
+                "cas",
+                serde_json::json!({"key": "k", "expected_version": 0, "value": [1], "ttl_seconds": 0}),
+            ),
+            (
+                "delete_if",
+                serde_json::json!({"key": "k", "expected_version": 1}),
+            ),
+            ("list", serde_json::json!({"prefix": "", "limit": 5})),
+        ] {
+            let err = c
+                .handle_kv(&call(CapabilityKind::Kv, op, args))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "backend", "{op}");
+            assert!(
+                err.message.contains("not supported"),
+                "{op}: {}",
+                err.message
+            );
+        }
+        let err = c
+            .handle_kv(&call(
+                CapabilityKind::Kv,
+                "cas",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
     }
 
     #[tokio::test]

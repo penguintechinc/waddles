@@ -30,7 +30,7 @@ jobs:
   # in parallel. Fails open: see scripts/ci/changed-paths.sh.
   changes:
     name: Detect changed areas
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -59,6 +59,7 @@ jobs:
     # Rust-affecting file changed, e.g. docs-only or Python-only PRs. Real
     # `if:` on the job, so no runner is allocated for the 24-crate matrix.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
+    # bare dal2-alpha-ci image has no cc/cmake/libatomic and sudo is blocked (no-new-privileges): C-toolchain / node jobs stay on hosted ubuntu-latest until a custom runner image bakes them in
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:

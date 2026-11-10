@@ -1,0 +1,2473 @@
+{
+ "_comment": "Golden vectors generated from the Python waddle_sdk.command implementation; consumed by both SDK test suites. CLI error/help text is not compared (argparse wording).",
+ "parse_command": [
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": null,
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!COUNT",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": null,
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "  !count  ",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": null,
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!lurk",
+   "error": "unrecognized command '!lurk', expected !count"
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "",
+   "error": "empty command text"
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "   ",
+   "error": "empty command text"
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count set 5",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "set",
+    "args": "5"
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count set",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "set",
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count SET 5",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "set",
+    "args": "5"
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count add 3",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "add",
+    "args": "3"
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count sub 2",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "sub",
+    "args": "2"
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count list",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "list",
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count reset",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "reset",
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count remove 42",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "remove",
+    "args": "42"
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count delete",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "delete",
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count set  a   b ",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "set",
+    "args": "a   b"
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count set\t5",
+   "error": "!count: unknown option or sub-module 'set\\t5'"
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count bogus",
+   "error": "!count: unknown option or sub-module 'bogus'"
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count enable ai",
+   "expect": {
+    "command": "count",
+    "sub_module": "ai",
+    "option": "enable",
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count set 'x y'",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "set",
+    "args": "'x y'"
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count set éÉ",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "set",
+    "args": "éÉ"
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count set\u001c5",
+   "error": "!count: unknown option or sub-module 'set\\x1c5'"
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count\u001cset 5",
+   "error": "unrecognized command '!count\\x1cset', expected !count"
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!countx",
+   "error": "unrecognized command '!countx', expected !count"
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "error": "command text exceeds 4096 characters"
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!count set xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "expect": {
+    "command": "count",
+    "sub_module": null,
+    "option": "set",
+    "args": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   }
+  },
+  {
+   "spec": {
+    "name": "count",
+    "sub_modules": []
+   },
+   "text": "!lurk's",
+   "error": "unrecognized command \"!lurk's\", expected !count"
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk enable ai",
+   "expect": {
+    "command": "lurk",
+    "sub_module": "ai",
+    "option": "enable",
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk ai enable",
+   "expect": {
+    "command": "lurk",
+    "sub_module": "ai",
+    "option": "enable",
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk disable ai",
+   "expect": {
+    "command": "lurk",
+    "sub_module": "ai",
+    "option": "disable",
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk AI DISABLE",
+   "expect": {
+    "command": "lurk",
+    "sub_module": "ai",
+    "option": "disable",
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk enable",
+   "error": "!lurk enable requires a sub-module name"
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk enable nope",
+   "error": "!lurk enable: unknown sub-module 'nope'"
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk enable ai extra",
+   "error": "!lurk enable: takes exactly one sub-module name"
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk ai enable extra",
+   "error": "!lurk ai enable: takes no further arguments"
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk ai",
+   "expect": {
+    "command": "lurk",
+    "sub_module": "ai",
+    "option": null,
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk ai set x",
+   "expect": {
+    "command": "lurk",
+    "sub_module": "ai",
+    "option": "set",
+    "args": "x"
+   }
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk ai bogus",
+   "error": "!lurk ai: unknown option 'bogus'"
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk enable ai ai",
+   "error": "!lurk enable: takes exactly one sub-module name"
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk nope'x",
+   "error": "!lurk: unknown option or sub-module \"nope'x\""
+  },
+  {
+   "spec": {
+    "name": "lurk",
+    "sub_modules": [
+     "ai"
+    ]
+   },
+   "text": "!lurk 'ai'",
+   "error": "!lurk: unknown option or sub-module \"'ai'\""
+  },
+  {
+   "spec": {
+    "name": "shoutout",
+    "sub_modules": [
+     "auto",
+     "ai"
+    ]
+   },
+   "text": "!shoutout auto set on",
+   "expect": {
+    "command": "shoutout",
+    "sub_module": "auto",
+    "option": "set",
+    "args": "on"
+   }
+  },
+  {
+   "spec": {
+    "name": "shoutout",
+    "sub_modules": [
+     "auto",
+     "ai"
+    ]
+   },
+   "text": "!shoutout ai list",
+   "expect": {
+    "command": "shoutout",
+    "sub_module": "ai",
+    "option": "list",
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "shoutout",
+    "sub_modules": [
+     "auto",
+     "ai"
+    ]
+   },
+   "text": "!shoutout enable auto",
+   "expect": {
+    "command": "shoutout",
+    "sub_module": "auto",
+    "option": "enable",
+    "args": null
+   }
+  },
+  {
+   "spec": {
+    "name": "shoutout",
+    "sub_modules": [
+     "auto",
+     "ai"
+    ]
+   },
+   "text": "!shoutout enable x",
+   "error": "!shoutout enable: unknown sub-module 'x'"
+  },
+  {
+   "spec": {
+    "name": "shoutout",
+    "sub_modules": [
+     "auto",
+     "ai"
+    ]
+   },
+   "text": "!shoutout auto",
+   "expect": {
+    "command": "shoutout",
+    "sub_module": "auto",
+    "option": null,
+    "args": null
+   }
+  }
+ ],
+ "placeholders": [
+  {
+   "template": "hello $(user)",
+   "values": {
+    "user": "bob"
+   },
+   "extract": [
+    "user"
+   ],
+   "substitute": "hello bob"
+  },
+  {
+   "template": "$(a) $(b) $(a)",
+   "values": {
+    "a": "1",
+    "b": "2"
+   },
+   "extract": [
+    "a",
+    "b"
+   ],
+   "substitute": "1 2 1"
+  },
+  {
+   "template": "$(missing)",
+   "values": {},
+   "extract": [
+    "missing"
+   ],
+   "missing": "missing"
+  },
+  {
+   "template": "no placeholders",
+   "values": {},
+   "extract": [],
+   "substitute": "no placeholders"
+  },
+  {
+   "template": "$() $( x) $(a-b) $x (a)",
+   "values": {},
+   "extract": [],
+   "substitute": "$() $( x) $(a-b) $x (a)"
+  },
+  {
+   "template": "$(a)$(a)",
+   "values": {
+    "a": "z"
+   },
+   "extract": [
+    "a"
+   ],
+   "substitute": "zz"
+  },
+  {
+   "template": "$$(a)",
+   "values": {
+    "a": "q"
+   },
+   "extract": [
+    "a"
+   ],
+   "substitute": "$q"
+  },
+  {
+   "template": "$(été)",
+   "values": {
+    "été": "v"
+   },
+   "extract": [
+    "été"
+   ],
+   "substitute": "v"
+  },
+  {
+   "template": "$(a",
+   "values": {
+    "a": "1"
+   },
+   "extract": [],
+   "substitute": "$(a"
+  },
+  {
+   "template": "price $(n)USD",
+   "values": {
+    "n": "5"
+   },
+   "extract": [
+    "n"
+   ],
+   "substitute": "price 5USD"
+  }
+ ],
+ "cli": [
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say hello",
+   "expect": {
+    "command": "say",
+    "subcommand": null,
+    "values": {
+     "msg": "hello"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say \"hello world\"",
+   "expect": {
+    "command": "say",
+    "subcommand": null,
+    "values": {
+     "msg": "hello world"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say 'it''s'",
+   "expect": {
+    "command": "say",
+    "subcommand": null,
+    "values": {
+     "msg": "its"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say \"a\\\"b\"",
+   "expect": {
+    "command": "say",
+    "subcommand": null,
+    "values": {
+     "msg": "a\"b"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say a\\ b",
+   "expect": {
+    "command": "say",
+    "subcommand": null,
+    "values": {
+     "msg": "a b"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say a b",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say \"unclosed",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say trailing\\",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!other x",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!SAY Hi",
+   "expect": {
+    "command": "say",
+    "subcommand": null,
+    "values": {
+     "msg": "Hi"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say \"\"",
+   "expect": {
+    "command": "say",
+    "subcommand": null,
+    "values": {
+     "msg": ""
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say --help",
+   "expect": {
+    "command": "say",
+    "subcommand": null,
+    "help": true
+   }
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say -- -x",
+   "expect": {
+    "command": "say",
+    "subcommand": null,
+    "values": {
+     "msg": "-x"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say -5",
+   "expect": {
+    "command": "say",
+    "subcommand": null,
+    "values": {
+     "msg": "-5"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say -x",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say \"-x y\"",
+   "expect": {
+    "command": "say",
+    "subcommand": null,
+    "values": {
+     "msg": "-x y"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "say",
+    "arguments": [
+     {
+      "name": "msg",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!say xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": 1,
+     "mode": null
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --count 5",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": 5,
+     "mode": null
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea -c 5",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": 5,
+     "mode": null
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea -c5",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": 5,
+     "mode": null
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --count=7",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": 7,
+     "mode": null
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer --count 3 tea",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": 3,
+     "mode": null
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --coun 4",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": 4,
+     "mode": null
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --count -3",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": -3,
+     "mode": null
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --count abc",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --count 1_0",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --count +5",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --count 123456789012345678901",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --count 12345678901234567890",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": 12345678901234567890,
+     "mode": null
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --count",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --mode fast --mode slow",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": 1,
+     "mode": "slow"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --mode",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --m fast",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": 1,
+     "mode": "fast"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --count 5 --count 6",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "values": {
+     "label": "tea",
+     "count": 6,
+     "mode": null
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer a b",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --nope 1",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --help",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "help": true
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer --help",
+   "expect": {
+    "command": "timer",
+    "subcommand": null,
+    "help": true
+   }
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --mode -x",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "timer",
+    "arguments": [
+     {
+      "name": "label",
+      "flags": [],
+      "required": true,
+      "kind": "string",
+      "default": null
+     },
+     {
+      "name": "count",
+      "flags": [
+       "-c",
+       "--count"
+      ],
+      "required": false,
+      "kind": "integer",
+      "default": 1
+     },
+     {
+      "name": "mode",
+      "flags": [
+       "--mode"
+      ],
+      "required": false,
+      "kind": "string",
+      "default": null
+     }
+    ]
+   },
+   "text": "!timer tea --mode -- x",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "clip",
+    "arguments": [],
+    "default_subcommand": "show",
+    "subcommands": [
+     {
+      "name": "show",
+      "arguments": [
+       {
+        "name": "id",
+        "flags": [],
+        "required": false,
+        "kind": "string",
+        "default": null
+       }
+      ]
+     },
+     {
+      "name": "set",
+      "arguments": [
+       {
+        "name": "limit",
+        "flags": [
+         "--limit",
+         "-l"
+        ],
+        "required": true,
+        "kind": "integer",
+        "default": null
+       }
+      ]
+     }
+    ]
+   },
+   "text": "!clip",
+   "expect": {
+    "command": "clip",
+    "subcommand": "show",
+    "values": {
+     "id": null
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "clip",
+    "arguments": [],
+    "default_subcommand": "show",
+    "subcommands": [
+     {
+      "name": "show",
+      "arguments": [
+       {
+        "name": "id",
+        "flags": [],
+        "required": false,
+        "kind": "string",
+        "default": null
+       }
+      ]
+     },
+     {
+      "name": "set",
+      "arguments": [
+       {
+        "name": "limit",
+        "flags": [
+         "--limit",
+         "-l"
+        ],
+        "required": true,
+        "kind": "integer",
+        "default": null
+       }
+      ]
+     }
+    ]
+   },
+   "text": "!clip show 7",
+   "expect": {
+    "command": "clip",
+    "subcommand": "show",
+    "values": {
+     "id": "7"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "clip",
+    "arguments": [],
+    "default_subcommand": "show",
+    "subcommands": [
+     {
+      "name": "show",
+      "arguments": [
+       {
+        "name": "id",
+        "flags": [],
+        "required": false,
+        "kind": "string",
+        "default": null
+       }
+      ]
+     },
+     {
+      "name": "set",
+      "arguments": [
+       {
+        "name": "limit",
+        "flags": [
+         "--limit",
+         "-l"
+        ],
+        "required": true,
+        "kind": "integer",
+        "default": null
+       }
+      ]
+     }
+    ]
+   },
+   "text": "!clip set --limit 5",
+   "expect": {
+    "command": "clip",
+    "subcommand": "set",
+    "values": {
+     "limit": 5
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "clip",
+    "arguments": [],
+    "default_subcommand": "show",
+    "subcommands": [
+     {
+      "name": "show",
+      "arguments": [
+       {
+        "name": "id",
+        "flags": [],
+        "required": false,
+        "kind": "string",
+        "default": null
+       }
+      ]
+     },
+     {
+      "name": "set",
+      "arguments": [
+       {
+        "name": "limit",
+        "flags": [
+         "--limit",
+         "-l"
+        ],
+        "required": true,
+        "kind": "integer",
+        "default": null
+       }
+      ]
+     }
+    ]
+   },
+   "text": "!clip set -l 5",
+   "expect": {
+    "command": "clip",
+    "subcommand": "set",
+    "values": {
+     "limit": 5
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "clip",
+    "arguments": [],
+    "default_subcommand": "show",
+    "subcommands": [
+     {
+      "name": "show",
+      "arguments": [
+       {
+        "name": "id",
+        "flags": [],
+        "required": false,
+        "kind": "string",
+        "default": null
+       }
+      ]
+     },
+     {
+      "name": "set",
+      "arguments": [
+       {
+        "name": "limit",
+        "flags": [
+         "--limit",
+         "-l"
+        ],
+        "required": true,
+        "kind": "integer",
+        "default": null
+       }
+      ]
+     }
+    ]
+   },
+   "text": "!clip set",
+   "error": true
+  },
+  {
+   "spec": {
+    "name": "clip",
+    "arguments": [],
+    "default_subcommand": "show",
+    "subcommands": [
+     {
+      "name": "show",
+      "arguments": [
+       {
+        "name": "id",
+        "flags": [],
+        "required": false,
+        "kind": "string",
+        "default": null
+       }
+      ]
+     },
+     {
+      "name": "set",
+      "arguments": [
+       {
+        "name": "limit",
+        "flags": [
+         "--limit",
+         "-l"
+        ],
+        "required": true,
+        "kind": "integer",
+        "default": null
+       }
+      ]
+     }
+    ]
+   },
+   "text": "!clip bogus",
+   "expect": {
+    "command": "clip",
+    "subcommand": "show",
+    "values": {
+     "id": "bogus"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "clip",
+    "arguments": [],
+    "default_subcommand": "show",
+    "subcommands": [
+     {
+      "name": "show",
+      "arguments": [
+       {
+        "name": "id",
+        "flags": [],
+        "required": false,
+        "kind": "string",
+        "default": null
+       }
+      ]
+     },
+     {
+      "name": "set",
+      "arguments": [
+       {
+        "name": "limit",
+        "flags": [
+         "--limit",
+         "-l"
+        ],
+        "required": true,
+        "kind": "integer",
+        "default": null
+       }
+      ]
+     }
+    ]
+   },
+   "text": "!clip --help",
+   "expect": {
+    "command": "clip",
+    "subcommand": "show",
+    "help": true
+   }
+  },
+  {
+   "spec": {
+    "name": "clip",
+    "arguments": [],
+    "default_subcommand": "show",
+    "subcommands": [
+     {
+      "name": "show",
+      "arguments": [
+       {
+        "name": "id",
+        "flags": [],
+        "required": false,
+        "kind": "string",
+        "default": null
+       }
+      ]
+     },
+     {
+      "name": "set",
+      "arguments": [
+       {
+        "name": "limit",
+        "flags": [
+         "--limit",
+         "-l"
+        ],
+        "required": true,
+        "kind": "integer",
+        "default": null
+       }
+      ]
+     }
+    ]
+   },
+   "text": "!clip set --help",
+   "expect": {
+    "command": "clip",
+    "subcommand": "set",
+    "help": true
+   }
+  },
+  {
+   "spec": {
+    "name": "clip",
+    "arguments": [],
+    "default_subcommand": "show",
+    "subcommands": [
+     {
+      "name": "show",
+      "arguments": [
+       {
+        "name": "id",
+        "flags": [],
+        "required": false,
+        "kind": "string",
+        "default": null
+       }
+      ]
+     },
+     {
+      "name": "set",
+      "arguments": [
+       {
+        "name": "limit",
+        "flags": [
+         "--limit",
+         "-l"
+        ],
+        "required": true,
+        "kind": "integer",
+        "default": null
+       }
+      ]
+     }
+    ]
+   },
+   "text": "!clip SET --limit 9",
+   "expect": {
+    "command": "clip",
+    "subcommand": "set",
+    "values": {
+     "limit": 9
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "clip",
+    "arguments": [],
+    "default_subcommand": "show",
+    "subcommands": [
+     {
+      "name": "show",
+      "arguments": [
+       {
+        "name": "id",
+        "flags": [],
+        "required": false,
+        "kind": "string",
+        "default": null
+       }
+      ]
+     },
+     {
+      "name": "set",
+      "arguments": [
+       {
+        "name": "limit",
+        "flags": [
+         "--limit",
+         "-l"
+        ],
+        "required": true,
+        "kind": "integer",
+        "default": null
+       }
+      ]
+     }
+    ]
+   },
+   "text": "!clip 5",
+   "expect": {
+    "command": "clip",
+    "subcommand": "show",
+    "values": {
+     "id": "5"
+    },
+    "help": false
+   }
+  },
+  {
+   "spec": {
+    "name": "clip",
+    "arguments": [],
+    "default_subcommand": "show",
+    "subcommands": [
+     {
+      "name": "show",
+      "arguments": [
+       {
+        "name": "id",
+        "flags": [],
+        "required": false,
+        "kind": "string",
+        "default": null
+       }
+      ]
+     },
+     {
+      "name": "set",
+      "arguments": [
+       {
+        "name": "limit",
+        "flags": [
+         "--limit",
+         "-l"
+        ],
+        "required": true,
+        "kind": "integer",
+        "default": null
+       }
+      ]
+     }
+    ]
+   },
+   "text": "!clip show a b",
+   "error": true
+  }
+ ]
+}

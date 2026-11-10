@@ -118,12 +118,18 @@ spec:
         envFrom:
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-db-migrate-secret
+        # feature/transit-tls-core (F1): DATABASE_URL already carries sslmode=verify-full&sslrootcert; the libpq env
+        # is the belt-and-braces for any code path that rebuilds the DSN.
+        env:
+        {{- include "waddlebot.transitTls.pgClientEnv" . | nindent 8 }}
         resources:
           {{- toYaml .Values.pipeline.migrationsJob.resources | nindent 10 }}
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
 {{- end }}

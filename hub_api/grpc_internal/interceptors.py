@@ -94,7 +94,7 @@ class DeadlineInterceptor(grpc.aio.ServerInterceptor):
 
 @dataclass(slots=True)
 class AuthInterceptor(grpc.aio.ServerInterceptor):
-    """Verifies the `authorization` metadata's EdDSA machine JWT on every RPC.
+    """Verifies the `authorization` metadata's ES256 machine JWT on every RPC.
 
     `required_scopes` maps a full gRPC method name (e.g.
     ``/waddles.hub.internal.v1.IdentityService/MintEphemeralPseudonyms``) to
@@ -111,6 +111,10 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
 
     verifier: ServiceJwtVerifier
     required_scopes: dict[str, str]
+    #: Bootstrap RPCs (the machine-JWT mint + JWKS) -- reachable without a machine JWT because
+    #: they are what produce / verify one. The servicer authenticates its own caller. An RPC is
+    #: public only if listed HERE explicitly; everything else still fails closed.
+    public_methods: frozenset[str] = frozenset()
 
     async def intercept_service(
         self,
@@ -125,6 +129,8 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
             return handler
 
         method = handler_call_details.method
+        if method in self.public_methods:
+            return handler
         required_scope = self.required_scopes.get(method)
         inner = handler.unary_unary
 
@@ -172,6 +178,16 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
         )
 
 
+def _peer_host(peer: str | None) -> str:
+    """Host part of a gRPC peer string (``ipv4:1.2.3.4:5678`` / ``ipv6:[::1]:5``), no port."""
+    if not peer:
+        return "unknown"
+    rest = peer.split(":", 1)[1] if ":" in peer else peer
+    if rest.startswith("["):
+        return rest[1 : rest.index("]")] if "]" in rest else rest
+    return rest.rsplit(":", 1)[0]
+
+
 @dataclass(slots=True)
 class _Bucket:
     """Token-bucket state for one calling service (`sub` claim)."""
@@ -214,7 +230,7 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
 
         async def wrapped(request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> Any:
             claims = service_claims.get()
-            key = claims["sub"] if claims else "unknown"
+            key = claims["sub"] if claims else f"peer:{_peer_host(context.peer())}"
             if limit is not None:
                 key = f"{key}|{method}"
             if not self._take(key, limit):

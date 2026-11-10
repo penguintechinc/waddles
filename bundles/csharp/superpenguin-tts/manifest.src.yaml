@@ -1,0 +1,39 @@
+slug: tts
+title: Text to Speech Commands (SuperPenguinTV TTS)
+version: 1.0.0
+upstream:
+  - TTS/TTSService.cs
+consumes:
+  - platform: twitch
+    event_types: [chat.message]
+    filters:
+      command_prefix: ['!tts', '!ttsvoice']
+  - platform: discord
+    event_types: [chat.message]
+    filters:
+      command_prefix: ['!tts', '!ttsvoice']
+permissions:
+  - id: storage.kv
+    justification: registered voices, per-user voice choice, per-user cooldown and the per-event record that makes a redelivered event speak the same thing
+  - id: identity.resolve
+    justification: resolve the invoking actor to a community user uuid (uuid-only, no names) for the cooldown, voice choice and replay key
+  - id: chat.send:discord
+    justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)
+  - id: chat.send:twitch
+    justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)
+  - id: tool.call:waddles.core.service.media:tts_synthesize
+    justification: Use the media service tts_synthesize contract (text, voice -> https url); the app owns only command and voice policy. The tool does not exist yet
+    params:
+      write: false
+  - id: overlay.media
+    justification: pushes tts play messages (alert-box surface, superpenguin.tts.play with an https audio url) to the community browser-source overlay that plays them
+    params:
+      allowed_hosts: [overlay.penguincloud.io]
+      max_duration_seconds: 15
+requested_tools:
+  - tool: tts_synthesize
+    access: read
+    target_app_id: waddles.core.service.media
+overlay_origins:
+  index.html: original
+  tts-overlay.js: original

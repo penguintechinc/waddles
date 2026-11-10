@@ -122,6 +122,9 @@ class AdapterSpec:
     #: unlimited. Enforced by the service (fast, friendly refusal) AND, for a provider whose data
     #: plane would otherwise be ambiguous (Kick), by a database trigger (the race-proof backstop).
     max_connections_per_community: int | None = None
+    #: For a kind-1 provider that also needs an outbound API credential beside its OAuth/public
+    #: token (Wix): the secret scheme of that sealed document. ``None`` = the provider has none.
+    api_credential_scheme: SecretScheme | None = None
 
     def __post_init__(self) -> None:
         """Reject a malformed spec at registration time rather than at first request."""

@@ -550,7 +550,7 @@ mod tests {
     fn cli(dynamic: bool) -> CliConfig {
         let mut c = CliConfig::parse_from(["svc-ingest"]);
         c.dynamic_connections = dynamic;
-        c.service_jwt_token_endpoint = "http://hub/internal/service-token".to_string();
+        c.service_jwt_token_endpoint = "https://hub:50204".to_string();
         c
     }
 

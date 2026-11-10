@@ -258,6 +258,10 @@ pub enum PermissionFamily {
     Moderation,
     /// `message.edit:<platform>` -- Edit a bot-authored message in the triggering event's own channel; op `message.edit`.
     MessageEdit,
+    /// `chat.clear:<platform>` -- Clear the whole chat of the triggering event's own channel; op `chat.clear` (host-executed tool path only, never `relay.push`).
+    ChatClear,
+    /// `webhook.manage:<platform>` -- Create channel webhooks (the reply carries a secret token that stays host-side); op `webhook.create` (host-executed tool path only, never `relay.push`).
+    WebhookManage,
     /// `message.reaction:<platform>` -- Add a reaction to a message in the triggering event's own channel; op `reaction.add`.
     MessageReaction,
     /// `commands.register:<platform>` -- App-scoped slash-command registration (bulk overwrite) for the community's own application; op `commands.register`.
@@ -371,6 +375,8 @@ impl PermissionFamily {
         Self::DmSend,
         Self::Moderation,
         Self::MessageEdit,
+        Self::ChatClear,
+        Self::WebhookManage,
         Self::MessageReaction,
         Self::CommandsRegister,
         Self::EventsubManage,
@@ -425,6 +431,8 @@ impl PermissionFamily {
             Self::DmSend => "dm.send",
             Self::Moderation => "moderation",
             Self::MessageEdit => "message.edit",
+            Self::ChatClear => "chat.clear",
+            Self::WebhookManage => "webhook.manage",
             Self::MessageReaction => "message.reaction",
             Self::CommandsRegister => "commands.register",
             Self::EventsubManage => "eventsub.manage",
@@ -481,6 +489,8 @@ impl PermissionFamily {
                 | Self::DmSend
                 | Self::Moderation
                 | Self::MessageEdit
+                | Self::ChatClear
+                | Self::WebhookManage
                 | Self::MessageReaction
                 | Self::CommandsRegister
                 | Self::EventsubManage
@@ -687,6 +697,26 @@ impl PermissionFamily {
                      destination ids come from host bindings only; UsageBatcher is metering only",
                 ),
                 notes: "Edit a bot-authored message in the triggering event's own channel; op `message.edit`",
+            },
+            Self::ChatClear => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Relay,
+                default_quota: Quota::Descriptive(
+                    "host-enforced exact-template policy in svc_ingest sender_exec; \
+                     destination ids come from host bindings only; UsageBatcher is metering only",
+                ),
+                notes: "Clear the whole chat of the triggering event's own channel; op `chat.clear` (host tool path only)",
+            },
+            Self::WebhookManage => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Relay,
+                default_quota: Quota::Descriptive(
+                    "host-enforced exact-template policy in svc_ingest sender_exec; \
+                     the created webhook's token never reaches a guest; UsageBatcher is metering only",
+                ),
+                notes: "Create channel webhooks; op `webhook.create` (host tool path only)",
             },
             Self::MessageReaction => CatalogEntry {
                 family: *self,
@@ -1047,6 +1077,8 @@ pub enum PermissionId {
     DmSend(String),
     Moderation(String),
     MessageEdit(String),
+    ChatClear(String),
+    WebhookManage(String),
     MessageReaction(String),
     CommandsRegister(String),
     EventsubManage(String),
@@ -1140,6 +1172,8 @@ impl PermissionId {
             Self::DmSend(_) => PermissionFamily::DmSend,
             Self::Moderation(_) => PermissionFamily::Moderation,
             Self::MessageEdit(_) => PermissionFamily::MessageEdit,
+            Self::ChatClear(_) => PermissionFamily::ChatClear,
+            Self::WebhookManage(_) => PermissionFamily::WebhookManage,
             Self::MessageReaction(_) => PermissionFamily::MessageReaction,
             Self::CommandsRegister(_) => PermissionFamily::CommandsRegister,
             Self::EventsubManage(_) => PermissionFamily::EventsubManage,
@@ -1207,6 +1241,8 @@ impl PermissionId {
             Self::DmSend(platform) => format!("dm.send:{platform}"),
             Self::Moderation(platform) => format!("moderation.{platform}"),
             Self::MessageEdit(platform) => format!("message.edit:{platform}"),
+            Self::ChatClear(platform) => format!("chat.clear:{platform}"),
+            Self::WebhookManage(platform) => format!("webhook.manage:{platform}"),
             Self::MessageReaction(platform) => format!("message.reaction:{platform}"),
             Self::CommandsRegister(platform) => format!("commands.register:{platform}"),
             Self::EventsubManage(platform) => format!("eventsub.manage:{platform}"),
@@ -1356,6 +1392,14 @@ impl PermissionId {
             Self::validate_platform(platform)?;
             return Ok(Self::MessageEdit(platform.to_string()));
         }
+        if let Some(platform) = raw.strip_prefix("chat.clear:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::ChatClear(platform.to_string()));
+        }
+        if let Some(platform) = raw.strip_prefix("webhook.manage:") {
+            Self::validate_platform(platform)?;
+            return Ok(Self::WebhookManage(platform.to_string()));
+        }
         if let Some(platform) = raw.strip_prefix("message.reaction:") {
             Self::validate_platform(platform)?;
             return Ok(Self::MessageReaction(platform.to_string()));
@@ -1439,6 +1483,8 @@ impl PermissionId {
         }
         if let Some(family) = [
             "message.edit",
+            "chat.clear",
+            "webhook.manage",
             "message.reaction",
             "commands.register",
             "eventsub.manage",
@@ -1755,6 +1801,8 @@ mod tests {
     fn platform_op_families_round_trip_and_reject_bare_and_unknown_platform() {
         for (raw, family) in [
             ("message.edit:discord", PermissionFamily::MessageEdit),
+            ("chat.clear:twitch", PermissionFamily::ChatClear),
+            ("webhook.manage:discord", PermissionFamily::WebhookManage),
             (
                 "message.reaction:discord",
                 PermissionFamily::MessageReaction,
@@ -1800,6 +1848,8 @@ mod tests {
     fn platform_op_family_risk_classes_are_pinned() {
         for (raw, risk) in [
             ("message.edit:discord", Risk::Dangerous),
+            ("chat.clear:twitch", Risk::Dangerous),
+            ("webhook.manage:discord", Risk::Dangerous),
             ("commands.register:discord", Risk::Dangerous),
             ("eventsub.manage:twitch", Risk::Dangerous),
             ("message.reaction:discord", Risk::Normal),
