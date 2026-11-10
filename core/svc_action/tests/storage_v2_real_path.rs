@@ -87,6 +87,7 @@ fn scope(community_id: i32) -> InvokeScope {
         origin_channel_id: None,
         origin_platform: None,
         origin_guild_id: None,
+        origin_user_id: None,
         tenant_id: 7,
         community_id,
         app_version: 1,
