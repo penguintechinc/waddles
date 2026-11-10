@@ -39,6 +39,7 @@
 
 pub mod active_context;
 pub mod bundle_schedule;
+pub mod resolve_scope;
 pub(crate) mod rpc;
 
 pub mod pb {
