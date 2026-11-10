@@ -48,7 +48,7 @@ only Rust's WASI subset (as a naive reading of `stage.wit` alone would
 suggest) would reject every legitimate Python component; do not do that.
 
 Exports are checked strictly: the non-WASI export set must EXACTLY equal one of
-`ALLOWED_EXPORT_SETS` -- `process-stage`+`action-stage` (optionally +
+`EXPORT_SETS_BY_KIND[<manifest kind>]` -- `process-stage`+`action-stage` (optionally +
 `streaming-lifecycle`) for chat/event bundles, `tool-provider` alone for
 `stage-tools` services, and `waddle:connector/{receiver,sender}` (optionally
 + `tool-provider`) for connectors. Any other (including mixed) export set is
@@ -137,13 +137,19 @@ _TOOL_PROVIDER = "waddle:bundle/tool-provider"
 _CONNECTOR_EXPORTS = frozenset(
     {f"{WADDLE_CONNECTOR_NAMESPACE}/receiver", f"{WADDLE_CONNECTOR_NAMESPACE}/sender"}
 )
-ALLOWED_EXPORT_SETS: tuple[frozenset[str], ...] = (
-    _STAGE_EXPORTS,
-    _STAGE_EXPORTS | {_STREAMING_LIFECYCLE},
-    frozenset({_TOOL_PROVIDER}),
-    _CONNECTOR_EXPORTS,
-    _CONNECTOR_EXPORTS | {_TOOL_PROVIDER},
-)
+#: Allowed export sets per MANIFEST-DECLARED `kind` -- the component's actual export surface must
+#: match the world its own manifest declares, never merely "some world the platform knows". An
+#: `app` (chat/event bundle) must export the stage pair; a `service` (tool provider or platform
+#: connector -- the manifest cannot tell those two apart, both are `kind: service`) must export
+#: `tool-provider` alone or the connector set. Order is the tie-break for the mismatch reason.
+EXPORT_SETS_BY_KIND: dict[str, tuple[frozenset[str], ...]] = {
+    "app": (_STAGE_EXPORTS, _STAGE_EXPORTS | {_STREAMING_LIFECYCLE}),
+    "service": (
+        frozenset({_TOOL_PROVIDER}),
+        _CONNECTOR_EXPORTS,
+        _CONNECTOR_EXPORTS | {_TOOL_PROVIDER},
+    ),
+}
 
 #: `componentize-py`'s synthetic reflection export always reports this exact
 #: package name and no interface name (see module docstring).
@@ -477,7 +483,7 @@ def _classify_world_items(
     return names, violations
 
 
-def _validate_document(doc: dict[str, Any]) -> ComponentValidationResult:
+def _validate_document(doc: dict[str, Any], kind: str = "app") -> ComponentValidationResult:
     if "_decode_error" in doc:
         return ComponentValidationResult(
             ok=False, reason=f"not_a_valid_component:{doc['_decode_error']}"
@@ -509,17 +515,29 @@ def _validate_document(doc: dict[str, Any]) -> ComponentValidationResult:
             exports=tuple(export_names),
         )
 
+    allowed_sets = EXPORT_SETS_BY_KIND.get(kind)
+    if allowed_sets is None:
+        return ComponentValidationResult(
+            ok=False,
+            reason=f"unknown_manifest_kind:{kind!r}",
+            imports=tuple(import_names),
+            exports=tuple(export_names),
+        )
     exported = frozenset(
         name
         for name in export_names
         if name.startswith((f"{WADDLE_BUNDLE_NAMESPACE}/", f"{WADDLE_CONNECTOR_NAMESPACE}/"))
     )
-    if exported not in ALLOWED_EXPORT_SETS:
-        nearest = max(ALLOWED_EXPORT_SETS, key=lambda s: len(s & exported) - len(s ^ exported))
+    if exported not in allowed_sets:
+        # Deterministic: closest set for the DECLARED kind; ties go to the earlier-declared set.
+        nearest = allowed_sets[0]
+        for candidate in allowed_sets[1:]:
+            if len(candidate ^ exported) < len(nearest ^ exported):
+                nearest = candidate
         return ComponentValidationResult(
             ok=False,
             reason=(
-                f"stage_export_mismatch: missing={sorted(nearest - exported)} "
+                f"stage_export_mismatch: kind={kind} missing={sorted(nearest - exported)} "
                 f"extra={sorted(exported - nearest)}"
             ),
             imports=tuple(import_names),
@@ -531,7 +549,9 @@ def _validate_document(doc: dict[str, Any]) -> ComponentValidationResult:
     )
 
 
-async def validate_component(component_bytes: bytes) -> ComponentValidationResult:
+async def validate_component(
+    component_bytes: bytes, kind: str = "app"
+) -> ComponentValidationResult:
     """Validate `component_bytes` against the `stage` WIT world's import/export contract.
 
     Raises `ComponentValidatorUnavailableError` (never a `ComponentValidationResult`)
@@ -539,4 +559,4 @@ async def validate_component(component_bytes: bytes) -> ComponentValidationResul
     "validated OK" (see that class's own docstring).
     """
     doc = await asyncio.to_thread(_run_wasm_tools_wit_json, component_bytes)
-    return _validate_document(doc)
+    return _validate_document(doc, kind)

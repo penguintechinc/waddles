@@ -159,20 +159,24 @@ def test_conformance_gate_accepts_every_world_a_catalog_row_is_built_against() -
     were allowed, which failed the core-bundle-seeder on dal2alpha.
     """
     worlds = _wit_world_docs()
-    rows = yaml.safe_load(_CATALOG.read_text())["bundles"]
-    used = {r.get("wit_world") or "stage" for r in rows}
+    pairs: set[tuple[str, str]] = set()
+    for entry, row in zip(
+        seeder.load_catalog(_CATALOG), yaml.safe_load(_CATALOG.read_text())["bundles"], strict=True
+    ):
+        pairs.add((row.get("wit_world") or "stage", _source_manifest(entry).get("kind") or "app"))
+    used = {w for w, _ in pairs}
     assert {"stage", "stage-tools", "connector", "connector-tools"} <= used
     rejected: dict[str, str | None] = {}
-    for world_name in sorted(used):
+    for world_name, kind in sorted(pairs):
         key = (
             f"waddle-connector:{world_name}"
             if world_name.startswith("connector")
             else f"waddle-bundle:{world_name}"
         )
         assert key in worlds, f"catalog wit_world {world_name!r} has no WIT definition"
-        result = validator._validate_document(worlds[key])
+        result = validator._validate_document(worlds[key], kind)
         if not result.ok:
-            rejected[world_name] = result.reason
+            rejected[f"{world_name}/{kind}"] = result.reason
     assert rejected == {}
 
 
@@ -194,8 +198,105 @@ def test_conformance_gate_still_rejects_a_mixed_or_unknown_export_surface() -> N
         }
 
     ref = lambda i: {"interface": {"id": i}}  # noqa: E731
-    assert validator._validate_document(doc({"a": ref(0)})).ok is True
+    assert validator._validate_document(doc({"a": ref(0)}), "service").ok is True
     mixed = validator._validate_document(doc({"a": ref(0), "b": ref(1), "c": ref(2)}))
     assert mixed.ok is False and mixed.reason and "stage_export_mismatch" in mixed.reason
     only_one_stage = validator._validate_document(doc({"a": ref(1)}))
     assert only_one_stage.ok is False
+
+
+_PKGS = [
+    {"name": "waddle:bundle@1.0.0"},
+    {"name": "waddle:connector@1.0.0"},
+    {"name": "waddle:connector-evil@1.0.0"},
+    {"name": "waddle:bundlex@1.0.0"},
+]
+_IFACES = [
+    {"name": "process-stage", "package": 0},  # 0
+    {"name": "action-stage", "package": 0},  # 1
+    {"name": "tool-provider", "package": 0},  # 2
+    {"name": "receiver", "package": 1},  # 3
+    {"name": "sender", "package": 1},  # 4
+    {"name": "receiver", "package": 2},  # 5 lookalike namespace
+    {"name": "process-stage", "package": 3},  # 6 lookalike namespace
+    {"name": "streaming-lifecycle", "package": 0},  # 7
+]
+
+
+def _export_doc(*ids: int) -> dict[str, Any]:
+    return {
+        "worlds": [
+            {
+                "name": "root",
+                "imports": {},
+                "exports": {f"e{i}": {"interface": {"id": i}} for i in ids},
+                "package": 0,
+            }
+        ],
+        "interfaces": _IFACES,
+        "types": [],
+        "packages": _PKGS,
+    }
+
+
+@pytest.mark.parametrize(
+    ("ids", "kind"),
+    [
+        ((0, 1), "app"),
+        ((0, 1, 7), "app"),
+        ((2,), "service"),
+        ((3, 4), "service"),
+        ((3, 4, 2), "service"),
+    ],
+)
+def test_each_valid_kind_and_export_pairing_is_accepted(ids: tuple[int, ...], kind: str) -> None:
+    assert validator._validate_document(_export_doc(*ids), kind).ok is True
+
+
+@pytest.mark.parametrize(
+    ("ids", "kind"),
+    [
+        ((2,), "app"),  # service (tool-provider) exports under an app manifest
+        ((3, 4), "app"),  # connector exports under an app manifest
+        ((3, 4, 2), "app"),
+        ((0, 1), "service"),  # an app's stage pair under a service manifest
+        ((0, 1, 7), "service"),
+        ((0, 1), "bogus"),
+    ],
+)
+def test_export_surface_must_match_the_manifest_declared_kind(
+    ids: tuple[int, ...], kind: str
+) -> None:
+    result = validator._validate_document(_export_doc(*ids), kind)
+    assert result.ok is False
+    assert result.reason and (
+        f"kind={kind}" in result.reason or "unknown_manifest_kind" in result.reason
+    )
+
+
+@pytest.mark.parametrize(
+    ("ids", "kind"),
+    [
+        ((5, 4), "service"),  # waddle:connector-evil/receiver + real sender
+        ((5, 3, 4), "service"),
+        ((6, 1), "app"),  # waddle:bundlex/process-stage + real action-stage
+    ],
+)
+def test_lookalike_namespaces_are_rejected_not_prefix_matched(
+    ids: tuple[int, ...], kind: str
+) -> None:
+    """A namespace that merely STARTS WITH an allowed one is a different, disallowed package."""
+    result = validator._validate_document(_export_doc(*ids), kind)
+    assert result.ok is False
+    assert result.reason and result.reason.startswith("disallowed_export")
+
+
+def test_mismatch_reason_is_the_declared_kinds_nearest_set_and_deterministic() -> None:
+    first = validator._validate_document(_export_doc(2), "app")
+    again = validator._validate_document(_export_doc(2), "app")
+    assert first.reason == again.reason
+    assert first.reason == (
+        "stage_export_mismatch: kind=app "
+        "missing=['waddle:bundle/action-stage', 'waddle:bundle/process-stage'] "
+        "extra=['waddle:bundle/tool-provider']"
+    )
