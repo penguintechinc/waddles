@@ -17,6 +17,17 @@
   {
     "access": "write",
     "hostOp": {
+      "op": "chat.clear",
+      "origin": "channel",
+      "platform": "twitch"
+    },
+    "name": "twitch.chat.clear",
+    "requiredScope": "community:moderate",
+    "risk": "dangerous"
+  },
+  {
+    "access": "write",
+    "hostOp": {
       "op": "mod.ban",
       "origin": "channel",
       "platform": "twitch",

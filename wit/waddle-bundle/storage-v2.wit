@@ -1,0 +1,195 @@
+package waddle:bundle@1.0.0;
+
+// Bundle storage v2 -- additive `kv-v2` and `db-v2` interfaces.
+//
+// Strictly additive: the frozen `kv` and `db` interfaces in stage.wit are
+// untouched and keep serving every existing bundle. A bundle opts in by being
+// built against a world that imports these (`stage-next`, `stage-v2`,
+// `stage-tools`). Normative design + limits: docs/bundle-storage-v2.md.
+/// kv v2: compare-and-swap with versions, key listing, and a per-invocation
+/// byte budget. Shares keys with `kv` (a `kv.set` changes the version, so
+/// mixed use is safe). Capability: `storage.kv`.
+interface kv-v2 {
+  variant error {
+    too-large(u64),
+    /// Live-key or per-invocation (ops / bytes) quota hit; the message names which.
+    quota-exceeded(string),
+    invalid(string),
+    backend(string),
+  }
+
+  /// A value and its opaque version token. Compare tokens for equality only.
+  record versioned {
+    value: list<u8>,
+    version: u64,
+  }
+
+  variant cas-result {
+    /// Written; the key's new version.
+    swapped(u64),
+    /// Not written; the key's current version (0 = the key is absent).
+    conflict(u64),
+  }
+
+  variant delete-result {
+    deleted,
+    /// Not deleted; the key's current version (0 = the key is absent).
+    conflict(u64),
+  }
+
+  record key-page {
+    /// Keys under the prefix, lexicographic.
+    keys: list<string>,
+    /// Pass back as `cursor` for the next page; none when exhausted.
+    next-cursor: option<string>,
+  }
+
+  get-versioned: func(key: string) -> result<option<versioned>, error>;
+  /// Writes `value` iff the key's version equals `expected-version`
+  /// (0 = create only if absent). ttl-seconds = 0 means no expiry.
+  cas: func(key: string, expected-version: u64, value: list<u8>, ttl-seconds: u32)
+    -> result<cas-result, error>;
+  /// Deletes iff the key's version equals `expected-version` (>= 1).
+  delete-if: func(key: string, expected-version: u64) -> result<delete-result, error>;
+  /// Lists keys under `prefix` (empty = all) after `cursor`; `limit` is 1..=200.
+  list-keys: func(prefix: string, cursor: option<string>, limit: u32)
+    -> result<key-page, error>;
+}
+
+/// db v2: several manifest-declared tables per bundle, typed columns with
+/// declared indexes, a STRUCTURED filtered/ordered/paginated query (no SQL, ever),
+/// and bounded atomic transactions. Every row is scoped host-side to the
+/// invocation's authenticated (tenant, community, bundle): a guest names only
+/// the LOGICAL tables/columns its approved manifest declared and can never
+/// address another community, bundle, or a physical table. Capability:
+/// `storage.tables` (same permission as `db`).
+interface db-v2 {
+  use db.{value};
+
+  record column-value {
+    column: string,
+    value: value,
+  }
+
+  /// `created-at`/`updated-at` are RFC 3339 UTC, microsecond precision.
+  record row {
+    table: string,
+    row-id: string,
+    version: u64,
+    created-at: string,
+    updated-at: string,
+    columns: list<column-value>,
+  }
+
+  record in-condition {
+    column: string,
+    values: list<value>,
+  }
+
+  /// One predicate; a filter is a list of these joined by AND. A filter must be
+  /// supported by a declared index (see the design doc).
+  variant condition {
+    eq(column-value),
+    ne(column-value),
+    lt(column-value),
+    le(column-value),
+    gt(column-value),
+    ge(column-value),
+    in-list(in-condition),
+    /// text column starts with the value (literal; % and _ are not wildcards).
+    prefix(column-value),
+    is-null(string),
+    is-not-null(string),
+  }
+
+  record order {
+    column: string,
+    descending: bool,
+  }
+
+  record query-request {
+    table: string,
+    filter: list<condition>,
+    /// none = row-id ascending. Must be a NOT NULL indexed column or a platform column.
+    order: option<order>,
+    /// 1..=200.
+    limit: u32,
+    /// Opaque cursor from the previous page of the SAME query.
+    cursor: option<string>,
+  }
+
+  record query-page {
+    rows: list<row>,
+    next-cursor: option<string>,
+  }
+
+  record guard-count {
+    table: string,
+    filter: list<condition>,
+    min: u64,
+    max: u64,
+  }
+
+  record insert-op {
+    table: string,
+    columns: list<column-value>,
+  }
+
+  record update-op {
+    table: string,
+    row-id: string,
+    expected-version: u64,
+    columns: list<column-value>,
+  }
+
+  record row-version-op {
+    table: string,
+    row-id: string,
+    expected-version: u64,
+  }
+
+  /// One operation in a `transact` batch. The whole batch is atomic; any
+  /// failing op rolls everything back and the error names the op index.
+  variant tx-op {
+    insert(insert-op),
+    update(update-op),
+    delete(row-version-op),
+    /// Locks the row and fails the batch unless its version matches.
+    guard-version(row-version-op),
+    /// Fails the batch unless min <= count(filter) <= max.
+    guard-count(guard-count),
+  }
+
+  variant tx-result {
+    /// insert / update: the stored row.
+    written(row),
+    /// delete / guards.
+    done,
+  }
+
+  variant error {
+    denied(string),
+    invalid-table(string),
+    invalid-column(string),
+    invalid-value(string),
+    invalid-query(string),
+    not-found,
+    /// Version mismatch, failed guard, or unique-index violation; retryable
+    /// after re-reading.
+    conflict(string),
+    /// Row or byte quota for this bundle in this community is exhausted.
+    quota-exceeded(string),
+    timeout,
+    backend(string),
+  }
+
+  insert: func(table: string, columns: list<column-value>) -> result<row, error>;
+  get: func(table: string, row-id: string) -> result<row, error>;
+  query: func(request: query-request) -> result<query-page, error>;
+  count: func(table: string, filter: list<condition>) -> result<u64, error>;
+  update: func(table: string, row-id: string, expected-version: u64, columns: list<column-value>)
+    -> result<row, error>;
+  delete: func(table: string, row-id: string, expected-version: u64) -> result<_, error>;
+  /// 1..=16 ops, one Postgres transaction, per-scope writer lock (see design doc).
+  transact: func(ops: list<tx-op>) -> result<list<tx-result>, error>;
+}

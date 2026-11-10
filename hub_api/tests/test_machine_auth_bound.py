@@ -1,6 +1,6 @@
 """``machine_authenticated(bind_community=True)`` + SVID path against a live Quart app.
 
-Real Ed25519 issuer/verifier; no mocking of the guard. Covers community/connection binding,
+real ES256 issuer/verifier; no mocking of the guard. Covers community/connection binding,
 the wrong-tenant behaviour, the default-off SPIFFE peer-identity path and fail-closed 503.
 """
 
@@ -10,7 +10,7 @@ from typing import Any
 
 import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import (
     ServiceIdentity,
     ServiceJwtIssuer,
@@ -29,7 +29,7 @@ HEADER = "X-Peer-Spiffe-Id"
 
 
 def _issuer() -> ServiceJwtIssuer:
-    priv = Ed25519PrivateKey.generate()
+    priv = ec.generate_private_key(ec.SECP256R1())
     ids = {
         INGEST: ServiceIdentity(INGEST, "waddlebot", "svc-ingest", frozenset({SCOPE}), "system"),
         TENANTED: ServiceIdentity(
@@ -132,7 +132,7 @@ async def test_non_integer_community_claim_is_401() -> None:
         "tenant": "system",
         "community": "abc",
     }
-    tok = jwt.encode(claims, key, algorithm="EdDSA", headers={"kid": "k1"})
+    tok = jwt.encode(claims, key, algorithm="ES256", headers={"kid": "k1"})
     resp = await app.test_client().get("/c/7/conn/3", headers={"Authorization": f"Bearer {tok}"})
     assert resp.status_code == 401
 

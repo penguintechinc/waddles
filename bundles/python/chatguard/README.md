@@ -149,3 +149,37 @@ mints placeholders, so a typed `{user:token-shaped-word}` is blanked like a ment
 - A timeout capability (see above) and Twitch delete are host work; escalation (warn -> timeout)
   needs the former.
 - Per-user exemptions (regulars/subscribers) and a link domain allow-list are not implemented.
+
+## Cross-platform moderation commands (v1.1.0)
+
+Moderators ban/timeout/kick across platforms with one grammar. The target is a plain username
+(`bob`, `@bob`) or an `@mention`; the platform word is optional and defaults to `all`. A plain
+username is resolved host-side (invoking platform first, then linked identities): ambiguous ->
+"@mention them to pick one", unknown -> "user not found". It is never sent to a tool or logged.
+
+| Command | Platforms |
+|---|---|
+| `!ban <user> [platform] [reason...]` | twitch, discord, youtube |
+| `!unban <user> [platform]` | twitch, discord, youtube |
+| `!timeout <user> <duration> [platform] [reason...]` (`30s 10m 2h 1d 1w 1h30m`) | twitch (<=14d), discord (<=28d), youtube (<=14d, assumed) |
+| `!untimeout <user> [platform]` | twitch (via unban), discord, youtube (via unban) |
+| `!kick <user> [platform]` | discord only; others answer "not supported" |
+| `!purge <user> [platform]` | twitch only (1 second timeout) |
+| `!modlog [n]` | last n (max 5) actions of this community |
+
+- `all` fans out to the platforms in the community's `moderation.config` kv blob
+  (`{"default_reason": str, "all_platforms": [..]}`, default twitch/discord/youtube) and the single
+  reply reports each platform: `banned on twitch, discord; youtube: no linked account`.
+- A duration over a platform cap is **clamped** for `all` (and noted) and **refused** when a single
+  platform is named.
+- Usernames never reach a platform tool: the mention is resolved host-side to a community user UUID
+  and every tool call carries `{"user": "<uuid>"}` only. The host-side tool maps the UUID to the
+  linked platform account.
+- Authorization is the host's: each platform tool requires `community:moderate` for the
+  host-verified actor (never chat badges). Protected targets (broadcaster/owner/other mods) are
+  refused by the platform tools' hierarchy gates; self-targets are refused here.
+- Every action is audited (PII-free `moderation.action` log + the `!modlog` ring).
+- Contract fixtures: `tests/fixtures/moderation_tools.json` (twitch/discord copied from the service
+  manifests; **youtube entries are assumed** until the YouTube tools merge).
+- The platform tools are only invocable once the host tool path (S0c) ships; until then a call
+  fails loud with `target_unavailable` ("unavailable, try again").

@@ -223,7 +223,13 @@ async fn forged_wrong_key_wrong_instance_and_stale_are_403() {
     // Tampered signature segment.
     let good = rig.jwt(&wix_sign::rs256(), INSTANCE, &unique(), now());
     let mut parts: Vec<&str> = good.split('.').collect();
-    let sig = format!("{}A", &parts[2][..parts[2].len() - 1]);
+    // Flip the FIRST signature char to one guaranteed different from the
+    // original (the old "replace last char with 'A'" was a no-op 1 time in
+    // 64, and the last base64url char carries padding bits that a lenient
+    // decoder may ignore). The first char always carries 6 significant bits.
+    let first = parts[2].chars().next().expect("non-empty signature");
+    let flipped = if first == 'A' { 'B' } else { 'A' };
+    let sig = format!("{flipped}{}", &parts[2][first.len_utf8()..]);
     parts[2] = &sig;
     assert_eq!(rig.post(parts.join(".").into_bytes()).await, 403);
     // alg=none / HS256 / lowercase confusion headers (signature is irrelevant).

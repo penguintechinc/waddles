@@ -631,3 +631,24 @@ async def test_real_conformant_component_validates_ok() -> None:
     result = await validator.validate_component(data)
     assert result.ok is True, result.reason
     assert set(result.exports) == {"waddle:bundle/process-stage", "waddle:bundle/action-stage"}
+
+
+@pytest.mark.parametrize("missing_stage", [False, True])
+async def test_stage_next_lifecycle_is_optional_but_never_replaces_a_stage(
+    monkeypatch: pytest.MonkeyPatch, missing_stage: bool
+) -> None:
+    interfaces = [*_CONFORMANT_INTERFACES, {"name": "streaming-lifecycle", "package": 0}]
+    exports = {"process": _iface_ref(1), "lifecycle": _iface_ref(4)}
+    if not missing_stage:
+        exports["action"] = _iface_ref(2)
+    doc = _doc(
+        packages=_CONFORMANT_PACKAGES,
+        interfaces=interfaces,
+        imports={"context": _iface_ref(0)},
+        exports=exports,
+    )
+    monkeypatch.setattr(validator, "_run_wasm_tools_wit_json", lambda data: doc)
+    result = await validator.validate_component(b"fake")
+    assert result.ok is (not missing_stage)
+    if missing_stage:
+        assert "action-stage" in (result.reason or "")

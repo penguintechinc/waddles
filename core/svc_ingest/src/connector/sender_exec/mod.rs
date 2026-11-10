@@ -31,6 +31,7 @@
 //! `role.add`/`role.remove` and the guild scheduled-event ops
 //! (`event.create|update|cancel|delete`) run as host duties.
 
+pub mod app_credentials;
 pub mod discord_duties;
 pub mod discord_slots;
 pub mod policy;
@@ -193,6 +194,19 @@ pub enum SlotError {
 /// Per-community slot / credential resolution, invoked on EVERY send. An
 /// implementation must not cache secrets and must never fall back to another
 /// community's credential.
+/// Stable refusal code for an app-credential kind with no host-side broadcaster binding.
+pub const APP_KIND_UNBOUND_CODE: &str = "slot_app_kind_unbound";
+
+/// Whether `(platform, kind)` would use the APP credential on per-broadcaster resources
+/// without any host-side proof the requesting community owns the broadcaster. Twitch
+/// EventSub subscriptions are app-wide: with the app token any community could list,
+/// delete or create another broadcaster's. Every `eventsub.*` kind is refused until an
+/// ownership binding exists (the Twitch-side check lands separately).
+#[must_use]
+pub fn app_kind_lacks_broadcaster_binding(platform: &str, kind: &str) -> bool {
+    platform == "twitch" && kind.starts_with("eventsub.")
+}
+
 #[allow(async_fn_in_trait)] // service-binary-internal
 pub trait SlotSource: Send + Sync {
     /// Resolves `req.handles`; every requested handle must be present in the
@@ -815,6 +829,17 @@ where
         for c in &verified.header_creds {
             handles.push(c.handle);
         }
+        // An app credential acts for the whole application, so a kind that reaches
+        // per-broadcaster resources with it needs a HOST-side broadcaster ownership
+        // binding. None exists yet: refuse every such kind (stable code) rather than let
+        // one community list/delete/create another broadcaster's subscriptions.
+        if handles
+            .iter()
+            .any(|h| h.starts_with(policy::APP_HANDLE_PREFIX))
+            && app_kind_lacks_broadcaster_binding(req.platform, kind_name)
+        {
+            return Err(ExecError::Slot(SlotError::Refused(APP_KIND_UNBOUND_CODE)));
+        }
         // Credential scope: an app-scoped kind may not also resolve a user-scoped slot, and
         // runs only on a source that declares app-credential support.
         let app_slots = verified
@@ -1004,7 +1029,12 @@ fn pin_channel(
             ..
         }) => {
             let origin = origin_channel.as_deref();
-            if channel.is_none() && origin.is_some_and(|o| role_guild_scope(o).is_some()) {
+            // A `guild:` scope names no channel, so it can never satisfy a kind that
+            // requires a pinned channel: that falls through and is refused below.
+            if !requires_pin
+                && channel.is_none()
+                && origin.is_some_and(|o| role_guild_scope(o).is_some())
+            {
                 return Ok(None);
             }
             match (channel.as_deref(), origin) {
@@ -1021,16 +1051,13 @@ fn pin_channel(
         OutboundAction::EventOp { .. } if !uses_stamp => return Ok(None),
         OutboundAction::EventOp { .. } => return Err(ExecError::BadAction),
     };
-    if !matches!(platform, "twitch" | "discord" | "youtube") {
-        return if uses_stamp {
-            Err(ExecError::Pin(PinError::UnsupportedPlatform))
-        } else {
-            Ok(None)
-        };
+    match crate::outbound_pin::pin_target(platform, channel, origin) {
+        Ok(p) => Ok(Some(p)),
+        // FAIL CLOSED: a platform without a pin implementation may only run a kind that needs
+        // no pin; a pinned kind (`requires_pin` / stamp slot) there is refused, never unpinned.
+        Err(PinError::UnsupportedPlatform) if !uses_stamp && !requires_pin => Ok(None),
+        Err(e) => Err(ExecError::Pin(e)),
     }
-    crate::outbound_pin::pin_target(platform, channel, origin)
-        .map(Some)
-        .map_err(ExecError::Pin)
 }
 
 /// Parses a role op's guild-scope wire form: `guild:-` -> `Some(None)` (no assertion, pin from
@@ -1090,6 +1117,8 @@ pub(crate) fn default_payload(
 
 #[cfg(test)]
 mod discord_tests;
+#[cfg(test)]
+mod pin_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]

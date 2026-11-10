@@ -71,7 +71,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: core-bundle-seeder
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "core-bundle-seeder" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "seeder" "imageTag" .Values.global.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         # Explicit (not a `toYaml .Values.securityContext` reference) for the same reason as
         # the pod-level securityContext above -- also adds a container-level seccompProfile,
@@ -97,6 +97,7 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_NAME
           value: "core-bundle-seeder"
         # PR #870 -- the seeder now signs bundles on activation (activate_for_community ->
@@ -195,12 +196,14 @@ spec:
         resources:
           {{- toYaml .Values.pipeline.coreBundleSeeder.resources | nindent 10 }}
         volumeMounts:
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         - name: tmp
           mountPath: /tmp
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
       volumes:
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       - name: tmp
         emptyDir: {}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}

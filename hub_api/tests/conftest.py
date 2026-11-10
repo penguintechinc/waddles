@@ -84,6 +84,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    Uuid,
 )
 
 from services.schema import (
@@ -1590,6 +1591,21 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("status_changed_at", DateTime),
     )
     Table(
+        "bundle_community_config",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("version", Integer, nullable=False),
+        Column("config", JSON, nullable=False),
+        Column("schema_sha256", String(64), nullable=False),
+        Column("updated_by", Integer),
+        Column("created_at", DateTime),
+        # Mirrors migration 0082's UNIQUE -- the save race guard.
+        UniqueConstraint("tenant_id", "community_id", "app_id", "version"),
+    )
+    Table(
         "app_install_approvals",
         metadata,
         Column("id", Integer, primary_key=True, autoincrement=True),
@@ -1642,9 +1658,38 @@ def _create_bundle_install_tables(conn: Any) -> None:
         metadata,
         Column("id", Integer, primary_key=True, autoincrement=True),
         Column("tenant_id", Integer, nullable=False),
+        Column("public_id", String(36)),
         Column("name", String(255)),
         Column("is_active", Boolean),
         Column("is_public", Boolean),
+        Column("platform", String(50)),
+        Column("platform_server_id", String(255)),
+    )
+    # community_servers (000_create_base_schema.sql) -- the approved source<->community links the
+    # slash-command desired-state / active-context lookups read.
+    Table(
+        "community_servers",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("community_id", Integer, nullable=False),
+        Column("platform", String(50), nullable=False),
+        Column("platform_server_id", String(255), nullable=False),
+        Column("status", String(50), server_default="pending"),
+        Column("is_primary", Boolean, server_default="0"),
+    )
+    # user_active_context (migration 0082) -- sqlite mirror; the real constraints are proven on
+    # Postgres in alembic/tests/test_0084_user_active_context.py.
+    Table(
+        "user_active_context",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("user_uuid", Uuid, nullable=False),
+        Column("platform", String(50), nullable=False),
+        Column("source_id", String(255), nullable=False),
+        Column("community_id", Integer, nullable=False),
+        Column("updated_at", DateTime),
+        UniqueConstraint("user_uuid", "platform", "source_id"),
     )
     # app_source_bindings (migration 0025) -- AUTO-BIND record of which
     # ingest_sources an approved app consumes (services/app_source_
@@ -1819,6 +1864,10 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("created_at", DateTime),
     )
     metadata.create_all(conn)
+    # pydal-created `tenants` / `app_catalog` pre-date migration 0082's `public_id`; mirror it
+    # (the real NOT NULL/unique/default are proven on Postgres in test_0082).
+    for table in ("tenants", "app_catalog"):
+        conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN public_id CHAR(36)")
 
 
 @pytest.fixture

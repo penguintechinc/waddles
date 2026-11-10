@@ -10,11 +10,12 @@ use super::{
     build, invoke, manifest_tools, twitch_event, FakeRelayQueue, Rig, UUID_A, UUID_B, UUID_C,
 };
 
-const EXPECTED: [(&str, &str); 4] = [
+const EXPECTED: [(&str, &str); 5] = [
     ("twitch.moderation.ban", "mod.ban"),
     ("twitch.moderation.timeout", "mod.timeout"),
     ("twitch.moderation.unban", "mod.unban"),
     ("twitch.moderation.delete_message", "chat.delete"),
+    ("twitch.chat.clear", "chat.clear"),
 ];
 
 fn rig() -> Rig {
@@ -22,6 +23,7 @@ fn rig() -> Rig {
         svc_grants: vec![
             "moderation.twitch".to_string(),
             "chat.delete:twitch".to_string(),
+            "chat.clear:twitch".to_string(),
         ],
         ..Rig::default()
     }
@@ -160,4 +162,56 @@ async fn only_a_verified_moderator_may_call_and_protected_targets_are_refused() 
         }
     }
     assert_eq!(c.relay_queue.envelopes().len(), 1, "only the unban was queued");
+}
+
+#[tokio::test]
+async fn chat_clear_queues_a_parameterless_op_pinned_to_the_origin_channel() {
+    let c = stage();
+    let out = call(&c, "500", "twitch.chat.clear", json!({}))
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(out, json!({"ok": true, "op": "chat.clear"}));
+    let envs = c.relay_queue.envelopes();
+    assert_eq!(envs.len(), 1);
+    let e = &envs[0];
+    assert_eq!(
+        (e["op"].as_str(), e["platform"].as_str(), e["channel"].as_str()),
+        (Some("chat.clear"), Some("twitch"), Some("#somechannel"))
+    );
+    for k in ["user_id", "text", "message_id"] {
+        assert!(e.get(k).is_none(), "chat.clear carries no {k}");
+    }
+    // Every argument is refused (never ignored): a clear cannot become a targeted op.
+    for args in [
+        json!({"message_id": "m"}),
+        json!({"user": UUID_B}),
+        json!({"channel": "#other"}),
+    ] {
+        let err = call(&c, "500", "twitch.chat.clear", args.clone())
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("invalid_args"), "{args}: {err}");
+    }
+    // A plain member lacks the moderate scope.
+    let err = call(&c, "501", "twitch.chat.clear", json!({})).await.unwrap_err();
+    assert!(err.contains("scope_denied"), "{err}");
+    assert_eq!(c.relay_queue.envelopes().len(), 1);
+}
+
+#[tokio::test]
+async fn chat_clear_needs_the_service_bundles_own_clear_grant() {
+    let c = build(
+        Rig {
+            svc_grants: vec![
+                "moderation.twitch".to_string(),
+                "chat.delete:twitch".to_string(),
+            ],
+            ..Rig::default()
+        },
+        manifest_tools("twitch"),
+        FakeRelayQueue::with_live_drain(),
+    );
+    let err = call(&c, "500", "twitch.chat.clear", json!({})).await.unwrap_err();
+    assert!(err.starts_with("forbidden") && err.contains("scope_denied"), "{err}");
+    assert!(c.relay_queue.envelopes().is_empty());
 }

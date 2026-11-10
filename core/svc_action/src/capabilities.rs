@@ -1066,6 +1066,20 @@ pub struct DbWiring {
     /// `crate::flags::BUNDLE_DB_CAPABILITY_FLAG` gate -- OFF denies every
     /// `db` call `feature_disabled` before any schema/authorize lookup.
     pub flag: Arc<dyn FeatureFlag>,
+    /// `db` v2 (multi-table, structured query, transactions, quotas).
+    pub v2: DbV2Wiring,
+}
+
+/// `db` v2 state shared by every invocation: the engine, the registry of
+/// manifest-declared tables (refreshed from `bundle_data.table_registry`), and
+/// the crate-seam grant snapshot (the stage's capability gate is the real
+/// authority; the snapshot is populated only after the gate passes). Same shape
+/// as `core/svc_process::capabilities::DbV2Wiring`.
+#[derive(Clone)]
+pub struct DbV2Wiring {
+    pub host: Arc<bundle_host_db::v2::DbV2Host>,
+    pub registry: Arc<bundle_host_db::v2::SchemaRegistryV2>,
+    pub capabilities: Arc<DbCapabilitySnapshot>,
 }
 
 pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::MultiplexedConnection> {
@@ -2322,8 +2336,24 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 Ok(Some(raw)) => {
                     return match parse_ack(&raw) {
                         Ok(AckOutcome::Confirmed) => {
-                            let v: serde_json::Value =
-                                serde_json::from_str(&raw).unwrap_or_default();
+                            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        provider,
+                                        op = op.as_str(),
+                                        error = %e,
+                                        "platform op ack was confirmed but its payload is unreadable"
+                                    );
+                                    return Err(denied(
+                                        "relay_unconfirmed",
+                                        format!(
+                                            "{provider} {} result payload was unreadable; the op is unconfirmed",
+                                            op.as_str()
+                                        ),
+                                    ));
+                                }
+                            };
                             Ok(v.get("data").or_else(|| v.get("id")).cloned())
                         }
                         Ok(AckOutcome::Refused(failure)) => {
@@ -2400,6 +2430,20 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         op: RelayOp,
         message: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
+        // Defense in depth behind `handle_relay`'s check: this guest-reachable producer has no
+        // verified actor, scope check or protected-target check, so it must never queue an op
+        // that exists only behind the host tool path (destructive moderation, chat.clear,
+        // webhook.create), even if a future caller forgets the upstream refusal.
+        if let RelayOp::Registered(name) = op {
+            if bundle_capability_gate::platform_ops::host_tool_only(provider, name) {
+                return Err(denied(
+                    "host_tool_only",
+                    format!(
+                        "op {name:?} for provider {provider:?} is only available through a platform service tool"
+                    ),
+                ));
+            }
+        }
         let id_field = |name: &str| -> Result<Option<&str>, HostResultError> {
             match message.get(name) {
                 None | Some(serde_json::Value::Null) => Ok(None),
@@ -2903,11 +2947,124 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                     .map_err(kv_err_to_host)?;
                 Ok(serde_json::json!({ "value": value }))
             }
+            "get_versioned" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                let found = kv
+                    .get_versioned(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(match found {
+                    Some((value, version)) => {
+                        serde_json::json!({ "value": value, "version": version })
+                    }
+                    None => serde_json::json!({ "value": null }),
+                })
+            }
+            "cas" => {
+                let args: KvCasArgs = parse_kv_args(&call.args)?;
+                let r = kv
+                    .cas(
+                        &kv_scope,
+                        call.call_id,
+                        &args.key,
+                        args.expected_version,
+                        &args.value,
+                        args.ttl_seconds,
+                    )
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(match r {
+                    bundle_host_kv::KvCasResult::Swapped(v) => {
+                        serde_json::json!({ "swapped": true, "version": v })
+                    }
+                    bundle_host_kv::KvCasResult::Conflict(v) => {
+                        serde_json::json!({ "swapped": false, "version": v })
+                    }
+                })
+            }
+            "delete_if" => {
+                let args: KvDeleteIfArgs = parse_kv_args(&call.args)?;
+                let r = kv
+                    .delete_if(&kv_scope, call.call_id, &args.key, args.expected_version)
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(match r {
+                    bundle_host_kv::KvDeleteIfResult::Deleted => {
+                        serde_json::json!({ "deleted": true, "version": 0 })
+                    }
+                    bundle_host_kv::KvDeleteIfResult::Conflict(v) => {
+                        serde_json::json!({ "deleted": false, "version": v })
+                    }
+                })
+            }
+            "list" => {
+                let args: KvListArgs = parse_kv_args(&call.args)?;
+                let page = kv
+                    .list(
+                        &kv_scope,
+                        call.call_id,
+                        &args.prefix,
+                        args.cursor.as_deref(),
+                        args.limit,
+                    )
+                    .await
+                    .map_err(kv_err_to_host_v2)?;
+                Ok(serde_json::json!({ "keys": page.keys, "next_cursor": page.next_cursor }))
+            }
             other => Err(denied(
                 "unknown_op",
                 format!("kv op {other:?} not supported"),
             )),
         }
+    }
+
+    /// `db` v2 (`db2.*` ops): multi-table, structured query, transactions,
+    /// quotas. Mirror of `core/svc_process::capabilities::StageCapabilities::
+    /// handle_db_v2`: same gate (`storage.tables`) and feature flag as v1; the
+    /// stage injects tenant/community/app from `scope`, never from `call`. The
+    /// wire contract and every limit live in `bundle_host_db::v2`.
+    async fn handle_db_v2(
+        &self,
+        scope: &InvokeScope,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::StorageTables,
+                ResourceRef::AppScoped(AppScopedResource::Table),
+            )
+            .map_err(denied_from_gate)?;
+        let Some(db) = &self.db else {
+            return Err(denied(
+                "not_implemented",
+                "db capability is not wired in this build (BUNDLE_DB_PASSWORD unset)",
+            ));
+        };
+        if !db.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "db capability is disabled (waddles.bundle-db-capability is OFF)",
+            ));
+        }
+        // The gate above is the authority; mirror its grant into the crate-seam
+        // snapshot (idempotent, only written when absent).
+        if !db.v2.capabilities.declares(&scope.app_id, "storage.tables") {
+            db.v2
+                .capabilities
+                .update(scope.app_id.clone(), ["storage.tables".to_string()]);
+        }
+        let db_scope = DbScope::new(scope.tenant_id, scope.community_id, scope.app_id.clone());
+        bundle_host_db::v2::wire::handle(
+            &db.v2.host,
+            &db_scope,
+            &db.v2.registry,
+            &db.v2.capabilities,
+            &call.op,
+            &call.args,
+        )
+        .await
+        .map_err(|e| denied(e.code, e.message))
     }
 
     /// Structured insert/get/update/delete/query against this app's own
@@ -2948,7 +3105,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         let Some(db) = &self.db else {
             return Err(denied(
                 "not_implemented",
-                "db capability is not wired in this build -- TODO(M4+)",
+                "db capability is not wired in this build (BUNDLE_DB_PASSWORD unset)",
             ));
         };
 
@@ -3228,6 +3385,31 @@ struct KvSetArgs {
     ttl_seconds: u32,
 }
 
+/// `kv-v2.cas` args.
+#[derive(serde::Deserialize)]
+struct KvCasArgs {
+    key: String,
+    expected_version: u64,
+    value: Vec<u8>,
+    ttl_seconds: u32,
+}
+
+/// `kv-v2.delete-if` args.
+#[derive(serde::Deserialize)]
+struct KvDeleteIfArgs {
+    key: String,
+    expected_version: u64,
+}
+
+/// `kv-v2.list-keys` args.
+#[derive(serde::Deserialize)]
+struct KvListArgs {
+    prefix: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    limit: u32,
+}
+
 /// `{"key": String, "delta": i64, "ttl_seconds": u32}` -- `kv.increment`'s args.
 #[derive(serde::Deserialize)]
 struct KvIncrementArgs {
@@ -3250,6 +3432,12 @@ fn parse_kv_args<T: serde::de::DeserializeOwned>(
 /// pass-through, not a second mapping layer.
 fn kv_err_to_host(err: KvError) -> HostResultError {
     denied(err.wire_code(), err.wire_message())
+}
+
+/// kv v2 keeps the fine-grained code (`quota_exceeded`/`rate_limited`/
+/// `invalid_key`/`too_large`) on the wire so the guest can branch on it.
+fn kv_err_to_host_v2(err: KvError) -> HostResultError {
+    denied(err.code(), err.wire_message())
 }
 
 impl<Q: RelayQueue, K: KvBackend> CapabilityHandler for StageCapabilities<Q, K> {
@@ -3299,7 +3487,16 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                         ResourceRef::AppScoped(AppScopedResource::None),
                     )
                     .map_err(denied_from_gate)?;
-                self.egress.send(&scope.app_id, &call.args).await
+                // Host-verified (tenant, community) of THIS invocation: the
+                // community whose connection a `connection:` secret grant
+                // resolves. Never a guest-supplied value.
+                let cred_scope = bundle_host_http::credentials::CallScope {
+                    tenant_id: i64::from(scope.tenant_id),
+                    community_id: i64::from(scope.community_id),
+                };
+                self.egress
+                    .send_scoped(&scope.app_id, &cred_scope, &call.args)
+                    .await
             }
             CapabilityKind::Kv => self.handle_kv(scope, &call).await,
             // `db` is wired below (mirrors svc_process); `handle_db`
@@ -3319,6 +3516,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 "not_implemented",
                 "platform-table is hosted by the process stage only (not the action stage)",
             )),
+            CapabilityKind::Db if bundle_host_db::v2::wire::is_v2_op(&call.op) => {
+                self.handle_db_v2(scope, &call).await
+            }
             CapabilityKind::Db => self.handle_db(scope, &call).await,
             // `enabled` is wired to a real `penguin_licensing::
             // LicenseClient` (`crate::flags::resolve_flag`) -- see
@@ -4585,6 +4785,108 @@ mod tests {
         assert_eq!(err.code, "unknown_op");
     }
 
+    #[tokio::test]
+    async fn db_v2_ops_are_not_implemented_when_unwired_and_disabled_when_flag_off() {
+        let unwired = caps(FakeRelayQueue::default());
+        let err = unwired
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Db,
+                    "db2.query",
+                    serde_json::json!({"table": "events", "limit": 5}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+
+        let off = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(false));
+        let err = off
+            .handle(
+                &scope(),
+                call(CapabilityKind::Db, "db2.query", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "feature_disabled");
+    }
+
+    #[tokio::test]
+    async fn db_v2_dispatch_routes_db2_ops_and_fails_loud_on_bad_ones() {
+        let on = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        // Routed through `handle` to the v2 engine (not v1's `no_table`): no v2
+        // tables are provisioned for this app, so an explicit invalid_table.
+        let err = on
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Db,
+                    "db2.get",
+                    serde_json::json!({"table": "events", "row_id": "00000000-0000-0000-0000-000000000000"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_table");
+        let err = on
+            .handle(
+                &scope(),
+                call(CapabilityKind::Db, "db2.drop", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+        let err = on
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Db,
+                    "db2.get",
+                    serde_json::json!({"table": 5}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn kv_v2_ops_fail_loud_on_a_backend_without_v2_support() {
+        let c = caps_with_kv(FakeRelayQueue::default());
+        for (op, args) in [
+            ("get_versioned", serde_json::json!({"key": "k"})),
+            (
+                "cas",
+                serde_json::json!({"key": "k", "expected_version": 0, "value": [1], "ttl_seconds": 0}),
+            ),
+            (
+                "delete_if",
+                serde_json::json!({"key": "k", "expected_version": 1}),
+            ),
+            ("list", serde_json::json!({"prefix": "", "limit": 5})),
+        ] {
+            let err = c
+                .handle(&scope(), call(CapabilityKind::Kv, op, args))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "backend", "{op}");
+            assert!(
+                err.message.contains("not supported"),
+                "{op}: {}",
+                err.message
+            );
+        }
+        let err = c
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "cas", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
     /// Mirrors `core/svc_process::capabilities::tests::mock_db_wiring` --
     /// same `MockDatabase`-backed `PostgresBackend`, over this crate's own
     /// `FeatureFlag`/`StaticFlag` instead of svc_process's `FeatureGate`.
@@ -4595,6 +4897,16 @@ mod tests {
             schemas: Arc::new(SchemaCache::new()),
             capabilities: Arc::new(DbCapabilitySnapshot::new()),
             flag: crate::flags::boxed(crate::flags::StaticFlag(flag_on)),
+            v2: DbV2Wiring {
+                host: Arc::new(bundle_host_db::v2::DbV2Host::new(
+                    bundle_host_db::v2::PostgresV2Backend::new(
+                        sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
+                            .into_connection(),
+                    ),
+                )),
+                registry: Arc::new(bundle_host_db::v2::SchemaRegistryV2::new()),
+                capabilities: Arc::new(DbCapabilitySnapshot::new()),
+            },
         }
     }
 
@@ -7676,37 +7988,44 @@ mod tests {
     /// queue and only reported successful after the drain's confirmation.
     #[tokio::test]
     async fn a_chat_scoped_registered_op_is_pinned_signed_and_confirmed() {
+        // `message.edit` (a chat-scoped registered op that is NOT host-tool-only; destructive
+        // moderation ops are, and are refused on this guest path -- see the host_tools tests).
         let caps = caps(FakeRelayQueue::with_live_drain());
-        let msg =
-            serde_json::json!({"op":"mod.ban","user_id":"123","channel":"#victim","text":"{}"});
+        let msg = serde_json::json!({
+            "op":"message.edit","message_id":"123456789","channel":"999999999999999999","text":"hi"
+        });
         let out = caps
-            .handle(&twitch_scope(), relay_call("twitch", &msg))
+            .handle(&discord_scope(), relay_call("discord", &msg))
             .await
             .unwrap();
         assert_eq!(out["confirmed"], true);
-        assert_eq!(out["op"], "mod.ban");
+        assert_eq!(out["op"], "message.edit");
         let env = &caps.relay_queue.envelopes()[0];
-        assert_eq!(env["op"], "mod.ban");
-        assert_eq!(env["platform"], "twitch");
-        assert_eq!(env["channel"], "#somechannel");
-        assert_eq!(env["origin_channel"], "#somechannel");
-        assert_eq!(env["user_id"], "123");
+        assert_eq!(env["op"], "message.edit");
+        assert_eq!(env["platform"], "discord");
+        // The bundle-named channel is ignored: pinned to the verified origin.
+        assert_eq!(env["channel"], "123456789012345678");
+        assert_eq!(env["origin_channel"], "123456789012345678");
+        assert_eq!(env["message_id"], "123456789");
         assert_eq!(env["tenant_id"], 7);
         assert!(env["pin_sig"].is_string());
         assert!(env["op_id"].is_string() && env["exp_ms"].is_u64());
         let pushed = caps.relay_queue.pushed.lock().unwrap();
-        assert_eq!(pushed[0].0, "waddles:transport:irc:twitch:outbound");
+        assert_eq!(pushed[0].0, "waddles:transport:irc:discord:outbound");
     }
 
     #[tokio::test]
     async fn a_chat_scoped_op_without_a_matching_origin_is_refused_before_queueing() {
         let caps = caps(FakeRelayQueue::with_live_drain());
         // No origin channel at all, and an origin on another platform.
-        for sc in [scope(), discord_scope()] {
+        for sc in [scope(), twitch_scope()] {
             let err = caps
                 .handle(
                     &sc,
-                    relay_call("twitch", &serde_json::json!({"op":"mod.ban","user_id":"1"})),
+                    relay_call(
+                        "discord",
+                        &serde_json::json!({"op":"message.edit","message_id":"1","text":"x"}),
+                    ),
                 )
                 .await
                 .unwrap_err();

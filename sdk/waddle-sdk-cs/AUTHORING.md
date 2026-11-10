@@ -1,5 +1,8 @@
 # Authoring a new C# bundle on `waddle-sdk-cs`
 
+> Bundles needing economy/identity/tool/overlay/ai/media (every wagering port): follow `docs/sdk-cs.md` (world `stage-next-tools`,
+> `Wit Include` the `wit/waddle-bundle` DIRECTORY, extra `StreamingLifecycleExportsImpl.cs`). The checklist below covers the `stage` world.
+
 Quick-reference checklist for the SuperPenguin C# port batch. Full
 rationale, code samples, and gotchas live in `README.md` "Writing a
 bundle" -- read that once; use this page as the per-bundle checklist
