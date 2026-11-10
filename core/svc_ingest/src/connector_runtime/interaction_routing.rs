@@ -19,7 +19,7 @@ use super::feed::DesiredConnection;
 use super::supervisor::{SinkBuildError, SinkFactory};
 use crate::active_context::{
     register_routing_metrics, ContextError, ContextSink, ContextSource, HubContextSource,
-    InteractionReplier, InvokerTokenizer, RoutingMetrics, ACTIVE_CONTEXT_JWT_SCOPE,
+    InteractionReplier, InvokerTokenizer, RoutingMetrics,
 };
 use crate::commands_reconcile::BoxFut;
 use crate::config::CliConfig;
@@ -81,7 +81,7 @@ impl InteractionRouting {
     /// # Errors
     /// A missing JWT bootstrap, a plaintext hub-api outside alpha, an HTTP client build
     /// failure or a duplicate metric registration -- all fatal, never a fallback.
-    pub fn from_config(
+    pub async fn from_config(
         cli: &CliConfig,
         store: InteractionStore,
         registry: &prometheus::Registry,
@@ -93,15 +93,17 @@ impl InteractionRouting {
                  no machine JWT for active-context routing"
             );
         }
-        crate::scope_resolver::check_transport(&cli.hub_api_url, &cli.environment)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        let jwt = Arc::new(service_auth::MachineJwtClient::new(
-            cli.service_jwt_token_endpoint.clone(),
-            cli.service_jwt_sa_token_path.clone(),
-            ACTIVE_CONTEXT_JWT_SCOPE,
-        ));
-        let source = HubContextSource::new(&cli.hub_api_url, jwt)
-            .map_err(|_| anyhow::anyhow!("active-context client could not be built"))?;
+        let metrics = register_routing_metrics(registry)
+            .map_err(|_| anyhow::anyhow!("interaction routing metrics could not be registered"))?;
+        let ca_file = cli.hub_api_grpc_ca_file.trim();
+        let source = HubContextSource::connect(
+            &cli.hub_api_grpc_endpoint,
+            &cli.service_jwt_token_endpoint,
+            &cli.service_jwt_sa_token_path,
+            (!ca_file.is_empty()).then_some(ca_file),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("active-context hub-api gRPC connect failed: {e}"))?;
         let client = GuardedClient::new(
             GuardedLimits {
                 max_redirects: 0,
@@ -115,8 +117,6 @@ impl InteractionRouting {
             client,
             crate::interaction_tap::API_BASE.to_string(),
         ));
-        let metrics = register_routing_metrics(registry)
-            .map_err(|_| anyhow::anyhow!("interaction routing metrics could not be registered"))?;
         Ok(Self {
             source: Arc::new(source),
             store,

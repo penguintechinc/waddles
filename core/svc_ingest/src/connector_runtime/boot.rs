@@ -950,7 +950,8 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
             crate::interaction_store::InteractionStore::new(lease_conn.clone()),
             &registry,
             tokenizer,
-        )?)
+        )
+        .await?)
     } else {
         None
     };
@@ -1661,8 +1662,8 @@ mod tests {
         );
     }
 
-    /// `InteractionRouting::from_config` fails loud on a missing JWT bootstrap and a
-    /// duplicate metric registration.
+    /// `InteractionRouting::from_config` fails loud on a missing JWT bootstrap, a duplicate
+    /// metric registration and a plaintext hub-api gRPC endpoint (no dial, no fallback).
     #[tokio::test]
     async fn interaction_routing_from_config_fails_loud() {
         let mut cli = cli_alpha();
@@ -1671,21 +1672,22 @@ mod tests {
         let registry = prometheus::Registry::new();
         let e =
             InteractionRouting::from_config(&cli, store.clone(), &registry, Arc::new(NoTokenizer))
+                .await
                 .err()
                 .expect("must fail");
         assert!(e.to_string().contains("SERVICE_JWT_TOKEN_ENDPOINT"));
         cli.service_jwt_token_endpoint = "http://sa/token".into();
-        assert!(InteractionRouting::from_config(
-            &cli,
-            store.clone(),
-            &registry,
-            Arc::new(NoTokenizer)
-        )
-        .is_ok());
-        assert!(
-            InteractionRouting::from_config(&cli, store, &registry, Arc::new(NoTokenizer)).is_err(),
-            "duplicate metric registration is a boot error"
-        );
+        let e =
+            InteractionRouting::from_config(&cli, store.clone(), &registry, Arc::new(NoTokenizer))
+                .await
+                .err()
+                .expect("plaintext gRPC endpoint must fail");
+        assert!(e.to_string().contains("https://"), "{e}");
+        let e = InteractionRouting::from_config(&cli, store, &registry, Arc::new(NoTokenizer))
+            .await
+            .err()
+            .expect("duplicate registration must fail");
+        assert!(e.to_string().contains("metrics"), "duplicate metric registration is a boot error: {e}");
     }
 
     /// `assemble` builds a runtime that reconciles every enabled platform's feed
