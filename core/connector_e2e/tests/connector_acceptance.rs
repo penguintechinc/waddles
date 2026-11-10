@@ -651,6 +651,7 @@ impl Rig {
         let runtime = assemble(
             &settings,
             AssembleDeps {
+                interaction_routing: None,
                 identify_budget: None,
                 resolver: hub,
                 scope: Arc::new(FakeScope {
