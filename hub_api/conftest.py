@@ -29,4 +29,4 @@ for _lib in ("flask_core", "waddle_transports"):
 #: Fixtures for the tamper-evident audit-log tests (`tests/audit_support.py`): registered as a
 #: plugin so test modules use `audit_dal` / `audit_service` / `gate` by name, without importing
 #: fixtures into their own namespace.
-pytest_plugins = ["tests.audit_support"]
+pytest_plugins = ["tests.audit_support", "tests.tenant_keys_pg"]

@@ -27,6 +27,7 @@ from penguin_dal import AsyncDB
 
 from services.bundle_install_dal import raw_sql_rows
 from services.envelope.gate import ExternalKmsEntitlement, ExternalKmsGate
+from services.envelope.invalidation import publish_dek_invalidation
 from services.envelope.platform_kek import LazyPlatformKek
 from services.envelope.providers import KmsProviders, ProviderSettings, build_providers
 from services.envelope.repository import PenguinDalEnvelopeRepository
@@ -89,6 +90,7 @@ def build_envelope_runtime(
         gate=gate or ExternalKmsGate(),
         settings=EnvelopeSettings.from_env(environ),
         slug_resolver=tenant_slug_resolver(dal),
+        invalidation_publisher=publish_dek_invalidation,
     )
     enabled = tuple(sorted(settings.enabled))
     logger.info("envelope.runtime.ready", extra={"providers": list(enabled)})

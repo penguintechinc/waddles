@@ -76,13 +76,19 @@ def gates(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeFlagGate, FakeLicenseGat
 
 
 @pytest.fixture
-def app(admin_db: Any) -> Quart:
+def app(admin_db: Any, monkeypatch: pytest.MonkeyPatch) -> Quart:
+    async def _no_key_store(dal: Any, service: Any, *, tenant_id: int, slug: str) -> None:
+        """Key provisioning needs the Postgres key store (see test_tenant_key_provisioning)."""
+
+    monkeypatch.setattr("blueprints.v1.superadmin.provision_new_tenant", _no_key_store)
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     quart_app.register_blueprint(superadmin_bp)
     quart_app.register_blueprint(user_management_bp)
     quart_app.config["dal"] = admin_db.dal
     quart_app.config["async_dal"] = admin_db
+    quart_app.config["envelope_runtime"] = type("R", (), {"service": object()})()
+    quart_app.config["install_dal"] = object()
     return quart_app
 
 

@@ -3572,6 +3572,12 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "identity:ephemeral:mint"
+        # feature/tenant-key-provisioning -- data-plane tenant-DEK broker
+        # (hub_api/blueprints/v1/internal_keys.py `POST /api/v1/internal/keys/tenant-dek`): the
+        # data plane holds the unwrapped tenant DEK in memory and does the AEAD itself. Granted
+        # ONLY to the three data-plane identities (svc-ingest/svc-process/svc-action), never to
+        # svc-presentation or anything else; hub-api additionally allow-lists the caller by name.
+        - "keys:tenant-dek:read"
         # bundle `identity` host capability (stage-next) -- svc-process resolves
         # a free-text @handle mention through IdentityService.ResolveHandle
         # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES) with a second,
@@ -3600,6 +3606,12 @@ serviceJwt:
         # ResolveDisplayNames call would 403 even with a working connection.
         - "identity:displayname:read"
         - "egress:connect"
+        # feature/tenant-key-provisioning -- data-plane tenant-DEK broker
+        # (hub_api/blueprints/v1/internal_keys.py `POST /api/v1/internal/keys/tenant-dek`): the
+        # data plane holds the unwrapped tenant DEK in memory and does the AEAD itself. Granted
+        # ONLY to the three data-plane identities (svc-ingest/svc-process/svc-action), never to
+        # svc-presentation or anything else; hub-api additionally allow-lists the caller by name.
+        - "keys:tenant-dek:read"
         # feature/edge-reshape-chunk2-conn-store (Task 8) -- svc-action is the per-send EGRESS
         # consumer of the connection store: `connections:resolve` mints a community-bound token
         # for twitch OAuth / youtube / moderation sends and `connections:resolve:static` is the
@@ -3640,6 +3652,12 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "connections:resolve"
+        # feature/tenant-key-provisioning -- data-plane tenant-DEK broker
+        # (hub_api/blueprints/v1/internal_keys.py `POST /api/v1/internal/keys/tenant-dek`): the
+        # data plane holds the unwrapped tenant DEK in memory and does the AEAD itself. Granted
+        # ONLY to the three data-plane identities (svc-ingest/svc-process/svc-action), never to
+        # svc-presentation or anything else; hub-api additionally allow-lists the caller by name.
+        - "keys:tenant-dek:read"
         # feature/edge-reshape-chunk2-conn-store (Task 8) -- unbound binding discovery
         # (GET /api/v1/internal/provider-connections) for the twitch OAuth kind. NOT the
         # `connections:resolve:static` scope: svc-ingest never resolves Lambda/GCP/HTTP secrets.

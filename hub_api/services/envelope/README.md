@@ -54,8 +54,19 @@ TenantEnvelopeService ──► KmsAdapter (Protocol) ──► PlatformKekAdapt
    parametrized scenarios in `test_service_byok.py` (revocation, outage, exit ramp, no-log-leak).
 5. Chart: provider id + credentials Secret in `_kms.tpl`'s validation and `kms.yaml`.
 
+## Provisioning and data-plane key distribution
+
+`TenantEnvelopeService.ensure_tenant_key` is wired into tenant create, hub-api startup and an
+idempotent backfill (`services/tenant_key_provisioning.py`), and `export_dek` is the single raw-DEK
+exit, used only by the `KeyService.GetTenantDek` gRPC broker. See
+`docs/guides/tenant-key-provisioning.md` for the contract.
+
 ## Tests
 
 `hub_api/tests/envelope/` -- see the module docstrings. Real Postgres (`test_repository_pg.py`) needs docker
 (skipped without it, like the repo's other PG tests); the SeaweedFS E2E is opt-in
 (`make test-seaweedfs-sse-kms`).
+
+## Data-plane DEK invalidation
+
+`rotate_dek` (after the new version commits) and a KMS access-denied revocation `XADD` `keys:tenant-dek:invalidate` with `tenant`, `purpose=at-rest`, `reason` (`rotated`/`revoked`) - the stream `core/bundle_host_crypto` listens on. No key material is carried; the stream is unauthenticated like `bundle:grants:invalidate` (Valkey ACL + TLS). A failed publish logs ERROR (`dek-invalidation-lost`), counts `waddles_envelope_operations_total{operation=dek_invalidation_publish,result=error}`, and raises `DekInvalidationPublishError` on rotation; data-plane caches then fall back to their TTL.

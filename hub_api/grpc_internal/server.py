@@ -49,6 +49,8 @@ MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 
 #: Full gRPC method name of the detokenizing RPC (its own, tighter rate-limit bucket).
 _PLATFORM_USER_METHOD = "/waddles.hub.internal.v1.IdentityService/ResolvePlatformUser"
+#: The one RPC that releases an unwrapped tenant DEK (tight per-caller bucket).
+_TENANT_DEK_METHOD = "/waddles.hub.internal.v1.KeyService/GetTenantDek"
 
 
 def _load_server_credentials() -> grpc.ServerCredentials:
@@ -102,6 +104,10 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
                     float(os.getenv("GRPC_PLATFORM_USER_RPS", "20")),
                     float(os.getenv("GRPC_PLATFORM_USER_BURST", "40")),
                 ),
+                _TENANT_DEK_METHOD: (
+                    float(os.getenv("GRPC_TENANT_DEK_RPS", "5")),
+                    float(os.getenv("GRPC_TENANT_DEK_BURST", "30")),
+                ),
                 # Bootstrap RPCs have no verified caller identity: each gets its own bucket,
                 # keyed per peer host, so a flood on one neither drains the other nor any
                 # authenticated caller's budget.
@@ -119,7 +125,11 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
 
 
 async def build_internal_grpc_server(
-    *, issuer: ServiceJwtIssuer, async_dal: Any = None, audit_logger: Any = None
+    *,
+    issuer: ServiceJwtIssuer,
+    async_dal: Any = None,
+    envelope_service: Any = None,
+    audit_logger: Any = None,
 ) -> grpc.aio.Server:
     """Builds (but does not start) the internal gRPC server.
 
@@ -137,7 +147,7 @@ async def build_internal_grpc_server(
         ],
     )
     identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(async_dal), server)
-    key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(), server)
+    key_pb2_grpc.add_KeyServiceServicer_to_server(KeyServicer(async_dal, envelope_service), server)
     service_auth_pb2_grpc.add_ServiceAuthServiceServicer_to_server(
         ServiceAuthServicer(issuer, audit_logger=audit_logger), server
     )
@@ -149,11 +159,18 @@ async def build_internal_grpc_server(
 
 
 async def start_internal_grpc_server(
-    *, issuer: ServiceJwtIssuer, async_dal: Any = None, audit_logger: Any = None
+    *,
+    issuer: ServiceJwtIssuer,
+    async_dal: Any = None,
+    envelope_service: Any = None,
+    audit_logger: Any = None,
 ) -> grpc.aio.Server:
     """Builds and starts the server -- called from `app.py`'s `before_serving`."""
     server = await build_internal_grpc_server(
-        issuer=issuer, async_dal=async_dal, audit_logger=audit_logger
+        issuer=issuer,
+        async_dal=async_dal,
+        envelope_service=envelope_service,
+        audit_logger=audit_logger,
     )
     await server.start()
     logger.info("hub_api.grpc_internal.started")

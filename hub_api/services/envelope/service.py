@@ -79,6 +79,11 @@ from services.envelope.errors import (
     UnavailableReason,
 )
 from services.envelope.gate import ExternalKmsEntitlement, current_request_host
+from services.envelope.invalidation import (
+    DekInvalidationPublisher,
+    DekInvalidationPublishError,
+    InvalidationReason,
+)
 from services.envelope.kms_adapter import KmsAdapter, KmsProviderRegistry
 from services.envelope.models import (
     CONFIG_ACTIVE,
@@ -200,8 +205,13 @@ class TenantEnvelopeService:
         settings: EnvelopeSettings | None = None,
         slug_resolver: SlugResolver | None = None,
         clock: Callable[[], float] = time.monotonic,
+        invalidation_publisher: DekInvalidationPublisher | None = None,
     ) -> None:
-        """Wire the service; every collaborator is injectable (tests use in-memory fakes)."""
+        """Wire the service; every collaborator is injectable (tests use in-memory fakes).
+
+        ``invalidation_publisher`` emits the data-plane `dek-rotated` event after a DEK rotation
+        commits or a key is revoked; production wiring (``runtime.py``) always supplies it.
+        """
         self._keys = keys
         self._configs = configs
         self._registry = registry
@@ -210,7 +220,13 @@ class TenantEnvelopeService:
         self._settings = settings or EnvelopeSettings()
         self._slug_resolver = slug_resolver
         self._clock = clock
+        self._invalidation_publisher = invalidation_publisher
         self._states: dict[int, _TenantState] = {}
+
+    async def _publish_invalidation(self, tenant_id: int, reason: InvalidationReason) -> None:
+        """Tell the data plane to drop its cached DEKs for `tenant_id` (no-op if unwired)."""
+        if self._invalidation_publisher is not None:
+            await self._invalidation_publisher(tenant_id, reason)
 
     def _state(self, tenant_id: int) -> _TenantState:
         """Return (creating on demand) the in-process state for `tenant_id`."""
@@ -421,13 +437,18 @@ class TenantEnvelopeService:
                 "alert": "tenant-kms-revoked",
             },
         )
-        if record.kek_kind != KEK_KIND_CUSTOMER:
-            return
+        if record.kek_kind == KEK_KIND_CUSTOMER:
+            try:
+                await self._configs.set_status(tenant_id, CONFIG_REVOKED, error_code=exc.code)
+                state.flagged_revoked = True
+            except Exception:
+                logger.exception("envelope.kms.revoked_flag_failed", extra={"tenant_id": tenant_id})
         try:
-            await self._configs.set_status(tenant_id, CONFIG_REVOKED, error_code=exc.code)
-            state.flagged_revoked = True
-        except Exception:
-            logger.exception("envelope.kms.revoked_flag_failed", extra={"tenant_id": tenant_id})
+            await self._publish_invalidation(tenant_id, "revoked")
+        except DekInvalidationPublishError:
+            # Already logged at ERROR + counted by the publisher; must not mask the
+            # TenantKeyUnavailableError the caller raises for the revocation itself.
+            logger.error("envelope.kms.revoked_invalidation_lost", extra={"tenant_id": tenant_id})
 
     async def _heal_revoked_flag(
         self, state: _TenantState, tenant_id: int, record: DekRecord
@@ -671,6 +692,57 @@ class TenantEnvelopeService:
                 record = await self._provision_first_key(state, tenant_id, tenant_slug)
             return record
 
+    async def export_dek(
+        self, tenant_id: int, *, dek_version: int | None = None
+    ) -> tuple[int, bytearray]:
+        """Unwrap a tenant DEK for the internal data-plane broker (the ONLY raw-DEK exit).
+
+        Returns ``(dek_version, raw_dek)``; ``dek_version=None`` selects the active version, an
+        explicit one may name a retired version (old ciphertext must stay readable). The raw DEK
+        is returned as a ``bytearray`` so the caller can zero it in place once sealed. It is never
+        cached, logged, or stored here. Same failure policy as encrypt/decrypt: a revoked key or
+        unreachable KMS raises :class:`TenantKeyUnavailableError`, a missing/destroyed version
+        :class:`TenantKeyNotFoundError`; there is no fallback key.
+        """
+        state = self._state(tenant_id)
+        if state.blocked_until > self._clock():
+            raise self._blocked_error(state)
+        if dek_version is None:
+            record = await self._keys.get_active(tenant_id)
+        else:
+            record = await self._keys.get_version(tenant_id, dek_version)
+        if record is None or record.wrapped_dek is None or record.status == KEY_DESTROYED:
+            raise TenantKeyNotFoundError("no usable data key for this tenant")
+        try:
+            adapter = await self._adapter_for_record(tenant_id, record)
+            dek = await adapter.unwrap(record.wrapped_dek, context=wrap_context(tenant_id))
+        except KmsAccessDeniedError as exc:
+            await self._on_revoked(state, tenant_id, record, exc)
+            raise TenantKeyUnavailableError(
+                "tenant encryption key unavailable: access denied by the key provider",
+                reason="kms_access_denied",
+            ) from exc
+        except KmsUnavailableError as exc:
+            reason: UnavailableReason = (
+                "kms_platform_credentials"
+                if isinstance(exc, KmsCredentialsError)
+                else "kms_unavailable"
+            )
+            self._start_backoff(state, reason, self._settings.transient_backoff_s)
+            metrics.record_kms_failure(record.kek_kind, "unavailable", tenant_id)
+            raise TenantKeyUnavailableError(
+                "tenant encryption key unavailable: key provider unreachable", reason=reason
+            ) from exc
+        except (KmsError, EnvelopeIntegrityError) as exc:
+            self._start_backoff(state, "kms_rejected", self._settings.transient_backoff_s)
+            metrics.record_kms_failure(record.kek_kind, "rejected", tenant_id)
+            raise TenantKeyUnavailableError(
+                "tenant encryption key unavailable: key provider rejected the key",
+                reason="kms_rejected",
+            ) from exc
+        metrics.record_operation("export_dek", "ok")
+        return record.dek_version, bytearray(dek)
+
     async def rotate_dek(
         self, tenant_id: int, *, tenant_slug: str | None = None, reason: str = "manual"
     ) -> DekRecord:
@@ -700,6 +772,9 @@ class TenantEnvelopeService:
             },
         )
         metrics.record_operation("rotate", "ok")
+        # After the new version committed; a publish failure raises DekInvalidationPublishError
+        # (loud) -- the rotation stands, data-plane caches fall back to their TTL.
+        await self._publish_invalidation(tenant_id, "rotated")
         return record
 
     async def _rewrap_rows(self, tenant_id: int, target: KmsAdapter) -> RewrapReport:
