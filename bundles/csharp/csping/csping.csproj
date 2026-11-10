@@ -104,8 +104,12 @@
       path ... and never inlines a copy." Same three-levels-up relative
       path Rust's sibling bundle uses (`bundles/rust/ping/Cargo.toml`'s
       `[package.metadata.component.target] path = "../../../wit/waddle-bundle"`).
+      Include the DIRECTORY, not stage.wit alone: stage.wit imports `kv-v2`/`db-v2`
+      from the sibling storage-v2.wit, which wit-bindgen only resolves from a package
+      directory (single-file input failed the seeder build: "interface or world
+      `kv-v2` does not exist").
     -->
-    <Wit Include="../../../wit/waddle-bundle/stage.wit" World="stage" />
+    <Wit Include="../../../wit/waddle-bundle" World="stage" />
   </ItemGroup>
 
 </Project>

@@ -387,6 +387,7 @@ async fn startup_functions_succeed_with_real_dependencies_and_fail_loud_without(
         metrics,
         dek(),
         prometheus::Registry::new(),
+        Arc::new(NoTok),
     )
     .await
     .err()
