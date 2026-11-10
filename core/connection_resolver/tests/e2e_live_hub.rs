@@ -5,7 +5,7 @@
 //! blueprints (`hub_api/tests/live/live_hub.py`) with identities rendered from the REAL Helm chart,
 //! and exports `LIVE_HUB_MANIFEST` (a JSON file: hub url, admin JWT, community ids, SA tokens).
 //! Nothing here is mocked: connections are seeded through the hub-api admin API, secrets are sealed
-//! and opened by the real vault, tokens are minted by the real `/internal/service-token`.
+//! and opened by the real vault, tokens are minted by the real gRPC `ServiceAuthService`.
 //!
 //! Each test prints one `LIVE_TELEMETRY logs=N spans=N metrics=N` line (resolver tracing events,
 //! resolver spans, `ResolverMetrics` data points); the script sums them and fails on zero.
@@ -69,6 +69,8 @@ impl ResolverMetrics for CountingMetrics {
 /// Per-test harness handle: manifest, SA-token files, telemetry counters and the tracing guard.
 struct Live {
     hub_url: String,
+    /// hub-api's internal gRPC endpoint (machine-JWT mint), from the live-hub manifest.
+    grpc_url: String,
     admin_token: String,
     community_a: i64,
     community_b: i64,
@@ -114,6 +116,7 @@ impl Live {
         });
         Self {
             hub_url: m["hub_url"].as_str().expect("hub_url").to_string(),
+            grpc_url: m["grpc_url"].as_str().expect("grpc_url").to_string(),
             admin_token: m["admin_token"].as_str().expect("admin_token").to_string(),
             community_a: id("community_a"),
             community_b: id("community_b"),
@@ -133,7 +136,7 @@ impl Live {
         let mut cfg = ResolverConfig::new(
             self.hub_url.clone(),
             "alpha",
-            format!("{}/internal/service-token", self.hub_url),
+            self.grpc_url.clone(),
             sa.to_string_lossy().to_string(),
         );
         cfg.resolve_scope = scope.to_string();

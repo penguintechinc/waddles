@@ -174,7 +174,8 @@ service_roles.py enforces at migration time, so a bad value fails here, at rende
 
 {{/* Connection target pieces (the in-chart Postgres Service). */}}
 {{- define "waddlebot.postgres.host" -}}
-{{- .Values.infrastructure.postgresql.service.name -}}
+{{- /* FQDN (feature/transit-tls-core F8): always in the server cert's SANs and inside the internal CA's nameConstraints suffix, so sslmode=verify-full holds. */ -}}
+{{- include "waddlebot.transitTls.pgHost" . -}}
 {{- end }}
 {{- define "waddlebot.postgres.port" -}}
 {{- .Values.infrastructure.postgresql.service.port -}}
@@ -822,7 +823,8 @@ joined: a stable hash input for waddlebot.hostApiTlsSansSha256, and directly
 {{- define "waddlebot.hostApiTlsDesiredDnsNames" -}}
 {{- $fullname := include "waddlebot.fullname" . -}}
 {{- $ns := .Values.namespace -}}
-{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-bundle-executor" $fullname) (printf "*.%s.svc.cluster.local" $ns) | sortAlpha | join "," -}}
+{{- /* Explicit FQDNs, never a `*.<ns>.svc.cluster.local` wildcard: a wildcard cert from the shared internal CA would let any pod holding it impersonate Postgres/Valkey/S3 (security review HIGH). */ -}}
+{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-bundle-executor" $fullname) (printf "%s-svc-process-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-svc-action-rust.%s.svc.cluster.local" $fullname $ns) (printf "%s-bundle-executor.%s.svc.cluster.local" $fullname $ns) | sortAlpha | join "," -}}
 {{- end }}
 
 {{/* sha256 of waddlebot.hostApiTlsDesiredDnsNames -- the waddlebot.io/cert-sans-sha256
@@ -995,6 +997,18 @@ true
 {{- end -}}
 {{- end }}
 
+{{/*
+Render-time guard (security review HIGH): fails when a Certificate that will be signed by the shared internal CA lists a
+wildcard SAN. Args (dict): what (label for the message), names (list of dnsNames).
+*/}}
+{{- define "waddlebot.assertNoWildcardSan" -}}
+{{- range .names -}}
+{{- if contains "*" . -}}
+{{- fail (printf "%s: wildcard SAN %q is forbidden on a certificate issued by the internal CA -- any pod holding it could impersonate other in-cluster services (Postgres/Valkey/S3). List explicit FQDNs instead." $.what .) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "waddlebot.valkeyTlsSansSha256" -}}
 {{- include "waddlebot.valkeyTlsDesiredDnsNames" . | sha256sum -}}
 {{- end }}
@@ -1091,10 +1105,11 @@ rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
 {{- define "waddlebot.valkeyTlsCaVolume" -}}
 - name: valkey-ca
   secret:
-    secretName: {{ include "waddlebot.fullname" . }}-valkey-tls
+    {{- /* cert-manager mode: the dedicated transit root (same CA as Postgres/S3); static mode: the Valkey CA. */}}
+    secretName: {{ if include "waddlebot.transitTls.cm" . }}{{ include "waddlebot.transitTls.caSecretName" . }}{{ else }}{{ include "waddlebot.fullname" . }}-valkey-tls{{ end }}
     defaultMode: 0440
     items:
-    - key: valkey-ca.crt
+    - key: {{ if include "waddlebot.transitTls.cm" . }}{{ include "waddlebot.transitTls.caKey" . }}{{ else }}ca.crt{{ end }}
       path: valkey-ca.crt
 {{- end }}
 
@@ -1129,7 +1144,7 @@ existingSecret (SSE assertion mandatory). Fails the render on any inconsistency.
 {{- include "waddlebot.bundleStorage.validate" . -}}
 {{- if eq .Values.bundleStorage.mode "bundled" }}
 - name: BUNDLE_STORAGE_ENDPOINT
-  value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+  value: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
 - name: BUNDLE_STORAGE_BUCKET
   value: {{ .Values.bundleStorage.bucketName | quote }}
 - name: BUNDLE_STORAGE_REGION

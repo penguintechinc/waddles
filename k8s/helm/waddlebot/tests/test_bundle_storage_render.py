@@ -99,7 +99,7 @@ def test_bundled_is_default_in_every_env(values):
     assert not any(a in ("Admin",) or ":" not in a for a in actions)
     for name, env in _consumer_envs(docs).items():
         assert env["BUNDLE_STORAGE_BUCKET"]["value"] == _BUCKET, name
-        assert env["BUNDLE_STORAGE_ENDPOINT"]["value"].startswith("http://") and "seaweedfs" in env["BUNDLE_STORAGE_ENDPOINT"]["value"], name
+        assert env["BUNDLE_STORAGE_ENDPOINT"]["value"].startswith("https://") and "seaweedfs" in env["BUNDLE_STORAGE_ENDPOINT"]["value"], name
         for k in ("BUNDLE_STORAGE_ACCESS_KEY_ID", "BUNDLE_STORAGE_SECRET_ACCESS_KEY"):
             assert "value" not in env[k] and "secretKeyRef" in env[k]["valueFrom"], f"{name}:{k}"
 

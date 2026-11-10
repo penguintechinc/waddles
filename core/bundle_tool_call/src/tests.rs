@@ -77,6 +77,8 @@ fn row(app: &str, version_id: i64, digest: &str, tools: ToolManifestInfo) -> Act
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
         declared_capabilities: Vec::new(),
+        egress: Vec::new(),
+        egress_rps: None,
         tools,
     }
 }
@@ -90,6 +92,7 @@ fn service(exports: &[(&str, bool)]) -> ToolManifestInfo {
                 name: (*n).to_string(),
                 write: *w,
                 required_scope: None,
+                host_op: None,
             })
             .collect(),
         requested: Vec::new(),
@@ -610,6 +613,7 @@ fn admin_world() -> (ActiveVersionSnapshot, CapabilityGate) {
         name: "admin_op".to_string(),
         write: true,
         required_scope: Some("community:admin".to_string()),
+        host_op: None,
     });
     let snap = snapshot(vec![
         row(

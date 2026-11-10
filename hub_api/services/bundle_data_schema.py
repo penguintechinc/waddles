@@ -668,6 +668,15 @@ def derive_table_identity(app_id: str, *, provider: str) -> TableIdentity:
         raise TableDeclarationError(
             REASON_INVALID_TABLE_IDENTITY, f"app_id {app_id!r} must start with a letter"
         )
+    # `__` is reserved: every db v2 physical table name contains it (see
+    # `bundle_data_v2.derive_v2_table_identity`), so a v1 name can never equal a
+    # v2 name -- one bundle can neither squat nor, via teardown, drop the other
+    # family's table.
+    if "__" in sanitized:
+        raise TableDeclarationError(
+            REASON_INVALID_TABLE_IDENTITY,
+            f"app_id {app_id!r} normalizes to a name containing '__', which is reserved",
+        )
 
     if len(sanitized) <= POSTGRES_IDENTIFIER_MAX_LEN:
         table = sanitized

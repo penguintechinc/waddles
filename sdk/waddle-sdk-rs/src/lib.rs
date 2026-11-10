@@ -47,6 +47,7 @@
 pub mod bindings_glue;
 
 pub mod clock;
+pub mod command;
 pub mod context;
 pub mod db;
 pub mod error;
@@ -56,6 +57,7 @@ pub mod kv;
 pub mod log;
 pub mod relay;
 pub mod stage;
+pub mod storage_v2;
 pub mod tool;
 pub mod types;
 

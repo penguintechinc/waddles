@@ -89,9 +89,19 @@ COPY bundles/rust/reputation /repo/bundles/rust/reputation
 WORKDIR /repo/bundles/rust/reputation
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
+# AI service (catalog `ai`, `kind: service`, world stage-tools): same pinned builder.
+COPY bundles/rust/ai /repo/bundles/rust/ai
+WORKDIR /repo/bundles/rust/ai
+RUN cargo component build --release --target wasm32-wasip2 --locked
+
 # Community economy service uses the tool-provider world and the same pinned builder.
 COPY bundles/rust/economy /repo/bundles/rust/economy
 WORKDIR /repo/bundles/rust/economy
+RUN cargo component build --release --target wasm32-wasip2 --locked
+
+# Twitch clips APP bundle (world stage-next-tools): same pinned builder.
+COPY bundles/rust/twitch-clips /repo/bundles/rust/twitch-clips
+WORKDIR /repo/bundles/rust/twitch-clips
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
 # Twitch platform connector (P6b, `kind: service`, world connector-tools): same pinned builder.
@@ -122,6 +132,11 @@ RUN cargo component build --release --target wasm32-wasip2 --locked
 # Wix webhook connector (`kind: service`, inbound-only, world connector-tools): same pinned builder.
 COPY bundles/rust/wix /repo/bundles/rust/wix
 WORKDIR /repo/bundles/rust/wix
+RUN cargo component build --release --target wasm32-wasip2 --locked
+
+# Music YouTube service (`kind: service`, world stage-tools): same pinned builder.
+COPY bundles/rust/music-youtube /repo/bundles/rust/music-youtube
+WORKDIR /repo/bundles/rust/music-youtube
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
 # AI Teammates app bundle (`stage-next-tools` world): same pinned builder.
@@ -318,25 +333,31 @@ RUN mkdir -p /core-bundles
 COPY bundles/core-bundles.yaml /core-bundles/core-bundles.yaml
 COPY bundles/rust/ping/hub-manifest.yaml /core-bundles/ping.manifest.yaml
 COPY bundles/rust/reputation/hub-manifest.yaml /core-bundles/reputation.manifest.yaml
+COPY bundles/rust/ai/hub-manifest.yaml /core-bundles/ai.manifest.yaml
 COPY bundles/rust/economy/hub-manifest.yaml /core-bundles/economy.manifest.yaml
 COPY bundles/rust/twitch/hub-manifest.yaml /core-bundles/twitch.manifest.yaml
+COPY bundles/rust/twitch-clips/hub-manifest.yaml /core-bundles/twitch-clips.manifest.yaml
 COPY bundles/rust/music-soundcloud/hub-manifest.yaml /core-bundles/music-soundcloud.manifest.yaml
 COPY bundles/rust/discord/hub-manifest.yaml /core-bundles/discord-connector.manifest.yaml
 COPY bundles/rust/youtube/hub-manifest.yaml /core-bundles/youtube.manifest.yaml
 COPY bundles/rust/spectrum/hub-manifest.yaml /core-bundles/spectrum.manifest.yaml
 COPY bundles/rust/wix/hub-manifest.yaml /core-bundles/wix-connector.manifest.yaml
+COPY bundles/rust/music-youtube/hub-manifest.yaml /core-bundles/music-youtube.manifest.yaml
 COPY bundles/rust/ai-teammates/hub-manifest.yaml /core-bundles/ai-teammates.manifest.yaml
 COPY bundles/csharp/csping/hub-manifest.yaml /core-bundles/csping.manifest.yaml
 COPY --from=rust-bundle-builder /repo/bundles/rust/ping/target/wasm32-wasip2/release/waddle_bundle_ping_rust.wasm /core-bundles/ping.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/reputation/target/wasm32-wasip2/release/waddle_bundle_reputation_service.wasm /core-bundles/reputation.wasm
+COPY --from=rust-bundle-builder /repo/bundles/rust/ai/target/wasm32-wasip2/release/waddle_bundle_ai_service.wasm /core-bundles/ai.wasm
 COPY --from=csharp-bundle-builder /repo/bundles/csharp/csping/bin/Release/net10.0/wasi-wasm/publish/csping.wasm /core-bundles/csping.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/economy/target/wasm32-wasip2/release/waddle_bundle_economy_service.wasm /core-bundles/economy.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/twitch/target/wasm32-wasip2/release/waddle_bundle_twitch_overlay.wasm /core-bundles/twitch.wasm
+COPY --from=rust-bundle-builder /repo/bundles/rust/twitch-clips/target/wasm32-wasip2/release/waddle_bundle_twitch_clips.wasm /core-bundles/twitch-clips.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/music-soundcloud/target/wasm32-wasip2/release/waddle_bundle_music_soundcloud.wasm /core-bundles/music-soundcloud.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/discord/target/wasm32-wasip2/release/waddle_bundle_discord_overlay.wasm /core-bundles/discord-connector.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/youtube/target/wasm32-wasip2/release/waddle_bundle_youtube_service.wasm /core-bundles/youtube.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/spectrum/target/wasm32-wasip2/release/waddle_bundle_spectrum_service.wasm /core-bundles/spectrum.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/wix/target/wasm32-wasip2/release/waddle_bundle_wix_service.wasm /core-bundles/wix-connector.wasm
+COPY --from=rust-bundle-builder /repo/bundles/rust/music-youtube/target/wasm32-wasip2/release/waddle_bundle_music_youtube_service.wasm /core-bundles/music-youtube.wasm
 COPY --from=rust-bundle-builder /repo/bundles/rust/ai-teammates/target/wasm32-wasip2/release/waddle_bundle_ai_teammates.wasm /core-bundles/ai-teammates.wasm
 # Every `language: python` bundle's manifest + .wasm, generated by build_python_bundles.py
 # (python-bundles-builder stage) into one flat dist/ dir keyed by the catalog's own

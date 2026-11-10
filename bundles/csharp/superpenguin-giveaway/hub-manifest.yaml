@@ -1,0 +1,115 @@
+schema_version: 2
+app_id: waddles.integrations.superpenguin.giveaway
+name: Ticket Giveaway and Raffle (SuperPenguinTV GiveawayFeature)
+version: 1.0.0
+feature: waddles.integrations.superpenguin
+module: integrations
+provider: thirdparty
+language: csharp
+artifact: prebuilt
+execution_model: native
+is_default: false
+author: github/psychoboy
+license: MIT
+category: alternatives
+source_url: https://github.com/Psychoboy/PenguinTwitchBot
+notice: |
+  Ported from PenguinTwitchBot (Features/GiveawayFeature.cs, Features/GiveawayFairnessReport.cs, TicketGames/RaffleRuntimeService.cs, github.com/Psychoboy/
+  PenguinTwitchBot) by superpenguintv (Psychoboy), used with permission.
+
+  MIT License
+
+  Copyright (c) 2023 Psychoboy
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+stages:
+  process:
+    entry: waddle:bundle/process-stage#transform
+    consumes:
+    - platform: twitch
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!tgw'
+        - '!ticketgiveaway'
+    - platform: discord
+      event_types:
+      - chat.message
+      filters:
+        command_prefix:
+        - '!tgw'
+        - '!ticketgiveaway'
+  action:
+    entry: waddle:bundle/action-stage#dispatch
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+- id: storage.kv
+  justification: sharded entry pool, round state with the private draw seed, exclusions, winner log, audit
+    record, raffles and per-event outcome records
+- id: identity.resolve
+  justification: resolve the invoking actor and mentioned users to community user uuids (uuid-only, no
+    names)
+- id: chat.send:discord
+  justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)
+- id: chat.send:twitch
+  justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)
+- id: tool.call:waddles.core.service.economy:points_view
+  justification: Use the economy service points_view contract for the currency alias and the max-entry
+    balance; the app owns only giveaway policy
+  params:
+    write: false
+- id: tool.call:waddles.core.service.economy:adjust_balance
+  justification: Use the economy service adjust_balance contract to charge entries and pay raffle winners;
+    the service owns caps and idempotency
+  params:
+    write: true
+- id: overlay.media
+  justification: Optional (moderator opt-in) giveaway/raffle alert-box messages for the browser-source
+    overlay; a refused push fails the command loudly
+  params:
+    allowed_hosts:
+    - overlay.penguincloud.io
+    max_duration_seconds: 15
+routes_to: []
+requested_tools:
+- tool: points_view
+  access: read
+  target_app_id: waddles.core.service.economy
+- tool: adjust_balance
+  access: write
+  target_app_id: waddles.core.service.economy
+collection: superpenguintv
+overlay_assets:
+- path: giveaway.js
+  sha256: f3cf3baaed62142c9ae1fc753c63a5f3c4d9b1c5c7ea71af45c5fbbb63d0a161
+  content_type: text/javascript
+  origin: original
+  license: MIT
+- path: index.html
+  sha256: 4472683f5048d9488bb956ee9495347bc2c077d380d19137af75b8f0e6b1695e
+  content_type: text/html
+  origin: original
+  license: MIT

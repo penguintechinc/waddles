@@ -31,6 +31,19 @@ impl EgressRuleSource for crate::distribution::BundleCatalog {
             EgressRuleRow::from_legacy_patterns(row.egress, row.egress_rps, row.granted_secret_refs)
         })
     }
+
+    /// A legacy env-override row wins; otherwise the egress the active-set
+    /// consumers published from the approved manifest for THIS call's
+    /// `(tenant, community)` scope (never another scope's, never merged).
+    fn resolve_scoped(
+        &self,
+        scope: &bundle_host_http::credentials::CallScope,
+        app_id: &str,
+    ) -> Option<EgressRuleRow> {
+        self.resolve(app_id).or_else(|| {
+            bundle_host_http::grants::ActiveEgressSnapshot::global().resolve_for(scope, app_id)
+        })
+    }
 }
 
 #[cfg(test)]

@@ -72,6 +72,7 @@ _SCHEME_KEYS: Final[dict[SecretScheme, frozenset[str]]] = {
     SecretScheme.API_KEY_HEADER: frozenset({"header", "value"}),
     SecretScheme.AWS_ACCESS_KEY: frozenset({"access_key_id", "secret_access_key"}),
     SecretScheme.GCP_SERVICE_ACCOUNT: frozenset({"client_email", "private_key"}),
+    SecretScheme.WIX_API_KEY: frozenset({"api_key", "site_id"}),
 }
 _MAX_LENGTHS: Final[dict[str, int]] = {
     "token": MAX_SECRET_VALUE_LENGTH,
@@ -83,7 +84,13 @@ _MAX_LENGTHS: Final[dict[str, int]] = {
     "secret_access_key": 256,
     "client_email": 320,
     "private_key": MAX_SECRET_VALUE_LENGTH,
+    "api_key": MAX_SECRET_VALUE_LENGTH,
+    "site_id": 64,
 }
+#: Wix site ids are UUIDs; the pattern is a conservative superset (matches the instance-id one).
+_WIX_SITE_ID_RE: Final = re.compile(r"[A-Za-z0-9-]{8,64}")
+#: Printable ASCII, no whitespace: the shape of every Wix API key (a long opaque token).
+_API_KEY_RE: Final = re.compile(r"[\x21-\x7e]+")
 
 
 def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -217,6 +224,11 @@ def validate_secret_document(scheme: SecretScheme, doc: Mapping[str, Any]) -> di
         cleaned[name] = value
     if scheme is SecretScheme.API_KEY_HEADER and not _HEADER_NAME_RE.fullmatch(cleaned["header"]):
         raise InvalidConnectionInput("secret field 'header' is not a valid header name")
+    if scheme is SecretScheme.WIX_API_KEY:
+        if not _API_KEY_RE.fullmatch(cleaned["api_key"]):
+            raise InvalidConnectionInput("secret field 'api_key' must be printable ASCII")
+        if not _WIX_SITE_ID_RE.fullmatch(cleaned["site_id"]):
+            raise InvalidConnectionInput("secret field 'site_id' has an invalid format")
     if scheme is SecretScheme.BEARER and re.search(r"[\s\x00-\x1f\x7f]", cleaned["token"]):
         raise InvalidConnectionInput("secret field 'token' must not contain whitespace")
     return cleaned
