@@ -57,6 +57,17 @@ where
             _ => Err(SlotError::Refused(UNKNOWN_PLATFORM)),
         }
     }
+
+    /// Delegates to the platform's own source; an unknown platform (Kick included, which has
+    /// no slot source yet) never supports app credentials.
+    fn supports_app_credentials(&self, platform: &str) -> bool {
+        match platform {
+            "twitch" => self.twitch.supports_app_credentials(platform),
+            "discord" => self.discord.supports_app_credentials(platform),
+            "youtube" => self.youtube.supports_app_credentials(platform),
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +136,14 @@ mod tests {
                     "{p}: source {j}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn app_credential_support_is_per_platform_and_defaults_off() {
+        let (r, _) = router();
+        for p in ["twitch", "discord", "youtube", "kick", "slack", ""] {
+            assert!(!r.supports_app_credentials(p), "{p:?}");
         }
     }
 

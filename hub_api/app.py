@@ -43,7 +43,6 @@ from quart_schema import Info, QuartSchema
 from werkzeug.exceptions import HTTPException
 
 from blueprints import register_blueprints
-from blueprints.service_jwt_bp import service_jwt_bp
 from bootstrap import BootstrapState, BootstrapStatus, run_bootstrap_loop
 from config import HubAPIConfig
 from grpc_internal.server import start_internal_grpc_server, stop_internal_grpc_server
@@ -255,7 +254,6 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
 
     app.register_blueprint(create_health_blueprint(cfg.module_name, cfg.module_version))
     app.register_blueprint(create_mcp_blueprint())
-    app.register_blueprint(service_jwt_bp)
     register_blueprints(app)
     register_openapi_docs(app)
 
@@ -317,16 +315,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             bootstrap_status.detail = "non-Postgres DATABASE_URL -- bootstrap skipped"
             # No keystore schema off Postgres (test harness only): nothing to provision.
             bootstrap_status.tenant_keys_ready = True
-        # Per-service EdDSA machine JWT issuance (flask_core.service_jwt,
+        # Per-service ES256 machine JWT issuance (flask_core.service_jwt,
         # feature/eddsa-machine-jwt) -- built from the `service-jwt-
         # signing-key` Secret (SERVICE_JWT_ACTIVE_KID/SERVICE_JWT_PRIVATE_
         # KEY_<kid>, mounted env-only into this container, see chart's
         # hub-api.yaml) plus the `serviceJwt.identities` allow-list
         # (SERVICE_JWT_IDENTITIES, JSON, see values.yaml). Missing/invalid
-        # config logs a warning and leaves issuance disabled (service_jwt_bp
-        # fails closed with 503) rather than crashing hub-api's whole app
-        # factory -- most non-prod/local deployments never call
-        # /internal/service-token at all.
+        # config logs a warning and leaves issuance disabled (the gRPC
+        # listener, which serves ServiceAuthService, simply never starts) rather than
+        # crashing hub-api's whole app factory -- most non-prod/local deployments never
+        # mint a machine JWT at all.
         app.config["SPIFFE_PEER_TRUST"] = cfg.spiffe_peer_trust
         app.config["SPIFFE_PEER_ID_HEADER"] = cfg.spiffe_peer_id_header
         try:
@@ -416,7 +414,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # svc-process/svc-action only, see grpc_internal/server.py. Reuses
         # the single `issuer` built above (same signing key material,
         # same identity allow-list) rather than re-deriving it from env a
-        # second time -- avoids parsing the Ed25519 private key twice and
+        # second time -- avoids parsing the ES256 private key twice and
         # widening its in-memory exposure window (see
         # flask_core.service_jwt module docstring). Fails OPEN for the
         # surrounding Quart app (never crashes hub-api's HTTP surface over
@@ -432,6 +430,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
                     issuer=issuer,
                     async_dal=async_dal,
                     envelope_service=envelope_runtime.service,
+                    audit_logger=app.config.get("logger"),
                 )
             except Exception as exc:  # noqa: BLE001 - see fail-open/fail-closed note above
                 logger.error(

@@ -43,6 +43,13 @@ global:
       enabled: true
       issuerKind: "ClusterIssuer"
       issuerName: "waddlebot-internal-ca"
+  # Dedicated transit trust root for Postgres / SeaweedFS S3 / Valkey: a namespaced SelfSigned Issuer -> root CA -> CA Issuer
+  # rendered by the chart (PREREQ: cert-manager with the NameConstraints feature gate). Clients trust only that root; the
+  # hostApiTls/grpcTls identities below keep waddlebot-internal-ca. Overrides global.valkeyTls.externalSecret (cert-manager owns
+  # <release>-valkey-tls in this mode).
+  transitTls:
+    certManager:
+      enabled: true
   hostApiTls:
     certManager:
       enabled: true

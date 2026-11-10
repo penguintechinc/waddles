@@ -1,17 +1,13 @@
-// `wit-bindgen c-sharp` requires this EXACT type name
-// (`ProcessStageExportsImpl`) implementing `IProcessStageExports` in this
-// EXACT namespace -- see `bundles/csharp/csping/ProcessStageExportsImpl.cs`'s
-// header comment for the full explanation (discovered empirically there, not
-// guessed). Deliberately thin: converts the wit-bindgen-generated
-// `Types.PlatformEvent` to/from `WaddleSdk.Types.PlatformEventInfo` and
-// delegates all real logic to `RollLogic` (`waddle-sdk-cs`'s
-// `WaddleProcessStage` base class) -- see `sdk/waddle-sdk-cs/README.md`
-// "Writing a bundle".
-namespace StageWorld.wit.Exports.waddle.bundle.v1_0_0;
+// `wit-bindgen c-sharp` requires this EXACT type name (`ProcessStageExportsImpl`) implementing `IProcessStageExports`
+// in this EXACT namespace (`<WorldName>World.wit.Exports.waddle.bundle.v1_0_0`) -- discovered empirically in
+// `bundles/csharp/csping`, not guessed. The world is `stage-next-tools`, so the root namespace is
+// `StageNextToolsWorld`. Deliberately thin: converts the generated `Types.PlatformEvent` to/from
+// `WaddleSdk.Types.PlatformEventInfo` and delegates all real logic to `RollLogic` -- see `docs/sdk-cs.md`.
+namespace StageNextToolsWorld.wit.Exports.waddle.bundle.v1_0_0;
 
 using WaddleBundleSuperpenguinRoll;
 using WaddleSdk.Types;
-using Types = global::StageWorld.wit.Imports.waddle.bundle.v1_0_0.ITypesImports;
+using Types = global::StageNextToolsWorld.wit.Imports.waddle.bundle.v1_0_0.ITypesImports;
 
 public class ProcessStageExportsImpl : IProcessStageExports
 {

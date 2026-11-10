@@ -1,0 +1,98 @@
+{
+  "target_app_id": "waddles.core.service.twitch",
+  "notes": "Contract the Twitch platform service bundle MUST expose for twitch-clips. Broadcaster and community are pinned host-side: no tool accepts a broadcaster/channel/community argument. Failures use ToolError::InvalidArgs(\"<code>[: detail]\") with code in not_live|rate_limited|not_connected|clips_disabled|platform_unavailable. Output carries no creator handle (PII).",
+  "tools": {
+    "twitch.clip.create": {
+      "access": "write",
+      "risk": "dangerous",
+      "idempotency_key": "required",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "duration_s": { "type": "integer", "minimum": 5, "maximum": 60 }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "clip_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,100}$" },
+          "edit_url": { "type": "string" }
+        },
+        "required": ["clip_id"]
+      }
+    },
+    "twitch.clip.get": {
+      "access": "read",
+      "risk": "normal",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "clip_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,100}$" }
+        },
+        "required": ["clip_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "ready": { "type": "boolean" },
+          "clip": { "$ref": "#/definitions/clip" }
+        },
+        "required": ["ready"],
+        "definitions": {
+          "clip": {
+            "type": "object",
+            "properties": {
+              "clip_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,100}$" },
+              "url": { "type": "string", "pattern": "^https://(clips\\.twitch\\.tv|www\\.twitch\\.tv|twitch\\.tv)/" },
+              "title": { "type": "string", "maxLength": 100 },
+              "created_at": { "type": "string" }
+            },
+            "required": ["clip_id", "url"]
+          }
+        }
+      }
+    },
+    "twitch.clip.list": {
+      "access": "read",
+      "risk": "normal",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+          "cursor": { "type": "string" },
+          "started_at": { "type": "string" },
+          "ended_at": { "type": "string" }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "clips": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/clip" }
+          },
+          "cursor": { "type": "string" }
+        },
+        "required": ["clips"],
+        "definitions": {
+          "clip": {
+            "type": "object",
+            "properties": {
+              "clip_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,100}$" },
+              "url": { "type": "string", "pattern": "^https://(clips\\.twitch\\.tv|www\\.twitch\\.tv|twitch\\.tv)/" },
+              "title": { "type": "string", "maxLength": 100 },
+              "created_at": { "type": "string" }
+            },
+            "required": ["clip_id", "url"]
+          }
+        }
+      }
+    }
+  }
+}

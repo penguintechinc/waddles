@@ -189,3 +189,30 @@ def test_required_scope_is_in_the_summary_only_when_set_and_changes_the_hash() -
     assert "requiredScope" not in s_plain["exportedTools"][0]
     assert s_gated["exportedTools"][0]["requiredScope"] == "community:admin"
     assert permission_hash(s_plain) != permission_hash(s_gated)
+
+
+def test_host_op_is_in_the_summary_only_when_declared_and_changes_the_hash() -> None:
+    from dataclasses import replace
+
+    from services.bundle_manifest_v2 import ExportedTool
+
+    schema: dict = {"type": "object", "properties": {}}
+    plain = ExportedTool("t", schema, schema, "write", "dangerous")
+    hosted = ExportedTool(
+        "t", schema, schema, "write", "dangerous", None, {"platform": "twitch", "op": "mod.ban"}
+    )
+
+    def build(tool: ExportedTool) -> dict:
+        return build_permission_summary(
+            replace(_MANIFEST, kind="service", exported_tools=(tool,)),
+            grant_labels=[],
+            component_capabilities=frozenset(),
+            min_tier="free",
+            flag_key="f",
+            allow_private_hosts=False,
+        )
+
+    s_plain, s_hosted = build(plain), build(hosted)
+    assert "hostOp" not in s_plain["exportedTools"][0]
+    assert s_hosted["exportedTools"][0]["hostOp"] == {"platform": "twitch", "op": "mod.ban"}
+    assert permission_hash(s_plain) != permission_hash(s_hosted)
